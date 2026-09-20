@@ -1,0 +1,13 @@
+{
+  "0": "Codify — Sub-Agent Orchestration Spec",
+  "1": "Codify — Settings App Spec (Sub-Agent Configuration)",
+  "2": "1. Security additions for the multi-agent/multi-provider system",
+  "3": "Codify — Architecture Overview (v2)",
+  "4": "3. Updated phased roadmap",
+  "5": "3. Provider abstraction",
+  "6": "4. Agent JSON contracts",
+  "7": "1. Domain models",
+  "8": "2. Data model",
+  "9": "db.py",
+  "10": "__init__.py"
+}
