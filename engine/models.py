@@ -63,6 +63,18 @@ BUILTIN_PROVIDERS: dict[str, dict[str, Any]] = {
         "needs_key": True,
         "local_only": False,
     },
+    "openrouter": {
+        "protocol": "openai_compat",
+        "base_url": "https://openrouter.ai/api/v1",
+        "needs_key": True,
+        "local_only": False,
+    },
+    "groq": {
+        "protocol": "openai_compat",
+        "base_url": "https://api.groq.com/openai/v1",
+        "needs_key": True,
+        "local_only": False,
+    },
 }
 
 
@@ -147,6 +159,14 @@ class GoalCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     description: str = Field("", max_length=20000)
     dry_run: bool = False
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
+class ProviderKeyUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+    provider: str
+    api_key: str
 
 
 class VersionedAction(BaseModel):

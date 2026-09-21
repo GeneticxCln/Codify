@@ -17,6 +17,7 @@ from engine.models import (
     AgentConfigUpdate,
     GoalCreate,
     GoalDetail,
+    ProviderKeyUpdate,
     ROLES,
     VersionedAction,
     WorkspaceCreate,
@@ -49,6 +50,8 @@ async def lifespan(app: FastAPI):
     keychain = Keychain()
     factory = ProviderFactory(keychain)
     app.state.conn = conn
+    app.state.keychain = keychain
+    app.state.factory = factory
     app.state.registry = AgentRegistryService(conn, factory, keychain)
     app.state.workspaces = WorkspaceService(conn)
     app.state.goals = GoalService(conn)
@@ -92,6 +95,29 @@ async def health():
 @app.get("/settings/providers")
 async def list_providers(request: Request):
     return request.app.state.registry.provider_catalog()
+
+
+@app.get("/settings/keys")
+async def get_keys(request: Request):
+    keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
+    from engine.models import BUILTIN_PROVIDERS
+    return [
+        {
+            "provider": slug,
+            "has_key": keychain.has_provider_key(slug),
+            "protocol": meta["protocol"],
+            "base_url": meta["base_url"],
+            "needs_key": meta["needs_key"],
+        }
+        for slug, meta in BUILTIN_PROVIDERS.items()
+    ]
+
+
+@app.post("/settings/keys")
+async def save_key(body: ProviderKeyUpdate, request: Request):
+    keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
+    keychain.set_provider_key(body.provider, body.api_key)
+    return {"ok": True, "provider": body.provider}
 
 
 @app.get("/settings/agents", response_model=list[AgentConfig])

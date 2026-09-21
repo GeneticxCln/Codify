@@ -3,6 +3,7 @@ import {
   Goal,
   PlanStep,
   ProviderCatalog,
+  ProviderKeyStatus,
   Workspace,
 } from "./types";
 
@@ -85,6 +86,31 @@ export async function fetchProviders(): Promise<ProviderCatalog> {
   return res.json();
 }
 
+export async function fetchProviderKeys(): Promise<ProviderKeyStatus[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/settings/keys`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function saveProviderKey(provider: string, api_key: string): Promise<void> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/settings/keys`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${currentEngine.token}`,
+    },
+    body: JSON.stringify({ provider, api_key }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `HTTP ${res.status}`);
+  }
+}
+
 export async function listWorkspaces(): Promise<Workspace[]> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/workspaces`, {
@@ -115,16 +141,22 @@ export async function createGoal(
   workspace_id: string,
   title: string,
   description: string,
-  dry_run: boolean
+  dry_run: boolean,
+  provider?: string,
+  model?: string
 ): Promise<Goal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
+  const payload: Record<string, any> = { workspace_id, title, description, dry_run };
+  if (provider) payload.provider = provider;
+  if (model) payload.model = model;
+
   const res = await fetch(`${base}/goals`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${currentEngine.token}`,
     },
-    body: JSON.stringify({ workspace_id, title, description, dry_run }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

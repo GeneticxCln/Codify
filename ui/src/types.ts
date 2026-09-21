@@ -107,3 +107,29 @@ export interface EngineInfo {
   port: number;
   token: string;
 }
+
+export interface ProviderKeyStatus {
+  provider: string;
+  has_key: boolean;
+  protocol: string;
+  base_url: string;
+  needs_key: boolean;
+}
+
+export interface ModelOption {
+  id: string;
+  name: string;
+  provider: string;
+  description: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: number;
+  goal?: Goal;
+  events?: Event[];
+  isStreaming?: boolean;
+}
+

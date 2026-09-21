@@ -165,15 +165,30 @@ class GoogleProvider(BaseProvider):
             return "".join(p.get("text", "") for p in parts)
 
 
+import os
+
+ENV_KEY_MAP: dict[str, list[str]] = {
+    "anthropic": ["ANTHROPIC_API_KEY"],
+    "openai": ["OPENAI_API_KEY"],
+    "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    "deepseek": ["DEEPSEEK_API_KEY"],
+    "openrouter": ["OPENROUTER_API_KEY"],
+    "groq": ["GROQ_API_KEY"],
+}
+
+
 class Keychain:
     def get(self, ref: str | None) -> str:
         if not ref:
             return ""
         try:
             import keyring
-            return keyring.get_password("codify", ref) or ""
+            val = keyring.get_password("codify", ref)
+            if val:
+                return val
         except Exception:
-            return ""
+            pass
+        return ""
 
     def set(self, role: str, api_key: str) -> str:
         ref = f"codify/agents/{role}"
@@ -184,13 +199,74 @@ class Keychain:
             raise ProviderError("keyring_unavailable", str(exc)) from exc
         return ref
 
+    def get_provider_key(self, provider: str) -> str:
+        """Find API key for provider in OS Keyring or fallback to environment variables."""
+        # 1. Try keyring under providers/<provider>
+        try:
+            import keyring
+            val = keyring.get_password("codify", f"providers/{provider}")
+            if val:
+                return val
+        except Exception:
+            pass
+
+        # 2. Try role-based keys in keyring
+        for role in ("coder", "planner", "tester", "reviewer", "summarizer"):
+            val = self.get(f"codify/agents/{role}")
+            if val:
+                return val
+
+        # 3. Try environment variables
+        env_vars = ENV_KEY_MAP.get(provider.lower(), [])
+        for var in env_vars:
+            val = os.environ.get(var)
+            if val:
+                return val
+
+        return ""
+
+    def set_provider_key(self, provider: str, api_key: str) -> None:
+        """Store API key for a provider in the OS Keyring."""
+        try:
+            import keyring
+            keyring.set_password("codify", f"providers/{provider}", api_key)
+        except Exception as exc:
+            raise ProviderError("keyring_unavailable", str(exc)) from exc
+
+    def has_provider_key(self, provider: str) -> bool:
+        if provider == "ollama":
+            return True
+        return bool(self.get_provider_key(provider))
+
 
 class ProviderFactory:
     def __init__(self, keychain: Keychain):
         self._keychain = keychain
 
+    def build_for(
+        self,
+        provider: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ) -> BaseProvider:
+        """Instantiate a provider dynamically for any model or harness."""
+        meta = BUILTIN_PROVIDERS.get(provider, {})
+        protocol = meta.get("protocol", "openai_compat")
+        key = api_key or self._keychain.get_provider_key(provider)
+        base = base_url or meta.get("base_url", "")
+
+        if protocol == "anthropic":
+            return AnthropicProvider(key, base)
+        if protocol == "openai_compat":
+            return OpenAICompatProvider(key, base)
+        if protocol == "ollama":
+            return OllamaProvider(base or "http://127.0.0.1:11434")
+        if protocol == "google":
+            return GoogleProvider(key, base)
+        raise ProviderError("unknown_protocol", f"Unknown protocol {protocol}")
+
     def build(self, config: AgentConfig) -> BaseProvider:
-        key = self._keychain.get(config.api_key_ref)
+        key = self._keychain.get(config.api_key_ref) or self._keychain.get_provider_key(config.provider)
         base = config.base_url or BUILTIN_PROVIDERS.get(config.provider, {}).get("base_url") or ""
         if config.protocol == "anthropic":
             return AnthropicProvider(key, base)
