@@ -56,7 +56,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({ role }) => {
     setSaving(true);
     setSaveError(null);
     try {
-      await update(role, {
+      const saved = await update(role, {
         display_name: active.display_name,
         provider: active.provider,
         protocol: active.protocol,
@@ -67,6 +67,8 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({ role }) => {
         max_tokens: active.max_tokens,
         system_prompt_override: active.system_prompt_override?.trim() || null,
       });
+      // Reset draft to server-normalised value (BUG-10 fix)
+      setDraft(saved);
       setPendingApiKey(undefined);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);

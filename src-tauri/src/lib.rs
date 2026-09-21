@@ -22,20 +22,38 @@ type SharedEngineState = Arc<Mutex<EngineState>>;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentConfig {
     pub role: String,
+    pub display_name: String,
     pub provider: String,
-    pub model: String,
+    pub protocol: String,
+    pub model_name: String,
+    pub api_key_ref: Option<String>,
     pub base_url: Option<String>,
-    pub api_key: Option<String>,
-    pub system_prompt: Option<String>,
+    pub system_prompt_override: Option<String>,
+    pub temperature: f64,
+    pub max_tokens: u32,
+    pub updated_at: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentConfigPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    pub model: Option<String>,
-    pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    pub system_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt_override: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -115,16 +133,19 @@ async fn codify_update_agent_config(
 async fn codify_test_agent_connection(
     role: String,
     state: State<'_, SharedEngineState>,
-) -> Result<bool, String> {
+) -> Result<serde_json::Value, String> {
     let (base, token) = engine_url(&state).await?;
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/settings/agents/{}/test", base, role))
+        // BUG-03 fix: correct endpoint is /test-connection not /test
+        .post(format!("{}/settings/agents/{}/test-connection", base, role))
         .bearer_auth(&token)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    Ok(resp.status().is_success())
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── Engine subprocess launcher ─────────────────────────────────────────────

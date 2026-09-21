@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Workspace, Goal } from "./types";
+import { Workspace, Goal, EngineInfo } from "./types";
 import {
   listWorkspaces,
   createWorkspace,
@@ -10,6 +10,8 @@ import {
   cancelGoal,
   retryStep,
   getEngineInfo,
+  setEngineInfo,
+  tauriInvoke,
 } from "./api";
 import { WorkspaceSelector } from "./components/WorkspaceSelector";
 import { GoalCreator } from "./components/GoalCreator";
@@ -22,6 +24,19 @@ export const App: React.FC = () => {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWs, setSelectedWs] = useState<Workspace | undefined>();
   const [activeGoal, setActiveGoal] = useState<Goal | undefined>();
+  const [engine, setEngine] = useState<EngineInfo>(getEngineInfo());
+
+  // Fetch real engine info from Tauri (or localStorage fallback) on mount
+  useEffect(() => {
+    tauriInvoke<EngineInfo>("codify_get_engine_info")
+      .then((info) => {
+        setEngineInfo(info);
+        setEngine(info);
+      })
+      .catch(() => {
+        // Running in browser dev mode — keep localStorage/default values
+      });
+  }, []);
 
   // Load workspaces
   const loadWorkspaces = useCallback(async () => {
@@ -92,7 +107,6 @@ export const App: React.FC = () => {
     setActiveGoal(refreshed);
   };
 
-  const engine = getEngineInfo();
 
   return (
     <div className="flex flex-col h-screen bg-[#0d1117] text-gray-200">

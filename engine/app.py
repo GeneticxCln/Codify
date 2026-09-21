@@ -56,6 +56,11 @@ async def lifespan(app: FastAPI):
     app.state.executor = ExecutorService(app.state.goals, app.state.workspaces, app.state.registry, app.state.sandbox)
     app.state.token = BOOT_TOKEN
     yield
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
 
 
@@ -205,7 +210,11 @@ async def _run_steps(app: FastAPI, goal_id: str) -> None:
             return
     g = app.state.goals.get(goal_id)
     if g.status == "RUNNING":
-        app.state.executor._set_status(goal_id, "COMPLETED", None)
+        try:
+            app.state.executor._set_status(goal_id, "COMPLETED", None)
+        except ApiError:
+            # Version conflict: another coroutine already updated the goal status.
+            pass
 
 
 @app.websocket("/ws/goals/{goal_id}")

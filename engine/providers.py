@@ -39,8 +39,8 @@ class BaseProvider(ABC):
 
     async def test_connection(self, model: str) -> tuple[bool, str]:
         try:
-            text = await self.complete("ping", "ping", model, 0.0, 8)
-            return True, "ok" if text is not None else "ok"
+            await self.complete("ping", "ping", model, 0.0, 8)
+            return True, "ok"
         except ProviderError as exc:
             return False, exc.message
         except Exception as exc:

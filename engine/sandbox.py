@@ -46,13 +46,13 @@ def validate_argv(argv: list[str], fs: FileSystemService) -> None:
             if not _is_workspace_path(fs, tok):
                 raise CommandNotAllowed(f"pytest path not allowed: {tok}")
         return
-    if cmd == "python":
+    if cmd in {"python", "python3"}:
         if rest[:2] == ["-m", "pytest"]:
             validate_argv(["pytest", *rest[2:]], fs)
             return
         if len(rest) == 1 and rest[0].endswith(".py") and _is_workspace_path(fs, rest[0]):
             return
-        raise CommandNotAllowed("python only allows -m pytest or one workspace .py script")
+        raise CommandNotAllowed(f"{cmd} only allows -m pytest or one workspace .py script")
     if cmd in {"npm", "pnpm"}:
         if rest and rest[0] == "test" and len(rest) == 1:
             return
@@ -87,7 +87,7 @@ class SandboxService:
         resolved = shutil.which(argv[0])
         if not resolved:
             raise CommandNotAllowed(f"{argv[0]} not found on PATH")
-        env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM") if k in os.environ}
+        env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME") if k in os.environ}
         proc = subprocess.run(
             [resolved, *argv[1:]],
             cwd=str(Path(root_path).resolve()),

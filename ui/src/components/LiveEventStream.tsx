@@ -14,33 +14,58 @@ export const LiveEventStream: React.FC<LiveEventStreamProps> = ({ goalId }) => {
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const engine = getEngineInfo();
-    const wsUrl = `ws://127.0.0.1:${engine.port}/ws/goals/${goalId}`;
-    const ws = new WebSocket(wsUrl);
+    let ws: WebSocket | null = null;
+    let retryDelay = 1000;
+    let destroyed = false;
+    const retryTimer = { id: 0 as ReturnType<typeof setTimeout> };
 
-    ws.onopen = () => {
-      setConnected(true);
-      // Send auth token frame
-      ws.send(JSON.stringify({ type: "auth", token: engine.token }));
+    const connect = () => {
+      if (destroyed) return;
+      const engine = getEngineInfo();
+      const wsUrl = `ws://127.0.0.1:${engine.port}/ws/goals/${goalId}`;
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        setConnected(true);
+        retryDelay = 1000; // reset backoff on success
+        ws!.send(JSON.stringify({ type: "auth", token: engine.token }));
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const ev: Event = JSON.parse(e.data);
+          setEvents((prev) => {
+            if (prev.some((item) => item.sequence === ev.sequence)) return prev;
+            return [...prev, ev].sort((a, b) => a.sequence - b.sequence);
+          });
+        } catch (err) {
+          console.error("WS Parse error", err);
+        }
+      };
+
+      ws.onclose = () => {
+        setConnected(false);
+        if (!destroyed) {
+          // Exponential backoff: 1s → 2s → 4s → 8s → capped at 16s
+          retryTimer.id = setTimeout(() => {
+            retryDelay = Math.min(retryDelay * 2, 16000);
+            connect();
+          }, retryDelay);
+        }
+      };
+
+      ws.onerror = () => {
+        // onclose will fire after onerror; reconnect handled there
+        setConnected(false);
+      };
     };
 
-    ws.onmessage = (e) => {
-      try {
-        const ev: Event = JSON.parse(e.data);
-        setEvents((prev) => {
-          if (prev.some((item) => item.sequence === ev.sequence)) return prev;
-          return [...prev, ev].sort((a, b) => a.sequence - b.sequence);
-        });
-      } catch (err) {
-        console.error("WS Parse error", err);
-      }
-    };
-
-    ws.onclose = () => setConnected(false);
-    ws.onerror = () => setConnected(false);
+    connect();
 
     return () => {
-      ws.close();
+      destroyed = true;
+      clearTimeout(retryTimer.id);
+      ws?.close();
     };
   }, [goalId]);
 

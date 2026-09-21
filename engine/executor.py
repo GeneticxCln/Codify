@@ -133,7 +133,8 @@ class ExecutorService:
     async def retry_step(self, goal_id: str, step_id: str, expected_version: int) -> PlanStep:
         step = self._step(goal_id, step_id)
         if not (step.status == "FAILED" or (step.status == "IN_PROGRESS" and bool(step.review_notes))):
-            raise AgentOutputInvalid("step is not in a retryable state")
+            from engine.services import ApiError
+            raise ApiError(409, "step_not_retryable", f"step {step_id} is not in a retryable state (status={step.status})")
         self.goals.update_status(goal_id, expected_version, "RUNNING")
         self._reset_step(goal_id, step)
         await self.run_step(goal_id, step_id)
@@ -148,6 +149,8 @@ class ExecutorService:
             f"Step: {step.title}\n{step.description}\nSuggested paths:\n{ctx}",
         )
         files = self._parse_files(out)
+        if not files:
+            self._log(goal_id, step.id, "warn", "coder returned an empty files list — no changes will be written")
         summaries = fs.apply(files, dry_run=dry_run)
         for s in summaries:
             self.goals.publish(self._event(goal_id, step.id, "diff", {"path": s["path"], "unified_diff": s["unified_diff"]}))
