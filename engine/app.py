@@ -5,7 +5,9 @@ import json
 import os
 import secrets
 import socket
+import subprocess
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Header, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -58,6 +60,16 @@ async def lifespan(app: FastAPI):
     app.state.sandbox = SandboxService()
     app.state.executor = ExecutorService(app.state.goals, app.state.workspaces, app.state.registry, app.state.sandbox)
     app.state.token = BOOT_TOKEN
+
+    # Auto-seed default workspace for cwd if no workspaces exist
+    if not app.state.workspaces.list():
+        cwd = str(Path.cwd().resolve())
+        name = Path(cwd).name or "Codify"
+        try:
+            app.state.workspaces.create(WorkspaceCreate(name=name, root_path=cwd))
+        except Exception:
+            pass
+
     yield
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -154,6 +166,91 @@ async def test_agent(role: str, request: Request):
 @app.post("/workspaces")
 async def create_ws(body: WorkspaceCreate, request: Request):
     return request.app.state.workspaces.create(body)
+
+
+@app.post("/workspaces/browse")
+async def browse_workspace(request: Request):
+    def _pick():
+        code = """
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk
+dialog = Gtk.FileChooserNative.new('Select Workspace Directory', None, Gtk.FileChooserAction.SELECT_FOLDER, '_Select', '_Cancel')
+res = dialog.run()
+if res == Gtk.ResponseType.ACCEPT:
+    print(dialog.get_filename())
+dialog.destroy()
+while Gtk.events_pending():
+    Gtk.main_iteration_do(False)
+"""
+        try:
+            p = subprocess.run(["python3", "-c", code], capture_output=True, text=True, timeout=120)
+            if p.returncode == 0 and p.stdout.strip():
+                return p.stdout.strip()
+        except Exception:
+            pass
+        return None
+
+    path = await asyncio.to_thread(_pick)
+    if not path:
+        return {"cancelled": True}
+
+    folder_name = Path(path).name or path
+    ws_service: WorkspaceService = request.app.state.workspaces
+    for ws in ws_service.list():
+        if ws.root_path == path:
+            return {"cancelled": False, "workspace": ws.model_dump()}
+
+    new_ws = ws_service.create(WorkspaceCreate(name=folder_name, root_path=path))
+    return {"cancelled": False, "workspace": new_ws.model_dump()}
+
+
+@app.get("/models")
+async def list_available_models(request: Request):
+    import httpx
+    keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
+    models = []
+
+    # 1. Check local Ollama models
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get("http://127.0.0.1:11434/api/tags")
+            if r.status_code == 200:
+                data = r.json()
+                for m in data.get("models", []):
+                    name = m.get("name")
+                    if name and not name.startswith("nomic-embed"):
+                        param_size = m.get("details", {}).get("parameter_size", "local")
+                        models.append({
+                            "id": name,
+                            "name": name,
+                            "provider": "ollama",
+                            "description": f"Ollama local model ({param_size})",
+                            "available": True,
+                        })
+    except Exception:
+        pass
+
+    # 2. Cloud models
+    cloud_models = [
+        {"id": "claude-3-7-sonnet-latest", "name": "Claude 3.7 Sonnet", "provider": "anthropic", "description": "Top-tier coding & CoT reasoning"},
+        {"id": "claude-3-5-sonnet-latest", "name": "Claude 3.5 Sonnet", "provider": "anthropic", "description": "High-speed precision coding"},
+        {"id": "gpt-4o", "name": "GPT-4o", "provider": "openai", "description": "OpenAI flagship multi-modal"},
+        {"id": "gpt-4o-mini", "name": "GPT-4o Mini", "provider": "openai", "description": "Fast & cost-effective"},
+        {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash", "provider": "google", "description": "Ultra low latency & high speed"},
+        {"id": "gemini-1.5-pro", "name": "Gemini 1.5 Pro", "provider": "google", "description": "2M token context window"},
+        {"id": "deepseek-chat", "name": "DeepSeek V3", "provider": "deepseek", "description": "High-performance open weights API"},
+        {"id": "deepseek-reasoner", "name": "DeepSeek R1", "provider": "deepseek", "description": "CoT reasoning & math"},
+    ]
+
+    for cm in cloud_models:
+        has_key = keychain.has_provider_key(cm["provider"])
+        models.append({
+            **cm,
+            "available": has_key,
+        })
+
+    return models
 
 
 @app.get("/workspaces")

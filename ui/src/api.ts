@@ -1,6 +1,7 @@
 import {
   EngineInfo,
   Goal,
+  ModelOption,
   PlanStep,
   ProviderCatalog,
   ProviderKeyStatus,
@@ -109,6 +110,27 @@ export async function saveProviderKey(provider: string, api_key: string): Promis
     const err = await res.json().catch(() => ({}));
     throw new Error(err.message || `HTTP ${res.status}`);
   }
+}
+
+export async function browseWorkspace(): Promise<Workspace | null> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/workspaces/browse`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (data.cancelled || !data.workspace) return null;
+  return data.workspace;
+}
+
+export async function fetchAvailableModels(): Promise<ModelOption[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/models`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) return [];
+  return res.json();
 }
 
 export async function listWorkspaces(): Promise<Workspace[]> {

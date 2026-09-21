@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { Workspace, ChatMessage, EngineInfo, Event } from "./types";
+import { Workspace, ChatMessage, EngineInfo, Event, ModelOption } from "./types";
 import {
   listWorkspaces,
   createWorkspace,
@@ -12,6 +12,8 @@ import {
   getEngineInfo,
   setEngineInfo,
   tauriInvoke,
+  browseWorkspace,
+  fetchAvailableModels,
 } from "./api";
 import { BottomCommandBar, AVAILABLE_MODELS, ExecutionMode } from "./components/BottomCommandBar";
 import { ChatTimeline } from "./components/ChatTimeline";
@@ -21,7 +23,8 @@ import { Code, Settings, FolderGit2 } from "lucide-react";
 export const App: React.FC = () => {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWs, setSelectedWs] = useState<Workspace | undefined>();
-  const [selectedModel, setSelectedModel] = useState(AVAILABLE_MODELS[0]);
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>(AVAILABLE_MODELS);
+  const [selectedModel, setSelectedModel] = useState<ModelOption>(AVAILABLE_MODELS[0]);
   const [mode, setMode] = useState<ExecutionMode>("direct");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -49,22 +52,65 @@ export const App: React.FC = () => {
     fetchInfo();
   }, []);
 
-  // Load workspaces
+  // Load workspaces and auto-select or auto-seed
   const loadWorkspaces = useCallback(async () => {
     try {
       const wsList = await listWorkspaces();
       setWorkspaces(wsList);
-      if (wsList.length > 0 && !selectedWs) {
-        setSelectedWs(wsList[0]);
+      if (wsList.length > 0) {
+        if (!selectedWs) {
+          setSelectedWs(wsList[0]);
+        }
+      } else {
+        // Auto-seed current project directory so workspace is never null
+        const defaultWs = await createWorkspace("Codify", "/home/quinton/Projects/Codify");
+        setWorkspaces([defaultWs]);
+        setSelectedWs(defaultWs);
       }
     } catch (err) {
       // Backend might still be starting
     }
   }, [selectedWs]);
 
+  // Load available models (detects local Ollama models like qwen2.5-coder!)
+  const loadModels = useCallback(async () => {
+    try {
+      const models = await fetchAvailableModels();
+      if (models && models.length > 0) {
+        setAvailableModels(models);
+        // Prefer installed local Ollama model if available
+        const localModel = models.find((m) => m.provider === "ollama");
+        if (localModel) {
+          setSelectedModel(localModel);
+        } else {
+          setSelectedModel(models[0]);
+        }
+      }
+    } catch (err) {
+      // Keep defaults
+    }
+  }, []);
+
   useEffect(() => {
     loadWorkspaces();
-  }, [loadWorkspaces]);
+    loadModels();
+  }, [loadWorkspaces, loadModels]);
+
+  // Native OS File Manager browser handler (opens Nautilus / portal)
+  const handleBrowseWorkspace = async () => {
+    try {
+      const ws = await browseWorkspace();
+      if (ws) {
+        setWorkspaces((prev) => {
+          const exists = prev.some((w) => w.id === ws.id);
+          return exists ? prev : [...prev, ws];
+        });
+        setSelectedWs(ws);
+      }
+    } catch (err) {
+      console.error("Failed to browse workspace", err);
+    }
+  };
 
   const handleCreateWorkspace = async (name: string, root_path: string) => {
     const ws = await createWorkspace(name, root_path);
@@ -102,7 +148,6 @@ export const App: React.FC = () => {
             })
           );
 
-          // If goal status changed or step status changed, refresh goal
           if (ev.type === "goal_status" || ev.type === "step_status") {
             getGoal(goalId).then((refreshed) => {
               setMessages((prev) =>
@@ -156,7 +201,19 @@ export const App: React.FC = () => {
   }, [messages, mode]);
 
   const handleSendMessage = async (promptText: string) => {
-    if (!selectedWs) return;
+    let wsToUse = selectedWs;
+    if (!wsToUse) {
+      // Auto-create workspace if none selected
+      try {
+        wsToUse = await createWorkspace("Codify", "/home/quinton/Projects/Codify");
+        setWorkspaces([wsToUse]);
+        setSelectedWs(wsToUse);
+      } catch (err) {
+        // Fall back to first
+        wsToUse = workspaces[0];
+      }
+    }
+    if (!wsToUse) return;
 
     const userMsgId = `user-${Date.now()}`;
     const assistantMsgId = `assistant-${Date.now() + 1}`;
@@ -183,7 +240,7 @@ export const App: React.FC = () => {
     try {
       const isDryRun = mode === "dry_run";
       const goal = await createGoal(
-        selectedWs.id,
+        wsToUse.id,
         promptText,
         "",
         isDryRun,
@@ -264,7 +321,8 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-[#0d1117] text-gray-200 font-sans select-none">
+    // select-none REMOVED so text cursor and selection work normally in WebKitGTK
+    <div className="flex flex-col h-screen bg-[#0d1117] text-gray-200 font-sans">
       {/* Top Header Bar */}
       <header className="bg-[#161b22] border-b border-[#30363d] px-4 py-2.5 flex items-center justify-between z-10 flex-shrink-0">
         <div className="flex items-center gap-3">
@@ -295,10 +353,10 @@ export const App: React.FC = () => {
           <button
             type="button"
             onClick={() => setIsSettingsOpen(true)}
-            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg bg-[#21262d] hover:bg-[#30363d] text-gray-200 border border-[#30363d] transition-colors"
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg bg-[#21262d] hover:bg-[#30363d] text-gray-200 border border-[#30363d] transition-colors cursor-pointer"
           >
             <Settings className="w-3.5 h-3.5 text-gray-400" />
-            <span>Keys & Providers</span>
+            <span>Keys & Endpoints</span>
           </button>
         </div>
       </header>
@@ -319,7 +377,9 @@ export const App: React.FC = () => {
           workspaces={workspaces}
           selectedWorkspace={selectedWs}
           onSelectWorkspace={setSelectedWs}
+          onBrowseWorkspace={handleBrowseWorkspace}
           onCreateWorkspace={handleCreateWorkspace}
+          availableModels={availableModels}
           selectedModel={selectedModel}
           onSelectModel={setSelectedModel}
           mode={mode}
@@ -333,7 +393,10 @@ export const App: React.FC = () => {
       {/* Global Settings Modal */}
       <SettingsModal
         isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
+        onClose={() => {
+          setIsSettingsOpen(false);
+          loadModels();
+        }}
       />
     </div>
   );
