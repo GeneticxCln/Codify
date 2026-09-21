@@ -156,9 +156,21 @@ async fn launch_engine(shared: SharedEngineState) {
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-    // Locate `uvicorn` / `python3` on PATH — fall back gracefully.
+    let project_root = std::env::current_dir()
+        .map(|p| {
+            if p.ends_with("src-tauri") {
+                p.parent().unwrap_or(&p).to_path_buf()
+            } else {
+                p
+            }
+        })
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    // Locate `python3` on PATH — fall back gracefully.
     let mut child = match tokio::process::Command::new("python3")
-        .args(["-m", "uvicorn", "engine.app:app", "--host", "127.0.0.1"])
+        .args(["-m", "engine"])
+        .current_dir(&project_root)
+        .env("PYTHONPATH", &project_root)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
