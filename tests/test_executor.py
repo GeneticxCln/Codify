@@ -179,6 +179,13 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         step_final = self.goals.steps(goal.id)[0]
         self.assertEqual(step_final.status, "COMPLETED")
 
+        # Retrying a COMPLETED step should raise ApiError
+        from engine.services import ApiError
+        with self.assertRaises(ApiError) as ctx:
+            await self.executor.retry_step(goal.id, step.id, self.goals.get(goal.id).version)
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(ctx.exception.code, "step_not_retryable")
+
     async def test_tester_fail_marks_step_failed(self):
         self.mock_responses["planner"] = {
             "steps": [{"title": "Step 1", "description": "Test failure", "suggested_paths": []}]

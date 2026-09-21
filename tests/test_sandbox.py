@@ -45,20 +45,26 @@ class TestSandboxService(unittest.TestCase):
             validate_argv(["pytest", "../other.py"], self.fs)
 
     def test_python_validation(self):
-        # python -m pytest
+        # python and python3 -m pytest
         validate_argv(["python", "-m", "pytest", "-q"], self.fs)
+        validate_argv(["python3", "-m", "pytest", "-v"], self.fs)
 
-        # python single script
+        # python and python3 single script
         (self.root / "script.py").write_text("", encoding="utf-8")
         validate_argv(["python", "script.py"], self.fs)
+        validate_argv(["python3", "script.py"], self.fs)
 
         # Disallowed -c
         with self.assertRaises(CommandNotAllowed):
             validate_argv(["python", "-c", "print(1)"], self.fs)
+        with self.assertRaises(CommandNotAllowed):
+            validate_argv(["python3", "-c", "print(1)"], self.fs)
 
         # Disallowed -m other
         with self.assertRaises(CommandNotAllowed):
             validate_argv(["python", "-m", "http.server"], self.fs)
+        with self.assertRaises(CommandNotAllowed):
+            validate_argv(["python3", "-m", "http.server"], self.fs)
 
     def test_npm_pnpm_validation(self):
         for cmd in ["npm", "pnpm"]:
