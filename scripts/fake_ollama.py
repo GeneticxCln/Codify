@@ -205,10 +205,13 @@ class Handler(BaseHTTPRequestHandler):
             # the verifier pick something the allowlist permits; without it this
             # path is only reached if a real refusal happened.
             out = VERIFIER_RETRY
-        elif "Diffs:" in prompt:
+        elif "Diffs:" in prompt and "You are Codify Critic" in prompt:
             out = CRITIC
-        elif "Changed files:" in prompt:
+        elif "You are Codify Scribe" in prompt:
             out = SCRIBE
+        elif "Diffs:" in prompt:
+            # Legacy shape: a critic-shaped prompt without the role marker.
+            out = CRITIC
         elif "Suggested paths" in prompt:
             # FAKE_BROKEN=1 also corrupts fixer replies (used by the per-role
             # routing E2E to prove which server each role actually hit).

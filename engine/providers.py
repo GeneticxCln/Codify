@@ -104,31 +104,90 @@ class OpenAICompatProvider(BaseProvider):
     def __init__(self, api_key: str | None, base_url: str):
         self._api_key = api_key or ""
         self._base_url = base_url.rstrip("/")
+        # Three states: None = not probed yet, True/False = probed. Cached per
+        # provider instance so the capability probe runs once, not per call.
+        self._json_mode: bool | None = None
 
     async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
         if not self._api_key:
             raise ProviderError("missing_api_key", "API key is not set")
         url = f"{self._base_url}/chat/completions"
+        # Every role here answers JSON by contract (default_prompts.py). Asking
+        # for structured output turns "please emit JSON" from prompt advice into
+        # a wire guarantee on servers that support it.
+        #
+        # It is opt-in per server because a strict server rejects the unknown
+        # field outright (some vLLM versions 400 on response_format) — one
+        # broken endpoint must not take every role's replies down. On the first
+        # 400 that mentions the field, remember it and retry plainly.
+        if self._json_mode is None:
+            self._json_mode = await self._supports_json_mode(url)
+        payload = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        if self._json_mode:
+            payload["response_format"] = {"type": "json_object"}
         async with httpx.AsyncClient(timeout=120) as client:
-            data = await post_json(
-                client,
-                url,
-                label="openai_compat",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                },
-            )
+            try:
+                data = await post_json(
+                    client,
+                    url,
+                    label="openai_compat",
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "content-type": "application/json",
+                    },
+                    json=payload,
+                )
+            except ProviderError as exc:
+                if not (self._json_mode and exc.code == "provider_http"):
+                    raise
+                # This server rejects the field: stop sending it.
+                self._json_mode = False
+                payload.pop("response_format", None)
+                data = await post_json(
+                    client,
+                    url,
+                    label="openai_compat",
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "content-type": "application/json",
+                    },
+                    json=payload,
+                )
         return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+
+    async def _supports_json_mode(self, url: str) -> bool:
+        """Ask /v1/models whether this server advertises structured output.
+
+        Conservative by design: any ambiguity (no route, odd body, no json
+        schema capability anywhere) means "don't send the field", because the
+        cost of a false positive is a 400 on every call, and the cost of a
+        false negative is just the old prompt-level behavior.
+        """
+        root = self._base_url.rsplit("/", 1)[0] if self._base_url.endswith("/chat/completions") else self._base_url
+        models_url = f"{root}/models"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    models_url,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                )
+            if resp.status_code != 200:
+                return False
+            for m in (resp.json() or {}).get("data", []):
+                caps = m.get("capabilities", {}) or {}
+                if isinstance(caps, dict) and caps.get("json_schema") or caps.get("json_object"):
+                    return True
+            return False
+        except Exception:
+            return False
 
 
 class OllamaProvider(BaseProvider):

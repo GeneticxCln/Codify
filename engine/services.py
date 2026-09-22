@@ -445,6 +445,38 @@ class GoalService:
         self.publish(event)
         return next(s for s in self.steps(goal_id) if s.id == step_id)
 
+    def fail_orphaned_active_goals(self) -> list[tuple[str, str, str]]:
+        """Mark goals left PLANNING/RUNNING by a dead process as FAILED.
+
+        Called once at boot, before any request can see the stale state. Returns
+        (goal_id, previous_status, message) so the caller can explain each rescue
+        in the goal's own event log. Version is bumped unconditionally here —
+        no client holds a view of a goal from a dead process, so there is
+        nothing to conflict with. Publishes nothing: the terminal status event
+        comes from the executor's `_fail`, so the stream shows one coherent
+        story (log line, then failure) rather than two competing writers.
+        """
+        rows = self._db.execute(
+            "SELECT id, status, version FROM goals WHERE status IN ('PLANNING', 'RUNNING')"
+        ).fetchall()
+        rescued: list[tuple[str, str, str]] = []
+        now = time.time()
+        for r in rows:
+            goal_id, previous, version = r["id"], r["status"], r["version"]
+            cur = self._db.execute(
+                "UPDATE goals SET status='FAILED', version=version+1, updated_at=? WHERE id=? AND version=?",
+                (now, goal_id, version),
+            )
+            if cur.rowcount != 1:
+                continue  # concurrent change mid-boot; not ours to fight
+            rescued.append((
+                goal_id,
+                previous,
+                f"the engine restarted while this goal was {previous} — marking it failed; retry to run it again",
+            ))
+        self._db.commit()
+        return rescued
+
     def set_dry_run(self, goal_id: str, enabled: bool) -> None:
         row = self._db.execute(
             "UPDATE goals SET dry_run = ?, updated_at = ? WHERE id = ?",

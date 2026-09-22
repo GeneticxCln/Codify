@@ -28,6 +28,8 @@ EventType = Literal[
     "library_evidence",
     "plan_updated",
     "laya_decision",
+    "fix_retry",
+    "fixer_pass",
     "error",
 ]
 

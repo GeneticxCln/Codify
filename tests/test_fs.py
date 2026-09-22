@@ -171,5 +171,105 @@ class TestWhatApplyActuallyChanged(unittest.TestCase):
             outside.unlink(missing_ok=True)
 
 
+class TestEditAction(unittest.TestCase):
+    """The fixer's search/replace op: resolved against the file as it exists."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.fs = FileSystemService(str(self.root))
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _seed(self, text: str, name: str = "svc.py") -> None:
+        (self.root / name).write_text(text, encoding="utf-8")
+
+    def test_an_exact_match_edit_replaces_and_reports_resolved_content(self):
+        self._seed("def greet():\n    return 1\n")
+        summaries = self.fs.apply(
+            [{"path": "svc.py", "action": "edit",
+              "edits": [{"old_text": "return 1", "new_text": "return 42"}]}],
+            dry_run=False,
+        )
+        self.assertEqual(self.fs.read_text("svc.py"), "def greet():\n    return 42\n")
+        self.assertTrue(summaries[0]["changed"])
+        self.assertIn("-    return 1", summaries[0]["unified_diff"])
+        self.assertIn("+    return 42", summaries[0]["unified_diff"])
+        # The resolved full content is what a dry-run proposal would store.
+        self.assertEqual(summaries[0]["resolved_content"], "def greet():\n    return 42\n")
+
+    def test_a_dry_run_edit_resolves_without_writing(self):
+        self._seed("a = 1\n")
+        summaries = self.fs.apply(
+            [{"path": "svc.py", "action": "edit",
+              "edits": [{"old_text": "a = 1", "new_text": "a = 2"}]}],
+            dry_run=True,
+        )
+        # Nothing written, but the proposal is concrete content, ready to store.
+        self.assertEqual(self.fs.read_text("svc.py"), "a = 1\n")
+        self.assertTrue(summaries[0]["changed"])
+        self.assertEqual(summaries[0]["resolved_content"], "a = 2\n")
+
+    def test_a_no_op_edit_is_not_a_change(self):
+        self._seed("a = 1\n")
+        summaries = self.fs.apply(
+            [{"path": "svc.py", "action": "edit",
+              "edits": [{"old_text": "a = 1", "new_text": "a = 1"}]}],
+            dry_run=False,
+        )
+        self.assertFalse(summaries[0]["changed"])
+
+    def test_a_count_mismatch_is_refused(self):
+        self._seed("x = f()\ny = f()\n")
+        with self.assertRaises(ValueError) as ctx:
+            self.fs.apply(
+                [{"path": "svc.py", "action": "edit",
+                  "edits": [{"old_text": "f()", "new_text": "g()"}]}],
+                dry_run=False,
+            )
+        self.assertIn("appears 2 time(s), expected 1", str(ctx.exception))
+        # The file is untouched — a refused edit must not write half an edit.
+        self.assertEqual(self.fs.read_text("svc.py"), "x = f()\ny = f()\n")
+
+    def test_count_zero_replaces_every_occurrence(self):
+        self._seed("x = f()\ny = f()\n")
+        self.fs.apply(
+            [{"path": "svc.py", "action": "edit",
+              "edits": [{"old_text": "f()", "new_text": "g()", "count": 0}]}],
+            dry_run=False,
+        )
+        self.assertEqual(self.fs.read_text("svc.py"), "x = g()\ny = g()\n")
+
+    def test_an_absent_old_text_is_refused(self):
+        self._seed("a = 1\n")
+        with self.assertRaises(ValueError) as ctx:
+            self.fs.apply(
+                [{"path": "svc.py", "action": "edit",
+                  "edits": [{"old_text": "not there", "new_text": "x"}]}],
+                dry_run=False,
+            )
+        self.assertIn("old_text appears 0 time(s), expected 1", str(ctx.exception))
+
+    def test_edits_apply_in_order_against_the_previous_result(self):
+        self._seed("def greet():\n    return 1\n")
+        self.fs.apply(
+            [{"path": "svc.py", "action": "edit", "edits": [
+                {"old_text": "return 1", "new_text": "return 2"},
+                {"old_text": "return 2", "new_text": "return 3"},
+            ]}],
+            dry_run=False,
+        )
+        self.assertEqual(self.fs.read_text("svc.py"), "def greet():\n    return 3\n")
+
+    def test_an_edit_on_a_missing_file_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.fs.apply(
+                [{"path": "ghost.py", "action": "edit",
+                  "edits": [{"old_text": "x", "new_text": "y"}]}],
+                dry_run=False,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

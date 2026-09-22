@@ -441,6 +441,37 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["status"], "CANCELLED")
 
+    async def test_cancel_from_planning_is_accepted(self):
+        """A PLANNING goal can be cancelled.
+
+        Planning runs in the background, and a goal stuck there (slow planner,
+        or one orphaned by an older engine build) could be neither started nor
+        stopped — the one state with no exit at all.
+        """
+        r = await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": "cxl", "root_path": str(self.root)},
+        )
+        self.assertEqual(r.status_code, 200)
+        ws_id = r.json()["id"]
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "stuck in planning", "description": ""},
+        )
+        self.assertEqual(r.status_code, 200)
+        goal = r.json()
+        self.assertEqual(goal["status"], "PLANNING")
+
+        r = await self.client.post(
+            f"/goals/{goal['id']}/cancel",
+            headers=self.headers,
+            json={"expected_version": goal["version"]},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["status"], "CANCELLED")
+        # (That a late planner cannot resurrect it is covered at the executor
+        # level, where the planner can be parked mid-flight.)
+
 
     async def test_plan_only_goal_lifecycle(self):
         """plan_only goals must plan, then refuse /start until execution is
@@ -496,6 +527,53 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["status"], "RUNNING")
+
+    async def test_enable_execution_rejects_a_stale_version(self):
+        """The route documented a version check it never performed (B5).
+
+        A client enabling execution from a stale view must get a 409, not
+        silently lift the guard on a plan the user has since edited.
+        """
+        ws_dir = self.root / "ws-stale-enable"
+        ws_dir.mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": "WS-STALE-EN", "root_path": str(ws_dir)},
+        )
+        ws_id = r.json()["id"]
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "Stale enable", "plan_only": True},
+        )
+        goal_id = r.json()["id"]
+        app.state.goals.update_status(goal_id, 0, "PENDING")
+        app.state.executor._insert_steps(
+            goal_id, [{"title": "S1", "description": "d", "suggested_paths": []}]
+        )
+
+        # Bump the version behind the client's back (a status change landing
+        # elsewhere — the only mutation that moves the version).
+        g_now = app.state.goals.get(goal_id)
+        app.state.goals.update_status(goal_id, g_now.version, "PAUSED")
+        app.state.goals.update_status(goal_id, g_now.version + 1, "PENDING")
+
+        r = await self.client.post(
+            f"/goals/{goal_id}/enable-execution", headers=self.headers,
+            json={"expected_version": g_now.version},  # the stale view
+        )
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.json()["code"], "version_conflict")
+        # The guard is still up — nothing was enabled.
+        self.assertTrue(app.state.goals.get(goal_id).plan_only)
+
+        # The fresh version is accepted and the guard lifts.
+        g_fresh = app.state.goals.get(goal_id)
+        r = await self.client.post(
+            f"/goals/{goal_id}/enable-execution", headers=self.headers,
+            json={"expected_version": g_fresh.version},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["plan_only"])
 
     async def test_edit_plan_steps(self):
         """Plan-only goals: PATCH step before execution, guards after."""

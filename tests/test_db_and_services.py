@@ -90,6 +90,40 @@ class TestDbAndServices(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 409)
         self.assertEqual(ctx.exception.code, "version_conflict")
 
+    def test_boot_rescue_fails_orphaned_planning_and_running_goals(self):
+        """Goals left PLANNING/RUNNING by a dead process are failed at boot.
+
+        Before this existed, a PLANNING goal orphaned by a crash was a dead
+        end: start refused it ("planning is still in progress" forever) and so
+        did cancel — it could be neither run nor stopped.
+        """
+        ws_path = self.temp_dir.name
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(ws_path)))
+        planning = self.goals.create(GoalCreate(workspace_id=ws.id, title="P", description=""))
+        running = self.goals.create(GoalCreate(workspace_id=ws.id, title="R", description=""))
+        paused = self.goals.create(GoalCreate(workspace_id=ws.id, title="S", description=""))
+        done = self.goals.create(GoalCreate(workspace_id=ws.id, title="D", description=""))
+        self.goals.update_status(running.id, running.version, "RUNNING")
+        self.goals.update_status(paused.id, paused.version, "PAUSED")
+        self.goals.update_status(done.id, done.version, "COMPLETED")
+
+        rescued = self.goals.fail_orphaned_active_goals()
+
+        by_id = {goal_id: previous for goal_id, previous, _ in rescued}
+        self.assertEqual(by_id, {planning.id: "PLANNING", running.id: "RUNNING"},
+                         "exactly the coroutine-less states are rescued")
+        self.assertEqual(self.goals.get(planning.id).status, "FAILED")
+        self.assertEqual(self.goals.get(running.id).status, "FAILED")
+        # PAUSED is a state the user chose; COMPLETED is already terminal.
+        self.assertEqual(self.goals.get(paused.id).status, "PAUSED")
+        self.assertEqual(self.goals.get(done.id).status, "COMPLETED")
+
+        # A rescued goal is startable again: the failed status is a real exit,
+        # not another wedge.
+        g = self.goals.get(planning.id)
+        updated = self.goals.update_status(g.id, g.version, "PENDING")
+        self.assertEqual(updated.status, "PENDING")
+
     def test_seeded_roles_name_no_model(self):
         """A fresh install must not ship hardcoded model ids.
 

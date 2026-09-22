@@ -88,6 +88,28 @@ class TestLibrarianReads(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.lib.search("   ")
 
+    def test_regex_search_finds_structural_patterns_literal_cannot(self):
+        """Alternation + escaped metachars: no single substring can ask this."""
+        res = self.lib.search(r"greet\(|GREETING", regex=True)
+        paths = {m["path"] for m in res["matches"]}
+        self.assertIn("src/app.py", paths)
+        self.assertIn("src/util.py", paths)
+        self.assertTrue(res.get("regex"), "the result must say which mode ran")
+
+    def test_regex_search_rejects_an_invalid_pattern_as_a_valueerror(self):
+        with self.assertRaises(ValueError):
+            self.lib.search("([unclosed", regex=True)
+
+    def test_regex_search_rejects_an_oversized_pattern(self):
+        with self.assertRaises(ValueError):
+            self.lib.search("a" * 201, regex=True)
+
+    def test_literal_search_is_untouched_by_the_regex_path(self):
+        res = self.lib.search("def greet")
+        self.assertTrue(res["matches"])
+        self.assertNotIn("regex", res)
+
+
     def test_tree_skips_caches_and_reports_its_limit(self):
         tree = self.lib.tree()
         self.assertTrue(any(p.endswith("src/app.py") for p in tree["files"]))

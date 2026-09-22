@@ -62,6 +62,8 @@ export type EventType =
   | "plan_updated"
   | "laya_decision"
   | "library_evidence"
+  | "fix_retry"
+  | "fixer_pass"
   | "error";
 
 export interface AgentConfig {

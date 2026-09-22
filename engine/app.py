@@ -84,6 +84,32 @@ async def lifespan(app: FastAPI):
     )
     app.state.token = BOOT_TOKEN
 
+    # ── Rescue goals orphaned by the last process ──────────────────────────
+    # A goal in PLANNING or RUNNING when the engine died has no coroutine
+    # driving it anymore. PLANNING was the worst wedge: start refuses (planning
+    # "in progress" forever), and cancel refused too — so the goal could be
+    # neither run nor deleted and its chat entry streamed nothing forever.
+    # RUNNING gets the same treatment: the step runner is gone, so a goal that
+    # claims to be running is a lie that a fresh boot must correct. Steps of a
+    # rescued RUNNING goal keep whatever status they died in (PENDING for
+    # un-started steps, IN_PROGRESS/COMPLETED for ones mid-flight); a retry
+    # picks up from there. PAUSED is deliberately untouched — it is a state the
+    # user chose, and /start handles it.
+    rescued = app.state.goals.fail_orphaned_active_goals()
+    for goal_id, previous, message in rescued:
+        try:
+            app.state.executor._log(goal_id, None, "warn", message)
+        except Exception:
+            pass
+        try:
+            app.state.executor._fail(
+                goal_id, None, "engine_restarted",
+                f"engine restarted while this goal was {previous} — it was not running anymore",
+                role=None,
+            )
+        except Exception:
+            pass
+
     # No workspace is created here on purpose.
     #
     # The engine used to auto-seed one from its own working directory whenever the
@@ -500,7 +526,12 @@ async def pause_goal(goal_id: str, body: VersionedAction, request: Request):
 @app.post("/goals/{goal_id}/cancel")
 async def cancel_goal(goal_id: str, body: VersionedAction, request: Request):
     g = request.app.state.goals.get(goal_id)
-    if g.status not in ("RUNNING", "PAUSED", "PENDING"):
+    # PLANNING is cancellable: planning runs in the background, and a goal stuck
+    # there (slow planner, or one orphaned before the boot rescue existed) could
+    # otherwise be neither started nor stopped. CANCELLED from PLANNING also
+    # beats the planning coroutine's own `_set_status(PENDING)` — the runner
+    # checks status before that transition and leaves a cancelled goal alone.
+    if g.status not in ("PLANNING", "RUNNING", "PAUSED", "PENDING"):
         raise ApiError(409, "illegal_status", f"cannot cancel from {g.status}")
     return request.app.state.goals.update_status(goal_id, body.expected_version, "CANCELLED")
 
@@ -562,6 +593,10 @@ async def enable_execution(goal_id: str, body: VersionedAction, request: Request
     g = goals.get(goal_id)
     if g.status not in ("PENDING", "PAUSED"):
         raise ApiError(409, "illegal_status", f"cannot enable execution from {g.status}")
+    # The version is not decoration: a client answering "yes, execute this plan"
+    # from a stale view must not silently enable a plan the user has since edited.
+    if body.expected_version != g.version:
+        raise ApiError(409, "version_conflict", "version mismatch", {"current": g.model_dump()})
     if not g.plan_only:
         return g  # idempotent
     updated = goals.set_plan_only(goal_id, False)

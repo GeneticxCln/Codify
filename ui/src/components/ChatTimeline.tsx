@@ -661,6 +661,38 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             <LayaGateCard payload={ev.payload} />
                           )}
 
+                          {/* The fix→verify loop said a test run failed and is
+                              being retried: shown so a goal that takes longer
+                              than usual explains itself. */}
+                          {ev.type === "fixer_pass" && (
+                            <div className="flex items-start gap-1.5 pl-2 text-sky-300">
+                              <ShieldAlert className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                              <span className="leading-relaxed">
+                                Fixer asked for another pass
+                                <span className="font-mono text-gray-400">
+                                  {' '}(pass {ev.payload.attempt}, {ev.payload.passes_left} of {ev.payload.max_passes} left)
+                                </span>
+                              </span>
+                            </div>
+                          )}
+
+                          {ev.type === "fix_retry" && (
+                            <div className="flex items-start gap-1.5 pl-2 text-amber-300">
+                              <ShieldAlert className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                              <span className="leading-relaxed">
+                                Tests failed — asking the fixer to try again
+                                <span className="font-mono text-gray-400">
+                                  {' '}(attempt {ev.payload.attempt}/{ev.payload.max_attempts})
+                                </span>
+                                {ev.payload.reason && (
+                                  <span className="block text-[11px] text-gray-500 font-mono">
+                                    {ev.payload.reason}
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+                          )}
+
                           {ev.type === "agent_assigned" && (
                             <div className="flex items-center gap-1.5 pl-2 text-purple-300">
                               <Bot className="w-3.5 h-3.5 flex-shrink-0" />

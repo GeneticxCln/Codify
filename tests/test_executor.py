@@ -1,7 +1,9 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import asyncio
 import json
 import subprocess
 import tempfile
+import time
 import threading
 import unittest
 from pathlib import Path
@@ -11,6 +13,7 @@ from engine.db import connect
 from engine.git import GitService
 from engine.executor import MAX_LIBRARY_ROUNDS, MAX_REFUSED_TEST_COMMANDS, ExecutorService
 from engine.laya import LayaDecision, LayaService
+from engine.library import LibraryService
 from engine.models import ROLES, AgentConfigUpdate, GoalCreate, WorkspaceCreate
 from engine.providers import BaseProvider, Keychain, ProviderError, ProviderFactory
 from engine.sandbox import SandboxService
@@ -125,6 +128,10 @@ class TestPerRoleConfig(unittest.IsolatedAsyncioTestCase):
         self.mock_responses["critic"] = {"decision": "approve", "reasons": []}
         self.mock_responses["scribe"] = {"summary": "s", "commit_message": "c: x"}
         step = self.goals.steps(goal.id)[0]
+        # run_step guards its late stages on goal status (a cancel must be able
+        # to stop a commit), so it is called the way every production caller
+        # calls it: with the goal RUNNING.
+        self.goals.update_status(goal.id, goal.version + 1, "RUNNING")
         await self.executor.run_step(goal.id, step.id)
 
         fixer_calls = [c for c in self.mock_provider.calls if "You are Codify Fixer" in c["system_prompt"]]
@@ -578,6 +585,9 @@ class TestHungTestCommand(unittest.IsolatedAsyncioTestCase):
         self.provider.verifier_replies = [
             {"argv": ["pytest", "-q"], "verdict": None, "explanation": "run the suite"},
             {"argv": None, "verdict": "fail", "explanation": "the run timed out"},
+            # The fix→verify loop retries once; the retry fails too, so the
+            # final attempt's TestsFailed is what fails the step.
+            {"argv": None, "verdict": "fail", "explanation": "still timing out after the retry"},
         ]
         await self.executor.run_planning(self.goal.id)
         step = self.goals.steps(self.goal.id)[0]
@@ -1037,6 +1047,724 @@ class TestWhatAStepChanges(unittest.IsolatedAsyncioTestCase):
         self.assertIn("blob.bin (not readable as text)", fixer_prompt)
         self.assertIn("missing.py (not readable as text)", fixer_prompt)
         self.assertEqual(self.goals.steps(goal.id)[0].status, "COMPLETED")
+
+
+class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
+    """A failing test run feeds back into one bounded fix attempt.
+
+    The verifier's output is exactly the evidence the fixer was missing when it
+    wrote the broken code; the old behavior threw the step away on the first
+    failing verdict. The loop is bounded (MAX_FIX_ATTEMPTS), publishes a
+    fix_retry event so the chat explains the extra work, and a cancel still
+    wins over the retry.
+    """
+
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.conn = connect(self.root / "t.db")
+        self.provider = _ScriptedProvider(
+            {
+                "planner": {
+                    "steps": [{
+                        "title": "Step 1", "description": "make greet.py",
+                        "suggested_paths": ["greet.py"],
+                    }]
+                },
+                "critic": {"decision": "approve", "reasons": []},
+                "scribe": {"summary": "did it", "commit_message": "feat: greet"},
+            }
+        )
+        self.registry = AgentRegistryService(
+            self.conn, _ScriptedFactory(self.provider, Keychain()), Keychain()
+        )
+        configure_every_role(self.registry)
+        self.goals = GoalService(self.conn)
+        self.workspaces = WorkspaceService(self.conn)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(), laya=_SkippedGate()
+        )
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+        self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
+
+    async def asyncTearDown(self):
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    def _fixer_replies(self, *contents: str) -> None:
+        """Script successive fixer attempts via a per-call queue on the provider."""
+        replies = [
+            {"files": [{"path": "greet.py", "action": "create", "content": c}]}
+            for c in contents
+        ]
+        self.provider.others["fixer"] = replies  # type: ignore[attr-defined]
+        original = self.provider.complete
+
+        async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
+            role = next(
+                (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
+            )
+            self.provider.calls.append((role, user_prompt))
+            if role == "fixer" and self.provider.others["fixer"]:  # type: ignore[attr-defined]
+                return json.dumps(self.provider.others["fixer"].pop(0))  # type: ignore[attr-defined]
+            if role == "verifier" and self.provider.verifier_replies:
+                return json.dumps(self.provider.verifier_replies.pop(0))
+            return json.dumps(self.provider.others.get(role, {}))  # type: ignore[attr-defined]
+
+        self.provider.complete = completing  # type: ignore[method-assign]
+
+    def _fixer_prompts(self) -> list[str]:
+        return [p for r, p in self.provider.calls if r == "fixer"]
+
+    def _events(self, type_: str) -> list:
+        return [e for e in self.goals.events_after(self.goal.id, 0) if e.type == type_]
+
+    async def _plan(self) -> None:
+        await self.executor.run_planning(self.goal.id)
+        self.goals.update_status(self.goal.id, self.goals.get(self.goal.id).version, "RUNNING")
+
+    async def test_first_failure_is_retried_and_the_retry_passes(self):
+        # Attempt 1 writes broken code; attempt 2 (after the failure feedback) writes good code.
+        self._fixer_replies("def broken():\n  assert False\n", "print('hello')\n")
+        self.provider.verifier_replies = [
+            {"argv": None, "verdict": "fail", "explanation": "assertion failed in broken()"},
+            {"argv": None, "verdict": "pass", "explanation": "all good now"},
+        ]
+        await self._plan()
+        step = self.goals.steps(self.goal.id)[0]
+
+        await self.executor.run_step(self.goal.id, step.id)
+
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "COMPLETED")
+        self.assertEqual(self.goals.get(self.goal.id).status, "RUNNING")
+        self.assertEqual((self.root / "greet.py").read_text(), "print('hello')\n",
+                         "the retry's fixed content is what ends up on disk")
+
+        retries = self._events("fix_retry")
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0].payload["attempt"], 1)
+        self.assertEqual(retries[0].payload["max_attempts"], 1)
+        self.assertIn("assertion failed", retries[0].payload["reason"])
+
+        # The retry prompt carried the failure back to the fixer.
+        prompts = self._fixer_prompts()
+        self.assertEqual(len(prompts), 2, "one attempt, one retry")
+        self.assertIn("FAILED verification", prompts[1])
+        self.assertIn("assertion failed in broken()", prompts[1])
+        self.assertIn("Do not start over from scratch", prompts[1])
+
+        # The second verifier call knows it is verifying a retry.
+        verdict_events = self._events("test_result")
+        self.assertEqual(len(verdict_events), 2, "both verdicts are published")
+
+    async def test_retry_failure_fails_the_step_with_tests_failed(self):
+        self._fixer_replies("bad one\n", "still bad\n")
+        self.provider.verifier_replies = [
+            {"argv": None, "verdict": "fail", "explanation": "first failure"},
+            {"argv": None, "verdict": "fail", "explanation": "second failure"},
+        ]
+        await self._plan()
+        step = self.goals.steps(self.goal.id)[0]
+
+        await self.executor.run_step(self.goal.id, step.id)
+
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "FAILED")
+        self.assertEqual(self.goals.get(self.goal.id).status, "FAILED")
+        error = next(e for e in self._events("error") if e.payload.get("code") == "tests_failed")
+        self.assertIn("second failure", error.payload["message"],
+                      "the FINAL failure is what the error reports")
+        self.assertEqual(len(self._fixer_prompts()), 2, "bounded: one retry, no more")
+        self.assertEqual(len(self._events("fix_retry")), 1)
+
+    async def test_cancel_wins_over_the_retry(self):
+        """A cancel landing during the failed verification stops the retry."""
+        self._fixer_replies("broken\n", "should never be written\n")
+        self.provider.verifier_replies = [
+            {"argv": None, "verdict": "fail", "explanation": "doomed"},
+        ]
+        await self._plan()
+        step = self.goals.steps(self.goal.id)[0]
+        # Simulate the user cancelling between the failure and the retry: the
+        # hook runs mid-run_step via the fix_retry publication below.
+        original_publish = self.goals.publish
+
+        def publish_and_cancel(event):
+            result = original_publish(event)
+            if event.type == "fix_retry":
+                g = self.goals.get(self.goal.id)
+                self.goals.update_status(g.id, g.version, "CANCELLED")
+            return result
+
+        self.goals.publish = publish_and_cancel  # type: ignore[method-assign]
+        await self.executor.run_step(self.goal.id, step.id)
+
+        self.assertEqual(self.goals.get(self.goal.id).status, "CANCELLED")
+        self.assertEqual((self.root / "greet.py").read_text(), "broken\n",
+                         "the retry's fixer call never ran")
+        self.assertEqual(len(self._fixer_prompts()), 1, "no second fixer call after cancel")
+
+    async def test_replay_path_never_loops(self):
+        """apply_goal replays reviewed files — a failing verdict there is final."""
+        self._fixer_replies("content\n")
+        self.provider.verifier_replies = [
+            {"argv": None, "verdict": "fail", "explanation": "nope"},
+        ]
+        await self._plan()
+        step = self.goals.steps(self.goal.id)[0]
+        # A replay is driven by stored_files; no fixer call happens at all.
+        stored = [{"path": "greet.py", "action": "create", "content": "stored\n"}]
+
+        await self.executor.run_step(self.goal.id, step.id, stored_files=stored)
+
+        self.assertEqual(len(self._fixer_prompts()), 0, "a replay never calls the fixer")
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "FAILED")
+        self.assertEqual(len(self._events("fix_retry")), 0, "no retry on a reviewed replay")
+
+
+class TestCancelStopsBeforeCommit(unittest.IsolatedAsyncioTestCase):
+    """A cancel that lands mid-step must prevent the commit.
+
+    `_run_steps` checks goal status only *between* steps, so a cancel landing
+    mid-step used to change nothing: the step ran to the end — including the
+    scribe's `git commit` of changes the user had just asked to stop. The fix
+    re-checks status after the verifier and again immediately before the
+    commit; this test holds the verifier mid-step so the cancel provably lands
+    inside the step, then asserts the commit never happens.
+    """
+
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.conn = connect(self.root / "t.db")
+        self.hold = threading.Event()
+        self.hold_released = threading.Event()
+        self.provider = _HoldingProvider(
+            {
+                "planner": {
+                    "steps": [{
+                        "title": "Step 1", "description": "create x.txt",
+                        "suggested_paths": ["x.txt"],
+                    }]
+                },
+                "fixer": {"files": [{"path": "x.txt", "action": "create", "content": "hi\n"}]},
+                "verifier": {"argv": None, "verdict": "pass", "explanation": "held then released"},
+                "critic": {"decision": "approve", "reasons": []},
+                "scribe": {"summary": "did it", "commit_message": "feat: x"},
+            },
+            hold_role="verifier",
+            hold_event=self.hold,
+            released_event=self.hold_released,
+        )
+        self.registry = AgentRegistryService(
+            self.conn, _ScriptedFactory(self.provider, Keychain()), Keychain()
+        )
+        configure_every_role(self.registry)
+        self.goals = GoalService(self.conn)
+        self.workspaces = WorkspaceService(self.conn)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(),
+            git=_RecordingGit(), laya=_SkippedGate(),
+        )
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+        self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
+
+    async def asyncTearDown(self):
+        self.hold.set()  # never leave a parked call parked
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    async def test_cancel_during_verifier_stops_review_and_commit(self):
+        await self.executor.run_planning(self.goal.id)
+        step = self.goals.steps(self.goal.id)[0]
+        self.goals.update_status(self.goal.id, self.goal.version + 1, "RUNNING")
+
+        run_task = asyncio.create_task(self.executor.run_step(self.goal.id, step.id))
+
+        # The fixer finishes (x.txt exists); the verifier call is now parked.
+        deadline = time.time() + 5
+        while not (self.root / "x.txt").exists() and time.time() < deadline:
+            await asyncio.sleep(0.01)
+        self.assertTrue(self.hold_released.wait(5), "verifier call never parked")
+
+        # Cancel while the verifier is genuinely mid-flight.
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, g.version, "CANCELLED")
+        self.hold.set()
+        await asyncio.wait_for(run_task, timeout=5)
+
+        self.assertEqual(self.goals.get(self.goal.id).status, "CANCELLED",
+                         "a cancel mid-step must not be overwritten")
+        self.assertEqual([], self.provider.critic_calls,
+                         "the critic must not judge a cancelled step")
+        self.assertEqual([], self.provider.scribe_calls,
+                         "the scribe must not run for a cancelled step")
+        self.assertEqual([], self.executor.git.commits,
+                         "nothing may be committed after a cancel")
+        # The fixer's work itself stays (documented mid-run-cancel semantics):
+        self.assertTrue((self.root / "x.txt").exists())
+
+    async def test_cancel_landing_during_critic_still_blocks_the_commit(self):
+        """The belt-and-braces guard: a cancel that slips in *after* the critic
+        approved must still be caught by the check right before the commit."""
+        self.provider.hold_role = "critic"
+        await self.executor.run_planning(self.goal.id)
+        step = self.goals.steps(self.goal.id)[0]
+        self.goals.update_status(self.goal.id, self.goal.version + 1, "RUNNING")
+
+        run_task = asyncio.create_task(self.executor.run_step(self.goal.id, step.id))
+        deadline = time.time() + 5
+        while not (self.root / "x.txt").exists() and time.time() < deadline:
+            await asyncio.sleep(0.01)
+        self.assertTrue(self.hold_released.wait(5), "critic call never parked")
+
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, g.version, "CANCELLED")
+        self.hold.set()
+        await asyncio.wait_for(run_task, timeout=5)
+
+        self.assertEqual(self.goals.get(self.goal.id).status, "CANCELLED")
+        self.assertEqual([], self.provider.scribe_calls,
+                         "the scribe must not run for a cancelled step")
+        self.assertEqual([], self.executor.git.commits,
+                         "nothing may be committed after a cancel, even from the late guard")
+
+
+class _HoldingProvider(BaseProvider):
+    """Scripted replies, with one role's call parked on an Event mid-flight.
+
+    Parking (rather than delaying) is what makes the cancel provably land
+    *inside* the step: the test cancels only after the held call has started.
+    """
+
+    def __init__(self, others: dict[str, Any], hold_role: str, hold_event: threading.Event,
+                 released_event: threading.Event):
+        self.others = others
+        self.hold_role = hold_role
+        self.hold_event = hold_event
+        self.released_event = released_event
+        self.critic_calls: list[str] = []
+        self.scribe_calls: list[str] = []
+        self.calls: list[tuple[str, str]] = []
+
+    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+        role = next(
+            (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
+        )
+        self.calls.append((role, user_prompt))
+        if role == "critic":
+            self.critic_calls.append(user_prompt)
+        if role == "scribe":
+            self.scribe_calls.append(user_prompt)
+        if role == self.hold_role:
+            self.released_event.set()
+            await asyncio.get_event_loop().run_in_executor(None, self.hold_event.wait)
+        return json.dumps(self.others.get(role, {}))
+
+
+class _RecordingGit(GitService):
+    """Stands in for git so the test can assert the commit never happens."""
+
+    def __init__(self):
+        self.commits: list[tuple[str, list[str]]] = []
+
+    def is_git_repo(self, root_path: str) -> bool:
+        return True
+
+    def commit(self, root_path: str, message: str, paths: list[str], *args, **kwargs) -> str | None:
+        self.commits.append((message, paths))
+        return "abcd1234"
+
+
+class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
+    """The fixer may declare a change multi-stage (needs_another_pass).
+
+    One reply cannot always finish a step: a config file in this pass, the code
+    that reads it in the next. The fixer asks by returning needs_another_pass
+    alongside its files; the engine grants the pass BEFORE verifying — verifying
+    an admittedly half-written change only burns a test run the fixer already
+    said it cannot pass — bounded by MAX_FIXER_PASSES, visible as fixer_pass
+    events, and cancel-aware like every other grant of extra work.
+    """
+
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.conn = connect(self.root / "t.db")
+        self.provider = _ScriptedProvider(
+            {
+                "planner": {
+                    "steps": [{
+                        "title": "Step 1", "description": "config then code",
+                        "suggested_paths": ["settings.conf"],
+                    }]
+                },
+                "critic": {"decision": "approve", "reasons": []},
+                "scribe": {"summary": "did it", "commit_message": "feat: staged"},
+            }
+        )
+        self.registry = AgentRegistryService(
+            self.conn, _ScriptedFactory(self.provider, Keychain()), Keychain()
+        )
+        configure_every_role(self.registry)
+        self.goals = GoalService(self.conn)
+        self.workspaces = WorkspaceService(self.conn)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(), laya=_SkippedGate()
+        )
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+        self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
+
+    async def asyncTearDown(self):
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    def _script_fixer(self, replies: list[dict]) -> None:
+        self.provider.others["fixer"] = replies  # type: ignore[attr-defined]
+        original = self.provider.complete
+
+        async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
+            role = next(
+                (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
+            )
+            self.provider.calls.append((role, user_prompt))
+            if role == "fixer" and self.provider.others["fixer"]:  # type: ignore[attr-defined]
+                return json.dumps(self.provider.others["fixer"].pop(0))  # type: ignore[attr-defined]
+            if role == "verifier" and self.provider.verifier_replies:
+                return json.dumps(self.provider.verifier_replies.pop(0))
+            return json.dumps(self.provider.others.get(role, {}))  # type: ignore[attr-defined]
+
+        self.provider.complete = completing  # type: ignore[method-assign]
+
+    def _events(self, type_: str) -> list:
+        return [e for e in self.goals.events_after(self.goal.id, 0) if e.type == type_]
+
+    async def _plan_and_run(self) -> None:
+        await self.executor.run_planning(self.goal.id)
+        self.goals.update_status(self.goal.id, self.goals.get(self.goal.id).version, "RUNNING")
+        await self.executor.run_step(self.goal.id, self.goals.steps(self.goal.id)[0].id)
+
+    async def test_two_staged_passes_finish_the_step(self):
+        self._script_fixer([
+            {"files": [{"path": "settings.conf", "action": "create", "content": "mode=fast\n"}],
+             "needs_another_pass": True},
+            {"files": [{"path": "reader.py", "action": "create", "content": "print(open('settings.conf').read())\n"}]},
+        ])
+        self.provider.verifier_replies = [
+            {"argv": None, "verdict": "pass", "explanation": "nothing to run"},
+        ]
+
+        await self._plan_and_run()
+
+        passes = self._events("fixer_pass")
+        self.assertEqual(len(passes), 1)
+        self.assertEqual(passes[0].payload["attempt"], 1)
+        self.assertEqual(passes[0].payload["passes_left"], 1)
+        # Both files exist: the pass actually ran, not just announced.
+        self.assertTrue((self.root / "settings.conf").exists())
+        self.assertTrue((self.root / "reader.py").exists())
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "COMPLETED")
+        fixer_prompts = [p for r, p in self.provider.calls if r == "fixer"]
+        self.assertEqual(len(fixer_prompts), 2, "pass 2 must actually call the fixer")
+
+    async def test_the_pass_bound_holds(self):
+        self._script_fixer([
+            {"files": [{"path": f"f{i}.txt", "action": "create", "content": "x\n"}],
+             "needs_another_pass": True}
+            for i in range(5)
+        ])
+        self.provider.verifier_replies = [
+            {"argv": None, "verdict": "pass", "explanation": "nothing to run"},
+        ]
+
+        await self._plan_and_run()
+
+        passes = self._events("fixer_pass")
+        self.assertEqual(len(passes), 2, "MAX_FIXER_PASSES grants two, no more")
+        self.assertEqual(passes[-1].payload["passes_left"], 0)
+        fixer_calls = [p for r, p in self.provider.calls if r == "fixer"]
+        self.assertEqual(len(fixer_calls), 3, "1 initial + 2 granted passes")
+        # The verifier ran once, after the LAST pass — no verify of half work.
+        self.assertEqual(len(self.provider.verifier_calls()), 1)
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "COMPLETED")
+
+    async def test_needs_another_pass_without_files_is_a_contract_error(self):
+        self._script_fixer([{"files": [], "needs_another_pass": True}])
+
+        await self._plan_and_run()
+
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "FAILED")
+        errors = [e.payload for e in self._events("error")]
+        self.assertTrue(any("needs_another_pass requires files" in str(e.get("message")) for e in errors))
+
+class TestCriticAndScribeEvidence(unittest.IsolatedAsyncioTestCase):
+    """The critic judges with the verdict; the scribe describes with the diff.
+
+    Both roles were asked for a judgment the executor never gave them evidence
+    for: the critic could approve changes whose tests had just failed (the
+    verdict was published as an event but never shown to it), and the scribe
+    was told to describe "what changed from the diff you are given" while being
+    given nothing but file names — so commit subjects were invented.
+    """
+
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.conn = connect(self.root / "t.db")
+        self.provider = _ScriptedProvider(
+            {
+                "planner": {
+                    "steps": [{
+                        "title": "Step 1", "description": "add a.py",
+                        "suggested_paths": ["a.py"],
+                    }]
+                },
+                "fixer": {
+                    "files": [{"path": "a.py", "action": "create", "content": "value = 4\n"}]
+                },
+                "critic": {"decision": "approve", "reasons": []},
+                "scribe": {"summary": "did it", "commit_message": "feat: a"},
+            }
+        )
+        self.registry = AgentRegistryService(
+            self.conn, _ScriptedFactory(self.provider, Keychain()), Keychain()
+        )
+        configure_every_role(self.registry)
+        self.goals = GoalService(self.conn)
+        self.workspaces = WorkspaceService(self.conn)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(), laya=_SkippedGate()
+        )
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+        self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
+
+    async def asyncTearDown(self):
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    async def _plan_and_run(self, verifier_reply: dict | None = None) -> None:
+        await self.executor.run_planning(self.goal.id)
+        step = self.goals.steps(self.goal.id)[0]
+        self.goals.update_status(self.goal.id, self.goal.version + 1, "RUNNING")
+        if verifier_reply is not None:
+            self.provider.verifier_replies.append(verifier_reply)
+        await self.executor.run_step(self.goal.id, step.id)
+
+    def _prompts_for(self, role: str) -> list[str]:
+        return [p for r, p in self.provider.calls if r == role]
+
+    async def test_critic_prompt_carries_the_test_verdict(self):
+        await self._plan_and_run(
+            {"argv": None, "verdict": "pass", "explanation": "2 passed"}
+        )
+
+        critic_prompt = self._prompts_for("critic")[0]
+        self.assertIn("Test verdict: pass", critic_prompt)
+        self.assertIn("2 passed", critic_prompt)
+
+    async def test_scribe_prompt_carries_the_actual_diff(self):
+        await self._plan_and_run(
+            {"argv": None, "verdict": "pass", "explanation": "2 passed"}
+        )
+
+        scribe_prompt = self._prompts_for("scribe")[0]
+        self.assertIn("Test verdict: pass", scribe_prompt)
+        self.assertIn("2 passed", scribe_prompt)
+        self.assertIn("Diffs:", scribe_prompt)
+        self.assertIn("File: a.py (create)", scribe_prompt)
+        self.assertIn("+value = 4", scribe_prompt, "the unified diff body must reach the scribe")
+
+    async def test_critic_prompt_says_when_no_verdict_exists(self):
+        """A missing verdict must not read as "no tests ran", which a critic
+        would treat as harmless — it has to be named as a wiring break."""
+        from engine.fs import FileSystemService
+
+        await self.executor.run_planning(self.goal.id)
+        step = self.goals.steps(self.goal.id)[0]
+        await self.executor._critic(
+            self.goal.id, step, FileSystemService(str(self.root)),
+            diffs=[], evidence={}, test_outcome=None,
+        )
+
+        critic_prompt = self._prompts_for("critic")[0]
+        self.assertIn("NONE REPORTED", critic_prompt)
+
+
+class TestEditActionEndToEnd(unittest.IsolatedAsyncioTestCase):
+    """The fixer's search/replace op, through the real step pipeline.
+
+    `edit` is a description ("replace this exact text") until the engine resolves
+    it against the file as it exists. Only the resolved full content is a proposal
+    Apply can replay deterministically — so a dry-run must store bytes, not the
+    description, and an edit that cannot match must fail the step as the fixer's
+    contract error, not an internal error.
+    """
+
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        (self.root / "a.py").write_text("value = 1\n", encoding="utf-8")
+        self.conn = connect(self.root / "t.db")
+        self.provider = _ScriptedProvider(
+            {
+                "planner": {
+                    "steps": [{
+                        "title": "Step 1", "description": "bump value",
+                        "suggested_paths": ["a.py"],
+                    }]
+                },
+                "fixer": {
+                    "files": [{"path": "a.py", "action": "edit",
+                               "edits": [{"old_text": "value = 1", "new_text": "value = 2"}]}]
+                },
+                "critic": {"decision": "approve", "reasons": []},
+                "scribe": {"summary": "did it", "commit_message": "feat: bump"},
+            }
+        )
+        self.registry = AgentRegistryService(
+            self.conn, _ScriptedFactory(self.provider, Keychain()), Keychain()
+        )
+        configure_every_role(self.registry)
+        self.goals = GoalService(self.conn)
+        self.workspaces = WorkspaceService(self.conn)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(), laya=_SkippedGate()
+        )
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+        self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
+
+    async def asyncTearDown(self):
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    def _plan(self):
+        g = self.goals.get(self.goal.id)  # fresh version — planning never ran here
+        self.goals.update_status(self.goal.id, g.version, "RUNNING")
+        self.provider.verifier_replies.append(
+            {"argv": None, "verdict": "pass", "explanation": "nothing to run"}
+        )
+        self.executor._insert_steps(
+            self.goal.id, [{"title": "S1", "description": "d", "suggested_paths": ["a.py"]}]
+        )
+        return self.goals.steps(self.goal.id)[0]
+
+    async def test_a_dry_run_edit_stores_the_resolved_content_not_the_description(self):
+        step = self._plan()
+        self.executor.goals.set_dry_run(self.goal.id, True)
+
+        await self.executor.run_step(self.goal.id, step.id)
+
+        rows = self.conn.execute(
+            "SELECT path, action, content FROM proposed_files WHERE goal_id = ? AND step_id = ?",
+            (self.goal.id, step.id),
+        ).fetchall()
+        self.assertEqual([(r[0], r[1]) for r in rows], [("a.py", "update")])
+        # The stored content is the resolved file, byte-identical to what Apply
+        # would write — not the {old_text, new_text} description.
+        self.assertEqual(rows[0][2], "value = 2\n")
+        # And the step's diff shows the edit as a normal change.
+        diffs = [e.payload for e in self.goals.events_after(self.goal.id, 0) if e.type == "diff"]
+        self.assertIn("+value = 2", diffs[0]["unified_diff"])
+
+    async def test_an_edit_that_cannot_match_fails_the_step_as_invalid_output(self):
+        self.provider.others["fixer"] = {
+            "files": [{"path": "a.py", "action": "edit",
+                       "edits": [{"old_text": "NO SUCH LINE", "new_text": "x"}]}]
+        }
+        step = self._plan()
+
+        await self.executor.run_step(self.goal.id, step.id)
+
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "FAILED")
+        errors = [e.payload for e in self.goals.events_after(self.goal.id, 0) if e.type == "error"]
+        self.assertTrue(any("old_text appears 0 time(s)" in str(e.get("message")) for e in errors))
+        # The user's file is untouched — a refused edit writes nothing.
+        self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "value = 1\n")
+
+    async def test_an_edit_with_no_resolved_change_stores_nothing_applyable(self):
+        self.provider.others["fixer"] = {
+            "files": [{"path": "a.py", "action": "edit",
+                       "edits": [{"old_text": "value = 1", "new_text": "value = 1"}]}]
+        }
+        step = self._plan()
+        self.executor.goals.set_dry_run(self.goal.id, True)
+
+        await self.executor.run_step(self.goal.id, step.id)
+
+        rows = self.conn.execute(
+            "SELECT path FROM proposed_files WHERE goal_id = ? AND step_id = ?",
+            (self.goal.id, step.id),
+        ).fetchall()
+        self.assertEqual(rows, [], "a no-op edit must not become an Apply proposal")
+
+
+class TestLibrarianLineRangeReads(unittest.IsolatedAsyncioTestCase):
+    """The librarian may ask for a line range: {path, offset, limit}.
+
+    Before this, a read past MAX_READ_CHARS was head-truncated and everything
+    after the cap was unreachable — the model had to pretend the bottom half of
+    the file did not exist.
+    """
+
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.conn = connect(self.root / "t.db")
+        self.provider = _QueuedProvider()
+        self.registry = AgentRegistryService(
+            self.conn, _QueuedFactory(self.provider, Keychain()), Keychain()
+        )
+        configure_every_role(self.registry)
+        self.workspaces = WorkspaceService(self.conn)
+        self.goals = GoalService(self.conn)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(), laya=_SkippedGate()
+        )
+        self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+
+    async def asyncTearDown(self):
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    def _requests(self, out: dict):
+        return self.executor._library_requests(out)
+
+    def test_a_range_request_is_parsed_with_normalized_bounds(self):
+        reqs = self._requests({"reads": [
+            {"path": "big.py", "offset": "200", "limit": "50"},
+            {"path": "big.py", "offset": 0, "limit": 0},
+            {"path": "big.py", "offset": "two", "limit": None},
+        ]})
+        self.assertEqual(reqs[0][1], {"path": "big.py", "offset": 200, "limit": 50})
+        # Junk/zero bounds fall back to sane defaults, not an exception.
+        self.assertEqual(reqs[1][1]["offset"], 1)
+        self.assertEqual(reqs[2][1]["offset"], 1)
+
+    def test_a_line_range_read_serves_that_slice_of_the_file(self):
+        (self.root / "big.py").write_text(
+            "\n".join(f"line {i}" for i in range(1, 51)) + "\n", encoding="utf-8"
+        )
+        lib = LibraryService(self.ws.root_path)
+        text, opened, matched, refused = self.executor._serve_library_requests(
+            "goal-x",
+            lib,
+            self._requests({"reads": [{"path": "big.py", "offset": 45, "limit": 5}]}),
+        )
+        self.assertIn("lines 45-49", text)
+        self.assertIn("line 45", text)
+        self.assertIn("line 49", text)
+        self.assertNotIn("line 1\n", text, "the head of the file is not in a tail-window read")
+        self.assertEqual(opened, {"big.py"})
+        self.assertEqual(refused, 0)
+
+    def test_a_beyond_eof_window_reports_an_empty_range_not_a_failure(self):
+        (self.root / "big.py").write_text("only\n", encoding="utf-8")
+        lib = LibraryService(self.ws.root_path)
+        text, opened, matched, refused = self.executor._serve_library_requests(
+            "goal-x", lib,
+            self._requests({"reads": [{"path": "big.py", "offset": 999, "limit": 5}]}),
+        )
+        self.assertIn("empty range", text)
+        self.assertEqual(refused, 0)
 
 
 if __name__ == "__main__":

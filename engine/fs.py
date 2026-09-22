@@ -107,6 +107,13 @@ class FileSystemService:
         exactly what it proposes produces an empty diff, and reporting that as a
         touched file (in the chat's change summary, and in the commit) is a claim
         the engine would be making without evidence.
+
+        The `edit` action is a search/replace against the file as it exists now:
+        `old_text` must appear exactly `count` times (default 1; 0 means every
+        occurrence). Each op is resolved to the resulting full content before
+        anything is written, so a dry-run's stored proposal is the final bytes —
+        `apply` replays content, never re-runs edits against a moved file.
+        An `edit` that cannot be applied raises ValueError with the reason.
         """
         summaries: list[dict] = []
         for item in files:
@@ -115,7 +122,18 @@ class FileSystemService:
             content = item.get("content")
             target = self.resolve(rel)
             before, note = self._read_for_diff(target)
-            after = "" if action == "delete" else (content or "")
+            if action == "edit":
+                # Resolve the ops against what is on disk right now. The result
+                # is the concrete `after` content, so dry-run storage and diff
+                # generation treat an edit exactly like a whole-file write.
+                after, edit_note = self._resolve_edits(before, target, item.get("edits") or [])
+                if edit_note:
+                    # An unaplicable edit is a fixer mistake, not an I/O error:
+                    # it must fail the step loudly rather than write half an edit.
+                    raise ValueError(f"edit failed for {rel}: {edit_note}")
+                note = None
+            else:
+                after = "" if action == "delete" else (content or "")
             # A delete changes the tree iff the file is there — an *empty* file
             # still disappears, which `before != after` alone would miss.
             changed = target.is_file() if action == "delete" else before != after
@@ -140,8 +158,52 @@ class FileSystemService:
                     "action": action,
                     "unified_diff": diff,
                     "changed": changed,
+                    # The resolved full content, so a stored dry-run proposal for
+                    # an edit replays byte-identically without re-matching. Only
+                    # set where it differs from what the fixer itself sent.
+                    "resolved_content": after if action == "edit" else None,
                     # Why a diff is absent when something *did* change.
                     "diff_note": note if changed and not diff else None,
                 }
             )
         return summaries
+
+    def _resolve_edits(self, before: str, target: Path, edits: list[dict]) -> tuple[str, str | None]:
+        """Apply search/replace ops in order; (result, error-reason-or-None).
+
+        Each op: {old_text, new_text, count}. `old_text` must exist exactly
+        `count` times (default 1 — the safest contract for a model, since an
+        ambiguous match silently editing the wrong occurrence is worse than an
+        error; count=0 means every occurrence). Ops apply to the result of the
+        previous one, in order, like a model would expect.
+        """
+        text = before
+        for i, op in enumerate(edits, 1):
+            if not isinstance(op, dict) or not isinstance(op.get("old_text"), str):
+                return text, f"edit #{i} is not {{old_text, new_text}}"
+            old = op["old_text"]
+            new = op.get("new_text")
+            if not isinstance(new, str):
+                return text, f"edit #{i} has no new_text"
+            raw_count = op.get("count")
+            if raw_count is None:
+                count = 1
+            else:
+                try:
+                    count = int(raw_count)
+                except (TypeError, ValueError):
+                    return text, f"edit #{i} has a non-integer count"
+                if count < 0:
+                    return text, f"edit #{i}: count must be >= 0"
+            occurrences = text.count(old) if old else 0
+            if count == 0:
+                if occurrences == 0:
+                    return text, f"edit #{i}: old_text not found"
+                text = text.replace(old, new)
+                continue
+            if occurrences != count:
+                return text, (
+                    f"edit #{i}: old_text appears {occurrences} time(s), expected {count}"
+                )
+            text = text.replace(old, new, count)
+        return text, None

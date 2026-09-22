@@ -71,6 +71,21 @@ class AgentNotConfigured(ProviderError):
 # model call.
 MAX_REFUSED_TEST_COMMANDS = 2
 
+# How many times a failing test run may be fed back to the fixer before the step
+# is declared failed. This is the loop that turns "a tool that proposes" into
+# "an agent that finishes": the verifier's output is exactly the evidence the
+# fixer was missing when it wrote the broken code. One attempt, deliberately:
+# each round costs a fixer + verifier call pair, and a second failure of the
+# same step usually means the approach (not the code) is wrong — that needs a
+# human, or an edited plan, not a third blind attempt.
+MAX_FIX_ATTEMPTS = 1
+# How many times the fixer may ask for another pass after applying changes
+# ("I set up the config file, now give me the test run"). Separate from the
+# test-failure retry: this is the fixer declaring it is not finished, not the
+# verifier telling it that it failed. Bounded the same way — an uncapped model
+# would loop forever, and each pass costs a model call.
+MAX_FIXER_PASSES = 2
+
 # Failures that mean the target could not be used at all, and so may be retried on
 # the role's fallback. The list is deliberately made of *provider* problems — no
 # credential, an endpoint that refuses, an error status, a reply the contract
@@ -112,6 +127,21 @@ class CriticRejection(AgentOutputInvalid):
     def __init__(self, message: str, reasons: list[str], role: str | None = "critic"):
         super().__init__(message, role)
         self.reasons = reasons
+
+
+def _as_read_int(value: Any, default: int | None) -> int | None:
+    """A model-supplied read offset/limit coerced to a sane int, or the default.
+
+    Models send "2", 2, 2.0, occasionally "two". Junk falls back to the default
+    rather than raising — a malformed window is a wasted round, not a defect.
+    """
+    if value is None:
+        return default
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return n if n >= 1 else default
 
 
 def extract_json(raw: str) -> Any:
@@ -393,6 +423,12 @@ class ExecutorService:
         )
         try:
             out = await self.orchestrator.run_agent("planner", goal_id, None, prompt)
+            # A cancel that landed while the planner was thinking must win: a
+            # goal the user cancelled must not reappear as PENDING with a plan
+            # they explicitly stopped. (PLANNING is a legal cancel state.)
+            if self.goals.get(goal_id).status == "CANCELLED":
+                self._log(goal_id, None, "info", "cancelled during planning — discarding the plan")
+                return
             steps = self._parse_steps(out)
             self._insert_steps(goal_id, steps)
             self._log(goal_id, None, "info", f"planner produced {len(steps)} steps")
@@ -499,7 +535,26 @@ class ExecutorService:
             if not isinstance(raw, list):
                 continue
             for item in raw[:cap]:
-                requests.append((kind, item))
+                # A read may be a plain path string or {path, offset, limit} —
+                # the line-range form that reaches the bottom half of a big file.
+                if kind == "reads" and isinstance(item, dict) and item.get("path"):
+                    requests.append((kind, {
+                        "path": str(item["path"]),
+                        "offset": _as_read_int(item.get("offset"), 1),
+                        "limit": _as_read_int(item.get("limit"), None),
+                    }))
+                elif kind == "searches" and isinstance(item, dict) and item.get("query"):
+                    # A search may be a plain string or {query, regex, glob} —
+                    # the pattern form for structural questions. The regex
+                    # itself is validated (and bounded) by the library, so a
+                    # bad pattern arrives here as a refusal, not a crash.
+                    requests.append((kind, {
+                        "query": str(item["query"]),
+                        "regex": bool(item.get("regex")),
+                        "glob": str(item["glob"]) if item.get("glob") else None,
+                    }))
+                else:
+                    requests.append((kind, item))
         return requests
 
     def _serve_library_requests(
@@ -523,10 +578,24 @@ class ExecutorService:
                 break
             label = " ".join(str(a) for a in item) if isinstance(item, list) else str(item)
             try:
-                if kind == "reads":
+                if kind == "reads" and isinstance(item, dict):
+                    # Line-range read: the path plus the 1-based window.
+                    res = lib.read(item["path"], offset=item.get("offset"), limit=item.get("limit"))
+                    label = (
+                        f"{item['path']} lines {item.get('offset') or 1}-"
+                        f"{(item.get('offset') or 1) + (item.get('limit') or 400) - 1}"
+                    )
+                    opened.add(res["path"])
+                    text = format_read(res)
+                elif kind == "reads":
                     res = lib.read(label)
                     opened.add(res["path"])
                     text = format_read(res)
+                elif kind == "searches" and isinstance(item, dict):
+                    # Structured search: {query, regex, glob}.
+                    res = lib.search(item["query"], glob=item.get("glob"), regex=bool(item.get("regex")))
+                    matched.update(m["path"] for m in res["matches"])
+                    text = format_search(res)
                 elif kind == "searches":
                     res = lib.search(label)
                     matched.update(m["path"] for m in res["matches"])
@@ -700,6 +769,17 @@ class ExecutorService:
             )
         return "\n".join(lines)
 
+    def _cancelled(self, goal_id: str) -> bool:
+        """True when the goal was cancelled (or otherwise left RUNNING) mid-step.
+
+        `_run_steps` only checks status *between* steps, so without this a cancel
+        landing mid-step changed nothing: the step ran to the end — including the
+        scribe's `git commit` of changes the user had just asked to stop. Writing
+        to the user's repository is the one act a cancel must be able to prevent,
+        so the stages that lead to it re-check before doing irreversible work.
+        """
+        return self.goals.get(goal_id).status != "RUNNING"
+
     async def run_step(self, goal_id: str, step_id: str, stored_files: list[dict] | None = None) -> None:
         """Run one step. stored_files=None asks the fixer for changes; a list
         (possibly empty) replays those exact file operations without a fixer
@@ -714,12 +794,93 @@ class ExecutorService:
         evidence = self._evidence_for(goal_id)
         try:
             if stored_files is None:
-                summaries = await self._fixer(goal_id, step, fs, goal.dry_run, evidence)
+                # The fix → verify loop. A failing test run is not the end of a
+                # step: the failing output is exactly the evidence the fixer was
+                # missing when it wrote the code, so it goes back once, bounded
+                # by MAX_FIX_ATTEMPTS. Attempt 1 runs with no feedback; a failed
+                # verification feeds the failure back and tries again; the last
+                # attempt's failure propagates and fails the step as before.
+                outcome: dict | None = None
+                summaries: list[dict] | None = None
+                prior_failure: dict | None = None
+                passes_left = MAX_FIXER_PASSES
+                for attempt in range(1, MAX_FIX_ATTEMPTS + 2):  # attempts, plus the final one
+                    final = attempt > MAX_FIX_ATTEMPTS
+                    try:
+                        summaries, wants_pass = await self._fixer(
+                            goal_id, step, fs, goal.dry_run, evidence,
+                            failure_feedback=prior_failure,
+                        )
+                        # The fixer declared the change multi-stage. Passes are
+                        # the fixer's own budget, granted BEFORE verifying (a
+                        # test run against admittedly half-written work is a
+                        # burn) and WITHOUT touching the retry attempt counter
+                        # — a `continue` here would spend a retry slot, and
+                        # two passes would exhaust the whole loop.
+                        while wants_pass and passes_left > 0:
+                            passes_left -= 1
+                            self.goals.publish(self._event(
+                                goal_id, step.id, "fixer_pass",
+                                {
+                                    "attempt": attempt,
+                                    "max_passes": MAX_FIXER_PASSES,
+                                    "passes_left": passes_left,
+                                },
+                            ))
+                            if self._cancelled(goal_id):
+                                self._log(goal_id, step.id, "info", "cancelled — not running the fixer's next pass")
+                                return
+                            summaries, wants_pass = await self._fixer(
+                                goal_id, step, fs, goal.dry_run, evidence,
+                                failure_feedback=prior_failure,
+                            )
+                        outcome = await self._verifier(
+                            goal_id, step, ws, evidence, prior_failure=prior_failure,
+                        )
+                    except TestsFailed as exc:
+                        if final:
+                            raise
+                        prior_failure = {
+                            "explanation": str(exc),
+                            # The verifier's own published record of what it ran
+                            # and saw — the model gets the real record, not a
+                            # paraphrase.
+                            "outcome": self._last_test_result(goal_id, step.id),
+                        }
+                        self.goals.publish(self._event(
+                            goal_id, step.id, "fix_retry",
+                            {
+                                "attempt": attempt,
+                                "max_attempts": MAX_FIX_ATTEMPTS,
+                                "reason": str(exc),
+                            },
+                        ))
+                        # A cancel that lands while tests fail must still win —
+                        # the retry is work, and work stops when the user says so.
+                        if self._cancelled(goal_id):
+                            self._log(goal_id, step.id, "info", "cancelled — not retrying the failed step")
+                            return
+                        continue
+                    break
             else:
+                # A replay is a reviewed decision, not a fresh attempt: there is
+                # nothing for a retry loop to fix, so it never runs on this path.
                 summaries = self._replay_files(goal_id, step, fs, stored_files, dry_run=goal.dry_run)
-            await self._verifier(goal_id, step, ws, evidence)
-            await self._critic(goal_id, step, fs, summaries, evidence)
-            await self._scribe(goal_id, step, summaries, ws.root_path, goal.dry_run)
+                outcome = await self._verifier(goal_id, step, ws, evidence)
+            # The fixer has already written by the time the verifier runs, so
+            # those stages are not cancel-safe and cancelling mid-flight leaves
+            # their work on disk (documented behavior of a mid-run cancel).
+            # But verification, judgment and *the commit* are separable: a
+            # cancel that arrives while tests run must stop the goal before the
+            # scribe records changes the user asked not to make.
+            if self._cancelled(goal_id):
+                self._log(goal_id, step.id, "info", "cancelled — skipping review and commit for this step")
+                return
+            await self._critic(goal_id, step, fs, summaries, evidence, outcome)
+            if self._cancelled(goal_id):
+                self._log(goal_id, step.id, "info", "cancelled — skipping the summary for this step")
+                return
+            await self._scribe(goal_id, step, summaries, ws.root_path, goal.dry_run, outcome)
         except CriticRejection:
             # Step remains IN_PROGRESS with review_notes, goal is PAUSED; human retry required
             return
@@ -803,6 +964,18 @@ class ExecutorService:
 
     # --- stages -------------------------------------------------------
 
+    def _last_test_result(self, goal_id: str, step_id: str) -> dict:
+        """The verifier's most recent published record for this step.
+
+        Read from the event log, not memory, like every other piece of goal
+        state — a resumed goal replays the same evidence.
+        """
+        latest: dict = {}
+        for ev in self.goals.events_after(goal_id, 0):
+            if ev.type == "test_result" and ev.step_id == step_id:
+                latest = ev.payload or {}
+        return latest
+
     async def _fixer(
         self,
         goal_id: str,
@@ -810,26 +983,68 @@ class ExecutorService:
         fs: FileSystemService,
         dry_run: bool,
         evidence: dict | None = None,
+        failure_feedback: dict | None = None,
     ) -> list[dict]:
         ctx, unreadable = self._suggested_paths_context(fs, step.suggested_paths)
+
+        # On a retry, the failed run's evidence is the most important part of
+        # the prompt: what the model wrote did not work, and here is exactly
+        # how. Without it the second attempt would be a coin flip.
+        feedback_text = ""
+        if failure_feedback:
+            outcome = failure_feedback.get("outcome") or {}
+            lines = [
+                "IMPORTANT — your previous attempt FAILED verification:",
+                str(failure_feedback.get("explanation", "")),
+            ]
+            if outcome.get("argv"):
+                lines.append(
+                    f"Command that was run: {' '.join(outcome['argv'])} (exit {outcome.get('exit_code')})"
+                )
+            lines.append(
+                "Fix what the failure describes. Do not start over from scratch — "
+                "edit your previous approach."
+            )
+            feedback_text = "\n".join(lines) + "\n\n"
         out = await self.orchestrator.run_agent(
             "fixer", goal_id, step.id,
-            f"Step: {step.title}\n{step.description}\n"
+            f"Step: {step.title}\n{step.description}\n\n"
+            f"{feedback_text}"
             f"What the librarian found:\n{self._evidence_text(evidence or {})}\n"
             f"Suggested paths (current contents):\n{ctx}{unreadable}",
         )
         files = self._parse_files(out)
+        # The fixer may declare itself unfinished: multi-stage changes (a config
+        # file in one pass, the code that reads it in the next) do not fit one
+        # reply. It asks by returning needs_another_pass=true WITH a plan note;
+        # an empty files list is still just a no-op, so the two can't be confused.
+        wants_pass = bool(isinstance(out, dict) and out.get("needs_another_pass"))
+        if not files and wants_pass:
+            raise AgentOutputInvalid(
+                "needs_another_pass requires files in the same reply — ask for "
+                "another pass alongside the changes you just made",
+                role="fixer",
+            )
         if not files:
             self._log(goal_id, step.id, "warn", "fixer returned an empty files list — no changes will be written")
+        try:
+            # Apply runs BEFORE storage now: an `edit` op is only a description
+            # ("replace this exact text") until the engine resolves it against
+            # the file as it exists, and only the resolved full content is a
+            # proposal "Apply" can replay deterministically later.
+            summaries = fs.apply(files, dry_run=dry_run)
+        except ValueError as exc:
+            # An edit whose old_text does not match the file is the fixer's
+            # mistake — a contract failure, not an internal error.
+            raise AgentOutputInvalid(str(exc), role="fixer") from exc
         if dry_run:
             # Persist the proposal so "Apply" can write these exact contents
             # later. An empty list clears the step's previous proposal — a retry
             # that now proposes nothing must not leave stale files applyable.
-            self._store_proposed_files(goal_id, step.id, files)
-        summaries = fs.apply(files, dry_run=dry_run)
+            self._store_proposed_files(goal_id, step.id, files, summaries)
         self._publish_changes(goal_id, step.id, summaries, dry_run)
         self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="fixer")
-        return summaries
+        return summaries, wants_pass
 
     def _publish_changes(self, goal_id: str, step_id: str, summaries: list[dict], dry_run: bool) -> None:
         """Emit one diff per file that actually changed, and say so when none did.
@@ -859,8 +1074,14 @@ class ExecutorService:
 
     async def _verifier(
         self, goal_id: str, step: PlanStep, ws: Any, evidence: dict | None = None,
-    ) -> None:
+        prior_failure: dict | None = None,
+    ) -> dict:
         """Get a test verdict, treating a refused command as information.
+
+        Returns the step's test outcome — the same fields the `test_result`
+        event carries — because the critic is asked to judge these changes
+        *after* the tests ran, and a critic that does not know the verdict can
+        approve code whose tests just failed.
 
         A test command that hangs must not wedge the goal: it is reported to the
         verifier as exit 124 so it can return the verdict it owes. A command the
@@ -887,6 +1108,11 @@ class ExecutorService:
                 f"{' '.join(str(t) for t in found_test_command)} (unverified — it may be wrong "
                 "or not allowlisted)."
             )
+        if prior_failure:
+            prompt += (
+                f"\n\nNote: a previous attempt at this step failed ({prior_failure.get('explanation', '')}). "
+                "The code has just been changed in response. Verify it afresh."
+            )
         argv: list[str] | None = None
         result: dict | None = None
         refusals: list[str] = []
@@ -900,13 +1126,24 @@ class ExecutorService:
             # Verdict-only answer: either it never needed a command, or it has
             # just been told what happened to the one it asked for.
             if proposed is None:
+                outcome = {
+                    "argv": argv,
+                    "verdict": out.get("verdict"),
+                    "explanation": out.get("explanation"),
+                    "exit_code": result["exit_code"] if result else None,
+                    "refused": refusals or [],
+                    "ran": argv is not None,
+                }
+                # Explicit fields rather than **-splatting: `outcome` also
+                # carries `ran`/`refused` (event-payload keys the critic's
+                # rendering uses) that the publisher has no parameters for.
                 self._test_result(
-                    goal_id, step, argv, out.get("verdict"), out.get("explanation"),
-                    result["exit_code"] if result else None,
-                    refusals=refusals,
+                    goal_id, step, argv=outcome["argv"],
+                    verdict=outcome["verdict"], explanation=outcome["explanation"],
+                    exit_code=outcome["exit_code"], refusals=outcome["refused"],
                 )
                 self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="verifier")
-                return
+                return outcome
 
             if result is not None:
                 raise AgentOutputInvalid("verifier second call must have argv null", role="verifier")
@@ -999,6 +1236,7 @@ class ExecutorService:
         fs: FileSystemService,
         diffs: list[dict],
         evidence: dict | None = None,
+        test_outcome: dict | None = None,
     ) -> None:
         diff_lines = []
         for d in diffs:
@@ -1007,9 +1245,28 @@ class ExecutorService:
                 diff_lines.append(d["unified_diff"])
         diff_text = "\n".join(diff_lines) if diff_lines else "No changes proposed."
 
+        # The verifier ran before the critic for exactly this: an approve that
+        # ignores a failing test is a false claim about the changes' quality.
+        # A verdict is always present (the verifier publishes one before this
+        # call), so a missing block means wiring broke — say so rather than
+        # letting the critic believe there were no tests.
+        outcome = test_outcome or {}
+        if outcome:
+            ran = "ran `" + " ".join(outcome["argv"]) + "`" if outcome.get("ran") else "ran nothing"
+            refused_note = (
+                f" (refused: {'; '.join(outcome['refused'])})" if outcome.get("refused") else ""
+            )
+            verdict_text = (
+                f"Test verdict: {outcome.get('verdict')} — {ran}, "
+                f"exit {outcome.get('exit_code')}{refused_note}. {outcome.get('explanation') or ''}"
+            )
+        else:
+            verdict_text = "Test verdict: NONE REPORTED — the verification stage produced no verdict."
+
         out = await self.orchestrator.run_agent(
             "critic", goal_id, step.id,
             f"Step: {step.title}\n{step.description}\n\n"
+            f"{verdict_text}\n\n"
             f"What the librarian found:\n{self._evidence_text(evidence or {})}\n\nDiffs:\n{diff_text}",
         )
         decision = out.get("decision")
@@ -1026,35 +1283,72 @@ class ExecutorService:
             raise CriticRejection("critic requested changes; human retry required", reasons)
         raise AgentOutputInvalid(f"critic decision invalid: {decision!r}", role="critic")
 
-    async def _scribe(self, goal_id: str, step: PlanStep, diffs: list[dict], root_path: str = "", dry_run: bool = False) -> None:
-        changed = ", ".join(d["path"] for d in diffs) if diffs else "none"
+    async def _scribe(
+        self, goal_id: str, step: PlanStep, diffs: list[dict], root_path: str = "",
+        dry_run: bool = False, test_outcome: dict | None = None,
+    ) -> None:
+        # The diffs themselves, not just their file names: the prompt tells the
+        # scribe to describe "what changed and why, from the diff you are given",
+        # and a bare path list made that a promise the executor never kept —
+        # commit subjects were invented from file names alone. Same cap as the
+        # critic's diff budget so one huge change cannot flood the prompt.
+        diff_lines = []
+        for d in diffs:
+            diff_lines.append(f"File: {d['path']} ({d['action']})")
+            if d.get("unified_diff"):
+                diff_lines.append(d["unified_diff"])
+        diff_text = "\n".join(diff_lines) if diff_lines else "No changes proposed."
+
+        outcome = test_outcome or {}
+        if outcome:
+            verdict_text = (
+                f"Test verdict: {outcome.get('verdict')}"
+                + (f" — {outcome.get('explanation')}" if outcome.get("explanation") else "")
+            )
+        else:
+            verdict_text = "Test verdict: NONE REPORTED."
+
         out = await self.orchestrator.run_agent(
             "scribe", goal_id, step.id,
-            f"Step: {step.title}\n{step.description}\nChanged files: {changed}",
+            f"Step: {step.title}\n{step.description}\n\n"
+            f"{verdict_text}\n\nDiffs:\n{diff_text}",
         )
         summary = out.get("summary")
         commit_message = out.get("commit_message")
         if not summary or not commit_message:
             raise AgentOutputInvalid("scribe requires summary and commit_message", role="scribe")
+        # The critic judges with the verdict; the scribe describes with the diff.
+        # Both used to be asked for a judgment the executor never gave them the
+        # evidence for: a critic could approve failing changes, and a scribe told
+        # to describe "the diff you are given" was given nothing but file names.
         self._set_step(goal_id, step, "IN_PROGRESS", commit_message=commit_message, last_agent_role="scribe")
         self._log(goal_id, step.id, "info", summary)
 
         if not dry_run and root_path and self.git.is_git_repo(root_path):
-            # Only what this step wrote. A bare `git add -A` would commit the
-            # user's own half-finished work under this step's message.
-            paths = [d["path"] for d in diffs]
-            commit_hash = self.git.commit(root_path, commit_message, paths)
-            if commit_hash:
-                self._log(goal_id, step.id, "info", f"git committed {commit_hash[:7]}: {commit_message}")
-            elif paths:
-                # Non-empty paths and no commit: either there was nothing left to
-                # record (the files matched what is already committed) or git
-                # refused. Silence here reads as "committed" to anyone watching.
+            # The last guard before the one irreversible act. A cancel that
+            # landed during the critic's call must not end in a commit the user
+            # asked to stop; the summary above still records what was done.
+            if self._cancelled(goal_id):
                 self._log(
-                    goal_id, step.id, "warn",
-                    "git commit produced nothing — the step's files match the last commit, "
-                    "or git refused (check its user.name/user.email config)",
+                    goal_id, step.id, "info",
+                    "cancelled — skipping the commit for this step",
                 )
+            else:
+                # Only what this step wrote. A bare `git add -A` would commit the
+                # user's own half-finished work under this step's message.
+                paths = [d["path"] for d in diffs]
+                commit_hash = self.git.commit(root_path, commit_message, paths)
+                if commit_hash:
+                    self._log(goal_id, step.id, "info", f"git committed {commit_hash[:7]}: {commit_message}")
+                elif paths:
+                    # Non-empty paths and no commit: either there was nothing left to
+                    # record (the files matched what is already committed) or git
+                    # refused. Silence here reads as "committed" to anyone watching.
+                    self._log(
+                        goal_id, step.id, "warn",
+                        "git commit produced nothing — the step's files match the last commit, "
+                        "or git refused (check its user.name/user.email config)",
+                    )
 
     # --- parsing ------------------------------------------------------
 
@@ -1083,11 +1377,23 @@ class ExecutorService:
             path = f.get("path")
             action = f.get("action")
             content = f.get("content")
-            if not path or action not in ("create", "update", "delete"):
+            if not path or action not in ("create", "update", "delete", "edit"):
                 raise AgentOutputInvalid("fixer file entry invalid", role="fixer")
             if action == "delete" and content is not None:
                 raise AgentOutputInvalid("fixer delete must have null content", role="fixer")
-            parsed.append({"path": path, "action": action, "content": content})
+            if action == "edit":
+                edits = f.get("edits")
+                if not isinstance(edits, list) or not edits:
+                    raise AgentOutputInvalid("fixer edit requires a non-empty edits list", role="fixer")
+                for e in edits:
+                    if not isinstance(e, dict) or not isinstance(e.get("old_text"), str) or not isinstance(e.get("new_text"), str):
+                        raise AgentOutputInvalid(
+                            "each fixer edit needs string old_text and new_text", role="fixer"
+                        )
+                # `content` plays no part in an edit; it is resolved from the file.
+                parsed.append({"path": path, "action": action, "content": None, "edits": edits})
+            else:
+                parsed.append({"path": path, "action": action, "content": content})
         return parsed
 
     # --- db helpers ---------------------------------------------------
@@ -1115,14 +1421,37 @@ class ExecutorService:
             )
         self.goals._db.commit()
 
-    def _store_proposed_files(self, goal_id: str, step_id: str, files: list[dict]) -> None:
+    def _store_proposed_files(
+        self, goal_id: str, step_id: str, files: list[dict], summaries: list[dict] | None = None,
+    ) -> None:
+        """Persist a dry-run proposal so Apply can replay it byte-identically.
+
+        `edit` ops are stored as the resolved full-content update (from the
+        apply summaries), never as the raw search/replace description: a file
+        may move between the dry run and Apply, and re-running a match against
+        moved text would silently do something else. Resolved content makes the
+        stored proposal exactly what the user reviewed in the diff.
+        """
         db = self.goals._db
+        by_path = {
+            s["path"]: s
+            for s in (summaries or [])
+            if s.get("resolved_content") is not None and s.get("changed", True)
+        }
         db.execute("DELETE FROM proposed_files WHERE goal_id = ? AND step_id = ?", (goal_id, step_id))
         now = time.time()
         for f in files:
+            path, action, content = f["path"], f["action"], f.get("content")
+            if action == "edit":
+                resolved = by_path.get(path)
+                if resolved is None:
+                    # An edit that resolved to nothing (no change) has no
+                    # proposal worth storing — Apply would be a no-op anyway.
+                    continue
+                path, action, content = path, "update", resolved["resolved_content"]
             db.execute(
                 "INSERT INTO proposed_files (id, goal_id, step_id, path, action, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), goal_id, step_id, f["path"], f["action"], f.get("content"), now),
+                (str(uuid.uuid4()), goal_id, step_id, path, action, content, now),
             )
         db.commit()
 
@@ -1169,7 +1498,14 @@ class ExecutorService:
         `role` is what makes "why did this fail?" answerable: the UI can show that
         role's provider, model, credential, and live catalog instead of asking the
         user to infer from prose which agent to go and inspect.
+
+        A terminal status is never overwritten: a cancel that lands mid-step
+        followed by the held call surfacing an error must leave the goal
+        CANCELLED, not relabel the user's decision as a failure.
         """
+        current = self.goals.get(goal_id)
+        if current.status in ("CANCELLED", "COMPLETED"):
+            return
         self.goals.publish(self._event(
             goal_id, step_id, "error",
             {"code": code, "message": message, "role": role},

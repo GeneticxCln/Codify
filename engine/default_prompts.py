@@ -26,9 +26,10 @@ DEFAULT_PROMPTS: dict[AgentRole, str] = {
         "Reply with JSON only: "
         '{"summary":str|null,"files":[{"path":str,"why":str}],"symbols":[{"name":str,"path":str}],'
         '"conventions":[str],"test_command":[str]|null,"risks":[str],'
-        '"reads":[str],"searches":[str],"git":[[str,...]],"run":[[str,...]],"enough":bool}. '
-        "Ask for more material by filling reads (workspace paths), searches (literal "
-        "strings), git (read-only argv after 'git', e.g. [[\"log\",\"-5\",\"--oneline\"]]), "
+        '"reads":[str|{"path":str,"offset":int,"limit":int}],"searches":[str|{"query":str,"regex":bool,"glob":str}],"git":[[str,...]],"run":[[str,...]],"enough":bool}. '
+        "Ask for more material by filling reads (workspace paths, or {path, offset, "
+        "limit} to read specific line ranges of a large file), searches (literal "
+        "strings, or {query, regex:bool, glob} for a bounded pattern search), git (read-only argv after 'git', e.g. [[\"log\",\"-5\",\"--oneline\"]]), "
         "or run (read-only argv, e.g. [[\"ls\",\"-la\"]]). "
         "Set enough=true when you have what the goal needs, or leave every request "
         "list empty to finish. "
@@ -48,8 +49,18 @@ DEFAULT_PROMPTS: dict[AgentRole, str] = {
     ),
     "fixer": (
         "You are Codify Fixer. Propose the smallest file edits that complete this step. "
-        'Reply with JSON only: {"files":[{"path":str,"action":"create"|"update"|"delete","content":str|null}]}. '
-        "content is the full new file text for create/update; null for delete. "
+        'Reply with JSON only: {"files":[{"path":str,"action":"create"|"update"|"delete"|"edit","content":str|null,"edits":[{"old_text":str,"new_text":str,"count":int}]|null}]}. '
+        "content is the full new file text for create/update; null for delete and edit. "
+        "For action=\"edit\" supply edits: each replaces exact old_text with new_text. "
+        "old_text must match the file exactly the given number of times (count, default "
+        "1; 0 = every occurrence) and must include enough surrounding lines to be "
+        "unambiguous — an edit that does not match the file fails the step. Prefer edit "
+        "for surgical changes to existing files; use update with full content only when "
+        "most of the file changes. "
+        "If this change needs another pass after this one (multi-stage work: a config "
+        "file now, the code that reads it next), set needs_another_pass=true alongside "
+        "your files — at most 2 extra passes are granted. Never return "
+        "needs_another_pass without files. "
         "Paths relative to workspace root. Do not escape the workspace. "
         "Match the conventions in the evidence pack (naming, error style, test layout) "
         "rather than introducing your own."
