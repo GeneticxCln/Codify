@@ -46,6 +46,9 @@ class _GoalAwareProvider(BaseProvider):
 
     def __init__(self):
         self.calls: list[tuple[str, str]] = []
+        # Optional in-run hook (marker, role) — lets a test act at a precise
+        # moment of the pipeline (e.g. attach a subscriber mid-goal).
+        self.on_call = None
 
     async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
         role = next(
@@ -54,10 +57,13 @@ class _GoalAwareProvider(BaseProvider):
         marker = (
             "alpha" if "alpha" in user_prompt
             else "beta" if "beta" in user_prompt
+            else "gamma" if "gamma" in user_prompt
             else "none"
         )
         self.calls.append((marker, role))
-        # Yield between every call so the two goals truly interleave instead of
+        if self.on_call:
+            self.on_call(marker, role)
+        # Yield between every call so the goals truly interleave instead of
         # running one after the other by accident of the event loop.
         await asyncio.sleep(0)
 
@@ -126,15 +132,16 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
         self.conn.close()
         self.temp_dir.cleanup()
 
-    async def _collect_stream(self, goal_id: str) -> list:
+    async def _collect_stream(self, goal_id: str, start_after: int = 0) -> list:
         """Poll like the WebSocket endpoint does until the goal is terminal.
 
         Keeps polling briefly after the terminal status so a straggler event —
         the kind a lost flush produces — cannot hide behind the reader stopping
-        early.
+        early. `start_after` is the reconnect floor: a subscriber that already
+        saw up to N resumes from N and must still get a gapless rest.
         """
         seen: list = []
-        after = 0
+        after = start_after
         terminal = False
         empty_polls_after_terminal = 0
         while empty_polls_after_terminal < 5:
@@ -153,6 +160,20 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
                 empty_polls_after_terminal += 1
             await asyncio.sleep(0.001)
         return seen
+
+    def _attach_resuming_reader(self, goal_id: str):
+        """Snapshot now, then keep reading from the snapshot's floor.
+
+        This is the reconnect contract the UI relies on (`goalStream` resumes
+        with `after=` = its last seen sequence, and Apply floors the replay the
+        same way): whatever was written before the attach must be exactly the
+        snapshot, and the tail must continue it with no gap and no overlap.
+        """
+        snapshot = self.goals.events_after(goal_id, 0)
+        assert snapshot, "attach point must already have events"
+        floor = snapshot[-1].sequence
+        reader = asyncio.create_task(self._collect_stream(goal_id, start_after=floor))
+        return snapshot, floor, reader
 
     async def test_two_concurrent_goals_never_cross_streams(self):
         goal_a = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="goal-alpha", description="first"))
@@ -254,6 +275,158 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
         # no call was routed with another goal's prompt.
         for marker, role in self.provider.calls:
             self.assertIn(marker, ("alpha", "beta"), f"{role} call had no goal marker")
+
+    async def test_three_goals_and_a_mid_run_subscriber(self):
+        """Three interleaved goals, and one subscriber attaching mid-run.
+
+        The attach happens the moment the goal's fixer is invoked — its plan is
+        done, half its transcript is written, and the run has most of its
+        lifetime ahead of it. The subscriber resumes from a floor like the UI's
+        reconnect does, and must stitch snapshot + tail into one gapless stream
+        equal to a subscriber that had been there all along.
+        """
+        goal_a = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="goal-alpha", description="first"))
+        goal_b = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="goal-beta", description="second"))
+        goal_c = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="goal-gamma", description="third"))
+
+        attach_signal = asyncio.Event()
+
+        def on_call(marker: str, role: str) -> None:
+            if marker == "gamma" and role == "fixer":
+                attach_signal.set()
+
+        self.provider.on_call = on_call
+
+        reader_a = asyncio.create_task(self._collect_stream(goal_a.id))
+        reader_b = asyncio.create_task(self._collect_stream(goal_b.id))
+        reader_c = asyncio.create_task(self._collect_stream(goal_c.id))
+
+        await asyncio.gather(
+            self.executor.run_planning(goal_a.id),
+            self.executor.run_planning(goal_b.id),
+            self.executor.run_planning(goal_c.id),
+        )
+        for g in (goal_a, goal_b, goal_c):
+            refreshed = self.goals.get(g.id)
+            self.goals.update_status(g.id, refreshed.version, "RUNNING")
+
+        async def _wait_then_attach(step_tasks):
+            await attach_signal.wait()
+            # The signal fires inside the fixer call, before its diff is
+            # written: attaching now means the snapshot ends mid-step. The
+            # provider's own await yields control right after the hook, so
+            # this task actually runs at that instant.
+            snapshot, floor, reader = self._attach_resuming_reader(goal_c.id)
+            # Stay alongside the run until it is done (gathering the same
+            # tasks, not re-awaiting their coroutines).
+            await asyncio.gather(*step_tasks)
+            return snapshot, floor, reader
+
+        attacher = asyncio.create_task(_wait_then_attach([]))
+        # Step tasks are created once and shared: the attacher awaits them so
+        # it survives until the run completes, and so does the test body.
+        step_tasks = [
+            asyncio.create_task(self.executor.run_step(g.id, s.id))
+            for g in (goal_a, goal_b, goal_c)
+            for s in self.goals.steps(g.id)
+        ]
+        attacher = asyncio.create_task(_wait_then_attach(step_tasks))
+        await asyncio.gather(*step_tasks)
+        self.provider.on_call = None  # the hook has served its purpose
+        # What app._run_steps does after the last step: close the goal out so
+        # the streams reach a terminal event, exactly as a real run would.
+        for g in (goal_a, goal_b, goal_c):
+            refreshed = self.goals.get(g.id)
+            self.goals.update_status(g.id, refreshed.version, "COMPLETED")
+
+        stream_a, stream_b, stream_c = await asyncio.wait_for(
+            asyncio.gather(reader_a, reader_b, reader_c), timeout=30
+        )
+        snapshot, floor, resuming_reader = await asyncio.wait_for(attacher, timeout=30)
+        tail = await asyncio.wait_for(resuming_reader, timeout=30)
+
+        # The pipeline actually ran, three times — the assertions below are not
+        # vacuously true over empty streams.
+        for name, goal in (("alpha", goal_a), ("beta", goal_b), ("gamma", goal_c)):
+            self.assertEqual(self.goals.get(goal.id).status, "COMPLETED", f"goal {name} must finish")
+        for name, stream in (("alpha", stream_a), ("beta", stream_b), ("gamma", stream_c)):
+            self.assertGreaterEqual(len(stream), 10, f"{name}'s stream is suspiciously thin")
+
+        # 1. Purity: every event a reader collected belongs to its goal.
+        for name, stream, goal in (
+            ("alpha", stream_a, goal_a), ("beta", stream_b, goal_b), ("gamma", stream_c, goal_c),
+        ):
+            for event in stream:
+                self.assertEqual(event.goal_id, goal.id, f"a foreign event reached {name}'s stream")
+
+        # 2. Integrity: per-goal sequences dense and ascending from 1.
+        for name, stream in (("alpha", stream_a), ("beta", stream_b), ("gamma", stream_c)):
+            seqs = [e.sequence for e in stream]
+            self.assertEqual(seqs, list(range(1, len(stream) + 1)), f"{name}'s sequence broke")
+
+        # 3. Separation by content — pairwise, across all three markers. UUID
+        # hex cannot contain any marker (no 'l'/'t'/'g' is false for g, but
+        # 'gamma' has an 'm' and hex is [0-9a-f], so a hit is real content).
+        texts = {
+            "alpha": "\n".join(e.model_dump_json() for e in stream_a),
+            "beta": "\n".join(e.model_dump_json() for e in stream_b),
+            "gamma": "\n".join(e.model_dump_json() for e in stream_c),
+        }
+        for name, text in texts.items():
+            for other in texts:
+                if other != name:
+                    self.assertNotIn(other, text, f"{name}'s stream contains {other}'s content")
+            self.assertIn(f"{name} body", text)
+
+        # 4. The mid-run subscriber: the snapshot is a prefix of the full
+        # stream, the tail continues at exactly floor+1, and the stitched whole
+        # equals the full stream a from-the-start subscriber saw.
+        # The attach was genuinely mid-run, not effectively at the end: the
+        # snapshot is a strict prefix and the tail is non-empty — otherwise
+        # every assertion below would pass vacuously.
+        self.assertLess(
+            len(snapshot), len(stream_c),
+            "the subscriber attached after the goal was already finished — "
+            "the mid-run scenario did not happen",
+        )
+        self.assertTrue(tail, "the resuming subscriber saw nothing after attaching")
+        self.assertGreaterEqual(
+            len(tail), 5,
+            "the subscriber attached too late to exercise a real resume",
+        )
+        self.assertEqual(
+            [e.sequence for e in snapshot],
+            [e.sequence for e in stream_c[: len(snapshot)]],
+            "the attach snapshot is not a prefix of the real stream",
+        )
+        full_seqs = [e.sequence for e in stream_c]
+        self.assertIn(floor, full_seqs, "the attach floor vanished from the stream")
+        tail_seqs = [e.sequence for e in tail]
+        self.assertEqual(tail_seqs, list(range(floor + 1, len(full_seqs) + 1)),
+                         "the resuming subscriber's tail has a gap or an overlap")
+        stitched = snapshot + tail
+        self.assertEqual(
+            [e.sequence for e in stitched], full_seqs,
+            "snapshot + tail is not exactly the stream a from-the-start subscriber saw",
+        )
+        for e in stitched:
+            self.assertEqual(e.goal_id, goal_c.id)
+
+        # Goals stayed mutually ignorant, three ways.
+        step_ids = {
+            name: {s.id for s in self.goals.steps(g.id)}
+            for name, g in (("a", goal_a), ("b", goal_b), ("c", goal_c))
+        }
+        for name_a, ids_a in step_ids.items():
+            for name_b, ids_b in step_ids.items():
+                if name_a < name_b:
+                    self.assertFalse(ids_a & ids_b, "two goals share a step id")
+        for name, filename in (("alpha", "alpha.txt"), ("beta", "beta.txt"), ("gamma", "gamma.txt")):
+            self.assertEqual((self.root / filename).read_text(), f"{name} body\n")
+
+        # Every provider call answered a goal whose material it was shown.
+        for marker, role in self.provider.calls:
+            self.assertIn(marker, ("alpha", "beta", "gamma"), f"{role} call had no goal marker")
 
 
 if __name__ == "__main__":
