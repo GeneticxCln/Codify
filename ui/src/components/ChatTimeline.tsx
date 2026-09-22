@@ -745,6 +745,20 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             </div>
                           )}
 
+                          {ev.type === "plan_consult" && (
+                            <div className="flex items-start gap-1.5 pl-2 text-cyan-300">
+                              <BookOpen className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                              <span className="leading-relaxed">
+                                Planner asked the librarian for a follow-up
+                                {ev.payload.refused > 0 && (
+                                  <span className="font-mono text-gray-400">
+                                    {' '}({ev.payload.refused} request{ev.payload.refused === 1 ? "" : "s"} refused)
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+                          )}
+
                           {ev.type === "fix_retry" && (
                             <div className="flex items-start gap-1.5 pl-2 text-amber-300">
                               <ShieldAlert className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />

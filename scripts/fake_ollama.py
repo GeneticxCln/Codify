@@ -227,8 +227,14 @@ class Handler(BaseHTTPRequestHandler):
                 out = json.dumps(
                     {"files": [{"path": target, "action": "create", "content": "hello from codify\n"}]}
                 )
-        elif "Title:" in prompt:
+        elif "Title:" in prompt and "The librarian answered your follow-up" in prompt:
+            # Round 2 after a consult: plan, citing the material that came back.
             out = PLANNER
+        elif "Title:" in prompt:
+            if os.environ.get("FAKE_PLANNER_CONSULT") == "1":
+                out = json.dumps({"consult": {"reads": ["greet.py"]}})
+            else:
+                out = PLANNER
         elif "Step:" in prompt:
             # Every role prompt carries "Step: <title>", so this branch sits below
             # the critic/scribe/fixer matchers. The verifier is the only role

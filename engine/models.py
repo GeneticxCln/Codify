@@ -30,6 +30,7 @@ EventType = Literal[
     "laya_decision",
     "fix_retry",
     "fixer_pass",
+    "plan_consult",
     "usage",
     "error",
 ]

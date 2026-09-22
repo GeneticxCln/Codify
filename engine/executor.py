@@ -89,6 +89,11 @@ MAX_FIXER_PASSES = 2
 # Read-only inspection rounds the critic may request during one review (see
 # _critic). Reuses the librarian's read-only allowlist via the sandbox.
 MAX_CRITIC_COMMANDS = 2
+# Follow-up reconnaissance calls the planner may make while planning (see
+# run_planning). The evidence pack is frozen once the librarian finishes; this
+# lets the planner reopen it when the pack provably misses what a step needs,
+# instead of planning a guess. Same serving machinery, own bound.
+MAX_PLANNER_CONSULTS = 1
 
 # Failures that mean the target could not be used at all, and so may be retried on
 # the role's fallback. The list is deliberately made of *provider* problems — no
@@ -441,16 +446,56 @@ class ExecutorService:
             f"Librarian evidence:\n{self._evidence_text(evidence)}"
         )
         try:
-            out = await self.orchestrator.run_agent("planner", goal_id, None, prompt)
-            # A cancel that landed while the planner was thinking must win: a
-            # goal the user cancelled must not reappear as PENDING with a plan
-            # they explicitly stopped. (PLANNING is a legal cancel state.)
-            if self.goals.get(goal_id).status == "CANCELLED":
-                self._log(goal_id, None, "info", "cancelled during planning — discarding the plan")
-                return
-            steps = self._parse_steps(out)
-            self._insert_steps(goal_id, steps)
-            self._log(goal_id, None, "info", f"planner produced {len(steps)} steps")
+            # A plan built on a blind spot is worse than a late question: the
+            # planner may ask the librarian for one bounded follow-up (same
+            # request shapes, same read-only serving) when the evidence pack
+            # misses what a step needs. The reply merges into the prompt and
+            # planning continues; a second ask is refused as a contract error.
+            consults_left = MAX_PLANNER_CONSULTS
+            while True:
+                out = await self.orchestrator.run_agent("planner", goal_id, None, prompt)
+                # A cancel that landed while the planner was thinking must win: a
+                # goal the user cancelled must not reappear as PENDING with a plan
+                # they explicitly stopped. (PLANNING is a legal cancel state.)
+                if self.goals.get(goal_id).status == "CANCELLED":
+                    self._log(goal_id, None, "info", "cancelled during planning — discarding the plan")
+                    return
+                consult = out.get("consult") if isinstance(out, dict) else None
+                if (
+                    not out.get("steps")
+                    and isinstance(consult, dict)
+                    and (consult.get("reads") or consult.get("searches")
+                         or consult.get("git") or consult.get("run"))
+                ):
+                    if consults_left <= 0:
+                        raise AgentOutputInvalid(
+                            "planner consulted the librarian after its last allowed follow-up",
+                            role="planner",
+                        )
+                    consults_left -= 1
+                    ws_root = ws.root_path
+                    served, _opened, _matched, refused = self._serve_library_requests(
+                        goal_id, LibraryService(ws_root),
+                        self._library_requests(consult),
+                    )
+                    self._log(
+                        goal_id, None, "info",
+                        "planner consulted the librarian"
+                        + (f" ({refused} request(s) refused)" if refused else ""),
+                    )
+                    self.goals.publish(self._event(
+                        goal_id, None, "plan_consult",
+                        {"refused": refused, "material_chars": len(served)},
+                    ))
+                    prompt = (
+                        f"{prompt}\n\n--- The librarian answered your follow-up ---\n{served}\n\n"
+                        "Now produce the plan (or one more follow-up, if you have none left)."
+                    )
+                    continue
+                steps = self._parse_steps(out)
+                self._insert_steps(goal_id, steps)
+                self._log(goal_id, None, "info", f"planner produced {len(steps)} steps")
+                break
         except (AgentOutputInvalid, ProviderError, ValueError) as exc:
             # Planning is the planner's phase; anything raised here is its.
             self._fail(

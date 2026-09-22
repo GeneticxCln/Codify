@@ -1496,6 +1496,140 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
         errors = [e.payload for e in self._events("error")]
         self.assertTrue(any("needs_another_pass requires files" in str(e.get("message")) for e in errors))
 
+class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
+    """The planner may reopen the librarian once while planning.
+
+    The evidence pack is frozen when the librarian says `enough` — but a pack
+    built before the goal's real question was asked can miss exactly what a
+    step needs. The planner used to plan a guess; now it may make ONE bounded
+    follow-up through the same read-only machinery, merge the answer, and plan
+    next round. A second consult is a contract error, and a planner that plans
+    immediately never enters the loop at all.
+    """
+
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        (self.root / "src").mkdir()
+        (self.root / "src" / "core.py").write_text("VALUE = 1\n", encoding="utf-8")
+        self.conn = connect(self.root / "t.db")
+        self.provider = _ScriptedProvider({})
+        self.registry = AgentRegistryService(
+            self.conn, _ScriptedFactory(self.provider, Keychain()), Keychain()
+        )
+        configure_every_role(self.registry)
+        self.goals = GoalService(self.conn)
+        self.workspaces = WorkspaceService(self.conn)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(), laya=_SkippedGate()
+        )
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+        self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
+
+    async def asyncTearDown(self):
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    def _planner_prompts(self) -> list[str]:
+        return [p for r, p in self.provider.calls if r == "planner"]
+
+    def _script_planner(self, replies: list[dict]) -> None:
+        # _ScriptedProvider serves each role one static reply from `others`, so
+        # successive planner rounds need a queue wrapped over it. The librarian
+        # answers {"enough": true} immediately: empty evidence is exactly the
+        # blind-spot situation a consult exists for.
+        queue = list(replies)
+        original = self.provider.complete
+
+        async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
+            role = next(
+                (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
+            )
+            self.provider.calls.append((role, user_prompt))
+            if role == "planner" and queue:
+                return json.dumps(queue.pop(0))
+            return await original(system_prompt, user_prompt, model, temperature, max_tokens)
+
+        self.provider.complete = completing  # type: ignore[method-assign]
+        self.provider.others["librarian"] = {"enough": True}
+
+    def _events(self, type_: str) -> list:
+        return [e for e in self.goals.events_after(self.goal.id, 0) if e.type == type_]
+
+    async def test_a_consult_reaches_round_two_with_the_material(self):
+        self._script_planner([
+            {"consult": {"reads": ["src/core.py"]}},
+            {"steps": [{"title": "S1", "description": "uses VALUE", "suggested_paths": ["src/core.py"]}]},
+        ])
+
+        await self.executor.run_planning(self.goal.id)
+
+        planner_calls = self._planner_prompts()
+        self.assertEqual(len(planner_calls), 2, "consult round + planning round")
+        self.assertIn("VALUE = 1", planner_calls[1], "the consulted material must reach round 2")
+        self.assertIn("The librarian answered your follow-up", planner_calls[1])
+        consults = self._events("plan_consult")
+        self.assertEqual(len(consults), 1)
+        self.assertEqual(consults[0].payload["refused"], 0)
+        # The plan landed: the goal is PENDING with its step inserted.
+        self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
+        self.assertEqual(len(self.goals.steps(self.goal.id)), 1)
+
+    async def test_a_refused_request_is_information_not_a_failure(self):
+        self._script_planner([
+            {"consult": {"reads": ["../../etc/passwd"]}},
+            {"steps": [{"title": "S1", "description": "d", "suggested_paths": []}]},
+        ])
+
+        await self.executor.run_planning(self.goal.id)
+
+        planner_calls = self._planner_prompts()
+        self.assertEqual(len(planner_calls), 2)
+        self.assertIn("refused", planner_calls[1])
+        consults = self._events("plan_consult")
+        self.assertEqual(consults[0].payload["refused"], 1)
+        self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
+
+    async def test_a_second_consult_is_refused(self):
+        self._script_planner([
+            {"consult": {"reads": ["src/core.py"]}},
+            {"consult": {"reads": ["src/core.py"]}},
+        ])
+
+        await self.executor.run_planning(self.goal.id)
+
+        planner_calls = self._planner_prompts()
+        self.assertEqual(len(planner_calls), 2, "initial + one granted consult")
+        self.assertEqual(self.goals.get(self.goal.id).status, "FAILED")
+        errors = [e.payload for e in self._events("error")]
+        self.assertTrue(any("last allowed follow-up" in str(e.get("message")) for e in errors))
+
+    async def test_a_direct_plan_never_consults(self):
+        self._script_planner([
+            {"steps": [{"title": "S1", "description": "d", "suggested_paths": []}]},
+        ])
+
+        await self.executor.run_planning(self.goal.id)
+
+        self.assertEqual(len(self._planner_prompts()), 1)
+        self.assertEqual(self._events("plan_consult"), [])
+        self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
+
+    async def test_a_consult_with_steps_is_a_contract_error(self):
+        """steps and consult are mutually exclusive — a reply claiming both is
+        not a plan and not a question; it is a malformed reply."""
+        self._script_planner([
+            {"steps": [{"title": "S1", "description": "d", "suggested_paths": []}],
+             "consult": {"reads": ["src/core.py"]}},
+        ])
+
+        await self.executor.run_planning(self.goal.id)
+
+        # steps present => parsed as the plan; the stray consult key is ignored.
+        self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
+        self.assertEqual(len(self.goals.steps(self.goal.id)), 1)
+        self.assertEqual(self._events("plan_consult"), [])
+
 class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
     """Token usage from provider responses becomes attributable events.
 

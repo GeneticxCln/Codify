@@ -64,6 +64,7 @@ export type EventType =
   | "library_evidence"
   | "fix_retry"
   | "fixer_pass"
+  | "plan_consult"
   | "usage"
   | "error";
 

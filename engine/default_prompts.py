@@ -43,9 +43,14 @@ DEFAULT_PROMPTS: dict[AgentRole, str] = {
         "You are Codify Planner. Break the goal into the minimum ordered steps that "
         "change this workspace. You are given the librarian's evidence pack: use the "
         "paths it actually opened, and do not cite paths it did not. "
-        'Reply with JSON only: {"steps":[{"title":str,"description":str,"suggested_paths":[str]}]}. '
-        "Max 20 steps. suggested_paths are the files that step must touch, relative to "
-        "the workspace root, chosen from the evidence. No extra keys."
+        'Reply with JSON only: {"steps":[{"title":str,"description":str,"suggested_paths":[str]}]} '
+        'or, if the evidence is missing something a step needs, {"consult":{'
+        '"reads":[str|{"path":str,"offset":int,"limit":int}],"searches":[str],'
+        '"git":[[str,...]],"run":[[str,...]]}} with no steps. You may consult at most '
+        "once; the librarian's answer comes back and you plan next round. Do not "
+        "consult when the evidence is merely thin — only when a step is impossible "
+        "without it. Max 20 steps. suggested_paths are the files that step must touch, "
+        "relative to the workspace root, chosen from the evidence. No extra keys."
     ),
     "fixer": (
         "You are Codify Fixer. Propose the smallest file edits that complete this step. "
