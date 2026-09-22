@@ -31,6 +31,14 @@ pub struct AgentConfig {
     pub system_prompt_override: Option<String>,
     pub temperature: f64,
     pub max_tokens: u32,
+    // The role's second target. These have to be here, not just in the engine's
+    // schema: this struct is what deserializes the frontend's patch, so a field
+    // missing from it is dropped silently — the card would say "Saved" about a
+    // fallback the engine never received.
+    pub fallback_provider: Option<String>,
+    pub fallback_model_name: String,
+    pub fallback_protocol: Option<String>,
+    pub fallback_base_url: Option<String>,
     pub updated_at: f64,
 }
 
@@ -54,6 +62,18 @@ pub struct AgentConfigPatch {
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    // Removing a fallback sends an empty provider rather than null: through this
+    // struct a `null` and an absent field are the same thing, and "no fallback"
+    // must be distinguishable from "leave it alone". The engine reads an empty
+    // slug as "clear the fallback", null as "no change".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_base_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -124,6 +144,28 @@ async fn codify_update_agent_config(
         .await
         .map_err(|e| e.to_string())?;
     resp.json::<AgentConfig>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Point every role that cannot run at a model the engine has discovered.
+///
+/// The decision is the engine's (`engine/role_repair.py`): this command only
+/// forwards it, so the desktop app and the standalone browser build cannot
+/// disagree about which roles count as broken.
+#[tauri::command]
+async fn codify_repair_agent_configs(
+    state: State<'_, SharedEngineState>,
+) -> Result<serde_json::Value, String> {
+    let (base, token) = engine_url(&state).await?;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/settings/agents/repair", base))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json::<serde_json::Value>()
         .await
         .map_err(|e| e.to_string())
 }
@@ -235,6 +277,7 @@ pub fn run() {
             codify_get_engine_info,
             codify_list_agent_configs,
             codify_update_agent_config,
+            codify_repair_agent_configs,
             codify_test_agent_connection,
         ])
         .run(tauri::generate_context!())

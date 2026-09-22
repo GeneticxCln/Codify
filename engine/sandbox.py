@@ -30,13 +30,63 @@ def _is_workspace_path(fs: FileSystemService, token: str) -> bool:
         return False
 
 
-def validate_argv(argv: list[str], fs: FileSystemService) -> None:
+# ── read-only mode ────────────────────────────────────────────────────────────
+# The librarian inspects the workspace and must never change it. This is the
+# allowlist for that mode: three binaries that cannot write, and a git subcommand
+# allowlist with the flags that would redirect git at another directory or another
+# file removed. Kept here, next to the test-mode allowlist, so there is exactly
+# one place that decides what a sub-agent may execute.
+READ_ONLY_BINARIES = {"ls", "wc", "git"}
+READ_ONLY_GIT_SUBCOMMANDS = {
+    "status", "diff", "log", "show", "blame", "ls-files", "rev-parse",
+    "describe", "shortlog", "grep", "branch", "tag", "cat-file", "show-ref",
+}
+LS_FLAGS = {"-l", "-a", "-h", "-1", "-la", "-al", "-lh", "-lah", "-alh", "-s", "-t"}
+WC_FLAGS = {"-l", "-w", "-c", "-m", "-L"}
+MAX_READ_ONLY_ARGS = 8
+# `-C` / `--git-dir` point git somewhere else; `--output` writes a file; `-o` is
+# shorthand for it; `--ext-diff` and `--no-index` run external readers.
+DANGEROUS_GIT_FLAGS = ("-C", "--git-dir", "--work-tree", "--output", "-o", "--ext-diff", "--no-index")
+
+
+def _validate_read_only(argv: list[str], fs: FileSystemService) -> None:
+    cmd = argv[0]
+    rest = argv[1:]
+    if cmd not in READ_ONLY_BINARIES:
+        raise CommandNotAllowed(
+            f"{cmd} is not a read-only command (the librarian may not change the workspace)"
+        )
+    if len(rest) > MAX_READ_ONLY_ARGS:
+        raise CommandNotAllowed("too many arguments for a read-only command")
+    if cmd == "git":
+        if not rest or rest[0].startswith("-"):
+            raise CommandNotAllowed("git requires a read-only subcommand")
+        if rest[0] not in READ_ONLY_GIT_SUBCOMMANDS:
+            raise CommandNotAllowed(f"git {rest[0]} is not a read-only git command")
+        for tok in rest:
+            if any(tok == flag or tok.startswith(flag + "=") for flag in DANGEROUS_GIT_FLAGS):
+                raise CommandNotAllowed(f"git flag not allowed: {tok}")
+        return
+    flags = LS_FLAGS if cmd == "ls" else WC_FLAGS
+    for tok in rest:
+        if tok.startswith("-"):
+            if tok not in flags:
+                raise CommandNotAllowed(f"{cmd} flag not allowed: {tok}")
+            continue
+        if not _is_workspace_path(fs, tok):
+            raise CommandNotAllowed(f"{cmd} path not allowed: {tok}")
+
+
+def validate_argv(argv: list[str], fs: FileSystemService, mode: str = "test") -> None:
     if not argv:
         raise CommandNotAllowed("empty argv")
     if "/" in argv[0] or "\\" in argv[0]:
         raise CommandNotAllowed("argv[0] must be a basename")
     cmd = argv[0]
     rest = argv[1:]
+    if mode == "read_only":
+        _validate_read_only(argv, fs)
+        return
     if cmd == "pytest":
         for tok in rest:
             if tok.startswith("-"):
@@ -81,9 +131,13 @@ def validate_argv(argv: list[str], fs: FileSystemService) -> None:
 
 
 class SandboxService:
-    def run_command(self, root_path: str, argv: list[str], timeout_s: int = 120) -> dict:
+    def run_command(
+        self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test",
+    ) -> dict:
+        """Run one allowlisted command. `mode="read_only"` narrows the allowlist
+        to commands that cannot change the workspace (used by the librarian)."""
         fs = FileSystemService(root_path)
-        validate_argv(argv, fs)
+        validate_argv(argv, fs, mode=mode)
         resolved = shutil.which(argv[0])
         if not resolved:
             raise CommandNotAllowed(f"{argv[0]} not found on PATH")

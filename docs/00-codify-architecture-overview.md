@@ -35,8 +35,8 @@ The original design was solid for a single-LLM, single-agent tool. The v2 requir
 |---|---|---|
 | **Codify Desktop** | Rust + Tauri | UI, Engine HTTP/WS client, exclusive Settings/Agents screen |
 | **Codify Engine** | Python + FastAPI | Workspace/goal registry, planning, execution, file/git/sandbox ops, event streaming |
-| **Codify Orchestrator** | Inside Engine | Decomposes a goal into phases; dispatches each phase to one of 5 slots |
-| **Sub-Agents** | Fixed set of 5 | `planner`, `coder`, `tester`, `reviewer`, `summarizer` |
+| **Codify Orchestrator** | Inside Engine | Decomposes a goal into phases; dispatches each phase to the slot that has the ability for it |
+| **Sub-Agents** | Fixed set of 6 (+ gate) | `librarian`, `planner`, `fixer`, `verifier`, `critic`, `scribe` |
 | **Provider Adapters** | Inside Engine | OpenAI, Anthropic, Google, local/Ollama |
 
 ## 4. High-level flow (updated)
@@ -48,7 +48,10 @@ User creates Goal in Desktop
 Engine: GoalService.create → Goal(status=PLANNING, version=0)
         │
         ▼
-Orchestrator.plan(goal) → Planner Agent
+Orchestrator.plan(goal) → Librarian Agent (reconnaissance, ≤3 rounds, read-only)
+        │                    evidence pack, checked against what it actually read
+        ▼
+                         Planner Agent (goal + evidence)
         │
         ▼
 Goal has PlanStep[]  (goal.status=PENDING)
@@ -57,19 +60,19 @@ User clicks Start → POST /goals/{id}/start  (no agent_config field)
         ▼
 Orchestrator.run(goal)
    for each step (status PENDING → IN_PROGRESS):
-     Phase 2  Coder      → file proposals
+     Phase 2  Fixer     → file proposals (+ the same evidence the planner had)
      apply via FileSystemService (dry_run skips writes)
-     Phase 4  Tester     → command + verdict via SandboxService
-     Phase 4.5 Reviewer  → approve | request-changes
-              request-changes → step FAILED or IN_PROGRESS; STOP. No auto-Coder.
-     Phase 5  Summarizer → summary + commit message (reviewer approved only)
+     Phase 3  Verifier  → command + verdict via SandboxService (test mode)
+     Phase 4  Critic    → approve | request-changes
+              request-changes → step IN_PROGRESS; goal PAUSED; STOP. No auto-fix.
+     Phase 5  Scribe    → summary + commit message (critic approved only)
         │
         ▼
 WS events: goal_status, step_status, log, diff, test_result,
-           file_change_summary, agent_assigned, error
+           file_change_summary, agent_assigned, library_evidence, error
 ```
 
-Reviewer rejection: Desktop click required to retry the step (`04` §4.3). Settings never appears on this path.
+Critic rejection: Desktop click required to retry the step (`04` §4.3). Settings never appears on this path.
 
 ## 5. Document set
 
@@ -88,5 +91,6 @@ Reviewer rejection: Desktop click required to retry the step (`04` §4.3). Setti
 3. Engine binds `127.0.0.1`. Every HTTP/WS request requires `Authorization: Bearer <boot_token>`.
 4. Responses NEVER include raw API keys.
 5. `LocalProvider.base_url` MUST pass `validate_local_base_url` before every request.
-6. Only Tester-proposed argv reaches `SandboxService.run_command`.
+6. Only verifier-proposed argv reaches `SandboxService.run_command` in `test` mode; the librarian's
+   requests use the same validator in `read_only` mode and cannot change the workspace.
 7. Single SQLite file: `~/.codify/codify.db`. There is no `agents.db`.

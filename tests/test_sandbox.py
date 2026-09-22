@@ -1,3 +1,4 @@
+from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import tempfile
 import unittest
 from pathlib import Path

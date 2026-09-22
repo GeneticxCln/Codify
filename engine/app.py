@@ -6,19 +6,30 @@ import os
 import secrets
 import socket
 import subprocess
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from engine import home
 from engine.db import connect
 from engine.executor import ExecutorService
+from engine.laya import LayaService
+from engine.role_repair import plan_role_repair
+from engine.model_catalog import ModelCatalogService
 from engine.models import (
+    BUILTIN_PROVIDERS,
+    ROLE_JOB,
+    ROLE_ORDER,
+    ROLE_TIMING,
     AgentConfig,
     AgentConfigUpdate,
     GoalCreate,
     GoalDetail,
+    PlanStepUpdate,
     ProviderKeyUpdate,
     ROLES,
     VersionedAction,
@@ -48,8 +59,10 @@ def pick_port() -> int:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    conn = connect()
+    # The keychain is built first so a role-id migration (coder→fixer, ...) can
+    # carry that role's stored credential onto the new id in the same step.
     keychain = Keychain()
+    conn = connect(on_role_migrated=keychain.rename_role_key)
     factory = ProviderFactory(keychain)
     app.state.conn = conn
     app.state.keychain = keychain
@@ -58,18 +71,28 @@ async def lifespan(app: FastAPI):
     app.state.workspaces = WorkspaceService(conn)
     app.state.goals = GoalService(conn)
     app.state.sandbox = SandboxService()
-    app.state.executor = ExecutorService(app.state.goals, app.state.workspaces, app.state.registry, app.state.sandbox)
+    app.state.models = ModelCatalogService(app.state.registry, keychain)
+    # The gate needs the registry for its LLM fallback when the real Laya SDK is
+    # not installed; without it every goal's gate would silently skip.
+    app.state.laya = LayaService(registry=app.state.registry)
+    app.state.executor = ExecutorService(
+        app.state.goals,
+        app.state.workspaces,
+        app.state.registry,
+        app.state.sandbox,
+        laya=app.state.laya,
+    )
     app.state.token = BOOT_TOKEN
 
-    # Auto-seed default workspace for cwd if no workspaces exist
-    if not app.state.workspaces.list():
-        cwd = str(Path.cwd().resolve())
-        name = Path(cwd).name or "Codify"
-        try:
-            app.state.workspaces.create(WorkspaceCreate(name=name, root_path=cwd))
-        except Exception:
-            pass
-
+    # No workspace is created here on purpose.
+    #
+    # The engine used to auto-seed one from its own working directory whenever the
+    # database had none. Two problems with that: the directory the engine runs in
+    # is an implementation detail (for a source checkout it is Codify's own tree,
+    # so the first prompt would have an agent editing the app itself), and it
+    # silently chose a target the user never picked. A workspace is now an
+    # explicit choice — the folder picker in the command bar — and a fresh install
+    # simply has none until one is chosen, which is what the UI already documented.
     yield
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -84,11 +107,41 @@ app = FastAPI(title="Codify Engine", lifespan=lifespan)
 
 @app.middleware("http")
 async def auth(request: Request, call_next):
+    # CORS preflights carry no Authorization header; let them through.
+    if request.method == "OPTIONS":
+        return await call_next(request)
     expected = getattr(request.app.state, "token", None) or BOOT_TOKEN
     header = request.headers.get("authorization", "")
     if not expected or header != f"Bearer {expected}":
         return JSONResponse({"code": "unauthorized", "message": "missing or invalid token"}, status_code=401)
     return await call_next(request)
+
+
+# The desktop UI is a separate origin (Vite dev server on :5173, or the Tauri
+# webview on tauri://localhost / http://tauri.localhost), so every fetch it
+# makes to 127.0.0.1:<port> is a cross-origin request. Browsers block those
+# without CORS headers. Allow-list loopback UI origins only — the engine itself
+# stays bound to 127.0.0.1 and still requires the bearer token.
+#
+# NOTE: registered AFTER the auth middleware on purpose. Starlette's
+# add_middleware inserts at position 0, so the LAST-registered middleware is
+# the OUTERMOST one. CORS must sit outside auth so it can answer preflight
+# OPTIONS requests and attach headers to 401 responses.
+UI_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "tauri://localhost",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=UI_ORIGINS,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 
 @app.exception_handler(ApiError)
@@ -100,8 +153,13 @@ async def api_error(_req, exc: ApiError):
 
 
 @app.get("/health")
-async def health():
-    return {"ok": True}
+async def health(request: Request):
+    # authenticated=False means the request arrived without a valid bearer
+    # token — still proof the engine is up (UI uses this as a fallback when
+    # Tauri IPC has not delivered the token yet).
+    expected = getattr(request.app.state, "token", None) or BOOT_TOKEN
+    header = request.headers.get("authorization", "")
+    return {"ok": True, "authenticated": header == f"Bearer {expected}"}
 
 
 @app.get("/settings/providers")
@@ -109,10 +167,27 @@ async def list_providers(request: Request):
     return request.app.state.registry.provider_catalog()
 
 
+@app.get("/settings/laya")
+async def laya_status(request: Request):
+    """Capability report for the System-1 gate (no model weights loaded here).
+
+    The UI uses this to say *which* engine is gating goals — the real in-process
+    Laya SDK, the `laya` role's configured LLM answering the same typed contract,
+    or nothing at all.
+    """
+    laya: LayaService = getattr(request.app.state, "laya", None) or LayaService()
+    return laya.status()
+
+
 @app.get("/settings/keys")
 async def get_keys(request: Request):
     keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
-    from engine.models import BUILTIN_PROVIDERS
+
+    # Where a saved key will actually go. The UI has to state this rather than
+    # promise "your OS keychain": on a machine without a usable keyring the key
+    # lands in a 0600 file, and quietly doing that would be the kind of lying
+    # the settings screen exists to avoid.
+    backend = keychain.backend
     return [
         {
             "provider": slug,
@@ -120,6 +195,12 @@ async def get_keys(request: Request):
             "protocol": meta["protocol"],
             "base_url": meta["base_url"],
             "needs_key": meta["needs_key"],
+            "storage": backend,
+            "storage_detail": keychain.describes_backend(),
+            # Why. `file` means "no usable keyring" *or* "this run was pointed at
+            # its own store"; a client that assumes the first one tells an isolated
+            # run its machine is missing a keyring.
+            "storage_reason": keychain.storage_reason(),
         }
         for slug, meta in BUILTIN_PROVIDERS.items()
     ]
@@ -128,13 +209,137 @@ async def get_keys(request: Request):
 @app.post("/settings/keys")
 async def save_key(body: ProviderKeyUpdate, request: Request):
     keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
-    keychain.set_provider_key(body.provider, body.api_key)
+    try:
+        keychain.set_provider_key(body.provider, body.api_key)
+    except ProviderError as exc:
+        # A machine without a usable OS keyring (headless Linux, no Secret
+        # Service, `keyring` not installed) gets a clear, actionable error
+        # instead of an unhandled 500 from inside the settings screen.
+        raise ApiError(503, exc.code, exc.message) from exc
+    # A new key can unlock a whole provider's model list, so don't let the
+    # catalog serve the pre-key answer from cache.
+    catalog: ModelCatalogService | None = getattr(request.app.state, "models", None)
+    if catalog:
+        catalog.invalidate()
     return {"ok": True, "provider": body.provider}
 
 
 @app.get("/settings/agents", response_model=list[AgentConfig])
 async def list_agents(request: Request):
     return request.app.state.registry.list_configs()
+
+
+@app.post("/settings/agents/repair")
+async def repair_agents(request: Request):
+    """Point the roles that cannot run at a model this engine has discovered.
+
+    One action, and deliberately not "apply one model to every role": a role that
+    works is left exactly as it is. The rule lives in `engine/role_repair.py` and
+    the response carries the reason for every change *and* every refusal to change,
+    so the screen can show what happened instead of asserting success.
+    """
+    registry: AgentRegistryService = request.app.state.registry
+    keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
+    catalog_service: ModelCatalogService | None = getattr(request.app.state, "models", None)
+
+    configs = [cfg.model_dump() for cfg in registry.list_configs()]
+    key_status = [
+        {
+            "provider": slug,
+            "has_key": keychain.has_provider_key(slug),
+            "needs_key": meta["needs_key"],
+        }
+        for slug, meta in BUILTIN_PROVIDERS.items()
+    ]
+    catalog = await catalog_service.get(refresh=True) if catalog_service else {
+        "models": [], "providers": []
+    }
+
+    plan = plan_role_repair(
+        configs=configs,
+        key_status=key_status,
+        provider_status=catalog.get("providers") or [],
+        catalog=catalog.get("models") or [],
+    )
+
+    repaired: list[dict] = []
+    if plan.changed:
+        for role, reason in plan.to_repair:
+            patch: dict = {"provider": plan.target["provider"], "model_name": plan.target["model"]}
+            # The protocol comes from the catalog entry the engine discovered, so a
+            # role moved onto a provider speaks that provider's wire format. The
+            # endpoint is deliberately NOT sent: a provider switch resets it to the
+            # provider's own default, while an unchanged provider keeps whatever
+            # endpoint the user configured (a proxy, say).
+            protocol = next(
+                (
+                    m.get("protocol")
+                    for m in catalog.get("models") or []
+                    if m.get("provider") == plan.target["provider"]
+                    and m.get("id") == plan.target["model"]
+                ),
+                None,
+            )
+            if protocol:
+                patch["protocol"] = protocol
+            updated = registry.set_config(role, AgentConfigUpdate(**patch))
+            repaired.append(
+                {
+                    "role": role,
+                    "reason": reason,
+                    "provider": updated.provider,
+                    "model": updated.model_name,
+                    "base_url": updated.base_url,
+                }
+            )
+        if catalog_service:
+            catalog_service.invalidate()
+
+    # Roles that need fixing and a repair that could not reach them are different
+    # outcomes. Reporting both as "nothing needed fixing" would be a green result on
+    # a broken install, so the roles left unfixed are named with their reasons.
+    unfixable = []
+    if not plan.changed:
+        unfixable = [
+            {"role": role, "reason": reason} for role, reason in plan.to_repair
+        ]
+        if not unfixable:
+            # Nothing was proven broken. A target only matters to roles that need one,
+            # so there is no reason to explain the absence of one.
+            plan.target_reason = ""
+
+    return {
+        "changed": bool(repaired),
+        "target": plan.target,
+        "target_reason": plan.target_reason,
+        "repaired": repaired,
+        "unfixable": unfixable,
+        "left_alone": [
+            {"role": role, "reason": reason} for role, reason in plan.left_alone
+        ],
+        "notes": plan.notes,
+    }
+
+
+@app.get("/settings/roles")
+async def list_roles(request: Request):
+    """What each slot is for, and when it runs.
+
+    The settings screen shows this instead of keeping its own copy: two lists in
+    two places is how a screen ends up describing abilities the engine no longer
+    grants.
+    """
+    configs = {cfg.role: cfg for cfg in request.app.state.registry.list_configs()}
+    return [
+        {
+            "role": role,
+            "display_name": configs[role].display_name if role in configs else role.title(),
+            "job": ROLE_JOB.get(role, ""),
+            "timing": ROLE_TIMING.get(role, ""),
+            "order": index,
+        }
+        for index, role in enumerate(ROLE_ORDER)
+    ]
 
 
 @app.get("/settings/agents/{role}", response_model=AgentConfig)
@@ -144,7 +349,13 @@ async def get_agent(role: str, request: Request):
 
 @app.put("/settings/agents/{role}", response_model=AgentConfig)
 async def put_agent(role: str, patch: AgentConfigUpdate, request: Request):
-    return request.app.state.registry.set_config(role, patch)
+    updated = request.app.state.registry.set_config(role, patch)
+    # The role may now point at a different provider/endpoint, which changes
+    # which models are discoverable at all.
+    catalog: ModelCatalogService | None = getattr(request.app.state, "models", None)
+    if catalog:
+        catalog.invalidate()
+    return updated
 
 
 @app.post("/settings/agents/{role}/test-connection")
@@ -206,51 +417,32 @@ while Gtk.events_pending():
 
 
 @app.get("/models")
-async def list_available_models(request: Request):
-    import httpx
-    keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
-    models = []
+async def list_available_models(request: Request, refresh: bool = False):
+    """The model catalog, discovered live from every configured provider.
 
-    # 1. Check local Ollama models
-    try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            r = await client.get("http://127.0.0.1:11434/api/tags")
-            if r.status_code == 200:
-                data = r.json()
-                for m in data.get("models", []):
-                    name = m.get("name")
-                    if name and not name.startswith("nomic-embed"):
-                        param_size = m.get("details", {}).get("parameter_size", "local")
-                        models.append({
-                            "id": name,
-                            "name": name,
-                            "provider": "ollama",
-                            "description": f"Ollama local model ({param_size})",
-                            "available": True,
-                        })
-    except Exception:
-        pass
+    `refresh=true` bypasses the short cache; the UI passes it when it opens so a
+    model released since the last launch is there without reinstalling anything.
+    There is deliberately no fallback list: if discovery finds nothing, the
+    answer is nothing, plus the per-provider reason why.
+    """
+    catalog: ModelCatalogService = getattr(request.app.state, "models", None) or ModelCatalogService(
+        request.app.state.registry,
+        getattr(request.app.state, "keychain", None) or Keychain(),
+    )
+    return await catalog.get(refresh=refresh)
 
-    # 2. Cloud models
-    cloud_models = [
-        {"id": "claude-3-7-sonnet-latest", "name": "Claude 3.7 Sonnet", "provider": "anthropic", "description": "Top-tier coding & CoT reasoning"},
-        {"id": "claude-3-5-sonnet-latest", "name": "Claude 3.5 Sonnet", "provider": "anthropic", "description": "High-speed precision coding"},
-        {"id": "gpt-4o", "name": "GPT-4o", "provider": "openai", "description": "OpenAI flagship multi-modal"},
-        {"id": "gpt-4o-mini", "name": "GPT-4o Mini", "provider": "openai", "description": "Fast & cost-effective"},
-        {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash", "provider": "google", "description": "Ultra low latency & high speed"},
-        {"id": "gemini-1.5-pro", "name": "Gemini 1.5 Pro", "provider": "google", "description": "2M token context window"},
-        {"id": "deepseek-chat", "name": "DeepSeek V3", "provider": "deepseek", "description": "High-performance open weights API"},
-        {"id": "deepseek-reasoner", "name": "DeepSeek R1", "provider": "deepseek", "description": "CoT reasoning & math"},
-    ]
 
-    for cm in cloud_models:
-        has_key = keychain.has_provider_key(cm["provider"])
-        models.append({
-            **cm,
-            "available": has_key,
-        })
+@app.get("/models/recent")
+async def recent_models(request: Request, limit: int = Query(5, ge=1, le=25)):
+    """Models that actually answered recently, newest first, from the event log.
 
-    return models
+    What the chat's model menu orders by. It is deliberately *not* derived from
+    `goals.provider/model`, which record what the command bar asked for: roles run
+    on their own configured models, so the two differ whenever a role is configured
+    and the intent is stale. A menu that labelled one of those "last run" would be
+    naming a model the engine never called.
+    """
+    return request.app.state.goals.recent_run_models(limit)
 
 
 @app.get("/workspaces")
@@ -266,7 +458,7 @@ async def get_ws(workspace_id: str, request: Request):
 @app.post("/goals")
 async def create_goal(body: GoalCreate, request: Request):
     goal = request.app.state.goals.create(body)
-    asyncio.create_task(request.app.state.executor.run_planning(goal.id))
+    _spawn(request.app, request.app.state.executor.run_planning(goal.id), goal.id)
     return goal
 
 
@@ -276,13 +468,24 @@ async def get_goal(goal_id: str, request: Request):
     return GoalDetail(**g.model_dump(), steps=request.app.state.goals.steps(goal_id))
 
 
+@app.patch("/goals/{goal_id}/steps/{step_id}")
+async def patch_step(goal_id: str, step_id: str, body: PlanStepUpdate, request: Request):
+    """Edit a plan step's title/description/paths before execution.
+
+    Version-protected like start/pause: expected_version is the goal version
+    the client last saw, so concurrent edits can't silently clobber each other.
+    """
+    patch = body.model_dump(exclude={"expected_version"})
+    return request.app.state.goals.update_step(goal_id, step_id, body.expected_version, patch)
+
+
 @app.post("/goals/{goal_id}/steps/{step_id}/retry")
 async def retry_step(goal_id: str, step_id: str, body: VersionedAction, request: Request):
     g = request.app.state.goals.get(goal_id)
     if g.status not in ("RUNNING", "PAUSED", "FAILED"):
         raise ApiError(409, "illegal_status", f"cannot retry from {g.status}")
     updated_step = await request.app.state.executor.retry_step(goal_id, step_id, body.expected_version)
-    asyncio.create_task(_run_steps(request.app, goal_id))
+    _spawn(request.app, _run_steps(request.app, goal_id), goal_id)
     return updated_step
 
 
@@ -311,13 +514,84 @@ async def goal_events(goal_id: str, request: Request, after: int = Query(0)):
 @app.post("/goals/{goal_id}/start")
 async def start_goal(goal_id: str, body: VersionedAction, request: Request):
     g = request.app.state.goals.get(goal_id)
+    if g.plan_only:
+        raise ApiError(
+            409,
+            "plan_only",
+            "goal is plan-only; enable execution first via /goals/{id}/enable-execution",
+        )
     if g.status == "PLANNING":
         raise ApiError(409, "illegal_status", "planning is still in progress")
     if g.status not in ("PENDING", "PAUSED"):
         raise ApiError(409, "illegal_status", f"cannot start from {g.status}")
     running = request.app.state.goals.update_status(goal_id, body.expected_version, "RUNNING")
-    asyncio.create_task(_run_steps(request.app, goal_id))
+    _spawn(request.app, _run_steps(request.app, goal_id), goal_id)
     return running
+
+
+@app.post("/goals/{goal_id}/apply")
+async def apply_goal(goal_id: str, request: Request):
+    """Replay a completed dry-run's proposed changes for real.
+
+    The guards run here, synchronously, so a request that cannot possibly
+    succeed answers 409 — the previous shape started a background task and
+    returned success unconditionally, so "apply" on a goal with nothing
+    proposed looked like it worked and quietly did nothing.
+    """
+    goals = request.app.state.goals
+    g = goals.get(goal_id)
+    if not g.dry_run:
+        raise ApiError(409, "not_dry_run", "only dry-run goals can be applied")
+    if g.status not in ("COMPLETED", "FAILED"):
+        raise ApiError(409, "illegal_status", f"cannot apply from {g.status}")
+    if not goals.has_proposed_files(goal_id):
+        raise ApiError(409, "nothing_to_apply", "dry-run produced no proposed changes")
+    _spawn(request.app, request.app.state.executor.apply_goal(goal_id), goal_id)
+    return {"applied": True, "goal_id": goal_id}
+
+
+@app.post("/goals/{goal_id}/enable-execution")
+async def enable_execution(goal_id: str, body: VersionedAction, request: Request):
+    """Lift the plan-only guard on a goal, leaving it ready to start.
+
+    plan_only itself is not version-protected (it is a pre-execution toggle,
+    like dry_run), but expected_version is still validated so a client cannot
+    enable execution based on a stale view of the goal.
+    """
+    goals = request.app.state.goals
+    g = goals.get(goal_id)
+    if g.status not in ("PENDING", "PAUSED"):
+        raise ApiError(409, "illegal_status", f"cannot enable execution from {g.status}")
+    if not g.plan_only:
+        return g  # idempotent
+    updated = goals.set_plan_only(goal_id, False)
+    request.app.state.executor._set_status(goal_id, "PENDING", None)
+    return request.app.state.goals.get(goal_id)
+
+
+def _spawn(app: FastAPI, coro, goal_id: str | None = None) -> None:
+    """Run a pipeline coroutine in the background, without losing its failure.
+
+    A bare ``asyncio.create_task`` drops its exception on the floor when nobody
+    awaits it, so a crashed planning or execution run left the chat waiting
+    forever with nothing explaining why. Failures here are surfaced as an error
+    event and fail the goal instead of vanishing into the event loop.
+    """
+
+    async def runner() -> None:
+        try:
+            await coro
+        except Exception as exc:  # last line of defence for background work
+            if goal_id is None:
+                return
+            try:
+                app.state.executor._fail(
+                    goal_id, None, getattr(exc, "code", "internal_error"), str(exc)
+                )
+            except Exception:
+                pass
+
+    asyncio.create_task(runner())
 
 
 async def _run_steps(app: FastAPI, goal_id: str) -> None:
@@ -376,6 +650,11 @@ def main() -> None:
     import uvicorn
 
     port = pick_port()
+    # Where this run's state actually lands, before anything can write. An isolated
+    # run says so out loud, and the half-redirected case is called out instead of
+    # being discovered later by finding a smoke-test key in a real keychain.
+    # stderr, because the Tauri shell parses stdout for the boot handshake.
+    print(home.startup_notice(), file=sys.stderr, flush=True)
     print(f"CODIFY_ENGINE token={BOOT_TOKEN} port={port}", flush=True)
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 

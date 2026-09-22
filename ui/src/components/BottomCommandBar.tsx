@@ -1,5 +1,12 @@
-import React, { useState, useRef, useEffect } from "react";
-import { Workspace, ModelOption } from "../types";
+import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
+import { Workspace, ModelOption, ProviderModelStatus } from "../types";
+import {
+  EMPTY_SIGNALS,
+  ModelSection,
+  ModelSignals,
+  modelBadges,
+  orderModelMenu,
+} from "../modelSignals";
 import {
   Folder,
   FolderOpen,
@@ -10,20 +17,14 @@ import {
   Layers,
   Check,
   Cpu,
+  RefreshCw,
+  AlertCircle,
 } from "lucide-react";
 
-export const AVAILABLE_MODELS: ModelOption[] = [
-  { id: "qwen2.5-coder:7b", name: "Qwen 2.5 Coder 7B", provider: "ollama", description: "Local Ollama model" },
-  { id: "claude-3-7-sonnet-latest", name: "Claude 3.7 Sonnet", provider: "anthropic", description: "Top coding & CoT reasoning" },
-  { id: "claude-3-5-sonnet-latest", name: "Claude 3.5 Sonnet", provider: "anthropic", description: "High-speed precision coding" },
-  { id: "gpt-4o", name: "GPT-4o", provider: "openai", description: "OpenAI flagship multi-modal" },
-  { id: "gpt-4o-mini", name: "GPT-4o Mini", provider: "openai", description: "Fast & cost-effective" },
-  { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash", provider: "google", description: "Ultra low latency & high speed" },
-  { id: "deepseek-chat", name: "DeepSeek V3", provider: "deepseek", description: "High performance open weights API" },
-  { id: "deepseek-reasoner", name: "DeepSeek R1", provider: "deepseek", description: "CoT reasoning & math" },
-];
-
 export type ExecutionMode = "direct" | "dry_run" | "plan_only";
+
+// Ordering and badges come from `modelSignals`, which is pure and shared with the
+// Settings field — so an id sits in the same place in both pickers.
 
 interface BottomCommandBarProps {
   workspaces: Workspace[];
@@ -32,11 +33,21 @@ interface BottomCommandBarProps {
   onBrowseWorkspace: () => Promise<void>;
   onCreateWorkspace: (name: string, root_path: string) => Promise<void>;
   availableModels: ModelOption[];
-  selectedModel: ModelOption;
+  selectedModel?: ModelOption;
   onSelectModel: (model: ModelOption) => void;
+  /** Per-provider discovery outcome, including failures. */
+  modelStatus?: ProviderModelStatus[];
+  /** What the app already knows: which roles use which model, and what ran last. */
+  modelSignals?: ModelSignals;
+  modelsLoading?: boolean;
+  onRefreshModels: () => void;
   mode: ExecutionMode;
   onChangeMode: (mode: ExecutionMode) => void;
-  onSubmit: (prompt: string) => void;
+  /**
+   * Returns false when the send was refused before anything was dispatched. A
+   * promise is awaited before the prompt is cleared.
+   */
+  onSubmit: (prompt: string) => boolean | void | Promise<boolean | void>;
   isLoading: boolean;
   onOpenSettings: () => void;
 }
@@ -50,6 +61,10 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   availableModels,
   selectedModel,
   onSelectModel,
+  modelStatus = [],
+  modelSignals = EMPTY_SIGNALS,
+  modelsLoading = false,
+  onRefreshModels,
   mode,
   onChangeMode,
   onSubmit,
@@ -61,6 +76,32 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   const [isModelOpen, setIsModelOpen] = useState(false);
   const [isModeOpen, setIsModeOpen] = useState(false);
   const [customModelId, setCustomModelId] = useState("");
+  // Typed filter for the model menu. A discovered catalog runs to hundreds of ids
+  // on a busy install, so finding one by scrolling is worse than typing a few
+  // letters — and the menu stays a short window either way.
+  const [modelFilter, setModelFilter] = useState("");
+  // Guards the window between "send pressed" and "isLoading is true".
+  const submitInFlight = useRef(false);
+
+  useEffect(() => {
+    if (!isModelOpen) setModelFilter("");
+  }, [isModelOpen]);
+
+  // Roles in use lead, then the models that ran recently (newest first), then
+  // every provider — with chat-capable ids first inside each group and non-chat
+  // ones badged and last. Every discovered model is still here; the leading
+  // sections are a convenience over the same list, not a filter on it.
+  const modelSections: ModelSection[] = React.useMemo(
+    () =>
+      orderModelMenu(availableModels, {
+        filter: modelFilter,
+        selected: selectedModel,
+        signals: modelSignals,
+      }),
+    [availableModels, modelFilter, selectedModel, modelSignals],
+  );
+
+  const shownModelCount = modelSections.reduce((n, s) => n + s.models.length, 0);
 
   // Manual workspace path dialog fallback
   const [isManualWsModal, setIsManualWsModal] = useState(false);
@@ -69,6 +110,118 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   const [wsError, setWsError] = useState<string | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const barRef = useRef<HTMLDivElement>(null);
+
+  // Menu placement: every dropdown floats FIXED above the ENTIRE prompt card
+  // (textarea included — menus must never cover the chat prompt), aligned to
+  // its button's left edge. The scrollable list is capped to the space that
+  // actually exists between the window top and the card, so a long model list
+  // always scrolls instead of overflowing the screen. Measured from the real
+  // DOM before paint, and re-measured on resize/scroll.
+  type PickerKey = "folder" | "model" | "mode";
+  // Viewport-anchored position for each open menu; null until measured.
+  const [menuPos, setMenuPos] = useState<Record<PickerKey, { left: number; bottom: number } | null>>({
+    folder: null,
+    model: null,
+    mode: null,
+  });
+  // Cap (px) for each menu's scrollable list; null = Tailwind default max-h.
+  const [menuMax, setMenuMax] = useState<Record<PickerKey, number | null>>({
+    folder: null,
+    model: null,
+    mode: null,
+  });
+  const wrapRefs: Record<PickerKey, React.RefObject<HTMLDivElement | null>> = {
+    folder: useRef<HTMLDivElement>(null),
+    model: useRef<HTMLDivElement>(null),
+    mode: useRef<HTMLDivElement>(null),
+  };
+  const menuRefs: Record<PickerKey, React.RefObject<HTMLDivElement | null>> = {
+    folder: useRef<HTMLDivElement>(null),
+    model: useRef<HTMLDivElement>(null),
+    mode: useRef<HTMLDivElement>(null),
+  };
+  const listRefs: Record<PickerKey, React.RefObject<HTMLDivElement | null>> = {
+    folder: useRef<HTMLDivElement>(null),
+    model: useRef<HTMLDivElement>(null),
+    mode: useRef<HTMLDivElement>(null),
+  };
+  const openState: Record<PickerKey, boolean> = {
+    folder: isFolderOpen,
+    model: isModelOpen,
+    mode: isModeOpen,
+  };
+
+  const measure = React.useCallback(() => {
+    const card = barRef.current;
+    if (!card) return;
+    const cardRect = card.getBoundingClientRect();
+    (Object.keys(openState) as PickerKey[]).forEach((key) => {
+      if (!openState[key]) return;
+      const wrap = wrapRefs[key].current;
+      const menu = menuRefs[key].current;
+      const list = listRefs[key].current;
+      if (!wrap || !menu) return;
+      const wrapRect = wrap.getBoundingClientRect();
+      // Fixed-position anchor: left edge of the button, bottom edge just
+      // above the whole card.
+      const left = Math.max(8, wrapRect.left);
+      const bottom = window.innerHeight - cardRect.top + 8;
+      setMenuPos((prev) => {
+        const next = { left, bottom };
+        const p = prev[key];
+        return p && p.left === next.left && p.bottom === next.bottom ? prev : { ...prev, [key]: next };
+      });
+
+      if (list) {
+        // Shrink the scrollable list so the whole menu fits between the
+        // window top and the card top.
+        const chrome = Math.max(0, menu.offsetHeight - list.offsetHeight);
+        const cap = Math.floor(cardRect.top - 12 - chrome);
+        // Cap at a comfortable window as well as at the available space: a menu
+        // that grows to fill the screen buries the chat behind it. Small list,
+        // scroll inside it.
+        const next = Math.max(120, Math.min(cap, 320));
+        setMenuMax((prev) => (prev[key] === next ? prev : { ...prev, [key]: next }));
+      }
+    });
+    // openState is rebuilt every render; depend on the individual flags.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFolderOpen, isModelOpen, isModeOpen, availableModels.length, workspaces.length]);
+
+  useLayoutEffect(() => {
+    measure();
+  }, [measure]);
+
+  // Re-measure on resize/scroll so an open menu keeps fitting the window.
+  useEffect(() => {
+    const anyOpen = isFolderOpen || isModelOpen || isModeOpen;
+    if (!anyOpen) return;
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [isFolderOpen, isModelOpen, isModeOpen, measure]);
+
+  // Dropdowns overlap the chat — close on any click outside the prompt card.
+  useEffect(() => {
+    if (!isFolderOpen && !isModelOpen && !isModeOpen) return;
+    const onPointerDown = (e: MouseEvent | TouchEvent) => {
+      if (barRef.current && !barRef.current.contains(e.target as Node)) {
+        setIsFolderOpen(false);
+        setIsModelOpen(false);
+        setIsModeOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("touchstart", onPointerDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("touchstart", onPointerDown);
+    };
+  }, [isFolderOpen, isModelOpen, isModeOpen]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -79,18 +232,36 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   }, [prompt]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    // `isComposing` matters for any input method that confirms with Enter (CJK,
+    // and the emoji pickers on macOS): sending there truncates the word being
+    // composed and dispatches a goal on half of it.
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSubmit();
     }
   };
 
-  const handleSubmit = () => {
-    if (!prompt.trim() || isLoading) return;
-    onSubmit(prompt.trim());
-    setPrompt("");
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
+  const handleSubmit = async () => {
+    // `isLoading` only arrives on the next render, so two fast Enters could both
+    // get past it and dispatch the same goal twice — two full agent runs.
+    if (!prompt.trim() || isLoading || submitInFlight.current) return;
+    submitInFlight.current = true;
+    try {
+      const accepted = await onSubmit(prompt.trim());
+      // A refused send (no workspace or no model chosen) leaves the text alone: the
+      // app shows what is missing in the error banner, and the prompt is still
+      // there once it is fixed. Clearing it here threw away work irrecoverably.
+      if (accepted === false) return;
+      setPrompt("");
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+      }
+    } catch (err) {
+      // handleSendMessage catches its own failures, so this is belt-and-braces —
+      // but an escaped rejection must not eat the prompt or wedge the input.
+      console.error("onSubmit failed", err);
+    } finally {
+      submitInFlight.current = false;
     }
   };
 
@@ -129,7 +300,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
 
   return (
     <div className="w-full max-w-4xl mx-auto p-4 z-20">
-      <div className="bg-[#161b22] border border-[#30363d] rounded-2xl shadow-2xl overflow-hidden focus-within:border-blue-500/80 transition-all duration-200">
+      <div ref={barRef} className="bg-[#161b22] border border-[#30363d] rounded-2xl shadow-2xl overflow-visible focus-within:border-blue-500/80 transition-all duration-200">
         {/* Main Textarea - NEVER disabled so cursor is always responsive */}
         <div className="p-3.5 pb-2">
           <textarea
@@ -145,12 +316,12 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
           />
         </div>
 
-        {/* Toolbar Controls */}
+        {/* Toolbar — pickers on the left edge of the prompt card, submit on the right. */}
         <div className="px-3 py-2 bg-[#0d1117]/60 border-t border-[#30363d]/60 flex flex-wrap items-center justify-between gap-2 text-xs">
-          {/* Left Pickers: Folder & Model & Mode */}
-          <div className="flex items-center gap-2 relative flex-wrap">
-            {/* Folder Picker Button */}
-            <div className="relative">
+          {/* Left Pickers */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Folder Picker */}
+            <div className="relative" ref={wrapRefs.folder}>
               <button
                 type="button"
                 onClick={() => {
@@ -172,14 +343,21 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 <ChevronDown className="w-3 h-3 text-gray-400" />
               </button>
 
-              {/* Folder Dropdown */}
+              {/* Folder Dropdown — opens UP over the chat, flips down if no room */}
               {isFolderOpen && (
-                <div className="absolute bottom-full left-0 mb-2 w-80 bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl p-2 z-50">
+                <div
+                  ref={menuRefs.folder}
+                  style={
+                    menuPos.folder
+                      ? { position: "fixed", left: menuPos.folder.left, bottom: menuPos.folder.bottom }
+                      : undefined
+                  }
+                  className="absolute left-0 bottom-full mb-2 w-80 bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl p-2 z-50"
+                >
                   <div className="text-[11px] font-semibold text-gray-400 px-2 py-1 uppercase tracking-wider">
                     Workspaces
                   </div>
 
-                  {/* Native File Manager Launcher */}
                   <div className="p-1 mb-1">
                     <button
                       type="button"
@@ -191,7 +369,11 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   </div>
 
                   {workspaces.length > 0 && (
-                    <div className="max-h-40 overflow-y-auto space-y-1 my-1">
+                    <div
+                      ref={listRefs.folder}
+                      style={menuMax.folder != null ? { maxHeight: menuMax.folder } : undefined}
+                      className="max-h-40 overflow-y-auto space-y-1 my-1"
+                    >
                       {workspaces.map((ws) => (
                         <button
                           key={ws.id}
@@ -232,8 +414,8 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
               )}
             </div>
 
-            {/* Model Picker Button */}
-            <div className="relative">
+            {/* Model Picker */}
+            <div className="relative" ref={wrapRefs.model}>
               <button
                 type="button"
                 onClick={() => {
@@ -244,57 +426,166 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#21262d] border border-[#30363d] text-gray-200 hover:bg-[#30363d] transition-colors cursor-pointer"
               >
                 <Cpu className="w-3.5 h-3.5 text-purple-400" />
-                <span className="font-medium truncate max-w-[150px]">{selectedModel.name}</span>
+                <span className="font-medium truncate max-w-[150px]">
+                  {selectedModel ? selectedModel.name : "No model"}
+                </span>
                 <ChevronDown className="w-3 h-3 text-gray-400" />
               </button>
 
-              {/* Model Dropdown */}
+              {/* Model Dropdown — opens UP over the chat; list scrolls, capped to fit */}
               {isModelOpen && (
-                <div className="absolute bottom-full left-0 mb-2 w-84 bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl p-2.5 z-50">
+                <div
+                  ref={menuRefs.model}
+                  style={
+                    menuPos.model
+                      ? { position: "fixed", left: menuPos.model.left, bottom: menuPos.model.bottom }
+                      : undefined
+                  }
+                  className="absolute left-0 bottom-full mb-2 w-80 bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl p-2.5 z-50"
+                >
                   <div className="flex items-center justify-between px-2 py-1 mb-1">
                     <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                      Available Models
+                      Models{availableModels.length > 0 ? ` (${availableModels.length})` : ""}
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsModelOpen(false);
-                        onOpenSettings();
-                      }}
-                      className="text-[11px] text-blue-400 hover:underline cursor-pointer"
-                    >
-                      API Keys
-                    </button>
-                  </div>
-
-                  {/* Dynamic Models List */}
-                  <div className="max-h-60 overflow-y-auto space-y-1 my-1">
-                    {availableModels.map((m) => (
+                    <div className="flex items-center gap-2">
                       <button
-                        key={m.id}
+                        type="button"
+                        onClick={onRefreshModels}
+                        disabled={modelsLoading}
+                        title="Ask every configured provider what it serves right now"
+                        className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-200 disabled:opacity-50 cursor-pointer"
+                      >
+                        <RefreshCw className={modelsLoading ? "w-3 h-3 animate-spin" : "w-3 h-3"} />
+                        Refresh
+                      </button>
+                      <button
                         type="button"
                         onClick={() => {
-                          onSelectModel(m);
                           setIsModelOpen(false);
+                          onOpenSettings();
                         }}
-                        className={`w-full text-left px-2.5 py-1.5 rounded-lg flex items-center justify-between text-xs transition-colors cursor-pointer ${
-                          selectedModel.id === m.id
-                            ? "bg-purple-600/20 text-purple-300 border border-purple-500/30 font-medium"
-                            : "text-gray-300 hover:bg-[#21262d]"
-                        }`}
+                        className="text-[11px] text-blue-400 hover:underline cursor-pointer"
                       >
-                        <div className="truncate pr-2">
-                          <div className="font-semibold flex items-center gap-1.5 truncate">
-                            <span className="truncate">{m.name}</span>
-                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-[#0d1117] text-gray-400 font-normal uppercase">
-                              {m.provider}
-                            </span>
-                          </div>
-                          <div className="text-[10px] text-gray-500 truncate">{m.description}</div>
-                        </div>
-                        {selectedModel.id === m.id && <Check className="w-3.5 h-3.5 text-purple-400 flex-shrink-0" />}
+                        API Keys
                       </button>
+                    </div>
+                  </div>
+
+                  {availableModels.length > 0 && (
+                    <div className="px-1 pb-1">
+                      <input
+                        type="text"
+                        value={modelFilter}
+                        onChange={(e) => setModelFilter(e.target.value)}
+                        placeholder={`Filter ${availableModels.length} models…`}
+                        className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-2.5 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-purple-500"
+                      />
+                    </div>
+                  )}
+
+                  <div
+                    ref={listRefs.model}
+                    style={menuMax.model != null ? { maxHeight: menuMax.model } : undefined}
+                    className="max-h-60 overflow-y-auto space-y-0.5 my-1"
+                  >
+                    {availableModels.length === 0 && (
+                      <div className="px-2.5 py-3 text-[11px] text-gray-400 leading-relaxed">
+                        {modelsLoading
+                          ? "Asking each provider what it serves..."
+                          : "No models yet. Add an API key under API Keys, or start a local Ollama server — its models appear automatically."}
+                      </div>
+                    )}
+
+                    {availableModels.length > 0 && shownModelCount === 0 && (
+                      <div className="px-2.5 py-3 text-[11px] text-gray-400">
+                        Nothing matches “{modelFilter.trim()}”. Every discovered model is listed — clear
+                        the filter to see them, or set the id below.
+                      </div>
+                    )}
+
+                    {modelSections.map((section) => (
+                      <div key={section.id} className="pb-1">
+                        <div
+                          className={
+                            "px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider " +
+                            (section.pinned ? "text-purple-300/80" : "text-gray-500")
+                          }
+                        >
+                          {section.label} ({section.models.length})
+                        </div>
+                        {section.models.map((m) => {
+                          const isCurrent =
+                            !!selectedModel &&
+                            selectedModel.id === m.id &&
+                            selectedModel.provider === m.provider;
+                          const badges = modelBadges(m, modelSignals);
+                          return (
+                            <button
+                              key={m.provider + ":" + m.id}
+                              type="button"
+                              title={
+                                `${m.id}` +
+                                (badges.rolesTitle ? `\n${badges.rolesTitle}` : "") +
+                                (badges.lastRunTitle ? `\n${badges.lastRunTitle}` : "") +
+                                (m.description ? `\n${m.description}` : "")
+                              }
+                              onClick={() => {
+                                onSelectModel(m);
+                                setIsModelOpen(false);
+                              }}
+                              className={
+                                "w-full text-left px-2.5 py-1 rounded-lg flex items-center gap-2 text-xs transition-colors cursor-pointer " +
+                                (isCurrent
+                                  ? "bg-purple-600/20 text-purple-300 border border-purple-500/30 font-medium"
+                                  : "text-gray-300 hover:bg-[#21262d]")
+                              }
+                            >
+                              <span className="font-semibold truncate flex-1 min-w-0">{m.name}</span>
+                              {badges.roles && (
+                                <span
+                                  className="text-[10px] text-teal-300/90 flex-shrink-0 max-w-[9rem] truncate"
+                                  title={badges.rolesTitle}
+                                >
+                                  {badges.roles}
+                                </span>
+                              )}
+                              {badges.lastRun && (
+                                <span className="text-[10px] text-blue-300/90 flex-shrink-0">last run</span>
+                              )}
+                              {badges.notChat ? (
+                                <span className="text-[10px] text-amber-400/80 flex-shrink-0">
+                                  not a chat model
+                                </span>
+                              ) : (
+                                !badges.roles &&
+                                m.description && (
+                                  <span className="text-[10px] text-gray-500 truncate max-w-[110px] flex-shrink-0">
+                                    {m.description}
+                                  </span>
+                                )
+                              )}
+                              {isCurrent && <Check className="w-3 h-3 text-purple-400 flex-shrink-0" />}
+                            </button>
+                          );
+                        })}
+                      </div>
                     ))}
+
+                    {/* Providers that answered *nothing* must say why — a silently
+                        missing provider looks like a Codify bug. */}
+                    {modelStatus
+                      .filter((p) => !p.ok)
+                      .map((p) => (
+                        <div
+                          key={"status:" + p.provider}
+                          className="flex items-start gap-1.5 px-2.5 py-1 text-[10px] text-amber-400/90"
+                        >
+                          <AlertCircle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                          <span className="truncate">
+                            <span className="font-semibold">{p.provider}</span> — {p.error}
+                          </span>
+                        </div>
+                      ))}
                   </div>
 
                   {/* Custom Model Input */}
@@ -322,7 +613,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
             </div>
 
             {/* Execution Mode Selector */}
-            <div className="relative">
+            <div className="relative" ref={wrapRefs.mode}>
               <button
                 type="button"
                 onClick={() => {
@@ -344,7 +635,15 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
               </button>
 
               {isModeOpen && (
-                <div className="absolute bottom-full left-0 mb-2 w-56 bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl p-1.5 z-50">
+                <div
+                  ref={menuRefs.mode}
+                  style={
+                    menuPos.mode
+                      ? { position: "fixed", left: menuPos.mode.left, bottom: menuPos.mode.bottom }
+                      : undefined
+                  }
+                  className="absolute left-0 bottom-full mb-2 w-56 bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl p-1.5 z-50"
+                >
                   <button
                     type="button"
                     onClick={() => {
@@ -391,7 +690,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   >
                     <div>
                       <div className="font-semibold">Plan Only</div>
-                      <div className="text-[10px] text-gray-500">Decompose into steps first</div>
+                      <div className="text-[10px] text-gray-500">Show the plan; you approve execution</div>
                     </div>
                     {mode === "plan_only" && <Check className="w-3.5 h-3.5 text-blue-400" />}
                   </button>
@@ -400,7 +699,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
             </div>
           </div>
 
-          {/* Right Action: Submit Button & Hint */}
+          {/* Right Action: Submit */}
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-gray-500 hidden sm:inline">
               ⏎ to send
@@ -444,7 +743,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 <label className="text-xs text-gray-400 block mb-1">Absolute Directory Path</label>
                 <input
                   type="text"
-                  placeholder="/home/quinton/Projects/my-app"
+                  placeholder="/home/you/Projects/my-app"
                   value={wsPath}
                   onChange={(e) => setWsPath(e.target.value)}
                   className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"

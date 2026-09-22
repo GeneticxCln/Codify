@@ -30,7 +30,10 @@ ui/src/
 
 ## 3. Screen
 
-Five cards, fixed order: planner, coder, tester, reviewer, summarizer. No add/remove.
+Seven cards, fixed order as in `ROLES`: laya, librarian, planner, fixer, verifier, critic, scribe. No
+add/remove. Each card shows what the slot is for and when it runs, read from `GET /settings/roles` —
+the ability text lives in the engine (`models.ROLE_JOB` / `ROLE_TIMING`), so the screen cannot describe
+a grant the engine no longer makes.
 
 Each card: Provider (builtin or custom slug), Protocol (when custom), Model, API Key (if needs_key), Base URL (ollama/custom), Temperature, Max tokens, prompt override, Save, Test Connection.
 

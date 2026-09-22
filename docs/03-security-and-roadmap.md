@@ -5,7 +5,8 @@
 ### 1.1 API key storage
 
 - Raw keys are NEVER persisted by the Engine in plaintext and NEVER echoed back in any API response — only `api_key_ref` (a keychain handle) is returned.
-- Engine: Python `keyring` (macOS Keychain / Windows Credential Manager / Linux Secret Service) under `codify/agents/{role}`.
+- Engine: Python `keyring` (macOS Keychain / Windows Credential Manager / Linux Secret Service) under `codify/agents/{role}` and `providers/{slug}`.
+- Where no usable keyring exists (headless Linux, no Secret Service, `keyring` not installed), keys go to `~/.codify/secrets.json` at mode `0600` instead — still never SQLite, still never returned by the API. `GET /settings/keys` reports `storage` so the UI states which store is in use rather than promising a keychain it does not have. See `04` §7.
 - Desktop: key typed into `ApiKeyField`, held in component state, sent once over the loopback HTTP call, dropped immediately after. NEVER written into `localStorage`, Tauri's store plugin, or logs.
 
 ### 1.2 Local-provider SSRF guard
@@ -34,15 +35,25 @@ On boot, the Engine generates a random token, writes it to stdout, and requires 
 - `FileSystemService` path containment (`root_path` boundary check).
 - Engine binds to `127.0.0.1` only.
 
+### 1.7 Commit scope
+
+A step commits only the paths it wrote: `git commit -m <msg> -- <paths>`, staged with the same pathspec.
+The engine never runs a bare `git add -A`, so a working tree with the user's own staged or half-finished
+work is not swept into a commit named after the step, and their index is left as they left it. A step whose
+proposal matched the file already commits nothing and says so (`04` §3.0).
+
 ## 2. Persistence layer
 
 Single file. **No `agents.db`.**
 
 ```
 ~/.codify/codify.db   # workspaces, goals, plan_steps, events, agent_configs
+~/.codify/secrets.json  # only when no OS keyring is usable (0600)
 ```
 
-SQL DDL, `Goal.version` / `event_seq`, Alembic `0001_init`: `04` §2.
+`CODIFY_HOME` (or `CODIFY_DB` / `CODIFY_SECRETS`) redirects these, and a redirected run also stops using
+the OS keychain so it cannot reach the real store — `04` §2.0, `04` §7. The test suite holds itself to
+the same rule (`tests/hermetic.py`), and `make run-engine-scratch` does it for a manual smoke test.
 
 - SQLModel maps Pydantic models in `04` §1.
 - `update_goal` is check-and-increment; `409` `version_conflict` on miss.
@@ -86,6 +97,7 @@ SQL DDL, `Goal.version` / `event_seq`, Alembic `0001_init`: `04` §2.
 | `system_prompt_override` | Free-text, **32768** chars. Blank → `NULL` / `DEFAULT_PROMPTS`. |
 | Reviewer → Coder | Human click: `POST /goals/{id}/steps/{step_id}/retry`. No auto-loop. |
 | `max_calls_per_goal` | Not on `AgentConfig`. Tester: at most one argv run + one verdict call per step attempt. |
-| SQLite path | `~/.codify/codify.db` only. |
+| SQLite path | `~/.codify/codify.db` — or `CODIFY_DB` / `CODIFY_HOME`, resolved in `engine/home.py` only. |
+| Redirected run | Never touches the real keychain (`04` §2.0). |
 
 Argv table, WS/auth handshake, HTTP catalog: `04`.

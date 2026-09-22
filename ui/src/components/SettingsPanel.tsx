@@ -1,27 +1,455 @@
-import React from "react";
-import { AgentRole } from "../types";
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  AgentRole,
+  LayaStatus,
+  ModelOption,
+  ProviderModelStatus,
+  RecentRunModel,
+  RepairReport,
+  RoleInfo,
+} from "../types";
+import { fetchRoles, getLayaStatus, repairAgentConfigs } from "../api";
+import { useAgentConfigs } from "../hooks/useAgentConfigs";
+import { buildModelSignals } from "../modelSignals";
+import { findStaleFallback, findStaleModel, StaleModel } from "../staleModel";
 import { AgentConfigCard } from "./AgentConfigCard";
-import { Sliders, ShieldCheck } from "lucide-react";
+import { Sliders, ShieldCheck, Zap, AlertTriangle, Cpu, Wand2, Wrench } from "lucide-react";
 
-const ORDERED_ROLES: AgentRole[] = ["planner", "coder", "tester", "reviewer", "summarizer"];
+interface SettingsPanelProps {
+  /** Render compactly inside the settings modal instead of as a full page. */
+  embedded?: boolean;
+  /** Discovered models, offered per role so the field autocompletes real ids. */
+  models?: ModelOption[];
+  /** Per-provider discovery outcome, so a stale role model can be flagged. */
+  providerStatus?: ProviderModelStatus[];
+  /** Ask every provider what it serves right now, from inside a model field. */
+  onRefreshModels?: () => void;
+  refreshingModels?: boolean;
+  /**
+   * Models that recently answered, so a role's model field can show *why* an id
+   * looks familiar. The roles half of these signals is built here from the store,
+   * which is the live copy — the panel must not re-derive it from a prop that can
+   * be a save behind.
+   */
+  recentRuns?: RecentRunModel[];
+}
 
-export const SettingsPanel: React.FC = () => {
+/**
+ * Which engine will actually gate goals, stated plainly.
+ *
+ * The gate has three possible engines (real SDK / fallback model / skipped), and
+ * a toggle that silently did nothing would be worse than no toggle at all — so
+ * the status card always names the one in force, and why.
+ */
+const LayaGateStatus: React.FC = () => {
+  const [status, setStatus] = useState<LayaStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    getLayaStatus()
+      .then((s) => {
+        if (!cancelled) setStatus(s);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (loading) return null;
+
+  if (!status) {
+    return (
+      <div className="flex items-start gap-2 text-xs text-gray-400 bg-[#161b22] border border-[#30363d] rounded-lg p-3">
+        <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+        <span>Gate status unavailable — the engine did not answer /settings/laya.</span>
+      </div>
+    );
+  }
+
+  const sdk = status.sdk_installed && !status.sdk_disabled;
+  const tone = sdk
+    ? "text-emerald-300"
+    : status.sdk_disabled
+    ? "text-amber-300"
+    : "text-gray-300";
+
   return (
-    <div className="max-w-5xl mx-auto py-6 px-4 flex flex-col gap-6">
-      <div className="flex flex-col gap-1 border-b border-[#30363d] pb-4">
-        <h2 className="text-xl font-bold text-gray-100 flex items-center gap-2">
-          <Sliders className="w-5 h-5 text-blue-400" />
-          Sub-Agent Configuration
-        </h2>
-        <p className="text-sm text-gray-400 flex items-center gap-2">
-          <ShieldCheck className="w-4 h-4 text-green-400" />
-          Settings is the exclusive mutator for sub-agent models and credentials. All API keys are securely persisted into your local OS Keyring.
+    <div className="flex flex-col gap-1.5 bg-[#161b22] border border-[#30363d] rounded-lg p-3">
+      <div className={`flex items-center gap-2 text-xs font-semibold ${tone}`}>
+        <Zap className="w-4 h-4" />
+        Pre-flight gate:{" "}
+        {sdk ? "Laya SDK (in-process, no tokens)" : "fallback model below, or skipped if it is unreachable"}
+      </div>
+      <p className="text-[11px] text-gray-400 flex items-start gap-1.5">
+        <Cpu className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+        <span>
+          Runs before the planner: typed intent / risk / prompt-injection decisions. Injection at or
+          above {status.policy.injection_block_threshold} blocks the goal before any model or
+          filesystem work happens. Risk ≥ {status.policy.risk_warn_level} and ambiguity ≥{" "}
+          {status.policy.clarify_warn_threshold} only warn.
+        </span>
+      </p>
+      {status.sdk_disabled && (
+        <p className="text-[11px] text-amber-400">
+          SDK disabled by CODIFY_LAYA_SDK=0 — the gate will use this role's provider below.
         </p>
+      )}
+      {!status.sdk_installed && !status.sdk_disabled && (
+        <p className="text-[11px] text-gray-500">
+          Install the SDK (`pip install laya` + weights) to run the gate in-process;{" "}
+          {status.sdk_error ? `last error: ${status.sdk_error}` : "no local weights installed yet."}
+        </p>
+      )}
+    </div>
+  );
+};
+
+export const SettingsPanel: React.FC<SettingsPanelProps> = ({
+  embedded = false,
+  models = [],
+  providerStatus = [],
+  onRefreshModels,
+  refreshingModels = false,
+  recentRuns = [],
+}) => {
+  // One config store for the whole screen, so every card and the summary below
+  // read the same state and a save updates all of them.
+  const store = useAgentConfigs();
+
+  // The same ordering signals the chat's menu uses, built from *this* screen's
+  // store rather than a prop: assigning a model to a role here must move it in
+  // both lists immediately, and a prop that arrives one save late would not.
+  const signals = useMemo(
+    () => buildModelSignals(store.configs, recentRuns),
+    [store.configs, recentRuns]
+  );
+
+  // What each slot is for, from the engine. The order comes from the configs
+  // themselves (already in pipeline order), so there is no second list of roles
+  // here to drift from the engine's.
+  const [roleInfo, setRoleInfo] = useState<Record<string, RoleInfo>>({});
+  useEffect(() => {
+    let cancelled = false;
+    fetchRoles().then((roles) => {
+      if (cancelled) return;
+      setRoleInfo(Object.fromEntries(roles.map((r) => [r.role, r])));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const  orderedRoles =  useMemo<AgentRole[]>(
+    () => store.configs.map((c) => c.role),
+    [store.configs]
+  );
+
+  // Which roles point at a model their provider no longer reports. Empty while
+  // configs are still loading — an unknown is not a problem.
+  const staleByRole = useMemo(() => {
+    const verdicts = new Map<AgentRole, StaleModel>();
+    for (const role of orderedRoles) {
+      const verdict = findStaleModel(
+        store.configs.find((c) => c.role === role),
+        models,
+        providerStatus
+      );
+      if (verdict) verdicts.set(role, verdict);
+    }
+    return verdicts;
+  }, [orderedRoles, store.configs, models, providerStatus]);
+
+  const staleRoles = [...staleByRole.entries()];
+
+  // The fallback target rots the same way and is even easier to miss: it is only
+  // used once something else has already failed.
+  const staleFallbackByRole = useMemo(() => {
+    const verdicts = new Map<AgentRole, StaleModel>();
+    for (const role of orderedRoles) {
+      const verdict = findStaleFallback(
+        store.configs.find((c) => c.role === role),
+        models,
+        providerStatus
+      );
+      if (verdict) verdicts.set(role, verdict);
+    }
+    return verdicts;
+  }, [orderedRoles, store.configs, models, providerStatus]);
+
+  // Roles with no model chosen. The seed deliberately names none (no model list
+  // is compiled into the build), so this is the state a fresh install is in.
+  // A role with a usable fallback is not "waiting for a model" in the sense this
+  // count means — but it is not configured either, so it is reported separately
+  // rather than silently dropped from the total.
+  const unconfigured = orderedRoles.filter((role) => {
+    const cfg = store.configs.find((c) => c.role === role);
+    return !(cfg?.model_name || "").trim() && !(cfg?.fallback_model_name || "").trim();
+  });
+  const fallbackOnly = orderedRoles.filter((role) => {
+    const cfg = store.configs.find((c) => c.role === role);
+    return !(cfg?.model_name || "").trim() && Boolean((cfg?.fallback_model_name || "").trim());
+  });
+
+  const [bulkChoice, setBulkChoice] = useState("");
+  // Fix the roles that cannot run, in one action, without touching the ones that
+  // work. The engine decides which is which and returns the reason for every
+  // change *and* every skip, so this card shows the outcome instead of asserting it.
+  const [repairBusy, setRepairBusy] = useState(false);
+  const [repairReport, setRepairReport] = useState<RepairReport | null>(null);
+  const [repairError, setRepairError] = useState<string | null>(null);
+  const repairRoles = async () => {
+    setRepairBusy(true);
+    setRepairError(null);
+    try {
+      const report = await repairAgentConfigs();
+      setRepairReport(report);
+      // The engine changed configs underneath the cards and invalidated its catalog;
+      // re-read both so the screen shows what is actually stored now.
+      await store.refresh();
+      onRefreshModels?.();
+    } catch (err: any) {
+      setRepairError(err?.message || "Could not repair the role configs");
+    } finally {
+      setRepairBusy(false);
+    }
+  };
+
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+
+  // Point every role at one discovered model — the fast path out of the
+  // unconfigured state, using ids the providers actually report.
+  const applyToEveryRole = async () => {
+    const option = models.find((m) => `${m.provider}:${m.id}` === bulkChoice);
+    if (!option) return;
+    setBulkBusy(true);
+    setBulkError(null);
+    try {
+      for (const role of orderedRoles) {
+        await store.update(role, {
+          provider: option.provider,
+          ...(option.protocol ? { protocol: option.protocol } : {}),
+          model_name: option.id,
+        });
+      }
+    } catch (err: any) {
+      setBulkError(err?.message || "Failed to apply the model to every role");
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className={
+        embedded
+          ? "flex flex-col gap-4 py-1"
+          : "max-w-5xl mx-auto py-6 px-4 flex flex-col gap-6"
+      }
+    >
+      {!embedded && (
+        <div className="flex flex-col gap-1 border-b border-[#30363d] pb-4">
+          <h2 className="text-xl font-bold text-gray-100 flex items-center gap-2">
+            <Sliders className="w-5 h-5 text-blue-400" />
+            Sub-Agent Configuration
+          </h2>
+          <p className="text-sm text-gray-400 flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-green-400" />
+            Settings is the exclusive mutator for sub-agent models and credentials. Keys go to your
+            OS keychain when one is available, otherwise to an owner-only file — the Provider Keys
+            tab states which is in force.
+          </p>
+        </div>
+      )}
+
+      <LayaGateStatus />
+
+      <div className="flex flex-col gap-2.5 bg-[#0d1117] border border-[#30363d] rounded-xl p-3.5">
+        <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
+          <Wrench className="w-3.5 h-3.5 text-emerald-400" />
+          Fix the roles that can't run
+        </div>
+        <p className="text-[11px] text-gray-400 leading-relaxed">
+          Points a role at a model this engine has discovered when it has no model chosen, when its
+          provider needs a credential none is stored for, or when its provider no longer serves the
+          model it is set to. <span className="text-gray-300">Roles that already work are not
+          touched</span> — unlike the override below, which deliberately applies to all of them.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={repairRoles}
+            disabled={repairBusy}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors"
+          >
+            <Wrench className={repairBusy ? "w-3.5 h-3.5 animate-pulse" : "w-3.5 h-3.5"} />
+            {repairBusy ? "Checking every role..." : "Fix roles that can't run"}
+          </button>
+          {repairReport && (
+            <button
+              type="button"
+              onClick={() => setRepairReport(null)}
+              className="text-[11px] text-gray-400 hover:text-gray-200"
+            >
+              Dismiss
+            </button>
+          )}
+        </div>
+
+        {repairError && (
+          <span className="text-[11px] text-red-400 font-medium">{repairError}</span>
+        )}
+
+        {repairReport && (
+          <div className="flex flex-col gap-1.5 border-t border-[#30363d] pt-2">
+            {repairReport.changed ? (
+              <>
+                <span className="text-[11px] text-gray-300">
+                  Pointed {repairReport.repaired.length} role
+                  {repairReport.repaired.length === 1 ? "" : "s"} at{" "}
+                  <span className="font-mono text-emerald-300">
+                    {repairReport.target?.provider}/{repairReport.target?.model}
+                  </span>{" "}
+                  — {repairReport.target_reason}.
+                </span>
+                <div className="flex flex-col gap-0.5">
+                  {repairReport.repaired.map((row) => (
+                    <span key={row.role} className="text-[11px] text-gray-400">
+                      <span className="font-mono text-gray-200">{row.role}</span> — {row.reason}
+                    </span>
+                  ))}
+                </div>
+              </>
+            ) : repairReport.unfixable.length > 0 ? (
+              /* A broken install and a broken install nobody could fix are not the
+                 same result, and this one must not read as a pass. */
+              <>
+                <span className="text-[11px] text-amber-300">
+                  Nothing was changed: {repairReport.unfixable.length} role
+                  {repairReport.unfixable.length === 1 ? "" : "s"} need a model and none could be
+                  pointed at{repairReport.target_reason ? ` — ${repairReport.target_reason}` : ""}.
+                </span>
+                <div className="flex flex-col gap-0.5">
+                  {repairReport.unfixable.map((row) => (
+                    <span key={row.role} className="text-[11px] text-amber-300/80">
+                      <span className="font-mono">{row.role}</span> — {row.reason}
+                    </span>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <span className="text-[11px] text-gray-300">
+                Nothing needed fixing
+                {repairReport.target_reason ? ` — ${repairReport.target_reason}` : ""}.
+              </span>
+            )}
+
+            {repairReport.left_alone.length > 0 && (
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[10px] uppercase tracking-wider text-gray-500">
+                  Left alone ({repairReport.left_alone.length})
+                </span>
+                {repairReport.left_alone.map((row) => (
+                  <span key={row.role} className="text-[11px] text-gray-500">
+                    <span className="font-mono text-gray-400">{row.role}</span> — {row.reason}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {repairReport.notes.map((note, i) => (
+              <span key={i} className="text-[11px] text-amber-400/90 flex items-start gap-1.5">
+                <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                {note}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
-      <div className="flex flex-col gap-6">
-        {ORDERED_ROLES.map((role) => (
-          <AgentConfigCard key={role} role={role} />
+      <div className="flex flex-col gap-2.5 bg-[#0d1117] border border-[#30363d] rounded-xl p-3.5">
+        <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
+          <Wand2 className="w-3.5 h-3.5 text-blue-400" />
+          Use one model for every role
+        </div>
+        <p className="text-[11px] text-gray-400 leading-relaxed">
+          No model list ships with Codify — every id below was discovered from a provider you
+          configured. Roles start with none chosen, so a fresh install has to say which model it
+          runs.
+          {unconfigured.length > 0 && (
+            <span className="text-amber-300">
+              {" "}
+              {unconfigured.length} of {orderedRoles.length} still need one: {unconfigured.join(", ")}.
+            </span>
+          )}
+          {fallbackOnly.length > 0 && (
+            <span className="text-teal-300">
+              {" "}
+              {fallbackOnly.join(", ")} {fallbackOnly.length === 1 ? "has" : "have"} no primary model
+              and will run on the configured fallback{fallbackOnly.length === 1 ? "" : "s"} instead.
+            </span>
+          )}
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={bulkChoice}
+            onChange={(e) => setBulkChoice(e.target.value)}
+            className="flex-1 min-w-[16rem] bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
+          >
+            <option value="">
+              {models.length > 0 ? "Choose a discovered model..." : "No models discovered yet"}
+            </option>
+            {models.map((m) => (
+              <option key={`${m.provider}:${m.id}`} value={`${m.provider}:${m.id}`}>
+                {m.provider} · {m.id}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={applyToEveryRole}
+            disabled={!bulkChoice || bulkBusy}
+            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+          >
+            {bulkBusy ? "Applying..." : `Apply to all ${orderedRoles.length} roles`}
+          </button>
+          {bulkError && <span className="text-[11px] text-red-400">{bulkError}</span>}
+        </div>
+      </div>
+
+      {/* Summary first: the role cards live in a scroll container, so a warning
+          on the fifth of six cards is invisible without knowing to look. */}
+      {staleRoles.length > 0 && (
+        <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg p-3">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <span className="leading-relaxed">
+            {staleRoles.length} of {orderedRoles.length} roles point at a model their provider no
+            longer reports:{" "}
+            {staleRoles.map(([role, s]) => `${role} (${s.model})`).join(", ")}. Each affected card
+            below is outlined in amber.
+          </span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+        {orderedRoles.map((role) => (
+          <AgentConfigCard
+            key={role}
+            role={role}
+            store={store}
+            models={models}
+            providerStatus={providerStatus}
+            stale={staleByRole.get(role) ?? null}
+            staleFallback={staleFallbackByRole.get(role) ?? null}
+            info={roleInfo[role]}
+            signals={signals}
+            onRefreshModels={onRefreshModels}
+            refreshingModels={refreshingModels}
+          />
         ))}
       </div>
     </div>

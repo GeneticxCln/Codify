@@ -1,4 +1,7 @@
-.PHONY: help test test-engine build-ui dev-ui check-tauri build-tauri run-engine check clean
+.PHONY: help test test-engine build-ui dev-ui check-tauri build-tauri run-engine run-engine-scratch check clean
+
+# Where a scratch engine keeps its state. Nothing under the real ~/.codify is opened.
+SCRATCH_HOME ?= /tmp/codify-scratch
 
 help:
 	@echo "Codify Development Commands:"
@@ -8,6 +11,7 @@ help:
 	@echo "  make check-tauri  - Cargo check Tauri Rust backend"
 	@echo "  make build-tauri  - Build Tauri desktop application"
 	@echo "  make run-engine   - Start Codify Python engine standalone"
+	@echo "  make run-engine-scratch - Start an engine isolated under $(SCRATCH_HOME) (real ~/.codify untouched)"
 	@echo "  make check        - Run all verifications (Python tests + UI build + Tauri check)"
 	@echo "  make clean        - Remove caches and build artifacts"
 
@@ -30,6 +34,13 @@ build-tauri:
 
 run-engine:
 	python3 -m engine
+
+# Smoke tests, screenshots and verification runs: one home override moves both the
+# database and the secrets file, and disables the OS keychain for this process, so
+# this run cannot read or write the developer's real credentials.
+run-engine-scratch:
+	@echo "Isolated engine: all state under $(SCRATCH_HOME)"
+	CODIFY_HOME=$(SCRATCH_HOME) python3 -m engine
 
 check: test build-ui check-tauri
 	@echo "All verifications passed successfully!"
