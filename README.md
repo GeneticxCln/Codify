@@ -148,7 +148,7 @@ the right file. See [`docs/01`](docs/01-subagent-orchestration-spec.md) §1.1 an
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/codify.git
+git clone https://github.com/GeneticxCln/Codify.git
 cd Codify
 
 # Install Python dependencies
@@ -164,9 +164,13 @@ cd ui && npm install && cd ..
 make check
 ```
 This executes:
-1. Full Python test suite (85 unit & integration tests)
-2. UI TypeScript validation and Vite production build
-3. Tauri Rust crate typecheck via `cargo check`
+1. Full Python test suite (216 unit & integration tests)
+2. The concurrency/stream-isolation tests explicitly, by name (`make test-streams`)
+3. UI TypeScript validation and Vite production build
+4. Tauri Rust crate typecheck via `cargo check`
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the rules of the road — what needs a
+test, where the isolation guarantees live, and how to run hermetically.
 
 ### Launching the Application
 
