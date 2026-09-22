@@ -333,6 +333,30 @@ export async function getGoal(goal_id: string): Promise<Goal> {
   return res.json();
 }
 
+export interface UsageBucket {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  calls: number;
+}
+
+export interface GoalUsage {
+  goal_id: string;
+  calls: number;
+  totals: { input_tokens: number; output_tokens: number; total_tokens: number };
+  by_role: Record<string, UsageBucket>;
+  by_model: Record<string, UsageBucket>;
+}
+
+export async function getGoalUsage(goal_id: string): Promise<GoalUsage> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/goals/${goal_id}/usage`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 export async function startGoal(goal_id: string, expected_version: number): Promise<Goal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/goals/${goal_id}/start`, {

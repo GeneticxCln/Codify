@@ -3,6 +3,7 @@ import { AgentRole, ChatMessage, PlanStep } from "../types";
 import { FailureDiagnosisPanel } from "./FailureDiagnosisPanel";
 import { DiffViewer } from "./DiffViewer";
 import { LayaDecision } from "../types";
+import { getGoalUsage, GoalUsage } from "../api";
 import {
   User,
   Bot,
@@ -24,6 +25,7 @@ import {
   Check,
   Pencil,
   X,
+  Coins,
 } from "lucide-react";
 
 /**
@@ -211,6 +213,63 @@ const PlanStepEditor: React.FC<{
         </button>
         <span className="text-[10px] text-gray-500 font-mono">plan v{version}</span>
       </div>
+    </div>
+  );
+};
+
+const UsageCard: React.FC<{ goalId: string }> = ({ goalId }) => {
+  const [usage, setUsage] = useState<GoalUsage | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getGoalUsage(goalId)
+      .then((u) => {
+        if (!cancelled) setUsage(u);
+      })
+      .catch(() => {
+        // No usage to show is normal (older engine, silent server). A failed
+        // fetch is information, not an error the chat should shout about.
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [goalId]);
+
+  if (failed || !usage) return null;
+
+  const fmt = (n: number) => n.toLocaleString();
+  const roles = Object.entries(usage.by_role).sort(
+    (a, b) => b[1].total_tokens - a[1].total_tokens
+  );
+
+  return (
+    <div className="p-2.5 rounded-xl bg-[#0d1117] border border-[#30363d] text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+          <Coins className="w-3.5 h-3.5 text-amber-400" />
+          Token Usage
+        </div>
+        <div className="font-mono text-[11px] text-gray-300">
+          {fmt(usage.totals.total_tokens)} tokens
+          <span className="text-gray-500">
+            {" "}
+            ({fmt(usage.totals.input_tokens)} in / {fmt(usage.totals.output_tokens)} out) ·{" "}
+            {usage.calls} call{usage.calls === 1 ? "" : "s"}
+          </span>
+        </div>
+      </div>
+      {roles.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+          {roles.map(([role, b]) => (
+            <span key={role} className="text-[11px] text-gray-400">
+              <span className="font-mono text-gray-300">{role}</span> {fmt(b.total_tokens)}
+              {b.calls > 1 && <span className="text-gray-500"> ({b.calls})</span>}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
@@ -520,6 +579,16 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                     </div>
                   </div>
                 )}
+
+                {/* Token usage, once the goal has run: totals + per-role split,
+                    from the engine's usage events. Hidden until terminal so a
+                    running goal shows a number that is still moving. */}
+                {msg.goal &&
+                  (msg.goal.status === "COMPLETED" ||
+                    msg.goal.status === "FAILED" ||
+                    msg.goal.status === "CANCELLED") && (
+                    <UsageCard goalId={msg.goal.id} />
+                  )}
 
                 {/* Event Stream (Diffs & Results) */}
                 {msg.events && msg.events.length > 0 && (

@@ -246,7 +246,14 @@ class Handler(BaseHTTPRequestHandler):
         else:
             out = SCRIBE
 
-        self._send({"response": out})
+        # Real Ollama reports token counts on every generate; include them so
+        # the engine's usage accounting (and the UI's usage card) can be
+        # exercised end to end without a live model.
+        self._send({
+            "response": out,
+            "prompt_eval_count": 128,
+            "eval_count": 64,
+        })
 
 
 if __name__ == "__main__":
