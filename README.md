@@ -2,6 +2,12 @@
 
 **Codify** is a local-first, multi-agent AI coding assistant and desktop application. It decomposes high-level software engineering goals into an atomic, verified execution plan using an orchestrated pipeline of specialized subagents, sandboxed test execution, git integration, and real-time telemetry.
 
+<p align="center">
+  <img src="docs/demo.gif" alt="Codify demo: a goal running live in the chat — librarian reconnaissance, planner steps, fixer diff, verifier verdict, critic approval, and scribe summary" width="720">
+</p>
+
+<sub>Live goal in the chat: reconnaissance → plan → diff → verify → commit. Click through to <a href="docs/demo.webm">docs/demo.webm</a> for the full-quality video.</sub>
+
 ---
 
 ## 🏛️ Architecture
