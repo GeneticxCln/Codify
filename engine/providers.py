@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -43,6 +43,41 @@ async def post_json(client: "httpx.AsyncClient", url: str, *, label: str, **kwar
         ) from exc
 
 
+def normalize_usage(provider: str, data: dict) -> dict | None:
+    """Pull the token-usage block out of a provider response, normalized.
+
+    Every provider names these fields differently and most code just drops
+    them — which is why nobody can answer "what did this goal cost in
+    tokens". Returns None when the response carries no usage at all (some
+    local servers do not).
+    """
+    if not isinstance(data, dict):
+        return None
+    if provider == "anthropic":
+        u = data.get("usage") or {}
+        return _mk_usage(u.get("input_tokens"), u.get("output_tokens"))
+    if provider == "openai_compat":
+        u = data.get("usage") or {}
+        return _mk_usage(u.get("prompt_tokens"), u.get("completion_tokens"))
+    if provider == "google":
+        u = data.get("usageMetadata") or {}
+        return _mk_usage(u.get("promptTokenCount"), u.get("candidatesTokenCount"))
+    if provider == "ollama":
+        return _mk_usage(data.get("prompt_eval_count"), data.get("eval_count"))
+    return None
+
+
+def _mk_usage(inp, out) -> dict | None:
+    try:
+        i = int(inp) if inp is not None else 0
+        o = int(out) if out is not None else 0
+    except (TypeError, ValueError):
+        return None
+    if i <= 0 and o <= 0:
+        return None
+    return {"input_tokens": i, "output_tokens": o, "total_tokens": i + o}
+
+
 def validate_local_base_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.hostname not in ("127.0.0.1", "localhost"):
@@ -52,11 +87,34 @@ def validate_local_base_url(url: str) -> None:
 
 
 class BaseProvider(ABC):
+    # Optional callback: providers that receive token usage in their responses
+    # invoke it with a normalized dict {input_tokens, output_tokens,
+    # total_tokens} after each successful call. The orchestrator attaches a
+    # recorder; anything else (health probes, settings tests) leaves it None.
+    usage_sink: "Callable[[dict], None] | None" = None
+
     @abstractmethod
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
     ) -> str: ...
+
+    def _report_usage(self, provider: str, data: dict) -> None:
+        """Hand the response's token usage to the sink, when one is attached.
+
+        Best-effort by design: accounting must never be able to fail a call —
+        a sink raising, or a response shaped unexpectedly, is swallowed here
+        and the completion already succeeded.
+        """
+        sink = getattr(self, "usage_sink", None)
+        if sink is None:
+            return
+        try:
+            usage = normalize_usage(provider, data)
+            if usage:
+                sink(usage)
+        except Exception:
+            pass
 
     async def test_connection(self, model: str) -> tuple[bool, str]:
         try:
@@ -95,6 +153,7 @@ class AnthropicProvider(BaseProvider):
                     "messages": [{"role": "user", "content": user_prompt}],
                 },
             )
+        self._report_usage("anthropic", data)
         return "".join(
             b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
         )
@@ -161,6 +220,7 @@ class OpenAICompatProvider(BaseProvider):
                     },
                     json=payload,
                 )
+        self._report_usage("openai_compat", data)
         return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
 
     async def _supports_json_mode(self, url: str) -> bool:
@@ -211,6 +271,7 @@ class OllamaProvider(BaseProvider):
             )
         if "response" not in data:
             raise ProviderError("provider_http", "ollama missing response")
+        self._report_usage("ollama", data)
         return data["response"]
 
 
@@ -237,6 +298,7 @@ class GoogleProvider(BaseProvider):
             if not candidates:
                 return ""
             parts = candidates[0].get("content", {}).get("parts", [])
+            self._report_usage("google", data)
             return "".join(p.get("text", "") for p in parts)
 
 

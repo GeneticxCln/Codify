@@ -12,6 +12,7 @@ from engine.fs import FileSystemService, PathEscapeError
 from engine.git import GitService
 from engine.library import (
     MAX_ROUND_CHARS,
+    READ_ONLY_TIMEOUT_S,
     LibraryService,
     format_command,
     format_read,
@@ -85,6 +86,9 @@ MAX_FIX_ATTEMPTS = 1
 # verifier telling it that it failed. Bounded the same way — an uncapped model
 # would loop forever, and each pass costs a model call.
 MAX_FIXER_PASSES = 2
+# Read-only inspection rounds the critic may request during one review (see
+# _critic). Reuses the librarian's read-only allowlist via the sandbox.
+MAX_CRITIC_COMMANDS = 2
 
 # Failures that mean the target could not be used at all, and so may be retried on
 # the role's fallback. The list is deliberately made of *provider* problems — no
@@ -311,6 +315,21 @@ class AgentOrchestrator:
                 goal_id, step_id, "agent_assigned",
                 {"role": role, "provider": target.provider, "model": model_name},
             ))
+            # Token accounting: every successful completion reports its usage
+            # here, attributed to the role and the target that served it. A
+            # fresh closure per target so a fallback's usage is labeled with
+            # the provider that actually ran, not the one that was asked first.
+            def _record(usage: dict, _role=role, _provider=target.provider, _model=model_name):
+                self.goals.publish(self._event(
+                    goal_id, step_id, "usage",
+                    {
+                        "role": _role,
+                        "provider": _provider,
+                        "model": _model,
+                        **usage,
+                    },
+                ))
+            provider.usage_sink = _record
             try:
                 raw = await provider.complete(
                     system_prompt=system,
@@ -876,7 +895,7 @@ class ExecutorService:
             if self._cancelled(goal_id):
                 self._log(goal_id, step.id, "info", "cancelled — skipping review and commit for this step")
                 return
-            await self._critic(goal_id, step, fs, summaries, evidence, outcome)
+            await self._critic(goal_id, step, fs, summaries, evidence, outcome, ws_root=ws.root_path)
             if self._cancelled(goal_id):
                 self._log(goal_id, step.id, "info", "cancelled — skipping the summary for this step")
                 return
@@ -1237,6 +1256,7 @@ class ExecutorService:
         diffs: list[dict],
         evidence: dict | None = None,
         test_outcome: dict | None = None,
+        ws_root: str = "",
     ) -> None:
         diff_lines = []
         for d in diffs:
@@ -1263,25 +1283,62 @@ class ExecutorService:
         else:
             verdict_text = "Test verdict: NONE REPORTED — the verification stage produced no verdict."
 
-        out = await self.orchestrator.run_agent(
-            "critic", goal_id, step.id,
+        # The critic may need evidence the diffs cannot carry ("is this symbol
+        # actually used?"). It asks for ONE read-only command per round, the
+        # engine runs it through the same allowlist the librarian uses, and the
+        # output goes back into the next review round. Bounded at 2: a critic
+        # that still cannot decide after two commands is indecisive, and each
+        # round is a model call.
+        base_prompt = (
             f"Step: {step.title}\n{step.description}\n\n"
             f"{verdict_text}\n\n"
-            f"What the librarian found:\n{self._evidence_text(evidence or {})}\n\nDiffs:\n{diff_text}",
+            f"What the librarian found:\n{self._evidence_text(evidence or {})}\n\nDiffs:\n{diff_text}"
         )
-        decision = out.get("decision")
-        reasons = out.get("reasons") or []
-        if decision == "approve":
-            self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="critic")
-            return
-        if decision == "request-changes":
-            if not reasons:
-                raise AgentOutputInvalid("critic request-changes requires >=1 reason", role="critic")
-            self._set_step(goal_id, step, "IN_PROGRESS", review_notes="\n".join(reasons), last_agent_role="critic")
-            self._log(goal_id, step.id, "warn", f"critic requested changes: {reasons}")
-            self._set_status(goal_id, "PAUSED", step.id)
-            raise CriticRejection("critic requested changes; human retry required", reasons)
-        raise AgentOutputInvalid(f"critic decision invalid: {decision!r}", role="critic")
+        commands_left = MAX_CRITIC_COMMANDS
+        prompt = base_prompt
+        while True:
+            out = await self.orchestrator.run_agent("critic", goal_id, step.id, prompt)
+            decision = out.get("decision")
+            reasons = out.get("reasons") or []
+            requested = out.get("run_command")
+            if decision is None and isinstance(requested, list) and requested:
+                if commands_left <= 0:
+                    self._log(
+                        goal_id, step.id, "warn",
+                        "critic asked for another command after its last one — deciding from what it has",
+                    )
+                    raise AgentOutputInvalid(
+                        "critic kept requesting commands without deciding", role="critic",
+                    )
+                commands_left -= 1
+                argv = [str(a) for a in requested]
+                try:
+                    result = self.sandbox.run_command(
+                        ws_root, argv, timeout_s=READ_ONLY_TIMEOUT_S, mode="read_only",
+                    )
+                    output = (
+                        f"Command output (exit {result['exit_code']}):\n"
+                        f"stdout:\n{(result['stdout'] or '')[:4000]}\n"
+                        f"stderr:\n{(result['stderr'] or '')[:2000]}"
+                    )
+                except CommandNotAllowed as exc:
+                    output = f"The command was NOT run — the sandbox refused it: {exc}. Decide from what you have."
+                except OSError as exc:
+                    output = f"The command could not be run: {exc}. Decide from what you have."
+                self._log(goal_id, step.id, "info", f"critic inspection: {' '.join(argv)}")
+                prompt = f"{base_prompt}\n\n--- Your requested inspection round ---\n{output}\n\nNow give your decision (or one more read-only command)."
+                continue
+            if decision == "approve":
+                self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="critic")
+                return
+            if decision == "request-changes":
+                if not reasons:
+                    raise AgentOutputInvalid("critic request-changes requires >=1 reason", role="critic")
+                self._set_step(goal_id, step, "IN_PROGRESS", review_notes="\n".join(reasons), last_agent_role="critic")
+                self._log(goal_id, step.id, "warn", f"critic requested changes: {reasons}")
+                self._set_status(goal_id, "PAUSED", step.id)
+                raise CriticRejection("critic requested changes; human retry required", reasons)
+            raise AgentOutputInvalid(f"critic decision invalid: {decision!r}", role="critic")
 
     async def _scribe(
         self, goal_id: str, step: PlanStep, diffs: list[dict], root_path: str = "",

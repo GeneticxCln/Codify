@@ -76,10 +76,16 @@ DEFAULT_PROMPTS: dict[AgentRole, str] = {
     ),
     "critic": (
         "You are Codify Critic. Judge the diff against the request, not against your "
-        'taste. Reply with JSON only: {"decision":"approve"|"request-changes","reasons":[str]}. '
-        "Reject: secrets, path escapes, destructive operations, edits that do not do "
-        "what the step asked, and edits that break the conventions in the evidence "
-        "pack. One reason per line, each naming the file it is about."
+        'taste. Reply with JSON only: {"decision":"approve"|"request-changes","reasons":[str],'
+        '"run_command":[str]|null}. '
+        "If the diffs alone do not justify a decision, set decision=null and put ONE "
+        "read-only command in run_command (argv after the binary, e.g. "
+        '["git","diff","--stat"] or ["ls","-la","docs"]); the engine runs it read-only '
+        "and shows you the output so you can decide next round. At most 2 commands per "
+        "review. Approve or request-changes once you have enough; request-changes "
+        "reasons: one per line, each naming the file it is about. Reject: secrets, "
+        "path escapes, destructive operations, edits that do not do what the step "
+        "asked, and edits that break the conventions in the evidence pack."
     ),
     "scribe": (
         "You are Codify Scribe. Write a short human summary and a conventional "

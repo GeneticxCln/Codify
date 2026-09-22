@@ -494,6 +494,43 @@ async def get_goal(goal_id: str, request: Request):
     return GoalDetail(**g.model_dump(), steps=request.app.state.goals.steps(goal_id))
 
 
+@app.get("/goals/{goal_id}/usage")
+async def get_goal_usage(goal_id: str, request: Request):
+    """Token totals for a goal, from the usage events the providers report.
+
+    Providers carry usage fields in every response; the orchestrator records
+    them as events so totals come free from the same store that feeds the
+    timeline. Per-role and per-model splits let the user see which agent (or
+    which fallback target) is actually spending the tokens.
+    """
+    request.app.state.goals.get(goal_id)  # 404 if unknown
+    usage_events = [
+        e for e in request.app.state.goals.events_after(goal_id, 0) if e.type == "usage"
+    ]
+    totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    by_role: dict[str, dict] = {}
+    by_model: dict[str, dict] = {}
+    calls = 0
+    for e in usage_events:
+        p = e.payload or {}
+        calls += 1
+        for bucket, key in ((by_role, p.get("role") or "unknown"),
+                            (by_model, f"{p.get('provider') or '?'}/{p.get('model') or '?'}")):
+            b = bucket.setdefault(
+                key, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "calls": 0}
+            )
+            b["input_tokens"] += p.get("input_tokens") or 0
+            b["output_tokens"] += p.get("output_tokens") or 0
+            b["total_tokens"] += p.get("total_tokens") or 0
+            b["calls"] += 1
+        # Totals accumulate once per event — not inside the bucket loop, where
+        # two buckets would count every event twice.
+        totals["input_tokens"] += p.get("input_tokens") or 0
+        totals["output_tokens"] += p.get("output_tokens") or 0
+        totals["total_tokens"] += p.get("total_tokens") or 0
+    return {"goal_id": goal_id, "calls": calls, "totals": totals, "by_role": by_role, "by_model": by_model}
+
+
 @app.patch("/goals/{goal_id}/steps/{step_id}")
 async def patch_step(goal_id: str, step_id: str, body: PlanStepUpdate, request: Request):
     """Edit a plan step's title/description/paths before execution.

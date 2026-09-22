@@ -1496,6 +1496,229 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
         errors = [e.payload for e in self._events("error")]
         self.assertTrue(any("needs_another_pass requires files" in str(e.get("message")) for e in errors))
 
+class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
+    """Token usage from provider responses becomes attributable events.
+
+    Every provider names usage differently and the raw counts used to be
+    dropped on the floor. Providers now report through an optional sink; the
+    orchestrator attaches one per call, labeled with the role and the target
+    that actually served it (so a fallback's usage is billed to the fallback).
+    """
+
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.conn = connect(self.root / "t.db")
+        self.provider = _ScriptedProvider({
+            "planner": {"steps": [{"title": "S1", "description": "d", "suggested_paths": []}]},
+            "critic": {"decision": "approve", "reasons": []},
+            "scribe": {"summary": "s", "commit_message": "feat: x"},
+        })
+        # Report ollama-style usage after each scripted completion.
+        scripted = self.provider
+        real_complete = scripted.complete
+
+        async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
+            text = await real_complete(system_prompt, user_prompt, model, temperature, max_tokens)
+            scripted._report_usage("ollama", {"response": text, "prompt_eval_count": 10, "eval_count": 5})
+            return text
+
+        scripted.complete = completing  # type: ignore[method-assign]
+        self.registry = AgentRegistryService(
+            self.conn, _ScriptedFactory(self.provider, Keychain()), Keychain()
+        )
+        configure_every_role(self.registry)
+        self.goals = GoalService(self.conn)
+        self.workspaces = WorkspaceService(self.conn)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(), laya=_SkippedGate()
+        )
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+        self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
+
+    async def asyncTearDown(self):
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    def _usage_events(self):
+        return [e for e in self.goals.events_after(self.goal.id, 0) if e.type == "usage"]
+
+    async def test_every_role_call_reports_attributed_usage(self):
+        await self.executor.run_planning(self.goal.id)
+
+        events = self._usage_events()
+        # Librarian rounds + planner (critic/scribe run per step, not in planning).
+        roles = {e.payload["role"] for e in events}
+        self.assertIn("librarian", roles)
+        self.assertIn("planner", roles)
+        for e in events:
+            self.assertEqual(e.payload["provider"], "ollama")
+            self.assertEqual(e.payload["model"], "test-model")
+            self.assertEqual(e.payload["input_tokens"], 10)
+            self.assertEqual(e.payload["output_tokens"], 5)
+
+    async def test_a_provider_without_usage_reports_nothing(self):
+        # Strip the reporting wrapper: a silent server must not produce events.
+        self.provider.complete = self.provider.complete.__wrapped__ if hasattr(self.provider.complete, "__wrapped__") else self.provider.complete
+        self.provider._report_usage = lambda *a, **k: None  # type: ignore[method-assign]
+
+        await self.executor.run_planning(self.goal.id)
+        self.assertEqual(self._usage_events(), [])
+
+    async def test_normalize_usage_handles_every_provider_dialect(self):
+        from engine.providers import normalize_usage
+        self.assertEqual(
+            normalize_usage("anthropic", {"usage": {"input_tokens": 3, "output_tokens": 4}}),
+            {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+        )
+        self.assertEqual(
+            normalize_usage("openai_compat", {"usage": {"prompt_tokens": 3, "completion_tokens": 4}}),
+            {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+        )
+        self.assertEqual(
+            normalize_usage("google", {"usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 4}}),
+            {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+        )
+        self.assertEqual(
+            normalize_usage("ollama", {"prompt_eval_count": 3, "eval_count": 4}),
+            {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+        )
+        # No usage at all is normal for some local servers.
+        self.assertIsNone(normalize_usage("ollama", {"response": "hi"}))
+        self.assertIsNone(normalize_usage("openai_compat", {"usage": {"prompt_tokens": "x"}}))
+
+class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
+    """The critic may ask for ONE read-only command per round, max 2.
+
+    "Is this symbol actually used?" is not answerable from a diff. The critic
+    used to guess; now it can request evidence the way the librarian does —
+    through the same read-only allowlist, sandbox-refusals reported back as
+    information rather than failing the step, and the whole thing bounded.
+    """
+
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        (self.root / "a.py").write_text("value = 1\n", encoding="utf-8")
+        self.conn = connect(self.root / "t.db")
+        self.provider = _ScriptedProvider(
+            {
+                "planner": {
+                    "steps": [{
+                        "title": "Step 1", "description": "bump value",
+                        "suggested_paths": ["a.py"],
+                    }]
+                },
+                "fixer": {
+                    "files": [{"path": "a.py", "action": "create", "content": "value = 2\n"}]
+                },
+                "scribe": {"summary": "did it", "commit_message": "feat: bump"},
+            }
+        )
+        self.registry = AgentRegistryService(
+            self.conn, _ScriptedFactory(self.provider, Keychain()), Keychain()
+        )
+        configure_every_role(self.registry)
+        self.goals = GoalService(self.conn)
+        self.workspaces = WorkspaceService(self.conn)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(), laya=_SkippedGate()
+        )
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+        self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
+        self.provider.verifier_replies = [
+            {"argv": None, "verdict": "pass", "explanation": "nothing to run"},
+        ]
+
+    async def asyncTearDown(self):
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    def _script_critic(self, replies: list[dict]) -> None:
+        self.provider.others["critic"] = replies  # type: ignore[attr-defined]
+        original = self.provider.complete
+
+        async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
+            role = next(
+                (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
+            )
+            self.provider.calls.append((role, user_prompt))
+            if role == "critic" and self.provider.others["critic"]:  # type: ignore[attr-defined]
+                return json.dumps(self.provider.others["critic"].pop(0))  # type: ignore[attr-defined]
+            if role == "verifier" and self.provider.verifier_replies:
+                return json.dumps(self.provider.verifier_replies.pop(0))
+            return json.dumps(self.provider.others.get(role, {}))  # type: ignore[attr-defined]
+
+        self.provider.complete = completing  # type: ignore[method-assign]
+
+    def _events(self, type_: str) -> list:
+        return [e for e in self.goals.events_after(self.goal.id, 0) if e.type == type_]
+
+    async def _plan_and_run(self) -> None:
+        await self.executor.run_planning(self.goal.id)
+        self.goals.update_status(self.goal.id, self.goals.get(self.goal.id).version, "RUNNING")
+        await self.executor.run_step(self.goal.id, self.goals.steps(self.goal.id)[0].id)
+
+    async def test_a_requested_command_runs_and_the_output_reaches_the_next_round(self):
+        (self.root / "docs").mkdir()
+        (self.root / "docs" / "note.txt").write_text("hello docs\n", encoding="utf-8")
+        self._script_critic([
+            {"decision": None, "reasons": [], "run_command": ["ls", "-la", "docs"]},
+            {"decision": "approve", "reasons": []},
+        ])
+
+        await self._plan_and_run()
+
+        critic_prompts = [p for r, p in self.provider.calls if r == "critic"]
+        self.assertEqual(len(critic_prompts), 2, "one round to ask, one to decide")
+        self.assertIn("note.txt", critic_prompts[1], "the command output must reach round 2")
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "COMPLETED")
+        logs = " | ".join(e.payload["message"] for e in self._events("log"))
+        self.assertIn("critic inspection: ls -la docs", logs)
+
+    async def test_a_refused_command_is_information_not_a_failure(self):
+        self._script_critic([
+            {"decision": None, "reasons": [], "run_command": ["rm", "-rf", "/"]},
+            {"decision": "approve", "reasons": []},
+        ])
+
+        await self._plan_and_run()
+
+        critic_prompts = [p for r, p in self.provider.calls if r == "critic"]
+        self.assertEqual(len(critic_prompts), 2)
+        self.assertIn("NOT run", critic_prompts[1])
+        self.assertIn("Decide from what you have", critic_prompts[1])
+        # The step still completes: a refusal is evidence about the command,
+        # not a defect in the critic.
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "COMPLETED")
+
+    async def test_the_command_bound_holds(self):
+        self._script_critic([
+            {"decision": None, "reasons": [], "run_command": ["ls", "-l"]},
+            {"decision": None, "reasons": [], "run_command": ["ls", "-a"]},
+            {"decision": None, "reasons": [], "run_command": ["ls", "-la"]},
+            {"decision": "approve", "reasons": []},
+        ])
+
+        await self._plan_and_run()
+
+        critic_prompts = [p for r, p in self.provider.calls if r == "critic"]
+        # Round 1 asks, rounds 2-3 run commands, round 3's third ask hits the
+        # bound and the step fails as invalid output.
+        self.assertEqual(len(critic_prompts), 3, "1 ask + 2 granted commands")
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "FAILED")
+        errors = [e.payload for e in self._events("error")]
+        self.assertTrue(any("kept requesting commands" in str(e.get("message")) for e in errors))
+
+    async def test_a_direct_decision_never_runs_a_command(self):
+        self._script_critic([{"decision": "approve", "reasons": []}])
+
+        await self._plan_and_run()
+
+        critic_prompts = [p for r, p in self.provider.calls if r == "critic"]
+        self.assertEqual(len(critic_prompts), 1, "no extra round when the critic decides immediately")
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "COMPLETED")
+
 class TestCriticAndScribeEvidence(unittest.IsolatedAsyncioTestCase):
     """The critic judges with the verdict; the scribe describes with the diff.
 

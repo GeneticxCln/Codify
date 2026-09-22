@@ -2,7 +2,9 @@ from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/herm
 import asyncio
 import os
 import tempfile
+import time
 import unittest
+import uuid
 from pathlib import Path
 
 import httpx
@@ -527,6 +529,47 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["status"], "RUNNING")
+
+    async def test_goal_usage_totals_from_usage_events(self):
+        """GET /goals/{id}/usage sums the usage events providers report."""
+        ws_dir = self.root / "ws-usage"
+        ws_dir.mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": "WS-USAGE", "root_path": str(ws_dir)},
+        )
+        ws_id = r.json()["id"]
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "Usage"},
+        )
+        goal_id = r.json()["id"]
+        # Seed two usage events through the real publisher.
+        g = app.state.goals.get(goal_id)
+        app.state.goals.publish(Event(
+            id=str(uuid.uuid4()), goal_id=goal_id, step_id=None, type="usage",
+            payload={"role": "librarian", "provider": "ollama", "model": "m",
+                     "input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            timestamp=time.time(), sequence=app.state.goals.next_sequence(goal_id),
+        ))
+        app.state.goals.publish(Event(
+            id=str(uuid.uuid4()), goal_id=goal_id, step_id=None, type="usage",
+            payload={"role": "planner", "provider": "openai_compat", "model": "gpt",
+                     "input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+            timestamp=time.time(), sequence=app.state.goals.next_sequence(goal_id),
+        ))
+
+        r = await self.client.get(f"/goals/{goal_id}/usage", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["calls"], 2)
+        self.assertEqual(body["totals"]["total_tokens"], 135)
+        self.assertEqual(body["by_role"]["librarian"]["total_tokens"], 15)
+        self.assertEqual(body["by_model"]["openai_compat/gpt"]["total_tokens"], 120)
+
+        # Unknown goal is a 404, not an empty report.
+        r = await self.client.get("/goals/nope/usage", headers=self.headers)
+        self.assertEqual(r.status_code, 404)
 
     async def test_enable_execution_rejects_a_stale_version(self):
         """The route documented a version check it never performed (B5).
