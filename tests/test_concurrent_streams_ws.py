@@ -21,9 +21,14 @@ asserting what arrives on each wire:
                 (`goalStream.ts`'s reconnect contract), so the mid-run
                 connection's frames must exactly equal the live connection's:
                 a dense replay flowing into the live tail with no seam.
+6. Pause      — a goal paused mid-run and resumed keeps a dense stream: the
+                PAUSED spell is on the wire, before the goal's last completed
+                step, and the work still finishes.
 
-Skipped (not failed) when the `websockets` client is unavailable, so the suite
-still runs in bare environments.
+All isolation guarantees live in `tests/stream_isolation.py` exactly once,
+shared with the service-layer twin (`test_concurrent_streams.py`) so the two
+layers cannot drift. Skipped (not failed) when the `websockets` client is
+unavailable, so the suite still runs in bare environments.
 """
 
 import asyncio
@@ -44,6 +49,15 @@ try:
     import websockets
 except ImportError:  # pragma: no cover - environment-dependent
     websockets = None
+
+from tests.stream_isolation import (
+    assert_content_separated,
+    assert_dense_from_one,
+    assert_midrun_resume_is_seamless,
+    assert_pause_spell_is_midstream,
+    assert_replay_equals_live,
+    assert_stream_pure,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -117,25 +131,28 @@ class _FakeAIHandler(BaseHTTPRequestHandler):
 class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
     @unittest.skipIf(websockets is None, "websockets client not installed")
     async def test_concurrent_goals_isolated_over_real_websockets(self):
-        ai_port, engine_port = _free_port(), _free_port()
+        ai_port = _free_port()
         fake = HTTPServer(("127.0.0.1", ai_port), _FakeAIHandler)
         threading.Thread(target=fake.serve_forever, daemon=True).start()
 
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             (home / "ws").mkdir()
-            env = {
-                **os.environ,
-                "CODIFY_HOME": str(home),
-                "CODIFY_PORT": str(engine_port),
-            }
-            engine = subprocess.Popen(
-                [sys.executable, "-m", "engine"],
-                cwd=str(PROJECT_ROOT), env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
+
+            def _spawn_engine():
+                # A fresh port per attempt: the probe-release-rebind gap is a
+                # TOCTOU we cannot remove, so a boot that loses it must be
+                # retried with a different port, not the same losing one.
+                return subprocess.Popen(
+                    [sys.executable, "-m", "engine"],
+                    cwd=str(PROJECT_ROOT),
+                    env={**os.environ, "CODIFY_HOME": str(home), "CODIFY_PORT": str(_free_port())},
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+
+            engine = _spawn_engine()
             try:
-                token, bound_port = await self._handshake(engine)
+                token, bound_port, engine = await self._handshake(engine, spawn=_spawn_engine)
                 api = f"http://127.0.0.1:{bound_port}"
                 headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
@@ -226,24 +243,39 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
 
     # --- harness ---------------------------------------------------------
 
-    async def _handshake(self, engine: subprocess.Popen, timeout: float = 15.0) -> str:
-        """Read the boot line `CODIFY_ENGINE token=… port=…` from stdout."""
+    async def _handshake(self, engine: subprocess.Popen, spawn, timeout: float = 15.0):
+        """Read the boot line `CODIFY_ENGINE token=… port=…` from stdout.
+
+        A boot death is retried once with a fresh process and a fresh port:
+        `_free_port` releases the port before the engine binds it, so an
+        unrelated ephemeral socket can occasionally win the race — the one
+        TOCTOU this harness cannot remove. The spawner picks a new port per
+        attempt; the handshake returns the port the engine actually bound
+        (which is also what real clients parse). A genuinely broken engine
+        fails both boots with the stderr in the message.
+        """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while loop.time() < deadline:
-            if engine.poll() is not None:
-                out, err = engine.communicate()
-                raise AssertionError(f"engine died at boot:\n{err.decode()[-800:]}")
-            line = await loop.run_in_executor(None, engine.stdout.readline)
-            text = line.decode(errors="replace").strip()
-            if text.startswith("CODIFY_ENGINE"):
-                fields = dict(p.split("=", 1) for p in text.split()[1:])
-                # The engine may not bind the requested port if it was taken
-                # between probe and spawn — believe the handshake, which is
-                # also what real clients parse.
-                return fields["token"], int(fields["port"])
-            await asyncio.sleep(0.05)
-        raise AssertionError(f"engine never printed its boot handshake within {timeout:.0f}s")
+        for attempt in (1, 2):
+            deadline = loop.time() + timeout
+            died = False
+            while loop.time() < deadline:
+                if engine.poll() is not None:
+                    out, err = engine.communicate()
+                    detail = err.decode()[-800:]
+                    if attempt == 2:
+                        raise AssertionError(f"engine died at boot:\n{detail}")
+                    died = True  # retry with a fresh process and port
+                    break
+                line = await loop.run_in_executor(None, engine.stdout.readline)
+                text = line.decode(errors="replace").strip()
+                if text.startswith("CODIFY_ENGINE"):
+                    fields = dict(p.split("=", 1) for p in text.split()[1:])
+                    return fields["token"], int(fields["port"]), engine
+                await asyncio.sleep(0.05)
+            if not died:
+                raise AssertionError(f"engine never printed its boot handshake within {timeout:.0f}s")
+            engine = spawn()
+        raise AssertionError("unreachable")
 
     async def _run_to_completion(self, client: "httpx.AsyncClient", goal_id: str) -> None:
         """Start through the API the way the chat does: planning runs in the
@@ -367,23 +399,7 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
 
     def _assert_pause_survivable(self, frames_b, goal_b) -> None:
         """A mid-run PAUSED spell leaves the stream complete and coherent."""
-        seqs = [e["sequence"] for e in frames_b]
-        self.assertEqual(seqs, list(range(1, len(seqs) + 1)),
-                         "the pause tore a hole in beta's wire stream")
-        statuses = [
-            e["payload"]["status"] for e in frames_b
-            if e["type"] == "goal_status"
-        ]
-        self.assertIn("PAUSED", statuses, "the pause never reached the wire")
-        self.assertIn("RUNNING", statuses[statuses.index("PAUSED"):],
-                      "the resume never reached the wire")
-        self.assertEqual(statuses[-1], "COMPLETED")
-        # PAUSED must appear mid-stream, not after everything already finished:
-        # its index must precede the index of the final step completion.
-        paused_idx = next(i for i, e in enumerate(frames_b) if e["type"] == "goal_status" and e["payload"]["status"] == "PAUSED")
-        completed_idx = max(i for i, e in enumerate(frames_b) if e["type"] == "step_status" and e["payload"]["status"] == "COMPLETED")
-        self.assertLess(paused_idx, completed_idx,
-                        "the PAUSED frame arrived after the goal's work was done")
+        assert_pause_spell_is_midstream(self, frames_b, "beta")
         # And the goal still finished its actual work.
         text = "\n".join(json.dumps(ev) for ev in frames_b)
         self.assertIn("beta body", text)
@@ -395,22 +411,8 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
         sequence (goalStream.ts), so "resuming" is proven by equality with the
         from-the-start stream: same dense sequence run, no seam at the floor.
         """
-        seqs_live = [e["sequence"] for e in frames_g]
-        seqs_mid = [e["sequence"] for e in frames_mid]
-        self.assertGreater(len(seqs_mid), floor, "the mid-run connection saw nothing new")
-        self.assertEqual(
-            seqs_mid, list(range(1, len(seqs_mid) + 1)),
-            "the mid-run replay is not dense — a seam at the attach point",
-        )
-        self.assertEqual(
-            seqs_mid, seqs_live[: len(seqs_mid)],
-            "the mid-run connection's frames diverge from the live stream",
-        )
-        for ev in frames_mid:
-            self.assertEqual(ev["goal_id"], goal_c)
+        assert_midrun_resume_is_seamless(self, frames_g, frames_mid, floor, goal_c, "gamma")
         text = "\n".join(json.dumps(ev) for ev in frames_mid)
-        self.assertNotIn("alpha", text)
-        self.assertNotIn("beta", text)
         self.assertIn("gamma body", text)
 
     async def _drain(self, wire, marker: str) -> list[dict]:
@@ -443,28 +445,25 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
         return frames
 
     async def _assert_isolated(self, frames_a, frames_b, goal_a, goal_b, replay) -> None:
-        for name, frames, goal_id, other in (
-            ("alpha", frames_a, goal_a, "beta"), ("beta", frames_b, goal_b, "alpha"),
+        for name, frames, goal_id in (
+            ("alpha", frames_a, goal_a), ("beta", frames_b, goal_b),
         ):
             self.assertGreaterEqual(len(frames), 10, f"{name}'s wire stream is suspiciously thin")
+            # 1–2. The shared guarantees, asserted exactly as the service-layer
+            # twin does (see tests/stream_isolation.py).
+            assert_stream_pure(self, frames, goal_id, name)
+            assert_dense_from_one(self, frames, name)
 
-            # 1. Purity: every frame carries this connection's goal.
-            for ev in frames:
-                self.assertEqual(ev["goal_id"], goal_id, f"a foreign frame reached {name}'s wire")
-
-            # 2. Integrity: dense, ascending, from 1 — gaps would mean dropped
-            # or duplicated frames on a live connection.
-            seqs = [ev["sequence"] for ev in frames]
-            self.assertEqual(seqs, list(range(1, len(frames) + 1)), f"{name}'s wire sequence broke")
-
-            # 3. Separation by content over the wire.
-            text = "\n".join(json.dumps(ev) for ev in frames)
-            self.assertNotIn(other, text, f"{name}'s wire carries {other}'s content")
-            self.assertIn(f"{name} body", text)
+        # 3. Separation by content over the wire.
+        assert_content_separated(
+            self, {"alpha": frames_a, "beta": frames_b},
+            body_markers={"alpha": "alpha body", "beta": "beta body"},
+        )
 
         # 4. Replay equality: the late connection got exactly the live frames.
-        self.assertEqual([e["sequence"] for e in replay], [e["sequence"] for e in frames_a],
-                         "wire replay diverged from the live wire stream")
+        assert_replay_equals_live(
+            self, [e["sequence"] for e in replay], [e["sequence"] for e in frames_a], "alpha",
+        )
 
 
 if __name__ == "__main__":

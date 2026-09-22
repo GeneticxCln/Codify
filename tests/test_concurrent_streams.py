@@ -7,9 +7,11 @@ concurrent goals could see each other's events — through a lost WHERE clause, 
 shared sequence counter, or a provider that answers the wrong run — the user
 would read goal A's diff inside goal B's conversation.
 
-So this test runs two goals *interleaved* (one shared provider, one shared
-database, readers polling while the writers run) and asserts four independent
-properties:
+The guarantees live in `tests/stream_isolation.py` exactly once, shared with
+the wire-level twin (`test_concurrent_streams_ws.py`) so the two layers cannot
+drift. This file runs the goals *interleaved* (one shared provider, one shared
+database, readers polling while the writers run) and asserts, through that
+helper:
 
 1. Purity       — every event a reader saw belongs to its goal.
 2. Integrity    — each stream's sequences are dense and ascending from 1.
@@ -32,6 +34,13 @@ from engine.models import ROLES, AgentConfigUpdate, GoalCreate, WorkspaceCreate
 from engine.providers import BaseProvider, Keychain, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.services import ApiError, AgentRegistryService, GoalService, WorkspaceService
+from tests.stream_isolation import (
+    assert_content_separated,
+    assert_dense_from_one,
+    assert_midrun_resume_is_seamless,
+    assert_replay_equals_live,
+    assert_stream_pure,
+)
 
 
 class _GoalAwareProvider(BaseProvider):
@@ -215,43 +224,29 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(stream_a), 10, "alpha's stream is suspiciously thin")
         self.assertGreaterEqual(len(stream_b), 10, "beta's stream is suspiciously thin")
 
-        # 1. Purity: every event a reader collected belongs to its goal.
-        for event in stream_a:
-            self.assertEqual(event.goal_id, goal_a.id, "a foreign event reached alpha's stream")
-        for event in stream_b:
-            self.assertEqual(event.goal_id, goal_b.id, "a foreign event reached beta's stream")
-
-        # 2. Integrity: per-goal sequences are dense and ascending from 1. The
-        # counter is per-goal (UPDATE … RETURNING on the goal row) — a shared
-        # counter would interleave and break density; a racy one would skip.
-        for name, stream in (("alpha", stream_a), ("beta", stream_b)):
-            seqs = [e.sequence for e in stream]
-            self.assertEqual(seqs, list(range(1, len(stream) + 1)), f"{name}'s sequence broke")
-
-        # 3. Separation by content: no byte of one goal appears in the other's
-        # transcript. UUID hex cannot contain these markers (no 'l' or 't'), so
-        # a hit is real content, not an id collision.
-        text_a = "\n".join(e.model_dump_json() for e in stream_a)
-        text_b = "\n".join(e.model_dump_json() for e in stream_b)
-        self.assertNotIn("beta", text_a, "alpha's stream contains beta's content")
-        self.assertNotIn("alpha", text_b, "beta's stream contains alpha's content")
+        # 1–3. The shared guarantees, asserted exactly as the wire twin does.
+        for name, stream, goal in (("alpha", stream_a, goal_a), ("beta", stream_b, goal_b)):
+            assert_stream_pure(self, stream, goal.id, name)
+            assert_dense_from_one(self, stream, name)
+        assert_content_separated(self, {"alpha": stream_a, "beta": stream_b})
         # The marker flows through the events that carry real content: the
         # fixer's diff, the verifier's explanation, the scribe's message.
+        from tests.stream_isolation import _frame_text
+        text_a = _frame_text(stream_a)
+        text_b = _frame_text(stream_b)
         self.assertIn("alpha body", text_a)
         self.assertIn("the alpha change trivially passes", text_a)
         self.assertIn("beta body", text_b)
         self.assertIn("feat: add beta file", text_b)
 
         # 4. A late subscriber replaying from 0 gets exactly the live stream.
-        self.assertEqual(
-            [e.sequence for e in self.goals.events_after(goal_a.id, 0)],
-            [e.sequence for e in stream_a],
-            "replay diverged from what the live reader saw",
+        assert_replay_equals_live(
+            self, [e.sequence for e in self.goals.events_after(goal_a.id, 0)],
+            [e.sequence for e in stream_a], "alpha",
         )
-        self.assertEqual(
-            [e.sequence for e in self.goals.events_after(goal_b.id, 0)],
-            [e.sequence for e in stream_b],
-            "replay diverged from what the live reader saw",
+        assert_replay_equals_live(
+            self, [e.sequence for e in self.goals.events_after(goal_b.id, 0)],
+            [e.sequence for e in stream_b], "beta",
         )
 
         # The interleaved fixers wrote to their own goal's paths, and the plans
@@ -352,31 +347,16 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
         for name, stream in (("alpha", stream_a), ("beta", stream_b), ("gamma", stream_c)):
             self.assertGreaterEqual(len(stream), 10, f"{name}'s stream is suspiciously thin")
 
-        # 1. Purity: every event a reader collected belongs to its goal.
+        # 1–3. The shared guarantees, pairwise across all three goals.
         for name, stream, goal in (
             ("alpha", stream_a, goal_a), ("beta", stream_b, goal_b), ("gamma", stream_c, goal_c),
         ):
-            for event in stream:
-                self.assertEqual(event.goal_id, goal.id, f"a foreign event reached {name}'s stream")
-
-        # 2. Integrity: per-goal sequences dense and ascending from 1.
-        for name, stream in (("alpha", stream_a), ("beta", stream_b), ("gamma", stream_c)):
-            seqs = [e.sequence for e in stream]
-            self.assertEqual(seqs, list(range(1, len(stream) + 1)), f"{name}'s sequence broke")
-
-        # 3. Separation by content — pairwise, across all three markers. UUID
-        # hex cannot contain any marker (no 'l'/'t'/'g' is false for g, but
-        # 'gamma' has an 'm' and hex is [0-9a-f], so a hit is real content).
-        texts = {
-            "alpha": "\n".join(e.model_dump_json() for e in stream_a),
-            "beta": "\n".join(e.model_dump_json() for e in stream_b),
-            "gamma": "\n".join(e.model_dump_json() for e in stream_c),
-        }
-        for name, text in texts.items():
-            for other in texts:
-                if other != name:
-                    self.assertNotIn(other, text, f"{name}'s stream contains {other}'s content")
-            self.assertIn(f"{name} body", text)
+            assert_stream_pure(self, stream, goal.id, name)
+            assert_dense_from_one(self, stream, name)
+        assert_content_separated(
+            self, {"alpha": stream_a, "beta": stream_b, "gamma": stream_c},
+            body_markers={"alpha": "alpha body", "beta": "beta body", "gamma": "gamma body"},
+        )
 
         # 4. The mid-run subscriber: the snapshot is a prefix of the full
         # stream, the tail continues at exactly floor+1, and the stitched whole
@@ -394,23 +374,14 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
             len(tail), 5,
             "the subscriber attached too late to exercise a real resume",
         )
-        self.assertEqual(
-            [e.sequence for e in snapshot],
-            [e.sequence for e in stream_c[: len(snapshot)]],
-            "the attach snapshot is not a prefix of the real stream",
-        )
+        assert_midrun_resume_is_seamless(self, stream_c, snapshot + tail, floor, goal_c.id, "gamma")
+        # And the resume tail itself was gapless from the floor.
         full_seqs = [e.sequence for e in stream_c]
         self.assertIn(floor, full_seqs, "the attach floor vanished from the stream")
-        tail_seqs = [e.sequence for e in tail]
-        self.assertEqual(tail_seqs, list(range(floor + 1, len(full_seqs) + 1)),
-                         "the resuming subscriber's tail has a gap or an overlap")
-        stitched = snapshot + tail
         self.assertEqual(
-            [e.sequence for e in stitched], full_seqs,
-            "snapshot + tail is not exactly the stream a from-the-start subscriber saw",
+            [e.sequence for e in tail], list(range(floor + 1, len(full_seqs) + 1)),
+            "the resuming subscriber's tail has a gap or an overlap",
         )
-        for e in stitched:
-            self.assertEqual(e.goal_id, goal_c.id)
 
         # Goals stayed mutually ignorant, three ways.
         step_ids = {
