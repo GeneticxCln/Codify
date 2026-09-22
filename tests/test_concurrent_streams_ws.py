@@ -24,6 +24,9 @@ asserting what arrives on each wire:
 6. Pause      — a goal paused mid-run and resumed keeps a dense stream: the
                 PAUSED spell is on the wire, before the goal's last completed
                 step, and the work still finishes.
+7. Cancel     — a goal cancelled mid-run ends its stream at the cancel:
+                nothing dribbles out afterwards, no other status follows, and
+                the cancel tore no hole in the sequence run.
 
 All isolation guarantees live in `tests/stream_isolation.py` exactly once,
 shared with the service-layer twin (`test_concurrent_streams.py`) so the two
@@ -51,6 +54,7 @@ except ImportError:  # pragma: no cover - environment-dependent
     websockets = None
 
 from tests.stream_isolation import (
+    assert_cancelled_stream_ends_cleanly,
     assert_content_separated,
     assert_dense_from_one,
     assert_midrun_resume_is_seamless,
@@ -176,10 +180,14 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                     r1 = await client.post("/goals", json={"workspace_id": ws_id, "title": "goal-alpha", "description": "alpha"})
                     r2 = await client.post("/goals", json={"workspace_id": ws_id, "title": "goal-beta", "description": "beta"})
                     r3 = await client.post("/goals", json={"workspace_id": ws_id, "title": "goal-gamma", "description": "gamma"})
+                    r4 = await client.post("/goals", json={"workspace_id": ws_id, "title": "goal-delta", "description": "delta"})
                     self.assertEqual(r1.status_code, 200)
                     self.assertEqual(r2.status_code, 200)
                     self.assertEqual(r3.status_code, 200)
-                    goal_a, goal_b, goal_c = r1.json()["id"], r2.json()["id"], r3.json()["id"]
+                    self.assertEqual(r4.status_code, 200)
+                    goal_a, goal_b, goal_c, goal_d = (
+                        r1.json()["id"], r2.json()["id"], r3.json()["id"], r4.json()["id"],
+                    )
 
                     async def _open(gid: str):
                         """Connect and authenticate like the UI does — the engine
@@ -189,10 +197,10 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                         await wire.send(json.dumps({"type": "auth", "token": token}))
                         return wire
 
-                    wire_a, wire_b, wire_g = await asyncio.gather(
-                        _open(goal_a), _open(goal_b), _open(goal_c)
+                    wire_a, wire_b, wire_g, wire_d = await asyncio.gather(
+                        _open(goal_a), _open(goal_b), _open(goal_c), _open(goal_d)
                     )
-                    async with wire_a, wire_b, wire_g:
+                    async with wire_a, wire_b, wire_g, wire_d:
                         # The mid-run subscriber watches REST until gamma's diff
                         # exists, then opens a SECOND connection to the same
                         # goal — the chat's re-subscribe-after-Apply path.
@@ -204,21 +212,27 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                         # resumed — its stream must survive a mid-run PAUSED
                         # spell.
                         pauser = asyncio.create_task(self._pause_resume(client, goal_b))
+                        # Delta is cancelled the moment its first step starts:
+                        # its stream must end at the cancel, cleanly, while the
+                        # others finish around it.
+                        canceller = asyncio.create_task(self._cancel_midrun(client, goal_d))
                         live = asyncio.gather(
                             self._drain(wire_a, "alpha"), self._drain(wire_b, "beta"),
-                            self._drain(wire_g, "gamma"),
+                            self._drain(wire_g, "gamma"), self._drain(wire_d, "delta"),
                         )
                         # Start through the same endpoint the chat uses; the
-                        # engine plans and runs all three goals concurrently in
+                        # engine plans and runs all four goals concurrently in
                         # the background while the wires are open. Beta's pause
-                        # and resume are driven by the pauser task, so it is
-                        # deliberately left out of the completion gather here.
+                        # and delta's cancel are owned by their own tasks, so
+                        # they are deliberately left out of the gather here.
                         await asyncio.gather(
                             self._run_to_completion(client, goal_a),
                             self._run_to_completion(client, goal_c),
                         )
-                        await pauser
-                        frames_a, frames_b, frames_g = await asyncio.wait_for(live, timeout=60)
+                        await asyncio.gather(pauser, canceller)
+                        frames_a, frames_b, frames_g, frames_d = await asyncio.wait_for(
+                            live, timeout=60
+                        )
                         floor, frames_mid = await asyncio.wait_for(midrun, timeout=60)
 
                     # Replay connection: opened after everything is done.
@@ -229,6 +243,14 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                 await self._assert_isolated(frames_a, frames_b, goal_a, goal_b, replay)
                 self._assert_midrun(frames_g, frames_mid, goal_c, floor)
                 self._assert_pause_survivable(frames_b, goal_b)
+                assert_cancelled_stream_ends_cleanly(self, frames_d, goal_d, "delta")
+                # The cancelled goal's content may be partially written (its
+                # fixer may have landed first), but nothing may carry *other*
+                # goals' content.
+                text_d = "\n".join(json.dumps(ev) for ev in frames_d)
+                self.assertNotIn("alpha", text_d)
+                self.assertNotIn("beta", text_d)
+                self.assertNotIn("gamma", text_d)
             finally:
                 # Reap unconditionally: a graceful SIGTERM can stall on an
                 # uvicorn that still sees an open connection, and an unreaped
@@ -332,6 +354,49 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
             frames = await self._drain_until_quiet(wire, "gamma")
         return floor, frames
 
+    async def _cancel_midrun(self, client: "httpx.AsyncClient", goal_id: str) -> None:
+        """Own delta's lifecycle: start it, cancel it the moment its first
+        step begins, and never resume it.
+
+        Cancel goes through POST /cancel (legal from RUNNING); the step runner
+        checks the status between steps and stops, so the stream must end at
+        the cancel with nothing dribbling out afterwards.
+        """
+        deadline = time.monotonic() + 30
+        while True:
+            g = (await client.get(f"/goals/{goal_id}")).json()
+            if g["status"] == "PENDING":
+                break
+            if time.monotonic() > deadline:
+                raise AssertionError(f"goal never got a plan (status={g['status']})")
+            await asyncio.sleep(0.05)
+        r = await client.post(f"/goals/{goal_id}/start", json={"expected_version": g["version"]})
+        self.assertEqual(r.status_code, 200, "goal must start")
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            detail = (await client.get(f"/goals/{goal_id}")).json()
+            steps = detail.get("steps") or []
+            if any(s.get("status") != "PENDING" for s in steps):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("delta never started a step — nothing to cancel")
+
+        r = await client.post(
+            f"/goals/{goal_id}/cancel",
+            json={"expected_version": (await client.get(f"/goals/{goal_id}")).json()["version"]},
+        )
+        self.assertEqual(r.status_code, 200, "cancel must be accepted mid-run")
+
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            g = (await client.get(f"/goals/{goal_id}")).json()
+            if g["status"] == "CANCELLED":
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("goal never reached CANCELLED")
+
     async def _pause_resume(self, client: "httpx.AsyncClient", goal_id: str) -> None:
         """Own the goal's whole lifecycle: start it, pause it at its first
         step, resume it, and let it finish.
@@ -429,7 +494,11 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                 continue
             event = json.loads(raw)
             frames.append(event)
-            if event.get("type") == "goal_status" and event.get("payload", {}).get("status") in ("COMPLETED", "FAILED"):
+            # Same terminal set as the UI (goalStream.ts): a cancelled goal's
+            # stream ends too, or this drain would spin on it forever.
+            if event.get("type") == "goal_status" and event.get("payload", {}).get("status") in (
+                "COMPLETED", "FAILED", "CANCELLED",
+            ):
                 terminal = True
         return frames
 

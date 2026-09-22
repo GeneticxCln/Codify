@@ -13,6 +13,7 @@ can feed:
     assert_replay_equals_live(tc, replay_seqs, live_seqs, "alpha")
     assert_midrun_resume_is_seamless(tc, live, midrun, floor, goal_id, "gamma")
     assert_pause_spell_is_midstream(tc, frames, "beta")
+    assert_cancelled_stream_ends_cleanly(tc, frames, goal_id, "delta")
 
 Each function takes the TestCase as `tc` so failures are reported against the
 running test. Event objects and raw JSON dicts are both accepted: the
@@ -157,3 +158,55 @@ def assert_pause_spell_is_midstream(tc, frames, name: str) -> None:
         paused_idx, max(completed_step_idxs),
         f"{name}'s PAUSED frame arrived after the goal's work was done",
     )
+
+
+def assert_cancelled_stream_ends_cleanly(tc, frames, goal_id: str, name: str) -> None:
+    """A goal cancelled mid-run ends its stream at the cancel, cleanly.
+
+    After the CANCELLED frame the stream must stay silent — the step runner
+    checks the status between steps and stops, so no scribe verdict or commit
+    may dribble out afterwards. Before it: density intact (the cancel tears no
+    hole), the CANCELLED frame lands mid-stream (the scenario was real, not a
+    post-completion rename), and at most one step may show COMPLETED (the one
+    in flight when the cancel landed — with a single-step plan, zero or one
+    are both honest outcomes).
+    """
+    assert_stream_pure(tc, frames, goal_id, name)
+    assert_dense_from_one(tc, frames, name)
+
+    dicts = _as_dicts(frames)
+    terminal = [
+        e for e in dicts
+        if e.get("type") == "goal_status"
+        and e.get("payload", {}).get("status") in ("COMPLETED", "FAILED", "CANCELLED")
+    ]
+    tc.assertTrue(terminal, f"{name}'s stream never reached a terminal status")
+    tc.assertEqual(
+        terminal[-1]["payload"]["status"], "CANCELLED",
+        f"{name} ended {terminal[-1]['payload']['status']}, not CANCELLED",
+    )
+    cancelled_idx = next(
+        i for i, e in enumerate(dicts)
+        if e.get("type") == "goal_status" and e.get("payload", {}).get("status") == "CANCELLED"
+    )
+    tc.assertLess(
+        cancelled_idx, len(dicts) - 1,
+        f"{name}'s CANCELLED frame is the last frame — the scenario was not mid-run",
+        # The drain loop keeps reading a quiet spell after the terminal frame,
+        # so at least one poll follows it; a cancel that arrived post-run would
+        # sit at the very end and make every other assertion vacuous.
+    )
+    completed_steps = [
+        e for e in dicts
+        if e.get("type") == "step_status" and e.get("payload", {}).get("status") == "COMPLETED"
+    ]
+    tc.assertLessEqual(
+        len(completed_steps), 1,
+        f"{name} completed {len(completed_steps)} steps despite being cancelled",
+    )
+    after = dicts[cancelled_idx + 1:]
+    for e in after:
+        tc.assertNotEqual(
+            _get(e, "type"), "goal_status",
+            f"{name} changed status again after CANCELLED",
+        )
