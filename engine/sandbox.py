@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
@@ -135,26 +136,64 @@ class SandboxService:
         self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test",
     ) -> dict:
         """Run one allowlisted command. `mode="read_only"` narrows the allowlist
-        to commands that cannot change the workspace (used by the librarian)."""
+        to commands that cannot change the workspace (used by the librarian).
+
+        The command runs in its own process group and a timeout kills the whole
+        group, not just the direct child: a test command that spawns children
+        (pytest spawning workers, npm spawning node) must not leave strays
+        behind holding ports or writing files after the engine moved on.
+        """
         fs = FileSystemService(root_path)
         validate_argv(argv, fs, mode=mode)
         resolved = shutil.which(argv[0])
         if not resolved:
             raise CommandNotAllowed(f"{argv[0]} not found on PATH")
         env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME") if k in os.environ}
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [resolved, *argv[1:]],
             cwd=str(Path(root_path).resolve()),
             env=env,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_s,
             shell=False,
-            check=False,
+            # A session of its own: the child becomes process-group leader, so
+            # everything it spawns joins a group the engine can signal as one.
+            start_new_session=True,
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            # The direct child is not enough — kill the entire group. A gentle
+            # TERM first, then KILL for anything still alive a moment later:
+            # a test runner that handles TERM to shut its workers down cleanly
+            # gets the chance to.
+            self._kill_group(proc.pid)
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._kill_group(proc.pid, sig=signal.SIGKILL)
+                stdout, stderr = proc.communicate()
+            stderr = (stderr or "") + f"\n[timed out after {timeout_s}s — the whole process group was killed]"
         return {
             "argv": argv,
             "exit_code": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
+            "stdout": stdout or "",
+            "stderr": stderr or "",
         }
+
+    @staticmethod
+    def _kill_group(pid: int, sig: int = signal.SIGTERM) -> None:
+        """Signal the child's whole process group; fall back to the child alone.
+
+        The group may already be gone (the child exited between the timeout and
+        the kill) — ProcessLookupError there is success, not a problem.
+        """
+        try:
+            os.killpg(os.getpgid(pid), sig)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc_kill = signal.SIGKILL if sig == signal.SIGKILL else sig
+                os.kill(pid, proc_kill)
+            except ProcessLookupError:
+                pass

@@ -1,5 +1,8 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -16,6 +19,29 @@ class TestSandboxService(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_timeout_kills_whole_process_group(self):
+        # A timed-out command that spawned grandchildren must leave no strays:
+        # the kill targets the process group, not just the direct child.
+        (self.root / "spawner.py").write_text(
+            "import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
+        )
+        started = time.monotonic()
+        result = self.sandbox.run_command(str(self.root), ["python3", "spawner.py"], timeout_s=2)
+        elapsed = time.monotonic() - started
+        self.assertIn("timed out after 2s", result["stderr"])
+        # The group kill lets the pipes EOF immediately; killing only the direct
+        # child leaves the grandchild holding the write ends, so run_command
+        # blocks until the grandchild exits (~60s here) and the 2s timeout lies.
+        self.assertLess(elapsed, 20, f"run_command blocked {elapsed:.1f}s past its 2s timeout")
+        time.sleep(0.5)
+        survivors = subprocess.run(
+            ["pgrep", "-f", r"time\.sleep\(60\)"], capture_output=True, text=True
+        ).stdout.strip()
+        self.assertEqual(survivors, "", f"stray grandchildren survived: {survivors}")
 
     def test_empty_and_basename(self):
         with self.assertRaises(CommandNotAllowed):
