@@ -24,6 +24,7 @@ helper:
 import asyncio
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from engine.providers import BaseProvider, Keychain, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.services import ApiError, AgentRegistryService, GoalService, WorkspaceService
 from tests.stream_isolation import (
+    assert_cancelled_stream_ends_cleanly,
     assert_content_separated,
     assert_dense_from_one,
     assert_midrun_resume_is_seamless,
@@ -58,6 +60,10 @@ class _GoalAwareProvider(BaseProvider):
         # Optional in-run hook (marker, role) — lets a test act at a precise
         # moment of the pipeline (e.g. attach a subscriber mid-goal).
         self.on_call = None
+        # (marker, role) pairs whose model call parks on hold_gate — lets a
+        # test cancel a goal while one of its calls is genuinely in flight.
+        self.hold_keys: set[tuple[str, str]] = set()
+        self.hold_gate: asyncio.Event | None = None
 
     async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
         role = next(
@@ -67,11 +73,14 @@ class _GoalAwareProvider(BaseProvider):
             "alpha" if "alpha" in user_prompt
             else "beta" if "beta" in user_prompt
             else "gamma" if "gamma" in user_prompt
+            else "delta" if "delta" in user_prompt
             else "none"
         )
         self.calls.append((marker, role))
         if self.on_call:
             self.on_call(marker, role)
+        if (marker, role) in self.hold_keys and self.hold_gate is not None:
+            await self.hold_gate.wait()
         # Yield between every call so the goals truly interleave instead of
         # running one after the other by accident of the event loop.
         await asyncio.sleep(0)
@@ -153,14 +162,18 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
         after = start_after
         terminal = False
         empty_polls_after_terminal = 0
-        while empty_polls_after_terminal < 5:
+        # Same terminal set as the UI (goalStream.ts) and the wire drain:
+        # CANCELLED ends a stream too. The grace is 50 quiet polls (~50ms) so
+        # a tail that straggles past the terminal frame — a cancelled goal's
+        # in-flight step, for one — cannot be cut off by the reader.
+        while empty_polls_after_terminal < 50:
             events = self.goals.events_after(goal_id, after)
             if events:
                 seen.extend(events)
                 after = events[-1].sequence
                 if any(
                     e.type == "goal_status"
-                    and e.payload.get("status") in ("COMPLETED", "FAILED")
+                    and e.payload.get("status") in ("COMPLETED", "FAILED", "CANCELLED")
                     for e in events
                 ):
                     terminal = True
@@ -398,6 +411,122 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
         # Every provider call answered a goal whose material it was shown.
         for marker, role in self.provider.calls:
             self.assertIn(marker, ("alpha", "beta", "gamma"), f"{role} call had no goal marker")
+
+    async def test_cancelled_goal_ends_its_stream_cleanly(self):
+        """A goal cancelled mid-run ends its stream at the cancel.
+
+        The service-layer twin of the wire test's delta: four goals interleave,
+        delta's fixer call is parked mid-flight (on the provider's hold gate),
+        and the cancel lands while that call is genuinely outstanding. The
+        cancelled stream must be pure, dense, end at CANCELLED with no status
+        after it, and show at most one completed step — asserted through the
+        same helper the wire test uses, so both layers prove one contract.
+        """
+        goal_a = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="goal-alpha", description="first"))
+        goal_b = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="goal-beta", description="second"))
+        goal_c = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="goal-gamma", description="third"))
+        goal_d = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="goal-delta", description="fourth"))
+
+        # Park delta's fixer call the moment it starts, so the cancel lands
+        # while the pipeline is genuinely mid-flight. Keyed by (marker, role)
+        # so planning itself is never deadlocked.
+        self.provider.hold_keys = {("delta", "fixer")}
+        self.provider.hold_gate = asyncio.Event()
+
+        reader_a = asyncio.create_task(self._collect_stream(goal_a.id))
+        reader_b = asyncio.create_task(self._collect_stream(goal_b.id))
+        reader_c = asyncio.create_task(self._collect_stream(goal_c.id))
+        reader_d = asyncio.create_task(self._collect_stream(goal_d.id))
+
+        await asyncio.gather(
+            self.executor.run_planning(goal_a.id),
+            self.executor.run_planning(goal_b.id),
+            self.executor.run_planning(goal_c.id),
+            self.executor.run_planning(goal_d.id),
+        )
+        for g in (goal_a, goal_b, goal_c, goal_d):
+            refreshed = self.goals.get(g.id)
+            self.goals.update_status(g.id, refreshed.version, "RUNNING")
+
+        step_tasks = {
+            g.id: [
+                asyncio.create_task(self.executor.run_step(g.id, s.id))
+                for s in self.goals.steps(g.id)
+            ]
+            for g in (goal_a, goal_b, goal_c, goal_d)
+        }
+
+        # Delta hits its fixer hold almost immediately; wait until it is
+        # genuinely parked before cancelling, otherwise the cancel could win
+        # the race and land before any step was in flight.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if ("delta", "fixer") in {
+                (m, r) for m, r in self.provider.calls
+            }:
+                break
+            await asyncio.sleep(0.001)
+        else:
+            raise AssertionError("delta's fixer call never started — cannot cancel mid-flight")
+
+        g = self.goals.get(goal_d.id)
+        self.goals.update_status(goal_d.id, g.version, "CANCELLED")
+        # What app._run_steps does between steps and after each one: the
+        # runner sees a non-RUNNING status and stops. The parked fixer call is
+        # released so its task can unwind like a real in-flight request would.
+        self.provider.hold_gate.set()
+        await asyncio.gather(*step_tasks[goal_d.id])
+
+        # Meanwhile the other three goals run to completion.
+        for gid in (goal_a.id, goal_b.id, goal_c.id):
+            await asyncio.gather(*step_tasks[gid])
+        for gid in (goal_a.id, goal_b.id, goal_c.id):
+            refreshed = self.goals.get(gid)
+            self.goals.update_status(gid, refreshed.version, "COMPLETED")
+
+        stream_a, stream_b, stream_c, stream_d = await asyncio.wait_for(
+            asyncio.gather(reader_a, reader_b, reader_c, reader_d), timeout=30
+        )
+
+        # The living goals actually finished — the isolation assertions below
+        # are not vacuously true over empty streams.
+        for name, gid in (("alpha", goal_a.id), ("beta", goal_b.id), ("gamma", goal_c.id)):
+            self.assertEqual(self.goals.get(gid).status, "COMPLETED", f"goal {name} must finish")
+        self.assertEqual(self.goals.get(goal_d.id).status, "CANCELLED", "delta must stay cancelled")
+
+        for name, stream, gid in (
+            ("alpha", stream_a, goal_a.id), ("beta", stream_b, goal_b.id),
+            ("gamma", stream_c, goal_c.id), ("delta", stream_d, goal_d.id),
+        ):
+            assert_stream_pure(self, stream, gid, name)
+            assert_dense_from_one(self, stream, name)
+        assert_content_separated(
+            self, {"alpha": stream_a, "beta": stream_b, "gamma": stream_c, "delta": stream_d},
+            body_markers={
+                "alpha": "alpha body", "beta": "beta body",
+                "gamma": "gamma body", "delta": "delta body",
+            },
+        )
+
+        # The cancelled stream, through the same helper the wire test uses:
+        # ends at CANCELLED, no status after it, at most one step completed.
+        assert_cancelled_stream_ends_cleanly(self, stream_d, goal_d.id, "delta")
+
+        # No goal shares step ids or file content with another.
+        step_ids = {
+            name: {s.id for s in self.goals.steps(gid)}
+            for name, gid in (("a", goal_a.id), ("b", goal_b.id), ("c", goal_c.id), ("d", goal_d.id))
+        }
+        for name_a, ids_a in step_ids.items():
+            for name_b, ids_b in step_ids.items():
+                if name_a < name_b:
+                    self.assertFalse(ids_a & ids_b, "two goals share a step id")
+        for marker in ("alpha", "beta", "gamma"):
+            self.assertEqual((self.root / f"{marker}.txt").read_text(), f"{marker} body\n")
+
+        # Every provider call answered a goal whose material it was shown.
+        for marker, role in self.provider.calls:
+            self.assertIn(marker, ("alpha", "beta", "gamma", "delta"), f"{role} call had no goal marker")
 
 
 if __name__ == "__main__":
