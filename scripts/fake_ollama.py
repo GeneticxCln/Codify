@@ -254,7 +254,24 @@ class Handler(BaseHTTPRequestHandler):
 
         # Real Ollama reports token counts on every generate; include them so
         # the engine's usage accounting (and the UI's usage card) can be
-        # exercised end to end without a live model.
+        # exercised end to end without a live model. When the engine asks to
+        # stream, answer NDJSON piece-wise (role replies are small, so the
+        # pieces are artificial splits of the same JSON the blocking path
+        # serves) — this is what exercises the engine's streaming parser.
+        if payload.get("stream"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            third = max(1, len(out) // 3)
+            pieces = [out[:third], out[third:2 * third], out[2 * third:]]
+            for i, piece in enumerate(pieces):
+                done = i == len(pieces) - 1
+                line = {"response": piece, "done": done}
+                if done:
+                    line["prompt_eval_count"] = 128
+                    line["eval_count"] = 64
+                self.wfile.write(json.dumps(line).encode() + b"\n")
+            return
         self._send({
             "response": out,
             "prompt_eval_count": 128,

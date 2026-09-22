@@ -112,7 +112,22 @@ class _FakeAIHandler(BaseHTTPRequestHandler):
             payload = {"summary": f"the {marker} file was created", "commit_message": f"feat: add {marker} file"}
         else:  # librarian
             payload = {"enough": True, "files": []}
-        # OllamaProvider reads the model's output from `response`.
+        # OllamaProvider reads the model's output from `response`. Asked to
+        # stream, the fake answers NDJSON — the same reply, one JSON object
+        # per line, done=true on the last — exactly what real Ollama does.
+        if body.get("stream"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            out = json.dumps(payload)
+            third = max(1, len(out) // 2)
+            for i, piece in enumerate((out[:third], out[third:])):
+                line = {"response": piece, "done": i == 1}
+                if i == 1:
+                    line["prompt_eval_count"] = 10
+                    line["eval_count"] = 5
+                self.wfile.write(json.dumps(line).encode() + b"\n")
+            return
         data = json.dumps({"response": json.dumps(payload)}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

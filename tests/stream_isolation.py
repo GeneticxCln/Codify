@@ -43,7 +43,13 @@ def _seqs(frames: Iterable[Any]) -> list[int]:
 
 
 def _frame_text(frames: Iterable[Any]) -> str:
-    return "\n".join(json.dumps(e, sort_keys=True) for e in _as_dicts(frames))
+    # `type` is engine vocabulary (e.g. the `model_delta` event type), not
+    # goal content — one of the goals is literally named "delta" — so it is
+    # masked before the substring scan.
+    return "\n".join(
+        json.dumps({k: v for k, v in e.items() if k != "type"}, sort_keys=True)
+        for e in _as_dicts(frames)
+    )
 
 
 def assert_stream_pure(tc, frames, goal_id: str, name: str) -> None:

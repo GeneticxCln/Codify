@@ -92,12 +92,35 @@ class BaseProvider(ABC):
     # total_tokens} after each successful call. The orchestrator attaches a
     # recorder; anything else (health probes, settings tests) leaves it None.
     usage_sink: "Callable[[dict], None] | None" = None
+    # Optional callback for streamed replies: invoked with the full text
+    # accumulated so far, whenever the server yields more. The orchestrator
+    # throttles it into chat-visible snapshots; leaving it None (health
+    # probes, settings tests) keeps the plain blocking behavior.
+    on_delta: "Callable[[str], None] | None" = None
 
     @abstractmethod
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
     ) -> str: ...
+
+    @staticmethod
+    async def _stream_lines(response: "httpx.Response"):
+        """Yield decoded SSE data payloads from a streaming response body.
+
+        Every OpenAI-descended dialect (OpenAI-compat, Google's alt=sse,
+        Anthropic) frames chunks as `data: {json}` lines separated by blank
+        lines; `[DONE]` closes the OpenAI-style streams. Shared so each
+        provider only owns its own payload unwrapping. (Ollama speaks raw
+        NDJSON instead and parses its body directly.)
+        """
+        async for line in response.aiter_lines():
+            line = (line or "").strip()
+            if not line.startswith("data:"):
+                continue
+            chunk = line[len("data:"):].strip()
+            if chunk and chunk != "[DONE]":
+                yield chunk
 
     def _report_usage(self, provider: str, data: dict) -> None:
         """Hand the response's token usage to the sink, when one is attached.
@@ -192,16 +215,34 @@ class OpenAICompatProvider(BaseProvider):
         }
         if self._json_mode:
             payload["response_format"] = {"type": "json_object"}
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "content-type": "application/json",
+        }
+        if self.on_delta is not None:
+            # SSE streaming (`stream: true`): each chunk carries a delta to
+            # append; the final chunk (finish_reason set) carries the usage
+            # block when the server includes it. A server that rejects the
+            # streaming request itself (4xx) is retried once the blocking way
+            # — the reply matters more than the delivery.
+            try:
+                return await self._complete_streaming(payload, headers)
+            except ProviderError as exc:
+                if exc.code != "provider_http":
+                    raise
+                saved = self.on_delta
+                self.on_delta = None
+                try:
+                    return await self.complete(system_prompt, user_prompt, model, temperature, max_tokens)
+                finally:
+                    self.on_delta = saved
         async with httpx.AsyncClient(timeout=120) as client:
             try:
                 data = await post_json(
                     client,
                     url,
                     label="openai_compat",
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "content-type": "application/json",
-                    },
+                    headers=headers,
                     json=payload,
                 )
             except ProviderError as exc:
@@ -214,10 +255,7 @@ class OpenAICompatProvider(BaseProvider):
                     client,
                     url,
                     label="openai_compat",
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "content-type": "application/json",
-                    },
+                    headers=headers,
                     json=payload,
                 )
         self._report_usage("openai_compat", data)
@@ -249,6 +287,38 @@ class OpenAICompatProvider(BaseProvider):
         except Exception:
             return False
 
+    async def _complete_streaming(self, payload: dict, headers: dict) -> str:
+        """One streaming pass over the SSE body; returns the full reply text."""
+        url = f"{self._base_url}/chat/completions"
+        text = ""
+        data: dict = {}
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream("POST", url, headers=headers, json={**payload, "stream": True}) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    raise ProviderError("provider_http", f"openai_compat {response.status_code}")
+                async for chunk in self._stream_lines(response):
+                    try:
+                        obj = json.loads(chunk)
+                    except ValueError:
+                        continue
+                    choices = obj.get("choices") or [{}]
+                    text += choices[0].get("delta", {}).get("content") or ""
+                    if self.on_delta is not None:
+                        try:
+                            self.on_delta(text)
+                        except Exception:
+                            pass
+                    if choices[0].get("finish_reason") or obj.get("usage"):
+                        data = obj
+            if not data:
+                raise ProviderError(
+                    "provider_bad_response",
+                    "openai_compat stream ended without a finish_reason chunk",
+                )
+        self._report_usage("openai_compat", data)
+        return text
+
 
 class OllamaProvider(BaseProvider):
     def __init__(self, base_url: str):
@@ -256,23 +326,68 @@ class OllamaProvider(BaseProvider):
         self._base_url = base_url.rstrip("/")
 
     async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+        stream = self.on_delta is not None
         async with httpx.AsyncClient(timeout=180) as client:
-            data = await post_json(
-                client,
-                f"{self._base_url}/api/generate",
-                label="ollama",
-                json={
-                    "model": model,
-                    "prompt": f"{system_prompt}\n\n{user_prompt}",
-                    "options": {"temperature": temperature, "num_predict": max_tokens},
-                    "stream": False,
-                    "format": "json",
-                },
-            )
-        if "response" not in data:
+            if not stream:
+                data = await post_json(
+                    client,
+                    f"{self._base_url}/api/generate",
+                    label="ollama",
+                    json={
+                        "model": model,
+                        "prompt": f"{system_prompt}\n\n{user_prompt}",
+                        "options": {"temperature": temperature, "num_predict": max_tokens},
+                        "stream": False,
+                        "format": "json",
+                    },
+                )
+            else:
+                # NDJSON streaming: one JSON object per line until the final
+                # one (done=true) carries the full text and the usage counts.
+                # Same reply, just delivered in pieces — the accumulated text
+                # is byte-identical to what stream=false returns.
+                text = ""
+                data: dict = {}
+                try:
+                    async with client.stream(
+                        "POST",
+                        f"{self._base_url}/api/generate",
+                        json={
+                            "model": model,
+                            "prompt": f"{system_prompt}\n\n{user_prompt}",
+                            "options": {"temperature": temperature, "num_predict": max_tokens},
+                            "stream": True,
+                            "format": "json",
+                        },
+                    ) as response:
+                        if response.status_code >= 400:
+                            raise ProviderError("provider_http", f"ollama {response.status_code}")
+                        async for line in response.aiter_lines():
+                            line = (line or "").strip()
+                            if not line:
+                                continue
+                            piece = json.loads(line)
+                            text += piece.get("response", "")
+                            try:
+                                self.on_delta(text)  # type: ignore[misc]
+                            except Exception:
+                                pass
+                            if piece.get("done"):
+                                data = piece
+                except json.JSONDecodeError as exc:
+                    raise ProviderError(
+                        "provider_bad_response", f"ollama streamed a line that is not JSON: {exc}"
+                    ) from exc
+                if not data.get("done"):
+                    raise ProviderError(
+                        "provider_bad_response", "ollama stream ended without a done=true chunk"
+                    )
+        if "response" not in data and not stream:
             raise ProviderError("provider_http", "ollama missing response")
         self._report_usage("ollama", data)
-        return data["response"]
+        # In streaming mode the reply is the accumulated text — the done
+        # chunk's own "response" field is just the last piece, not the whole.
+        return text if stream else data["response"]
 
 
 class GoogleProvider(BaseProvider):

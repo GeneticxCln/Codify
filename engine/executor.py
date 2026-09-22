@@ -5,7 +5,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from engine.default_prompts import DEFAULT_PROMPTS
 from engine.fs import FileSystemService, PathEscapeError
@@ -239,6 +239,51 @@ class AgentOrchestrator:
             targets.append(("fallback", fallback))
         return cfg, targets
 
+    def _delta_publisher(
+        self, goal_id: str, step_id: str | None, role: AgentRole,
+        provider_name: str, model_name: str,
+    ) -> tuple[Callable[[str], None], Callable[[], None]]:
+        """A sink for provider token deltas plus the flush to call at the end.
+
+        Model replies stream in fast; the chat's WebSocket polls the event
+        store at 250ms, so persisting every token would bury both the store
+        and the wire. Deltas are coalesced into *snapshot* events — the full
+        text accumulated so far, roughly every 400ms — so any event the
+        client sees is self-contained (a mid-run reconnect repaints the
+        current text correctly instead of replaying overlapping fragments).
+        A final event carries the complete text and `final: true`.
+        """
+        state = {"buf": "", "dirty": False, "last": 0.0}
+
+        def on_delta(text: str) -> None:
+            state["buf"] = text
+            state["dirty"] = True
+            now = time.monotonic()
+            if now - state["last"] >= 0.4:
+                state["last"] = now
+                state["dirty"] = False
+                self.goals.publish(self._event(
+                    goal_id, step_id, "model_delta",
+                    {"role": role, "provider": provider_name, "model": model_name,
+                     "text": state["buf"], "final": False},
+                ))
+
+        def flush(text: str | None = None) -> None:
+            # The final snapshot ships even when nothing new arrived: it is
+            # what closes the stream for the client (and it is the only
+            # event a fast model that finished between two throttles needs).
+            # The text argument lets a non-streaming provider still produce
+            # one complete reply card at the end.
+            if text is not None:
+                state["buf"] = text
+            self.goals.publish(self._event(
+                goal_id, step_id, "model_delta",
+                {"role": role, "provider": provider_name, "model": model_name,
+                 "text": state["buf"], "final": True},
+            ))
+
+        return on_delta, flush
+
     def _publish_fallback(
         self, goal_id: str, step_id: str | None, role: AgentRole,
         primary, target, exc: ProviderError,
@@ -335,6 +380,8 @@ class AgentOrchestrator:
                     },
                 ))
             provider.usage_sink = _record
+            on_delta, flush_deltas = self._delta_publisher(goal_id, step_id, role, target.provider, model_name)
+            provider.on_delta = on_delta
             try:
                 raw = await provider.complete(
                     system_prompt=system,
@@ -344,10 +391,14 @@ class AgentOrchestrator:
                     max_tokens=target.max_tokens,
                 )
             except ProviderError as exc:
+                flush_deltas()
                 failures.append((label, target.provider, self._provider_failure(role, target, label, exc)))
                 if exc.code not in FALLBACK_TRIGGER_CODES:
                     break
                 continue
+            finally:
+                provider.on_delta = None
+            flush_deltas(raw)
             try:
                 return extract_json(raw)
             except (ValueError, TypeError) as exc:

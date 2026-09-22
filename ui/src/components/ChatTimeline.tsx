@@ -606,8 +606,23 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       second renderer to keep in sync.
                     */}
                     <div className="space-y-2">
-                      {msg.events.map((ev) => (
-                        <div key={ev.sequence} className="text-xs">
+                      {(() => {
+                        // Streaming replies render as ONE live card per role
+                        // showing the newest snapshot, not one bubble per
+                        // throttle tick; non-streaming events map as before.
+                        const streamHeads: Record<string, { text: string; role: string; final: boolean }> = {};
+                        const rendered: React.ReactNode[] = [];
+                        msg.events.forEach((ev) => {
+                          if (ev.type === "model_delta") {
+                            streamHeads[ev.payload.role] = {
+                              text: ev.payload.text,
+                              role: ev.payload.role,
+                              final: !!ev.payload.final,
+                            };
+                            return;
+                          }
+                          rendered.push(
+                            <div key={ev.sequence} className="text-xs">
                           {ev.type === "diff" && (
                             <DiffViewer
                               path={ev.payload.path}
@@ -870,7 +885,44 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             </div>
                           )}
                         </div>
-                      ))}
+                          );
+                        });
+                        // The live reply cards, one per role, newest snapshot:
+                        const streamRoles = Object.keys(streamHeads);
+                        if (streamRoles.length > 0) {
+                          rendered.push(
+                            <div key="model-stream" className="space-y-1.5">
+                              {streamRoles.map((r) => {
+                                const head = streamHeads[r];
+                                return (
+                                  <div
+                                    key={r}
+                                    className={`p-2 rounded-lg border font-mono text-[11px] leading-relaxed ${
+                                      head.final
+                                        ? "bg-[#161b22] border-[#30363d] text-gray-400"
+                                        : "bg-[#0d1117] border-blue-800/60 text-blue-100"
+                                    }`}
+                                  >
+                                    <div
+                                      className={`flex items-center gap-1.5 text-[10px] uppercase tracking-wider mb-1 ${
+                                        head.final ? "text-gray-500" : "text-blue-400"
+                                      }`}
+                                    >
+                                      <Terminal className="w-3 h-3" />
+                                      {head.role} replied
+                                      {!head.final && <span className="animate-pulse">▍</span>}
+                                    </div>
+                                    <div className="whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+                                      {head.text || "…"}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        }
+                        return rendered;
+                      })()}
                     </div>
                   </div>
                 )}

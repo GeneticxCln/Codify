@@ -1721,6 +1721,138 @@ class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(normalize_usage("ollama", {"response": "hi"}))
         self.assertIsNone(normalize_usage("openai_compat", {"usage": {"prompt_tokens": "x"}}))
 
+class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
+    """Streamed replies reach the chat as coalesced snapshot events.
+
+    The WebSocket layer polls the event store, so tokens must flow as events;
+    coalescing to *snapshots* (full text so far, ~400ms) keeps the store light
+    and makes any reconnect self-healing — the newest snapshot is the truth,
+    no fragment replay needed.
+    """
+
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        (self.root / "a.py").write_text("value = 1\n", encoding="utf-8")
+        self.conn = connect(self.root / "t.db")
+        self.provider = _ScriptedProvider(
+            {
+                "planner": {
+                    "steps": [{
+                        "title": "Step 1", "description": "bump value",
+                        "suggested_paths": ["a.py"],
+                    }]
+                },
+                "fixer": {
+                    "files": [{"path": "a.py", "action": "create", "content": "value = 2\n"}]
+                },
+                "scribe": {"summary": "did it", "commit_message": "feat: bump"},
+            }
+        )
+        self.registry = AgentRegistryService(
+            self.conn, _ScriptedFactory(self.provider, Keychain()), Keychain()
+        )
+        configure_every_role(self.registry)
+        self.goals = GoalService(self.conn)
+        self.workspaces = WorkspaceService(self.conn)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(), laya=_SkippedGate()
+        )
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+        self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
+        self.provider.verifier_replies = [
+            {"argv": None, "verdict": "pass", "explanation": "nothing to run"},
+        ]
+
+    async def asyncTearDown(self):
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    def _deltas(self, goal_id: str) -> list[Any]:
+        return [
+            e for e in self.goals.events_after(goal_id, 0) if e.type == "model_delta"
+        ]
+
+    async def test_streaming_role_emits_snapshots_and_a_final_event(self):
+        # Script the fixer to stream: on_delta fires as the "model" produces.
+        original = self.provider.complete
+
+        async def streaming(system_prompt, user_prompt, model, temperature, max_tokens):
+            role = next(
+                (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
+            )
+            self.provider.calls.append((role, user_prompt))
+            if role == "fixer" and self.provider.on_delta:
+                pieces = ['{"files"', ': [{"path"', ': "a.py", "action"']
+                full = '{"files": [{"path": "a.py", "action": "create", "content": "value = 2\n"}]}'
+                acc = ""
+                for piece in pieces:
+                    acc += piece
+                    self.provider.on_delta(acc)
+                self.provider.on_delta(full)
+                return full
+            return await original(system_prompt, user_prompt, model, temperature, max_tokens)
+
+        self.provider.complete = streaming  # type: ignore[method-assign]
+        await self.executor.run_planning(self.goal.id)
+        step = self.goals.steps(self.goal.id)[0]
+        await self.executor.run_step(self.goal.id, step.id)
+        deltas = self._deltas(self.goal.id)
+        # Every role call flushes exactly one final; scope to the fixer's stream.
+        fixer = [d for d in deltas if d.payload["role"] == "fixer"]
+        self.assertTrue(fixer, "streamed reply must produce model_delta events")
+        self.assertFalse(fixer[0].payload["final"], "intermediate snapshots stream first")
+        finals = [d for d in fixer if d.payload["final"]]
+        self.assertEqual(len(finals), 1, "exactly one final snapshot for the role")
+        self.assertTrue(finals[0].payload["text"].startswith('{"files"'))
+        self.assertTrue(
+            all(a.sequence < b.sequence for a, b in zip(fixer, fixer[1:])),
+            "snapshots must be ordered",
+        )
+
+    async def test_non_streaming_provider_still_gets_one_final_card(self):
+        # _ScriptedProvider never calls on_delta: the flush must still emit a
+        # single final snapshot carrying the complete reply.
+        await self.executor.run_planning(self.goal.id)
+        step = self.goals.steps(self.goal.id)[0]
+        await self.executor.run_step(self.goal.id, step.id)
+        deltas = [d for d in self._deltas(self.goal.id) if d.payload["role"] == "fixer"]
+        self.assertEqual(len(deltas), 1)
+        self.assertTrue(deltas[0].payload["final"])
+        self.assertIn("files", deltas[0].payload["text"])
+
+    async def test_failed_call_still_closes_the_stream(self):
+        # The flush must run on the error path too, or the live card would
+        # spin forever on a role whose provider just blew up.
+        from engine.providers import ProviderError as PE
+
+        original = self.provider.complete
+
+        async def failing(system_prompt, user_prompt, model, temperature, max_tokens):
+            role = next(
+                (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
+            )
+            self.provider.calls.append((role, user_prompt))
+            if role == "fixer":
+                raise PE("provider_unreachable", "ollama unreachable: X")
+            return await original(system_prompt, user_prompt, model, temperature, max_tokens)
+
+        self.provider.complete = failing  # type: ignore[method-assign]
+        await self.executor.run_planning(self.goal.id)
+        from engine.executor import FALLBACK_TRIGGER_CODES
+
+        if "provider_unreachable" not in FALLBACK_TRIGGER_CODES:
+            with self.assertRaises(PE):
+                await self.executor.run_step(self.goal.id, 1)
+            deltas = [d for d in self._deltas(self.goal.id) if d.payload["role"] == "fixer"]
+            self.assertTrue(deltas, "the failed call must still have closed its stream")
+            self.assertTrue(
+                all(d.payload["final"] for d in deltas),
+                "every snapshot after a failure must be final (stream closed)",
+            )
+            self.assertEqual(deltas[-1].payload["text"], "")
+
+
 class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
     """The critic may ask for ONE read-only command per round, max 2.
 

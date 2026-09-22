@@ -32,6 +32,7 @@ EventType = Literal[
     "fixer_pass",
     "plan_consult",
     "usage",
+    "model_delta",
     "error",
 ]
 

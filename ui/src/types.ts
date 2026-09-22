@@ -66,6 +66,7 @@ export type EventType =
   | "fixer_pass"
   | "plan_consult"
   | "usage"
+  | "model_delta"
   | "error";
 
 export interface AgentConfig {
