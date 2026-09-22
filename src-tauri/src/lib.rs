@@ -3,16 +3,21 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Manager, State};
 use tokio::sync::Mutex;
 
 // ── Engine process state ────────────────────────────────────────────────────
 
 /// Shared state: engine token + port discovered from stdout.
-#[derive(Default, Clone, Debug)]
+///
+/// The `Child` lives here too: the exit handler has to be able to kill the
+/// engine when the app closes, and it can only do that through a handle that
+/// outlives the task that spawned it.
+#[derive(Default)]
 pub struct EngineState {
     pub token: Option<String>,
     pub port: Option<u16>,
+    pub child: Option<tokio::process::Child>,
 }
 
 type SharedEngineState = Arc<Mutex<EngineState>>;
@@ -215,6 +220,9 @@ async fn launch_engine(shared: SharedEngineState) {
         .env("PYTHONPATH", &project_root)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
+        // Belt: if this handle is ever dropped unexpectedly, the engine dies
+        // with it instead of surviving as a stray holding the port and DB.
+        .kill_on_drop(true)
         .spawn()
     {
         Ok(c) => c,
@@ -225,6 +233,11 @@ async fn launch_engine(shared: SharedEngineState) {
     };
 
     let stdout = child.stdout.take().expect("child stdout");
+    // Suspenders: park the handle where the exit handler can reach it.
+    {
+        let mut s = shared.lock().await;
+        s.child = Some(child);
+    }
     let mut lines = BufReader::new(stdout).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
@@ -251,8 +264,9 @@ async fn launch_engine(shared: SharedEngineState) {
         }
     }
 
-    // Wait for the child process so it doesn't become a zombie.
-    let _ = child.wait().await;
+    // No `child.wait()` here: the handle lives in shared state and tokio's
+    // reaper collects the process in the background. Waiting on a child we no
+    // longer own would just pin this task forever.
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -280,6 +294,22 @@ pub fn run() {
             codify_repair_agent_configs,
             codify_test_agent_connection,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Codify application");
+        .build(tauri::generate_context!())
+        .expect("error while building Codify application")
+        .run(|app, event| {
+            // The engine is our child process: when the app goes, it goes.
+            // Without this, closing Codify left a stray `python3 -m engine`
+            // holding the port, the DB, and any writes it was mid-way through.
+            if let tauri::RunEvent::Exit = event {
+                let shared = app.state::<SharedEngineState>();
+                let mut guard = match shared.try_lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                if let Some(child) = guard.child.as_mut() {
+                    let _ = child.start_kill();
+                    println!("[Codify] Engine process stopped");
+                }
+            }
+        });
 }
