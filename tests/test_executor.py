@@ -1946,6 +1946,135 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self.executor.settings.set_int("parallel_width", 6)
         self.assertEqual(self.executor._parallel_width(), 6, "re-read per batch")
 
+    async def test_batch_refused_when_paths_change_between_batching_and_dispatch(self):
+        """The dispatch re-check catches a plan edited after batching.
+
+        Batch two disjoint steps, then (between batching and gather) rewrite
+        one step's stored paths to collide with its sibling. _run_parallel
+        must refuse with batch_no_longer_disjoint — not race the two onto the
+        same file — and the driver must recover by re-batching.
+        """
+        self.goals.set_parallel(self.goal.id, True)
+        self._script_parallel(delays={"a": 0.15, "b": 0.15})
+        await self.executor.run_planning(self.goal.id)
+        steps = self.goals.steps(self.goal.id)
+        self.assertEqual(len(steps), 2)
+
+        # Simulate the edit landing after _independent_batch proved disjointness
+        # but before the gather: write the collision straight into the store.
+        plan_row = self.conn.execute(
+            "SELECT id FROM plan_steps WHERE goal_id = ? ORDER BY ordinal LIMIT 1",
+            (self.goal.id,),
+        ).fetchone()
+        self.conn.execute(
+            "UPDATE plan_steps SET suggested_paths = ? WHERE id = ?",
+            (json.dumps(["b.txt"]), plan_row["id"]),
+        )
+        self.conn.commit()
+
+        # Direct dispatch (what the driver does) must refuse.
+        from engine.services import ApiError
+        with self.assertRaises(ApiError) as ctx:
+            await self.executor._run_parallel(self.goal.id, steps, None)
+        self.assertEqual(ctx.exception.code, "batch_no_longer_disjoint")
+
+        # And the files must NOT have been written by the refused batch.
+        self.assertFalse((self.root / "a.txt").exists())
+        self.assertFalse((self.root / "b.txt").exists())
+
+    async def test_driver_recovers_by_rebatching_after_a_refused_batch(self):
+        """A refused batch is not a failure: the driver re-batches from the store.
+
+        Same collision as above, but driven through the production loop. The
+        refused pass logs a warning and re-batches; the colliding steps then
+        run one at a time and the goal still COMPLETED.
+        """
+        self.goals.set_parallel(self.goal.id, True)
+        self._script_parallel(delays={"a": 0.1, "b": 0.1})
+        await self.executor.run_planning(self.goal.id)
+        plan_row = self.conn.execute(
+            "SELECT id FROM plan_steps WHERE goal_id = ? ORDER BY ordinal LIMIT 1",
+            (self.goal.id,),
+        ).fetchone()
+        self.conn.execute(
+            "UPDATE plan_steps SET suggested_paths = ? WHERE id = ?",
+            (json.dumps(["b.txt"]), plan_row["id"]),
+        )
+        self.conn.commit()
+
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, g.version, "RUNNING")
+        await self._drive()
+        g = self.goals.get(self.goal.id)
+        self.assertEqual(g.status, "COMPLETED", f"status: {g.status}")
+        # Both files written (sequentially after the refusal), exactly once each.
+        self.assertTrue((self.root / "a.txt").exists())
+        self.assertTrue((self.root / "b.txt").exists())
+        fixer_calls = [c for c in self.provider.calls if c[0] == "fixer"]
+        self.assertEqual(len(fixer_calls), 2)
+
+    async def test_retry_refused_when_edited_paths_collide_with_unfinished_step(self):
+        """retry_step re-proves disjointness against unfinished siblings.
+
+        Two parallel steps, one failed. Edit the failed step's paths to collide
+        with the sibling (allowed while paused/failed), then retry: refused
+        with retry_collides_with_running rather than racing the sibling.
+        """
+        from engine.services import ApiError
+        self.goals.set_parallel(self.goal.id, True)
+        self._script_parallel(delays={"a": 0.1}, fail_on="a")
+        await self.executor.run_planning(self.goal.id)
+        steps = {s.title: s for s in self.goals.steps(self.goal.id)}
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, g.version, "RUNNING")
+        await self._drive()
+        g = self.goals.get(self.goal.id)
+        self.assertEqual(g.status, "FAILED")
+
+        # The failure left the goal FAILED; edit a's paths to collide with b.
+        # update_step refuses edits unless every step is PENDING, so mirror the
+        # store the way a real edit-after-crash could: straight SQL, which the
+        # retry check must not trust around.
+        self.conn.execute(
+            "UPDATE plan_steps SET suggested_paths = ? WHERE id = ?",
+            (json.dumps(["b.txt"]), steps["a"].id),
+        )
+        self.conn.commit()
+
+        with self.assertRaises(ApiError) as ctx:
+            await self.executor.retry_step(self.goal.id, steps["a"].id, g.version)
+        self.assertEqual(ctx.exception.code, "retry_collides_with_running")
+
+    async def test_apply_batches_on_proposed_paths_not_plan_guesses(self):
+        """apply_goal proves disjointness from the files that will be written.
+
+        A dry run stores proposals for paths the plan never named (or stopped
+        naming after an edit); batching on suggested_paths there would prove
+        the wrong thing. Two steps whose plans collide on paper but whose
+        proposals are disjoint must still batch; and vice versa.
+        """
+        self.goals.set_parallel(self.goal.id, True)
+        self._script_parallel(n_steps=2)
+        await self.executor.run_planning(self.goal.id)
+        steps = self.goals.steps(self.goal.id)
+
+        # _independent_batch with a paths_for override reads from the override.
+        proposals = {
+            steps[0].id: [{"path": "shared.txt", "action": "create", "content": "x"}],
+            steps[1].id: [{"path": "other.txt", "action": "create", "content": "y"}],
+        }
+        batch = self.executor._independent_batch(
+            steps, paths_for=lambda sid: {f["path"] for f in proposals[sid]}
+        )
+        self.assertEqual(len(batch), 2, "disjoint proposals must batch despite plan paths")
+
+        # And colliding proposals must not, even with disjoint plan paths.
+        proposals[steps[1].id] = [{"path": "shared.txt", "action": "create", "content": "z"}]
+        batch = self.executor._independent_batch(
+            steps, paths_for=lambda sid: {f["path"] for f in proposals[sid]}
+        )
+        self.assertEqual(len(batch), 1, "colliding proposals must never batch")
+
     async def test_cancel_fails_the_batch_promptly(self):
         self.goals.set_parallel(self.goal.id, True)
         self._script_parallel(delays={"a": 0.35, "b": 0.35})

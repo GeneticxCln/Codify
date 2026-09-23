@@ -772,7 +772,16 @@ async def _run_steps(app: FastAPI, goal_id: str) -> None:
             batch_ids = {s.id for s in batch}
             remaining = [s for s in remaining if s.id not in batch_ids]
             if len(batch) > 1:
-                await executor._run_parallel(goal_id, batch, None)
+                try:
+                    await executor._run_parallel(goal_id, batch, None)
+                except ApiError as exc:
+                    # The dispatch re-check found the proof stale (the plan was
+                    # edited between batching and dispatch). Not a failure: drop
+                    # back into the loop, which re-reads the plan and re-batches
+                    # from what is actually stored now.
+                    executor._log(goal_id, None, "warn", f"batch refused, re-batching: {exc.message}")
+                    remaining = [s for s in app.state.goals.steps(goal_id) if s.status != "COMPLETED"]
+                    continue
             else:
                 await executor.run_step(goal_id, batch[0].id)
         else:

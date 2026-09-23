@@ -1093,17 +1093,38 @@ class ExecutorService:
             self._reset_step(goal_id, step)
         self._set_status(goal_id, "RUNNING", None)
 
+        # Batch on what will actually be WRITTEN, not on the plan's guesses.
+        # apply replays stored proposals byte-identically, so a step's real
+        # filesystem footprint is its proposed_files rows — which diverge from
+        # suggested_paths whenever the plan was edited after the dry run (the
+        # edit API allows it) or the fixer wrote somewhere the plan never
+        # named. Batching on the guess here would prove disjointness for paths
+        # nothing writes while two replays race on the same real file.
+        def effective_paths(step_id: str) -> set[str]:
+            paths = {f["path"] for f in by_step.get(step_id, []) if f.get("path")}
+            return paths or {p.strip() for p in (
+                next((s for s in self.goals.steps(goal_id) if s.id == step_id), None).suggested_paths or []
+            ) if p.strip()}
+
         remaining = list(self.goals.steps(goal_id))
         while remaining:
             refreshed = self.goals.get(goal_id)
             if refreshed.status != "RUNNING":
                 return refreshed
             if refreshed.parallel:
-                batch = self._independent_batch(remaining)
+                batch = self._independent_batch(remaining, paths_for=effective_paths)
                 batch_ids = {s.id for s in batch}
                 remaining = [s for s in remaining if s.id not in batch_ids]
                 if len(batch) > 1:
-                    await self._run_parallel(goal_id, batch, by_step)
+                    try:
+                        await self._run_parallel(goal_id, batch, by_step)
+                    except ApiError as exc:
+                        # Dispatch re-check found the disjointness proof stale
+                        # (the plan changed under us). Not a failure: re-read
+                        # the plan and let the loop re-batch from reality.
+                        self._log(goal_id, None, "warn", f"batch refused, re-batching: {exc.message}")
+                        remaining = [s for s in self.goals.steps(goal_id) if s.status != "COMPLETED"]
+                        continue
                 else:
                     await self.run_step(goal_id, batch[0].id, stored_files=by_step.get(batch[0].id, []))
             else:
@@ -1118,7 +1139,9 @@ class ExecutorService:
             pass
         return self.goals.get(goal_id)
 
-    def _independent_batch(self, steps: list[PlanStep]) -> list[PlanStep]:
+    def _independent_batch(
+        self, steps: list[PlanStep], paths_for: Any = None,
+    ) -> list[PlanStep]:
         """The longest prefix of steps that provably cannot observe each other.
 
         Two steps are independent when neither's target paths appear in the
@@ -1128,6 +1151,12 @@ class ExecutorService:
         never batches: it runs alone, exactly as today. Suggested paths are a
         plan, not a straitjacket — which is precisely why they gate parallelism
         rather than being trusted after the fact.
+
+        `paths_for` lets a caller state a step's real footprint when the plan's
+        guess would be a lie — apply_goal passes its proposed-file paths, since
+        a replay writes exactly what was stored, edited plan or not. The
+        dispatch re-check in _run_parallel is the second half of this: both
+        halves must agree the proof holds at execution time.
 
         The batch is also capped at the configured width (Settings → Agents,
         or the CODIFY_PARALLEL_WIDTH env override; default 4): each in-flight
@@ -1139,6 +1168,8 @@ class ExecutorService:
         width = self._parallel_width()
 
         def paths(s: PlanStep) -> set[str]:
+            if paths_for is not None:
+                return set(paths_for(s.id))
             return {p.strip() for p in (s.suggested_paths or []) if p.strip()}
 
         batch: list[PlanStep] = []
@@ -1165,12 +1196,46 @@ class ExecutorService:
         exception in one step fails the goal after every sibling settles —
         matching the sequential semantics where the next step is simply
         never started.
+
+        The steps are re-read from the store before the gather: the batch was
+        proven disjoint against what the planner *wrote*, but run_step must
+        execute what is in the DB *now*. A plan edited between batching and
+        dispatch (or any drift between the snapshot and the store) would
+        otherwise run under a disjointness proof that no longer holds. A
+        re-read that breaks disjointness refuses the batch rather than racing
+        — refusing is the conservative failure, and matches how the batcher
+        treats any step it cannot prove.
         """
+        current = {s.id: s for s in self.goals.steps(goal_id)}
+        resolved: list[PlanStep] = []
+        taken: set[str] = set()
+        for snap in steps:
+            step = current.get(snap.id)
+            if step is None:
+                raise ApiError(
+                    409, "step_vanished",
+                    f"step {snap.id} disappeared between batching and dispatch",
+                )
+            mine = {p.strip() for p in (step.suggested_paths or []) if p.strip()}
+            if not mine or mine & taken:
+                # The proof is stale: this step now shares a path with a batch
+                # sibling (or has no provable paths). Refuse the whole batch —
+                # running some of it would be exactly the torn write the gate
+                # exists to prevent. The caller's next loop pass re-batches
+                # from scratch with the current plan.
+                raise ApiError(
+                    409, "batch_no_longer_disjoint",
+                    f"step {step.title!r} no longer provably disjoint from its batch — "
+                    "the plan changed after batching; re-batching",
+                )
+            taken |= mine
+            resolved.append(step)
+
         async def run_one(step: PlanStep) -> None:
             stored = (stored_files or {}).get(step.id)
             await self.run_step(goal_id, step.id, stored_files=stored)
 
-        results = await asyncio.gather(*(run_one(s) for s in steps), return_exceptions=True)
+        results = await asyncio.gather(*(run_one(s) for s in resolved), return_exceptions=True)
         errors = [r for r in results if isinstance(r, BaseException)]
         if errors:
             raise errors[0]
@@ -1186,6 +1251,29 @@ class ExecutorService:
         step = self._step(goal_id, step_id)
         if not (step.status == "FAILED" or (step.status == "IN_PROGRESS" and bool(step.review_notes))):
             raise ApiError(409, "step_not_retryable", f"step {step_id} is not in a retryable state (status={step.status})")
+        # A retry re-runs this step's paths while the driver loop may be mid-wave
+        # on siblings batched against the OLD suggested_paths. Re-prove
+        # disjointness against every still-unfinished step: a plan edit that made
+        # this step collide with a running sibling must not turn the retry into
+        # the torn write parallelism exists to prevent. (Sequential goals have no
+        # wave in flight — the driver awaits each step — so the check is a no-op
+        # there and skipped.)
+        goal = self.goals.get(goal_id)
+        if goal.parallel:
+            others = {
+                p.strip()
+                for s in self.goals.steps(goal_id)
+                if s.id != step_id and s.status != "COMPLETED"
+                for p in (s.suggested_paths or [])
+                if p.strip()
+            }
+            mine = {p.strip() for p in (step.suggested_paths or []) if p.strip()}
+            if mine & others:
+                raise ApiError(
+                    409, "retry_collides_with_running",
+                    f"step {step.title!r} now shares paths with a step that has not finished "
+                    "— edit the plan (or finish the other step) before retrying",
+                )
         self.goals.update_status(goal_id, expected_version, "RUNNING")
         self._reset_step(goal_id, step)
         await self.run_step(goal_id, step_id)
