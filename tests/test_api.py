@@ -936,6 +936,17 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         }, 107.0))
         # s1 never gets a terminal status — the engine died here.
 
+        # Assignment without completion: the critic was announced but never
+        # produced a model call — it must be flagged as silent. The fixer and
+        # planner DID complete calls (usage events above), so they must not
+        # be flagged even though the goal died mid-run.
+        app.state.goals.publish(ev("a1", "agent_assigned", {
+            "role": "critic", "provider": "ollama", "model": "qwen3:8b",
+        }, 108.0))
+        app.state.goals.publish(ev("a2", "agent_assigned", {
+            "role": "fixer", "provider": "ollama", "model": "qwen3:8b",
+        }, 109.0))
+
         r = await self.client.get(f"/goals/{goal.id}/audit", headers=self.headers)
         self.assertEqual(r.status_code, 200)
         body = r.json()
@@ -998,6 +1009,21 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live["totals"], usage["totals"])
         self.assertEqual(live["by_role"], usage["by_role"])
         self.assertEqual(live["by_model"], usage["by_model"])
+
+        # Silent roles: this goal is still RUNNING, so no verdict is issued —
+        # its roles may simply not have taken their turn yet. In-flight runs
+        # must never be called silent, or every healthy goal would be flagged.
+        self.assertEqual(body["silent_roles"], [])
+
+        # Drive the goal to a terminal status: NOW the missing critic is
+        # judged. fixer and planner ran (usage above) and stay unflagged.
+        g2 = app.state.goals.get(goal.id)
+        app.state.goals.update_status(goal.id, g2.version, "FAILED")
+        r = await self.client.get(f"/goals/{goal.id}/audit", headers=self.headers)
+        body = r.json()
+        silent = body["silent_roles"]
+        self.assertEqual([s["role"] for s in silent], ["critic"])
+        self.assertEqual(silent[0]["assigned_model"], "ollama/qwen3:8b")
 
     async def test_engine_settings_roundtrip_clamp_and_unknown_key(self):
         """GET/PUT /settings/engine: values persist, clamp, and reject typos."""

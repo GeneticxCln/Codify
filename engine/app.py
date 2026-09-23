@@ -720,6 +720,33 @@ async def get_goal_audit(goal_id: str, request: Request):
 
     parallel = _parallel_peak_from_events(events)
     usage = _usage_from_events(events)
+
+    # Silent roles: the engine announced them (agent_assigned — it decided this
+    # role should run) but no model call ever completed (zero usage events).
+    # That difference is worth surfacing: it usually means the role was skipped
+    # by a guard, its calls failed silently, or a fallback absorbed its work.
+    # A role the engine never assigned (e.g. the Laya gate deciding to skip
+    # itself) is a deliberate no, not silence — so it never appears here.
+    # A goal that is still RUNNING gets no verdict yet: its roles may simply
+    # not have taken their turn, and calling that "silent" would cry wolf on
+    # every healthy in-flight run. Only terminal goals are judged.
+    silent_roles: list[dict] = []
+    if goal.status in ("COMPLETED", "FAILED", "CANCELLED"):
+        assigned: dict[str, str] = {}
+        for e in events:
+            if e.type == "agent_assigned" and (e.payload or {}).get("role"):
+                role = e.payload["role"]
+                model = f"{e.payload.get('provider') or '?'}/{e.payload.get('model') or '?'}"
+                # Last assignment wins: a role re-assigned after a retry
+                # carries its latest configuration.
+                assigned[role] = model
+        spent = set(usage.get("by_role", {}))
+        silent_roles = [
+            {"role": role, "assigned_model": assigned[role]}
+            for role in sorted(assigned)
+            if role not in spent
+        ]
+
     return {
         "goal_id": goal_id,
         "prompt": goal.title,
@@ -744,6 +771,8 @@ async def get_goal_audit(goal_id: str, request: Request):
         # Same aggregation the usage endpoint serves — who spent what, per
         # role and per model (fallback targets show up here too).
         "usage": usage,
+        # Roles that were assigned but never completed a model call.
+        "silent_roles": silent_roles,
     }
 
 

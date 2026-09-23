@@ -11,6 +11,7 @@ import {
   Clock,
   Workflow,
   Coins,
+  BellOff,
   ChevronDown,
   ChevronRight,
 } from "lucide-react";
@@ -76,6 +77,7 @@ export interface AuditDoc {
     by_role?: Record<string, { input_tokens?: number; output_tokens?: number; total_tokens?: number; calls?: number }>;
     by_model?: Record<string, { input_tokens?: number; output_tokens?: number; total_tokens?: number; calls?: number }>;
   };
+  silent_roles?: { role?: string; assigned_model?: string }[];
 }
 
 /** Structural check, not a schema parser: enough to reject wrong files with a clear message. */
@@ -373,6 +375,30 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Silent roles: assigned by the engine but never completed a model
+          call. Worth noticing — a guard skip, a silent failure, or another
+          role absorbing the work. Deliberate skips (never assigned) don't
+          appear, so an empty run shows nothing here. */}
+      {(doc.silent_roles?.length ?? 0) > 0 && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 space-y-1.5">
+          <div className="flex items-center gap-2 text-xs font-semibold text-amber-300">
+            <BellOff className="w-3.5 h-3.5" />
+            <span>
+              Silent role{(doc.silent_roles ?? []).length === 1 ? "" : "s"} — assigned but never ran
+            </span>
+          </div>
+          {(doc.silent_roles ?? []).map((s, i) => (
+            <div key={i} className="flex items-center gap-2 text-[11px]">
+              <span className="font-semibold text-amber-200/90">{s.role}</span>
+              {s.assigned_model && (
+                <span className="font-mono text-gray-500">{s.assigned_model}</span>
+              )}
+              <span className="text-gray-500">no completed model call</span>
+            </div>
+          ))}
         </div>
       )}
 
