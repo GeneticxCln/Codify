@@ -547,6 +547,11 @@ def _parallel_peak_from_events(events: list) -> dict:
     under-reporting. Waves count the times a running step *starts while all
     currently-running steps have finished* — a sequential goal of N steps
     reports N waves, a fully-parallel one reports 1.
+
+    Re-published IN_PROGRESS for a step already running (the role-transition
+    heartbeat inside a step) is idempotent here: `add` on a set member. A
+    terminal status for a step that was never seen starting (the log opens
+    mid-run) discards nothing — `discard` tolerates unknown members.
     """
     active: set[str] = set()
     peak = 0
@@ -610,6 +615,9 @@ async def get_goal_usage(goal_id: str, request: Request):
 
     The parallel numbers come from the same log: peak steps in flight at once
     (what the width cap actually bounded) and how many waves the plan took.
+
+    An in-flight goal reports its totals up to *now* — the snapshot grows as
+    the run spends, matching how the audit endpoint snapshots a live run.
     """
     request.app.state.goals.get(goal_id)  # 404 if unknown
     events = request.app.state.goals.events_after(goal_id, 0)
