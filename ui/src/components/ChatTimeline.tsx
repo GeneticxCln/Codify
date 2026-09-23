@@ -1019,6 +1019,56 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             </div>
                           )}
 
+                          {/* The plan was edited before execution. Paths gate
+                              parallel batching, so a path edit is
+                              execution-relevant drift: the transcript shows
+                              what moved, not just that something did. */}
+                          {ev.type === "plan_updated" && (() => {
+                            const ch = ev.payload?.changes ?? {};
+                            const stepTitle =
+                              (msg.goal?.steps ?? []).find((s: PlanStep) => s.id === ev.step_id)?.title ??
+                              ev.payload?.step_title ?? "step";
+                            const paths = ch.suggested_paths;
+                            const pathChanged =
+                              paths && JSON.stringify(paths.before) !== JSON.stringify(paths.after);
+                            const titleChanged = ch.title && ch.title.before !== ch.title.after;
+                            const fmtPaths = (ps: string[]) =>
+                              ps.length ? ps.join(", ") : "(none)";
+                            // Every changed field gets its own line: a combined
+                            // edit (paths + rename) must be auditable in full,
+                            // not reduced to whichever branch won the if/else.
+                            return (
+                              <div className="flex items-start gap-1.5 pl-2 text-violet-300">
+                                <Pencil className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                                <span className="leading-relaxed">
+                                  Plan edited —{" "}
+                                  <span className="font-semibold">{stepTitle}</span>
+                                  {pathChanged && (
+                                    <span className="block font-mono text-[11px] text-gray-400">
+                                      paths: <span className="text-red-400/80 line-through">{fmtPaths(paths.before)}</span>{" "}
+                                      → <span className="text-green-400">{fmtPaths(paths.after)}</span>
+                                    </span>
+                                  )}
+                                  {titleChanged && (
+                                    <span className="block text-gray-400">
+                                      renamed from “{ch.title.before}”
+                                    </span>
+                                  )}
+                                  {ch.description &&
+                                    ch.description.before !== ch.description.after && (
+                                      <span className="block text-gray-400">
+                                        description updated
+                                      </span>
+                                    )}
+                                  {!pathChanged && !titleChanged &&
+                                    !(ch.description && ch.description.before !== ch.description.after) && (
+                                      <span className="text-gray-400">updated</span>
+                                    )}
+                                </span>
+                              </div>
+                            );
+                          })()}
+
                           {ev.type === "agent_assigned" && (
                             <div className="flex items-center gap-1.5 pl-2 text-purple-300">
                               <Bot className="w-3.5 h-3.5 flex-shrink-0" />

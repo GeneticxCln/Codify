@@ -447,9 +447,27 @@ class GoalService:
         # Capture what the patch *edited* before `data` is completed from the
         # stored step below — after that, every key looks changed.
         updates = set(data)
+        # The transcript must be able to show what an edit changed, not just
+        # that something changed: suggested_paths gate parallel batching, so a
+        # path edit is execution-relevant drift and gets before/after in the
+        # event. Unedited fields carry identical before/after — the UI decides
+        # what is worth showing by comparing them.
+        new_paths = None
         if "suggested_paths" in data:
-            cleaned = [p.strip() for p in data["suggested_paths"] if p and p.strip()]
-            data["suggested_paths"] = json.dumps(cleaned)
+            new_paths = [p.strip() for p in data["suggested_paths"] if p and p.strip()]
+        changes: dict[str, dict] = {
+            "suggested_paths": {
+                "before": list(step.suggested_paths),
+                "after": new_paths if new_paths is not None else list(step.suggested_paths),
+            },
+            "title": {"before": step.title, "after": data.get("title", step.title)},
+            "description": {
+                "before": step.description,
+                "after": data.get("description", step.description),
+            },
+        }
+        if new_paths is not None:
+            data["suggested_paths"] = json.dumps(new_paths)
         else:
             data["suggested_paths"] = json.dumps(step.suggested_paths)
         if "title" not in data:
@@ -490,7 +508,16 @@ class GoalService:
             # title-only edit used to announce all three fields as changed and
             # any client refetching on that signal redrew fields that had not
             # moved — clobbering an in-progress edit in another field.
-            payload={"step_id": step_id, "fields": sorted(updates)},
+            # `changes` carries before/after per field so the chat transcript
+            # can show the drift itself: suggested_paths gate parallel
+            # batching, and an edit there is exactly what the transcript needs
+            # when explaining why a batch was later refused.
+            payload={
+                "step_id": step_id,
+                "step_title": step.title,
+                "fields": sorted(updates),
+                "changes": changes,
+            },
             timestamp=time.time(),
             sequence=self.next_sequence(goal_id),
         )

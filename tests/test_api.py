@@ -669,6 +669,14 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         plan_events = [e for e in events if e.type == "plan_updated"]
         self.assertEqual(len(plan_events), 1)
         self.assertEqual(plan_events[0].payload["step_id"], step_id)
+        # The event carries before/after per field so the transcript can show
+        # the drift itself — paths gate parallel batching, so their edit is
+        # execution-relevant history, not just a UI refresh signal.
+        changes = plan_events[0].payload["changes"]
+        self.assertEqual(changes["suggested_paths"]["before"], ["a.txt"])
+        self.assertEqual(changes["suggested_paths"]["after"], ["b.txt", "c.txt"])
+        self.assertEqual(changes["title"]["before"], "Step 1")
+        self.assertEqual(changes["title"]["after"], "Renamed step")
 
         # A title-only edit announces only the title — the event names what the
         # patch edited, not the merged record (which always carries all fields).
