@@ -920,6 +920,20 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         # at fixer → verifier → critic → scribe. This is NOT a new attempt —
         # the count must stay 1 (the regression that once read attempts: 5).
         app.state.goals.publish(ev("e5", "step_status", {"status": "IN_PROGRESS"}, 104.0))
+        # Token usage: two fixer calls (one via the fallback target) and one
+        # planner call — the by-role split must reflect who actually spent.
+        app.state.goals.publish(ev("u1", "usage", {
+            "role": "fixer", "provider": "anthropic", "model": "claude-sonnet-4-6",
+            "input_tokens": 100, "output_tokens": 20, "total_tokens": 120,
+        }, 105.0))
+        app.state.goals.publish(ev("u2", "usage", {
+            "role": "fixer", "provider": "ollama", "model": "qwen3:8b",
+            "input_tokens": 50, "output_tokens": 30, "total_tokens": 80,
+        }, 106.0))
+        app.state.goals.publish(ev("u3", "usage", {
+            "role": "planner", "provider": "ollama", "model": "qwen3:8b",
+            "input_tokens": 200, "output_tokens": 50, "total_tokens": 250,
+        }, 107.0))
         # s1 never gets a terminal status — the engine died here.
 
         r = await self.client.get(f"/goals/{goal.id}/audit", headers=self.headers)
@@ -966,6 +980,24 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         # Unknown goal → 404 like every other goal route.
         r = await self.client.get("/goals/does-not-exist/audit", headers=self.headers)
         self.assertEqual(r.status_code, 404)
+
+        # Token usage rides in the same document, aggregated exactly as the
+        # usage endpoint aggregates it: per role (fixer spent on two models),
+        # per model, and totals that count each call once.
+        usage = body["usage"]
+        self.assertEqual(usage["calls"], 3)
+        self.assertEqual(usage["totals"]["total_tokens"], 120 + 80 + 250)
+        self.assertEqual(usage["by_role"]["fixer"]["total_tokens"], 200)
+        self.assertEqual(usage["by_role"]["fixer"]["calls"], 2)
+        self.assertEqual(usage["by_role"]["planner"]["total_tokens"], 250)
+        self.assertEqual(usage["by_model"]["anthropic/claude-sonnet-4-6"]["total_tokens"], 120)
+        self.assertEqual(usage["by_model"]["ollama/qwen3:8b"]["total_tokens"], 80 + 250)
+        # And the usage endpoint must agree with the audit export to the token.
+        r = await self.client.get(f"/goals/{goal.id}/usage", headers=self.headers)
+        live = r.json()
+        self.assertEqual(live["totals"], usage["totals"])
+        self.assertEqual(live["by_role"], usage["by_role"])
+        self.assertEqual(live["by_model"], usage["by_model"])
 
     async def test_engine_settings_roundtrip_clamp_and_unknown_key(self):
         """GET/PUT /settings/engine: values persist, clamp, and reject typos."""

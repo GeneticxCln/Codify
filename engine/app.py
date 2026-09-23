@@ -569,26 +569,22 @@ def _parallel_peak_from_events(events: list) -> dict:
     return {"peak": peak, "waves": waves}
 
 
-@app.get("/goals/{goal_id}/usage")
-async def get_goal_usage(goal_id: str, request: Request):
-    """Token totals for a goal, from the usage events the providers report.
+def _usage_from_events(events: list) -> dict:
+    """Token totals from the usage events the providers report.
 
     Providers carry usage fields in every response; the orchestrator records
     them as events so totals come free from the same store that feeds the
-    timeline. Per-role and per-model splits let the user see which agent (or
-    which fallback target) is actually spending the tokens.
-
-    The parallel numbers come from the same log: peak steps in flight at once
-    (what the width cap actually bounded) and how many waves the plan took.
+    timeline. Per-role and per-model splits show which agent (or which
+    fallback target) is actually spending the tokens. Shared by the usage
+    endpoint and the audit export so the two can never disagree.
     """
-    request.app.state.goals.get(goal_id)  # 404 if unknown
-    events = request.app.state.goals.events_after(goal_id, 0)
-    usage_events = [e for e in events if e.type == "usage"]
     totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     by_role: dict[str, dict] = {}
     by_model: dict[str, dict] = {}
     calls = 0
-    for e in usage_events:
+    for e in events:
+        if e.type != "usage":
+            continue
         p = e.payload or {}
         calls += 1
         for bucket, key in ((by_role, p.get("role") or "unknown"),
@@ -605,13 +601,23 @@ async def get_goal_usage(goal_id: str, request: Request):
         totals["input_tokens"] += p.get("input_tokens") or 0
         totals["output_tokens"] += p.get("output_tokens") or 0
         totals["total_tokens"] += p.get("total_tokens") or 0
+    return {"calls": calls, "totals": totals, "by_role": by_role, "by_model": by_model}
+
+
+@app.get("/goals/{goal_id}/usage")
+async def get_goal_usage(goal_id: str, request: Request):
+    """Token totals for a goal, from the usage events the providers report.
+
+    The parallel numbers come from the same log: peak steps in flight at once
+    (what the width cap actually bounded) and how many waves the plan took.
+    """
+    request.app.state.goals.get(goal_id)  # 404 if unknown
+    events = request.app.state.goals.events_after(goal_id, 0)
+    usage = _usage_from_events(events)
     parallel = _parallel_peak_from_events(events)
     return {
         "goal_id": goal_id,
-        "calls": calls,
-        "totals": totals,
-        "by_role": by_role,
-        "by_model": by_model,
+        **usage,
         "parallel_peak": parallel["peak"],
         "parallel_waves": parallel["waves"],
     }
@@ -713,6 +719,7 @@ async def get_goal_audit(goal_id: str, request: Request):
         entry.setdefault("status", "IN_PROGRESS")
 
     parallel = _parallel_peak_from_events(events)
+    usage = _usage_from_events(events)
     return {
         "goal_id": goal_id,
         "prompt": goal.title,
@@ -734,6 +741,9 @@ async def get_goal_audit(goal_id: str, request: Request):
         ],
         "parallel_peak": parallel["peak"],
         "parallel_waves": parallel["waves"],
+        # Same aggregation the usage endpoint serves — who spent what, per
+        # role and per model (fallback targets show up here too).
+        "usage": usage,
     }
 
 
