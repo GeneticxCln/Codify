@@ -426,6 +426,43 @@ const UsageCard: React.FC<{ goalId: string }> = ({ goalId }) => {
   );
 };
 
+/**
+ * One-line audit summary for the goal card: how many plan edits, provider
+ * fallbacks, and errors the goal's own event log records. Derived from the
+ * message's events — the same log the engine's audit endpoint sweeps — so the
+ * badges are live while running and stay correct after completion, with no
+ * extra fetch. Only non-zero counts render.
+ */
+function auditSummary(events: Event[] | undefined): {
+  edits: number;
+  fallbacks: number;
+  errors: number;
+} | null {
+  if (!events || events.length === 0) return null;
+  let edits = 0;
+  let fallbacks = 0;
+  let errors = 0;
+  for (const ev of events) {
+    if (ev.type === "plan_updated") {
+      // Count edits that actually changed something — a no-op patch is not drift.
+      const changes = (ev.payload?.changes ?? {}) as Record<
+        string,
+        { before?: unknown; after?: unknown }
+      >;
+      const changed = Object.values(changes).some(
+        (ch) => JSON.stringify(ch.before) !== JSON.stringify(ch.after)
+      );
+      if (changed) edits += 1;
+    } else if (ev.type === "provider_fallback") {
+      fallbacks += 1;
+    } else if (ev.type === "error") {
+      errors += 1;
+    }
+  }
+  if (edits === 0 && fallbacks === 0 && errors === 0) return null;
+  return { edits, fallbacks, errors };
+}
+
 interface ChatTimelineProps {
   messages: ChatMessage[];
   onStartGoal: (goalId: string, version: number) => void;
@@ -602,6 +639,41 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         PARALLEL
                       </span>
                     )}
+                    {/* One-line audit summary: the counts the audit export
+                        would show, computed live from this message's events.
+                        Each badge appears only when non-zero. */}
+                    {(() => {
+                      const summary = auditSummary(msg.events);
+                      if (!summary) return null;
+                      return (
+                        <>
+                          {summary.edits > 0 && (
+                            <span
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-violet-950/40 border border-violet-800 text-violet-300 font-semibold"
+                              title="Plan steps were edited after planning (see the transcript for before/after)"
+                            >
+                              {summary.edits} edit{summary.edits === 1 ? "" : "s"}
+                            </span>
+                          )}
+                          {summary.fallbacks > 0 && (
+                            <span
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-teal-950/40 border border-teal-800 text-teal-300 font-semibold"
+                              title="Model calls that fell back to another provider/model"
+                            >
+                              {summary.fallbacks} fallback{summary.fallbacks === 1 ? "" : "s"}
+                            </span>
+                          )}
+                          {summary.errors > 0 && (
+                            <span
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-red-950/40 border border-red-800 text-red-300 font-semibold"
+                              title="Errors recorded during the run"
+                            >
+                              {summary.errors} error{summary.errors === 1 ? "" : "s"}
+                            </span>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
 
                   {/* Goal Action Buttons */}
