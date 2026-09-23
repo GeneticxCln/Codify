@@ -17,6 +17,7 @@ from engine.services import (
     AgentRegistryService,
     ApiError,
     GoalService,
+    SettingsService,
     WorkspaceService,
 )
 
@@ -31,6 +32,7 @@ class TestDbAndServices(unittest.TestCase):
         self.registry = AgentRegistryService(self.conn, self.factory, self.keychain)
         self.workspaces = WorkspaceService(self.conn)
         self.goals = GoalService(self.conn)
+        self.settings = SettingsService(self.conn)
 
     def tearDown(self):
         self.conn.close()
@@ -139,6 +141,26 @@ class TestDbAndServices(unittest.TestCase):
             self.assertEqual(cfg.model_name, "", f"{role} must not ship a model id")
             self.assertEqual(cfg.provider, "ollama")
             self.assertEqual(cfg.protocol, "ollama")
+
+    def test_engine_settings_roundtrip_clamp_and_corrupt_value(self):
+        """The persisted settings store: defaults, clamps, and recovery.
+
+        The value is read on every parallel batch, so a corrupt or missing row
+        must degrade to the default, never crash a running goal.
+        """
+        self.assertEqual(self.settings.get_int("parallel_width"), 4, "default")
+        self.assertEqual(self.settings.set_int("parallel_width", 2), 2)
+        self.assertEqual(self.settings.get_int("parallel_width"), 2, "persists")
+        self.assertEqual(self.settings.set_int("parallel_width", 500), 16, "clamped high")
+        self.assertEqual(self.settings.set_int("parallel_width", 0), 1, "clamped low")
+        with self.assertRaises(ApiError):
+            self.settings.set_int("no_such_key", 1)
+
+        # A row a hand-edit (or an old build) mangled reads as unset.
+        self.conn.execute(
+            "UPDATE engine_settings SET value = 'not-a-number' WHERE key = 'parallel_width'"
+        )
+        self.assertEqual(self.settings.get_int("parallel_width"), 4, "corrupt → default")
 
     def test_provider_switch_inherits_new_protocol(self):
         """Regression: switching provider without an explicit protocol used to

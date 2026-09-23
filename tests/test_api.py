@@ -16,10 +16,10 @@ from engine.app import app, BOOT_TOKEN
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.model_catalog import ModelCatalogService
-from engine.models import Event, ROLES
+from engine.models import Event, PlanStep, ROLES, GoalCreate, WorkspaceCreate
 from engine.providers import Keychain, ProviderFactory
 from engine.sandbox import SandboxService
-from engine.services import AgentRegistryService, GoalService, WorkspaceService
+from engine.services import AgentRegistryService, GoalService, SettingsService, WorkspaceService
 
 
 class _StubCatalog:
@@ -54,7 +54,9 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         app.state.workspaces = WorkspaceService(conn)
         app.state.goals = GoalService(conn)
         app.state.sandbox = SandboxService()
+        app.state.settings = SettingsService(conn)
         app.state.executor = ExecutorService(app.state.goals, app.state.workspaces, app.state.registry, app.state.sandbox)
+        app.state.executor.settings = app.state.settings
         # Mock run_planning so background planning does not call live LLM providers in API tests
         async def mock_run_planning(goal_id: str) -> None:
             pass
@@ -810,6 +812,84 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         # A limit outside the allowed range is refused, not silently clamped.
         r = await self.client.get("/models/recent?limit=0", headers=self.headers)
         self.assertEqual(r.status_code, 422)
+
+    def _mkstep(self, goal_id: str, sid: str) -> PlanStep:
+        return PlanStep(
+            id=sid, goal_id=goal_id, ordinal=0, title=sid, description="",
+            status="PENDING", suggested_paths=[],
+        )
+
+    async def test_usage_reports_parallel_peak_and_waves(self):
+        """The usage endpoint reconstructs how wide a run was from the log.
+
+        A two-step parallel goal with staggered overlap: peak 2, one wave. A
+        sequential goal of the same shape: peak 1, two waves. This is the
+        after-the-fact evidence the usage card shows, so both halves matter.
+        """
+        ws = app.state.workspaces.create(
+            WorkspaceCreate(name="peakws", root_path=str(self.root))
+        )
+        goal = app.state.goals.create(
+            GoalCreate(workspace_id=ws.id, title="peak", description="", parallel=True)
+        )
+        # Two steps with genuinely overlapping lifetimes.
+        g = app.state.goals.get(goal.id)
+        app.state.goals.update_status(goal.id, g.version, "RUNNING")
+        for sid in ("s1", "s2"):
+            app.state.executor._set_step(goal.id, PlanStep(id=sid, goal_id=goal.id, ordinal=0, title=sid, description="", status="PENDING", suggested_paths=[]), "IN_PROGRESS")
+        app.state.executor._set_step(goal.id, self._mkstep(goal.id, "s1"), "COMPLETED")
+        app.state.executor._set_step(goal.id, self._mkstep(goal.id, "s2"), "COMPLETED")
+
+        r = await self.client.get(f"/goals/{goal.id}/usage", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["parallel_peak"], 2, body)
+        self.assertEqual(body["parallel_waves"], 1, body)
+
+        # Sequential goal of the same shape: every step starts on an empty set.
+        goal2 = app.state.goals.create(
+            GoalCreate(workspace_id=ws.id, title="seq", description="")
+        )
+        g2 = app.state.goals.get(goal2.id)
+        app.state.goals.update_status(goal2.id, g2.version, "RUNNING")
+        for sid in ("t1", "t2"):
+            app.state.executor._set_step(goal2.id, PlanStep(id=sid, goal_id=goal2.id, ordinal=0, title=sid, description="", status="PENDING", suggested_paths=[]), "IN_PROGRESS")
+            app.state.executor._set_step(goal2.id, PlanStep(id=sid, goal_id=goal2.id, ordinal=0, title=sid, description="", status="PENDING", suggested_paths=[]), "COMPLETED")
+        r = await self.client.get(f"/goals/{goal2.id}/usage", headers=self.headers)
+        body = r.json()
+        self.assertEqual(body["parallel_peak"], 1, body)
+        self.assertEqual(body["parallel_waves"], 2, body)
+
+    async def test_engine_settings_roundtrip_clamp_and_unknown_key(self):
+        """GET/PUT /settings/engine: values persist, clamp, and reject typos."""
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["parallel_width"]["value"], 4)
+        self.assertEqual(body["parallel_width"]["min"], 1)
+        self.assertEqual(body["parallel_width"]["max"], 16)
+
+        # A save persists and echoes what was stored.
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, json={"parallel_width": 8}
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["saved"]["parallel_width"], 8)
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual(r.json()["parallel_width"]["value"], 8)
+
+        # Out-of-band values are clamped, and the clamp is what comes back.
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, json={"parallel_width": 999}
+        )
+        self.assertEqual(r.json()["saved"]["parallel_width"], 16)
+
+        # A typo'd key is refused, not silently ignored.
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, json={"paralel_width": 4}
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["code"], "unknown_setting")
 
 
 if __name__ == "__main__":

@@ -8,12 +8,12 @@ import {
   RepairReport,
   RoleInfo,
 } from "../types";
-import { fetchRoles, getLayaStatus, repairAgentConfigs } from "../api";
+import { fetchRoles, getEngineSettings, getLayaStatus, repairAgentConfigs, saveEngineSettings } from "../api";
 import { useAgentConfigs } from "../hooks/useAgentConfigs";
 import { buildModelSignals } from "../modelSignals";
 import { findStaleFallback, findStaleModel, StaleModel } from "../staleModel";
 import { AgentConfigCard } from "./AgentConfigCard";
-import { Sliders, ShieldCheck, Zap, AlertTriangle, Cpu, Wand2, Wrench } from "lucide-react";
+import { Sliders, ShieldCheck, Zap, AlertTriangle, Cpu, Wand2, Wrench, Workflow } from "lucide-react";
 
 interface SettingsPanelProps {
   /** Render compactly inside the settings modal instead of as a full page. */
@@ -221,6 +221,51 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState<string | null>(null);
 
+  // ── Engine settings (persisted in the store, not env vars) ─────────────
+  const [parallelWidth, setParallelWidth] = useState<number | null>(null);
+  const [parallelWidthBounds, setParallelWidthBounds] = useState({ min: 1, max: 16 });
+  const [widthDraft, setWidthDraft] = useState<string>("");
+  const [widthSaving, setWidthSaving] = useState(false);
+  const [widthMsg, setWidthMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getEngineSettings().then((s) => {
+      if (cancelled || !s) return;
+      setParallelWidth(s.parallel_width.value);
+      setParallelWidthBounds({ min: s.parallel_width.min, max: s.parallel_width.max });
+      setWidthDraft(String(s.parallel_width.value));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const saveParallelWidth = async () => {
+    const parsed = parseInt(widthDraft, 10);
+    if (!Number.isFinite(parsed)) {
+      setWidthMsg({ ok: false, text: "Enter a whole number." });
+      return;
+    }
+    setWidthSaving(true);
+    setWidthMsg(null);
+    try {
+      const res = await saveEngineSettings({ parallel_width: parsed });
+      const saved = res.saved.parallel_width;
+      setParallelWidth(saved);
+      setWidthDraft(String(saved));
+      setWidthMsg(
+        saved === parsed
+          ? { ok: true, text: "Saved — the next parallel batch uses it, no restart needed." }
+          : { ok: true, text: `Clamped to ${saved} (allowed ${parallelWidthBounds.min}–${parallelWidthBounds.max}).` }
+      );
+    } catch (err: any) {
+      setWidthMsg({ ok: false, text: err?.message || "Could not save the parallel width." });
+    } finally {
+      setWidthSaving(false);
+    }
+  };
+
   // Point every role at one discovered model — the fast path out of the
   // unconfigured state, using ids the providers actually report.
   const applyToEveryRole = async () => {
@@ -267,6 +312,58 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       )}
 
       <LayaGateStatus />
+
+      <div className="flex flex-col gap-2.5 bg-[#0d1117] border border-[#30363d] rounded-xl p-3.5">
+        <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
+          <Workflow className="w-3.5 h-3.5 text-purple-400" />
+          Engine
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <label
+            htmlFor="parallel-width"
+            className="text-[11px] text-gray-300 font-medium"
+            title="How many steps of a parallel goal may run at once"
+          >
+            Parallel step width
+          </label>
+          <input
+            id="parallel-width"
+            type="number"
+            min={parallelWidthBounds.min}
+            max={parallelWidthBounds.max}
+            value={widthDraft}
+            onChange={(e) => {
+              setWidthDraft(e.target.value);
+              setWidthMsg(null);
+            }}
+            disabled={parallelWidth === null || widthSaving}
+            className="w-20 bg-[#161b22] border border-[#30363d] rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
+          />
+          <button
+            type="button"
+            onClick={saveParallelWidth}
+            disabled={
+              parallelWidth === null ||
+              widthSaving ||
+              widthDraft === String(parallelWidth)
+            }
+            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+          >
+            {widthSaving ? "Saving..." : "Save"}
+          </button>
+          {widthMsg && (
+            <span className={`text-[11px] ${widthMsg.ok ? "text-green-400" : "text-red-400"}`}>
+              {widthMsg.text}
+            </span>
+          )}
+        </div>
+        <p className="text-[11px] text-gray-400 leading-relaxed">
+          How many steps of a parallel goal may run at once; a wider plan runs in waves of this size
+          instead of opening every model session simultaneously. Stored with the engine's settings
+          (the <span className="font-mono">CODIFY_PARALLEL_WIDTH</span> env var, if set, overrides
+          this field), and applies from the next batch without a restart.
+        </p>
+      </div>
 
       <div className="flex flex-col gap-2.5 bg-[#0d1117] border border-[#30363d] rounded-xl p-3.5">
         <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">

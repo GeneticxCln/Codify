@@ -32,6 +32,55 @@ class ApiError(Exception):
         self.extra = extra or {}
 
 
+class SettingsService:
+    """Engine-wide settings persisted in the store (`engine_settings` key/value).
+
+    Deliberately tiny and stringly: one row per key, values validated by the
+    caller (each key owns its clamp), so adding a setting never needs a
+    migration. Reads are unlogged and cheap — the executor asks on every
+    parallel batch.
+    """
+
+    # Every known key with its (default, clamp). Anything read must be listed
+    # here: an unknown key is not a setting, it is a typo.
+    SPEC: dict[str, tuple[int, callable]] = {
+        # How many steps of a parallel goal may run at once (see
+        # executor.DEFAULT_PARALLEL_WIDTH). Clamped to a band a machine can take.
+        "parallel_width": (4, lambda v: max(1, min(v, 16))),
+    }
+
+    def __init__(self, conn):
+        self._db = conn
+
+    def get_int(self, key: str) -> int:
+        default, clamp = self.SPEC[key]
+        row = self._db.execute(
+            "SELECT value FROM engine_settings WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None:
+            return default
+        try:
+            return clamp(int(str(row["value"]).strip()))
+        except (TypeError, ValueError):
+            # A value that cannot parse is treated as unset, never as a crash:
+            # the settings screen wrote it, so a bad save must not wedge goals.
+            return default
+
+    def set_int(self, key: str, value: int) -> int:
+        if key not in self.SPEC:
+            raise ApiError(400, "unknown_setting", f"unknown engine setting: {key}")
+        default, clamp = self.SPEC[key]
+        clamped = clamp(int(value))
+        self._db.execute(
+            """INSERT INTO engine_settings (key, value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at""",
+            (key, str(clamped), time.time()),
+        )
+        self._db.commit()
+        return clamped
+
+
 class AgentRegistryService:
     def __init__(self, conn, factory: ProviderFactory, keychain: Keychain):
         self._db = conn

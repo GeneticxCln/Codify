@@ -37,7 +37,13 @@ from engine.models import (
 )
 from engine.providers import Keychain, ProviderError, ProviderFactory
 from engine.sandbox import SandboxService
-from engine.services import AgentRegistryService, ApiError, GoalService, WorkspaceService
+from engine.services import (
+    AgentRegistryService,
+    ApiError,
+    GoalService,
+    SettingsService,
+    WorkspaceService,
+)
 
 BOOT_TOKEN = os.environ.get("CODIFY_BOOT_TOKEN") or secrets.token_hex(32)
 
@@ -71,6 +77,7 @@ async def lifespan(app: FastAPI):
     app.state.workspaces = WorkspaceService(conn)
     app.state.goals = GoalService(conn)
     app.state.sandbox = SandboxService()
+    app.state.settings = SettingsService(conn)
     app.state.models = ModelCatalogService(app.state.registry, keychain)
     # The gate needs the registry for its LLM fallback when the real Laya SDK is
     # not installed; without it every goal's gate would silently skip.
@@ -82,6 +89,7 @@ async def lifespan(app: FastAPI):
         app.state.sandbox,
         laya=app.state.laya,
     )
+    app.state.executor.settings = app.state.settings
     app.state.token = BOOT_TOKEN
 
     # ── Rescue goals orphaned by the last process ──────────────────────────
@@ -471,6 +479,38 @@ async def recent_models(request: Request, limit: int = Query(5, ge=1, le=25)):
     return request.app.state.goals.recent_run_models(limit)
 
 
+@app.get("/settings/engine")
+async def get_engine_settings(request: Request):
+    """The engine-wide settings screen values, each with its clamp bounds so the
+    UI can validate before saving instead of discovering a clamp after."""
+    settings: SettingsService = request.app.state.settings
+    return {
+        "parallel_width": {
+            "value": settings.get_int("parallel_width"),
+            "min": 1,
+            "max": 16,
+        },
+    }
+
+
+@app.put("/settings/engine")
+async def put_engine_settings(body: dict, request: Request):
+    """Persist engine-wide settings. Only known keys are accepted; each clamps
+    to its band, and the response echoes what was actually stored so the UI
+    shows the truth rather than what the user typed."""
+    settings: SettingsService = request.app.state.settings
+    out: dict[str, int] = {}
+    for key, value in body.items():
+        if key == "parallel_width":
+            try:
+                out[key] = settings.set_int(key, int(value))
+            except (TypeError, ValueError):
+                raise ApiError(422, "invalid_value", f"{key} must be an integer")
+        else:
+            raise ApiError(400, "unknown_setting", f"unknown engine setting: {key}")
+    return {"saved": out}
+
+
 @app.get("/workspaces")
 async def list_ws(request: Request):
     return request.app.state.workspaces.list()
@@ -494,6 +534,41 @@ async def get_goal(goal_id: str, request: Request):
     return GoalDetail(**g.model_dump(), steps=request.app.state.goals.steps(goal_id))
 
 
+def _parallel_peak_from_events(events: list) -> dict:
+    """Peak step concurrency and wave count, from the step_status log.
+
+    Every step's run is bracketed by IN_PROGRESS/terminal step_status events
+    the executor already publishes, so sweeping them in sequence reconstructs
+    exactly how many steps were in flight at once — no new event type, no
+    schema, and it works retroactively for goals that ran before this existed.
+
+    A step that never gets a terminal status (the goal died mid-step) is
+    still open at the sweep's end, so the peak includes it rather than
+    under-reporting. Waves count the times a running step *starts while all
+    currently-running steps have finished* — a sequential goal of N steps
+    reports N waves, a fully-parallel one reports 1.
+    """
+    active: set[str] = set()
+    peak = 0
+    waves = 0
+    for e in events:
+        if e.type != "step_status" or not e.step_id:
+            continue
+        status = (e.payload or {}).get("status")
+        if status == "IN_PROGRESS":
+            # A step starting while others already run is the same wave; a
+            # start onto an empty set is a new one.
+            if not active:
+                waves += 1
+            active.add(e.step_id)
+            peak = max(peak, len(active))
+        elif status in ("COMPLETED", "FAILED", "CANCELLED"):
+            active.discard(e.step_id)
+    # Steps still open at the end (a killed engine) stay counted.
+    peak = max(peak, len(active))
+    return {"peak": peak, "waves": waves}
+
+
 @app.get("/goals/{goal_id}/usage")
 async def get_goal_usage(goal_id: str, request: Request):
     """Token totals for a goal, from the usage events the providers report.
@@ -502,11 +577,13 @@ async def get_goal_usage(goal_id: str, request: Request):
     them as events so totals come free from the same store that feeds the
     timeline. Per-role and per-model splits let the user see which agent (or
     which fallback target) is actually spending the tokens.
+
+    The parallel numbers come from the same log: peak steps in flight at once
+    (what the width cap actually bounded) and how many waves the plan took.
     """
     request.app.state.goals.get(goal_id)  # 404 if unknown
-    usage_events = [
-        e for e in request.app.state.goals.events_after(goal_id, 0) if e.type == "usage"
-    ]
+    events = request.app.state.goals.events_after(goal_id, 0)
+    usage_events = [e for e in events if e.type == "usage"]
     totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     by_role: dict[str, dict] = {}
     by_model: dict[str, dict] = {}
@@ -528,7 +605,16 @@ async def get_goal_usage(goal_id: str, request: Request):
         totals["input_tokens"] += p.get("input_tokens") or 0
         totals["output_tokens"] += p.get("output_tokens") or 0
         totals["total_tokens"] += p.get("total_tokens") or 0
-    return {"goal_id": goal_id, "calls": calls, "totals": totals, "by_role": by_role, "by_model": by_model}
+    parallel = _parallel_peak_from_events(events)
+    return {
+        "goal_id": goal_id,
+        "calls": calls,
+        "totals": totals,
+        "by_role": by_role,
+        "by_model": by_model,
+        "parallel_peak": parallel["peak"],
+        "parallel_waves": parallel["waves"],
+    }
 
 
 @app.patch("/goals/{goal_id}/steps/{step_id}")

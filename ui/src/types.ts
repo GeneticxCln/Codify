@@ -179,6 +179,17 @@ export interface LayaStatus {
   };
 }
 
+/** One engine-wide setting: the live value plus the band the engine clamps to. */
+export interface EngineSettingValue {
+  value: number;
+  min: number;
+  max: number;
+}
+
+export interface EngineSettings {
+  parallel_width: EngineSettingValue;
+}
+
 /** Payload of a `laya_decision` event (one pre-flight gate verdict). */
 export interface LayaDecision {
   engine: "sdk" | "llm-fallback" | "skipped";

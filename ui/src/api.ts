@@ -1,6 +1,7 @@
 import {
   AgentConfig,
   EngineInfo,
+  EngineSettings,
   Goal,
   LayaStatus,
   ModelCatalog,
@@ -159,6 +160,40 @@ export async function getLayaStatus(): Promise<LayaStatus | null> {
   } catch {
     return null;
   }
+}
+
+/** Engine-wide settings (each value with its clamp bounds). */
+export async function getEngineSettings(): Promise<EngineSettings | null> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  try {
+    const res = await fetch(`${base}/settings/engine`, {
+      headers: { Authorization: `Bearer ${currentEngine.token}` },
+    });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+/** Persist engine-wide settings; the response echoes the clamped values. */
+export async function saveEngineSettings(
+  patch: { parallel_width?: number }
+): Promise<{ saved: Record<string, number> }> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/settings/engine`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${currentEngine.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(detail || `HTTP ${res.status}`);
+  }
+  return res.json();
 }
 
 /**
@@ -348,6 +383,10 @@ export interface GoalUsage {
   totals: { input_tokens: number; output_tokens: number; total_tokens: number };
   by_role: Record<string, UsageBucket>;
   by_model: Record<string, UsageBucket>;
+  /** Most steps that were in flight at once (1 = fully sequential). */
+  parallel_peak: number;
+  /** How many times a step started with none already running. */
+  parallel_waves: number;
 }
 
 export async function getGoalUsage(goal_id: string): Promise<GoalUsage> {

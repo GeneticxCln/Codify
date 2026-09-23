@@ -90,6 +90,12 @@ CREATE TABLE IF NOT EXISTS proposed_files (
   content TEXT,
   created_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS engine_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at REAL NOT NULL
+);
 """
 
 
