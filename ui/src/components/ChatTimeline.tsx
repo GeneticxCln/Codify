@@ -26,6 +26,7 @@ import {
   Pencil,
   X,
   Coins,
+  Workflow,
 } from "lucide-react";
 
 /**
@@ -270,6 +271,19 @@ const UsageCard: React.FC<{ goalId: string }> = ({ goalId }) => {
           ))}
         </div>
       )}
+      {/* How wide this run actually was, from the step_status log — the
+          after-the-fact answer to "did parallel mode do anything?". A
+          sequential run is peak 1 and stays silent; the number only appears
+          when it says something. */}
+      {usage.parallel_peak > 1 && (
+        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-blue-300">
+          <Workflow className="w-3 h-3" />
+          Peak {usage.parallel_peak} step{usage.parallel_peak === 1 ? "" : "s"} in parallel
+          {usage.parallel_waves > 1 && (
+            <span className="text-gray-500"> · {usage.parallel_waves} wave{usage.parallel_waves === 1 ? "" : "s"}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 };
@@ -411,6 +425,14 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         PLAN ONLY
                       </span>
                     )}
+                    {msg.goal?.parallel && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-purple-950/40 border border-purple-800 text-purple-300 font-semibold"
+                        title="Independent steps of this goal may run concurrently"
+                      >
+                        PARALLEL
+                      </span>
+                    )}
                   </div>
 
                   {/* Goal Action Buttons */}
@@ -478,8 +500,19 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                 {/* Plan Steps Accordion */}
                 {msg.goal?.steps && msg.goal.steps.length > 0 && (
                   <div className="space-y-2">
-                    <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                      Execution Plan ({msg.goal.steps.length} Steps)
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+                        Execution Plan ({msg.goal.steps.length} Steps)
+                      </div>
+                      {/* How many steps are in flight right now. >1 is the
+                          parallel-mode proof; the whole point of the flag. */}
+                      {msg.goal.status === "RUNNING" &&
+                        msg.goal.steps.filter((s: PlanStep) => s.status === "IN_PROGRESS").length > 1 && (
+                          <span className="flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-950/50 border border-blue-800 text-blue-300">
+                            <PlayCircle className="w-3 h-3 animate-pulse" />
+                            {msg.goal.steps.filter((s: PlanStep) => s.status === "IN_PROGRESS").length} steps in parallel
+                          </span>
+                        )}
                     </div>
                     <div className="space-y-2">
                       {msg.goal.steps.map((step: PlanStep) => (
@@ -504,6 +537,18 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               <span className="text-xs font-semibold text-gray-200">
                                 Step {step.ordinal + 1}: {step.title}
                               </span>
+                              {/* This step is one of several running right now —
+                                  the visual proof that parallel mode is real. */}
+                              {step.status === "IN_PROGRESS" &&
+                                msg.goal?.steps &&
+                                msg.goal.steps.filter((s: PlanStep) => s.status === "IN_PROGRESS").length > 1 && (
+                                  <span
+                                    className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-950/60 border border-blue-700 text-blue-300 animate-pulse"
+                                    title="Running concurrently with the other highlighted steps"
+                                  >
+                                    ⫴ PARALLEL
+                                  </span>
+                                )}
                             </div>
 
                             {/* Edit Plan affordance: plan-only goals still awaiting execution */}
@@ -607,17 +652,30 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                     */}
                     <div className="space-y-2">
                       {(() => {
-                        // Streaming replies render as ONE live card per role
-                        // showing the newest snapshot, not one bubble per
-                        // throttle tick; non-streaming events map as before.
-                        const streamHeads: Record<string, { text: string; role: string; final: boolean }> = {};
+                        // Streaming replies render as ONE live card per (step,
+                        // role) showing the newest snapshot, not one bubble per
+                        // throttle tick. Keyed by step_id too: under a parallel
+                        // goal two agents of the same role run at once, and a
+                        // role-keyed map would interleave their text into one
+                        // card. The step title rides along for the label.
                         const rendered: React.ReactNode[] = [];
+                        const streamHeads: Record<
+                          string,
+                          { text: string; role: string; final: boolean; stepTitle?: string }
+                        > = {};
+                        const stepTitleById = new Map<string, string>();
+                        (msg.goal?.steps ?? []).forEach((s: PlanStep) =>
+                          stepTitleById.set(s.id, s.title)
+                        );
                         msg.events.forEach((ev) => {
                           if (ev.type === "model_delta") {
-                            streamHeads[ev.payload.role] = {
+                            const headKey = `${ev.step_id ?? "goal"}::${ev.payload.role}`;
+                            streamHeads[headKey] = {
                               text: ev.payload.text,
                               role: ev.payload.role,
                               final: !!ev.payload.final,
+                              stepTitle:
+                                (ev.step_id && stepTitleById.get(ev.step_id)) || undefined,
                             };
                             return;
                           }
@@ -796,6 +854,13 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               <Bot className="w-3.5 h-3.5 flex-shrink-0" />
                               <span>
                                 Sub-agent assigned: <span className="font-semibold">{ev.payload.role}</span>
+                                {ev.step_id && (
+                                  <span className="text-gray-400">
+                                    {" · "}
+                                    {(msg.goal?.steps ?? []).find((s: PlanStep) => s.id === ev.step_id)?.title ??
+                                      "step"}
+                                  </span>
+                                )}
                                 {ev.payload.provider && ev.payload.model && (
                                   <span className="font-mono text-gray-500"> ({ev.payload.provider}/{ev.payload.model})</span>
                                 )}
@@ -887,16 +952,16 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         </div>
                           );
                         });
-                        // The live reply cards, one per role, newest snapshot:
-                        const streamRoles = Object.keys(streamHeads);
-                        if (streamRoles.length > 0) {
+                        // The live reply cards, one per (step, role), newest snapshot:
+                        const streamKeys = Object.keys(streamHeads);
+                        if (streamKeys.length > 0) {
                           rendered.push(
                             <div key="model-stream" className="space-y-1.5">
-                              {streamRoles.map((r) => {
-                                const head = streamHeads[r];
+                              {streamKeys.map((k) => {
+                                const head = streamHeads[k];
                                 return (
                                   <div
-                                    key={r}
+                                    key={k}
                                     className={`p-2 rounded-lg border font-mono text-[11px] leading-relaxed ${
                                       head.final
                                         ? "bg-[#161b22] border-[#30363d] text-gray-400"
@@ -910,6 +975,11 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                     >
                                       <Terminal className="w-3 h-3" />
                                       {head.role} replied
+                                      {head.stepTitle && (
+                                        <span className="normal-case font-sans text-gray-500">
+                                          · {head.stepTitle}
+                                        </span>
+                                      )}
                                       {!head.final && <span className="animate-pulse">▍</span>}
                                     </div>
                                     <div className="whitespace-pre-wrap break-words max-h-48 overflow-y-auto">

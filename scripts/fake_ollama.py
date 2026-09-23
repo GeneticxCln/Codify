@@ -233,9 +233,11 @@ class Handler(BaseHTTPRequestHandler):
                 import re
                 # The real fixer prompt embeds "Suggested paths (current
                 # contents):" then either readable lines `- path: text` or the
-                # unreadable note `- path (not readable as text)`. Match both,
-                # so the demo writes the step's actual target.
-                m = re.search(r"- ([^\s:()]+)(?: |:| \(not readable\))", prompt)
+                # unreadable note `- path (not readable as text)`. Search only
+                # that section — the evidence section above it also contains
+                # `- path:` shapes, and matching those wrote the wrong file.
+                section = prompt.split("Suggested paths (current contents):", 1)[-1]
+                m = re.search(r"- ([^\s:()]+)(?: |:| \(not readable\))", section)
                 target = m.group(1) if m else "banner.txt"
                 out = json.dumps(
                     {"files": [{"path": target, "action": "create", "content": "hello from codify\n"}]}
