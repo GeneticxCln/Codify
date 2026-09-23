@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import time
 import uuid
@@ -131,6 +132,29 @@ MAX_LIBRARY_READS_PER_ROUND = 12
 MAX_LIBRARY_SEARCHES_PER_ROUND = 6
 MAX_LIBRARY_GIT_PER_ROUND = 6
 MAX_LIBRARY_RUNS_PER_ROUND = 4
+
+# How many steps of a parallel goal may run at once. Each running step is a
+# streaming model session plus its verifier/critic/scribe tail, so an unbounded
+# batch against a plan with many independent steps would open every session
+# simultaneously — rate limits, memory, and a burst the user cannot read anyway.
+# The batch machinery already loops until the plan is exhausted, so capping the
+# batch size turns parallelism into waves instead of removing it.
+#
+# Where the width comes from, in order: the CODIFY_PARALLEL_WIDTH env var (an
+# operator's explicit override, clamped so a nonsense value cannot disable the
+# bound), then the persisted `parallel_width` setting (Settings → Agents), then
+# this default.
+DEFAULT_PARALLEL_WIDTH = 4
+
+def _env_parallel_width() -> int | None:
+    raw = (os.environ.get("CODIFY_PARALLEL_WIDTH") or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return max(1, min(value, 16))
 
 
 class CriticRejection(AgentOutputInvalid):
@@ -437,6 +461,9 @@ class ExecutorService:
         # exists — is safe.
         self._sandbox_lock = asyncio.Lock()
         self._git_lock = asyncio.Lock()
+        # Optional settings store (SettingsService). Attached by app lifespan
+        # when present; tests without one just get the default width.
+        self.settings = None
 
     def _event(self, goal_id: str, step_id: str | None, type_: EventType, payload: dict) -> Event:
         return Event(
@@ -448,6 +475,20 @@ class ExecutorService:
             timestamp=time.time(),
             sequence=self.goals.next_sequence(goal_id),
         )
+
+    def _parallel_width(self) -> int:
+        """The configured parallel width: env override, then persisted setting,
+        then the built-in default. Read per batch, so a settings change lands
+        on the next wave without a restart."""
+        env = _env_parallel_width()
+        if env is not None:
+            return env
+        if self.settings is not None:
+            try:
+                return self.settings.get_int("parallel_width")
+            except Exception:
+                pass
+        return DEFAULT_PARALLEL_WIDTH
 
     # --- public -------------------------------------------------------
 
@@ -1087,13 +1128,24 @@ class ExecutorService:
         never batches: it runs alone, exactly as today. Suggested paths are a
         plan, not a straitjacket — which is precisely why they gate parallelism
         rather than being trusted after the fact.
+
+        The batch is also capped at the configured width (Settings → Agents,
+        or the CODIFY_PARALLEL_WIDTH env override; default 4): each in-flight
+        step is a streaming model session plus its verification tail, so a
+        twenty-step plan must open them in waves of 4, not all at once. The
+        caller loops until the plan is exhausted, so the cap throttles
+        concurrency without serializing anything.
         """
+        width = self._parallel_width()
+
         def paths(s: PlanStep) -> set[str]:
             return {p.strip() for p in (s.suggested_paths or []) if p.strip()}
 
         batch: list[PlanStep] = []
         taken: set[str] = set()
         for step in steps:
+            if len(batch) >= width:
+                break
             mine = paths(step)
             if not mine or mine & taken:
                 break

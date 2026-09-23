@@ -1,6 +1,7 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import asyncio
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -1772,16 +1773,21 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         return time.monotonic() - started
 
     def _script_parallel(self, delays: dict[str, float] | None = None,
-                         fail_on: str | None = None):
-        """Planner produces two path-disjoint steps; the fixer identifies its step
-        from the prompt's `Step: {title}` line (never from suggested-path contents,
-        which don't exist yet for create steps) and sleeps before writing, so
-        overlap is measurable by wall clock. fail_on: make that step's fixer raise."""
+                         fail_on: str | None = None, n_steps: int = 2):
+        """Planner produces n_steps path-disjoint steps (a..z); the fixer
+        identifies its step from the prompt's `Step: {title}` line (never from
+        suggested-path contents, which don't exist yet for create steps) and
+        sleeps before writing, so overlap is measurable by wall clock.
+        fail_on: make that step's fixer raise. Concurrent fixers are also
+        tracked live: self.concurrent_peak records the max number in flight."""
         delays = delays or {}
+        names = [chr(ord("a") + i) for i in range(n_steps)]
         self.provider.others["planner"] = {"steps": [
-            {"title": "a", "description": "write a", "suggested_paths": ["a.txt"]},
-            {"title": "b", "description": "write b", "suggested_paths": ["b.txt"]},
+            {"title": n, "description": f"write {n}", "suggested_paths": [f"{n}.txt"]}
+            for n in names
         ]}
+        self._fixers_in_flight = 0
+        self._concurrent_peak = 0
         original = self.provider.complete
 
         async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
@@ -1795,7 +1801,12 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
                 if fail_on and target == fail_on:
                     from engine.providers import ProviderError as PE
                     raise PE("provider_unreachable", f"boom on {target}")
-                await asyncio.sleep(delays.get(target, 0.0))
+                self._fixers_in_flight += 1
+                self._concurrent_peak = max(self._concurrent_peak, self._fixers_in_flight)
+                try:
+                    await asyncio.sleep(delays.get(target, 0.0))
+                finally:
+                    self._fixers_in_flight -= 1
                 return json.dumps({"files": [{
                     "path": f"{target}.txt", "action": "create", "content": f"{target} body\n",
                 }]})
@@ -1867,6 +1878,73 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         # finish: its file exists, proving the batch joined rather than
         # abandoning it the instant b failed.
         self.assertTrue((self.root / "a.txt").exists(), "healthy sibling was abandoned")
+
+    async def test_parallel_width_caps_concurrency_in_waves(self):
+        """A batch wider than the configured width runs in waves, not all at once.
+
+        5 disjoint steps with a width of 2: the peak number of fixers in
+        flight must be 2 (never 5), yet the goal still completes everything —
+        the cap throttles concurrency, it does not serialize the plan.
+        """
+        from engine.executor import _env_parallel_width
+        os.environ["CODIFY_PARALLEL_WIDTH"] = "2"
+        try:
+            self.assertEqual(_env_parallel_width(), 2)
+            self.goals.set_parallel(self.goal.id, True)
+            self._script_parallel(delays={n: 0.3 for n in "abcde"}, n_steps=5)
+            await self.executor.run_planning(self.goal.id)
+            elapsed = await self._drive()
+        finally:
+            os.environ.pop("CODIFY_PARALLEL_WIDTH", None)
+
+        g = self.goals.get(self.goal.id)
+        self.assertEqual(g.status, "COMPLETED", f"goal status: {g.status}")
+        self.assertEqual(
+            self._concurrent_peak, 2,
+            f"expected waves of 2, saw peak concurrency {self._concurrent_peak}",
+        )
+        # Waves of 2 over 5 steps with 0.3s sleeps: ~3 waves ~= 0.9s. If the
+        # cap were ignored (all 5 at once) it would be ~0.3s.
+        self.assertGreaterEqual(elapsed, 0.85, f"waves not enforced ({elapsed:.2f}s)")
+        for name in ("a.txt", "b.txt", "c.txt", "d.txt", "e.txt"):
+            self.assertTrue((self.root / name).exists(), f"{name} missing")
+        # Every step ran exactly once.
+        fixer_calls = [c for c in self.provider.calls if c[0] == "fixer"]
+        self.assertEqual(len(fixer_calls), 5)
+
+    async def test_parallel_width_is_clamped(self):
+        """A nonsense or extreme env value cannot disable the bound."""
+        from engine.executor import _env_parallel_width, DEFAULT_PARALLEL_WIDTH
+        self.assertEqual(_env_parallel_width() or DEFAULT_PARALLEL_WIDTH, DEFAULT_PARALLEL_WIDTH)
+        for raw, expected in (("0", 1), ("-3", 1), ("99", 16), ("abc", None)):
+            os.environ["CODIFY_PARALLEL_WIDTH"] = raw
+            self.assertEqual(_env_parallel_width(), expected, f"raw={raw!r}")
+        os.environ.pop("CODIFY_PARALLEL_WIDTH", None)
+
+    async def test_parallel_width_reads_the_persisted_setting(self):
+        """Without an env override, the width comes from the settings store.
+
+        Priority: env (operator override) > persisted setting > default. Read
+        per batch, so a settings change lands on the next wave with no restart.
+        """
+        from engine.services import SettingsService
+
+        self.assertEqual(self.executor._parallel_width(), 4, "no setting → default")
+
+        self.executor.settings = SettingsService(self.conn)
+        self.executor.settings.set_int("parallel_width", 3)
+        self.assertEqual(self.executor._parallel_width(), 3, "persisted setting wins over default")
+
+        # The env var is the operator's explicit override of the field.
+        os.environ["CODIFY_PARALLEL_WIDTH"] = "2"
+        try:
+            self.assertEqual(self.executor._parallel_width(), 2, "env overrides the setting")
+        finally:
+            os.environ.pop("CODIFY_PARALLEL_WIDTH", None)
+
+        # Changing the setting again is picked up immediately (same instance).
+        self.executor.settings.set_int("parallel_width", 6)
+        self.assertEqual(self.executor._parallel_width(), 6, "re-read per batch")
 
     async def test_cancel_fails_the_batch_promptly(self):
         self.goals.set_parallel(self.goal.id, True)
