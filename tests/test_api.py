@@ -868,6 +868,105 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["parallel_peak"], 1, body)
         self.assertEqual(body["parallel_waves"], 2, body)
 
+    async def test_audit_trail_collects_edits_fallbacks_and_failures(self):
+        """The audit endpoint reconstructs the run's full structured trail.
+
+        One goal exercises every auditable lane: a plan edit with real
+        before/after values, a provider fallback naming who was skipped and
+        who answered instead, a fix retry, an error with its responsible
+        role, and a step that never got a terminal status (it must report
+        IN_PROGRESS, not pretend to have finished).
+        """
+        ws = app.state.workspaces.create(
+            WorkspaceCreate(name="auditws", root_path=str(self.root))
+        )
+        goal = app.state.goals.create(
+            GoalCreate(workspace_id=ws.id, title="audit-me", description="", parallel=True)
+        )
+        g = app.state.goals.get(goal.id)
+        app.state.goals.update_status(goal.id, g.version, "RUNNING")
+        app.state.executor._set_step(goal.id, self._mkstep(goal.id, "s1"), "IN_PROGRESS")
+
+        # A plan edit that actually changed something, plus a no-op field the
+        # document must not report as drift. Sequences come from the store so
+        # they interleave with the goal_status/step_status events already
+        # published above.
+        def ev(eid, type_, payload, ts):
+            return Event(
+                id=eid, goal_id=goal.id, step_id="s1", type=type_, payload=payload,
+                timestamp=ts, sequence=app.state.goals.next_sequence(goal.id),
+            )
+
+        app.state.goals.publish(ev("e1", "plan_updated", {
+            "step_id": "s1", "step_title": "s1", "fields": ["suggested_paths"],
+            "changes": {
+                "suggested_paths": {"before": ["alpha.txt"], "after": ["gamma.txt"]},
+                "description": {"before": "same", "after": "same"},
+            },
+        }, 100.0))
+        app.state.goals.publish(ev("e2", "provider_fallback", {
+            "role": "fixer",
+            "from": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+            "to": {"provider": "ollama", "model": "qwen3:8b"},
+            "code": "connection_refused", "detail": "primary down",
+        }, 101.0))
+        app.state.goals.publish(ev("e3", "fix_retry", {
+            "attempt": 1, "max_attempts": 2, "reason": "tests failed",
+        }, 102.0))
+        app.state.goals.publish(ev("e4", "error", {
+            "code": "model_output_invalid", "message": "bad json", "role": "fixer",
+        }, 103.0))
+        # Role transition inside the step: the engine re-publishes IN_PROGRESS
+        # at fixer → verifier → critic → scribe. This is NOT a new attempt —
+        # the count must stay 1 (the regression that once read attempts: 5).
+        app.state.goals.publish(ev("e5", "step_status", {"status": "IN_PROGRESS"}, 104.0))
+        # s1 never gets a terminal status — the engine died here.
+
+        r = await self.client.get(f"/goals/{goal.id}/audit", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["final_status"], "RUNNING")
+        self.assertEqual(body["mode"], {"plan_only": False, "dry_run": False, "parallel": True})
+
+        # Plan edits: only genuinely-changed fields, with before/after.
+        self.assertEqual(len(body["plan_edits"]), 1, body["plan_edits"])
+        edit = body["plan_edits"][0]
+        self.assertEqual(edit["fields"], ["suggested_paths"])
+        self.assertEqual(edit["changes"]["suggested_paths"], {"from": ["alpha.txt"], "to": ["gamma.txt"]})
+
+        self.assertEqual(len(body["fallbacks"]), 1)
+        fb = body["fallbacks"][0]
+        self.assertEqual(fb["role"], "fixer")
+        self.assertEqual(fb["from"]["provider"], "anthropic")
+        self.assertEqual(fb["to"]["model"], "qwen3:8b")
+        self.assertEqual(fb["code"], "connection_refused")
+
+        self.assertEqual(len(body["fix_retries"]), 1)
+        self.assertEqual(body["fix_retries"][0]["attempt"], 1)
+
+        self.assertEqual(len(body["errors"]), 1)
+        err = body["errors"][0]
+        self.assertEqual(err["role"], "fixer")
+        self.assertEqual(err["code"], "model_output_invalid")
+
+        # The step open at sweep end keeps its in-flight status...
+        self.assertEqual(len(body["step_outcomes"]), 1)
+        step = body["step_outcomes"][0]
+        self.assertEqual(step["status"], "IN_PROGRESS")
+        self.assertEqual(step["attempts"], 1)
+        # ...and the parallel sweep still sees it as the peak.
+        self.assertEqual(body["parallel_peak"], 1)
+        self.assertEqual(body["parallel_waves"], 1)
+
+        # Status timeline records every published transition in order (the
+        # initial PENDING comes from the row, not an event).
+        statuses = [t["status"] for t in body["status_timeline"]]
+        self.assertEqual(statuses, ["RUNNING"])
+
+        # Unknown goal → 404 like every other goal route.
+        r = await self.client.get("/goals/does-not-exist/audit", headers=self.headers)
+        self.assertEqual(r.status_code, 404)
+
     async def test_engine_settings_roundtrip_clamp_and_unknown_key(self):
         """GET/PUT /settings/engine: values persist, clamp, and reject typos."""
         r = await self.client.get("/settings/engine", headers=self.headers)

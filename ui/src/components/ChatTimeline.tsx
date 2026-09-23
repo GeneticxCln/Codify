@@ -3,7 +3,7 @@ import { AgentRole, ChatMessage, Event, PlanStep } from "../types";
 import { FailureDiagnosisPanel } from "./FailureDiagnosisPanel";
 import { DiffViewer } from "./DiffViewer";
 import { LayaDecision } from "../types";
-import { getGoalUsage, GoalUsage } from "../api";
+import { getGoalUsage, GoalUsage, getGoalAudit } from "../api";
 import {
   User,
   Bot,
@@ -27,6 +27,7 @@ import {
   X,
   Coins,
   Workflow,
+  FileDown,
 } from "lucide-react";
 
 /**
@@ -628,6 +629,40 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                           <XCircle className="w-4 h-4" />
                         </button>
                       )}
+
+                      {/* Audit export: the run's structured trail (plan edits,
+                          fallbacks, failures, outcomes) as a downloaded JSON
+                          document. Available at any stage — an in-flight goal's
+                          audit is a snapshot up to now. */}
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const audit = await getGoalAudit(msg.goal!.id);
+                            const blob = new Blob([JSON.stringify(audit, null, 2)], {
+                              type: "application/json",
+                            });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+                            const slug = (msg.goal!.title || msg.goal!.id)
+                              .toLowerCase()
+                              .replace(/[^a-z0-9]+/g, "-")
+                              .replace(/^-+|-+$/g, "")
+                              .slice(0, 40) || msg.goal!.id.slice(0, 8);
+                            a.href = url;
+                            a.download = `audit-${slug}-${stamp}.json`;
+                            a.click();
+                            URL.revokeObjectURL(url);
+                          } catch (err) {
+                            console.error("audit export failed", err);
+                          }
+                        }}
+                        className="p-1 text-gray-400 hover:text-blue-400 rounded-lg transition-colors"
+                        title="Export audit trail (plan edits, fallbacks, failures)"
+                      >
+                        <FileDown className="w-4 h-4" />
+                      </button>
                     </div>
                   )}
                 </div>

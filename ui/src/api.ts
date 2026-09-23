@@ -398,6 +398,16 @@ export async function getGoalUsage(goal_id: string): Promise<GoalUsage> {
   return res.json();
 }
 
+/** The goal's full audit trail — plan edits, fallbacks, failures, outcomes — as one document. */
+export async function getGoalAudit(goal_id: string): Promise<Record<string, unknown>> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/goals/${goal_id}/audit`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 export async function startGoal(goal_id: string, expected_version: number): Promise<Goal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/goals/${goal_id}/start`, {

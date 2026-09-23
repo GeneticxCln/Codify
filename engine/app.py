@@ -617,6 +617,126 @@ async def get_goal_usage(goal_id: str, request: Request):
     }
 
 
+@app.get("/goals/{goal_id}/audit")
+async def get_goal_audit(goal_id: str, request: Request):
+    """The goal's audit trail as one structured document, for export or review.
+
+    Everything auditable about a run, reconstructed from the event log the
+    same way the usage endpoint works — so it covers every goal that ever
+    ran, with no new event types or schema. Plan edits (with before/after
+    values), provider fallbacks (who was skipped, why, who answered instead),
+    errors and failures (with the responsible role), fix-retry loops, and
+    the outcome/status timeline all come from the same events the chat
+    transcript renders; this is the machine-readable form of the same story.
+    """
+    goals = request.app.state.goals
+    goal = goals.get(goal_id)  # 404 if unknown
+    events = goals.events_after(goal_id, 0)
+    steps = {s.id: s for s in goals.steps(goal_id)}
+
+    def step_label(step_id: str | None) -> str | None:
+        if not step_id or step_id not in steps:
+            return None
+        s = steps[step_id]
+        return f"{s.title} ({s.id})"
+
+    plan_edits = []
+    fallbacks = []
+    fix_retries = []
+    errors = []
+    status_timeline = []
+    step_outcomes = {}
+    running: set[str] = set()
+    for e in events:
+        p = e.payload or {}
+        when = e.timestamp
+        if e.type == "plan_updated":
+            changed = {}
+            for field, ch in (p.get("changes") or {}).items():
+                if ch.get("before") != ch.get("after"):
+                    changed[field] = {"from": ch.get("before"), "to": ch.get("after")}
+            if changed:
+                plan_edits.append({
+                    "step": step_label(e.step_id),
+                    "fields": list(changed),
+                    "changes": changed,
+                    "at": when,
+                })
+        elif e.type == "provider_fallback":
+            fallbacks.append({
+                "role": p.get("role"),
+                "step": step_label(e.step_id),
+                "from": p.get("from"),
+                "to": p.get("to"),
+                "code": p.get("code"),
+                "detail": p.get("detail"),
+                "at": when,
+            })
+        elif e.type == "fix_retry":
+            fix_retries.append({
+                "step": step_label(e.step_id),
+                "attempt": p.get("attempt"),
+                "max_attempts": p.get("max_attempts"),
+                "reason": p.get("reason"),
+                "at": when,
+            })
+        elif e.type == "error":
+            errors.append({
+                "step": step_label(e.step_id),
+                "role": p.get("role"),
+                "code": p.get("code"),
+                "message": p.get("message"),
+                "at": when,
+            })
+        elif e.type == "goal_status":
+            status_timeline.append({"status": p.get("status"), "version": p.get("version"), "at": when})
+        elif e.type == "step_status":
+            entry = step_outcomes.setdefault(e.step_id, {})
+            entry["step"] = step_label(e.step_id)
+            status = p.get("status")
+            if status == "IN_PROGRESS":
+                # The engine re-publishes IN_PROGRESS at every role transition
+                # inside a step (fixer → verifier → critic → scribe); only a
+                # start from a not-running state is a real attempt, or every
+                # step would report its role count as its attempt count.
+                if e.step_id not in running:
+                    running.add(e.step_id)
+                    entry["attempts"] = entry.get("attempts", 0) + 1
+                    entry["started_at"] = when
+            elif status in ("COMPLETED", "FAILED", "CANCELLED"):
+                running.discard(e.step_id)
+                entry["status"] = status
+                entry["ended_at"] = when
+    # A step open at the end (killed engine) keeps its last known status:
+    # report IN_PROGRESS rather than pretending it finished.
+    for entry in step_outcomes.values():
+        entry.setdefault("status", "IN_PROGRESS")
+
+    parallel = _parallel_peak_from_events(events)
+    return {
+        "goal_id": goal_id,
+        "prompt": goal.title,
+        "workspace_id": goal.workspace_id,
+        "mode": {
+            "plan_only": goal.plan_only,
+            "dry_run": goal.dry_run,
+            "parallel": goal.parallel,
+        },
+        "final_status": goal.status,
+        "created_at": goal.created_at,
+        "status_timeline": status_timeline,
+        "plan_edits": plan_edits,
+        "fallbacks": fallbacks,
+        "fix_retries": fix_retries,
+        "errors": errors,
+        "step_outcomes": [
+            {"step_id": sid, **entry} for sid, entry in step_outcomes.items()
+        ],
+        "parallel_peak": parallel["peak"],
+        "parallel_waves": parallel["waves"],
+    }
+
+
 @app.patch("/goals/{goal_id}/steps/{step_id}")
 async def patch_step(goal_id: str, step_id: str, body: PlanStepUpdate, request: Request):
     """Edit a plan step's title/description/paths before execution.
