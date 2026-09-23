@@ -292,6 +292,7 @@ class GoalService:
             status="PLANNING",
             dry_run=body.dry_run,
             plan_only=body.plan_only,
+            parallel=body.parallel,
             version=0,
             created_at=now,
             updated_at=now,
@@ -299,9 +300,9 @@ class GoalService:
             model=body.model,
         )
         self._db.execute(
-            """INSERT INTO goals (id, workspace_id, title, description, status, dry_run, plan_only, version, event_seq, created_at, updated_at, provider, model)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)""",
-            (goal.id, goal.workspace_id, goal.title, goal.description, goal.status, int(goal.dry_run), int(goal.plan_only), now, now, goal.provider, goal.model),
+            """INSERT INTO goals (id, workspace_id, title, description, status, dry_run, plan_only, parallel, version, event_seq, created_at, updated_at, provider, model)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)""",
+            (goal.id, goal.workspace_id, goal.title, goal.description, goal.status, int(goal.dry_run), int(goal.plan_only), int(goal.parallel), now, now, goal.provider, goal.model),
         )
         self._db.commit()
         return goal
@@ -312,6 +313,8 @@ class GoalService:
             raise ApiError(404, "unknown_goal", "goal not found")
         data = {k: row[k] for k in row.keys() if k in Goal.model_fields}
         data["dry_run"] = bool(row["dry_run"])
+        data["plan_only"] = bool(row["plan_only"])
+        data["parallel"] = bool(row["parallel"])
         return Goal.model_validate(data)
 
     def recent_run_models(self, limit: int = 5, scan_events: int = 300) -> list[dict]:
@@ -480,6 +483,15 @@ class GoalService:
     def set_dry_run(self, goal_id: str, enabled: bool) -> None:
         row = self._db.execute(
             "UPDATE goals SET dry_run = ?, updated_at = ? WHERE id = ?",
+            (int(enabled), time.time(), goal_id),
+        )
+        if row.rowcount != 1:
+            raise ApiError(404, "unknown_goal", "goal not found")
+        self._db.commit()
+
+    def set_parallel(self, goal_id: str, enabled: bool) -> None:
+        row = self._db.execute(
+            "UPDATE goals SET parallel = ?, updated_at = ? WHERE id = ?",
             (int(enabled), time.time(), goal_id),
         )
         if row.rowcount != 1:

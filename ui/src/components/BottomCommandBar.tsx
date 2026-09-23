@@ -19,6 +19,7 @@ import {
   Cpu,
   RefreshCw,
   AlertCircle,
+  Workflow,
 } from "lucide-react";
 
 export type ExecutionMode = "direct" | "dry_run" | "plan_only";
@@ -43,6 +44,9 @@ interface BottomCommandBarProps {
   onRefreshModels: () => void;
   mode: ExecutionMode;
   onChangeMode: (mode: ExecutionMode) => void;
+  /** Opt-in: independent (path-disjoint) steps of the goal run concurrently. */
+  parallel?: boolean;
+  onToggleParallel?: (on: boolean) => void;
   /**
    * Returns false when the send was refused before anything was dispatched. A
    * promise is awaited before the prompt is cleared.
@@ -67,6 +71,8 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   onRefreshModels,
   mode,
   onChangeMode,
+  parallel = false,
+  onToggleParallel,
   onSubmit,
   isLoading,
   onOpenSettings,
@@ -697,6 +703,24 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 </div>
               )}
             </div>
+
+            {/* Parallel toggle: independent (path-disjoint) steps run concurrently.
+                Safe by construction — steps that touch the same files still go
+                in order, and the sandbox/git stay serialized inside the engine. */}
+            <button
+              type="button"
+              onClick={() => onToggleParallel?.(!parallel)}
+              disabled={!onToggleParallel}
+              title="Run independent steps concurrently — steps that touch the same files still go in order"
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors cursor-pointer disabled:opacity-40 ${
+                parallel
+                  ? "bg-purple-600/20 border-purple-500/50 text-purple-300 hover:bg-purple-600/30"
+                  : "bg-[#21262d] border-[#30363d] text-gray-400 hover:bg-[#30363d]"
+              }`}
+            >
+              <Workflow className="w-3.5 h-3.5" />
+              <span>Parallel</span>
+            </button>
           </div>
 
           {/* Right Action: Submit */}

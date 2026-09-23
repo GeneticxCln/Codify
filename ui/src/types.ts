@@ -148,6 +148,8 @@ export interface Goal {
   dry_run: boolean;
   /** plan_only goals block /start until execution is explicitly enabled. */
   plan_only: boolean;
+  /** Independent (path-disjoint) steps may run concurrently. */
+  parallel: boolean;
   version: number;
   canStart: boolean;
   created_at: number;

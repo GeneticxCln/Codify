@@ -8,9 +8,18 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-PLANNER = json.dumps(
-    {"steps": [{"title": "Add banner", "description": "Create a banner file", "suggested_paths": ["banner.txt"]}]}
-)
+# FAKE_PLANNER_STEPS=2 turns the plan into two path-disjoint steps, so a live
+# parallel goal has something real to overlap.
+_PLANNER_STEPS = int(os.environ.get("FAKE_PLANNER_STEPS", "1") or 1)
+_PLANS = {
+    1: [{"title": "Add banner", "description": "Create a banner file", "suggested_paths": ["banner.txt"]}],
+    2: [
+        {"title": "Write alpha", "description": "Create alpha.txt", "suggested_paths": ["alpha.txt"]},
+        {"title": "Write beta", "description": "Create beta.txt", "suggested_paths": ["beta.txt"]},
+    ],
+}
+PLANNER = json.dumps({"steps": _PLANS.get(_PLANNER_STEPS, _PLANS[1])})
+PLANNER_NONSTREAM = PLANNER
 CODER = json.dumps(
     {"files": [{"path": "banner.txt", "action": "create", "content": "hello from codify\n"}]}
 )
@@ -222,7 +231,11 @@ class Handler(BaseHTTPRequestHandler):
                 # prompt, so Edit-Plan E2Es can prove edited plan values
                 # actually drive what gets written.
                 import re
-                m = re.search(r"Suggested paths:\n- ([^\s:]+):", prompt)
+                # The real fixer prompt embeds "Suggested paths (current
+                # contents):" then either readable lines `- path: text` or the
+                # unreadable note `- path (not readable as text)`. Match both,
+                # so the demo writes the step's actual target.
+                m = re.search(r"- ([^\s:()]+)(?: |:| \(not readable\))", prompt)
                 target = m.group(1) if m else "banner.txt"
                 out = json.dumps(
                     {"files": [{"path": target, "action": "create", "content": "hello from codify\n"}]}
@@ -259,6 +272,12 @@ class Handler(BaseHTTPRequestHandler):
         # pieces are artificial splits of the same JSON the blocking path
         # serves) — this is what exercises the engine's streaming parser.
         if payload.get("stream"):
+            # Optional per-call delay so live runs can prove step-level
+            # concurrency (two in-flight fixer calls overlap in time).
+            delay = float(os.environ.get("FAKE_FIXER_DELAY_MS", "0")) / 1000.0
+            if delay:
+                import time as _t
+                _t.sleep(delay)
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson")
             self.end_headers()

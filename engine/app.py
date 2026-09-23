@@ -667,20 +667,37 @@ def _spawn(app: FastAPI, coro, goal_id: str | None = None) -> None:
 
 
 async def _run_steps(app: FastAPI, goal_id: str) -> None:
-    for step in app.state.goals.steps(goal_id):
+    """Execute a goal's pending steps, honoring the goal's parallel flag.
+
+    Sequential by default, exactly as before. With parallel=True the steps
+    are taken in path-disjoint batches (see ExecutorService._independent_batch)
+    and each batch runs concurrently; the shared resources — sandbox and git —
+    are serialized inside run_step. A COMPLETED step is skipped in both modes
+    (a resumed goal replays only what is left).
+    """
+    executor = app.state.executor
+    remaining = [s for s in app.state.goals.steps(goal_id) if s.status != "COMPLETED"]
+    while remaining:
         refreshed = app.state.goals.get(goal_id)
         if refreshed.status != "RUNNING":
             return
-        if step.status == "COMPLETED":
-            continue
-        await app.state.executor.run_step(goal_id, step.id)
-        refreshed = app.state.goals.get(goal_id)
-        if refreshed.status != "RUNNING":
+        if refreshed.parallel:
+            batch = executor._independent_batch(remaining)
+            batch_ids = {s.id for s in batch}
+            remaining = [s for s in remaining if s.id not in batch_ids]
+            if len(batch) > 1:
+                await executor._run_parallel(goal_id, batch, None)
+            else:
+                await executor.run_step(goal_id, batch[0].id)
+        else:
+            step = remaining.pop(0)
+            await executor.run_step(goal_id, step.id)
+        if app.state.goals.get(goal_id).status != "RUNNING":
             return
     g = app.state.goals.get(goal_id)
     if g.status == "RUNNING":
         try:
-            app.state.executor._set_status(goal_id, "COMPLETED", None)
+            executor._set_status(goal_id, "COMPLETED", None)
         except ApiError:
             # Version conflict: another coroutine already updated the goal status.
             pass

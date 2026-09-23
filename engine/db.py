@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS goals (
   status TEXT NOT NULL,
   dry_run INTEGER NOT NULL DEFAULT 0,
   plan_only INTEGER NOT NULL DEFAULT 0,
+  parallel INTEGER NOT NULL DEFAULT 0,
   version INTEGER NOT NULL DEFAULT 0,
   event_seq INTEGER NOT NULL DEFAULT 0,
   created_at REAL NOT NULL,
@@ -120,6 +121,10 @@ def connect(
             pass
     try:
         conn.execute("ALTER TABLE goals ADD COLUMN plan_only INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE goals ADD COLUMN parallel INTEGER NOT NULL DEFAULT 0")
     except Exception:
         pass
     # Adding a fallback target must not require wiping an install: an existing

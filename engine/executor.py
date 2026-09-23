@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import time
@@ -431,6 +432,11 @@ class ExecutorService:
         # System-1 pre-flight gate (see engine/laya.py). Optional by design: a
         # gate that cannot run is a skipped gate, never a broken pipeline.
         self.laya = laya or LayaService(registry=registry)
+        # Shared-resource locks for parallel goals. asyncio.Lock() is loop-lazy
+        # (binds on first acquire), so constructing here — before any loop
+        # exists — is safe.
+        self._sandbox_lock = asyncio.Lock()
+        self._git_lock = asyncio.Lock()
 
     def _event(self, goal_id: str, step_id: str | None, type_: EventType, payload: dict) -> Event:
         return Event(
@@ -1046,20 +1052,76 @@ class ExecutorService:
             self._reset_step(goal_id, step)
         self._set_status(goal_id, "RUNNING", None)
 
-        for step in self.goals.steps(goal_id):
+        remaining = list(self.goals.steps(goal_id))
+        while remaining:
             refreshed = self.goals.get(goal_id)
             if refreshed.status != "RUNNING":
                 return refreshed
-            await self.run_step(goal_id, step.id, stored_files=by_step.get(step.id, []))
-            refreshed = self.goals.get(goal_id)
-            if refreshed.status != "RUNNING":
-                return refreshed
+            if refreshed.parallel:
+                batch = self._independent_batch(remaining)
+                batch_ids = {s.id for s in batch}
+                remaining = [s for s in remaining if s.id not in batch_ids]
+                if len(batch) > 1:
+                    await self._run_parallel(goal_id, batch, by_step)
+                else:
+                    await self.run_step(goal_id, batch[0].id, stored_files=by_step.get(batch[0].id, []))
+            else:
+                step = remaining.pop(0)
+                await self.run_step(goal_id, step.id, stored_files=by_step.get(step.id, []))
+            if self.goals.get(goal_id).status != "RUNNING":
+                return self.goals.get(goal_id)
 
         try:
             self._set_status(goal_id, "COMPLETED", None)
         except ApiError:
             pass
         return self.goals.get(goal_id)
+
+    def _independent_batch(self, steps: list[PlanStep]) -> list[PlanStep]:
+        """The longest prefix of steps that provably cannot observe each other.
+
+        Two steps are independent when neither's target paths appear in the
+        other's — disjoint writes AND disjoint reads, because a step reading a
+        file another step is rewriting sees torn state. A step with no paths
+        ("improve the README prose") touches nothing we can prove, so it
+        never batches: it runs alone, exactly as today. Suggested paths are a
+        plan, not a straitjacket — which is precisely why they gate parallelism
+        rather than being trusted after the fact.
+        """
+        def paths(s: PlanStep) -> set[str]:
+            return {p.strip() for p in (s.suggested_paths or []) if p.strip()}
+
+        batch: list[PlanStep] = []
+        taken: set[str] = set()
+        for step in steps:
+            mine = paths(step)
+            if not mine or mine & taken:
+                break
+            batch.append(step)
+            taken |= mine
+        return batch
+
+    async def _run_parallel(
+        self, goal_id: str, steps: list[PlanStep], stored_files: dict[str, list[dict]] | None,
+    ) -> None:
+        """Run a path-disjoint batch concurrently; failures and cancels join.
+
+        Filesystem work is disjoint by construction (the batch gates on
+        suggested_paths). The two genuinely shared resources are serialized:
+        sandbox commands (a test run sees the whole tree) and git commits
+        (the index is global). Cancel fails the whole batch promptly; an
+        exception in one step fails the goal after every sibling settles —
+        matching the sequential semantics where the next step is simply
+        never started.
+        """
+        async def run_one(step: PlanStep) -> None:
+            stored = (stored_files or {}).get(step.id)
+            await self.run_step(goal_id, step.id, stored_files=stored)
+
+        results = await asyncio.gather(*(run_one(s) for s in steps), return_exceptions=True)
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if errors:
+            raise errors[0]
 
     def _replay_files(self, goal_id: str, step: PlanStep, fs: FileSystemService, files: list[dict], dry_run: bool) -> list[dict]:
         """Apply stored file operations and emit the same diff events as _fixer."""
@@ -1270,7 +1332,12 @@ class ExecutorService:
             proposals_left -= 1
 
             try:
-                result = self.sandbox.run_command(ws.root_path, proposed, timeout_s=timeout_s)
+                # The sandbox is shared: under a parallel goal another step's
+                # test must not run in the tree this command is measuring.
+                async with self._sandbox_lock:
+                    result = await asyncio.to_thread(
+                        self.sandbox.run_command, ws.root_path, proposed, timeout_s=timeout_s,
+                    )
             except subprocess.TimeoutExpired:
                 # A hang is not a refusal (nothing was proposed wrongly, so it is
                 # not the verifier's fault) and not a pass — the command may still
@@ -1409,9 +1476,13 @@ class ExecutorService:
                 commands_left -= 1
                 argv = [str(a) for a in requested]
                 try:
-                    result = self.sandbox.run_command(
-                        ws_root, argv, timeout_s=READ_ONLY_TIMEOUT_S, mode="read_only",
-                    )
+                    # Same shared-sandbox rule as the verifier: serialized so a
+                    # concurrent step's writes cannot move under a read-only probe.
+                    async with self._sandbox_lock:
+                        result = await asyncio.to_thread(
+                            self.sandbox.run_command,
+                            ws_root, argv, timeout_s=READ_ONLY_TIMEOUT_S, mode="read_only",
+                        )
                     output = (
                         f"Command output (exit {result['exit_code']}):\n"
                         f"stdout:\n{(result['stdout'] or '')[:4000]}\n"
@@ -1488,9 +1559,14 @@ class ExecutorService:
                 )
             else:
                 # Only what this step wrote. A bare `git add -A` would commit the
-                # user's own half-finished work under this step's message.
+                # user's own half-finished work under this step's message. The git
+                # lock serializes the index: two parallel steps committing at once
+                # would otherwise interleave their staged paths.
                 paths = [d["path"] for d in diffs]
-                commit_hash = self.git.commit(root_path, commit_message, paths)
+                async with self._git_lock:
+                    commit_hash = await asyncio.to_thread(
+                        self.git.commit, root_path, commit_message, paths,
+                    )
                 if commit_hash:
                     self._log(goal_id, step.id, "info", f"git committed {commit_hash[:7]}: {commit_message}")
                 elif paths:

@@ -201,6 +201,8 @@ class Goal(BaseModel):
     # plan_only: run planning only; execution is blocked until the user
     # explicitly enables it via POST /goals/{id}/enable-execution.
     plan_only: bool = False
+    # parallel: independent steps of this goal may run concurrently.
+    parallel: bool = False
     version: int = Field(0, ge=0)
     created_at: float
     updated_at: float
@@ -256,6 +258,7 @@ class GoalCreate(BaseModel):
     description: str = Field("", max_length=20000)
     dry_run: bool = False
     plan_only: bool = False
+    parallel: bool = False
     provider: Optional[str] = None
     model: Optional[str] = None
 

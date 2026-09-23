@@ -1,6 +1,7 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import asyncio
 import json
+import re
 import subprocess
 import tempfile
 import time
@@ -1720,6 +1721,173 @@ class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
         # No usage at all is normal for some local servers.
         self.assertIsNone(normalize_usage("ollama", {"response": "hi"}))
         self.assertIsNone(normalize_usage("openai_compat", {"usage": {"prompt_tokens": "x"}}))
+
+class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
+    """Opt-in per-goal parallelism for independent steps.
+
+    A batch is the longest prefix of steps whose suggested_paths are pairwise
+    disjoint; the batch runs concurrently while the sandbox and git are
+    serialized. Every scenario drives the production loop (app._run_steps),
+    not a hand-rolled re-implementation, so the tests exercise the same code
+    path a real goal takes.
+    """
+
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.conn = connect(self.root / "t.db")
+        self.provider = _ScriptedProvider({})
+        self.registry = AgentRegistryService(
+            self.conn, _ScriptedFactory(self.provider, Keychain()), Keychain()
+        )
+        configure_every_role(self.registry)
+        self.goals = GoalService(self.conn)
+        self.workspaces = WorkspaceService(self.conn)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(), laya=_SkippedGate()
+        )
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+        self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
+
+    async def asyncTearDown(self):
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    async def _drive(self) -> float:
+        """Run the goal exactly like the API layer: start (RUNNING) then _run_steps.
+        Returns elapsed."""
+        from engine.app import _run_steps
+
+        class _App:
+            pass
+
+        app = _App()
+        app.state = _App()
+        app.state.goals = self.goals
+        app.state.executor = self.executor
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, g.version, "RUNNING")
+        started = time.monotonic()
+        await _run_steps(app, self.goal.id)
+        return time.monotonic() - started
+
+    def _script_parallel(self, delays: dict[str, float] | None = None,
+                         fail_on: str | None = None):
+        """Planner produces two path-disjoint steps; the fixer identifies its step
+        from the prompt's `Step: {title}` line (never from suggested-path contents,
+        which don't exist yet for create steps) and sleeps before writing, so
+        overlap is measurable by wall clock. fail_on: make that step's fixer raise."""
+        delays = delays or {}
+        self.provider.others["planner"] = {"steps": [
+            {"title": "a", "description": "write a", "suggested_paths": ["a.txt"]},
+            {"title": "b", "description": "write b", "suggested_paths": ["b.txt"]},
+        ]}
+        original = self.provider.complete
+
+        async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
+            role = next(
+                (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
+            )
+            self.provider.calls.append((role, user_prompt))
+            if role == "fixer":
+                m = re.search(r"^Step: (\S+)$", user_prompt, re.MULTILINE)
+                target = m.group(1) if m else "x.txt"
+                if fail_on and target == fail_on:
+                    from engine.providers import ProviderError as PE
+                    raise PE("provider_unreachable", f"boom on {target}")
+                await asyncio.sleep(delays.get(target, 0.0))
+                return json.dumps({"files": [{
+                    "path": f"{target}.txt", "action": "create", "content": f"{target} body\n",
+                }]})
+            if role == "verifier":
+                return json.dumps({"argv": None, "verdict": "pass", "explanation": "trivial"})
+            if role == "critic":
+                return json.dumps({"decision": "approve", "reasons": []})
+            if role == "scribe":
+                return json.dumps({"summary": "ok", "commit_message": "feat: ok"})
+            # Planner (and any role this wrapper does not script) answers from
+            # the underlying scripted map — dropping a role on the floor here
+            # makes planning fail silently and the goal "complete" with no steps.
+            return await original(system_prompt, user_prompt, model, temperature, max_tokens)
+
+        self.provider.complete = completing  # type: ignore[method-assign]
+
+    async def test_independent_batch_rules(self):
+        from engine.models import PlanStep
+        mk = lambda i, title, paths: PlanStep(
+            id=str(i), goal_id="g", ordinal=i, title=title, description="d",
+            status="PENDING", suggested_paths=paths,
+        )
+        batch = self.executor._independent_batch([
+            mk(0, "a", ["a.txt"]),
+            mk(1, "b", ["b.txt"]),
+            mk(2, "c", ["a.txt"]),   # collides with step 0
+        ])
+        self.assertEqual([x.title for x in batch], ["a", "b"])
+        alone = self.executor._independent_batch([mk(0, "vague", [])])
+        self.assertEqual(len(alone), 0, "a step with no paths never batches — it runs alone")
+        solo = self.executor._independent_batch([mk(0, "solo", ["s.txt"])])
+        self.assertEqual([x.title for x in solo], ["solo"])
+
+    async def test_parallel_goal_really_overlaps_and_completes(self):
+        self.goals.set_parallel(self.goal.id, True)
+        self._script_parallel(delays={"a": 0.6, "b": 0.6})
+        await self.executor.run_planning(self.goal.id)
+        elapsed = await self._drive()
+        g = self.goals.get(self.goal.id)
+        self.assertEqual(g.status, "COMPLETED", f"goal status: {g.status}")
+        # Sequential would be ~1.2s of fixer sleeps; overlapped, ~0.6s.
+        self.assertLess(elapsed, 1.05, f"steps did not overlap (took {elapsed:.2f}s)")
+        for name in ("a.txt", "b.txt"):
+            self.assertTrue((self.root / name).exists(), f"{name} missing")
+
+    async def test_sequential_goal_stays_sequential(self):
+        # No parallel flag: the same driver must take at least the SUM of the sleeps.
+        self._script_parallel(delays={"a": 0.4, "b": 0.4})
+        await self.executor.run_planning(self.goal.id)
+        elapsed = await self._drive()
+        g = self.goals.get(self.goal.id)
+        self.assertEqual(g.status, "COMPLETED", f"goal status: {g.status}")
+        self.assertGreaterEqual(elapsed, 0.8, f"sequential steps unexpectedly overlapped ({elapsed:.2f}s)")
+
+    async def test_parallel_failure_fails_the_goal_after_join(self):
+        # run_step absorbs a ProviderError into _fail (step FAILED, goal FAILED)
+        # rather than raising; _run_parallel must still join the healthy sibling
+        # before the driver observes the failure.
+        self.goals.set_parallel(self.goal.id, True)
+        self._script_parallel(delays={"a": 0.4}, fail_on="b")
+        await self.executor.run_planning(self.goal.id)
+        elapsed = await self._drive()
+        g = self.goals.get(self.goal.id)
+        self.assertEqual(g.status, "FAILED", f"expected FAILED, got {g.status}")
+        steps = self.goals.steps(self.goal.id)
+        statuses = {s.title: s.status for s in steps}
+        self.assertEqual(statuses["b"], "FAILED", f"statuses: {statuses}")
+        # The healthy sibling a.txt (0.4s of work) must have been allowed to
+        # finish: its file exists, proving the batch joined rather than
+        # abandoning it the instant b failed.
+        self.assertTrue((self.root / "a.txt").exists(), "healthy sibling was abandoned")
+
+    async def test_cancel_fails_the_batch_promptly(self):
+        self.goals.set_parallel(self.goal.id, True)
+        self._script_parallel(delays={"a": 0.35, "b": 0.35})
+        await self.executor.run_planning(self.goal.id)
+        remaining = [s for s in self.goals.steps(self.goal.id) if s.status != "COMPLETED"]
+        self.assertEqual(len(remaining), 2)
+
+        async def cancel_soon():
+            await asyncio.sleep(0.05)
+            g = self.goals.get(self.goal.id)
+            self.goals.update_status(self.goal.id, g.version, "CANCELLED")
+
+        started = time.monotonic()
+        await asyncio.gather(cancel_soon(), self._drive())
+        elapsed = time.monotonic() - started
+        g = self.goals.get(self.goal.id)
+        self.assertEqual(g.status, "CANCELLED", f"expected CANCELLED, got {g.status}")
+        # A cancel must stop the batch promptly, not wait out the sleeps.
+        self.assertLess(elapsed, 1.0, f"cancel did not stop the batch promptly ({elapsed:.2f}s)")
+
 
 class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
     """Streamed replies reach the chat as coalesced snapshot events.

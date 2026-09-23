@@ -302,12 +302,14 @@ export async function createGoal(
   dry_run: boolean,
   provider?: string,
   model?: string,
-  plan_only: boolean = false
+  plan_only: boolean = false,
+  parallel: boolean = false
 ): Promise<Goal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const payload: Record<string, any> = { workspace_id, title, description, dry_run, plan_only };
   if (provider) payload.provider = provider;
   if (model) payload.model = model;
+  if (parallel) payload.parallel = true;
 
   const res = await fetch(`${base}/goals`, {
     method: "POST",

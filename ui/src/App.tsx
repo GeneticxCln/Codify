@@ -56,6 +56,8 @@ export const App: React.FC = () => {
   const [agentConfigs, setAgentConfigs] = useState<AgentConfig[]>([]);
   const [recentRuns, setRecentRuns] = useState<RecentRunModel[]>([]);
   const [mode, setMode] = useState<ExecutionMode>("direct");
+  // Opt-in parallelism: independent (path-disjoint) steps of a goal run concurrently.
+  const [parallel, setParallel] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -411,6 +413,7 @@ export const App: React.FC = () => {
     try {
       const isDryRun = mode === "dry_run";
       const isPlanOnly = mode === "plan_only"; // now backed by a real engine field
+      const parallelEnabled = parallel; // independent steps may run concurrently
       // The engine caps titles at 200 chars; send the full prompt as the
       // description so the planner sees every word regardless of length.
       const goal = await createGoal(
@@ -420,7 +423,8 @@ export const App: React.FC = () => {
         isDryRun,
         selectedModel.provider,
         selectedModel.id,
-        isPlanOnly
+        isPlanOnly,
+        parallelEnabled
       );
 
       const fullGoal = await getGoal(goal.id);
@@ -695,6 +699,8 @@ export const App: React.FC = () => {
           onRefreshModels={() => loadModels(true)}
           mode={mode}
           onChangeMode={setMode}
+          parallel={parallel}
+          onToggleParallel={setParallel}
           onSubmit={handleSendMessage}
           isLoading={isLoading}
           onOpenSettings={() => openSettings("keys")}
