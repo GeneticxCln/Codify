@@ -433,6 +433,49 @@ const UsageCard: React.FC<{ goalId: string }> = ({ goalId }) => {
  * badges are live while running and stay correct after completion, with no
  * extra fetch. Only non-zero counts render.
  */
+type AuditMarkerKind = "edits" | "fallbacks" | "errors";
+
+/**
+ * Scroll the transcript to the Nth transcript entry carrying
+ * `data-audit-marker="<kind>"` for the given goal card, and flash it so the
+ * eye lands. Used by the card's audit badges — a count is a claim; the jump
+ * is the evidence behind it.
+ *
+ * `scope` (the card container) keeps the search inside ONE goal's transcript:
+ * with several goal cards rendered, an unscoped query would jump to the first
+ * card's entry regardless of which card's badge was clicked.
+ *
+ * `index` cycles through the matches: the badge's click handler advances a
+ * per-badge cursor and wraps back to 0 after the last entry, so repeated
+ * clicks walk through every match instead of landing on the first forever.
+ *
+ * Scrolls instantly on purpose: `behavior: "smooth"` is a silent no-op in
+ * embedded Chromium (verified live — the click fired, the flash played, the
+ * container never moved), so a smooth travel would leave users on some builds
+ * staring at an unmoved transcript. The flash is the motion cue instead.
+ * Called only from event handlers, never during render.
+ */
+function scrollToAuditMarker(kind: AuditMarkerKind, scope: ParentNode, index: number): void {
+  const matches = scope.querySelectorAll(`[data-audit-marker="${kind}"]`);
+  if (matches.length === 0) return;
+  const el = matches[Math.min(index, matches.length - 1)];
+  // scrollIntoView walks up to the nearest scrollable ancestor — the
+  // transcript container — so the entry, not the page, is what moves.
+  el.scrollIntoView({ block: "center" });
+  // Force a reflow so re-clicking the badge restarts the animation.
+  el.classList.remove("audit-flash", `audit-flash-${kind}`);
+  void (el as HTMLElement).offsetWidth;
+  el.classList.add("audit-flash", `audit-flash-${kind}`);
+}
+
+/**
+ * Per-badge cycling cursor: which match a badge's next click jumps to.
+ * Keyed by `messageId:kind` and held at module level — a view cursor, not
+ * data — so it survives the re-renders that streaming events trigger every
+ * few hundred milliseconds. Wraps via modulo in the click handler.
+ */
+const auditMarkerCursor = new Map<string, number>();
+
 function auditSummary(events: Event[] | undefined): {
   edits: number;
   fallbacks: number;
@@ -500,6 +543,10 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   const bottomRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState<{ goalId: string; stepId: string } | null>(null);
   // The failure being investigated, if any.
+  // Per-goal-card DOM scopes for audit-badge jumps: a badge must scroll to
+  // entries in ITS card's transcript, not the first card that happens to
+  // render. Keyed by message id; entries clean up on unmount.
+  const cardScopes = useRef(new Map<string, HTMLElement>());
   const [diagnosis, setDiagnosis] = useState<{
     code: string;
     message: string;
@@ -562,7 +609,15 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
 
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 max-w-4xl mx-auto w-full">
-      {messages.map((msg) => (
+      {messages.map((msg) => {
+        // Scope the audit-badge jumps to THIS card: several goal cards render
+        // in one transcript, and an unscoped document query would jump to the
+        // first card's entry regardless of which badge was clicked.
+        const scopeRef = (node: HTMLDivElement | null) => {
+          if (node) cardScopes.current.set(msg.id, node);
+          else cardScopes.current.delete(msg.id);
+        };
+        return (
         <div key={msg.id} className="space-y-4">
           {/* User Message */}
           {msg.role === "user" ? (
@@ -581,7 +636,10 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                 <Bot className="w-4 h-4" />
               </div>
 
-              <div className="flex-1 bg-[#161b22] border border-[#30363d] rounded-2xl p-4 sm:p-5 shadow-lg space-y-4">
+              <div
+                ref={scopeRef}
+                className="flex-1 bg-[#161b22] border border-[#30363d] rounded-2xl p-4 sm:p-5 shadow-lg space-y-4"
+              >
                 {/* An imported audit document renders as a standalone report —
                     it has no live goal, so it short-circuits the whole
                     execution-card chrome. */}
@@ -641,35 +699,63 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                     )}
                     {/* One-line audit summary: the counts the audit export
                         would show, computed live from this message's events.
-                        Each badge appears only when non-zero. */}
+                        Each badge appears only when non-zero — and clicking
+                        one scrolls the transcript to the matching entry, so
+                        the count's evidence is one click away. */}
                     {(() => {
                       const summary = auditSummary(msg.events);
                       if (!summary) return null;
+                      const badgeCls =
+                        "text-[10px] px-1.5 py-0.5 rounded border font-semibold transition-colors cursor-pointer";
+                      // Each click advances this badge's cursor through the
+                      // matches and wraps. The wrap bound is the LIVE marker
+                      // count in this card, not the badge number: both derive
+                      // from the same events, but the DOM is the thing actually
+                      // being cycled, so it can never disagree with itself.
+                      const jump = (kind: AuditMarkerKind) => () => {
+                        const scope = cardScopes.current.get(msg.id);
+                        if (!scope) return;
+                        const total = scope.querySelectorAll(`[data-audit-marker="${kind}"]`).length;
+                        if (total === 0) return;
+                        const key = `${msg.id}:${kind}`;
+                        const index = auditMarkerCursor.get(key) ?? 0;
+                        scrollToAuditMarker(kind, scope, index);
+                        auditMarkerCursor.set(key, (index + 1) % total);
+                      };
                       return (
                         <>
                           {summary.edits > 0 && (
-                            <span
-                              className="text-[10px] px-1.5 py-0.5 rounded bg-violet-950/40 border border-violet-800 text-violet-300 font-semibold"
-                              title="Plan steps were edited after planning (see the transcript for before/after)"
+                            <button
+                              type="button"
+                              onClick={jump("edits")}
+                              className={`${badgeCls} bg-violet-950/40 border-violet-800 text-violet-300 hover:bg-violet-900/60`}
+                              title="Plan steps were edited after planning — click to cycle through each edit"
+                              aria-label="Plan steps were edited after planning — click to cycle through each edit"
                             >
                               {summary.edits} edit{summary.edits === 1 ? "" : "s"}
-                            </span>
+                            </button>
                           )}
                           {summary.fallbacks > 0 && (
-                            <span
-                              className="text-[10px] px-1.5 py-0.5 rounded bg-teal-950/40 border border-teal-800 text-teal-300 font-semibold"
-                              title="Model calls that fell back to another provider/model"
+                            <button
+                              type="button"
+                              onClick={jump("fallbacks")}
+                              className={`${badgeCls} bg-teal-950/40 border-teal-800 text-teal-300 hover:bg-teal-900/60`}
+                              title="Model calls that fell back — click to cycle through each fallback"
+                              aria-label="Model calls that fell back — click to cycle through each fallback"
                             >
                               {summary.fallbacks} fallback{summary.fallbacks === 1 ? "" : "s"}
-                            </span>
+                            </button>
                           )}
                           {summary.errors > 0 && (
-                            <span
-                              className="text-[10px] px-1.5 py-0.5 rounded bg-red-950/40 border border-red-800 text-red-300 font-semibold"
-                              title="Errors recorded during the run"
+                            <button
+                              type="button"
+                              onClick={jump("errors")}
+                              className={`${badgeCls} bg-red-950/40 border-red-800 text-red-300 hover:bg-red-900/60`}
+                              title="Errors recorded during the run — click to cycle through each error"
+                              aria-label="Errors recorded during the run — click to cycle through each error"
                             >
                               {summary.errors} error{summary.errors === 1 ? "" : "s"}
-                            </span>
+                            </button>
                           )}
                         </>
                       );
@@ -1178,7 +1264,10 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             // edit (paths + rename) must be auditable in full,
                             // not reduced to whichever branch won the if/else.
                             return (
-                              <div className="flex items-start gap-1.5 pl-2 text-violet-300">
+                              <div
+                                className="flex items-start gap-1.5 pl-2 text-violet-300 rounded"
+                                data-audit-marker="edits"
+                              >
                                 <Pencil className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                                 <span className="leading-relaxed">
                                   Plan edited —{" "}
@@ -1232,7 +1321,10 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               because the reply that follows came from a different
                               model, and the transcript must not credit the wrong one. */}
                           {ev.type === "provider_fallback" && (
-                            <div className="flex items-start gap-1.5 pl-2 text-teal-300">
+                            <div
+                              className="flex items-start gap-1.5 pl-2 text-teal-300 rounded"
+                              data-audit-marker="fallbacks"
+                            >
                               <Route className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                               <span className="leading-relaxed">
                                 <span className="font-semibold">{ev.payload.role}</span> fell back to{" "}
@@ -1287,7 +1379,10 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                           )}
 
                           {ev.type === "error" && (
-                            <div className="p-2 rounded-lg bg-red-950/40 border border-red-800 text-red-300 font-semibold flex flex-col gap-2">
+                            <div
+                              className="p-2 rounded-lg bg-red-950/40 border border-red-800 text-red-300 font-semibold flex flex-col gap-2"
+                              data-audit-marker="errors"
+                            >
                               <span>
                                 Error [{ev.payload.code}]: {ev.payload.message}
                               </span>
@@ -1362,7 +1457,8 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
             </div>
           )}
         </div>
-      ))}
+        );
+      })}
       <div ref={bottomRef} />
 
       {diagnosis && (

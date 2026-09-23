@@ -26,3 +26,25 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #484f58;
 }
+
+/* Clicking an audit badge on a goal card scrolls to the matching transcript
+   entry and flashes it, so the count's evidence is one click away. Each kind
+   flashes in its badge's own color family, so the flash points at the entry
+   type the badge counted. */
+@keyframes audit-flash-bg {
+  0% { background-color: var(--audit-flash-color); }
+  100% { background-color: transparent; }
+}
+.audit-flash {
+  animation: audit-flash-bg 1.5s ease-out;
+}
+.audit-flash-edits { --audit-flash-color: rgba(167, 139, 250, 0.28); }      /* violet-400 */
+.audit-flash-fallbacks { --audit-flash-color: rgba(45, 212, 191, 0.28); }   /* teal-400 */
+.audit-flash-errors { --audit-flash-color: rgba(248, 113, 113, 0.28); }     /* red-400 */
+
+/* Users who opt out of motion get the instant jump without the flash. */
+@media (prefers-reduced-motion: reduce) {
+  .audit-flash {
+    animation: none;
+  }
+}
