@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState } from "react";
-import { AgentRole, ChatMessage, PlanStep } from "../types";
+import { AgentRole, ChatMessage, Event, PlanStep } from "../types";
 import { FailureDiagnosisPanel } from "./FailureDiagnosisPanel";
 import { DiffViewer } from "./DiffViewer";
 import { LayaDecision } from "../types";
@@ -48,6 +48,141 @@ function layaNumber(value: unknown): number | null {
   const n = typeof value === "string" ? parseFloat(value) : value;
   return typeof n === "number" && Number.isFinite(n) ? n : null;
 }
+
+/**
+ * One step's execution window, reconstructed from the step_status events:
+ * when it started, when it ended, and which other steps were in flight with
+ * it (by step id). Windows from different runs of the same step (a retry)
+ * are kept separately — a retry is a second bar, not a stretched first one.
+ */
+interface StepWindow {
+  start: number;
+  end: number | null; // null = still running
+  overlaps: Set<string>; // step ids whose windows intersect this one
+}
+
+function buildStepWindows(events: Event[]): Map<string, StepWindow[]> {
+  const open: { stepId: string; start: number; overlaps: Set<string> }[] = [];
+  const byStep = new Map<string, StepWindow[]>();
+  for (const ev of events) {
+    if (ev.type !== "step_status" || !ev.step_id) continue;
+    const status = ev.payload?.status;
+    if (status === "IN_PROGRESS") {
+      // The engine re-publishes IN_PROGRESS at every role transition inside a
+      // step (fixer → verifier → critic → scribe), so this is idempotent per
+      // step: only the FIRST start opens a window. Otherwise a step would
+      // render five bars and count its own re-entries as "other steps".
+      if (open.some((o) => o.stepId === ev.step_id)) continue;
+      // Every currently-open window overlaps this one, and vice versa.
+      const entry = { stepId: ev.step_id, start: ev.timestamp, overlaps: new Set<string>() };
+      for (const o of open) {
+        o.overlaps.add(ev.step_id);
+        entry.overlaps.add(o.stepId);
+      }
+      open.push(entry);
+    } else if (status === "COMPLETED" || status === "FAILED") {
+      // Close this step's open window (a retry opens a fresh one later).
+      const windows = byStep.get(ev.step_id) ?? [];
+      const pendingIdx = open.findIndex((o) => o.stepId === ev.step_id);
+      if (pendingIdx !== -1) {
+        const [w] = open.splice(pendingIdx, 1);
+        windows.push({ start: w.start, end: ev.timestamp, overlaps: w.overlaps });
+        byStep.set(ev.step_id, windows);
+      }
+    }
+  }
+  // Still-open windows belong to a running goal (or a killed engine); render
+  // them as running — the bar extends to "now" in the component.
+  for (const o of open) {
+    const windows = byStep.get(o.stepId) ?? [];
+    windows.push({ start: o.start, end: null, overlaps: o.overlaps });
+    byStep.set(o.stepId, windows);
+  }
+  return byStep;
+}
+
+/**
+ * Timeline bars for one step: one row per execution window, drawn on a shared
+ * axis from the goal's first step start to its last step end. The overlap
+ * shading is computed from the event log itself, so a bar can only claim
+ * concurrency when the log shows another step genuinely in flight.
+ */
+/**
+ * Durations in chat-readable form: sub-second runs as milliseconds, then
+ * seconds with one decimal, then whole seconds + minutes. The usage card and
+ * the bars share the vocabulary so "2.4s" means the same thing in both.
+ */
+function formatDuration(seconds: number): string {
+  if (seconds < 1) return `${Math.round(seconds * 1000)}ms`;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return `${m}m ${s}s`;
+}
+
+const StepTimelineBars: React.FC<{
+  windows: StepWindow[];
+  axis: { start: number; end: number | null };
+  running: boolean;
+}> = ({ windows, axis, running }) => {
+  const span = Math.max((axis.end ?? Date.now() / 1000) - axis.start, 0.001);
+  return (
+    <div className="ml-6 mt-1 flex flex-col gap-1">
+      {windows.map((w, i) => {
+        const left = ((w.start - axis.start) / span) * 100;
+        const endAt = w.end ?? Date.now() / 1000;
+        const width = ((endAt - w.start) / span) * 100;
+        const hasOverlap = w.overlaps.size > 0;
+        const overlapCount = w.overlaps.size;
+        const duration = formatDuration(Math.max(endAt - w.start, 0));
+        return (
+          <div key={i} className="flex items-center gap-2">
+            {/* The bar itself, on the shared axis. */}
+            <div
+              className="relative h-2.5 flex-1 rounded bg-[#161b22] overflow-hidden"
+              title={
+                hasOverlap
+                  ? `Ran alongside ${overlapCount} other step${overlapCount === 1 ? "" : "s"} — ${duration}`
+                  : `Ran alone — ${duration}`
+              }
+            >
+              <div
+                className={`absolute h-full rounded ${
+                  w.end === null
+                    ? "bg-blue-500 animate-pulse"
+                    : hasOverlap
+                    ? "bg-blue-600/70"
+                    : "bg-[#30363d]"
+                }`}
+                style={{ left: `${Math.max(left, 0)}%`, width: `${Math.min(Math.max(width, 1), 100)}%` }}
+              />
+              {hasOverlap && (
+                <div
+                  className="absolute h-full bg-blue-400/40"
+                  title="overlap window"
+                  style={{ left: `${Math.max(left, 0)}%`, width: `${Math.min(Math.max(width, 1), 100)}%` }}
+                />
+              )}
+            </div>
+            {/* The runtime, readable without hovering. Still-running windows
+                recompute on every render (the poll refresh re-renders the
+                card), so a live goal counts up in place. */}
+            <span
+              className={`text-[9px] font-mono tabular-nums flex-shrink-0 ${
+                w.end === null ? "text-blue-400" : "text-gray-500"
+              }`}
+            >
+              {duration}
+            </span>
+          </div>
+        );
+      })}
+      {running && (
+        <span className="text-[9px] text-gray-500 font-mono">running…</span>
+      )}
+    </div>
+  );
+};
 
 const LayaGateCard: React.FC<{ payload: Record<string, any> }> = ({ payload }) => {
   const decision = payload as Partial<LayaDecision>;
@@ -515,7 +650,27 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         )}
                     </div>
                     <div className="space-y-2">
-                      {msg.goal.steps.map((step: PlanStep) => (
+                      {(() => {
+                        // Shared timeline axis: from the first step start to the
+                        // last step end (or "now" while anything is running), so
+                        // every bar sits on the same scale and overlap is visible
+                        // as aligned bars, not just claimed by color.
+                        const windowsByStep = msg.events?.length ? buildStepWindows(msg.events) : new Map();
+                        let axisStart = Infinity;
+                        let axisEnd: number | null = null;
+                        for (const ws of windowsByStep.values()) {
+                          for (const w of ws) {
+                            axisStart = Math.min(axisStart, w.start);
+                            axisEnd = w.end === null ? null : (axisEnd === null ? Math.max(axisEnd ?? 0, w.end) : Math.max(axisEnd, w.end));
+                          }
+                        }
+                        const axis = Number.isFinite(axisStart)
+                          ? { start: axisStart, end: axisEnd }
+                          : null;
+                        const anyRunning = msg.goal?.status === "RUNNING";
+                        return msg.goal.steps.map((step: PlanStep) => {
+                          const windows = windowsByStep.get(step.id) ?? [];
+                          return (
                         <div
                           key={step.id}
                           className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3 flex flex-col gap-1.5"
@@ -601,6 +756,19 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 {step.description}
                               </p>
 
+                              {/* When this step ran, on the goal's shared axis.
+                                  Aligned bars across cards = overlap you can see;
+                                  blue = ran alongside another step, gray = alone,
+                                  pulsing = still running. One row per execution
+                                  (a retry adds a second bar). */}
+                              {axis && windows.length > 0 && (
+                                <StepTimelineBars
+                                  windows={windows}
+                                  axis={axis}
+                                  running={anyRunning && step.status === "IN_PROGRESS"}
+                                />
+                              )}
+
                               {step.review_notes && (
                                 <div className="ml-6 mt-1 p-2 rounded-lg bg-amber-950/30 border border-amber-800/60 text-xs text-amber-300 flex items-start gap-1.5">
                                   <ShieldCheck className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
@@ -620,7 +788,9 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             </>
                           )}
                         </div>
-                      ))}
+                          );
+                        });
+                      })()}
                     </div>
                   </div>
                 )}
