@@ -297,5 +297,7 @@ export interface ChatMessage {
   goal?: Goal;
   events?: Event[];
   isStreaming?: boolean;
+  /** A downloaded audit document imported into the transcript for review. */
+  auditDoc?: object;
 }
 

@@ -4,6 +4,7 @@ import { FailureDiagnosisPanel } from "./FailureDiagnosisPanel";
 import { DiffViewer } from "./DiffViewer";
 import { LayaDecision } from "../types";
 import { getGoalUsage, GoalUsage, getGoalAudit } from "../api";
+import { AuditReport } from "./AuditReport";
 import {
   User,
   Bot,
@@ -28,6 +29,7 @@ import {
   Coins,
   Workflow,
   FileDown,
+  FileUp,
 } from "lucide-react";
 
 /**
@@ -441,6 +443,8 @@ interface ChatTimelineProps {
   onQuickPrompt: (prompt: string) => void;
   /** Opens Settings on the tab that holds the fix. */
   onOpenSettings: (tab: "keys" | "agents") => void;
+  /** Opens a file picker and imports an exported audit JSON as a report message. */
+  onImportAudit: () => void;
 }
 
 export const ChatTimeline: React.FC<ChatTimelineProps> = ({
@@ -454,6 +458,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   onRetryStep,
   onQuickPrompt,
   onOpenSettings,
+  onImportAudit,
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState<{ goalId: string; stepId: string } | null>(null);
@@ -502,6 +507,18 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
             </button>
           ))}
         </div>
+
+        {/* Import an exported audit document back into the transcript as a
+            readable report — a closed artifact, reviewable with no engine. */}
+        <button
+          type="button"
+          onClick={onImportAudit}
+          className="mt-4 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#161b22] border border-[#30363d] hover:border-blue-500/40 text-xs text-gray-400 hover:text-blue-400 transition-colors"
+          title="Open an exported audit-trail JSON and view it as a report"
+        >
+          <FileUp className="w-3.5 h-3.5" />
+          Import audit report…
+        </button>
       </div>
     );
   }
@@ -528,6 +545,22 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
               </div>
 
               <div className="flex-1 bg-[#161b22] border border-[#30363d] rounded-2xl p-4 sm:p-5 shadow-lg space-y-4">
+                {/* An imported audit document renders as a standalone report —
+                    it has no live goal, so it short-circuits the whole
+                    execution-card chrome. */}
+                {msg.auditDoc ? (
+                    <>
+                      <div className="flex items-center gap-2 text-xs font-semibold text-gray-300 border-b border-[#30363d]/60 pb-3">
+                        <FileUp className="w-3.5 h-3.5 text-blue-400" />
+                        Imported audit report
+                        {msg.content && (
+                          <span className="ml-auto font-normal text-[10px] text-gray-500">{msg.content}</span>
+                        )}
+                      </div>
+                      <AuditReport doc={msg.auditDoc as never} />
+                    </>
+                ) : (
+                <>
                 {/* Header: Title and Status */}
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#30363d]/60 pb-3">
                   <div className="flex items-center gap-2">
@@ -1250,6 +1283,8 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       })()}
                     </div>
                   </div>
+                )}
+                </>
                 )}
               </div>
             </div>

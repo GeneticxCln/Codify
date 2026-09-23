@@ -34,6 +34,7 @@ import {
 } from "./api";
 import { BottomCommandBar, ExecutionMode } from "./components/BottomCommandBar";
 import { ChatTimeline } from "./components/ChatTimeline";
+import { looksLikeAudit } from "./components/AuditReport";
 import { SettingsModal } from "./components/SettingsModal";
 import { openGoalStream, GoalStreamHandle } from "./goalStream";
 import { Code, Settings, FolderGit2, AlertCircle } from "lucide-react";
@@ -368,6 +369,43 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [messages, mode]);
 
+  /** Import a downloaded audit JSON back into the transcript as a readable
+   * report. A closed artifact: it needs no engine connection, so a run can be
+   * reviewed long after the goal (or the machine that ran it) is gone. */
+  const handleImportAudit = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json,.json";
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const doc = JSON.parse(text);
+        if (!looksLikeAudit(doc)) {
+          setError(
+            `"${file.name}" is not a Codify audit export — expected a JSON document with plan_edits / fallbacks / step_outcomes.`
+          );
+          return;
+        }
+        setError(null);
+        const imported: ChatMessage = {
+          id: `audit-${Date.now()}`,
+          role: "assistant",
+          content: `${file.name}`,
+          timestamp: Date.now(),
+          auditDoc: doc,
+        };
+        setMessages((prev) => [...prev, imported]);
+      } catch (err) {
+        setError(
+          `Could not read "${file.name}": ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    };
+    input.click();
+  };
+
   /**
    * Returns false when the prompt was refused *before* anything was dispatched, so
    * the command bar can keep the text. Losing a long prompt because a picker is
@@ -680,6 +718,7 @@ export const App: React.FC = () => {
           onRetryStep={handleRetryStep}
           onQuickPrompt={(text) => handleSendMessage(text)}
           onOpenSettings={openSettings}
+          onImportAudit={handleImportAudit}
         />
 
         {/* Bottom Pinned Command Center — pickers live on the toolbar's left
