@@ -7,10 +7,11 @@ import secrets
 import socket
 import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Header, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -19,6 +20,9 @@ from engine.db import connect
 from engine.executor import ExecutorService
 from engine.laya import LayaService
 from engine.role_repair import plan_role_repair
+from engine.stats import build_overview, normalize_window
+from engine.stats_history import StatsSnapshotService
+from engine.stats_import import StatsImportInvalid, StatsImportService
 from engine.model_catalog import ModelCatalogService
 from engine.models import (
     BUILTIN_PROVIDERS,
@@ -51,7 +55,13 @@ BOOT_TOKEN = os.environ.get("CODIFY_BOOT_TOKEN") or secrets.token_hex(32)
 def pick_port() -> int:
     env = os.environ.get("CODIFY_PORT")
     if env:
-        return int(env)
+        try:
+            port = int(str(env).strip())
+        except (TypeError, ValueError):
+            raise RuntimeError(f"invalid CODIFY_PORT={env!r}: must be an integer 1024-65535")
+        if not 1024 <= port <= 65535:
+            raise RuntimeError(f"invalid CODIFY_PORT={port}: must be 1024-65535")
+        return port
     for port in range(7430, 7441):
         with socket.socket() as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -79,6 +89,13 @@ async def lifespan(app: FastAPI):
     app.state.sandbox = SandboxService()
     app.state.settings = SettingsService(conn)
     app.state.models = ModelCatalogService(app.state.registry, keychain)
+    # One frozen statistics document per past day, written lazily on the first
+    # stats read after a day ends (see engine/stats_history.py).
+    app.state.stats_snapshots = StatsSnapshotService(conn)
+    # The stats-history document the user imported from a file, kept so it
+    # survives a restart. Separate from snapshots: an imported day is another
+    # machine's measurement, not one this engine froze (see engine/stats_import.py).
+    app.state.stats_imports = StatsImportService(conn)
     # The gate needs the registry for its LLM fallback when the real Laya SDK is
     # not installed; without it every goal's gate would silently skip.
     app.state.laya = LayaService(registry=app.state.registry)
@@ -269,6 +286,86 @@ async def list_agents(request: Request):
     return request.app.state.registry.list_configs()
 
 
+@app.get("/settings/agents/stats")
+async def agent_call_stats(request: Request, limit: int = Query(20, ge=1, le=100)):
+    """What actually happened to each role the last time it ran, and how often.
+
+    The roadmap's "per-agent cost/latency stats on Agents settings cards": read
+    from the event log the goals already write, so it covers every goal that
+    ever ran — the same source the audit and usage endpoints sweep — with no
+    new store and no probing of live providers. A card that claims "last call
+    1.2s" is quoting the run that happened, not a health check.
+
+    Registered before /settings/agents/{role} for the same reason /repair is:
+    FastAPI matches in declaration order, and "stats" is a valid role shape —
+    the parameterised route would swallow this one whole.
+
+    Both an agent's success and its failure land here: a `usage` event records
+    a completed call (with its duration), an `agent_call_failed` records one
+    that did not. `last` is whichever is newer — a role that only ever fails
+    shows its failure, never a comforting blank.
+    """
+    conn = request.app.state.conn
+    types = ("usage", "agent_call_failed")
+    placeholders = ",".join("?" for _ in types)
+    rows = conn.execute(
+        f"""SELECT type, payload, timestamp FROM events
+            WHERE type IN ({placeholders})
+            ORDER BY timestamp DESC, sequence DESC
+            LIMIT ?""",
+        (*types, max(1, int(limit)) * 20),
+    ).fetchall()
+
+    stats: dict[str, dict] = {
+        role: {
+            "role": role,
+            "last_call": None,
+            "calls_seen": 0,
+            "failures_seen": 0,
+            "last_error": None,
+        }
+        for role in ROLES
+    }
+
+    def _load(raw) -> dict:
+        try:
+            return json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            return {}
+
+    for row in rows:
+        p = _load(row["payload"])
+        role = p.get("role")
+        if role not in stats:
+            continue
+        entry = stats[role]
+        happened_at = row["timestamp"]
+        if row["type"] == "usage":
+            entry["calls_seen"] += 1
+            duration_ms = p.get("duration_ms")
+            if entry["last_call"] is None:
+                entry["last_call"] = {
+                    # duration_ms may be absent on events written before the
+                    # field existed; null reads as "unknown", not "instant".
+                    "duration_ms": duration_ms if isinstance(duration_ms, (int, float)) else None,
+                    "provider": p.get("provider"),
+                    "model": p.get("model"),
+                    "at": happened_at,
+                }
+        else:
+            entry["failures_seen"] += 1
+            if entry["last_error"] is None:
+                entry["last_error"] = {
+                    "code": p.get("code"),
+                    "message": p.get("message"),
+                    "provider": p.get("provider"),
+                    "model": p.get("model"),
+                    "at": happened_at,
+                }
+
+    return {"stats": [stats[role] for role in ROLES], "scanned_events": len(rows)}
+
+
 @app.post("/settings/agents/repair")
 async def repair_agents(request: Request):
     """Point the roles that cannot run at a model this engine has discovered.
@@ -303,7 +400,9 @@ async def repair_agents(request: Request):
     )
 
     repaired: list[dict] = []
-    if plan.changed:
+    # `plan.changed` already means the target is set (see the property in
+    # `engine/role_repair.py`); this says so where the target is dereferenced.
+    if plan.changed and plan.target is not None:
         for role, reason in plan.to_repair:
             patch: dict = {"provider": plan.target["provider"], "model_name": plan.target["model"]}
             # The protocol comes from the catalog entry the engine discovered, so a
@@ -448,7 +547,7 @@ while Gtk.events_pending():
 
     folder_name = Path(path).name or path
     ws_service: WorkspaceService = request.app.state.workspaces
-    for ws in ws_service.list():
+    for ws in ws_service.list_workspaces():
         if ws.root_path == path:
             return {"cancelled": False, "workspace": ws.model_dump()}
 
@@ -496,6 +595,13 @@ async def get_engine_settings(request: Request):
             "min": 1,
             "max": 16,
         },
+        "stats_retention_days": {
+            "value": settings.get_int("stats_retention_days"),
+            # The band mirrors SettingsService.SPEC's clamp. 0 keeps everything;
+            # the max is the bound a fat-fingered "999999" clamps down to.
+            "min": 0,
+            "max": 730,
+        },
     }
 
 
@@ -507,7 +613,9 @@ async def put_engine_settings(body: dict, request: Request):
     settings: SettingsService = request.app.state.settings
     out: dict[str, int] = {}
     for key, value in body.items():
-        if key == "parallel_width":
+        if key in ("parallel_width", "stats_retention_days"):
+            if isinstance(value, bool):
+                raise ApiError(422, "invalid_value", f"{key} must be an integer, not a boolean")
             try:
                 out[key] = settings.set_int(key, int(value))
             except (TypeError, ValueError):
@@ -519,7 +627,7 @@ async def put_engine_settings(body: dict, request: Request):
 
 @app.get("/workspaces")
 async def list_ws(request: Request):
-    return request.app.state.workspaces.list()
+    return request.app.state.workspaces.list_workspaces()
 
 
 @app.get("/workspaces/{workspace_id}")
@@ -527,11 +635,57 @@ async def get_ws(workspace_id: str, request: Request):
     return request.app.state.workspaces.get(workspace_id)
 
 
+@app.delete("/workspaces/{workspace_id}")
+async def delete_ws(
+    workspace_id: str,
+    request: Request,
+    delete_goals: bool = False,
+):
+    """Forget a workspace, and with it the goal history recorded against it.
+
+    Declared before nothing in particular (no sibling path shape to shadow) but
+    after the GET so the route table reads in CRUD order. Two things this
+    deliberately does *not* do, both stated in the response so a caller never
+    has to guess:
+
+    - it never touches the directory at `root_path`. This deletes Codify's
+      record of a folder, not the folder. A user reading "delete workspace"
+      should never have to wonder whether their project just went away.
+    - it never deletes goals implicitly. `delete_goals=true` is the explicit
+      opt-in, and a workspace with history is a 409 (with the goal count)
+      until the caller asks for it, instead of the bare IntegrityError the FK
+      used to produce.
+    """
+    return request.app.state.workspaces.delete(workspace_id, delete_goals=delete_goals)
+
+
 @app.post("/goals")
 async def create_goal(body: GoalCreate, request: Request):
     goal = request.app.state.goals.create(body)
     _spawn(request.app, request.app.state.executor.run_planning(goal.id), goal.id)
     return goal
+
+
+@app.get("/goals")
+async def list_goals(
+    request: Request,
+    workspace_id: str | None = None,
+    status: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """Goal history, newest first (active goals lead, so a just-dispatched goal
+    never sinks under a wall of finished runs).
+
+    The one read the docs' data model always implied and the API never shipped:
+    every goal is persisted, but with no list route the only survivors of an app
+    restart were the goals still open in a browser tab. `GET /goals/{id}` plus
+    `GET /goals/{id}/events?after=0` is the restore path — this route is how a
+    client finds out which ids to restore.
+    """
+    return request.app.state.goals.list_goals(
+        workspace_id=workspace_id, status=status, limit=limit, offset=offset
+    )
 
 
 @app.get("/goals/{goal_id}")
@@ -665,7 +819,7 @@ async def get_goal_audit(goal_id: str, request: Request):
     fix_retries = []
     errors = []
     status_timeline = []
-    step_outcomes = {}
+    step_outcomes: dict[str, dict] = {}
     running: set[str] = set()
     for e in events:
         p = e.payload or {}
@@ -790,6 +944,176 @@ async def get_goal_audit(goal_id: str, request: Request):
     }
 
 
+async def _sweep_stats(conn) -> tuple[list[dict], list[dict]]:
+    """The raw material the stats views aggregate: goal rows and parsed call
+    events. One loader for both the live overview and the snapshot writer, so
+    the two can never read different worlds."""
+    goal_rows = conn.execute(
+        "SELECT id, status, created_at, updated_at FROM goals ORDER BY created_at DESC LIMIT 5000"
+    ).fetchall()
+    events = conn.execute(
+        """SELECT type, payload, timestamp FROM events
+           WHERE type IN ('usage', 'agent_call_failed')
+           ORDER BY timestamp DESC LIMIT 20000"""
+    ).fetchall()
+    parsed = []
+    for row in events:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        parsed.append({"type": row["type"], "payload": payload, "timestamp": row["timestamp"]})
+    return [dict(r) for r in goal_rows], parsed
+
+
+@app.get("/stats/overview")
+async def stats_overview(request: Request, window: int = Query(0)):
+    """Cross-goal statistics: outcomes, success rate, spend, and a daily trend.
+
+    The per-goal endpoints answer "what happened in this run"; this answers the
+    question that needs many runs — is this setup working, what does it cost,
+    is it trending better or worse. Everything is aggregated from the stores
+    that already exist (the goals table and the `usage` / `agent_call_failed`
+    events), so it covers goals that ran before any of this existed.
+
+    The arithmetic lives in `engine/stats.py` as a pure function over plain
+    dicts — same shape as `role_repair` — so the numbers are testable without
+    HTTP and cannot drift between how they are computed and how they are tested.
+
+    The first read after a day ends also freezes that day's final document into
+    `stats_snapshots` (`engine/stats_history.py`), which is what lets the trend
+    survive engine restarts and outlive the log entries it was computed from —
+    and enforces the `stats_retention_days` policy (Settings → Engine: how many
+    recent days to keep, 0 = keep everything), so the table's growth is a
+    decision rather than an accident. A snapshot or prune failure is swallowed:
+    history maintenance must never be able to fail the read that happens to
+    trigger it.
+
+    `window` is in days: 1, 7, 30, or 0 = all time (the default, and the only
+    honest view for a fresh install). An unknown window clamps to 7 rather than
+    erroring, because a stats view has no broken state to refuse.
+    """
+    conn = request.app.state.conn
+    goals, parsed = await _sweep_stats(conn)
+    now = time.time()
+
+    # Freeze yesterday, once, then enforce retention. The service owns the day
+    # boundary and the "already frozen" check; this only decides that a
+    # failure to maintain history is not worth failing the present. Deliberately
+    # silent: log events live in the per-goal stream, and a snapshot has no
+    # goal to attribute itself to. Pruning on read (not only on freeze) is what
+    # makes a lowered policy take effect without waiting for tomorrow.
+    try:
+        snapshots: StatsSnapshotService = request.app.state.stats_snapshots
+        snapshots.maybe_snapshot(conn, goals, parsed, now)
+        retention = request.app.state.settings.get_int("stats_retention_days")
+        snapshots.prune(retention)
+    except Exception:
+        pass
+
+    window_days = normalize_window(window)
+    overview = build_overview(goals, parsed, window_days=window_days, now=now)
+    return {**overview, "generated_at": now}
+
+
+@app.get("/stats/history")
+async def stats_history(request: Request, limit: int = Query(120, ge=0, le=730)):
+    """One frozen document per past day, oldest first — the long memory.
+
+    `limit=0` returns every stored frozen day, which is the full-history export
+    path; a positive limit keeps the chart request bounded.
+
+    Each entry is the complete overview document that day ended with, computed
+    by the same engine build that served it live and stored at full fidelity:
+    per-role and per-model spend, call durations, and the daily rows are all
+    still in there, so a week-old question ("which model was I spending on
+    last Tuesday?") stays answerable no matter what has since happened to the
+    live log. The current day is deliberately absent — it is still moving and
+    belongs to `/stats/overview`.
+
+    `day_stats` is the entry's own calendar day, extracted from the frozen
+    document's daily rows and stated explicitly. The document's top-level
+    `goals` block is cumulative-to-that-day — reading it as "that day's
+    outcomes" is the mistake that made a chart double-count its window — so
+    the per-day view the trend charts need is a named field, not an inference.
+    """
+    snapshots: StatsSnapshotService = request.app.state.stats_snapshots
+    days = snapshots.history(limit=limit)
+    out = []
+    for entry in days:
+        doc = entry["document"]
+        day_row = next(
+            (r for r in doc.get("daily", []) if r.get("date") == entry["day"]), None
+        )
+        out.append({
+            "day": entry["day"],
+            "day_stats": day_row
+            or {
+                # A frozen day always has activity (a day with none gets no
+                # row), so this is belt-and-braces — but a zeroed row reads as
+                # an honest empty day rather than crashing the chart.
+                "date": entry["day"], "created": 0, "succeeded": 0,
+                "failed": 0, "cancelled": 0, "total_tokens": 0, "calls": 0,
+            },
+            **doc,
+        })
+    return {"days": out}
+
+
+@app.get("/stats/import")
+async def get_stats_import(request: Request):
+    """The currently-imported stats-history document, if there is one.
+
+    This is what makes an import survive a restart: the Stats panel asks for it
+    on open and gets back the same frozen days it showed before. `imported` is
+    false rather than a 404 when nothing is stored, because "no import yet" is
+    a normal state the panel renders every day, not a missing resource.
+    """
+    service: StatsImportService = request.app.state.stats_imports
+    stored = service.get()
+    if stored is None:
+        return {"imported": False, "days": [], "source": None, "imported_at": None}
+    return {
+        "imported": True,
+        "days": stored["days"],
+        "source": stored["source"] or None,
+        "imported_at": stored["imported_at"],
+        "exported_at": stored["exported_at"],
+    }
+
+
+@app.post("/stats/import")
+async def post_stats_import(body: dict, request: Request):
+    """Validate and persist an exported stats-history document.
+
+    The engine re-validates rather than trusting the client: a hand-edited file,
+    a different build of the UI, or a hand-rolled curl must not be able to get
+    an unvalidated document into the store where the chart would later render
+    it as measured fact. A refusal is a 422 carrying the engine's own reason,
+    so the panel can show the same wording its client-side check would have.
+
+    The document *replaces* any previous import rather than merging — one
+    imported file at a time, matching what the panel holds.
+    """
+    service: StatsImportService = request.app.state.stats_imports
+    # `source` rides alongside the document rather than inside it: it is a label
+    # about the upload, not part of the exported artifact, and must not become
+    # part of what gets re-exported.
+    document = {k: v for k, v in (body or {}).items() if k != "source"}
+    try:
+        result = service.replace(document, (body or {}).get("source"))
+    except StatsImportInvalid as exc:
+        raise ApiError(422, exc.code, exc.message) from exc
+    return {"imported": True, **result}
+
+
+@app.delete("/stats/import")
+async def delete_stats_import(request: Request):
+    """Forget the current import. Idempotent: clearing an empty import is fine."""
+    service: StatsImportService = request.app.state.stats_imports
+    return {"imported": False, "cleared": service.clear()}
+
+
 @app.patch("/goals/{goal_id}/steps/{step_id}")
 async def patch_step(goal_id: str, step_id: str, body: PlanStepUpdate, request: Request):
     """Edit a plan step's title/description/paths before execution.
@@ -830,6 +1154,33 @@ async def cancel_goal(goal_id: str, body: VersionedAction, request: Request):
     if g.status not in ("PLANNING", "RUNNING", "PAUSED", "PENDING"):
         raise ApiError(409, "illegal_status", f"cannot cancel from {g.status}")
     return request.app.state.goals.update_status(goal_id, body.expected_version, "CANCELLED")
+
+
+@app.delete("/goals/{goal_id}")
+async def delete_goal(goal_id: str, request: Request):
+    """Delete a goal and everything recorded about it.
+
+    The event log, plan steps, and dry-run proposals cascade with it. The
+    response counts them so the UI can state what went rather than shrugging
+    with "deleted".
+
+    Refused while the goal is PLANNING or RUNNING, and re-checked here against
+    the executor's live driver set: a coroutine that outlives its row would keep
+    publishing events for a goal that no longer exists. The user cancels first,
+    which is also the only honest way to stop work already touching files.
+    """
+    goals = request.app.state.goals
+    goal = goals.get(goal_id)  # 404 if unknown
+    executor = getattr(request.app.state, "executor", None)
+    if goal.status in ("PLANNING", "RUNNING") or (
+        executor is not None and executor.is_driving(goal_id)
+    ):
+        raise ApiError(
+            409, "goal_in_progress",
+            f"this goal is {goal.status.lower()} — cancel it before deleting it",
+            {"goal_id": goal_id, "status": goal.status},
+        )
+    return goals.delete(goal_id)
 
 
 @app.get("/goals/{goal_id}/events")
@@ -902,7 +1253,7 @@ async def enable_execution(goal_id: str, body: VersionedAction, request: Request
         raise ApiError(409, "version_conflict", "version mismatch", {"current": g.model_dump()})
     if not g.plan_only:
         return g  # idempotent
-    updated = goals.set_plan_only(goal_id, False)
+    goals.set_plan_only(goal_id, False)
     request.app.state.executor._set_status(goal_id, "PENDING", None)
     return request.app.state.goals.get(goal_id)
 
@@ -921,6 +1272,8 @@ def _spawn(app: FastAPI, coro, goal_id: str | None = None) -> None:
             await coro
         except Exception as exc:  # last line of defence for background work
             if goal_id is None:
+                import sys
+                print(f"background task failed with no goal: {exc}", file=sys.stderr)
                 return
             try:
                 app.state.executor._fail(
@@ -1011,7 +1364,8 @@ async def ws_goal(websocket: WebSocket, goal_id: str):
         try:
             msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
             auth_msg = json.loads(msg)
-            if auth_msg.get("type") == "auth" and auth_msg.get("token") == expected_token:
+            token = str(auth_msg.get("token") or "")
+            if auth_msg.get("type") == "auth" and secrets.compare_digest(token, expected_token):
                 authenticated = True
         except Exception:
             pass
@@ -1031,10 +1385,25 @@ async def ws_goal(websocket: WebSocket, goal_id: str):
 
     after = 0
     try:
+        misses = 0
         while True:
-            for event in websocket.app.state.goals.events_after(goal_id, after):
+            try:
+                websocket.app.state.goals.get(goal_id)
+            except ApiError:
+                await websocket.close(code=4404)
+                return
+            batch = websocket.app.state.goals.events_after(goal_id, after)[:500]
+            for event in batch:
                 await websocket.send_text(event.model_dump_json())
                 after = event.sequence
+            if not batch:
+                misses += 1
+            else:
+                misses = 0
+            if misses > 20:
+                # Goal deleted mid-loop would otherwise spin forever; re-check
+                # above already closes it. Reset counter to keep polling cheap.
+                misses = 0
             await asyncio.sleep(0.25)
     except WebSocketDisconnect:
         pass
@@ -1059,9 +1428,13 @@ def main() -> None:
     # wire-level stream tests). uvicorn serves the pre-bound socket, so the
     # port is owned by this process end to end.
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", port))
-    sock.listen(128)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port))
+        sock.listen(128)
+    except OSError:
+        sock.close()
+        raise
     print(f"CODIFY_ENGINE token={BOOT_TOKEN} port={port}", flush=True)
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)
