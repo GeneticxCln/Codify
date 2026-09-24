@@ -1,0 +1,134 @@
+name: check
+
+# CONTRIBUTING.md states the bar in one line: "`make check` must pass." This runs
+# that same gate in CI — the union of the three jobs below is exactly the targets
+# `make check` depends on (lint, typecheck, test-ui, test, test-streams, build-ui,
+# check-tauri), split by toolchain so a Python failure cannot hide a Rust one and
+# each job installs only the toolchain it needs.
+#
+# Until this existed there was no CI at all, and the failures that reached the
+# repository were the ones a single local interpreter cannot see: a PEP 701
+# f-string that parsed on 3.14 and was a SyntaxError on the declared 3.10 minimum,
+# and a WebSocket isolation test that skipped itself (passing) whenever an
+# undeclared `websockets` package was missing.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: python ${{ matrix.python }} — lint, tests, stream isolation
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor pyproject.toml declares (`requires-python`) and 3.14 the
+        # newest tested. Both ends are covered deliberately: the engine is spawned
+        # as `python3 -m engine` by the desktop shell, so the floor is a real
+        # deployment target rather than a formality.
+        python: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: engine/requirements.txt
+
+      - name: Install engine dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r engine/requirements.txt
+          # Dev tools, not engine dependencies; `make lint`/`make typecheck` need
+          # them on PATH.
+          python -m pip install "ruff>=0.6" "mypy>=1.11"
+
+      # Rules and target-version are pinned in pyproject.toml, so this checks the
+      # same thing on every machine — including the syntax ruff only rejects for
+      # the declared 3.10 target.
+      - name: Lint
+        run: make lint
+
+      # mypy's python_version = "3.10" (same pin, same reason): on the 3.10 leg it
+      # resolves against the real old stdlib types, on 3.14 it still checks the
+      # floor's rules — two views of the same annotations, one job.
+      - name: Typecheck
+        run: make typecheck
+
+      - name: Tests
+        run: make test
+
+      # Run by name on purpose: the stream-isolation guarantees must stay in the
+      # gate even if the discovery pattern is ever narrowed.
+      - name: Stream isolation
+        run: make test-streams
+
+  ui:
+    name: ui — unit tests, typecheck, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # `make test-ui` runs the TypeScript tests directly through
+          # `node --test --experimental-strip-types`, which needs 22.6+. The Vite
+          # build only needs 18+, so 22 is the floor for the whole UI job.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install UI dependencies
+        run: npm ci
+        working-directory: ui
+
+      # `npm run build` typechecks and bundles but never executes ui/tests/, which
+      # is why these are two separate steps.
+      - name: UI unit tests
+        run: make test-ui
+
+      - name: Typecheck and build
+        run: make build-ui
+
+  rust:
+    name: rust — cargo check, fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # Tauri v2 links the platform webview: without these the crate does not
+      # compile at all on a bare runner.
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libssl-dev \
+            pkg-config \
+            build-essential
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # `cargo check` compiles without the frontend bundle, so this job needs no
+      # Node toolchain — verified by running it with ui/dist removed.
+      - name: Check
+        run: make check-tauri

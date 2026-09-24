@@ -1,4 +1,8 @@
-.PHONY: help test test-engine test-streams build-ui dev-ui check-tauri build-tauri run-engine run-engine-scratch check clean
+.PHONY: help test test-engine test-streams test-ui lint typecheck build-ui dev-ui check-tauri build-tauri run-engine run-engine-scratch check clean
+
+# mypy is a dev tool, installed like ruff (`pip install mypy` or `pip install -e ".[dev]"`);
+# when it is only in the project venv, fall back to that so `make check` works unactivated.
+MYPY ?= $(shell command -v mypy 2>/dev/null || echo .venv/bin/mypy)
 
 # Where a scratch engine keeps its state. Nothing under the real ~/.codify is opened.
 SCRATCH_HOME ?= /tmp/codify-scratch
@@ -7,14 +11,21 @@ help:
 	@echo "Codify Development Commands:"
 	@echo "  make test         - Run full Python test suite (includes the concurrency/stream tests)"
 	@echo "  make test-streams - Run the concurrency/stream-isolation tests explicitly, by name"
+	@echo "  make test-ui      - Run the React/TypeScript unit tests (node --test, needs Node 22.6+)"
+	@echo "  make lint         - Lint engine, tests and scripts with ruff (rules pinned in pyproject.toml)"
+	@echo "  make typecheck    - Static-type-check engine, tests and scripts with mypy (config in pyproject.toml)"
 	@echo "  make build-ui     - Typecheck and build React frontend (Vite)"
 	@echo "  make dev-ui       - Start Vite dev server"
 	@echo "  make check-tauri  - Cargo check Tauri Rust backend"
 	@echo "  make build-tauri  - Build Tauri desktop application"
 	@echo "  make run-engine   - Start Codify Python engine standalone"
 	@echo "  make run-engine-scratch - Start an engine isolated under $(SCRATCH_HOME) (real ~/.codify untouched)"
-	@echo "  make check        - Run all verifications (Python tests + stream tests + UI build + Tauri check)"
+	@echo "  make check        - Run all verifications (ruff + UI tests + Python tests + stream tests + UI build + Tauri check)"
 	@echo "  make clean        - Remove caches and build artifacts"
+	@echo ""
+	@echo "Prerequisites: engine needs \`pip install -r engine/requirements.txt\` (plus \`pip install ruff mypy\`"
+	@echo "for the checks, or one \`pip install -e \".[dev]\"\`); the ui targets need \`npm install\` in ui/,"
+	@echo "and \`make test-ui\` needs Node 22.6+."
 
 test: test-engine
 
@@ -30,6 +41,29 @@ test-engine:
 test-streams:
 	python3 -m unittest tests.test_concurrent_streams tests.test_concurrent_streams_ws -v
 
+# `npm run build` typechecks and bundles; it does not *execute* the tests in
+# ui/tests/, which assert the client-side rules the chat depends on (goal stream
+# framing, model ordering, failure diagnosis, stats-history merging). They run
+# directly through `node --test` with type stripping, so they need no build step
+# and no bundler — but that flag landed in Node 22.6.
+test-ui:
+	cd ui && npm test
+
+# Ruff's rule selection is pinned in pyproject.toml (target-version = the declared
+# minimum Python), so this is the same check on every machine and in CI. It covers
+# tests/ and scripts/ too: a dead local in a test is a lost assertion, and this
+# project's whole bar is what the suite proves.
+lint:
+	ruff check engine tests scripts
+
+# Same scope as lint (engine, tests, scripts) — ruff sees the syntax and the dead
+# names, mypy sees the annotated-but-wrong types neither it nor the tests catch
+# (an annotation like `tuple[int, callable]` names a *builtin*, not the type, and
+# no runtime check fires on it). Config lives in pyproject.toml: the 3.10 floor,
+# the pydantic plugin, and the same engine+tests+scripts file set.
+typecheck:
+	$(MYPY)
+
 build-ui:
 	cd ui && npm run build
 
@@ -38,7 +72,11 @@ dev-ui:
 
 check-tauri:
 	cd src-tauri && cargo check
+	cd src-tauri && cargo fmt --check
 
+# NOTE: this only compiles the Rust lib (`cargo build`). It does NOT produce a
+# desktop installer — that needs the Tauri CLI, which is not vendored in ui/
+# (`npm i -D @tauri-apps/cli`, then `npx tauri build` from the repo root).
 build-tauri:
 	cd src-tauri && cargo build
 
@@ -52,10 +90,15 @@ run-engine-scratch:
 	@echo "Isolated engine: all state under $(SCRATCH_HOME)"
 	CODIFY_HOME=$(SCRATCH_HOME) python3 -m engine
 
-check: test test-streams build-ui check-tauri
+# The fastest checks first, so the cheap failure is the one you read. CI runs the
+# same targets, split by toolchain (.github/workflows/check.yml).
+check: lint typecheck test-ui test test-streams build-ui check-tauri
 	@echo "All verifications passed successfully!"
 
+# Removes build artifacts and tool caches only. graphify-out's tracked entries were
+# untracked from the index (kept on disk, ignored by .gitignore), so `clean` no longer
+# deletes anything version-controlled — it may clear the directory's caches wholesale.
 clean:
-	rm -rf ui/dist src-tauri/target __pycache__ engine/__pycache__ tests/__pycache__
+	rm -rf ui/dist src-tauri/target __pycache__ engine/__pycache__ tests/__pycache__ .pytest_cache .ruff_cache .mypy_cache graphify-out/cache coverage
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true

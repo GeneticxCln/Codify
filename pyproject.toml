@@ -32,6 +32,58 @@ dev = [
     "mypy>=1.11",
 ]
 
+[tool.mypy]
+# The same floor as ruff below, for the same reason: the engine is booted as
+# `python3 -m engine`, so what the declared minimum interpreter accepts is a
+# deployment question, not a preference.
+python_version = "3.10"
+# Everything the project ships, tests included: the suite is the only thing holding
+# most of these contracts, and a test that indexes an Optional or unpacks a value
+# into the wrong shape is a failing assertion waiting to happen.
+files = ["engine", "tests", "scripts"]
+# pydantic v2 models are not understood without it. Without the plugin a field
+# declared `fallback_model_name: str = Field("", ...)` reads as a *required*
+# argument, so every model constructor reports missing arguments it does not have —
+# three of them in `engine/models.py` alone.
+plugins = ["pydantic.mypy"]
+check_untyped_defs = true
+no_implicit_optional = true
+strict_equality = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+# Deliberately not --strict. This is the first type check this codebase has had,
+# and the job is to catch wrong types in what is *already* annotated — not to
+# demand annotations everywhere in the same change. Turning on
+# disallow_untyped_defs is the next step, once the current findings are gone.
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# The Laya System-1 SDK is optional by design: `engine/laya.py` probes for it and
+# falls back to the LLM gate when it is absent (docs/05). It is not a dependency
+# and ships no stubs, so a missing import here is the documented normal case.
+module = ["laya", "laya.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+# The oldest interpreter this project promises (`requires-python` above). Pinned
+# here rather than inferred, so ruff reports syntax that 3.10/3.11 reject instead
+# of accepting whatever the developer's own interpreter happens to allow. A PEP 701
+# f-string reached `engine/executor.py` that way: it parsed on 3.14 and was a
+# SyntaxError on the declared minimum. CI runs the suite on 3.10 to prove it.
+target-version = "py310"
+
+[tool.ruff.lint]
+# Ruff's documented default set, written out so `make lint` cannot change meaning
+# with the ruff build or a machine-local config. That is not hypothetical: the ruff
+# on the maintainer's machine checks ~400 rules by default, which turned a gate that
+# should pass into 189 findings nobody had triaged.
+#
+# E4  import handling      E7  statements        E9  syntax errors
+# F   pyflakes: unused imports/variables, undefined names, redefinitions
+#
+# Wider sets (security, bugbear, modernization) are worth adopting one at a time,
+# with their fixes, rather than switching on hundreds of findings at once.
+select = ["E4", "E7", "E9", "F"]
 
 [tool.setuptools.packages.find]
 include = ["engine*"]

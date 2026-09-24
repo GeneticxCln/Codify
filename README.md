@@ -35,7 +35,7 @@ Codify follows a strict two-tier architecture:
 │  │  intent · risk · prompt-injection → block before LLMs │  │
 │  └──────────────────────────┬────────────────────────────┘  │
 │  ┌──────────────────────────┴────────────────────────────┐  │
-│  │            Subagent Orchestrator (6 slots)            │  │
+│  │       Subagent Orchestrator (6 pipeline stages)       │  │
 │  │  Librarian ─► Planner ─► [ Fixer ─► Verifier ─►       │  │
 │  │   read only     no tools   writer    runs commands   │  │
 │  │                            Critic  ─► Scribe ]        │  │
@@ -101,7 +101,7 @@ is never dressed up as *"your model was retired"*. Every finding that has a fix 
 screen that holds it: **Add a key for openai** opens Provider Keys, **Choose a current model** opens
 that role's card in Agent Roles.
 
-### The System-1 Gate + 5 Subagent Roles
+### The System-1 Gate + 6 Pipeline Roles
 
 Before any LLM is called, every goal passes a **pre-flight gate**: [Laya](https://github.com/NandhaKishorM/laya),
 a non-generative decision engine that answers typed questions (`choice` / `score` / `noul`) about the
@@ -109,7 +109,11 @@ request in a single forward pass — intent, risk, and a **calibrated** prompt-i
 Injection at `≥ 0.85` fails the goal before the planner runs; softer signals only warn. See
 [`docs/05-laya-system-1-gate.md`](docs/05-laya-system-1-gate.md).
 
-Then Codify runs a sequential subagent pipeline. Each slot is a **different ability**, enforced by the
+Then Codify runs a sequential subagent pipeline over 6 stages. Together with the gate that is
+**7 roles** (`laya`, `librarian`, `planner`, `fixer`, `verifier`, `critic`, `scribe` — see
+`engine/models.py` `ROLES`). Independent steps of a `parallel` goal run concurrently, bounded by the
+configurable parallel width (default 4, `parallel_width` setting, 1–16 — see `engine/executor.py`
+`DEFAULT_PARALLEL_WIDTH`), not by a slot count. Each role is a **different ability**, enforced by the
 engine rather than requested of the prompt:
 
 | Role | Runs | Ability | Responsibility |
@@ -146,8 +150,10 @@ the right file. See [`docs/01`](docs/01-subagent-orchestration-spec.md) §1.1 an
 
 ### Prerequisites
 
-- **Python**: 3.10+ (tested up to 3.14)
-- **Node.js**: 18+ (tested with Node 20 / 26)
+- **Python**: 3.10+ (tested up to 3.14) — the engine is booted as `python3 -m engine`, so this is a
+  real deployment floor, not a formality
+- **Node.js**: 18+ to build the UI (tested with Node 20 / 26); **22.6+** to run the UI test suite,
+  which `make test-ui` executes with `node --experimental-strip-types`
 - **Rust / Cargo**: 1.77+ (for desktop shell)
 
 ### Setup & Installation
@@ -170,10 +176,19 @@ cd ui && npm install && cd ..
 make check
 ```
 This executes:
-1. Full Python test suite (216 unit & integration tests)
-2. The concurrency/stream-isolation tests explicitly, by name (`make test-streams`)
-3. UI TypeScript validation and Vite production build
-4. Tauri Rust crate typecheck via `cargo check`
+1. `ruff check engine tests scripts` — the Python linter, with its rule set and target Python pinned in
+   `pyproject.toml` (`make lint`)
+2. `mypy` over the same files — static type checking with its config (the 3.10 floor, the pydantic
+   plugin) pinned in `pyproject.toml` (`make typecheck`)
+3. The React/TypeScript unit tests in `ui/tests/` (`make test-ui`)
+4. Full Python test suite (411 unit & integration tests — the number moves; trust the run)
+5. The concurrency/stream-isolation tests explicitly, by name (`make test-streams`)
+6. UI TypeScript validation and Vite production build
+7. Tauri Rust crate typecheck via `cargo check`, plus `cargo fmt --check`
+
+CI runs those same targets on every push and pull request — Python on **3.10 and 3.14**, Node 22, and
+stable Rust (`.github/workflows/check.yml`). 3.10 matters: a construct that only 3.12+ parses is
+invisible on a modern interpreter and fatal on the declared minimum.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the rules of the road — what needs a
 test, where the isolation guarantees live, and how to run hermetically.
@@ -185,6 +200,14 @@ test, where the isolation guarantees live, and how to run hermetically.
 cd src-tauri
 cargo run
 ```
+
+> **Bundled app requires Python 3.10+.** The Tauri shell does not embed the
+> engine: at startup it spawns `python3 -m engine` from the project root and
+> reads the `CODIFY_ENGINE token=… port=…` handshake from its stdout
+> (see `src-tauri/src/lib.rs` `launch_engine`). A packaged `.AppImage`/`.dmg`
+> therefore needs a system Python 3.10+ with the engine dependencies installed
+> (`pip install -r engine/requirements.txt`) — otherwise the window opens with
+> no engine behind it.
 
 #### Option B: Standalone Engine + Vite Dev Server
 ```bash
@@ -217,7 +240,7 @@ runs; a plain `python3 -m engine` is the only thing that ever opens `~/.codify`.
 Codify/
 ├── engine/                # FastAPI backend & orchestration engine
 │   ├── app.py             # FastAPI routes, WebSocket handler & lifespan
-│   ├── executor.py        # Gate + 5-stage agent execution & state transitions
+│   ├── executor.py        # Gate + 6-stage pipeline execution & state transitions
 │   ├── laya.py            # Laya System-1 pre-flight gate (SDK + LLM fallback)
 │   ├── models.py          # Pydantic domain models & schemas
 │   ├── providers.py       # LLM provider implementations (Anthropic, OpenAI, Gemini, Ollama)
@@ -228,7 +251,7 @@ Codify/
 │   ├── model_catalog.py   # Live model discovery per provider (no hardcoded lists)
 │   ├── db.py              # SQLite connection, WAL configuration, and seeders
 │   ├── home.py            # Where state lives (CODIFY_HOME) + the isolated-run guarantee
-│   └── default_prompts.py # System prompts for all 6 subagent roles
+│   └── default_prompts.py # System prompts for all 7 roles
 ├── ui/                    # React 19 + TypeScript desktop frontend
 │   ├── src/
 │   │   ├── components/    # ChatTimeline, BottomCommandBar, SettingsModal, AgentConfigCard, …
@@ -242,7 +265,7 @@ Codify/
 │   │   └── main.rs        # Application entry point
 │   ├── tauri.conf.json    # Tauri configuration & capabilities
 │   └── Cargo.toml         # Rust dependencies
-├── tests/                 # Comprehensive test suite (85 tests)
+├── tests/                 # Comprehensive test suite (22 modules, incl. the minimum-Python syntax guard)
 │   ├── test_api.py        # HTTP & WebSocket route integration tests
 │   ├── test_apply_flow.py # Dry-run → apply flow, guards & status events
 │   ├── test_laya.py       # Gate policy, engines, and the block path
@@ -272,8 +295,8 @@ make test
 python3 -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-All 192 tests run in sub-second time without external network calls, using deterministic mock providers and
-in-memory/temporary databases.
+The Python suite runs in ~37s without external network calls, using deterministic mock providers and
+in-memory/temporary databases; `make test-ui` adds the TypeScript tests in `ui/tests/`.
 
 The suite is **hermetic by construction**: `tests/hermetic.py` points every test at a throwaway state
 directory and disables the OS keychain for the process, so no test — including the ones that build a
