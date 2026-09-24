@@ -464,6 +464,9 @@ class ExecutorService:
         # Optional settings store (SettingsService). Attached by app lifespan
         # when present; tests without one just get the default width.
         self.settings = None
+        # One driver per goal: start, retry, and apply each spawn a driver
+        # loop, and two loops on one goal re-run the same steps concurrently.
+        self._drivers: set[str] = set()
 
     def _event(self, goal_id: str, step_id: str | None, type_: EventType, payload: dict) -> Event:
         return Event(
@@ -491,6 +494,23 @@ class ExecutorService:
         return DEFAULT_PARALLEL_WIDTH
 
     # --- public -------------------------------------------------------
+
+    def claim_driver(self, goal_id: str) -> bool:
+        """Take exclusive right to drive this goal's steps.
+
+        start, retry, and apply each spawn a driver loop. Without this guard a
+        retry landing mid-run spawned a SECOND driver that re-read the same
+        unfinished steps — two fixers on the same files, the exact torn write
+        the batching gate exists to prevent. Single-threaded event loop makes
+        the check-then-set atomic between awaits.
+        """
+        if goal_id in self._drivers:
+            return False
+        self._drivers.add(goal_id)
+        return True
+
+    def release_driver(self, goal_id: str) -> None:
+        self._drivers.discard(goal_id)
 
     async def run_planning(self, goal_id: str) -> None:
         goal = self.goals.get(goal_id)
@@ -585,9 +605,22 @@ class ExecutorService:
                         goal_id, None, "plan_consult",
                         {"refused": refused, "material_chars": len(served)},
                     ))
+                    # The invitation must match the budget: on the last allowed
+                    # follow-up this previously still offered "one more", and a
+                    # planner that took the offer failed its own contract on the
+                    # next round. Say how many are actually left.
+                    if consults_left > 0:
+                        tail = (
+                            f"You may ask {consults_left} more follow-up"
+                            f"{'s' if consults_left != 1 else ''} after this one."
+                            if consults_left > 1
+                            else "This was your last follow-up — produce the plan now."
+                        )
+                    else:
+                        tail = "You have no follow-ups left — produce the plan now."
                     prompt = (
                         f"{prompt}\n\n--- The librarian answered your follow-up ---\n{served}\n\n"
-                        "Now produce the plan (or one more follow-up, if you have none left)."
+                        f"Now produce the plan. {tail}"
                     )
                     continue
                 steps = self._parse_steps(out)
@@ -1072,7 +1105,14 @@ class ExecutorService:
         goal = self.goals.get(goal_id)
         if goal.status not in ("COMPLETED", "FAILED"):
             raise ApiError(409, "illegal_status", f"cannot apply from {goal.status}")
+        if not self.claim_driver(goal_id):
+            raise ApiError(409, "driver_busy", "another driver is already running this goal")
+        try:
+            return await self._apply_goal_locked(goal_id)
+        finally:
+            self.release_driver(goal_id)
 
+    async def _apply_goal_locked(self, goal_id: str) -> Goal:
         rows = self.goals._db.execute(
             "SELECT step_id, path, action, content FROM proposed_files WHERE goal_id = ? ORDER BY rowid",
             (goal_id,),
@@ -1101,10 +1141,18 @@ class ExecutorService:
         # named. Batching on the guess here would prove disjointness for paths
         # nothing writes while two replays race on the same real file.
         def effective_paths(step_id: str) -> set[str]:
+            """A step's real apply footprint: its stored proposals, falling back
+            to suggested_paths for a step that proposed nothing (it still runs
+            its verifier/critic/scribe tail, so it needs *some* footprint to be
+            provable). Steps are looked up from the store each call — a step
+            deleted mid-run must yield an empty set, not an AttributeError."""
             paths = {f["path"] for f in by_step.get(step_id, []) if f.get("path")}
-            return paths or {p.strip() for p in (
-                next((s for s in self.goals.steps(goal_id) if s.id == step_id), None).suggested_paths or []
-            ) if p.strip()}
+            if paths:
+                return paths
+            step = next((s for s in self.goals.steps(goal_id) if s.id == step_id), None)
+            if step is None:
+                return set()
+            return {p.strip() for p in (step.suggested_paths or []) if p.strip()}
 
         remaining = list(self.goals.steps(goal_id))
         while remaining:
@@ -1117,7 +1165,9 @@ class ExecutorService:
                 remaining = [s for s in remaining if s.id not in batch_ids]
                 if len(batch) > 1:
                     try:
-                        await self._run_parallel(goal_id, batch, by_step)
+                        await self._run_parallel(
+                            goal_id, batch, by_step, paths_for=effective_paths,
+                        )
                     except ApiError as exc:
                         # Dispatch re-check found the disjointness proof stale
                         # (the plan changed under us). Not a failure: re-read
@@ -1125,8 +1175,14 @@ class ExecutorService:
                         self._log(goal_id, None, "warn", f"batch refused, re-batching: {exc.message}")
                         remaining = [s for s in self.goals.steps(goal_id) if s.status != "COMPLETED"]
                         continue
-                else:
+                elif batch:
                     await self.run_step(goal_id, batch[0].id, stored_files=by_step.get(batch[0].id, []))
+                else:
+                    # The head step's footprint is unprovable (no proposals, no
+                    # suggested paths): it runs alone, same contract as the
+                    # normal driver.
+                    head = remaining.pop(0)
+                    await self.run_step(goal_id, head.id, stored_files=by_step.get(head.id, []))
             else:
                 step = remaining.pop(0)
                 await self.run_step(goal_id, step.id, stored_files=by_step.get(step.id, []))
@@ -1186,6 +1242,7 @@ class ExecutorService:
 
     async def _run_parallel(
         self, goal_id: str, steps: list[PlanStep], stored_files: dict[str, list[dict]] | None,
+        paths_for: Any = None,
     ) -> None:
         """Run a path-disjoint batch concurrently; failures and cancels join.
 
@@ -1205,6 +1262,12 @@ class ExecutorService:
         re-read that breaks disjointness refuses the batch rather than racing
         — refusing is the conservative failure, and matches how the batcher
         treats any step it cannot prove.
+
+        `paths_for` must carry the SAME footprint the batcher proved against:
+        a caller that batches on one definition (apply_goal batches on stored
+        proposals) but re-checks on another (suggested_paths) would have the
+        re-check refuse every batch the batcher legitimately proved — a
+        refuse/re-batch loop that never runs a step. One proof, one source.
         """
         current = {s.id: s for s in self.goals.steps(goal_id)}
         resolved: list[PlanStep] = []
@@ -1216,7 +1279,10 @@ class ExecutorService:
                     409, "step_vanished",
                     f"step {snap.id} disappeared between batching and dispatch",
                 )
-            mine = {p.strip() for p in (step.suggested_paths or []) if p.strip()}
+            if paths_for is not None:
+                mine = {p.strip() for p in paths_for(step.id) if p and p.strip()}
+            else:
+                mine = {p.strip() for p in (step.suggested_paths or []) if p.strip()}
             if not mine or mine & taken:
                 # The proof is stale: this step now shares a path with a batch
                 # sibling (or has no provable paths). Refuse the whole batch —
@@ -1633,7 +1699,16 @@ class ExecutorService:
                 except OSError as exc:
                     output = f"The command could not be run: {exc}. Decide from what you have."
                 self._log(goal_id, step.id, "info", f"critic inspection: {' '.join(argv)}")
-                prompt = f"{base_prompt}\n\n--- Your requested inspection round ---\n{output}\n\nNow give your decision (or one more read-only command)."
+                # Same honesty rule as the planner's consult loop: the closing
+                # invitation must reflect the real remaining budget. Offering
+                # "one more command" on the final round made obeying the prompt
+                # a contract violation.
+                tail = (
+                    "You may request one more read-only command."
+                    if commands_left > 0
+                    else "That was your last allowed command — give your decision now."
+                )
+                prompt = f"{base_prompt}\n\n--- Your requested inspection round ---\n{output}\n\nNow give your decision. {tail}"
                 continue
             if decision == "approve":
                 self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="critic")

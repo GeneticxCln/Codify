@@ -512,10 +512,17 @@ export const App: React.FC = () => {
   const handleApplyGoal = async (goalId: string) => {
     setError(null);
     try {
-      await applyGoal(goalId);
+      // The apply route is version-guarded: plan edits between viewing the
+      // dry run and clicking Apply must 409 (surfaced below) rather than
+      // replay a plan the user has since changed.
       // The stream closed when the dry-run goal reached COMPLETED; open a new
       // one for the apply run. Find the assistant message carrying this goal.
       const msg = messages.find((m) => m.goal?.id === goalId);
+      // The apply route is version-guarded: plan edits between viewing the
+      // dry run and clicking Apply must 409 (surfaced below) rather than
+      // replay a plan the user has since changed.
+      const version = msg?.goal?.version ?? 0;
+      await applyGoal(goalId, version);
       if (msg) {
         delete goalStreams.current[goalId];
         // Floor the replay at the last event already rendered so the server's

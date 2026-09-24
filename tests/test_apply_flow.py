@@ -165,7 +165,10 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         _, goal_id = await self._run_dry_run()
         fixer_calls_before = self.provider.fixer_calls()
 
-        r = await self.client.post(f"/goals/{goal_id}/apply", headers=self.headers)
+        r = await self.client.post(
+            f"/goals/{goal_id}/apply", headers=self.headers,
+            json={"expected_version": self.goals.get(goal_id).version},
+        )
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json(), {"applied": True, "goal_id": goal_id})
 
@@ -191,13 +194,19 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
 
         # Not a dry run at all.
         real = await self._mk_goal(ws_id, dry_run=False)
-        r = await self.client.post(f"/goals/{real['id']}/apply", headers=self.headers)
+        r = await self.client.post(
+            f"/goals/{real['id']}/apply", headers=self.headers,
+            json={"expected_version": 0},
+        )
         self.assertEqual(r.status_code, 409)
         self.assertEqual(r.json()["code"], "not_dry_run")
 
         # A dry run that has not finished yet cannot be applied.
         pending = await self._mk_goal(ws_id, dry_run=True)
-        r = await self.client.post(f"/goals/{pending['id']}/apply", headers=self.headers)
+        r = await self.client.post(
+            f"/goals/{pending['id']}/apply", headers=self.headers,
+            json={"expected_version": 0},
+        )
         self.assertEqual(r.status_code, 409)
         self.assertEqual(r.json()["code"], "illegal_status")
 
@@ -206,7 +215,10 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
             "UPDATE goals SET status='COMPLETED', version=version+1 WHERE id=?", (pending["id"],)
         )
         self.goals._db.commit()
-        r = await self.client.post(f"/goals/{pending['id']}/apply", headers=self.headers)
+        r = await self.client.post(
+            f"/goals/{pending['id']}/apply", headers=self.headers,
+            json={"expected_version": self.goals.get(pending["id"]).version},
+        )
         self.assertEqual(r.status_code, 409)
         self.assertEqual(r.json()["code"], "nothing_to_apply")
 

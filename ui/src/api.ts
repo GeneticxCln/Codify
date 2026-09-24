@@ -489,11 +489,15 @@ export async function checkEngineHealth(): Promise<HealthStatus> {
  * apply run has been dispatched; progress arrives over the goal's event
  * stream (re-subscribe to /ws/goals/{id} after calling this).
  */
-export async function applyGoal(goal_id: string): Promise<{ applied: boolean; goal_id: string }> {
+export async function applyGoal(
+  goal_id: string,
+  expected_version: number,
+): Promise<{ applied: boolean; goal_id: string }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/goals/${goal_id}/apply`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${currentEngine.token}` },
+    headers: { Authorization: `Bearer ${currentEngine.token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_version }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

@@ -2075,6 +2075,121 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(batch), 1, "colliding proposals must never batch")
 
+    async def test_unprovable_head_step_runs_alone(self):
+        """A head step with no provable paths runs alone, not crashes.
+
+        _independent_batch returns [] for a step with no paths (its contract:
+        "it runs alone"). Both drivers used to do batch[0] on that empty list —
+        IndexError, swallowed by _spawn into `internal_error: list index out
+        of range`, and a goal that died with nothing on screen explaining why.
+        """
+        from engine.models import PlanStep
+        mk = lambda i, title, paths: PlanStep(
+            id=str(i), goal_id="g", ordinal=i, title=title, description="d",
+            status="PENDING", suggested_paths=paths,
+        )
+        self.assertEqual(self.executor._independent_batch([mk(0, "vague", [])]), [])
+
+        self.goals.set_parallel(self.goal.id, True)
+        self._script_parallel(n_steps=2)
+        # Make the head step provably unbatchable: no suggested paths at all.
+        await self.executor.run_planning(self.goal.id)
+        self.conn.execute(
+            "UPDATE plan_steps SET suggested_paths='[]' WHERE ordinal = 0 AND goal_id = ?",
+            (self.goal.id,),
+        )
+        self.conn.commit()
+
+        elapsed = await self._drive()
+        g = self.goals.get(self.goal.id)
+        self.assertEqual(g.status, "COMPLETED", f"goal status: {g.status}")
+        statuses = {s.title: s.status for s in self.goals.steps(self.goal.id)}
+        self.assertEqual(statuses, {"a": "COMPLETED", "b": "COMPLETED"}, f"statuses: {statuses}")
+        del elapsed  # only completion matters here
+
+    async def test_second_driver_claim_is_refused(self):
+        """A retry landing mid-run must not spawn a second driver loop.
+
+        start and retry each spawn _run_steps with no mutual exclusion: the
+        second driver re-read the same unfinished steps and ran fixers on the
+        same files concurrently — the torn write the batching gate exists to
+        prevent. The executor's claim/release guard makes the second claim a
+        no-op that just joins nothing.
+        """
+        self.goals.set_parallel(self.goal.id, True)
+        self._script_parallel(delays={"a": 0.35, "b": 0.35})
+        await self.executor.run_planning(self.goal.id)
+
+        from engine.app import _run_steps
+
+        class _App:
+            pass
+
+        app = _App()
+        app.state = _App()
+        app.state.goals = self.goals
+        app.state.executor = self.executor
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, g.version, "RUNNING")
+
+        first = asyncio.create_task(_run_steps(app, self.goal.id))
+        await asyncio.sleep(0.05)  # let the first driver claim and enter its wave
+        started = time.monotonic()
+        await _run_steps(app, self.goal.id)  # second claim: must return promptly, run nothing
+        second_elapsed = time.monotonic() - started
+        await first
+
+        self.assertLess(
+            second_elapsed, 0.2,
+            f"second driver ran steps instead of yielding ({second_elapsed:.2f}s)",
+        )
+        self.assertEqual(self.goals.get(self.goal.id).status, "COMPLETED")
+        self.assertFalse(self.executor._drivers, "driver claim leaked after completion")
+
+    async def test_apply_recheck_uses_the_batchers_proof(self):
+        """apply's dispatch re-check must prove the same footprint it batched on.
+
+        apply_goal batches on stored-proposal paths but _run_parallel used to
+        re-check suggested_paths. Two steps whose paper paths collide but whose
+        proposals are disjoint were refused at dispatch, re-batched (still
+        'disjoint' per the batcher), refused again — an infinite loop: apply
+        never completed and never ran a step. Both halves now share one proof.
+        """
+        self.goals.set_parallel(self.goal.id, True)
+        self.goals.set_dry_run(self.goal.id, True)
+        self._script_parallel(n_steps=2)
+        await self.executor.run_planning(self.goal.id)
+
+        # Both steps' PLANS collide on shared.txt (as if the plan was edited
+        # that way after planning), so the dry run itself cannot batch — fine,
+        # it runs sequentially and stores disjoint proposals (a.txt, b.txt).
+        self.conn.execute(
+            "UPDATE plan_steps SET suggested_paths=? WHERE goal_id = ?",
+            (json.dumps(["shared.txt"]), self.goal.id),
+        )
+        self.conn.commit()
+
+        # Complete the dry run so apply's terminal-status guard passes.
+        elapsed = await self._drive()
+        del elapsed
+        self.assertEqual(self.goals.get(self.goal.id).status, "COMPLETED")
+        steps = self.goals.steps(self.goal.id)
+        stored = self.conn.execute(
+            "SELECT DISTINCT step_id FROM proposed_files WHERE goal_id = ?", (self.goal.id,)
+        ).fetchall()
+        self.assertEqual(len(stored), 2, f"both steps must hold proposals: {stored}")
+
+        # Reaching dispatch proves the batcher accepted the plan-collision
+        # (batching on proposals); completing proves the re-check did too.
+        result = await self.executor.apply_goal(self.goal.id)
+        self.assertEqual(result.status, "COMPLETED", f"apply status: {result.status}")
+        for name in ("a.txt", "b.txt"):
+            self.assertTrue((self.root / name).exists(), f"{name} missing after apply")
+        self.assertFalse((self.root / "shared.txt").exists())
+        refused = [e for e in self.goals.events_after(self.goal.id, 0)
+                   if e.type == "log" and "batch refused" in e.payload.get("message", "")]
+        self.assertEqual(refused, [], "apply hit a refuse/re-batch loop")
+
     async def test_cancel_fails_the_batch_promptly(self):
         self.goals.set_parallel(self.goal.id, True)
         self._script_parallel(delays={"a": 0.35, "b": 0.35})
