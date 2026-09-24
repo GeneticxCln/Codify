@@ -88,7 +88,8 @@ class StatsSnapshotService:
         if row is None:
             return None
         try:
-            return json.loads(row["document"])
+            document: dict[str, Any] = json.loads(row["document"])
+            return document
         except (TypeError, ValueError):
             return None
 

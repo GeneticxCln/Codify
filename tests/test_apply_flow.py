@@ -122,7 +122,8 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
             "/workspaces", json={"name": "WS", "root_path": str(self.ws_dir)}, headers=self.headers
         )
         self.assertEqual(r.status_code, 200, r.text)
-        return r.json()["id"]
+        workspace_id: str = r.json()["id"]
+        return workspace_id
 
     async def _mk_goal(self, ws_id: str, *, dry_run: bool) -> dict[str, Any]:
         r = await self.client.post(
@@ -131,7 +132,8 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
             headers=self.headers,
         )
         self.assertEqual(r.status_code, 200, r.text)
-        return r.json()
+        goal: dict[str, Any] = r.json()
+        return goal
 
     async def _wait_for_status(
         self, goal_id: str, wanted: set[str], timeout: float = 5.0

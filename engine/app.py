@@ -226,7 +226,8 @@ async def health(request: Request) -> dict[str, bool]:
 
 @app.get("/settings/providers")
 async def list_providers(request: Request) -> dict[str, Any]:
-    return request.app.state.registry.provider_catalog()
+    registry: AgentRegistryService = request.app.state.registry
+    return registry.provider_catalog()
 
 
 @app.get("/settings/laya")
@@ -292,7 +293,8 @@ async def save_key(body: ProviderKeyUpdate, request: Request) -> dict[str, Any]:
 
 @app.get("/settings/agents", response_model=list[AgentConfig])
 async def list_agents(request: Request) -> list[AgentConfig]:
-    return request.app.state.registry.list_configs()
+    registry: AgentRegistryService = request.app.state.registry
+    return registry.list_configs()
 
 
 @app.get("/settings/agents/stats")
@@ -338,7 +340,8 @@ async def agent_call_stats(request: Request, limit: int = Query(20, ge=1, le=100
 
     def _load(raw: Any) -> dict[str, Any]:
         try:
-            return json.loads(raw or "{}")
+            parsed: dict[str, Any] = json.loads(raw or "{}")
+            return parsed
         except (TypeError, ValueError):
             return {}
 
@@ -492,12 +495,14 @@ async def list_roles(request: Request) -> list[dict[str, Any]]:
 
 @app.get("/settings/agents/{role}", response_model=AgentConfig)
 async def get_agent(role: str, request: Request) -> AgentConfig:
-    return request.app.state.registry.get_config(role)
+    registry: AgentRegistryService = request.app.state.registry
+    return registry.get_config(role)
 
 
 @app.put("/settings/agents/{role}", response_model=AgentConfig)
 async def put_agent(role: str, patch: AgentConfigUpdate, request: Request) -> AgentConfig:
-    updated = request.app.state.registry.set_config(role, patch)
+    registry: AgentRegistryService = request.app.state.registry
+    updated = registry.set_config(role, patch)
     # The role may now point at a different provider/endpoint, which changes
     # which models are discoverable at all.
     catalog: ModelCatalogService | None = getattr(request.app.state, "models", None)
@@ -524,7 +529,8 @@ async def test_agent(role: str, request: Request) -> dict[str, Any]:
 
 @app.post("/workspaces")
 async def create_ws(body: WorkspaceCreate, request: Request) -> Workspace:
-    return request.app.state.workspaces.create(body)
+    workspaces: WorkspaceService = request.app.state.workspaces
+    return workspaces.create(body)
 
 
 @app.post("/workspaces/browse")
@@ -590,7 +596,8 @@ async def recent_models(request: Request, limit: int = Query(5, ge=1, le=25)) ->
     and the intent is stale. A menu that labelled one of those "last run" would be
     naming a model the engine never called.
     """
-    return request.app.state.goals.recent_run_models(limit)
+    goals: GoalService = request.app.state.goals
+    return goals.recent_run_models(limit)
 
 
 @app.get("/settings/engine")
@@ -636,12 +643,14 @@ async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[st
 
 @app.get("/workspaces")
 async def list_ws(request: Request) -> list[Workspace]:
-    return request.app.state.workspaces.list_workspaces()
+    workspaces: WorkspaceService = request.app.state.workspaces
+    return workspaces.list_workspaces()
 
 
 @app.get("/workspaces/{workspace_id}")
 async def get_ws(workspace_id: str, request: Request) -> Workspace:
-    return request.app.state.workspaces.get(workspace_id)
+    workspaces: WorkspaceService = request.app.state.workspaces
+    return workspaces.get(workspace_id)
 
 
 @app.delete("/workspaces/{workspace_id}")
@@ -665,12 +674,14 @@ async def delete_ws(
       until the caller asks for it, instead of the bare IntegrityError the FK
       used to produce.
     """
-    return request.app.state.workspaces.delete(workspace_id, delete_goals=delete_goals)
+    workspaces: WorkspaceService = request.app.state.workspaces
+    return workspaces.delete(workspace_id, delete_goals=delete_goals)
 
 
 @app.post("/goals")
 async def create_goal(body: GoalCreate, request: Request) -> Goal:
-    goal = request.app.state.goals.create(body)
+    goals: GoalService = request.app.state.goals
+    goal = goals.create(body)
     _spawn(request.app, request.app.state.executor.run_planning(goal.id), goal.id)
     return goal
 
@@ -692,7 +703,8 @@ async def list_goals(
     `GET /goals/{id}/events?after=0` is the restore path — this route is how a
     client finds out which ids to restore.
     """
-    return request.app.state.goals.list_goals(
+    goals: GoalService = request.app.state.goals
+    return goals.list_goals(
         workspace_id=workspace_id, status=status, limit=limit, offset=offset
     )
 
@@ -1131,7 +1143,8 @@ async def patch_step(goal_id: str, step_id: str, body: PlanStepUpdate, request: 
     the client last saw, so concurrent edits can't silently clobber each other.
     """
     patch = body.model_dump(exclude={"expected_version"})
-    return request.app.state.goals.update_step(goal_id, step_id, body.expected_version, patch)
+    goals: GoalService = request.app.state.goals
+    return goals.update_step(goal_id, step_id, body.expected_version, patch)
 
 
 @app.post("/goals/{goal_id}/steps/{step_id}/retry")
@@ -1139,7 +1152,8 @@ async def retry_step(goal_id: str, step_id: str, body: VersionedAction, request:
     g = request.app.state.goals.get(goal_id)
     if g.status not in ("RUNNING", "PAUSED", "FAILED"):
         raise ApiError(409, "illegal_status", f"cannot retry from {g.status}")
-    updated_step = await request.app.state.executor.retry_step(goal_id, step_id, body.expected_version)
+    executor: ExecutorService = request.app.state.executor
+    updated_step = await executor.retry_step(goal_id, step_id, body.expected_version)
     _spawn(request.app, _run_steps(request.app, goal_id), goal_id)
     return updated_step
 
@@ -1149,7 +1163,8 @@ async def pause_goal(goal_id: str, body: VersionedAction, request: Request) -> G
     g = request.app.state.goals.get(goal_id)
     if g.status != "RUNNING":
         raise ApiError(409, "illegal_status", f"cannot pause from {g.status}")
-    return request.app.state.goals.update_status(goal_id, body.expected_version, "PAUSED")
+    goals: GoalService = request.app.state.goals
+    return goals.update_status(goal_id, body.expected_version, "PAUSED")
 
 
 @app.post("/goals/{goal_id}/cancel")
@@ -1162,7 +1177,8 @@ async def cancel_goal(goal_id: str, body: VersionedAction, request: Request) -> 
     # checks status before that transition and leaves a cancelled goal alone.
     if g.status not in ("PLANNING", "RUNNING", "PAUSED", "PENDING"):
         raise ApiError(409, "illegal_status", f"cannot cancel from {g.status}")
-    return request.app.state.goals.update_status(goal_id, body.expected_version, "CANCELLED")
+    goals: GoalService = request.app.state.goals
+    return goals.update_status(goal_id, body.expected_version, "CANCELLED")
 
 
 @app.delete("/goals/{goal_id}")
@@ -1178,7 +1194,7 @@ async def delete_goal(goal_id: str, request: Request) -> dict[str, Any]:
     publishing events for a goal that no longer exists. The user cancels first,
     which is also the only honest way to stop work already touching files.
     """
-    goals = request.app.state.goals
+    goals: GoalService = request.app.state.goals
     goal = goals.get(goal_id)  # 404 if unknown
     executor = getattr(request.app.state, "executor", None)
     if goal.status in ("PLANNING", "RUNNING") or (
@@ -1194,8 +1210,9 @@ async def delete_goal(goal_id: str, request: Request) -> dict[str, Any]:
 
 @app.get("/goals/{goal_id}/events")
 async def goal_events(goal_id: str, request: Request, after: int = Query(0)) -> list[Event]:
-    request.app.state.goals.get(goal_id)
-    return request.app.state.goals.events_after(goal_id, after)
+    goals: GoalService = request.app.state.goals
+    goals.get(goal_id)
+    return goals.events_after(goal_id, after)
 
 
 @app.post("/goals/{goal_id}/start")
@@ -1211,7 +1228,8 @@ async def start_goal(goal_id: str, body: VersionedAction, request: Request) -> G
         raise ApiError(409, "illegal_status", "planning is still in progress")
     if g.status not in ("PENDING", "PAUSED"):
         raise ApiError(409, "illegal_status", f"cannot start from {g.status}")
-    running = request.app.state.goals.update_status(goal_id, body.expected_version, "RUNNING")
+    goals: GoalService = request.app.state.goals
+    running = goals.update_status(goal_id, body.expected_version, "RUNNING")
     _spawn(request.app, _run_steps(request.app, goal_id), goal_id)
     return running
 
@@ -1252,7 +1270,7 @@ async def enable_execution(goal_id: str, body: VersionedAction, request: Request
     like dry_run), but expected_version is still validated so a client cannot
     enable execution based on a stale view of the goal.
     """
-    goals = request.app.state.goals
+    goals: GoalService = request.app.state.goals
     g = goals.get(goal_id)
     if g.status not in ("PENDING", "PAUSED"):
         raise ApiError(409, "illegal_status", f"cannot enable execution from {g.status}")
@@ -1263,8 +1281,9 @@ async def enable_execution(goal_id: str, body: VersionedAction, request: Request
     if not g.plan_only:
         return g  # idempotent
     goals.set_plan_only(goal_id, False)
-    request.app.state.executor._set_status(goal_id, "PENDING", None)
-    return request.app.state.goals.get(goal_id)
+    executor: ExecutorService = request.app.state.executor
+    executor._set_status(goal_id, "PENDING", None)
+    return goals.get(goal_id)
 
 
 def _spawn(

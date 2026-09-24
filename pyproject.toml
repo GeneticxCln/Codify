@@ -46,16 +46,19 @@ files = ["engine", "tests", "scripts"]
 # argument, so every model constructor reports missing arguments it does not have —
 # three of them in `engine/models.py` alone.
 plugins = ["pydantic.mypy"]
+# The type-checking floor for everything the repo ships (engine, tests, scripts):
+# every def declares its types, every generic is parameterized, and no function
+# returns an untyped Any. New modules inherit the bar rather than opting into it.
+# The config equals --strict flag for flag (warn_unused_configs is meaningless
+# here — files is pinned explicitly); warn_unreachable is one step beyond it.
+disallow_untyped_defs = true
 check_untyped_defs = true
 no_implicit_optional = true
 strict_equality = true
 warn_redundant_casts = true
 warn_unused_ignores = true
-# The --strict components that pass as-is, now pinned so they cannot regress.
-# The one that does not pass everywhere yet is measured, not waved away:
-# warn_return_any (27 sites returning Any from annotated functions) is a
-# separate cleanup.
 disallow_any_generics = true
+warn_return_any = true
 disallow_untyped_calls = true
 disallow_incomplete_defs = true
 disallow_subclassing_any = true
@@ -63,13 +66,6 @@ disallow_untyped_decorators = true
 no_implicit_reexport = true
 extra_checks = true
 warn_unreachable = true
-# The type-checking floor for everything the repo ships (engine, tests, scripts).
-# Every def declares its types, so the check is on by default and a new module
-# inherits the bar rather than opting into it. The --strict components that
-# pass as-is are pinned below so they cannot regress; the two that do not pass
-# are measured, not waved away: disallow_any_generics (205 bare `dict`/`list`
-# generics) and warn_return_any (27 sites returning Any from annotated
-# functions) are a separate, mechanical cleanup each.
 
 [[tool.mypy.overrides]]
 # The Laya System-1 SDK is optional by design: `engine/laya.py` probes for it and

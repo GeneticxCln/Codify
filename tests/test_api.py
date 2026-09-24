@@ -1119,7 +1119,8 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
                 "/goals", headers=self.headers,
                 json={"workspace_id": ws_id, "title": title},
             )
-            return r.json()["id"]
+            goal_id: str = r.json()["id"]
+            return goal_id
 
         done_id = await mk("done")
         cancel_id = await mk("cancelled")

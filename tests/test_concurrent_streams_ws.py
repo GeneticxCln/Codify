@@ -70,7 +70,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+        port: int = s.getsockname()[1]
+        return port
 
 
 class _FakeAIHandler(BaseHTTPRequestHandler):

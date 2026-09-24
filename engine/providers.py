@@ -669,7 +669,7 @@ class Keychain:
         if keyring_mod:
             try:
                 val = keyring_mod.get_password("codify", ref)
-                if val:
+                if isinstance(val, str) and val:
                     return val
             except Exception:
                 pass
