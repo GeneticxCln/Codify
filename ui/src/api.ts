@@ -1,8 +1,16 @@
-import {
+import type {
+  AgentCallStat,
   AgentConfig,
+  DeletedGoal,
+  DeletedWorkspace,
   EngineInfo,
+  StatsHistoryDay,
+  StatsImportState,
+  StatsOverview,
   EngineSettings,
+  Event,
   Goal,
+  GoalStatus,
   LayaStatus,
   ModelCatalog,
   PlanStep,
@@ -12,7 +20,7 @@ import {
   RecentRunModel,
   RoleInfo,
   Workspace,
-} from "./types";
+} from "./types.ts";
 
 let currentEngine: EngineInfo = {
   port: parseInt(localStorage.getItem("CODIFY_PORT") || "7430", 10),
@@ -116,24 +124,61 @@ async function fallbackHttpInvoke<T>(cmd: string, args?: Record<string, any>): P
 }
 
 /**
+ * Parse an engine error body into a useful message. The engine reports
+ * failures as `{code, message}` or `{detail}`; fall back to the HTTP status
+ * so a failure is never silent or empty.
+ */
+async function engineError(res: Response, fallback: string): Promise<Error> {
+  let code = "";
+  let message = "";
+  let extra: Record<string, unknown> = {};
+  try {
+    const body = await res.json();
+    code = typeof body?.code === "string" ? body.code : "";
+    message =
+      typeof body?.message === "string"
+        ? body.message
+        : typeof body?.detail === "string"
+        ? body.detail
+        : "";
+    // Keep whatever else the engine attached. The delete routes refuse with
+    // structured facts (`workspace_not_empty` carries the goal count) that a
+    // confirm dialog has to read — a stringified "409: ..." would lose the one
+    // number the user needs before agreeing to a cascade.
+    if (body && typeof body === "object") {
+      const { code: _c, message: _m, detail: _d, ...rest } = body as Record<string, unknown>;
+      extra = rest;
+    }
+  } catch {
+    /* non-JSON body — fall through to status text below */
+  }
+  const detail = message || `HTTP ${res.status}`;
+  const err = new Error(code ? `${code}: ${detail}` : `${fallback}: ${detail}`);
+  // Still a plain Error for every existing caller; the fields are additive.
+  (err as Error & { code?: string; status?: number; extra?: Record<string, unknown> }).code = code;
+  (err as Error & { code?: string; status?: number; extra?: Record<string, unknown> }).status = res.status;
+  (err as Error & { code?: string; status?: number; extra?: Record<string, unknown> }).extra = extra;
+  return err;
+}
+
+/**
  * Models that actually answered recently, newest first.
  *
  * Read from the engine's `agent_assigned` events, not from the goals' requested
  * model — a role runs on its own configured model, so "what was asked for" and
  * "what answered" are different facts, and only the second belongs on a badge
  * that says "last run".
+ *
+ * Throws on HTTP/network failure with the engine's code/message — callers
+ * that treat this as an ordering hint catch and fall back to [].
  */
 export async function fetchRecentRunModels(limit = 5): Promise<RecentRunModel[]> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  try {
-    const res = await fetch(`${base}/models/recent?limit=${limit}`, {
-      headers: { Authorization: `Bearer ${currentEngine.token}` },
-    });
-    if (!res.ok) return [];
-    return res.json();
-  } catch {
-    return [];
-  }
+  const res = await fetch(`${base}/models/recent?limit=${limit}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to fetch recent models");
+  return res.json();
 }
 
 export async function fetchProviders(): Promise<ProviderCatalog> {
@@ -148,37 +193,32 @@ export async function fetchProviders(): Promise<ProviderCatalog> {
 /**
  * Capability report for the Laya System-1 gate. Loading no weights, so this is
  * cheap enough to call when the settings screen opens.
+ *
+ * Throws with the engine's code/message on failure — callers render the
+ * "unavailable" state from the catch, not from a silent null.
  */
-export async function getLayaStatus(): Promise<LayaStatus | null> {
+export async function getLayaStatus(): Promise<LayaStatus> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  try {
-    const res = await fetch(`${base}/settings/laya`, {
-      headers: { Authorization: `Bearer ${currentEngine.token}` },
-    });
-    if (!res.ok) return null;
-    return res.json();
-  } catch {
-    return null;
-  }
+  const res = await fetch(`${base}/settings/laya`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to fetch Laya status");
+  return res.json();
 }
 
-/** Engine-wide settings (each value with its clamp bounds). */
-export async function getEngineSettings(): Promise<EngineSettings | null> {
+/** Engine-wide settings (each value with its clamp bounds). Throws on failure. */
+export async function getEngineSettings(): Promise<EngineSettings> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  try {
-    const res = await fetch(`${base}/settings/engine`, {
-      headers: { Authorization: `Bearer ${currentEngine.token}` },
-    });
-    if (!res.ok) return null;
-    return res.json();
-  } catch {
-    return null;
-  }
+  const res = await fetch(`${base}/settings/engine`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to fetch engine settings");
+  return res.json();
 }
 
 /** Persist engine-wide settings; the response echoes the clamped values. */
 export async function saveEngineSettings(
-  patch: { parallel_width?: number }
+  patch: { parallel_width?: number; stats_retention_days?: number }
 ): Promise<{ saved: Record<string, number> }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/settings/engine`, {
@@ -202,18 +242,16 @@ export async function saveEngineSettings(
  * Read-only and used by the failure diagnosis panel, so it deliberately does not
  * go through the Tauri IPC command the settings hook uses: diagnosing a failure
  * should work the same way in the desktop shell and a plain browser.
+ *
+ * Throws with the engine's code/message on failure — callers decide the fallback.
  */
 export async function fetchAgentConfigs(): Promise<AgentConfig[]> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  try {
-    const res = await fetch(`${base}/settings/agents`, {
-      headers: { Authorization: `Bearer ${currentEngine.token}` },
-    });
-    if (!res.ok) return [];
-    return res.json();
-  } catch {
-    return [];
-  }
+  const res = await fetch(`${base}/settings/agents`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to fetch agent configs");
+  return res.json();
 }
 
 /**
@@ -221,18 +259,108 @@ export async function fetchAgentConfigs(): Promise<AgentConfig[]> {
  *
  * Served rather than hardcoded here: two lists is how a settings screen ends up
  * promising an ability the engine stopped granting.
+ *
+ * Throws with the engine's code/message on failure.
  */
 export async function fetchRoles(): Promise<RoleInfo[]> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/settings/roles`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to fetch roles");
+  return res.json();
+}
+
+/** Cross-goal statistics: success rate, spend per role/model, and the daily
+ * trend, aggregated by the engine from the goals and events it already stores. */
+export async function fetchStatsOverview(windowDays: number): Promise<StatsOverview> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/stats/overview?window=${windowDays}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/** One frozen document per past day, oldest first — the trend that survives
+ * engine restarts and outlives the log entries it was computed from. A limit of
+ * zero asks the engine for every stored day, for the full-history export. */
+/**
+ * The stats-history document currently imported into the engine, if any.
+ *
+ * The engine keeps it, so an import survives closing the tab and restarting
+ * the engine. `imported: false` is the normal empty state, not an error.
+ */
+export async function fetchStatsImport(): Promise<StatsImportState | null> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
   try {
-    const res = await fetch(`${base}/settings/roles`, {
+    const res = await fetch(`${base}/stats/import`, {
       headers: { Authorization: `Bearer ${currentEngine.token}` },
     });
-    if (!res.ok) return [];
+    if (!res.ok) return null;
     return res.json();
   } catch {
-    return [];
+    return null;
   }
+}
+
+/** Validate and persist an exported stats-history document (replaces any previous). */
+export async function saveStatsImport(
+  doc: unknown,
+  source: string,
+): Promise<{ imported: true; days: number; source: string }> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/stats/import`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${currentEngine.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ...(doc as object), source }),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to save the imported history");
+  return res.json();
+}
+
+/** Forget the engine-stored import. Idempotent. */
+export async function clearStatsImport(): Promise<{ imported: false; cleared: number }> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/stats/import`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to clear the imported history");
+  return res.json();
+}
+
+export async function fetchStatsHistory(limit: number = 60): Promise<StatsHistoryDay[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/stats/history?limit=${limit}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `HTTP ${res.status}`);
+  }
+  const body = await res.json();
+  return body?.days ?? [];
+}
+
+/** What actually happened to each role the last time it ran — last call, last
+ * error, and how often each occurred. Read from the goal event log; a role
+ * that never ran (or a pre-stats engine) simply has nothing to show.
+ * Throws with the engine's code/message on failure. */
+export async function fetchAgentCallStats(): Promise<AgentCallStat[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/settings/agents/stats`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to fetch agent call stats");
+  const body = await res.json();
+  return body?.stats ?? [];
 }
 
 /**
@@ -251,7 +379,7 @@ export async function fetchProviderKeys(): Promise<ProviderKeyStatus[]> {
   const res = await fetch(`${base}/settings/keys`, {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
-  if (!res.ok) return [];
+  if (!res.ok) throw await engineError(res, "Failed to fetch provider keys");
   return res.json();
 }
 
@@ -289,19 +417,17 @@ export async function browseWorkspace(): Promise<Workspace | null> {
  * `refresh` bypasses the engine's short cache; the app passes it on open so a
  * model released since the last launch is present without a reinstall, and the
  * "failed providers" list stays accurate rather than cached.
+ *
+ * Throws with the engine's code/message on failure — callers that can run
+ * without a catalog catch and fall back to an empty one.
  */
 export async function fetchModelCatalog(refresh = false): Promise<ModelCatalog> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const empty: ModelCatalog = { models: [], providers: [], fetched_at: 0, cached: false };
-  try {
-    const res = await fetch(`${base}/models${refresh ? "?refresh=true" : ""}`, {
-      headers: { Authorization: `Bearer ${currentEngine.token}` },
-    });
-    if (!res.ok) return empty;
-    return res.json();
-  } catch {
-    return empty;
-  }
+  const res = await fetch(`${base}/models${refresh ? "?refresh=true" : ""}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to fetch model catalog");
+  return res.json();
 }
 
 export async function listWorkspaces(): Promise<Workspace[]> {
@@ -310,6 +436,42 @@ export async function listWorkspaces(): Promise<Workspace[]> {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Delete a goal and everything recorded about it (events, steps, dry-run
+ * proposals). Refused with `goal_in_progress` while it is PLANNING or RUNNING —
+ * cancel it first. Files on disk are never touched.
+ */
+export async function deleteGoal(goal_id: string): Promise<DeletedGoal> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/goals/${goal_id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to delete goal");
+  return res.json();
+}
+
+/**
+ * Delete a workspace from Codify's records. The directory is left alone.
+ *
+ * A workspace that still has goals is refused with `workspace_not_empty`
+ * carrying the count, so the UI can show what the cascade will cost before
+ * the user agrees to it; pass `deleteGoals` only once they have.
+ */
+export async function deleteWorkspace(
+  workspace_id: string,
+  opts: { deleteGoals?: boolean } = {},
+): Promise<DeletedWorkspace> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const qs = opts.deleteGoals ? "?delete_goals=true" : "";
+  const res = await fetch(`${base}/workspaces/${workspace_id}${qs}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to delete workspace");
   return res.json();
 }
 
@@ -543,6 +705,43 @@ export async function enableExecution(goal_id: string, expected_version: number)
     const err = await res.json().catch(() => ({}));
     throw new Error(err.message || `HTTP ${res.status}`);
   }
+  return res.json();
+}
+
+/** Goal history, newest first (active goals lead). The index the restore path
+ * reads: without it, a restart forgets every goal the engine still has on disk. */
+export async function listGoals(params: {
+  workspace_id?: string;
+  status?: GoalStatus;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<Goal[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const qs = new URLSearchParams();
+  if (params.workspace_id) qs.set("workspace_id", params.workspace_id);
+  if (params.status) qs.set("status", params.status);
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  const res = await fetch(`${base}/goals${suffix}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Every event a goal ever published, oldest first. Feeds the transcript
+ * hydration when a past goal is reopened — the same log the live stream appends
+ * to, so a restored card and a live card are one format. */
+export async function getGoalEvents(goal_id: string): Promise<Event[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/goals/${goal_id}/events?after=0`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 

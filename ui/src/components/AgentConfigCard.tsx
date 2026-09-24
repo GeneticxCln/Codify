@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import {
+  AgentCallStat,
   AgentConfig,
   AgentRole,
   ModelOption,
@@ -58,9 +59,22 @@ interface AgentConfigCardProps {
   signals?: ModelSignals;
   /** What the engine says this slot is for, and when it runs. */
   info?: RoleInfo;
+  /** The newest outcome for this role's model calls — how long the last one
+   * took and what the last failure was. Null when the role has never run or the
+   * engine predates the stats endpoint. */
+  callStat?: AgentCallStat | null;
   /** Ask every provider what it serves right now — offered inside the field. */
   onRefreshModels?: () => void;
   refreshingModels?: boolean;
+}
+
+/** Call duration in the same vocabulary the chat's usage card uses: ms below a
+ * second, then seconds. Null (a call whose duration was never recorded) reads as
+ * "duration unknown" rather than a fake "0ms". */
+function formatCallDuration(durationMs: number | null): string {
+  if (durationMs == null) return "(duration unknown)";
+  if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
+  return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
 // One icon per ability: the librarian reads, the fixer writes, the verifier runs,
@@ -91,6 +105,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
   staleFallback = null,
   info,
   signals = EMPTY_SIGNALS,
+  callStat = null,
 }) => {
   const { configs, update, testConnection } = store;
   const config = configs.find((c) => c.role === role);
@@ -101,15 +116,36 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Set when the server config moved underneath unsaved edits (e.g. the
+  // panel's "Fix roles that can't run" refreshed the store). The draft keeps
+  // the user's edits — but silently keeping them would hide the repair, so
+  // the card says so and offers the server values in one click.
+  const [externallyUpdated, setExternallyUpdated] = useState(false);
   // The fallback section is collapsed until it is in use, so it never grows the
   // card for the roles that do not have one.
   const [fallbackOpen, setFallbackOpen] = useState(false);
 
   // Sync draft when the server config arrives, but never clobber fields the
   // user has already edited locally (the hook refetches after every save).
+  const lastServerJson = React.useRef<string | null>(null);
   useEffect(() => {
-    if (config) {
-      setDraft((prev) => (dirty ? prev ?? config : config));
+    if (!config) return;
+    const serverJson = JSON.stringify(config);
+    if (lastServerJson.current === null) {
+      lastServerJson.current = serverJson;
+      if (!dirty) setDraft(config);
+      return;
+    }
+    if (serverJson === lastServerJson.current) return;
+    lastServerJson.current = serverJson;
+    if (dirty) {
+      // The server moved while edits were unsaved (e.g. a panel-level repair
+      // refreshed the store) — keep the user's edits, but flag it instead of
+      // silently discarding either side.
+      setExternallyUpdated(true);
+    } else {
+      setDraft(config);
+      setExternallyUpdated(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config]);
@@ -155,6 +191,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
       // Reset draft to server-normalised value (BUG-10 fix)
       setDraft(saved);
       setDirty(false);
+      setExternallyUpdated(false);
       setPendingApiKey(undefined);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -220,6 +257,28 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
                 </span>
               </p>
             )}
+            {callStat && (callStat.last_call || callStat.last_error) && (
+              <p className="text-[11px] text-gray-500 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                {callStat.last_call && (
+                  <span className="whitespace-nowrap text-gray-400">
+                    · last call {formatCallDuration(callStat.last_call.duration_ms)}
+                    {callStat.last_call.provider && (
+                      <span className="font-mono text-gray-500">
+                        {" "}({callStat.last_call.provider}/{callStat.last_call.model})
+                      </span>
+                    )}
+                  </span>
+                )}
+                {callStat.last_error && (
+                  <span
+                    className="whitespace-nowrap text-amber-400/90"
+                    title={callStat.last_error.message ?? undefined}
+                  >
+                    · last error <span className="font-mono">{callStat.last_error.code}</span>
+                  </span>
+                )}
+              </p>
+            )}
           </div>
         </div>
 
@@ -267,6 +326,33 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               </>
             )}
           </span>
+        </div>
+      )}
+
+      {/* The server config changed underneath unsaved edits (e.g. the panel's
+          repair refreshed the store). The draft keeps the user's edits — this
+          names that fact and offers the server values in one click. */}
+      {externallyUpdated && dirty && (
+        <div className="flex items-start gap-2 text-[11px] text-blue-300 bg-blue-950/30 border border-blue-800/60 rounded-lg px-3 py-2">
+          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+          <span className="leading-relaxed flex-1">
+            The saved config changed underneath your unsaved edits (a repair or another save).
+            Your edits are kept — Save to overwrite, or load the server values.
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              if (config) {
+                setDraft(config);
+                lastServerJson.current = JSON.stringify(config);
+              }
+              setDirty(false);
+              setExternallyUpdated(false);
+            }}
+            className="flex-shrink-0 text-[11px] px-2 py-0.5 rounded border border-blue-700/60 hover:bg-blue-900/40 transition-colors"
+          >
+            Load server values
+          </button>
         </div>
       )}
 
@@ -457,12 +543,16 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="flex flex-col gap-1.5">
           <div className="flex justify-between">
-            <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+            <label
+              htmlFor={`temperature-${role}`}
+              className="text-xs font-semibold text-gray-400 uppercase tracking-wider"
+            >
               Temperature
             </label>
             <span className="text-xs font-mono text-gray-300">{active.temperature}</span>
           </div>
           <input
+            id={`temperature-${role}`}
             type="range"
             min={0}
             max={2}

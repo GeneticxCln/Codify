@@ -63,6 +63,7 @@ export type EventType =
   | "laya_decision"
   | "library_evidence"
   | "fix_retry"
+  | "agent_call_failed"
   | "fixer_pass"
   | "plan_consult"
   | "usage"
@@ -151,10 +152,96 @@ export interface Goal {
   /** Independent (path-disjoint) steps may run concurrently. */
   parallel: boolean;
   version: number;
-  canStart: boolean;
+  /** Optional: older engines omit this; the UI derives startability from status. */
+  canStart?: boolean;
   created_at: number;
   updated_at: number;
   steps?: PlanStep[];
+}
+
+/** What actually happened to one role the last time it was called, read from
+ * the goal event log — the engine's GET /settings/agents/stats response. */
+export interface AgentCallStat {
+  role: AgentRole;
+  /** The newest completed call. duration_ms is null on events written before
+   * the field existed — unknown, never "instant". */
+  last_call: {
+    duration_ms: number | null;
+    provider: string | null;
+    model: string | null;
+    at: number;
+  } | null;
+  calls_seen: number;
+  failures_seen: number;
+  last_error: {
+    code: string | null;
+    message: string | null;
+    provider: string | null;
+    model: string | null;
+    at: number;
+  } | null;
+}
+
+/** One per-role (or per-model) lane of the cross-goal usage rollup. */
+export interface UsageLane {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  calls: number;
+  /** Mean call duration in ms over the calls that measured one; null when
+   * none did — unknown, never "instant". */
+  avg_duration_ms: number | null;
+}
+
+/** The engine's GET /stats/overview response: cross-goal outcomes, spend, and
+ * a sparse daily trend, all read from the persisted goal and event stores. */
+export interface StatsOverview {
+  window_days: number;
+  generated_at: number;
+  goals: StatsGoals;
+  usage: UsageLane & { failures: number; by_role: Record<string, UsageLane>; by_model: Record<string, UsageLane> };
+  /** Sparse UTC days (only days with activity), oldest first. */
+  daily: {
+    date: string;
+    created: number;
+    succeeded: number;
+    failed: number;
+    cancelled: number;
+    total_tokens: number;
+    calls: number;
+  }[];
+}
+
+/** The outcome lane of any stats document (live overview or frozen day). */
+export interface StatsGoals {
+  goals: number;
+  active: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  /** COMPLETED / terminal, percent. Null when nothing terminal yet. */
+  success_rate: number | null;
+}
+
+/** One frozen day from GET /stats/history: the complete overview document
+ * that day ended with, keyed by its UTC date. `day_stats` is that day's own
+ * outcomes and spend (from the document's daily rows); the top-level `goals`
+ * and `usage` blocks are cumulative-to-that-day, NOT the day alone. */
+export interface StatsHistoryDay {
+  day: string;
+  /** The frozen calendar day's own row — what a per-day chart must read. */
+  day_stats: {
+    date: string;
+    created: number;
+    succeeded: number;
+    failed: number;
+    cancelled: number;
+    total_tokens: number;
+    calls: number;
+  };
+  /** Cumulative through the end of this day (the whole frozen document). */
+  goals: StatsGoals;
+  usage: UsageLane;
 }
 
 export interface Event {
@@ -188,6 +275,8 @@ export interface EngineSettingValue {
 
 export interface EngineSettings {
   parallel_width: EngineSettingValue;
+  /** How many daily stats snapshots to keep; 0 = keep everything. */
+  stats_retention_days: EngineSettingValue;
 }
 
 /** Payload of a `laya_decision` event (one pre-flight gate verdict). */
@@ -287,6 +376,40 @@ export interface ModelCatalog {
   fetched_at: number;
   /** True when served from the engine's short-lived cache. */
   cached: boolean;
+}
+
+/** The stats-history document the engine currently holds (GET /stats/import).
+ * `imported: false` is the ordinary empty state, not a missing resource. */
+export interface StatsImportState {
+  imported: boolean;
+  days: StatsHistoryDay[];
+  source: string | null;
+  imported_at?: number | null;
+  exported_at?: string;
+}
+
+/** What a goal deletion actually removed, counted by the engine. */
+export interface DeletedGoal {
+  deleted: true;
+  goal_id: string;
+  title: string;
+  workspace_id: string;
+  steps: number;
+  events: number;
+  proposed_files: number;
+  /** Always false: deleting a goal's record never touches files on disk. */
+  files_touched: false;
+}
+
+/** What a workspace deletion removed, including the goal history it took. */
+export interface DeletedWorkspace {
+  deleted: true;
+  workspace_id: string;
+  name: string;
+  goals: number;
+  events: number;
+  /** Always false: the directory at root_path is never removed. */
+  files_touched: false;
 }
 
 export interface ChatMessage {
