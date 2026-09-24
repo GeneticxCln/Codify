@@ -30,6 +30,7 @@ import {
   Workflow,
   FileDown,
   FileUp,
+  Trash2,
 } from "lucide-react";
 
 /**
@@ -38,6 +39,9 @@ import {
  *
  * Answers arrive either nested ({"intent": {"choice": …}}) or flat, so both
  * shapes are read here — same tolerance the engine applies.
+ *
+ * `noul` is the engine's own field name (engine/laya.py: a calibrated
+ * probability in [0,1]) — not a typo for "null".
  */
 function layaAnswer(payload: Record<string, any> | undefined, key: string): unknown {
   const raw = payload?.answers?.[key];
@@ -143,6 +147,12 @@ const StepTimelineBars: React.FC<{
             {/* The bar itself, on the shared axis. */}
             <div
               className="relative h-2.5 flex-1 rounded bg-[#161b22] overflow-hidden"
+              role="img"
+              aria-label={
+                hasOverlap
+                  ? `Ran alongside ${overlapCount} other step${overlapCount === 1 ? "" : "s"} — ${duration}`
+                  : `Ran alone — ${duration}`
+              }
               title={
                 hasOverlap
                   ? `Ran alongside ${overlapCount} other step${overlapCount === 1 ? "" : "s"} — ${duration}`
@@ -491,6 +501,21 @@ function ordinalLabel(n: number): string {
   return `${n}${n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th"}`;
 }
 
+/**
+ * Whether one event is an "issue" for the transcript's issues-only filter: the
+ * engine's own errors, warn/error log lines, and failed model calls. One rule,
+ * module-level, so the toggle's visibility and the filtering itself can never
+ * disagree about what counts — and so a new failure-shaped event type added to
+ * the renderer has a deliberate choice to make about this list.
+ */
+function isIssueEvent(ev: Event): boolean {
+  if (ev.type === "error" || ev.type === "agent_call_failed") return true;
+  if (ev.type === "log") {
+    return ev.payload?.level === "warn" || ev.payload?.level === "error";
+  }
+  return false;
+}
+
 function auditSummary(events: Event[] | undefined): {
   edits: number;
   fallbacks: number;
@@ -534,6 +559,8 @@ interface ChatTimelineProps {
   ) => boolean | void | Promise<boolean | void>;
   onPauseGoal: (goalId: string, version: number) => void;
   onCancelGoal: (goalId: string, version: number) => void;
+  /** Confirms, then deletes the goal and its recorded history. */
+  onDeleteGoal: (goalId: string, title: string) => void;
   onRetryStep: (goalId: string, stepId: string, version: number) => void;
   onQuickPrompt: (prompt: string) => void;
   /** Opens Settings on the tab that holds the fix. */
@@ -550,6 +577,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   onEditStep,
   onPauseGoal,
   onCancelGoal,
+  onDeleteGoal,
   onRetryStep,
   onQuickPrompt,
   onOpenSettings,
@@ -557,6 +585,11 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState<{ goalId: string; stepId: string } | null>(null);
+  // Transcript-wide "issues only" mode: long runs render hundreds of telemetry
+  // entries, and the review question is usually just "what went wrong". One
+  // toggle for the whole transcript — a filter that had to be found per card
+  // would be three controls pretending to be one.
+  const [issueOnly, setIssueOnly] = useState(false);
   // The failure being investigated, if any.
   // Per-goal-card DOM scopes for audit-badge jumps: a badge must scroll to
   // entries in ITS card's transcript, not the first card that happens to
@@ -573,6 +606,9 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
     message: string;
     role: AgentRole | null;
   } | null>(null);
+  // Audit-export failures surface inline — a console-only error leaves the
+  // user clicking a button that appears to do nothing.
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -630,6 +666,12 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
 
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 max-w-4xl mx-auto w-full">
+      {exportError && (
+        <div className="flex items-start gap-2 p-2.5 rounded-xl bg-red-950/40 border border-red-800 text-xs text-red-300">
+          <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-red-400" />
+          <span className="leading-relaxed">{exportError}</span>
+        </div>
+      )}
       {messages.map((msg) => {
         // Scope the audit-badge jumps to THIS card: several goal cards render
         // in one transcript, and an unscoped document query would jump to the
@@ -638,6 +680,9 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
           if (node) cardScopes.current.set(msg.id, node);
           else cardScopes.current.delete(msg.id);
         };
+        // The toggle only appears on cards that have something to filter: a
+        // pill that filters nothing is noise, not a control.
+        const hasIssues = (msg.events ?? []).some(isIssueEvent);
         return (
         <div key={msg.id} className="space-y-4">
           {/* User Message */}
@@ -685,6 +730,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                     </span>
                     {msg.goal && (
                       <span
+                        title={`Goal status: ${msg.goal.status}`}
                         className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
                           msg.goal.status === "COMPLETED"
                             ? "bg-green-950/40 text-green-400 border-green-800"
@@ -851,8 +897,28 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                           onClick={() => onCancelGoal(msg.goal!.id, msg.goal!.version)}
                           className="p-1 text-gray-400 hover:text-red-400 rounded-lg transition-colors"
                           title="Cancel Goal"
+                          aria-label="Cancel goal"
                         >
                           <XCircle className="w-4 h-4" />
+                        </button>
+                      )}
+
+                      {/* Delete is offered only once the goal has stopped, for
+                          the same reason Cancel exists: an in-flight run has a
+                          live coroutine writing files, and "delete" must never
+                          be how a user stops work already in progress — Cancel
+                          is, and it leaves a record of what was attempted. */}
+                      {(msg.goal.status === "COMPLETED" ||
+                        msg.goal.status === "FAILED" ||
+                        msg.goal.status === "CANCELLED") && (
+                        <button
+                          type="button"
+                          onClick={() => onDeleteGoal(msg.goal!.id, msg.goal!.title)}
+                          className="p-1 text-gray-500 hover:text-red-400 rounded-lg transition-colors"
+                          title="Delete this goal and its event log (your files are not touched)"
+                          aria-label="Delete goal"
+                        >
+                          <Trash2 className="w-4 h-4" />
                         </button>
                       )}
 
@@ -864,6 +930,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         type="button"
                         onClick={async () => {
                           try {
+                            setExportError(null);
                             const audit = await getGoalAudit(msg.goal!.id);
                             const blob = new Blob([JSON.stringify(audit, null, 2)], {
                               type: "application/json",
@@ -880,12 +947,13 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             a.download = `audit-${slug}-${stamp}.json`;
                             a.click();
                             URL.revokeObjectURL(url);
-                          } catch (err) {
-                            console.error("audit export failed", err);
+                          } catch (err: any) {
+                            setExportError(err?.message || "Could not export the audit trail.");
                           }
                         }}
                         className="p-1 text-gray-400 hover:text-blue-400 rounded-lg transition-colors"
                         title="Export audit trail (plan edits, fallbacks, failures)"
+                        aria-label="Export audit trail"
                       >
                         <FileDown className="w-4 h-4" />
                       </button>
@@ -1074,6 +1142,25 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       {msg.goal?.dry_run
                         ? "Proposed Changes (Dry Run — nothing written)"
                         : "Telemetry & Changes"}
+                      {hasIssues && (
+                        <button
+                          type="button"
+                          onClick={() => setIssueOnly(!issueOnly)}
+                          title={
+                            issueOnly
+                              ? "Showing warnings, errors, and failed calls only — click to show the full telemetry"
+                              : "Show only warnings, errors, and failed calls"
+                          }
+                          className={`ml-auto flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-semibold normal-case tracking-normal transition-colors cursor-pointer ${
+                            issueOnly
+                              ? "bg-amber-950/40 text-amber-300 border-amber-800"
+                              : "bg-[#0d1117] text-gray-400 border-[#30363d] hover:text-gray-200"
+                          }`}
+                        >
+                          <AlertCircle className="w-3 h-3" />
+                          Issues only
+                        </button>
+                      )}
                     </div>
 
                     {/*
@@ -1098,9 +1185,25 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         (msg.goal?.steps ?? []).forEach((s: PlanStep) =>
                           stepTitleById.set(s.id, s.title)
                         );
+                        // "Issues only": the (step, role) streams whose role hit a
+                        // real failure this run. Their replies stay — the last words
+                        // before a failure are its context — while finished streams
+                        // from healthy roles are exactly the noise being filtered.
+                        const failedKeys = new Set<string>();
+                        if (issueOnly) {
+                          msg.events.forEach((ev) => {
+                            if (
+                              (ev.type === "error" || ev.type === "agent_call_failed") &&
+                              ev.payload?.role
+                            ) {
+                              failedKeys.add(`${ev.step_id ?? "goal"}::${ev.payload.role}`);
+                            }
+                          });
+                        }
                         msg.events.forEach((ev) => {
                           if (ev.type === "model_delta") {
                             const headKey = `${ev.step_id ?? "goal"}::${ev.payload.role}`;
+                            if (issueOnly && !failedKeys.has(headKey)) return;
                             streamHeads[headKey] = {
                               text: ev.payload.text,
                               role: ev.payload.role,
@@ -1110,6 +1213,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             };
                             return;
                           }
+                          if (issueOnly && !isIssueEvent(ev)) return;
                           rendered.push(
                             <div key={ev.sequence} className="text-xs">
                           {ev.type === "diff" && (
@@ -1378,6 +1482,33 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             </div>
                           )}
 
+                          {/* A model call that failed outright — distinct from a
+                              fallback (the work continued elsewhere) and from an
+                              error event (the goal-level failure record). The
+                              Settings screen's "last error" reads these too. */}
+                          {ev.type === "agent_call_failed" && (
+                            <div
+                              className="flex items-start gap-1.5 pl-2 text-amber-300/90 rounded"
+                              data-audit-marker="errors"
+                            >
+                              <ShieldAlert className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                              <span className="leading-relaxed">
+                                <span className="font-semibold">{ev.payload.role}</span> could not call{" "}
+                                <span className="font-mono text-gray-300">
+                                  {ev.payload.provider}/{ev.payload.model}
+                                </span>{" "}
+                                ({ev.payload.target}) — <span className="font-mono">{ev.payload.code}</span>
+                                {ev.payload.duration_ms != null && (
+                                  <span className="text-gray-500">
+                                    {" "}after {ev.payload.duration_ms < 1000
+                                      ? `${Math.round(ev.payload.duration_ms)}ms`
+                                      : `${(ev.payload.duration_ms / 1000).toFixed(1)}s`}
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+                          )}
+
                           {ev.type === "file_change_summary" && (
                             <div className="flex items-start gap-1.5 pl-2 text-blue-300">
                               <FileCode className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
@@ -1444,6 +1575,18 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         });
                         // The live reply cards, one per (step, role), newest snapshot:
                         const streamKeys = Object.keys(streamHeads);
+                        // Filtered down to nothing: say so, rather than rendering a
+                        // bare section header over an empty box.
+                        if (issueOnly && rendered.length === 0 && streamKeys.length === 0) {
+                          rendered.push(
+                            <div
+                              key="issues-empty"
+                              className="text-[11px] text-gray-500 pl-2 border-l-2 border-amber-500/60 py-0.5"
+                            >
+                              Nothing else to show — no warnings or errors in this run.
+                            </div>
+                          );
+                        }
                         if (streamKeys.length > 0) {
                           rendered.push(
                             <div key="model-stream" className="space-y-1.5">

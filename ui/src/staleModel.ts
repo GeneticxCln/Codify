@@ -1,4 +1,4 @@
-import { AgentConfig, ModelOption, ProviderModelStatus } from "./types";
+import type { AgentConfig, ModelOption, ProviderModelStatus } from "./types.ts";
 
 /** A role whose saved model the provider no longer reports. */
 export interface StaleModel {
@@ -27,6 +27,8 @@ export function staleTarget(
   models: ModelOption[],
   providerStatus: ProviderModelStatus[]
 ): StaleModel | null {
+  provider = (provider || "").trim();
+  model = (model || "").trim();
   if (!provider || !model) return null;
 
   const discovery = providerStatus.find((s) => s.provider === provider);

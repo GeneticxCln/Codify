@@ -1,4 +1,4 @@
-import { AgentConfig, AgentRole, ModelOption, RecentRunModel } from "./types";
+import type { AgentConfig, AgentRole, ModelOption, RecentRunModel } from "./types.ts";
 
 /**
  * What the app already knows about each discovered model.

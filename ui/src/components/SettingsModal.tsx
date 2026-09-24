@@ -48,13 +48,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [modelStatus, setModelStatus] = useState<ProviderModelStatus[]>([]);
 
   const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
 
   const loadCatalog = useCallback(async (refresh = false) => {
     setCatalogLoading(true);
+    setCatalogError(null);
     try {
       const catalog: ModelCatalog = await fetchModelCatalog(refresh);
-      setModels(catalog.models);
-      setModelStatus(catalog.providers);
+      setModels(catalog.models ?? []);
+      setModelStatus(catalog.providers ?? []);
+    } catch (err: any) {
+      setCatalogError(err?.message || "Could not discover models from the engine.");
     } finally {
       setCatalogLoading(false);
     }
@@ -194,6 +198,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="flex items-start gap-2 p-3 bg-red-950/40 border border-red-800 rounded-xl text-xs text-red-300">
                   <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <span>{error}</span>
+                </div>
+              )}
+              {catalogError && (
+                <div className="flex items-start gap-2 p-3 bg-amber-950/30 border border-amber-800/60 rounded-xl text-xs text-amber-300">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <span>{catalogError}</span>
                 </div>
               )}
 

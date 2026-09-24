@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  AgentCallStat,
   AgentRole,
   LayaStatus,
   ModelOption,
@@ -8,7 +9,7 @@ import {
   RepairReport,
   RoleInfo,
 } from "../types";
-import { fetchRoles, getEngineSettings, getLayaStatus, repairAgentConfigs, saveEngineSettings } from "../api";
+import { fetchAgentCallStats, fetchRoles, getEngineSettings, getLayaStatus, repairAgentConfigs, saveEngineSettings } from "../api";
 import { useAgentConfigs } from "../hooks/useAgentConfigs";
 import { buildModelSignals } from "../modelSignals";
 import { findStaleFallback, findStaleModel, StaleModel } from "../staleModel";
@@ -49,7 +50,10 @@ const LayaGateStatus: React.FC = () => {
     let cancelled = false;
     getLayaStatus()
       .then((s) => {
-        if (!cancelled) setStatus(s);
+        if (!cancelled) setStatus(s ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setStatus(null);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -132,16 +136,49 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   // themselves (already in pipeline order), so there is no second list of roles
   // here to drift from the engine's.
   const [roleInfo, setRoleInfo] = useState<Record<string, RoleInfo>>({});
+  const [rolesError, setRolesError] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
-    fetchRoles().then((roles) => {
-      if (cancelled) return;
-      setRoleInfo(Object.fromEntries(roles.map((r) => [r.role, r])));
-    });
+    fetchRoles()
+      .then((roles) => {
+        if (cancelled) return;
+        setRoleInfo(Object.fromEntries(roles.map((r) => [r.role, r])));
+        setRolesError(null);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        setRolesError(err?.message || "Could not load role descriptions.");
+      });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  // What actually happened to each role the last time it ran (the roadmap's
+  // per-agent latency/error stats). Re-read when a save lands so a
+  // test-connection result and the next goal run both show up without leaving
+  // the screen; an engine without the endpoint simply yields nothing.
+  const [callStats, setCallStats] = useState<Record<string, AgentCallStat>>({});
+  const [callStatsError, setCallStatsError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetchAgentCallStats()
+      .then((stats) => {
+        if (cancelled) return;
+        setCallStats(Object.fromEntries(stats.map((s) => [s.role, s])));
+        setCallStatsError(null);
+      })
+      .catch((err: any) => {
+        // Stats are informational — a failure leaves the cards without the
+        // "last call" line rather than failing the screen, but it is recorded
+        // instead of swallowed so a broken endpoint is visible.
+        if (cancelled) return;
+        setCallStatsError(err?.message || "Could not load per-role call stats.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [store.configs]);
 
   const  orderedRoles =  useMemo<AgentRole[]>(
     () => store.configs.map((c) => c.role),
@@ -227,15 +264,35 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const [widthDraft, setWidthDraft] = useState<string>("");
   const [widthSaving, setWidthSaving] = useState(false);
   const [widthMsg, setWidthMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // Snapshot retention (Settings → Engine): how many daily stats snapshots to
+  // keep. 0 means everything — the default is bounded (90) so an unattended
+  // machine's table grows by a decision, not an accident.
+  const [retention, setRetention] = useState<number | null>(null);
+  const [retentionBounds, setRetentionBounds] = useState({ min: 0, max: 730 });
+  const [retentionDraft, setRetentionDraft] = useState<string>("");
+  const [retentionSaving, setRetentionSaving] = useState(false);
+  const [retentionMsg, setRetentionMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [engineSettingsError, setEngineSettingsError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    getEngineSettings().then((s) => {
-      if (cancelled || !s) return;
-      setParallelWidth(s.parallel_width.value);
-      setParallelWidthBounds({ min: s.parallel_width.min, max: s.parallel_width.max });
-      setWidthDraft(String(s.parallel_width.value));
-    });
+    getEngineSettings()
+      .then((s) => {
+        if (cancelled || !s) return;
+        setParallelWidth(s.parallel_width.value);
+        setParallelWidthBounds({ min: s.parallel_width.min, max: s.parallel_width.max });
+        setWidthDraft(String(s.parallel_width.value));
+        if (s.stats_retention_days) {
+          setRetention(s.stats_retention_days.value);
+          setRetentionBounds({ min: s.stats_retention_days.min, max: s.stats_retention_days.max });
+          setRetentionDraft(String(s.stats_retention_days.value));
+        }
+        setEngineSettingsError(null);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        setEngineSettingsError(err?.message || "Could not load engine settings.");
+      });
     return () => {
       cancelled = true;
     };
@@ -263,6 +320,37 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       setWidthMsg({ ok: false, text: err?.message || "Could not save the parallel width." });
     } finally {
       setWidthSaving(false);
+    }
+  };
+
+  const saveRetention = async () => {
+    const parsed = parseInt(retentionDraft, 10);
+    if (!Number.isFinite(parsed)) {
+      setRetentionMsg({ ok: false, text: "Enter a whole number (0 keeps everything)." });
+      return;
+    }
+    setRetentionSaving(true);
+    setRetentionMsg(null);
+    try {
+      const res = await saveEngineSettings({ stats_retention_days: parsed });
+      const saved = res.saved.stats_retention_days;
+      setRetention(saved);
+      setRetentionDraft(String(saved));
+      setRetentionMsg(
+        saved === parsed
+          ? {
+              ok: true,
+              text:
+                saved === 0
+                  ? "Saved — every daily snapshot is kept."
+                  : `Saved — the ${saved} most recent days are kept; older ones go on the next stats view.`,
+            }
+          : { ok: true, text: `Clamped to ${saved} (allowed ${retentionBounds.min}–${retentionBounds.max}).` }
+      );
+    } catch (err: any) {
+      setRetentionMsg({ ok: false, text: err?.message || "Could not save the retention setting." });
+    } finally {
+      setRetentionSaving(false);
     }
   };
 
@@ -313,6 +401,27 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
       <LayaGateStatus />
 
+      {rolesError && (
+        <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg p-3">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <span className="leading-relaxed">Role descriptions unavailable — {rolesError}</span>
+        </div>
+      )}
+
+      {callStatsError && (
+        <div className="flex items-start gap-2 text-[11px] text-gray-400 bg-[#161b22] border border-[#30363d] rounded-lg p-3">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5 text-gray-500" />
+          <span className="leading-relaxed">Per-role call stats unavailable — {callStatsError}</span>
+        </div>
+      )}
+
+      {engineSettingsError && (
+        <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg p-3">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <span className="leading-relaxed">Engine settings unavailable — {engineSettingsError}</span>
+        </div>
+      )}
+
       <div className="flex flex-col gap-2.5 bg-[#0d1117] border border-[#30363d] rounded-xl p-3.5">
         <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
           <Workflow className="w-3.5 h-3.5 text-purple-400" />
@@ -362,6 +471,51 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           instead of opening every model session simultaneously. Stored with the engine's settings
           (the <span className="font-mono">CODIFY_PARALLEL_WIDTH</span> env var, if set, overrides
           this field), and applies from the next batch without a restart.
+        </p>
+
+        <div className="flex flex-wrap items-center gap-2 border-t border-[#30363d] pt-2.5">
+          <label
+            htmlFor="stats-retention"
+            className="text-[11px] text-gray-300 font-medium"
+            title="How many daily statistics snapshots to keep"
+          >
+            Stats history to keep (days)
+          </label>
+          <input
+            id="stats-retention"
+            type="number"
+            min={retentionBounds.min}
+            max={retentionBounds.max}
+            value={retentionDraft}
+            onChange={(e) => {
+              setRetentionDraft(e.target.value);
+              setRetentionMsg(null);
+            }}
+            disabled={retention === null || retentionSaving}
+            className="w-20 bg-[#161b22] border border-[#30363d] rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
+          />
+          <button
+            type="button"
+            onClick={saveRetention}
+            disabled={
+              retention === null ||
+              retentionSaving ||
+              retentionDraft === String(retention)
+            }
+            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+          >
+            {retentionSaving ? "Saving..." : "Save"}
+          </button>
+          {retentionMsg && (
+            <span className={`text-[11px] ${retentionMsg.ok ? "text-green-400" : "text-red-400"}`}>
+              {retentionMsg.text}
+            </span>
+          )}
+        </div>
+        <p className="text-[11px] text-gray-400 leading-relaxed">
+          How many of the daily statistics snapshots (the “Day by day” chart in Stats) to keep.
+          <span className="text-gray-300"> 0 keeps everything.</span> Lowering the number prunes the
+          oldest days on the next stats view; the newest days always survive.
         </p>
       </div>
 
@@ -543,6 +697,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             stale={staleByRole.get(role) ?? null}
             staleFallback={staleFallbackByRole.get(role) ?? null}
             info={roleInfo[role]}
+            callStat={callStats[role] ?? null}
             signals={signals}
             onRefreshModels={onRefreshModels}
             refreshingModels={refreshingModels}

@@ -1,4 +1,4 @@
-import { AgentConfig, ModelOption, ProviderKeyStatus, ProviderModelStatus } from "./types";
+import type { AgentConfig, ModelOption, ProviderKeyStatus, ProviderModelStatus } from "./types.ts";
 
 /** What the engine told us about a failure, plus the live state of the role. */
 export interface FailureFacts {

@@ -1,5 +1,5 @@
-import { Event } from "./types";
-import { getEngineInfo } from "./api";
+import type { Event } from "./types.ts";
+import { getEngineInfo } from "./api.ts";
 
 /**
  * Live goal event stream over WebSocket with reconnect + exponential backoff.

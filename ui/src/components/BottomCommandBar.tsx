@@ -20,6 +20,7 @@ import {
   RefreshCw,
   AlertCircle,
   Workflow,
+  Trash2,
 } from "lucide-react";
 
 export type ExecutionMode = "direct" | "dry_run" | "plan_only";
@@ -33,6 +34,8 @@ interface BottomCommandBarProps {
   onSelectWorkspace: (ws: Workspace) => void;
   onBrowseWorkspace: () => Promise<void>;
   onCreateWorkspace: (name: string, root_path: string) => Promise<void>;
+  /** Confirms, then forgets the workspace and (after a second confirm) its goals. */
+  onDeleteWorkspace: (workspaceId: string, name: string) => void;
   availableModels: ModelOption[];
   selectedModel?: ModelOption;
   onSelectModel: (model: ModelOption) => void;
@@ -62,6 +65,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   onSelectWorkspace,
   onBrowseWorkspace,
   onCreateWorkspace,
+  onDeleteWorkspace,
   availableModels,
   selectedModel,
   onSelectModel,
@@ -82,6 +86,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   const [isModelOpen, setIsModelOpen] = useState(false);
   const [isModeOpen, setIsModeOpen] = useState(false);
   const [customModelId, setCustomModelId] = useState("");
+  const [customModelError, setCustomModelError] = useState<string | null>(null);
   // Typed filter for the model menu. A discovered catalog runs to hundreds of ids
   // on a busy install, so finding one by scrolling is worse than typing a few
   // letters — and the menu stays a short window either way.
@@ -292,11 +297,27 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
 
   const handleCustomModelSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!customModelId.trim()) return;
+    setCustomModelError(null);
+    const raw = customModelId.trim();
+    if (!raw) return;
+    // A custom id must name its provider explicitly ("provider/model"). A bare
+    // id used to be accepted as provider "custom", which no provider serves —
+    // so the goal failed later, far from the field that caused it.
+    const slash = raw.indexOf("/");
+    if (slash <= 0 || slash === raw.length - 1) {
+      setCustomModelError('Use the form provider/model, e.g. "ollama/qwen2.5-coder:7b".');
+      return;
+    }
+    const provider = raw.slice(0, slash).trim();
+    const id = raw.slice(slash + 1).trim();
+    if (!provider || !id) {
+      setCustomModelError('Use the form provider/model, e.g. "ollama/qwen2.5-coder:7b".');
+      return;
+    }
     const custom: ModelOption = {
-      id: customModelId.trim(),
-      name: customModelId.trim(),
-      provider: customModelId.includes("/") ? customModelId.split("/")[0] : "custom",
+      id,
+      name: raw,
+      provider,
       description: "User-defined custom model",
     };
     onSelectModel(custom);
@@ -318,6 +339,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
             onKeyDown={handleKeyDown}
             disabled={isLoading}
             placeholder="Ask Codify to build, edit files, fix tests, or refactor code..."
+            aria-label="Chat prompt"
             className="w-full bg-transparent text-gray-100 placeholder-gray-500 text-sm resize-none focus:outline-none leading-relaxed cursor-text"
           />
         </div>
@@ -381,25 +403,43 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                       className="max-h-40 overflow-y-auto space-y-1 my-1"
                     >
                       {workspaces.map((ws) => (
-                        <button
+                        // A row, not a button: the remove control is a sibling
+                        // button, and a button inside a button is invalid HTML
+                        // that swallows the inner click in practice.
+                        <div
                           key={ws.id}
-                          type="button"
-                          onClick={() => {
-                            onSelectWorkspace(ws);
-                            setIsFolderOpen(false);
-                          }}
-                          className={`w-full text-left px-2.5 py-1.5 rounded-lg flex items-center justify-between text-xs transition-colors ${
+                          className={`w-full flex items-center gap-1 rounded-lg transition-colors ${
                             selectedWorkspace?.id === ws.id
-                              ? "bg-blue-600/20 text-blue-400 border border-blue-500/30 font-medium"
+                              ? "bg-blue-600/20 text-blue-400 border border-blue-500/30"
                               : "text-gray-300 hover:bg-[#21262d]"
                           }`}
                         >
-                          <div className="truncate">
-                            <div className="font-semibold truncate">{ws.name}</div>
-                            <div className="text-[10px] text-gray-500 truncate font-mono">{ws.root_path}</div>
-                          </div>
-                          {selectedWorkspace?.id === ws.id && <Check className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />}
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSelectWorkspace(ws);
+                              setIsFolderOpen(false);
+                            }}
+                            className="flex-1 min-w-0 text-left px-2.5 py-1.5 text-xs"
+                          >
+                            <div className="truncate">
+                              <div className="font-semibold truncate">{ws.name}</div>
+                              <div className="text-[10px] text-gray-500 truncate font-mono">{ws.root_path}</div>
+                            </div>
+                          </button>
+                          {selectedWorkspace?.id === ws.id && (
+                            <Check className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => onDeleteWorkspace(ws.id, ws.name)}
+                            className="p-1 mr-1.5 text-gray-500 hover:text-red-400 rounded-lg transition-colors flex-shrink-0"
+                            title={`Remove ${ws.name} from Codify (your files are not deleted)`}
+                            aria-label={`Remove workspace ${ws.name}`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -600,9 +640,13 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                     <div className="flex items-center gap-1.5">
                       <input
                         type="text"
-                        placeholder="e.g. qwen2.5-coder:7b or claude-3-7-sonnet"
+                        placeholder="e.g. ollama/qwen2.5-coder:7b"
                         value={customModelId}
-                        onChange={(e) => setCustomModelId(e.target.value)}
+                        onChange={(e) => {
+                          setCustomModelId(e.target.value);
+                          setCustomModelError(null);
+                        }}
+                        aria-label="Custom model in provider/model form"
                         className="flex-1 bg-[#0d1117] border border-[#30363d] rounded-lg px-2.5 py-1 text-xs text-gray-200 focus:outline-none focus:border-purple-500 font-mono"
                       />
                       <button
@@ -613,6 +657,9 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                         Set
                       </button>
                     </div>
+                    {customModelError && (
+                      <p className="text-[10px] text-red-400 px-1 mt-1">{customModelError}</p>
+                    )}
                   </form>
                 </div>
               )}
@@ -732,6 +779,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
               type="button"
               onClick={handleSubmit}
               disabled={!prompt.trim() || isLoading}
+              aria-label="Send prompt"
               className="w-8 h-8 rounded-xl bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center transition-all disabled:opacity-40 disabled:hover:bg-blue-600 shadow-md cursor-pointer"
             >
               {isLoading ? (
@@ -747,7 +795,12 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
       {/* Manual Workspace Path Modal */}
       {isManualWsModal && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 max-w-md w-full shadow-2xl">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Enter workspace path"
+            className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 max-w-md w-full shadow-2xl"
+          >
             <h3 className="text-sm font-bold text-gray-100 mb-3 flex items-center gap-2">
               <Folder className="w-4 h-4 text-blue-400" /> Enter Workspace Path
             </h3>

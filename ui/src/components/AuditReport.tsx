@@ -1,7 +1,5 @@
 import React, { useState } from "react";
 import {
-  FileDown,
-  FileUp,
   Pencil,
   Route,
   AlertCircle,
@@ -416,5 +414,3 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
     </div>
   );
 }
-
-export const AuditReportIcons = { FileDown, FileUp };

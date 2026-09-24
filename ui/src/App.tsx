@@ -4,6 +4,7 @@ import {
   ChatMessage,
   EngineInfo,
   Event,
+  Goal,
   ModelCatalog,
   ModelOption,
   AgentConfig,
@@ -17,9 +18,13 @@ import {
   createWorkspace,
   createGoal,
   getGoal,
+  listGoals,
+  getGoalEvents,
   startGoal,
   pauseGoal,
   cancelGoal,
+  deleteGoal,
+  deleteWorkspace,
   retryStep,
   patchStep,
   getEngineInfo,
@@ -33,11 +38,12 @@ import {
   applyGoal,
 } from "./api";
 import { BottomCommandBar, ExecutionMode } from "./components/BottomCommandBar";
+import { StatsPanel } from "./components/StatsPanel";
 import { ChatTimeline } from "./components/ChatTimeline";
 import { looksLikeAudit } from "./components/AuditReport";
 import { SettingsModal } from "./components/SettingsModal";
 import { openGoalStream, GoalStreamHandle } from "./goalStream";
-import { Code, Settings, FolderGit2, AlertCircle } from "lucide-react";
+import { Code, Settings, FolderGit2, AlertCircle, History, BarChart3 } from "lucide-react";
 
 export const App: React.FC = () => {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -163,12 +169,13 @@ export const App: React.FC = () => {
     try {
       const wsList = await listWorkspaces();
       setWorkspaces(wsList);
-      if (wsList.length > 0) {
-        setSelectedWs((prev) => prev ?? wsList[0]);
-      } else {
-        setWorkspaces([]);
-        setSelectedWs(undefined);
-      }
+      setSelectedWs((prev) => {
+        if (wsList.length === 0) return undefined;
+        // The selected workspace may have been deleted or the list re-read
+        // after an engine restart — re-validate against the fresh list.
+        if (prev && wsList.some((w) => w.id === prev.id)) return prev;
+        return wsList[0];
+      });
       setError(null);
     } catch (err: any) {
       // Backend might still be starting — App also retries engine info above.
@@ -197,6 +204,10 @@ export const App: React.FC = () => {
         // Otherwise prefer a local model: no tokens, no latency, no surprise.
         return catalog.models.find((m) => m.protocol === "ollama") ?? catalog.models[0];
       });
+    } catch (err: any) {
+      // Discovery failure must not wedge the picker: keep the last catalog
+      // and say why the list may be stale.
+      setError(err?.message || "Failed to discover models from the engine.");
     } finally {
       setModelsLoading(false);
     }
@@ -252,15 +263,21 @@ export const App: React.FC = () => {
         });
         setSelectedWs(ws);
       }
-    } catch (err) {
-      console.error("Failed to browse workspace", err);
+    } catch (err: any) {
+      setError(err?.message || "Failed to open the folder browser.");
     }
   };
 
   const handleCreateWorkspace = async (name: string, root_path: string) => {
-    const ws = await createWorkspace(name, root_path);
-    setWorkspaces((prev) => [...prev, ws]);
-    setSelectedWs(ws);
+    setError(null);
+    try {
+      const ws = await createWorkspace(name, root_path);
+      setWorkspaces((prev) => [...prev, ws]);
+      setSelectedWs(ws);
+    } catch (err: any) {
+      setError(err?.message || "Failed to create workspace");
+      throw err;
+    }
   };
 
   // Subscribe to live goal events via WebSocket (reconnects with backoff,
@@ -291,6 +308,8 @@ export const App: React.FC = () => {
                 msg.id === messageId ? { ...msg, goal: refreshed } : msg
               )
             );
+          }).catch((err: any) => {
+            setError(err?.message || "Failed to refresh goal");
           });
         }
       };
@@ -315,6 +334,8 @@ export const App: React.FC = () => {
                 msg.id === messageId ? { ...msg, goal: refreshed } : msg
               )
             );
+          }).catch((err: any) => {
+            setError(err?.message || "Failed to refresh goal");
           });
         },
       });
@@ -322,16 +343,114 @@ export const App: React.FC = () => {
     []
   );
 
+  // Goal history: every goal the engine has persisted for the selected
+  // workspace, newest first. The engine always kept the records — this is the
+  // read that was missing, and the restore path below is what makes them more
+  // than rows in a database nobody sees after a restart.
+  const [history, setHistory] = useState<Goal[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  // Cross-goal statistics drawer. Mirrors the history drawer; the two are
+  // mutually exclusive — both overlay the transcript's right edge, and two
+  // overlapping overlays is a z-index fight, not a feature.
+  const [statsOpen, setStatsOpen] = useState(false);
+
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const goals = await listGoals({ workspace_id: selectedWs?.id, limit: 50 });
+      setHistory(goals ?? []);
+    } catch (err: any) {
+      setError(err?.message || "Failed to load goal history");
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [selectedWs?.id]);
+
+  // Fetch when the drawer opens, and again whenever the workspace changes while
+  // it stays open — the list follows the selected workspace, never lags behind it.
+  useEffect(() => {
+    if (historyOpen) loadHistory();
+  }, [historyOpen, loadHistory]);
+
+  /** Reopen a past goal in the transcript with its full transcript hydrated
+   * from the persisted event log — the same events a live stream delivers, so
+   * a restored card renders exactly like one that never left the tab. A still
+   * non-terminal goal re-subscribes, so it keeps updating live from here on. */
+  const restoreGoal = useCallback(
+    async (goalId: string) => {
+      if (restoring) return;
+      setRestoring(true);
+      setError(null);
+      try {
+        const [goal, events] = await Promise.all([getGoal(goalId), getGoalEvents(goalId)]);
+        const userMsg: ChatMessage = {
+          id: `user-${goalId}`,
+          role: "user",
+          content: goal.title,
+          timestamp: goal.created_at * 1000,
+        };
+        const assistantMsg: ChatMessage = {
+          id: `assistant-${goalId}`,
+          role: "assistant",
+          content: goal.description || goal.title,
+          timestamp: goal.created_at * 1000,
+          goal,
+          events: [...events].sort((a, b) => a.sequence - b.sequence),
+          // Terminal goals are done; a live one re-subscribes below instead.
+          isStreaming: false,
+        };
+        setMessages((prev) => [
+          ...prev.filter((m) => m.id !== userMsg.id && m.id !== assistantMsg.id),
+          userMsg,
+          assistantMsg,
+        ]);
+        setHistoryOpen(false);
+        const terminal = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
+        if (!terminal.has(goal.status)) {
+          subscribeToGoal(goalId, assistantMsg.id);
+        }
+      } catch (err: any) {
+        setError(err?.message || "Failed to restore goal");
+      } finally {
+        setRestoring(false);
+      }
+    },
+    [restoring, subscribeToGoal]
+  );
+
   // Goals whose execution we have already kicked off in direct mode. Without
   // this, the auto-start had to observe the PLANNING → PENDING transition, so a
   // plan that finished before the first poll tick (the common case with a fast
   // local model) never started at all.
   const autoStartedGoals = useRef<Set<string>>(new Set());
+  // Guard against overlapping poll ticks: a slow engine response must not
+  // stack a second round of getGoal/startGoal calls on top of the first.
+  const polling = useRef(false);
+  const TERMINAL_STATUSES = useMemo(
+    () => new Set(["COMPLETED", "FAILED", "CANCELLED"]),
+    []
+  );
 
   // Poll active goals periodically
   useEffect(() => {
     const interval = setInterval(() => {
-      messages.forEach(async (msg) => {
+      if (polling.current) return;
+      polling.current = true;
+      (async () => {
+      // Prune entries for goals that already reached a terminal status so
+      // the set cannot grow without bound across a long session.
+      for (const m of messages) {
+        if (m.goal && TERMINAL_STATUSES.has(m.goal.status)) {
+          autoStartedGoals.current.delete(m.goal.id);
+        }
+      }
+      if (autoStartedGoals.current.size > 200) {
+        const ids = [...autoStartedGoals.current].slice(0, autoStartedGoals.current.size - 200);
+        for (const id of ids) autoStartedGoals.current.delete(id);
+      }
+      for (const msg of messages) {
         if (
           msg.goal &&
           (msg.goal.status === "PLANNING" ||
@@ -363,11 +482,14 @@ export const App: React.FC = () => {
             // Ignore polling errors
           }
         }
+      }
+      })().finally(() => {
+        polling.current = false;
       });
     }, 1500);
 
     return () => clearInterval(interval);
-  }, [messages, mode]);
+  }, [messages, mode, TERMINAL_STATUSES]);
 
   /** Import a downloaded audit JSON back into the transcript as a readable
    * report. A closed artifact: it needs no engine connection, so a run can be
@@ -607,6 +729,81 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleDeleteGoal = async (goalId: string, title: string) => {
+    // Confirm names the cascade, because "delete" on a run record is not
+    // obviously the same as forgetting a chat entry: the event log, the plan
+    // steps, and any dry-run proposals go with it.
+    const ok = window.confirm(
+      `Delete this goal?\n\n"${title}" and its full record will be removed: ` +
+        `its event log, plan steps, and any dry-run proposals.\n\n` +
+        `Files your fixer wrote in the workspace are NOT touched.`,
+    );
+    if (!ok) return;
+    setError(null);
+    try {
+      const removed = await deleteGoal(goalId);
+      // The card disappearing is the feedback, matching how the rest of the app
+      // reports a successful mutation. The engine's counts are what the confirm
+      // dialog promised; if they ever disagree with the dialog's wording, that
+      // is a bug in the message, not something to paper over with a toast.
+      console.info(
+        `deleted goal ${removed.goal_id}: ${removed.events} event(s), ` +
+          `${removed.steps} step(s), ${removed.proposed_files} proposal(s); files untouched`,
+      );
+      // Drop it from the transcript and the history drawer in one move —
+      // a card left behind would be a goal the engine has already forgotten.
+      setMessages((prev) => prev.filter((m) => m.goal?.id !== goalId));
+      setHistory((prev) => prev.filter((g) => g.id !== goalId));
+      delete goalStreams.current[goalId];
+      autoStartedGoals.current.delete(goalId);
+    } catch (err: any) {
+      setError(err?.message || "Failed to delete goal");
+    }
+  };
+
+  const handleDeleteWorkspace = async (workspaceId: string, name: string) => {
+    if (!window.confirm(
+      `Remove "${name}" from Codify?\n\n` +
+        `This forgets the folder. Your files stay exactly where they are.`,
+    )) {
+      return;
+    }
+    setError(null);
+    try {
+      await deleteWorkspace(workspaceId);
+      // Deleting the selected workspace leaves the picker pointing at a
+      // workspace that no longer exists, so clear the selection with it.
+      setSelectedWs((current) => (current?.id === workspaceId ? undefined : current));
+      await loadWorkspacesRef.current?.();
+    } catch (err: any) {
+      // The engine refuses a workspace that still has goals, and hands back
+      // the count. That is a question, not a failure: ask it before deleting
+      // anyone's history.
+      const code = (err as { code?: string })?.code;
+      const goals = Number((err as { extra?: { goals?: number } })?.extra?.goals ?? NaN);
+      if (code === "workspace_not_empty" && Number.isFinite(goals)) {
+        const go = window.confirm(
+          `"${name}" has ${goals} goal${goals === 1 ? "" : "s"} recorded against it.\n\n` +
+            `Deleting the workspace deletes all ${goals} of them and their event logs too. ` +
+            `Your files are not touched.\n\nContinue?`,
+        );
+        if (!go) return;
+        setError(null);
+        try {
+          await deleteWorkspace(workspaceId, { deleteGoals: true });
+          setSelectedWs((current) => (current?.id === workspaceId ? undefined : current));
+          // A cascade removed goals the transcript may still be showing.
+          setMessages((prev) => prev.filter((m) => !m.goal || m.goal.workspace_id !== workspaceId));
+          await loadWorkspacesRef.current?.();
+        } catch (retryErr: any) {
+          setError(retryErr?.message || "Failed to delete workspace");
+        }
+        return;
+      }
+      setError(err?.message || "Failed to delete workspace");
+    }
+  };
+
   const handleRetryStep = async (goalId: string, stepId: string, version: number) => {
     setError(null);
     try {
@@ -693,6 +890,43 @@ export const App: React.FC = () => {
             </span>
           </button>
 
+          {/* Goal history: everything this workspace ever ran, restorable into
+              the transcript. Fetched when opened, so a restart can never show a
+              stale list. */}
+          <button
+            type="button"
+            onClick={() => {
+              setStatsOpen(!statsOpen);
+              if (!statsOpen) setHistoryOpen(false);
+            }}
+            title="Cross-goal statistics — success rate, token spend, daily trend"
+            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
+              statsOpen
+                ? "bg-blue-950/40 text-blue-300 border-blue-800"
+                : "bg-[#21262d] hover:bg-[#30363d] text-gray-200 border-[#30363d]"
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5 text-gray-400" />
+            <span>Stats</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setHistoryOpen(!historyOpen);
+              if (!historyOpen) setStatsOpen(false);
+            }}
+            title="Goal history — reopen a past goal with its full transcript"
+            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
+              historyOpen
+                ? "bg-blue-950/40 text-blue-300 border-blue-800"
+                : "bg-[#21262d] hover:bg-[#30363d] text-gray-200 border-[#30363d]"
+            }`}
+          >
+            <History className="w-3.5 h-3.5 text-gray-400" />
+            <span>History</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setIsSettingsOpen(true)}
@@ -723,10 +957,105 @@ export const App: React.FC = () => {
           onPauseGoal={handlePauseGoal}
           onCancelGoal={handleCancelGoal}
           onRetryStep={handleRetryStep}
+          onDeleteGoal={handleDeleteGoal}
           onQuickPrompt={(text) => handleSendMessage(text)}
           onOpenSettings={openSettings}
           onImportAudit={handleImportAudit}
         />
+
+        {/* Cross-goal statistics drawer: the wide-angle lens over the same
+            log the per-goal cards render. Independent of workspace on purpose —
+            "is this setup working" spans workspaces. */}
+        {statsOpen && (
+          <aside className="absolute top-0 right-0 bottom-0 z-20 w-96 max-w-full bg-[#161b22] border-l border-[#30363d] shadow-2xl flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+              <div className="flex items-center gap-2 text-sm font-semibold text-gray-200">
+                <BarChart3 className="w-4 h-4 text-blue-400" />
+                Statistics
+              </div>
+              <button
+                type="button"
+                onClick={() => setStatsOpen(false)}
+                aria-label="Close statistics"
+                className="text-gray-400 hover:text-gray-200 text-sm cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3">
+              <StatsPanel />
+            </div>
+          </aside>
+        )}
+
+        {/* Goal history drawer: a right-side overlay so the transcript stays in
+            place behind it. Empty only when this workspace never ran a goal. */}
+        {historyOpen && (
+          <aside className="absolute top-0 right-0 bottom-0 z-20 w-80 max-w-full bg-[#161b22] border-l border-[#30363d] shadow-2xl flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+              <div className="flex items-center gap-2 text-sm font-semibold text-gray-200">
+                <History className="w-4 h-4 text-blue-400" />
+                Goal history
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={loadHistory}
+                  disabled={historyLoading}
+                  title="Reload from the engine"
+                  aria-label="Reload goal history"
+                  className="text-gray-400 hover:text-gray-200 disabled:opacity-50 cursor-pointer"
+                >
+                  {historyLoading ? "…" : "↻"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHistoryOpen(false)}
+                  aria-label="Close goal history"
+                  className="text-gray-400 hover:text-gray-200 text-sm cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 space-y-1">
+              {history.length === 0 && !historyLoading && (
+                <p className="text-xs text-gray-500 px-2 py-4 leading-relaxed">
+                  No goals for this workspace yet. Everything you run — including
+                  goals from previous sessions — appears here.
+                </p>
+              )}
+              {history.map((g) => (
+                <button
+                  key={g.id}
+                  type="button"
+                  onClick={() => restoreGoal(g.id)}
+                  className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-[#21262d] transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-gray-200 truncate">{g.title}</span>
+                    <span
+                      className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full border flex-shrink-0 ${
+                        g.status === "COMPLETED"
+                          ? "bg-green-950/40 text-green-400 border-green-800"
+                          : g.status === "RUNNING" || g.status === "PLANNING" || g.status === "PAUSED"
+                          ? "bg-blue-950/40 text-blue-400 border-blue-800"
+                          : g.status === "FAILED"
+                          ? "bg-red-950/40 text-red-400 border-red-800"
+                          : "bg-[#21262d] text-gray-400 border-[#30363d]"
+                      }`}
+                    >
+                      {g.status}
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-gray-500 mt-0.5">
+                    {new Date(g.created_at * 1000).toLocaleString()}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </aside>
+        )}
 
         {/* Bottom Pinned Command Center — pickers live on the toolbar's left
             edge; their menus open UP over the chat, never over the textarea. */}
@@ -736,6 +1065,7 @@ export const App: React.FC = () => {
           onSelectWorkspace={setSelectedWs}
           onBrowseWorkspace={handleBrowseWorkspace}
           onCreateWorkspace={handleCreateWorkspace}
+          onDeleteWorkspace={handleDeleteWorkspace}
           availableModels={modelCatalog.models}
           selectedModel={selectedModel}
           onSelectModel={setSelectedModel}

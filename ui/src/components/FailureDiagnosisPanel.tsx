@@ -65,19 +65,26 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
   const [keys, setKeys] = useState<ProviderKeyStatus[]>([]);
   const [catalog, setCatalog] = useState<ModelOption[]>([]);
   const [status, setStatus] = useState<ProviderModelStatus[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
-    const [cfg, keyList, cat] = await Promise.all([
-      fetchAgentConfigs(),
-      fetchProviderKeys(),
-      fetchModelCatalog(true),
-    ]);
-    setConfigs(cfg);
-    setKeys(keyList);
-    setCatalog((cat as ModelCatalog).models);
-    setStatus((cat as ModelCatalog).providers);
-    setLoading(false);
+    setLoadError(null);
+    try {
+      const [cfg, keyList, cat] = await Promise.all([
+        fetchAgentConfigs(),
+        fetchProviderKeys(),
+        fetchModelCatalog(true),
+      ]);
+      setConfigs(cfg ?? []);
+      setKeys(keyList ?? []);
+      setCatalog((cat as ModelCatalog).models ?? []);
+      setStatus((cat as ModelCatalog).providers ?? []);
+    } catch (err: any) {
+      setLoadError(err?.message || "Could not read the engine's current state.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -101,7 +108,12 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
 
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-[#161b22] border border-[#30363d] rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Failure diagnosis"
+        className="bg-[#161b22] border border-[#30363d] rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col"
+      >
         <div className="flex items-start justify-between gap-3 border-b border-[#30363d] px-5 py-3.5">
           <div className="flex flex-col gap-0.5 min-w-0">
             <h3 className="text-sm font-bold text-gray-100 flex items-center gap-2">
@@ -124,6 +136,7 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
               onClick={load}
               disabled={loading}
               title="Re-read the engine's current state"
+              aria-label="Re-read the engine's current state"
               className="text-gray-400 hover:text-gray-200 p-1.5 rounded-lg hover:bg-[#21262d] disabled:opacity-40"
             >
               <RefreshCw className={loading ? "w-4 h-4 animate-spin" : "w-4 h-4"} />
@@ -131,6 +144,7 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
             <button
               type="button"
               onClick={onClose}
+              aria-label="Close failure diagnosis"
               className="text-gray-400 hover:text-gray-200 p-1.5 rounded-lg hover:bg-[#21262d]"
             >
               <X className="w-4 h-4" />
@@ -146,7 +160,14 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
             </div>
           )}
 
-          {!loading && (
+          {!loading && loadError && (
+            <div className="border border-red-800/70 bg-red-950/30 rounded-xl px-3.5 py-2.5 text-xs text-red-200">
+              Could not read the engine's current state: {loadError} The verdicts below are
+              based on the failure alone.
+            </div>
+          )}
+
+          {!loading && !loadError && (
             <>
               {verdicts.map((v, i) => (
                 <div key={i} className={`border rounded-xl px-3.5 py-2.5 ${LEVEL_STYLE[v.level].wrap}`}>

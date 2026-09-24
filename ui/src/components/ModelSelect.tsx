@@ -198,7 +198,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
             const badges = modelBadges(m, signals);
             return (
               <button
-                key={m.id}
+                key={`${m.provider}:${m.id}`}
                 type="button"
                 title={
                   `${m.id}` +
