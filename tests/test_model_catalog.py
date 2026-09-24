@@ -47,13 +47,17 @@ class _StubKeychain:
 
 
 class _StubConfig:
-    def __init__(self, role, provider, protocol, base_url=None, api_key_ref=None, model_name="m"):
+    def __init__(self, role, provider, protocol, base_url=None, api_key_ref=None, model_name="m",
+                 fallback_provider=None, fallback_protocol=None, fallback_base_url=None):
         self.role = role
         self.provider = provider
         self.protocol = protocol
         self.base_url = base_url
         self.api_key_ref = api_key_ref
         self.model_name = model_name
+        self.fallback_provider = fallback_provider
+        self.fallback_protocol = fallback_protocol
+        self.fallback_base_url = fallback_base_url
 
 
 class _StubRegistry:
@@ -280,6 +284,60 @@ class TestTargets(unittest.TestCase):
         registry = _StubRegistry([_StubConfig("fixer", "deepseek", "openai_compat")])
         targets = {t.provider: t for t in _targets(registry, _StubKeychain(provider_keys={"deepseek": "k"}))}
         self.assertEqual(targets["deepseek"].base_url, "https://api.deepseek.com")
+
+    def test_a_fallback_provider_is_discoverable_too(self):
+        """The settings screen flags a stale fallback with the same live-catalog
+        rule as a primary. A fallback whose provider was never queried reports
+        ok=false / no models, which would dress "we never asked" up as "your
+        model is gone". Both the builtin case (catalog endpoint, key from the
+        keychain) and a custom endpoint case must be targeted."""
+        registry = _StubRegistry([
+            _StubConfig(
+                "fixer", "anthropic", "anthropic",
+                fallback_provider="ollama",
+                # A fallback_base_url the role configured itself (custom server).
+                fallback_protocol="ollama",
+                fallback_base_url="http://127.0.0.1:18999",
+            ),
+            _StubConfig(
+                "planner", "deepseek", "openai_compat",
+                fallback_provider="groq",
+            ),
+        ])
+        keychain = _StubKeychain(provider_keys={"deepseek": "dk", "groq": "gk"})
+        targets = {t.provider: t for t in _targets(registry, keychain)}
+
+        self.assertIn("ollama", targets)
+        self.assertEqual(targets["ollama"].base_url, "http://127.0.0.1:18999")
+        self.assertIn("fallback:fixer", targets["ollama"].sources)
+        self.assertIn("groq", targets)
+        self.assertEqual(targets["groq"].api_key, "gk", "builtin fallback inherits the keychain key")
+        self.assertEqual(targets["groq"].base_url, "https://api.groq.com/openai/v1")
+
+    def test_a_role_set_endpoint_beats_the_seed_defaults(self):
+        """Discovery must poll the endpoint the roles actually talk to.
+
+        list_configs is role-ordered and the seeded laya role has no base_url,
+        so the first 'ollama' target carried the builtin 11434 endpoint. The
+        merge kept that first base_url and silently dropped the endpoint every
+        other role had configured — discovery polled a server the roles never
+        talk to, and the stale-model warning judged models against that wrong
+        catalog (a model missing from 11434 but served by the configured
+        endpoint warned; the reverse silently passed).
+        """
+        registry = _StubRegistry([
+            _StubConfig("laya", "ollama", "ollama"),  # seeded: no base_url
+            _StubConfig("fixer", "ollama", "ollama", base_url="http://127.0.0.1:18999"),
+        ])
+        targets = {t.provider: t for t in _targets(registry, _StubKeychain())}
+        self.assertEqual(
+            targets["ollama"].base_url, "http://127.0.0.1:18999",
+            "a role-configured endpoint must win over the seed default",
+        )
+        # And when only the seed has spoken, the builtin default stands.
+        registry2 = _StubRegistry([_StubConfig("laya", "ollama", "ollama")])
+        targets2 = {t.provider: t for t in _targets(registry2, _StubKeychain())}
+        self.assertEqual(targets2["ollama"].base_url, "http://127.0.0.1:11434")
 
 
 class TestCatalogService(unittest.IsolatedAsyncioTestCase):

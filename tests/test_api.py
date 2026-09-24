@@ -366,6 +366,16 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["display_name"], "API Planner")
 
+    async def test_workspace_refuses_the_filesystem_root(self):
+        """A workspace at `/` makes every containment check vacuous — refused."""
+        r = await self.client.post(
+            "/workspaces",
+            headers=self.headers,
+            json={"name": "ROOT", "root_path": "/"},
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["code"], "invalid_root")
+
     async def test_workspaces_and_goals_lifecycle(self):
         ws_dir = self.root / "ws1"
         ws_dir.mkdir()
@@ -1055,6 +1065,106 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["code"], "unknown_setting")
+
+    async def test_provider_switch_does_not_carry_the_key_ref_over(self):
+        """A credential stored for provider A must never be sent to provider B.
+
+        `api_key_ref` is saved under the provider the role had at save time; a
+        patch that switches provider must null it, or ProviderFactory resolves
+        the old key and POSTs it to the new provider's endpoint.
+        """
+        r = await self.client.put(
+            "/settings/agents/planner",
+            headers=self.headers,
+            json={"api_key": "sk-anthropic-secret"},
+        )
+        self.assertEqual(r.status_code, 200)
+        planner = r.json()
+        self.assertTrue(planner["api_key_ref"])
+
+        # Switch provider with no new key: the ref belongs to the old provider.
+        r = await self.client.put(
+            "/settings/agents/planner",
+            headers=self.headers,
+            json={"provider": "openai"},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.json()["api_key_ref"])
+
+        # An explicit key in the same patch as the switch wins — the ref points
+        # at the key the user just supplied, not a stale one.
+        r = await self.client.put(
+            "/settings/agents/planner",
+            headers=self.headers,
+            json={"provider": "deepseek", "api_key": "sk-deepseek-new"},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["api_key_ref"])
+
+    async def test_apply_rejects_a_stale_version(self):
+        """POST /apply is version-guarded like every other mutating goal route."""
+        ws_dir = self.root / "ws-applyv"
+        ws_dir.mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": "WS-APPLYV", "root_path": str(ws_dir)},
+        )
+        ws_id = r.json()["id"]
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "Dry run", "dry_run": True},
+        )
+        goal_id = r.json()["id"]
+        g = app.state.goals.get(goal_id)
+        app.state.goals.update_status(goal_id, 0, "COMPLETED")
+        # Seed a proposal so the route reaches the version check, not 409
+        # nothing_to_apply first.
+        app.state.executor._store_proposed_files(
+            goal_id, "step-1",
+            [{"path": "x.txt", "action": "write", "content": "hi"}],
+        )
+        g = app.state.goals.get(goal_id)
+
+        # A client answering from a stale view must 409, not double-apply.
+        r = await self.client.post(
+            f"/goals/{goal_id}/apply", headers=self.headers,
+            json={"expected_version": g.version + 5},
+        )
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.json()["code"], "version_conflict")
+
+        # The current version is accepted (the apply itself is dispatched to a
+        # background task; the assertion is the gate, not the run).
+        r = await self.client.post(
+            f"/goals/{goal_id}/apply", headers=self.headers,
+            json={"expected_version": g.version},
+        )
+        self.assertEqual(r.status_code, 200)
+
+    def test_ws_refuses_an_unknown_goal_after_auth(self):
+        """Authenticated socket to a goal that does not exist → close 4404.
+
+        The old endpoint accepted every socket and only ever closed 4401, so a
+        bad goal id surfaced as a mystery stream that sends nothing.
+        """
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            self.skipTest("starlette testclient's websocket support unavailable")
+        from starlette.websockets import WebSocketDisconnect
+        # TestClient enters lifespan, which would rebuild app.state on the real
+        # home store — so reuse the isolated state ASGI app is not possible; but
+        # TestClient(app) raises on lifespan only if it errors. The engine's
+        # lifespan honors CODIFY_HOME/CODIFY_SECRETS, which tests/hermetic.py
+        # has already pointed at a throwaway dir for this process.
+        with TestClient(app) as client:
+            with self.assertRaises(WebSocketDisconnect) as ctx:
+                with client.websocket_connect(
+                    "/ws/goals/does-not-exist",
+                    headers={"Authorization": f"Bearer {app.state.token}"},
+                ) as ws:
+                    ws.receive_text()
+            self.assertEqual(ctx.exception.code, 4404)
 
 
 if __name__ == "__main__":

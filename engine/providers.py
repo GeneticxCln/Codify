@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
+import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
 import httpx
 
+from engine import home
 from engine.models import AgentConfig, BUILTIN_PROVIDERS
 
 
@@ -292,30 +296,45 @@ class OpenAICompatProvider(BaseProvider):
         url = f"{self._base_url}/chat/completions"
         text = ""
         data: dict = {}
-        async with httpx.AsyncClient(timeout=120) as client:
-            async with client.stream("POST", url, headers=headers, json={**payload, "stream": True}) as response:
-                if response.status_code >= 400:
-                    await response.aread()
-                    raise ProviderError("provider_http", f"openai_compat {response.status_code}")
-                async for chunk in self._stream_lines(response):
-                    try:
-                        obj = json.loads(chunk)
-                    except ValueError:
-                        continue
-                    choices = obj.get("choices") or [{}]
-                    text += choices[0].get("delta", {}).get("content") or ""
-                    if self.on_delta is not None:
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                async with client.stream("POST", url, headers=headers, json={**payload, "stream": True}) as response:
+                    if response.status_code >= 400:
+                        await response.aread()
+                        raise ProviderError("provider_http", f"openai_compat {response.status_code}")
+                    async for chunk in self._stream_lines(response):
                         try:
-                            self.on_delta(text)
-                        except Exception:
-                            pass
-                    if choices[0].get("finish_reason") or obj.get("usage"):
-                        data = obj
-            if not data:
-                raise ProviderError(
-                    "provider_bad_response",
-                    "openai_compat stream ended without a finish_reason chunk",
-                )
+                            obj = json.loads(chunk)
+                        except ValueError:
+                            continue
+                        choices = obj.get("choices") or [{}]
+                        text += choices[0].get("delta", {}).get("content") or ""
+                        if self.on_delta is not None:
+                            try:
+                                self.on_delta(text)
+                            except Exception:
+                                pass
+                        # Usage arrives in whichever chunk carries it, the
+                        # finish chunk in another. Overwriting `data` wholesale
+                        # loses one when the two don't coincide — merge so the
+                        # usage report sees both.
+                        if obj.get("usage"):
+                            data = {**data, "usage": obj["usage"]}
+                        if choices[0].get("finish_reason"):
+                            # obj wins per-key: the finish chunk's usage (the
+                            # complete one) overrides an earlier partial.
+                            data = {**data, **obj} if data else obj
+        except httpx.HTTPError as exc:
+            # A refused/dropped connection mid-stream is unreachability, not a
+            # bug — same normalization post_json applies to non-streaming calls.
+            raise ProviderError(
+                "provider_unreachable", f"openai_compat unreachable: {type(exc).__name__}: {exc}"
+            ) from exc
+        if not data:
+            raise ProviderError(
+                "provider_bad_response",
+                "openai_compat stream ended without a finish_reason chunk",
+            )
         self._report_usage("openai_compat", data)
         return text
 
@@ -378,6 +397,13 @@ class OllamaProvider(BaseProvider):
                     raise ProviderError(
                         "provider_bad_response", f"ollama streamed a line that is not JSON: {exc}"
                     ) from exc
+                except httpx.HTTPError as exc:
+                    # A refused/dropped connection is unreachability, not a bug —
+                    # the streaming twin of post_json's normalization; without it
+                    # a dead endpoint escapes the fallback machinery entirely.
+                    raise ProviderError(
+                        "provider_unreachable", f"ollama unreachable: {type(exc).__name__}: {exc}"
+                    ) from exc
                 if not data.get("done"):
                     raise ProviderError(
                         "provider_bad_response", "ollama stream ended without a done=true chunk"
@@ -398,7 +424,7 @@ class GoogleProvider(BaseProvider):
         self._base_url = base_url.rstrip("/")
 
     async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
-        url = f"{self._base_url}/models/{model}:generateContent?key={self._api_key}"
+        url = f"{self._base_url}/models/{model}:generateContent"
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
@@ -407,8 +433,13 @@ class GoogleProvider(BaseProvider):
                 "maxOutputTokens": max_tokens,
             },
         }
+        # The key travels in a header, not the URL: a query-string credential
+        # lands in proxy/server access logs, and Google accepts the header form.
         async with httpx.AsyncClient(timeout=120) as client:
-            data = await post_json(client, url, label="google", json=payload)
+            data = await post_json(
+                client, url, label="google", json=payload,
+                headers={"x-goog-api-key": self._api_key},
+            )
             candidates = data.get("candidates") or []
             if not candidates:
                 return ""
@@ -416,13 +447,6 @@ class GoogleProvider(BaseProvider):
             self._report_usage("google", data)
             return "".join(p.get("text", "") for p in parts)
 
-
-import json
-import os
-from pathlib import Path
-from typing import Any
-
-from engine import home
 
 ENV_KEY_MAP: dict[str, list[str]] = {
     "anthropic": ["ANTHROPIC_API_KEY"],
@@ -474,6 +498,9 @@ class Keychain:
         self._explicit_store = secrets_path is not None
         self._keyring: Any = None
         self._keyring_checked = False
+        # Until a save happens, report the configured preference as the last
+        # write — there has been no write to disagree with it yet.
+        self._last_write_backend = self.backend
 
     # ── backends ────────────────────────────────────────────────────────────
 
@@ -519,13 +546,26 @@ class Keychain:
             return "your OS keychain"
         return f"the local file {self._secrets_path} (permissions 0600)"
 
-    def _read_file(self) -> dict[str, str]:
+    def _read_file(self, *, strict: bool = False) -> dict[str, str]:
         try:
             data = json.loads(self._secrets_path.read_text())
             return data if isinstance(data, dict) else {}
         except FileNotFoundError:
             return {}
-        except Exception:
+        except Exception as exc:
+            if strict:
+                # A write is about to REPLACE this store. Silently treating a
+                # corrupt/unreadable file as empty would wipe every other key
+                # in it (the old bytes are discarded by the atomic replace even
+                # though they might have been recoverable, e.g. a transient
+                # EACCES). Fail the save loudly instead; reads stay lenient so
+                # a corrupt store degrades to "no key" rather than a dead app.
+                raise ProviderError(
+                    "secrets_unreadable",
+                    f"the local secret store at {self._secrets_path} exists but "
+                    f"cannot be read ({exc.__class__.__name__}); refusing to "
+                    "overwrite it — fix or remove the file, then save again",
+                ) from exc
             # A corrupted secret store must not take the engine down; acting as
             # if it were empty is recoverable (the key can be re-entered).
             return {}
@@ -538,8 +578,12 @@ class Keychain:
         except OSError:
             pass
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
-        tmp.chmod(0o600)
+        # Create the temp file already 0600: write_text creates it with the
+        # process umask (typically 0644), leaving a window where the plaintext
+        # secrets sit world-readable before the chmod below runs.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data, indent=2, sort_keys=True))
         tmp.replace(path)  # atomic: a crash mid-write cannot truncate the store
 
     # ── generic ref access ──────────────────────────────────────────────────
@@ -567,17 +611,33 @@ class Keychain:
         if keyring_mod:
             try:
                 keyring_mod.set_password("codify", ref, api_key)
+                self._last_write_backend = "keyring"
                 return
             except Exception:
                 # Keyring present but unusable at write time (locked, no session
                 # bus). Fall through rather than failing the save.
                 pass
-        data = self._read_file()
+        # Strict read: saving must not wipe a store it merely failed to read
+        # (the empty-dict default here would make the replace drop every other
+        # key the file held).
+        data = self._read_file(strict=True)
         data[ref] = api_key
         try:
             self._write_file(data)
         except OSError as exc:
             raise ProviderError("secrets_unwritable", str(exc)) from exc
+        self._last_write_backend = "file"
+
+    def last_write_backend(self) -> str:
+        """"keyring" or "file" — where the most recent save ACTUALLY landed.
+
+        `backend` is the configured preference; a keyring that throws at write
+        time silently falls through to the file, and a UI that trusted the
+        preference would tell the user "stored in your OS keychain" about a key
+        sitting in a JSON file. Call this right after a save to report the
+        truth.
+        """
+        return self._last_write_backend
 
     def get_provider_key(self, provider: str) -> str:
         """Find an API key for this provider only.

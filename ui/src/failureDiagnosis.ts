@@ -79,6 +79,13 @@ export function diagnoseFailure(facts: FailureFacts): Verdict[] {
   const verdicts: Verdict[] = [];
   const { config, keys, discovery } = facts;
 
+  // Declared up front: the no-config early return below pushes it too.
+  const explainer: Verdict = {
+    level: "info",
+    title: `What "${facts.code}" means`,
+    detail: CODE_MEANING[facts.code] || "No explanation recorded for this code yet.",
+  };
+
   if (!facts.role) {
     verdicts.push({
       level: "info",
@@ -96,6 +103,9 @@ export function diagnoseFailure(facts: FailureFacts): Verdict[] {
         "The engine has no provider or model for this role, so it cannot run. Recreate the role in Settings → Agent Roles.",
       fix: { tab: "agents", label: "Open Agent Roles" },
     });
+    // The blocker is the answer, but the failure code still deserves its
+    // explainer — an early return here used to drop it.
+    verdicts.push(explainer);
     return verdicts;
   }
 
@@ -124,9 +134,12 @@ export function diagnoseFailure(facts: FailureFacts): Verdict[] {
   }
 
   // A discovery failure caused by the missing key above is a symptom, not a
-  // second problem — and its error text already says so.
+  // second problem — and its error text already says so. Suppress only when a
+  // missing key is CONFIRMED: with key state unknown (`keys` unset), treating
+  // it as missing would hide a real discovery problem.
   const discoveryIsSymptom = (discovery?.error || "").toLowerCase().includes("no api key");
-  if (config && discovery && !discovery.ok && !(discoveryIsSymptom && !keys?.has_key)) {
+  const keyConfirmedMissing = keys?.has_key === false;
+  if (config && discovery && !discovery.ok && !(discoveryIsSymptom && keyConfirmedMissing)) {
     verdicts.push({
       level: "warning",
       title: `Could not read ${config.provider}'s model list`,
@@ -158,12 +171,6 @@ export function diagnoseFailure(facts: FailureFacts): Verdict[] {
       });
     }
   }
-
-  const explainer: Verdict = {
-    level: "info",
-    title: `What "${facts.code}" means`,
-    detail: CODE_MEANING[facts.code] || "No explanation recorded for this code yet.",
-  };
 
   const rank = { blocker: 0, warning: 1, info: 2 } as const;
   const bySeverity = (a: Verdict, b: Verdict) => rank[a.level] - rank[b.level];

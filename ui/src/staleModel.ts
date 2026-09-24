@@ -30,9 +30,15 @@ export function staleTarget(
   if (!provider || !model) return null;
 
   const discovery = providerStatus.find((s) => s.provider === provider);
+  // Not asked yet (no entry) counts as "unknown", same as a failed ask: warning
+  // on an unqueried provider would dress "the catalog has not loaded yet" up as
+  // "your model was retired".
   if (!discovery?.ok) return null;
 
-  const catalog = models.filter((m) => m.provider === provider);
+  // A discovery that answered but never listed this provider's models (engine
+  // shape drift) is also unknown — only a real, successful listing may condemn.
+  const catalog = models.filter((m) => m && m.provider === provider && typeof m.id === "string");
+  if (discovery.count > 0 && catalog.length === 0) return null;
   if (catalog.some((m) => m.id === model)) return null;
 
   return { model, provider, reportedCount: catalog.length };

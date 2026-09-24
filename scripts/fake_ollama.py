@@ -19,7 +19,6 @@ _PLANS = {
     ],
 }
 PLANNER = json.dumps({"steps": _PLANS.get(_PLANNER_STEPS, _PLANS[1])})
-PLANNER_NONSTREAM = PLANNER
 CODER = json.dumps(
     {"files": [{"path": "banner.txt", "action": "create", "content": "hello from codify\n"}]}
 )

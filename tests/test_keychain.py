@@ -100,8 +100,19 @@ class TestKeychainFileBackend(unittest.TestCase):
     def test_corrupt_store_reads_as_empty_instead_of_crashing(self):
         self.path.write_text("{ this is not json")
         kc = file_backed(secrets_path=self.path)
+        # Reads stay lenient: a corrupt store degrades to "no key", never a
+        # dead app.
         self.assertEqual(kc.get_provider_key("openai"), "")
-        # ...and a later save repairs it rather than failing forever.
+        # But a SAVE must not silently wipe it: the empty-dict read-before-write
+        # would discard the corrupt (possibly recoverable) bytes. The save fails
+        # with a coded, actionable error and the file is left untouched.
+        with self.assertRaises(Exception) as ctx:
+            kc.set_provider_key("openai", "sk-new")
+        self.assertEqual(getattr(ctx.exception, "code", None), "secrets_unreadable")
+        self.assertEqual(self.path.read_text(), "{ this is not json")
+        # Recovery is explicit: once a human fixes or removes the file, saves
+        # work again.
+        self.path.write_text("{}")
         kc.set_provider_key("openai", "sk-new")
         self.assertEqual(kc.get_provider_key("openai"), "sk-new")
 

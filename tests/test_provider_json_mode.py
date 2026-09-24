@@ -19,10 +19,15 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
     response_format are accepted or rejected with a 400.
     """
 
-    def __init__(self, advertise: bool, reject_json_mode: bool, reject_stream: bool = False):
+    def __init__(self, advertise: bool, reject_json_mode: bool, reject_stream: bool = False,
+                 split_usage: bool = False):
         self.advertise = advertise
         self.reject_json_mode = reject_json_mode
         self.reject_stream = reject_stream
+        # split_usage: emit the usage block on its own chunk, ahead of the
+        # finish chunk — the shape real providers produce when the usage
+        # counters are computed after the last token.
+        self.split_usage = split_usage
         self.post_bodies: list[dict] = []
         self.models_requests = 0
         class Handler(BaseHTTPRequestHandler):
@@ -48,15 +53,24 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
                     if self.server.reject_stream:
                         self.send_error(400, "streaming is not supported")
                         return
-                    # SSE: two content chunks, then usage on the final chunk.
+                    # SSE: content chunks, then usage and the finish chunk —
+                    # together, or on separate chunks when split_usage is set.
                     self.send_response(200)
                     self.send_header("content-type", "text/event-stream")
                     self.end_headers()
-                    for chunk in (
-                        {"choices": [{"delta": {"content": "hel"}}]},
-                        {"choices": [{"delta": {"content": "lo"}, "finish_reason": "stop"}],
-                         "usage": {"prompt_tokens": 5, "completion_tokens": 2}},
-                    ):
+                    if self.server.split_usage:
+                        chunks = (
+                            {"choices": [{"delta": {"content": "hel"}}]},
+                            {"usage": {"prompt_tokens": 5, "completion_tokens": 2}},
+                            {"choices": [{"delta": {"content": "lo"}, "finish_reason": "stop"}]},
+                        )
+                    else:
+                        chunks = (
+                            {"choices": [{"delta": {"content": "hel"}}]},
+                            {"choices": [{"delta": {"content": "lo"}, "finish_reason": "stop"}],
+                             "usage": {"prompt_tokens": 5, "completion_tokens": 2}},
+                        )
+                    for chunk in chunks:
                         self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
                     self.wfile.write(b"data: [DONE]\n\n")
                     return
@@ -77,8 +91,9 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
 
 
 class _ServerMixin(unittest.TestCase):
-    def _start(self, advertise: bool, reject_json_mode: bool = False, reject_stream: bool = False) -> _FakeOpenAIServer:
-        server = _FakeOpenAIServer(advertise, reject_json_mode, reject_stream)
+    def _start(self, advertise: bool, reject_json_mode: bool = False, reject_stream: bool = False,
+               split_usage: bool = False) -> _FakeOpenAIServer:
+        server = _FakeOpenAIServer(advertise, reject_json_mode, reject_stream, split_usage)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
@@ -162,6 +177,20 @@ class TestOpenAIStreaming(_ServerMixin):
         self.assertEqual(usage and usage[0], {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7})
         self.assertTrue(all(b.get("stream") is True for b in server.post_bodies))
 
+    def test_usage_on_a_separate_chunk_survives_the_finish_merge(self):
+        """Usage and finish_reason often arrive on different SSE chunks. Over-
+        writing the accumulator with the finish chunk dropped the usage block,
+        so the usage report saw nothing at all."""
+        server = self._start(advertise=False, split_usage=True)
+        provider = OpenAICompatProvider("test-key", self.base)
+        usage: list[dict] = []
+        provider.usage_sink = usage.append
+
+        out, _seen = self._run(provider)
+
+        self.assertEqual(out, "hello")
+        self.assertEqual(usage and usage[0], {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7})
+
     def test_a_server_that_rejects_streaming_falls_back_to_blocking(self):
         server = self._start(advertise=False, reject_stream=True)
         provider = OpenAICompatProvider("test-key", self.base)
@@ -233,6 +262,79 @@ class TestOllamaStreaming(unittest.TestCase):
         self.assertEqual(out, '{"files": []}')
         self.assertEqual(seen, [])
         self.assertIs(server.post_bodies[0].get("stream"), False)
+
+    def test_a_dead_endpoint_raises_provider_unreachable_when_streaming(self):
+        """A refused connection must not escape as a raw httpx exception.
+
+        post_json normalizes transport failures for non-streaming calls, but the
+        streaming branch called client.stream() bare: a dead endpoint raised raw
+        ConnectError, which is neither a ProviderError nor a FALLBACK_TRIGGER,
+        so it bypassed the fallback machinery, crashed the step gather, and
+        surfaced as internal_error with role=None. The engine-side fix wraps the
+        stream; this test pins the normalization on both providers' streaming
+        paths (the ollama one here, the openai_compat one below).
+        """
+        import asyncio
+        from engine.providers import OllamaProvider, ProviderError
+
+        # Port 1 on loopback: nothing listens, connection refused immediately.
+        provider = OllamaProvider("http://127.0.0.1:1")
+        provider.on_delta = lambda _text: None  # force the streaming branch
+        with self.assertRaises(ProviderError) as ctx:
+            asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64))
+        self.assertEqual(ctx.exception.code, "provider_unreachable")
+
+    def test_openai_compat_streaming_dead_endpoint_raises_provider_unreachable(self):
+        """Same normalization for the openai_compat SSE stream."""
+        import asyncio
+        from engine.providers import OpenAICompatProvider, ProviderError
+
+        provider = OpenAICompatProvider("test-key", "http://127.0.0.1:1/v1")
+        provider.on_delta = lambda _text: None  # force the streaming branch
+        with self.assertRaises(ProviderError) as ctx:
+            asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64))
+        self.assertEqual(ctx.exception.code, "provider_unreachable")
+
+
+class TestGoogleKeyHeader(unittest.TestCase):
+    """The API key must travel in the x-goog-api-key header, never in the URL:
+    a query-string credential lands in proxy and server access logs."""
+
+    def test_key_travels_in_the_header_not_the_url(self):
+        import asyncio
+        from engine.providers import GoogleProvider
+        seen: dict = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("content-length", 0))
+                self.rfile.read(length)
+                seen["path"] = self.path
+                seen["api_key_header"] = self.headers.get("x-goog-api-key")
+                body = json.dumps(
+                    {"candidates": [{"content": {"parts": [{"text": "hi"}]}}]}
+                ).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):  # silence the test log
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        provider = GoogleProvider("secret-key", f"http://127.0.0.1:{server.server_address[1]}")
+        out = asyncio.run(provider.complete("sys", "user", "gemini-pro", 0.0, 64))
+
+        self.assertEqual(out, "hi")
+        self.assertEqual(seen["api_key_header"], "secret-key")
+        self.assertNotIn("key=", seen["path"], "the key must not ride in the URL query")
 
 
 

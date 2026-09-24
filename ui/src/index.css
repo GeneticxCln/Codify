@@ -27,12 +27,19 @@ body {
   background: #484f58;
 }
 
+/* Firefox doesn't support the -webkit-* pseudo-elements; these standard
+   properties give it the same thin, dark scrollbar. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #30363d #0d1117;
+}
+
 /* Clicking an audit badge on a goal card scrolls to the matching transcript
    entry and flashes it, so the count's evidence is one click away. Each kind
    flashes in its badge's own color family, so the flash points at the entry
    type the badge counted. */
 @keyframes audit-flash-bg {
-  0% { background-color: var(--audit-flash-color); }
+  0% { background-color: var(--audit-flash-color, rgba(148, 163, 184, 0.28)); }
   100% { background-color: transparent; }
 }
 .audit-flash {

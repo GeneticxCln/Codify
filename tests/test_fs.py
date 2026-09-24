@@ -251,6 +251,20 @@ class TestEditAction(unittest.TestCase):
             )
         self.assertIn("old_text appears 0 time(s), expected 1", str(ctx.exception))
 
+    def test_an_empty_old_text_is_refused(self):
+        """old_text="" would make str.replace interleave `new` between every
+        character, and the occurrence math is meaningless for it — the empty
+        match must be named as a bad edit, not reported as "not found"."""
+        self._seed("a = 1\n")
+        with self.assertRaises(ValueError) as ctx:
+            self.fs.apply(
+                [{"path": "svc.py", "action": "edit",
+                  "edits": [{"old_text": "", "new_text": "x"}]}],
+                dry_run=False,
+            )
+        self.assertIn("old_text must not be empty", str(ctx.exception))
+        self.assertEqual(self.fs.read_text("svc.py"), "a = 1\n")
+
     def test_edits_apply_in_order_against_the_previous_result(self):
         self._seed("def greet():\n    return 1\n")
         self.fs.apply(

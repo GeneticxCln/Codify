@@ -128,7 +128,7 @@ class FileSystemService:
                 # generation treat an edit exactly like a whole-file write.
                 after, edit_note = self._resolve_edits(before, target, item.get("edits") or [])
                 if edit_note:
-                    # An unaplicable edit is a fixer mistake, not an I/O error:
+                    # An inapplicable edit is a fixer mistake, not an I/O error:
                     # it must fail the step loudly rather than write half an edit.
                     raise ValueError(f"edit failed for {rel}: {edit_note}")
                 note = None
@@ -195,7 +195,13 @@ class FileSystemService:
                     return text, f"edit #{i} has a non-integer count"
                 if count < 0:
                     return text, f"edit #{i}: count must be >= 0"
-            occurrences = text.count(old) if old else 0
+            if old == "":
+                # An empty old_text is never a legal edit: str.replace("") would
+                # interleave `new` between every character, and the occurrence
+                # math above is meaningless for it. Name the mistake instead of
+                # confusing the model with a misleading "not found".
+                return text, f"edit #{i}: old_text must not be empty"
+            occurrences = text.count(old)
             if count == 0:
                 if occurrences == 0:
                     return text, f"edit #{i}: old_text not found"

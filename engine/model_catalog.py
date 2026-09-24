@@ -310,9 +310,26 @@ def _targets(registry: Any, keychain: Any) -> list[ProviderTarget]:
         if existing is None:
             by_provider[target.provider] = target
             return
-        # Prefer whichever candidate actually holds a credential/base_url.
+        # Prefer whichever candidate actually holds a credential/base_url —
+        # and an endpoint a role actually configured beats the builtin default.
+        # The first-wins rule used to let a role with no base_url (seeded laya)
+        # pin the builtin endpoint while every later role's real endpoint was
+        # dropped, so discovery polled a server the roles never talk to — and
+        # the stale-model warning judged models against the wrong catalog.
         if not existing.api_key and target.api_key:
             existing.api_key = target.api_key
+        if target.base_url and target.base_url != existing.base_url:
+            # Both candidates here carry "agent:<role>" sources (every target in
+            # the config loop does), so the discriminator is whether the
+            # EXISTING base_url was role-set or fell back to the builtin default.
+            existing_is_default = existing.base_url == BUILTIN_PROVIDERS.get(
+                existing.provider, {}
+            ).get("base_url")
+            if not existing_is_default or existing.base_url == "":
+                pass  # existing endpoint is deliberate; keep it
+            else:
+                existing.base_url = target.base_url
+                existing.protocol = target.protocol
         existing.sources.extend(s for s in target.sources if s not in existing.sources)
 
     try:
@@ -322,6 +339,12 @@ def _targets(registry: Any, keychain: Any) -> list[ProviderTarget]:
 
     for cfg in configs:
         builtin = BUILTIN_PROVIDERS.get(cfg.provider, {})
+        # A non-null api_key_ref belongs to this config's CURRENT provider:
+        # `SettingsService.set_config` nulls the ref whenever the patch switches
+        # provider, so a stored ref was always saved under the provider this row
+        # names now. Keep that single-writer invariant true rather than
+        # re-checking it here — the keychain has no provider stamp on role refs,
+        # so a consumer-side check could only guess.
         add(
             ProviderTarget(
                 provider=cfg.provider,
@@ -332,6 +355,25 @@ def _targets(registry: Any, keychain: Any) -> list[ProviderTarget]:
                 sources=[f"agent:{cfg.role}"],
             )
         )
+        # A fallback target must be discoverable too: the settings screen flags a
+        # stale fallback with the same live-catalog rule as a primary, and a
+        # fallback whose provider was never queried reports "no models", which
+        # would dress "we never asked" up as "your model is gone". Custom
+        # endpoints are discovered with their own base_url; builtins inherit the
+        # catalog endpoint.
+        fb_provider = (cfg.fallback_provider or "").strip()
+        if fb_provider and fb_provider not in by_provider:
+            fb_builtin = BUILTIN_PROVIDERS.get(fb_provider, {})
+            add(
+                ProviderTarget(
+                    provider=fb_provider,
+                    protocol=cfg.fallback_protocol or fb_builtin.get("protocol", "openai_compat"),
+                    base_url=cfg.fallback_base_url or fb_builtin.get("base_url", ""),
+                    api_key=keychain.get_provider_key(fb_provider),
+                    needs_key=bool(fb_builtin.get("needs_key", True)),
+                    sources=[f"fallback:{cfg.role}"],
+                )
+            )
 
     for slug, meta in BUILTIN_PROVIDERS.items():
         if not meta.get("needs_key"):

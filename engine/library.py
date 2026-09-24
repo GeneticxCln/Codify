@@ -91,15 +91,21 @@ class LibraryService:
         resolved = self._fs.resolve(path)
         if resolved.is_dir():
             raise IsADirectoryError(f"{path} is a directory")
-        raw = resolved.read_bytes()
-        text = raw[: MAX_READ_CHARS * 4].decode("utf-8", errors="replace")[:MAX_READ_CHARS]
-        truncated = len(raw) > MAX_READ_CHARS
+        # Read only the prefix the cap can use — a multi-GB log file is a real
+        # workspace resident, and read_bytes() on it is an OOM for a window we
+        # throw 3/4 of away. total_size answers "was it truncated" without
+        # loading the rest.
+        with resolved.open("rb") as fh:
+            raw = fh.read(MAX_READ_CHARS * 4)
+        total_size = resolved.stat().st_size
+        text = raw.decode("utf-8", errors="replace")[:MAX_READ_CHARS]
+        truncated = total_size > MAX_READ_CHARS
         lines = text.count("\n") + 1
         result = {
             "path": str(resolved.relative_to(self.root)),
             "text": text,
             "lines": lines,
-            "bytes": len(raw),
+            "bytes": total_size,
             "truncated": truncated,
         }
         if offset is not None or limit is not None:
@@ -117,8 +123,12 @@ class LibraryService:
             window = min(limit or MAX_READ_LINES, MAX_READ_LINES)
             # A window that hits the char cap still stops cleanly: slice, then
             # re-trim to MAX_READ_CHARS so one read cannot balloon the prompt.
-            window_text = "\n".join(all_lines[start - 1 : start - 1 + window])[:MAX_READ_CHARS]
-            shown = window_text.count("\n") + 1 if window_text else (1 if window_text == "" and window >= 1 else 0)
+            window_lines = all_lines[start - 1 : start - 1 + window]
+            window_text = "\n".join(window_lines)[:MAX_READ_CHARS]
+            # Count the lines actually sliced, not newlines in the joined text:
+            # an empty window is 0 lines (the old +1 turned an empty file read
+            # into "1 line" and produced ranges like "lines 100-99").
+            shown = len(window_lines)
             result.update({
                 "text": window_text,
                 "lines": shown,

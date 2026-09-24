@@ -146,13 +146,6 @@ def _as_float(value: Any) -> float | None:
     return None
 
 
-def _confidence(answers: dict[str, Any], key: str) -> float | None:
-    raw = answers.get(key)
-    if isinstance(raw, dict):
-        return _as_float(raw.get("confidence") or raw.get("probability"))
-    return None
-
-
 def evaluate_policy(answers: dict[str, Any]) -> tuple[bool, str | None, list[str]]:
     """Apply the confidence-gated policy. Returns (blocked, reason, warnings)."""
     warnings: list[str] = []
