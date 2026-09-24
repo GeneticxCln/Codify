@@ -4,7 +4,7 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, get_args
 
 from engine.db import dumps, row_to_dict
 from engine.models import (
@@ -17,6 +17,7 @@ from engine.models import (
     Event,
     Goal,
     GoalCreate,
+    GoalStatus,
     PlanStep,
     Workspace,
     WorkspaceCreate,
@@ -47,10 +48,15 @@ class SettingsService:
 
     # Every known key with its (default, clamp). Anything read must be listed
     # here: an unknown key is not a setting, it is a typo.
-    SPEC: dict[str, tuple[int, callable]] = {
+    SPEC: dict[str, tuple[int, Callable[[int], int]]] = {
         # How many steps of a parallel goal may run at once (see
         # executor.DEFAULT_PARALLEL_WIDTH). Clamped to a band a machine can take.
         "parallel_width": (4, lambda v: max(1, min(v, 16))),
+        # How many daily stats snapshots to keep (stats_snapshots). 0 keeps
+        # everything — the honest default for a machine with disk to spare;
+        # the upper bound exists so a fat-fingered 999999 cannot be stored as
+        # "effectively forever" when the user meant bounded.
+        "stats_retention_days": (90, lambda v: max(0, min(v, 730))),
     }
 
     def __init__(self, conn):
@@ -216,7 +222,10 @@ class AgentRegistryService:
             # first and re-pointed the ref at a key the user just supplied.
             data["api_key_ref"] = None
         data["updated_at"] = time.time()
-        merged = AgentConfig.model_validate(data)
+        try:
+            merged = AgentConfig.model_validate(data)
+        except Exception as exc:
+            raise ApiError(422, "invalid_config", f"merged agent config is invalid: {exc}") from exc
         self._db.execute(
             """UPDATE agent_configs SET display_name=?, provider=?, protocol=?, model_name=?,
                api_key_ref=?, base_url=?, system_prompt_override=?, temperature=?, max_tokens=?,
@@ -305,10 +314,12 @@ class WorkspaceService:
             )
             self._db.commit()
         except Exception as exc:
-            raise ApiError(409, "duplicate_workspace", str(exc)) from exc
+            if "UNIQUE constraint failed: workspaces.root_path" in str(exc):
+                raise ApiError(409, "duplicate_workspace", f"workspace already exists for {root}") from exc
+            raise ApiError(409, "duplicate_workspace", "workspace could not be created (duplicate id or path)") from exc
         return ws
 
-    def list(self) -> list[Workspace]:
+    def list_workspaces(self) -> list[Workspace]:
         return [Workspace.model_validate(row_to_dict(r)) for r in self._db.execute("SELECT * FROM workspaces")]
 
     def get(self, workspace_id: str) -> Workspace:
@@ -316,6 +327,78 @@ class WorkspaceService:
         if row is None:
             raise ApiError(404, "unknown_workspace", "workspace not found")
         return Workspace.model_validate(row_to_dict(row))
+
+    def goal_count(self, workspace_id: str) -> int:
+        """How many goals point at this workspace — the cost of deleting it."""
+        row = self._db.execute(
+            "SELECT count(*) FROM goals WHERE workspace_id = ?", (workspace_id,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def delete(self, workspace_id: str, *, delete_goals: bool = False) -> dict[str, Any]:
+        """Forget a workspace, and optionally the goal history recorded against it.
+
+        Only Codify's records are removed. The directory at `root_path` is never
+        touched — nothing here reads or writes the user's files, and a workspace
+        row is just a path this engine was pointed at. Saying so in the response
+        is part of the contract: "delete workspace" that also deleted a project
+        would be a very different button.
+
+        `goals.workspace_id` deliberately carries **no** ON DELETE CASCADE, so a
+        workspace with history is refused rather than silently taking the goals
+        with it. The caller has to ask for the cascade explicitly, and the
+        refusal names the count so the UI can show what the second click costs.
+        Without that, the FK violation surfaced as a bare IntegrityError — an
+        HTTP 500 whose message is "FOREIGN KEY constraint failed" and which
+        tells the user nothing about what to do next.
+        """
+        workspace = self.get(workspace_id)  # 404 if unknown
+        goals = self.goal_count(workspace_id)
+        if goals and not delete_goals:
+            raise ApiError(
+                409, "workspace_not_empty",
+                f"this workspace still has {goals} goal{'' if goals == 1 else 's'} recorded "
+                "against it — delete them too, or delete the workspace afterwards",
+                {"goals": goals, "workspace_id": workspace_id},
+            )
+        if goals:
+            # Refuse while anything is still in flight: a PLANNING or RUNNING
+            # goal has a live coroutine that will keep publishing events for a
+            # row that no longer exists. Cancel it first.
+            live = self._db.execute(
+                """SELECT id, title, status FROM goals
+                   WHERE workspace_id = ? AND status IN ('PLANNING', 'RUNNING')
+                   LIMIT 1""",
+                (workspace_id,),
+            ).fetchone()
+            if live is not None:
+                phase = "planning" if live["status"] == "PLANNING" else "running"
+                raise ApiError(
+                    409, "workspace_has_active_goals",
+                    f"goal {live['title']!r} is still {phase}; "
+                    "cancel it before deleting its workspace",
+                    {"goal_id": live["id"], "workspace_id": workspace_id},
+                )
+            events = self._db.execute(
+                """SELECT count(*) FROM events
+                   WHERE goal_id IN (SELECT id FROM goals WHERE workspace_id = ?)""",
+                (workspace_id,),
+            ).fetchone()[0]
+            self._db.execute("DELETE FROM goals WHERE workspace_id = ?", (workspace_id,))
+        else:
+            events = 0
+        self._db.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
+        self._db.commit()
+        return {
+            "deleted": True,
+            "workspace_id": workspace_id,
+            "name": workspace.name,
+            "goals": goals,
+            "events": int(events),
+            # Stated explicitly so no caller has to guess whether "delete
+            # workspace" means "delete the user's project".
+            "files_touched": False,
+        }
 
 
 GOAL_TITLE_MAX = 200
@@ -388,6 +471,54 @@ class GoalService:
         data["plan_only"] = bool(row["plan_only"])
         data["parallel"] = bool(row["parallel"])
         return Goal.model_validate(data)
+
+    def list_goals(
+        self,
+        workspace_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Goal]:
+        """Goals, newest first, for the UI's history.
+
+        Every goal is already persisted; this is the read that was missing, which
+        left a restart showing nothing about any of them. `status` is validated
+        against GoalStatus's values (a bad one is a 422, not an empty list), and
+        the page is bounded because a long-lived install keeps every goal it ever
+        ran. Active goals still lead a filtered-by-nothing list: the one a user
+        just dispatched must not sink under a wall of finished runs.
+        """
+        if status is not None and status not in get_args(GoalStatus):
+            raise ApiError(422, "invalid_status", f"unknown goal status: {status}")
+        limit = max(1, min(int(limit), 200))
+        offset = max(0, int(offset))
+        where = []
+        params: list[Any] = []
+        if workspace_id is not None:
+            where.append("workspace_id = ?")
+            params.append(workspace_id)
+        if status is not None:
+            where.append("status = ?")
+            params.append(status)
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        params.extend([limit, offset])
+        rows = self._db.execute(
+            """SELECT * FROM goals"""
+            + clause
+            + """ ORDER BY
+                  CASE WHEN status IN ('PLANNING', 'PENDING', 'RUNNING', 'PAUSED') THEN 0 ELSE 1 END,
+                  created_at DESC, id DESC
+                LIMIT ? OFFSET ?""",
+            params,
+        )
+        out = []
+        for row in rows:
+            data = {k: row[k] for k in row.keys() if k in Goal.model_fields}
+            data["dry_run"] = bool(row["dry_run"])
+            data["plan_only"] = bool(row["plan_only"])
+            data["parallel"] = bool(row["parallel"])
+            out.append(Goal.model_validate(data))
+        return out
 
     def recent_run_models(self, limit: int = 5, scan_events: int = 300) -> list[dict]:
         """The models that *actually* answered recently, newest first.
@@ -646,11 +777,69 @@ class GoalService:
         ).fetchone()
         return row is not None
 
+    # Statuses with a live coroutine attached: a planning run, or a step driver.
+    # Deleting one of these leaves that coroutine publishing events for a row
+    # that no longer exists, so the route refuses and the user cancels first.
+    ACTIVE_DRIVER_STATUSES = ("PLANNING", "RUNNING")
+
+    def delete(self, goal_id: str) -> dict[str, Any]:
+        """Delete a goal and everything recorded against it.
+
+        The event log, plan steps, and any dry-run proposals go with it via the
+        schema's ON DELETE CASCADE — they describe this run and are meaningless
+        without it. The counts come back in the response rather than being
+        logged and forgotten, so the UI can say what it actually removed instead
+        of a bare "deleted".
+
+        Nothing on disk is touched. A goal's record says *what* Codify did; the
+        files a fixer wrote are the user's, and undoing a write is a different
+        and much more dangerous operation than forgetting a log.
+        """
+        goal = self.get(goal_id)  # 404 if unknown
+        if goal.status in self.ACTIVE_DRIVER_STATUSES:
+            raise ApiError(
+                409, "goal_in_progress",
+                f"this goal is {goal.status.lower()} — cancel it before deleting it",
+                {"goal_id": goal_id, "status": goal.status},
+            )
+        counts = {
+            "steps": int(self._db.execute(
+                "SELECT count(*) FROM plan_steps WHERE goal_id = ?", (goal_id,)
+            ).fetchone()[0]),
+            "events": int(self._db.execute(
+                "SELECT count(*) FROM events WHERE goal_id = ?", (goal_id,)
+            ).fetchone()[0]),
+            "proposed_files": int(self._db.execute(
+                "SELECT count(*) FROM proposed_files WHERE goal_id = ?", (goal_id,)
+            ).fetchone()[0]),
+        }
+        self._db.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+        self._db.commit()
+        return {
+            "deleted": True,
+            "goal_id": goal_id,
+            "title": goal.title,
+            "workspace_id": goal.workspace_id,
+            **counts,
+            "files_touched": False,
+        }
+
     def next_sequence(self, goal_id: str) -> int:
-        row = self._db.execute(
-            "UPDATE goals SET event_seq = event_seq + 1 WHERE id = ? RETURNING event_seq",
-            (goal_id,),
-        ).fetchone()
+        try:
+            row = self._db.execute(
+                "UPDATE goals SET event_seq = event_seq + 1 WHERE id = ? RETURNING event_seq",
+                (goal_id,),
+            ).fetchone()
+        except Exception:
+            # SQLite < 3.35 has no UPDATE...RETURNING. Fall back to the
+            # portable read-modify-write (single-writer engine, same result).
+            cur = self._db.execute("SELECT event_seq FROM goals WHERE id = ?", (goal_id,)).fetchone()
+            if cur is None:
+                raise ApiError(404, "unknown_goal", "goal not found")
+            nxt = int(cur[0]) + 1
+            self._db.execute("UPDATE goals SET event_seq = ? WHERE id = ?", (nxt, goal_id))
+            self._db.commit()
+            return nxt
         if row is None:
             raise ApiError(404, "unknown_goal", "goal not found")
         self._db.commit()
@@ -671,6 +860,12 @@ class GoalService:
         out = []
         for r in rows:
             d = row_to_dict(r)
-            d["payload"] = json.loads(d["payload"])
-            out.append(Event.model_validate(d))
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except (TypeError, ValueError):
+                continue
+            try:
+                out.append(Event.model_validate(d))
+            except Exception:
+                continue
         return out

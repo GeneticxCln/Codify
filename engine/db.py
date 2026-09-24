@@ -96,6 +96,29 @@ CREATE TABLE IF NOT EXISTS engine_settings (
   value TEXT NOT NULL,
   updated_at REAL NOT NULL
 );
+
+-- One frozen cross-goal statistics document per UTC day, written on the first
+-- stats read after the day ends. Keeps the trend chartable across engine
+-- restarts and independent of the event log's lifetime.
+CREATE TABLE IF NOT EXISTS stats_snapshots (
+  day TEXT PRIMARY KEY,
+  document TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+
+-- The currently-imported stats-history document, one row per frozen day.
+-- Deliberately NOT a column on stats_snapshots: an imported day came from a
+-- file the user chose on another machine, while a snapshot is a day this
+-- engine froze itself. Merging them would make provenance unknowable and let
+-- retention pruning silently discard data Codify never measured. One document
+-- at a time, matching what the Stats panel holds in the UI, so importing
+-- twice replaces rather than accumulates.
+CREATE TABLE IF NOT EXISTS stats_imports (
+  day TEXT PRIMARY KEY,
+  document TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  imported_at REAL NOT NULL
+);
 """
 
 
@@ -116,8 +139,11 @@ def connect(
     """
     db_path = path or default_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    if db_path.is_dir():
+        raise RuntimeError(f"database path is a directory: {db_path}")
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.executescript(SCHEMA)
     # Migrate columns if existing db
     for col in ("provider", "model"):
@@ -173,11 +199,15 @@ def migrate_agent_roles(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     so the caller can carry the keychain entry across as well.
     """
     known = {cfg.role for cfg in DEFAULT_AGENTS}
-    display_names = {cfg.role: cfg.display_name for cfg in DEFAULT_AGENTS}
+    # Keys are the role literals, but they are looked up with a plain `str`.
+    display_names: dict[str, str] = {cfg.role: cfg.display_name for cfg in DEFAULT_AGENTS}
     moved: list[tuple[str, str]] = []
 
     for row in conn.execute("SELECT * FROM agent_configs").fetchall():
-        role = row["role"]
+        try:
+            role = row["role"]
+        except (KeyError, IndexError, TypeError):
+            continue
         if role in known:
             continue
         new_role = LEGACY_ROLE_RENAMES.get(role)
@@ -197,7 +227,7 @@ def migrate_agent_roles(conn: sqlite3.Connection) -> list[tuple[str, str]]:
             )
             moved.append((role, new_role))
             continue
-        if new_role and not target["updated_at"]:
+        if new_role and target is not None and not target["updated_at"]:
             conn.execute(
                 """UPDATE agent_configs SET
                      provider = ?, protocol = ?, model_name = ?, api_key_ref = ?,

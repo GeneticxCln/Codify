@@ -47,7 +47,11 @@ def codify_home() -> Path:
 def db_path() -> Path:
     """The SQLite store: `CODIFY_DB`, else inside the state directory."""
     override = _env(ENV_DB)
-    return Path(override).expanduser() if override else codify_home() / "codify.db"
+    if override:
+        if override == ":memory:":
+            raise RuntimeError("CODIFY_DB=:memory: is not supported — every connection would get a different empty store")
+        return Path(override).expanduser()
+    return codify_home() / "codify.db"
 
 
 def secrets_path() -> Path:
