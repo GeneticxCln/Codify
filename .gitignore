@@ -33,7 +33,7 @@ ENV/
 
 # Node / Web UI
 node_modules/
-dist/
+ui/dist/
 .vite/
 npm-debug.log*
 yarn-debug.log*
@@ -42,6 +42,9 @@ yarn-error.log*
 # Rust / Tauri
 src-tauri/target/
 Cargo.lock
+# ...but the desktop crate is an end product, not a library: its lockfile pins
+# the exact dependency tree the app ships, so it stays tracked.
+!src-tauri/Cargo.lock
 
 # IDE & OS
 .vscode/
@@ -53,3 +56,14 @@ Thumbs.db
 
 # Tooling state (not project code)
 .freebuff/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+graphify-out/
+coverage/
+
+# Logs
+*.log
+
+# Never commit credentials or their fallback store
+secrets.json
