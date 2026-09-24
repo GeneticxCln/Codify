@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 from engine.fs import PathEscapeError
-from engine.library import MAX_READ_CHARS, LibraryService, format_search
+from engine.library import MAX_READ_CHARS, LibraryService, format_read, format_search
 from engine.sandbox import CommandNotAllowed, SandboxService, validate_argv
 
 
@@ -109,6 +109,42 @@ class TestLibrarianReads(unittest.TestCase):
         self.assertTrue(res["matches"])
         self.assertNotIn("regex", res)
 
+
+    def test_line_range_reaches_past_the_head_cap(self):
+        """The window is taken where the lines are, not from the first 8K chars:
+        a range read exists to reach the bottom half of a large file."""
+        lines = [f"line {i}" for i in range(1, 1501)]
+        (self.root / "long.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        res = self.lib.read("long.txt", offset=1400, limit=50)
+
+        self.assertTrue(res["text"].startswith("line 1400"), res["text"][:60])
+        self.assertIn("line 1449", res["text"])
+        self.assertNotIn("line 1399", res["text"])
+        self.assertEqual(res["lines"], 50)
+        self.assertEqual(res["total_lines"], 1500)
+        self.assertTrue(res["truncated"])
+
+    def test_line_window_on_a_small_file_reports_its_slice(self):
+        res = self.lib.read("src/app.py", offset=2, limit=1)
+        self.assertIn("hello", res["text"])
+        self.assertEqual(res["lines"], 1)
+        self.assertEqual(res["offset"], 2)
+        self.assertEqual(res["total_lines"], 6)
+
+    def test_an_empty_window_is_rendered_as_one(self):
+        """format_read must not do range math on an empty window — the old
+        offset+lines-1 math produced nonsense like "lines 50-49"."""
+        rendered = format_read({
+            "path": "x.py", "text": "", "lines": 0, "offset": 50,
+            "window": 10, "total_lines": 40, "truncated": True,
+        })
+        self.assertIn("empty range", rendered)
+        self.assertNotIn("lines 50-49", rendered)
+
+    def test_search_rendering_names_the_glob(self):
+        res = self.lib.search("greet", glob="*.py")
+        self.assertIn("glob=", format_search(res))
 
     def test_tree_skips_caches_and_reports_its_limit(self):
         tree = self.lib.tree()

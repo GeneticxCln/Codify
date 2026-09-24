@@ -41,6 +41,11 @@ MAX_REGEX_PATTERN = 200
 PER_LINE_REGEX_SECONDS = 0.5
 MAX_ROUND_CHARS = 60_000
 MAX_MATCHES = 40
+# How far a line-range read will scan a file to place its window (and to count
+# the file's true line total). A cap keeps a multi-GB log from being read in
+# full just to answer "lines 4500-4600"; past it the count is a floor and the
+# result is already marked truncated.
+MAX_RANGE_SCAN_BYTES = 32_000_000
 # Searches walk the tree in sorted order and stop at these. Reported, never silent.
 MAX_FILES_SCANNED = 800
 MAX_SCAN_BYTES = 200_000
@@ -91,54 +96,130 @@ class LibraryService:
         resolved = self._fs.resolve(path)
         if resolved.is_dir():
             raise IsADirectoryError(f"{path} is a directory")
+        total_size = resolved.stat().st_size
+        rel = str(resolved.relative_to(self.root))
+        if offset is not None or limit is not None:
+            # Normalize: 1-based, bounded window, reported back so the model can
+            # tell (and say) when it is seeing a slice rather than the file.
+            return self._read_line_window(
+                resolved, rel, total_size,
+                max(1, offset or 1), min(limit or MAX_READ_LINES, MAX_READ_LINES),
+            )
         # Read only the prefix the cap can use — a multi-GB log file is a real
         # workspace resident, and read_bytes() on it is an OOM for a window we
         # throw 3/4 of away. total_size answers "was it truncated" without
         # loading the rest.
         with resolved.open("rb") as fh:
             raw = fh.read(MAX_READ_CHARS * 4)
-        total_size = resolved.stat().st_size
         text = raw.decode("utf-8", errors="replace")[:MAX_READ_CHARS]
-        truncated = total_size > MAX_READ_CHARS
-        lines = text.count("\n") + 1
-        result = {
-            "path": str(resolved.relative_to(self.root)),
+        return {
+            "path": rel,
             "text": text,
-            "lines": lines,
+            "lines": text.count("\n") + 1,
             "bytes": total_size,
-            "truncated": truncated,
+            "truncated": total_size > MAX_READ_CHARS,
         }
-        if offset is not None or limit is not None:
-            # Normalize: 1-based, bounded window, reported back so the model can
-            # tell (and say) when it is seeing a slice rather than the file.
-            all_lines = text.splitlines()
-            total = len(all_lines)
-            start = max(1, offset or 1)
-            if start > total:
-                result.update({
-                    "text": "", "lines": 0, "offset": start, "window": 0,
-                    "total_lines": total, "truncated": True,
-                })
-                return result
-            window = min(limit or MAX_READ_LINES, MAX_READ_LINES)
-            # A window that hits the char cap still stops cleanly: slice, then
-            # re-trim to MAX_READ_CHARS so one read cannot balloon the prompt.
-            window_lines = all_lines[start - 1 : start - 1 + window]
-            window_text = "\n".join(window_lines)[:MAX_READ_CHARS]
-            # Count the lines actually sliced, not newlines in the joined text:
-            # an empty window is 0 lines (the old +1 turned an empty file read
-            # into "1 line" and produced ranges like "lines 100-99").
-            shown = len(window_lines)
-            result.update({
-                "text": window_text,
-                "lines": shown,
-                "offset": start,
-                "window": window,
-                "total_lines": total,
-                # Range reads never claim to be the whole file.
-                "truncated": True,
-            })
-        return result
+
+    def _read_line_window(
+        self, resolved: Path, rel: str, total_size: int, start: int, window: int,
+    ) -> dict:
+        """A line window taken from where the lines actually are.
+
+        Seeks to the byte where line `start` begins instead of slicing the
+        head-capped text: windowing the first MAX_READ_CHARS characters made
+        any range past the cap come back empty — defeating the one thing line
+        ranges exist for, reaching the bottom half of a file the head hides.
+        Scanning streams in bounded chunks, so placing a window in a multi-GB
+        file costs no more than the chunks actually read.
+        """
+        start_byte: int | None = None
+        newlines_before = 0
+        newlines_after_start = 0
+        consumed = 0
+        eof_seen = False
+        last_bytes = b""
+        window_raw = b""
+        window_lines: list[str] = []
+
+        with resolved.open("rb") as fh:
+            # Pass 1: find the byte offset where line `start` begins.
+            while True:
+                chunk = fh.read(MAX_SCAN_BYTES)
+                if chunk:
+                    last_bytes = chunk[-1:]
+                count = chunk.count(b"\n")
+                if newlines_before + count >= start - 1:
+                    # Walk to the (start-1)th newline inside this chunk; the
+                    # window starts on the byte after it.
+                    idx = -1
+                    for _ in range((start - 1) - newlines_before):
+                        idx = chunk.index(b"\n", idx + 1)
+                    start_byte = consumed + idx + 1
+                    break
+                newlines_before += count
+                consumed += len(chunk)
+                if not chunk:
+                    eof_seen = True
+                    break
+                if consumed > MAX_RANGE_SCAN_BYTES:
+                    break
+
+            if start_byte is None:
+                # Line `start` is beyond EOF (or the scan cap stopped us):
+                # an empty window either way, with the exact line count when
+                # EOF was reached and a floor when the cap was.
+                total = newlines_before
+                if eof_seen and total_size > 0 and last_bytes != b"\n":
+                    total += 1
+                return {
+                    "path": rel, "text": "", "lines": 0, "offset": start,
+                    "window": window, "total_lines": total, "truncated": True,
+                }
+
+            # Pass 2: the window itself, from the real line start.
+            fh.seek(start_byte)
+            window_raw = fh.read(MAX_READ_CHARS * 4)
+            if window_raw:
+                last_bytes = window_raw[-1:]
+            window_lines = window_raw.decode("utf-8", errors="replace").splitlines()
+            newlines_after_start = window_raw.count(b"\n")
+
+            # Pass 3 (bounded): finish counting to EOF so the "of N" label is
+            # the file's real line total, not a guess from the head. Past the
+            # cap it stays a floor; `truncated` already marks the view partial.
+            scan_after = 0
+            while True:
+                chunk = fh.read(MAX_SCAN_BYTES)
+                if not chunk:
+                    eof_seen = True
+                    break
+                if chunk:
+                    last_bytes = chunk[-1:]
+                newlines_after_start += chunk.count(b"\n")
+                scan_after += len(chunk)
+                if scan_after > MAX_RANGE_SCAN_BYTES:
+                    break
+
+        total = (start - 1) + newlines_after_start
+        if eof_seen and total_size > 0 and last_bytes != b"\n":
+            total += 1
+        # A window that hits the char cap still stops cleanly: slice, then
+        # re-trim to MAX_READ_CHARS so one read cannot balloon the prompt.
+        text = "\n".join(window_lines[:window])[:MAX_READ_CHARS]
+        # Count the lines actually sliced, not newlines in the joined text:
+        # an empty window is 0 lines (the old +1 turned an empty file read
+        # into "1 line" and produced ranges like "lines 100-99").
+        shown = len(window_lines[:window])
+        return {
+            "path": rel,
+            "text": text,
+            "lines": shown,
+            "offset": start,
+            "window": window,
+            "total_lines": total,
+            # Range reads never claim to be the whole file.
+            "truncated": True,
+        }
 
     def tree(self, depth: int = 2) -> dict:
         """A shallow listing, so the first librarian call starts from the real tree.
@@ -328,6 +409,13 @@ def format_read(result: dict) -> str:
     """Render a read for the model, including the part it must know about."""
     if "offset" in result:
         # A line-range read announces its slice: what it saw, of how many lines.
+        # An empty window must not do the range math — lines-1 with lines=0
+        # produced nonsense like "lines 50-49".
+        if result.get("lines", 0) == 0:
+            head = (
+                f"--- {result['path']} (line {result['offset']} requested — empty range)"
+            )
+            return f"{head} of {result['total_lines']}"
         head = (
             f"--- {result['path']} lines {result['offset']}-{result['offset'] + result['lines'] - 1} "
             f"of {result['total_lines']}"
@@ -340,9 +428,13 @@ def format_read(result: dict) -> str:
 
 def format_search(result: dict) -> str:
     kind = "regex" if result.get("regex") else "search"
+    # No nested same-quote f-string: the inner expression needs Python 3.12 to
+    # parse, while pyproject declares >=3.10 — the engine failed to import at
+    # all on 3.10/3.11. Plain concatenation parses everywhere.
+    glob_note = (" glob=" + str(result["glob"])) if result["glob"] else ""
     head = (
         f"--- {kind} {result['query']!r}"
-        f"{f' glob={result['glob']}' if result['glob'] else ''}: "
+        f"{glob_note}: "
         f"{len(result['matches'])} matches in {result['files_scanned']} files"
     )
     if result["truncated"]:
