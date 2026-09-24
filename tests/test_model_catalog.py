@@ -191,6 +191,22 @@ class TestProtocolDiscovery(unittest.IsolatedAsyncioTestCase):
         self.assertIn("gemini-3-pro", [m["id"] for m in result.models], "page 2 was consumed")
         self.assertEqual(len(seen), 2, "exactly two requests: first page, then the next")
 
+    async def test_google_discovery_sends_the_key_in_the_header_not_the_url(self):
+        """Same credential rule as GoogleProvider.complete(): a query-string key
+        lands in proxy and server access logs, so discovery must use the
+        x-goog-api-key header too."""
+        calls: list[httpx.Request] = []
+        routes = {"/models": (200, {"models": [{"name": "models/gemini-2.5-flash"}]})}
+        target = ProviderTarget(
+            "google", "google", "https://generativelanguage.googleapis.com/v1beta", "goog-key"
+        )
+        async with _client(routes, calls) as client:
+            result = await discover_provider(target, client=client)
+
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(calls[0].headers["x-goog-api-key"], "goog-key")
+        self.assertNotIn("key=", str(calls[0].url), "the key must not ride in the URL query")
+
     async def test_ollama_lists_local_models(self):
         routes = {
             "/api/tags": (

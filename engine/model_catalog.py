@@ -202,10 +202,20 @@ async def discover_google(target: ProviderTarget, client: httpx.AsyncClient) -> 
     out: list[dict[str, Any]] = []
     page_token: str | None = None
     for _ in range(GOOGLE_MAX_PAGES):
-        params: dict[str, Any] = {"key": target.api_key, "pageSize": 200}
+        # The key travels in the x-goog-api-key header, never the URL: a
+        # query-string credential lands in proxy and server access logs — the
+        # same rule GoogleProvider.complete() follows for generation calls.
+        # The key travels in the x-goog-api-key header, never the URL: a
+        # query-string credential lands in proxy and server access logs — the
+        # same rule GoogleProvider.complete() follows for generation calls.
+        params: dict[str, Any] = {"pageSize": 200}
         if page_token:
             params["pageToken"] = page_token
-        r = await client.get(f"{target.base_url.rstrip('/')}/models", params=params)
+        r = await client.get(
+            f"{target.base_url.rstrip('/')}/models",
+            params=params,
+            headers={"x-goog-api-key": target.api_key},
+        )
         r.raise_for_status()
         body = r.json()
         for m in body.get("models") or []:
