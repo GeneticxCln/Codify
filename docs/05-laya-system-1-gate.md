@@ -6,7 +6,7 @@ Upstream: [NandhaKishorM/laya](https://github.com/NandhaKishorM/laya).
 
 ## 1. What Laya actually is
 
-Laya is not another chat model, so it is *not* wired in as a sixth pipeline stage. It is a
+Laya is not another chat model, so it is *not* wired in as a pipeline stage at all. It is a
 **non-autoregressive, multilingual decision engine**: you hand it a state and a set of *typed
 questions*, and it answers them in one forward pass (upstream reports ~33 ms), with a Router that
 selects the checkpoint per request and reports which one it used.
@@ -42,7 +42,7 @@ librarian → planner → fixer → verifier → critic → scribe   (System-2, 
 ```
 
 The gate runs in `ExecutorService.run_planning` **before** the first LLM call. Rationale: the
-expensive, non-deterministic part of the system is the five-LLM pipeline, and the cheapest way to
+expensive, non-deterministic part of the system is the six-LLM pipeline, and the cheapest way to
 protect it is to reject hostile or underspecified requests before any of it runs. A blocked goal
 therefore has **zero** `plan_steps` and **zero** provider calls — verifiable in the event stream.
 
@@ -122,7 +122,7 @@ wild. `GET /settings/laya` returns the capability report: `sdk_installed`, `sdk_
 
 ## 6. Role slot
 
-`laya` is a real sixth slot in the registry (`ROLES`), seeded at first migration, so its
+`laya` is a real seventh slot in the registry (`ROLES`), seeded at first migration, so its
 provider/model/prompt are Settings-only like every other role. It is hidden from the pipeline
 ordering in the UI (it renders first, labelled "Laya — System-1 Gate") and it never receives a
 `PlanStep`.

@@ -187,7 +187,7 @@ through a typed Rust struct where an explicit `null` and an absent field deseria
 
 A role with an empty `model_name` is **refused before any provider call**: the goal fails with
 `agent_not_configured` naming the role and the screen that fixes it — never with a protocol error from
-an endpoint asked to run an empty model id. `POST /settings/agents/{role}` accepts an empty
+an endpoint asked to run an empty model id. `PUT /settings/agents/{role}` accepts an empty
 `model_name` for the same reason (clearing a choice is legitimate). A role with no primary model but a
 configured fallback is the exception: it runs on the fallback, because a rescue that works is a working
 role.
@@ -197,8 +197,8 @@ an existing database gains them by `ALTER TABLE`, keeping every configured role)
 ```python
 DEFAULT_AGENTS = [
     _role("laya",       "Laya — System-1 Gate", 0.0,  512),
-    _role("planner",    "Planner Agent",       0.3, 4096),
     _role("librarian",  "Librarian Agent",     0.1, 8192),
+    _role("planner",    "Planner Agent",       0.3, 4096),
     _role("fixer",      "Fixer Agent",         0.1, 8192),
     _role("verifier",   "Verifier Agent",      0.0, 2048),
     _role("critic",     "Critic Agent",        0.2, 4096),
@@ -228,7 +228,7 @@ script. The test doubles route on the role whose `AgentConfig` built the provide
 
 Adding a **harness** later = one catalog row, not a new class. Adding a new **wire format** = one protocol class.
 
-`test_connection`: `max_tokens=8`, prompt `ping`, 15s. Never echo keys.
+`test_connection`: `max_tokens=8`, prompt `ping`, 15s — enforced with `asyncio.wait_for` around the provider's own `complete` (`TEST_CONNECTION_TIMEOUT_S` in `engine/providers.py`), because a probe that inherits the generation client's 120s+ timeout is the settings screen hanging. Never echo keys.
 
 ## 4. Registry / Orchestrator / API
 

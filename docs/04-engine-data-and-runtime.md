@@ -91,7 +91,10 @@ Unique `(goal_id, ordinal)`. Max 20 steps per goal (planner contract).
 ```python
 EventType = Literal[
     "goal_status", "step_status", "log", "diff", "test_result",
-    "file_change_summary", "agent_assigned", "provider_fallback", "error",
+    "file_change_summary", "agent_assigned", "provider_fallback",
+    "library_evidence", "plan_updated", "laya_decision",
+    "fix_retry", "fixer_pass", "plan_consult",
+    "agent_call_failed", "usage", "model_delta", "error",
 ]
 
 class Event(BaseModel):
@@ -104,19 +107,35 @@ class Event(BaseModel):
     sequence: int  # per-goal, starts at 1, +1 per publish
 ```
 
-Payloads:
+Payloads — one row per type the engine publishes (verified against the
+`publish` sites in `executor.py` / `services.py`; this table has drifted
+before, so a new event type means a new row here in the same change):
 
-| type | payload |
-|---|---|
-| `goal_status` | `{status, version}` |
-| `step_status` | `{status, review_notes?}` |
-| `log` | `{level: "info"|"warn"|"error", message}` |
-| `diff` | `{path, unified_diff}` |
-| `test_result` | `{argv, verdict, explanation, exit_code?}` |
-| `file_change_summary` | `{paths: [str], dry_run: bool}` |
-| `agent_assigned` | `{role, provider, model}` |
-| `provider_fallback` | `{role, from: {provider, model}, to: {provider, model}, code, detail}` |
-| `error` | `{code: str, message: str, role: str \| null}` |
+| type | `step_id` | payload |
+|---|---|---|
+| `goal_status` | — | `{status, version}` |
+| `step_status` | step | `{status, review_notes?, commit_message?}` — republished with `status: "IN_PROGRESS"` at every role transition inside a step (fixer → verifier → critic → scribe); only a start from a not-running state is a real attempt |
+| `log` | any | `{level: "info"\|"warn"\|"error", message}` |
+| `diff` | step | `{path, unified_diff, note?}` — `note` says why a real change has an empty diff (binary, or over the 1 MB cap) |
+| `test_result` | step | `{argv, verdict, explanation, exit_code?, refused: [str], ran: bool}` — `ran: false` with `argv: null` means nothing executed; `refused` lists every command the sandbox rejected |
+| `file_change_summary` | step | `{paths: [str], dry_run: bool, unchanged: [str]}` — `unchanged` are paths whose proposal already matched the file ("already matched — left alone") |
+| `agent_assigned` | any (`null` for laya) | `{role, provider, model}` — the model about to be called, published before the call |
+| `provider_fallback` | any | `{role, from: {provider, model}, to: {provider, model}, code, detail}` |
+| `library_evidence` | — | the checked evidence pack: `{summary, files: [{path, why, evidence}], symbols, conventions, test_command, risks, rounds, counts: {opened, matched, considered}, dropped_paths}` (`04` §4.0) |
+| `plan_updated` | step | `{step_id, step_title, fields: [str], changes: {field: {before, after}}}` — only fields the patch edited, only those whose value actually changed |
+| `laya_decision` | — | the gate's full verdict: `{engine, answers, routing, blocked, block_reason, warnings, skipped_reason, provider, model, policy: {injection_block_threshold, risk_warn_level, clarify_warn_threshold}}` (`05`) |
+| `fix_retry` | step | `{attempt, max_attempts, reason}` — a failing test run fed back to the fixer (bounded by `MAX_FIX_ATTEMPTS`) |
+| `fixer_pass` | step | `{attempt, max_passes, passes_left}` — the fixer asked for another pass of its own (bounded by `MAX_FIXER_PASSES`) |
+| `plan_consult` | — | `{refused, material_chars}` — the planner reopened the frozen evidence pack (`MAX_PLANNER_CONSULTS`) |
+| `agent_call_failed` | any | `{role, provider, model, target: "primary"\|"fallback", code, message, duration_ms}` — a provider call that failed; the record the Settings screen's "last error" reads |
+| `usage` | any | `{role, provider, model, duration_ms, input_tokens, output_tokens, total_tokens}` — one per successful model call; feeds `/goals/{id}/usage`, the audit document, and the stats rollups. `duration_ms` is absent on events written before it existed |
+| `model_delta` | any | `{role, provider, model, text, final}` — a streaming snapshot of the reply so far (self-contained, ~every 400 ms); `final: true` closes the card. Chat-render only |
+| `error` | any | `{code: str, message: str, role: str \| null}` |
+
+`step_id` column: `—` marks goal-level events that never carry a step; `step`
+marks step-scoped ones; `any` marks types published both ways (agent-level
+events exist per role call, with `null` when the role runs at goal scope — the
+librarian and laya — or per step, with the step's id when it runs inside one).
 
 `error.role` names the role responsible when the engine knows it (`librarian`, `planner`,
 `fixer`, `verifier`, `critic`, `scribe`), and is `null` for failures raised outside a role phase, such as a
@@ -234,6 +253,42 @@ CREATE TABLE agent_configs (
   fallback_base_url TEXT,
   updated_at REAL NOT NULL
 );
+
+CREATE TABLE proposed_files (
+  id TEXT PRIMARY KEY,
+  goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+  step_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  action TEXT NOT NULL,
+  content TEXT,
+  created_at REAL NOT NULL
+);
+
+CREATE TABLE engine_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at REAL NOT NULL
+);
+
+-- A day THIS engine froze from its own goals and events. Subject to the
+-- count-based retention policy (`stats_retention_days`).
+CREATE TABLE stats_snapshots (
+  day TEXT PRIMARY KEY,
+  document TEXT NOT NULL, -- the full overview document, JSON
+  created_at REAL NOT NULL
+);
+
+-- The stats-history document the user imported from a file, one row per frozen
+-- day. Deliberately NOT part of stats_snapshots: an imported day is another
+-- machine's measurement, so merging the tables would make provenance unknowable
+-- and let retention pruning delete data Codify never produced. One document at a
+-- time — a new import replaces the previous set outright.
+CREATE TABLE stats_imports (
+  day TEXT PRIMARY KEY,
+  document TEXT NOT NULL, -- one day entry: day, day_stats, goals, usage
+  source TEXT NOT NULL DEFAULT '',
+  imported_at REAL NOT NULL
+);
 ```
 
 Alembic revision `0001_init` creates these. Startup seeder inserts missing `DEFAULT_AGENTS` rows only.
@@ -250,18 +305,46 @@ Error body: `{ "code": str, "message": str }`.
 |---|---|---|---|
 | `GET` | `/health` | — | `{ok:true}` (still requires Bearer) |
 | `POST` | `/workspaces` | `{name, root_path}` extra=forbid | `Workspace` |
+| `POST` | `/workspaces/browse` | — | `{cancelled} \| {cancelled:false, workspace}` (native folder picker) |
 | `GET` | `/workspaces` | — | `Workspace[]` |
 | `GET` | `/workspaces/{id}` | — | `Workspace` |
-| `POST` | `/goals` | `{workspace_id, title, description?, dry_run?}` extra=forbid | `Goal` |
+| `DELETE` | `/workspaces/{id}?delete_goals={bool}` | — | forgets the folder; **never touches `root_path`**. 409 `workspace_not_empty` (with the goal count) unless the cascade is requested, 409 `workspace_has_active_goals` if anything is PLANNING/RUNNING |
+| `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, provider?, model?}` extra=forbid | `Goal` |
+| `GET` | `/goals` | query: `workspace_id?`, `status?`, `limit` (1–200, default 50), `offset` | `Goal[]` — active goals first, then newest |
 | `GET` | `/goals/{id}` | — | `Goal` + `steps: PlanStep[]` |
+| `DELETE` | `/goals/{id}` | — | deletes the run record; events/steps/proposals cascade, counts returned. 409 `goal_in_progress` while PLANNING/RUNNING or a driver holds it. Never touches files |
 | `POST` | `/goals/{id}/start` | `{expected_version}` extra=forbid | `Goal` |
 | `POST` | `/goals/{id}/pause` | `{expected_version}` | `Goal` |
 | `POST` | `/goals/{id}/cancel` | `{expected_version}` | `Goal` |
+| `PATCH` | `/goals/{id}/steps/{step_id}` | `{expected_version, title?, description?, suggested_paths?}` extra=forbid | `PlanStep` (PENDING goals only) |
 | `POST` | `/goals/{id}/steps/{step_id}/retry` | `{expected_version}` | `PlanStep` |
-| `POST` | `/settings/agents/repair` | — | `RepairReport` (`04` §3.1) |
 | `GET` | `/goals/{id}/events?after={seq}` | — | `Event[]` where `sequence > after` |
+| `GET` | `/goals/{id}/usage` | — | token totals + `parallel_peak`/`parallel_waves` (from `usage` events) |
+| `GET` | `/goals/{id}/audit` | — | the goal's audit document (plan edits, fallbacks, fix retries, errors, outcomes, usage, silent roles) |
+| `POST` | `/goals/{id}/apply` | `{expected_version}` | replays a completed dry-run's stored proposals for real |
+| `POST` | `/goals/{id}/enable-execution` | `{expected_version}` | lifts the `plan_only` guard (`Goal`) |
+| `GET` | `/stats/overview?window={1\|7\|30\|0}` | — | cross-goal outcomes, success rate, spend, daily trend (`engine/stats.py`). Bounded windows are anchored to the request's wall clock, so an idle install sees an empty window rather than its last run relabelled as recent |
+| `GET` | `/stats/history?limit={0..730}` | — | frozen daily stats documents, oldest first; `limit=0` returns every stored day for JSON export |
+| `GET` | `/stats/import` | — | the currently-imported history document (`{imported: false, days: []}` when none — a normal state, not a 404) |
+| `POST` | `/stats/import` | `{exported_at, days[], source?}` | validates and **replaces** the stored import (`engine/stats_import.py`). 422 with a specific `code` (`duplicate_day`, `out_of_order`, `bad_day`, `empty`, `too_many_days`, `missing_exported_at`, `storage_failed`). Stored separately from `stats_snapshots` so retention can never prune imported data |
+| `DELETE` | `/stats/import` | — | forgets the stored import; idempotent, returns the day count cleared |
 | `GET` | `/settings/providers` | — | `{builtins, custom}` (`01` §2.1) |
+| `GET` | `/settings/laya` | — | gate capability report (`sdk` \| `llm-fallback` \| `skipped`) |
+| `GET` | `/settings/keys` | — | per-provider key status + `storage`/`storage_detail`/`storage_reason` (`04` §7) |
+| `POST` | `/settings/keys` | `{provider, api_key}` | `{ok, provider, storage}` |
+| `GET` | `/settings/agents` | — | `AgentConfig[]`, fixed role order |
+| `GET` | `/settings/agents/stats` | query: `limit` | per-role last call / last error / counts, from the event log |
+| `POST` | `/settings/agents/repair` | — | `RepairReport` (`04` §3.1) |
+| `GET` | `/settings/agents/{role}` | — | `AgentConfig` |
+| `PUT` | `/settings/agents/{role}` | `AgentConfigUpdate` | `AgentConfig` |
+| `POST` | `/settings/agents/{role}/test-connection` | — | `{ok, message}` — a 15s liveness probe (`01` §3) |
+| `GET` | `/settings/roles` | — | each role's `job` + `timing` (`01` §1) |
+| `GET` | `/settings/engine` | — | engine-wide settings with clamp bounds (currently `parallel_width`) |
+| `PUT` | `/settings/engine` | `{parallel_width}` | `{saved: {…}}` — echoes clamped values |
+| `GET` | `/models?refresh=` | — | live-discovered catalog, per-provider status (`06`) |
 | `GET` | `/models/recent?limit={1..25}` | — | `[{provider, model, role, ran_at}]`, newest first (`06` §3.1) |
+
+Declaration order matters for the parameterised settings routes: `/settings/agents/stats` and `/settings/agents/repair` are registered **before** `/settings/agents/{role}`, or FastAPI's in-order matching would read `stats` and `repair` as role ids and 404/422 them.
 
 `retry`: only if step `FAILED` or (`IN_PROGRESS` and last review was `request-changes`). Resets step to `PENDING` then the Executor runs fixer → verifier → critic → scribe again. No agent overrides in body.
 
@@ -351,16 +434,24 @@ Parse with `json.loads`. Extra keys ignored. Missing required keys → `agent_ou
 Every key is optional. The round ends when `enough` is `true` **or** all four request lists
 (`reads` / `searches` / `git` / `run`) are empty; otherwise the engine serves the requests and calls
 again, at most `MAX_LIBRARY_ROUNDS` (3) calls per goal. Per-round request caps: 12 reads, 6 searches,
-6 git calls, 4 inspect commands, and `MAX_ROUND_CHARS` of material.
+6 git calls, 4 `run` commands, and `MAX_ROUND_CHARS` of material.
+
+Two request entries may be plain values or small objects: a `reads` entry is a path string or
+`{path, offset, limit}` (the line-range form for reaching the bottom half of a big file), and a
+`searches` entry is a query string or `{query, regex, glob}`.
 
 Requests are executed by `engine/library.py`:
 
 - `reads` → `LibraryService.read`, capped at `MAX_READ_CHARS` and reporting `truncated`.
-- `searches` → literal case-insensitive substring search (never a model-supplied regex), skipping
-  VCS internals and package caches, capped at `MAX_MATCHES` / `MAX_FILES_SCANNED` and reporting both.
+- `searches` → literal case-insensitive substring search by default, skipping VCS internals and
+  package caches, capped at `MAX_MATCHES` / `MAX_FILES_SCANNED` and reporting both. A request may
+  opt into regex with `{"query": …, "regex": true}` (and may narrow it with `glob`): a
+  model-supplied pattern is untrusted input, so it is bounded at `MAX_REGEX_PATTERN` (200 chars)
+  with a `PER_LINE_REGEX_SECONDS` (0.5s) per-file-line deadline against catastrophic backtracking,
+  and an invalid or oversized pattern comes back as a refusal, not a crash.
 - `git` / `run` → `SandboxService.run_command(mode="read_only")`: `ls`, `wc`, and a read-only git
-  subcommand allowlist, with `-C`, `--git-dir`, `--output`, `-o`, `--ext-diff` and `--no-index`
-  refused.
+  subcommand allowlist, with `-C`, `--git-dir`, `--work-tree`, `--output`, `-o`, `--ext-diff` and
+  `--no-index` refused.
 
 A refused request is **feedback, not failure**: the refusal is returned to the librarian (so it can
 ask for something else) and logged at `warn`. The goal is unaffected.

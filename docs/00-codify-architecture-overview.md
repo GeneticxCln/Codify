@@ -1,18 +1,19 @@
 # Codify — Architecture Overview (v2)
 
-Normative. If a later doc contradicts this file on product shape (5 slots, Settings-only mutation, loopback Engine), this file wins. Field-level contracts live in `01`–`04`.
+Normative. If a later doc contradicts this file on product shape (7 roles, Settings-only mutation, loopback Engine), this file wins. Field-level contracts live in `01`–`04`.
 
 ## 1. What changed from the original OCDify/Codify draft
 
 The original design was solid for a single-LLM, single-agent tool. The v2 requirement changes the core execution model:
 
-- One orchestrating AI controls **5 sub-agents**.
+- One orchestrating AI controls **7 roles**: the `laya` pre-flight gate plus 6 pipeline stages
+  (`librarian`, `planner`, `fixer`, `verifier`, `critic`, `scribe`).
 - Each sub-agent MAY be assigned a different model from a different provider.
 - Sub-agents are configurable **only** from the Settings screen. Nowhere else in the app MAY change which model a sub-agent uses.
 
 | Surface | Change |
 |---|---|
-| Engine execution core | `ExecutorService` no longer calls one `LLMService`. It calls an `AgentOrchestrator` that routes to 5 role-specific agents. |
+| Engine execution core | `ExecutorService` no longer calls one `LLMService`. It calls an `AgentOrchestrator` that routes to 7 role-specific agents. |
 | Data model | New `AgentConfig` entity, one per role, persisted. |
 | API | New `/settings/agents` namespace, deliberately separate from `/goals` and `/workspaces`. |
 | Desktop | New Settings screen is the **only** mutator of agent config. Every other screen only displays which agent/model ran (read-only). |
@@ -86,7 +87,8 @@ Critic rejection: Desktop click required to retry the step (`04` §4.3). Setting
 
 ## 6. Invariants (non-negotiable)
 
-1. Exactly five `AgentRole` values. No create/delete of slots.
+1. Exactly seven `AgentRole` values (`laya`, `librarian`, `planner`, `fixer`, `verifier`,
+   `critic`, `scribe`). No create/delete of slots.
 2. Only `PUT /settings/agents/{role}` mutates agent config. `POST /goals` and `POST /goals/{id}/start` MUST reject unknown fields including `agent_config`.
 3. Engine binds `127.0.0.1`. Every HTTP/WS request requires `Authorization: Bearer <boot_token>`.
 4. Responses NEVER include raw API keys.

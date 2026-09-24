@@ -139,7 +139,7 @@ and nothing about the saved row says so. The failure then lands mid-goal, as a 4
 happened to run first.
 
 Settings therefore flags it: each affected card shows an amber warning and an amber outline, and the
-panel carries a summary above the list (`N of 6 roles point at a model their provider no longer
+panel carries a summary above the list (`N of 7 roles point at a model their provider no longer
 reports`) so the affected card does not have to be scrolled to. `findStaleModel()` in
 `ui/src/staleModel.ts` is the single rule behind both, so the two can never disagree.
 
