@@ -476,6 +476,21 @@ function scrollToAuditMarker(kind: AuditMarkerKind, scope: ParentNode, index: nu
  */
 const auditMarkerCursor = new Map<string, number>();
 
+/**
+ * The match each badge LAST SHOWED, keyed like `auditMarkerCursor`. The cursor
+ * above points at the *next* match to show; this records the *previous* one, so
+ * the tooltip can say "showing 2nd of 3" for the match just jumped to. Kept at
+ * module level for the same reason: a view cursor, not data.
+ */
+const auditMarkerViewed = new Map<string, number>();
+
+/**
+ * The badge label's ordinal for the tooltip: 1-based human form.
+ */
+function ordinalLabel(n: number): string {
+  return `${n}${n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th"}`;
+}
+
 function auditSummary(events: Event[] | undefined): {
   edits: number;
   fallbacks: number;
@@ -547,6 +562,12 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   // entries in ITS card's transcript, not the first card that happens to
   // render. Keyed by message id; entries clean up on unmount.
   const cardScopes = useRef(new Map<string, HTMLElement>());
+  // Bumped on every audit-badge click: the cursor and viewed maps live at
+  // module level, so without a state change the re-render (and thus the
+  // updated "showing 2nd of 3" tooltip) would never happen. Streaming events
+  // re-render often anyway, but a quiet goal must still update its tooltip on
+  // click — this guarantees it.
+  const [, setAuditTick] = useState(0);
   const [diagnosis, setDiagnosis] = useState<{
     code: string;
     message: string;
@@ -712,6 +733,18 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       // count in this card, not the badge number: both derive
                       // from the same events, but the DOM is the thing actually
                       // being cycled, so it can never disagree with itself.
+                      // Where the badge's cycling stands, for the tooltip: the
+                      // last-shown 1-based position, or null before the first
+                      // click (nothing has been shown yet — no suffix). Read
+                      // from the LIVE DOM, like the wrap bound, so tooltip and
+                      // scroll target can never disagree.
+                      const positionSuffix = (kind: AuditMarkerKind): string => {
+                        const scope = cardScopes.current.get(msg.id);
+                        const total = scope?.querySelectorAll(`[data-audit-marker="${kind}"]`).length ?? 0;
+                        const viewed = auditMarkerViewed.get(`${msg.id}:${kind}`);
+                        if (!scope || total === 0 || viewed === undefined) return "";
+                        return ` — showing ${ordinalLabel(viewed + 1)} of ${total}`;
+                      };
                       const jump = (kind: AuditMarkerKind) => () => {
                         const scope = cardScopes.current.get(msg.id);
                         if (!scope) return;
@@ -720,7 +753,9 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         const key = `${msg.id}:${kind}`;
                         const index = auditMarkerCursor.get(key) ?? 0;
                         scrollToAuditMarker(kind, scope, index);
+                        auditMarkerViewed.set(key, index);
                         auditMarkerCursor.set(key, (index + 1) % total);
+                        setAuditTick((t) => t + 1); // tooltip is DOM-derived; force the re-render
                       };
                       return (
                         <>
@@ -729,8 +764,8 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               type="button"
                               onClick={jump("edits")}
                               className={`${badgeCls} bg-violet-950/40 border-violet-800 text-violet-300 hover:bg-violet-900/60`}
-                              title="Plan steps were edited after planning — click to cycle through each edit"
-                              aria-label="Plan steps were edited after planning — click to cycle through each edit"
+                              title={`Plan steps were edited after planning — click to cycle through each edit${positionSuffix("edits")}`}
+                              aria-label={`Plan steps were edited after planning — click to cycle through each edit${positionSuffix("edits")}`}
                             >
                               {summary.edits} edit{summary.edits === 1 ? "" : "s"}
                             </button>
@@ -740,8 +775,8 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               type="button"
                               onClick={jump("fallbacks")}
                               className={`${badgeCls} bg-teal-950/40 border-teal-800 text-teal-300 hover:bg-teal-900/60`}
-                              title="Model calls that fell back — click to cycle through each fallback"
-                              aria-label="Model calls that fell back — click to cycle through each fallback"
+                              title={`Model calls that fell back — click to cycle through each fallback${positionSuffix("fallbacks")}`}
+                              aria-label={`Model calls that fell back — click to cycle through each fallback${positionSuffix("fallbacks")}`}
                             >
                               {summary.fallbacks} fallback{summary.fallbacks === 1 ? "" : "s"}
                             </button>
@@ -751,8 +786,8 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               type="button"
                               onClick={jump("errors")}
                               className={`${badgeCls} bg-red-950/40 border-red-800 text-red-300 hover:bg-red-900/60`}
-                              title="Errors recorded during the run — click to cycle through each error"
-                              aria-label="Errors recorded during the run — click to cycle through each error"
+                              title={`Errors recorded during the run — click to cycle through each error${positionSuffix("errors")}`}
+                              aria-label={`Errors recorded during the run — click to cycle through each error${positionSuffix("errors")}`}
                             >
                               {summary.errors} error{summary.errors === 1 ? "" : "s"}
                             </button>
