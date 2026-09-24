@@ -26,6 +26,10 @@ from engine.providers import Keychain, ProviderError, ProviderFactory, validate_
 
 class ApiError(Exception):
     def __init__(self, status: int, code: str, message: str, extra: dict | None = None):
+        # str(exc) must be the message: goal failures, logs, and error cards all
+        # stringify the exception, and without super().__init__ every one of them
+        # rendered as an empty string with the real message buried in attributes.
+        super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
@@ -202,6 +206,15 @@ class AgentRegistryService:
                 data["api_key_ref"] = self._keychain.set(role, raw_key)
             except ProviderError as exc:
                 raise ApiError(400, exc.code, exc.message) from exc
+        elif data.get("provider") != cfg.provider and data.get("api_key_ref"):
+            # A provider switch must not carry the previous provider's credential
+            # over with it — same rule as `_normalize_target` applies to the
+            # endpoint. `api_key_ref` was stored under the OLD provider; keeping
+            # it would hand that key to the new provider's endpoint (a live
+            # credential leak, e.g. an Anthropic key POSTed to OpenAI). An
+            # explicit `api_key` in the same patch wins: the branch above ran
+            # first and re-pointed the ref at a key the user just supplied.
+            data["api_key_ref"] = None
         data["updated_at"] = time.time()
         merged = AgentConfig.model_validate(data)
         self._db.execute(
@@ -274,6 +287,16 @@ class WorkspaceService:
         root = str(Path(body.root_path).expanduser().resolve())
         if not Path(root).is_dir():
             raise ApiError(400, "invalid_root", "root_path must be an existing directory")
+        # `/` (or any filesystem ancestor of everything) makes every
+        # path-containment check vacuous: nothing can escape a root that
+        # contains the whole machine. A workspace must be a directory the user
+        # deliberately chose, and no legitimate project IS the filesystem root.
+        if Path(root).parent == Path(root):
+            raise ApiError(
+                400, "invalid_root",
+                "root_path refuses to be the filesystem root — a workspace that "
+                "contains every path makes containment checks meaningless",
+            )
         ws = Workspace(id=str(uuid.uuid4()), name=body.name, root_path=root, created_at=time.time())
         try:
             self._db.execute(

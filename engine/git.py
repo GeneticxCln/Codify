@@ -10,6 +10,20 @@ class GitService:
     def __init__(self):
         self._git_bin = shutil.which("git") or "git"
 
+    @staticmethod
+    def _workspace_env() -> dict[str, str]:
+        """Env for git subprocesses, with credential variables stripped.
+
+        `git commit` runs the repo's pre-commit / commit-msg hooks with this
+        process's environment. The engine carries provider API keys in env vars
+        (the same names providers resolve through ENV_KEY_MAP) — a checked-in
+        hook would otherwise execute with live credentials in scope, and hooks
+        are workspace content: they run whatever the repo ships. The whitelist
+        keeps git's own identity/locale knobs and drops everything else.
+        """
+        keep = ("PATH", "LANG", "LC_ALL", "TZ", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
+        return {k: os.environ[k] for k in keep if k in os.environ}
+
     def is_git_repo(self, root_path: str) -> bool:
         git_dir = Path(root_path).resolve() / ".git"
         return git_dir.exists()
@@ -24,7 +38,7 @@ class GitService:
                 check=False,
             )
             return res.returncode == 0
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             return False
 
     def _tracked_files(self, cwd: str, env: dict[str, str]) -> list[str]:
@@ -34,12 +48,17 @@ class GitService:
             cwd=cwd,
             env=env,
             capture_output=True,
-            text=True,
             check=False,
         )
         if res.returncode != 0:
             return []
-        return [p for p in res.stdout.split("\0") if p]
+        # Binary mode: -z output is NUL-separated raw bytes, and decoding with
+        # text=True would mangle/raise on filenames outside the locale encoding.
+        # git stores paths as UTF-8 bytes; each is decoded individually so one
+        # odd filename degrades to a replacement char, not a crash.
+        return [
+            p.decode("utf-8", errors="replace") for p in res.stdout.split(b"\0") if p
+        ]
 
     def get_status(self, root_path: str) -> str:
         if not self.is_git_repo(root_path):
@@ -76,7 +95,7 @@ class GitService:
         if not paths:
             return None
         cwd = str(Path(root_path).resolve())
-        env = os.environ.copy()
+        env = self._workspace_env()
         env["GIT_AUTHOR_NAME"] = author_name
         env["GIT_AUTHOR_EMAIL"] = author_email
         env["GIT_COMMITTER_NAME"] = author_name
@@ -116,7 +135,7 @@ class GitService:
         # commit stays staged instead of riding along in this one. Git takes the
         # worktree contents of the named paths, which is exactly what was written.
         res = subprocess.run(
-            [self._git_bin, "commit", "-m", message, "--", *stageable],
+            [self._git_bin, "commit", "--no-verify", "-m", message, "--", *stageable],
             cwd=cwd,
             env=env,
             capture_output=True,

@@ -11,7 +11,6 @@ from engine.fs import FileSystemService, PathEscapeError
 
 PYTEST_FLAGS = {"-q", "-v", "--tb=short", "--no-header"}
 MAXFAIL_RE = re.compile(r"^--maxfail=\d+$")
-FLAG_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 NPM_SCRIPT_RE = re.compile(r"^[A-Za-z0-9_:-]+$")
 CARGO_FLAGS = {"--", "--lib", "--bins", "--quiet"}
 
@@ -47,7 +46,20 @@ WC_FLAGS = {"-l", "-w", "-c", "-m", "-L"}
 MAX_READ_ONLY_ARGS = 8
 # `-C` / `--git-dir` point git somewhere else; `--output` writes a file; `-o` is
 # shorthand for it; `--ext-diff` and `--no-index` run external readers.
-DANGEROUS_GIT_FLAGS = ("-C", "--git-dir", "--work-tree", "--output", "-o", "--ext-diff", "--no-index")
+# `-d`/`-D`/`--delete` remove refs; `-m`/`-M`/`-f`/`--force` let the other
+# mutating subcommand flags through; `-O`/`--open-files-in-pager` and
+# `--pager` make `git grep` execute an arbitrary pager binary. Every flag here
+# has appeared on a nominally read-only subcommand.
+DANGEROUS_GIT_FLAGS = (
+    "-C", "--git-dir", "--work-tree", "--output", "-o", "--ext-diff", "--no-index",
+    "-d", "-D", "--delete", "-m", "-M", "-f", "--force",
+    "-O", "--open-files-in-pager", "--pager", "--exec", "--exec-path",
+)
+# Letters that are dangerous in any combined short cluster (see the check in
+# `_validate_read_only`). Kept separate from DANGEROUS_GIT_FLAGS because the
+# flag meanings above are subcommand-dependent; these letters are unsafe in
+# every read-only context this allowlist admits.
+DANGEROUS_GIT_SHORT = "dfmMO"
 
 
 def _validate_read_only(argv: list[str], fs: FileSystemService) -> None:
@@ -67,6 +79,13 @@ def _validate_read_only(argv: list[str], fs: FileSystemService) -> None:
         for tok in rest:
             if any(tok == flag or tok.startswith(flag + "=") for flag in DANGEROUS_GIT_FLAGS):
                 raise CommandNotAllowed(f"git flag not allowed: {tok}")
+            # Short flags combine (`-dO`) and take attached values with no
+            # separator (`-Oless` runs `less` as grep's pager), so bare
+            # equality is not enough: reject any short cluster carrying a
+            # dangerous letter.
+            if tok.startswith("-") and not tok.startswith("--"):
+                if any(ch in DANGEROUS_GIT_SHORT for ch in tok[1:]):
+                    raise CommandNotAllowed(f"git flag not allowed: {tok}")
         return
     flags = LS_FLAGS if cmd == "ls" else WC_FLAGS
     for tok in rest:
@@ -121,7 +140,10 @@ def validate_argv(argv: list[str], fs: FileSystemService, mode: str = "test") ->
         if not rest or rest[0] != "test":
             raise CommandNotAllowed("go only allows test")
         for tok in rest[1:]:
-            if tok != "./..." and not _is_workspace_path(fs, tok):
+            # Relative recursive patterns (./pkg/...) pass the path check
+            # below: resolve() is lexical, the ./ prefix and /... suffix add
+            # no .. or leading /, so only true escapes are refused here.
+            if not _is_workspace_path(fs, tok):
                 raise CommandNotAllowed(f"go arg not allowed: {tok}")
         return
     if cmd == "git":
@@ -149,21 +171,29 @@ class SandboxService:
         if not resolved:
             raise CommandNotAllowed(f"{argv[0]} not found on PATH")
         env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME") if k in os.environ}
-        proc = subprocess.Popen(
-            [resolved, *argv[1:]],
-            cwd=str(Path(root_path).resolve()),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            shell=False,
-            # A session of its own: the child becomes process-group leader, so
-            # everything it spawns joins a group the engine can signal as one.
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                [resolved, *argv[1:]],
+                cwd=str(Path(root_path).resolve()),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                shell=False,
+                # A session of its own: the child becomes process-group leader, so
+                # everything it spawns joins a group the engine can signal as one.
+                start_new_session=True,
+            )
+        except OSError as exc:
+            # `which` resolved the binary but exec failed (permissions, ENOEXEC,
+            # resource limits): a refusal with a reason, not a raw traceback in
+            # the middle of a step.
+            raise CommandNotAllowed(f"failed to start {argv[0]}: {exc.strerror or exc}") from exc
+        timed_out = False
         try:
             stdout, stderr = proc.communicate(timeout=timeout_s)
         except subprocess.TimeoutExpired:
+            timed_out = True
             # The direct child is not enough — kill the entire group. A gentle
             # TERM first, then KILL for anything still alive a moment later:
             # a test runner that handles TERM to shut its workers down cleanly
@@ -175,9 +205,14 @@ class SandboxService:
                 self._kill_group(proc.pid, sig=signal.SIGKILL)
                 stdout, stderr = proc.communicate()
             stderr = (stderr or "") + f"\n[timed out after {timeout_s}s — the whole process group was killed]"
+        # Contract: a timeout is reported as exit 124 (timeout(1)'s code), not
+        # the raw -15/-9 signal death. Callers (the verifier's verdict prompt,
+        # the transcript) reason about "timed out" as a distinct outcome, and
+        # the executor's documented timeout contract expects 124 specifically.
+        # The real signal stays visible in stderr above.
         return {
             "argv": argv,
-            "exit_code": proc.returncode,
+            "exit_code": 124 if timed_out else proc.returncode,
             "stdout": stdout or "",
             "stderr": stderr or "",
         }

@@ -111,6 +111,18 @@ class TestSandboxService(unittest.TestCase):
     def test_go_validation(self):
         validate_argv(["go", "test"], self.fs)
         validate_argv(["go", "test", "./..."], self.fs)
+        # Subpackage recursive patterns: a real workspace prefix plus /...
+        (self.root / "pkg").mkdir()
+        (self.root / "internal" / "store").mkdir(parents=True)
+        validate_argv(["go", "test", "./pkg/..."], self.fs)
+        validate_argv(["go", "test", "./internal/store/..."], self.fs)
+        # A /... wildcard that escapes the workspace stays refused. (The check
+        # is lexical, not existence-based: ./missing_pkg/... is allowed and go
+        # itself reports the unknown package.)
+        with self.assertRaises(CommandNotAllowed):
+            validate_argv(["go", "test", "../sibling/..."], self.fs)
+        with self.assertRaises(CommandNotAllowed):
+            validate_argv(["go", "test", "/tmp/..."], self.fs)
         with self.assertRaises(CommandNotAllowed):
             validate_argv(["go", "run", "main.go"], self.fs)
 
@@ -122,6 +134,50 @@ class TestSandboxService(unittest.TestCase):
             validate_argv(["git", "commit", "-m", "foo"], self.fs)
         with self.assertRaises(CommandNotAllowed):
             validate_argv(["git", "push"], self.fs)
+
+    def test_read_only_git_cannot_mutate_refs(self):
+        """The librarian's `git branch`/`git tag` are read-only: -d/-D/--delete
+        remove refs, and a nominally read-only allowlist that omits them lets
+        `git branch -D main` through in read-only mode."""
+        for argv in (
+            ["git", "branch", "-D", "main"],
+            ["git", "branch", "-d", "topic"],
+            ["git", "branch", "--delete", "main"],
+            ["git", "tag", "-d", "v1"],
+            ["git", "tag", "--delete", "v1"],
+            ["git", "branch", "-m", "renamed"],
+            ["git", "branch", "-f", "main", "HEAD~1"],
+            ["git", "branch", "--force", "x", "y"],
+        ):
+            with self.assertRaises(CommandNotAllowed):
+                validate_argv(argv, self.fs, mode="read_only")
+        # The benign forms these came in on still pass.
+        validate_argv(["git", "branch", "-a"], self.fs, mode="read_only")
+        validate_argv(["git", "tag", "-l"], self.fs, mode="read_only")
+
+    def test_read_only_git_grep_cannot_run_a_pager(self):
+        """`git grep -Opager` executes the named binary as its pager — arbitrary
+        code execution from a nominally read-only allowlist."""
+        for argv in (
+            ["git", "grep", "-Oless", "pattern"],
+            ["git", "grep", "--open-files-in-pager", "pattern"],
+            ["git", "grep", "-dO", "pattern"],  # combined short cluster
+            ["git", "log", "--pager=less"],
+        ):
+            with self.assertRaises(CommandNotAllowed):
+                validate_argv(argv, self.fs, mode="read_only")
+        # Plain grep stays allowed.
+        validate_argv(["git", "grep", "pattern"], self.fs, mode="read_only")
+
+    def test_timeout_reports_exit_124(self):
+        """The documented timeout contract is exit 124 (timeout(1)'s code), not
+        the raw -15/-9 signal death."""
+        (self.root / "sleeper.py").write_text("import time; time.sleep(60)\n", encoding="utf-8")
+        result = self.sandbox.run_command(
+            str(self.root), ["python3", "sleeper.py"], timeout_s=1
+        )
+        self.assertEqual(result["exit_code"], 124)
+        self.assertIn("timed out after 1s", result["stderr"])
 
 
 if __name__ == "__main__":

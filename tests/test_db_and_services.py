@@ -12,7 +12,7 @@ from engine.models import (
     ROLES,
     WorkspaceCreate,
 )
-from engine.providers import Keychain, ProviderFactory
+from engine.providers import Keychain, ProviderError, ProviderFactory
 from engine.services import (
     AgentRegistryService,
     ApiError,
@@ -45,6 +45,32 @@ class TestDbAndServices(unittest.TestCase):
         # the System-1 gate that runs before the planner.
         self.assertEqual(roles, list(ROLES))
         self.assertEqual(len(configs), len(ROLES))
+
+    def test_saving_a_key_never_wipes_a_corrupt_store(self):
+        """The file backend's read-before-write must fail loudly on a corrupt
+        store: silently treating it as empty makes the atomic replace discard
+        every OTHER key the file held."""
+        store = Path(self.temp_dir.name) / "secrets.json"
+        kc = Keychain(secrets_path=store)
+        kc.set_provider_key("openai", "sk-first")
+        # Corrupt the store AFTER the first key is in.
+        store.write_text("{not json at all", encoding="utf-8")
+        with self.assertRaises(ProviderError) as ctx:
+            kc.set_provider_key("anthropic", "sk-second")
+        self.assertEqual(ctx.exception.code, "secrets_unreadable")
+        # The corrupt bytes were NOT overwritten by an empty-dict save.
+        self.assertEqual(store.read_text(encoding="utf-8"), "{not json at all")
+
+    def test_secrets_temp_file_is_created_0600(self):
+        """No world-readable window: the temp file is created O_CREAT 0600, not
+        written with the umask and chmodded afterwards."""
+        import stat
+
+        store = Path(self.temp_dir.name) / "secrets.json"
+        kc = Keychain(secrets_path=store)
+        kc.set_provider_key("openai", "sk-perms")
+        # The final file must be 0600 (the tmp path is gone after replace).
+        self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
 
     def test_workspace_service(self):
         ws_path = Path(self.temp_dir.name) / "workspace1"

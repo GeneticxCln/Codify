@@ -55,6 +55,54 @@ class TestGitService(GitTestBase):
         # Nothing left to record for that path.
         self.assertIsNone(self.git.commit(str(self.root), "feat: duplicate", ["hello.py"]))
 
+    def test_commit_does_not_run_repo_hooks(self):
+        """Hooks are workspace content: a checked-in pre-commit hook must not
+        execute (with the engine's environment) as a side effect of committing.
+        """
+        hook = self.root / ".git" / "hooks" / "pre-commit"
+        hook.write_text(
+            "#!/bin/sh\n"
+            "echo HOOK_RAN >> hook-evidence.txt\n"
+            "exit 1\n"  # a hook that fails the commit if it runs
+        )
+        hook.chmod(0o755)
+        self.write("hooked.py", "x = 1\n")
+        rev = self.git.commit(str(self.root), "feat: hook test", ["hooked.py"])
+        self.assertIsNotNone(rev, "commit must succeed regardless of repo hooks")
+        self.assertFalse((self.root / "hook-evidence.txt").exists(),
+                         "pre-commit hook executed during commit")
+
+    def test_commit_env_does_not_carry_credentials(self):
+        """The commit subprocess env must not include provider key variables —
+        hooks would otherwise run with live credentials in scope."""
+        captured: dict = {}
+        real_run = subprocess.run
+
+        def spy(argv, **kwargs):
+            # self._git_bin resolves to an absolute path (shutil.which).
+            if argv and argv[0].endswith("git") and len(argv) > 1 and argv[1] == "commit":
+                captured.update(kwargs.get("env") or {})
+            return real_run(argv, **kwargs)
+
+        with tempfile.TemporaryDirectory() as td:
+            pass
+        import os as _os
+        _os.environ["ANTHROPIC_API_KEY"] = "sk-leak-check"
+        _os.environ["OPENAI_API_KEY"] = "sk-leak-check-2"
+        try:
+            import unittest.mock as mock
+            with mock.patch("engine.git.subprocess.run", side_effect=spy):
+                self.write("envcheck.py", "y = 2\n")
+                rev = self.git.commit(str(self.root), "feat: env", ["envcheck.py"])
+                self.assertIsNotNone(rev)
+        finally:
+            _os.environ.pop("ANTHROPIC_API_KEY", None)
+            _os.environ.pop("OPENAI_API_KEY", None)
+        self.assertNotIn("ANTHROPIC_API_KEY", captured)
+        self.assertNotIn("OPENAI_API_KEY", captured)
+        # Git still gets what it needs to run.
+        self.assertIn("PATH", captured)
+
     def test_a_commit_contains_only_the_paths_it_names(self):
         """The regression: `git add -A` swept the user's work into our commit.
 
