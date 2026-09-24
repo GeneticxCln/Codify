@@ -59,9 +59,14 @@ target Python from `pyproject.toml`, because a linter's defaults are not a
 contract: the ruff on one machine checked ~400 rules and reported 189 findings no
 one had triaged, while a stock ruff reported none of them. Pin the behaviour, then
 widen the ruleset deliberately — with the fixes — rather than inheriting whatever
-the installed version does today. The same logic pins `make typecheck`: mypy's
-config (the 3.10 floor, the pydantic plugin, the file set) lives in
-`pyproject.toml`, not in anyone's command line.
+the installed version does today. That is how the wider sets landed: bugbear,
+the bandit-style security rules and pyupgrade are all on, and every security
+finding they raise is triaged per site — the `per-file-ignores` block in
+`pyproject.toml` names each exemption with the reason it is safe (argv-list
+subprocess, engine-owned SQL identifiers, documented best-effort paths). A new
+`S` finding is a decision to make, not noise to silence. The same logic pins
+`make typecheck`: mypy's config (the 3.10 floor, the pydantic plugin, the file
+set) lives in `pyproject.toml`, not in anyone's command line.
 
 **Type annotations are checked, not decorative.** `make typecheck` only sees what
 is already annotated, but that is the point: an annotation like

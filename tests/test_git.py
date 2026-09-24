@@ -3,18 +3,19 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from engine.git import GitService
 
 
 class GitTestBase(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.git = GitService()
         self.git.init_repo(str(self.root))
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
     def write(self, name: str, text: str) -> None:
@@ -37,11 +38,11 @@ class GitTestBase(unittest.TestCase):
 
 
 class TestGitService(GitTestBase):
-    def test_git_init_and_detection(self):
+    def test_git_init_and_detection(self) -> None:
         self.assertTrue(self.git.is_git_repo(str(self.root)))
         self.assertFalse(self.git.is_git_repo(str(self.root / "nope")))
 
-    def test_status_and_commit(self):
+    def test_status_and_commit(self) -> None:
         self.assertEqual(self.git.get_status(str(self.root)).strip(), "")
 
         self.write("hello.py", "print('hello')\n")
@@ -55,7 +56,7 @@ class TestGitService(GitTestBase):
         # Nothing left to record for that path.
         self.assertIsNone(self.git.commit(str(self.root), "feat: duplicate", ["hello.py"]))
 
-    def test_commit_does_not_run_repo_hooks(self):
+    def test_commit_does_not_run_repo_hooks(self) -> None:
         """Hooks are workspace content: a checked-in pre-commit hook must not
         execute (with the engine's environment) as a side effect of committing.
         """
@@ -72,13 +73,13 @@ class TestGitService(GitTestBase):
         self.assertFalse((self.root / "hook-evidence.txt").exists(),
                          "pre-commit hook executed during commit")
 
-    def test_commit_env_does_not_carry_credentials(self):
+    def test_commit_env_does_not_carry_credentials(self) -> None:
         """The commit subprocess env must not include provider key variables —
         hooks would otherwise run with live credentials in scope."""
-        captured: dict = {}
+        captured: dict[str, Any] = {}
         real_run = subprocess.run
 
-        def spy(argv, **kwargs):
+        def spy(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
             # self._git_bin resolves to an absolute path (shutil.which).
             if argv and argv[0].endswith("git") and len(argv) > 1 and argv[1] == "commit":
                 captured.update(kwargs.get("env") or {})
@@ -101,7 +102,7 @@ class TestGitService(GitTestBase):
         # Git still gets what it needs to run.
         self.assertIn("PATH", captured)
 
-    def test_a_commit_contains_only_the_paths_it_names(self):
+    def test_a_commit_contains_only_the_paths_it_names(self) -> None:
         """The regression: `git add -A` swept the user's work into our commit.
 
         A workspace is usually a working tree with somebody's unfinished business in
@@ -123,7 +124,7 @@ class TestGitService(GitTestBase):
         self.assertIn("?? user_wip.py", status, "untracked work stays untracked")
         self.assertIn("A  user_staged.py", status, "the user's staged file stays staged")
 
-    def test_an_empty_path_list_commits_nothing_at_all(self):
+    def test_an_empty_path_list_commits_nothing_at_all(self) -> None:
         """A step that changed nothing must not commit what the user had staged."""
         self.write("user_staged.py", "staged before we ran\n")
         subprocess.run(["git", "add", "--", "user_staged.py"], cwd=self.root, check=False)
@@ -133,7 +134,7 @@ class TestGitService(GitTestBase):
         self.assertEqual(self.git_out("log", "--oneline").strip(), "")
         self.assertIn("A  user_staged.py", self.porcelain())
 
-    def test_a_deletion_is_part_of_the_commit(self):
+    def test_a_deletion_is_part_of_the_commit(self) -> None:
         self.write("gone.py", "temporary\n")
         self.git.commit(str(self.root), "feat: add gone", ["gone.py"])
         (self.root / "gone.py").unlink()
@@ -143,7 +144,7 @@ class TestGitService(GitTestBase):
         self.assertEqual(self.committed_paths(), set())
         self.assertEqual(self.git.get_status(str(self.root)).strip(), "")
 
-    def test_a_path_that_does_not_exist_is_not_an_error_per_path(self):
+    def test_a_path_that_does_not_exist_is_not_an_error_per_path(self) -> None:
         """A mixed proposal (one real file, one phantom) still commits the real one."""
         self.write("real.py", "content\n")
         rev = self.git.commit(str(self.root), "feat: add real", ["real.py", "phantom.py"])

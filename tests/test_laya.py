@@ -16,7 +16,15 @@ from engine.laya import (
     build_state,
     evaluate_policy,
 )
-from engine.models import ROLES, AgentConfigUpdate, GoalCreate, WorkspaceCreate
+import sqlite3
+
+from engine.models import (
+    ROLES,
+    AgentConfig,
+    AgentConfigUpdate,
+    GoalCreate,
+    WorkspaceCreate,
+)
 from engine.providers import (
     BaseProvider,
     Keychain,
@@ -29,7 +37,7 @@ from engine.services import AgentRegistryService, GoalService, WorkspaceService
 class TestPolicy(unittest.TestCase):
     """Thresholds are the whole point of a calibrated gate: pin them down."""
 
-    def test_safe_request_passes_silently(self):
+    def test_safe_request_passes_silently(self) -> None:
         blocked, reason, warnings = evaluate_policy({
             "intent": {"choice": "code_change", "confidence": 0.9},
             "risk": {"score": 0.0},
@@ -40,7 +48,7 @@ class TestPolicy(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertEqual(warnings, [])
 
-    def test_high_confidence_injection_blocks_with_the_number(self):
+    def test_high_confidence_injection_blocks_with_the_number(self) -> None:
         blocked, reason, warnings = evaluate_policy({
             "prompt_injection": {"noul": 0.91},
         })
@@ -49,7 +57,7 @@ class TestPolicy(unittest.TestCase):
         self.assertIn("0.91", reason)
         self.assertEqual(warnings, [])
 
-    def test_injection_just_below_threshold_only_warns(self):
+    def test_injection_just_below_threshold_only_warns(self) -> None:
         blocked, reason, _ = evaluate_policy({"prompt_injection": {"noul": 0.84}})
         self.assertFalse(blocked)
         self.assertIsNone(reason)
@@ -57,7 +65,7 @@ class TestPolicy(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("injection", warnings[0])
 
-    def test_risk_and_clarity_warn_but_never_block(self):
+    def test_risk_and_clarity_warn_but_never_block(self) -> None:
         blocked, _, warnings = evaluate_policy({
             "risk": {"score": 2.0},
             "needs_clarification": {"noul": 0.95},
@@ -66,11 +74,11 @@ class TestPolicy(unittest.TestCase):
         self.assertFalse(blocked)
         self.assertEqual(len(warnings), 3)
 
-    def test_flat_and_nested_shapes_both_parse(self):
+    def test_flat_and_nested_shapes_both_parse(self) -> None:
         _, _, flat = evaluate_policy({"risk": 2, "needs_clarification": 0.9})
         self.assertEqual(len(flat), 2)
 
-    def test_garbage_values_are_ignored_not_crashed_on(self):
+    def test_garbage_values_are_ignored_not_crashed_on(self) -> None:
         blocked, reason, warnings = evaluate_policy({
             "risk": "not-a-number",
             "prompt_injection": True,
@@ -82,7 +90,7 @@ class TestPolicy(unittest.TestCase):
 
 
 class TestState(unittest.TestCase):
-    def test_state_carries_request_and_execution_mode(self):
+    def test_state_carries_request_and_execution_mode(self) -> None:
         goal = types.SimpleNamespace(
             title="t", description="d", plan_only=True, dry_run=False
         )
@@ -91,11 +99,11 @@ class TestState(unittest.TestCase):
         self.assertEqual(state["mode"], "plan-only")
         self.assertEqual(state["workspace"], "ws")
 
-    def test_dry_run_mode_reported(self):
+    def test_dry_run_mode_reported(self) -> None:
         goal = types.SimpleNamespace(title="t", description="d", plan_only=False, dry_run=True)
         self.assertEqual(build_state(goal)["mode"], "dry-run")
 
-    def test_over_long_request_keeps_both_ends(self):
+    def test_over_long_request_keeps_both_ends(self) -> None:
         # Laya's context is 512-1024 tokens: clip head AND tail, because an
         # injected instruction is as likely appended as stated up front.
         request = "SMOKE_HEAD " + ("x" * 20000) + " SMOKE_TAIL"
@@ -114,9 +122,12 @@ class _StubProvider(BaseProvider):
     def __init__(self, reply: Any = None, **by_role: Any):
         self.reply = reply if reply is not None else {"status": "ok"}
         self.by_role = by_role
-        self.calls: list[dict] = []
+        self.calls: list[dict[str, Any]] = []
 
-    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
         self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt, "model": model})
         chosen = self.reply
         for role, resp in self.by_role.items():
@@ -129,14 +140,16 @@ class _StubProvider(BaseProvider):
 
 
 class _StubFactory(ProviderFactory):
-    def __init__(self, provider):
+    def __init__(self, provider: BaseProvider) -> None:
         self.provider = provider
 
-    def build(self, config):
+    def build(self, config: AgentConfig) -> BaseProvider:
         return self.provider
 
 
-def _registry_with(provider, tmp: Path, model: str = "stub-model"):
+def _registry_with(
+    provider: BaseProvider, tmp: Path, model: str = "stub-model"
+) -> tuple[sqlite3.Connection, AgentRegistryService]:
     conn = connect(tmp / "laya.db")
     registry = AgentRegistryService(conn, _StubFactory(provider), Keychain())
     # Seeded roles carry no model id — there is no hardcoded model list — so each
@@ -155,24 +168,24 @@ def _install_fake_sdk(router: object) -> None:
     checker to see.
     """
     module = types.ModuleType("laya")
-    setattr(module, "Router", router)
+    setattr(module, "Router", router)  # noqa: B010 — the name is the SDK's, kept dynamic on purpose
     sys.modules["laya"] = module
 
 
 class TestLayaService(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name).resolve()
         # The real SDK is not installed in CI; make sure no test inherits a stub.
         self._saved = sys.modules.pop("laya", None)
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         sys.modules.pop("laya", None)
         if self._saved is not None:
             sys.modules["laya"] = self._saved
         self.tmp.cleanup()
 
-    async def test_llm_fallback_answers_the_typed_contract(self):
+    async def test_llm_fallback_answers_the_typed_contract(self) -> None:
         provider = _StubProvider({
             "answers": {
                 "intent": {"choice": "code_change", "confidence": 0.88},
@@ -192,7 +205,7 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(provider.calls), 1)
         self.assertIn("typed questions", provider.calls[0]["user_prompt"])
 
-    async def test_fallback_blocks_on_injection(self):
+    async def test_fallback_blocks_on_injection(self) -> None:
         provider = _StubProvider({"prompt_injection": {"noul": 0.97}})
 
         conn, registry = _registry_with(provider, self.root)
@@ -204,7 +217,7 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         assert decision.block_reason is not None, "a block explains itself"
         self.assertIn("prompt-injection", decision.block_reason)
 
-    async def test_fallback_prose_with_fences_is_tolerated(self):
+    async def test_fallback_prose_with_fences_is_tolerated(self) -> None:
         provider = _StubProvider(
             "Sure!\n```json\n{\"answers\": {\"intent\": {\"choice\": \"question\"}}}\n```"
         )
@@ -216,7 +229,7 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.engine, "llm-fallback")
         self.assertEqual(decision.answers["intent"]["choice"], "question")
 
-    async def test_provider_failure_degrades_to_skipped_never_blocks(self):
+    async def test_provider_failure_degrades_to_skipped_never_blocks(self) -> None:
         provider = _StubProvider(RuntimeError("connection refused"))
         conn, registry = _registry_with(provider, self.root)
         try:
@@ -228,19 +241,19 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         assert decision.skipped_reason is not None, "a skipped gate says why"
         self.assertIn("connection refused", decision.skipped_reason)
 
-    async def test_no_registry_and_no_sdk_is_skipped(self):
+    async def test_no_registry_and_no_sdk_is_skipped(self) -> None:
         decision = await LayaService(registry=None).decide({"request": "x"})
         self.assertEqual(decision.engine, "skipped")
         self.assertFalse(decision.blocked)
 
-    async def test_sdk_is_preferred_over_the_llm_fallback(self):
-        calls: list[dict] = []
+    async def test_sdk_is_preferred_over_the_llm_fallback(self) -> None:
+        calls: list[dict[str, Any]] = []
 
         class Router:
             def __init__(self, preload: bool = False):
                 calls.append({"preload": preload})
 
-            def predict(self, state, questions):
+            def predict(self, state: dict[str, Any], questions: list[Any]) -> dict[str, Any]:
                 self.assert_questions = questions
                 return {
                     "answers": {"prompt_injection": {"noul": 0.99}},
@@ -261,12 +274,12 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.calls, [], "SDK path must not call the fallback model")
         self.assertEqual(calls, [{"preload": True}])
 
-    async def test_sdk_crash_falls_back_instead_of_failing(self):
+    async def test_sdk_crash_falls_back_instead_of_failing(self) -> None:
         class Router:
             def __init__(self, preload: bool = False):
                 pass
 
-            def predict(self, state, questions):
+            def predict(self, state: dict[str, Any], questions: list[Any]) -> dict[str, Any]:
                 raise RuntimeError("weights missing")
 
         _install_fake_sdk(Router)
@@ -283,7 +296,7 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         assert sdk_error is not None, "a fallback off the SDK reports the SDK's error"
         self.assertIn("weights missing", sdk_error)
 
-    def test_sdk_disable_env_forces_the_fallback(self):
+    def test_sdk_disable_env_forces_the_fallback(self) -> None:
         _install_fake_sdk(object)
         import os
 
@@ -295,7 +308,7 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         finally:
             os.environ.pop("CODIFY_LAYA_SDK", None)
 
-    def test_status_reports_questions_and_policy(self):
+    def test_status_reports_questions_and_policy(self) -> None:
         status = LayaService().status()
         self.assertEqual(status["questions"], LAYA_QUESTIONS)
         self.assertEqual(status["policy"]["injection_block_threshold"], 0.85)
@@ -304,7 +317,7 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
 class _BlockingLaya(LayaService):
     """Stands in for a high-confidence injection verdict from the real SDK."""
 
-    async def decide(self, state):
+    async def decide(self, state: dict[str, Any]) -> LayaDecision:
         return LayaDecision(
             engine="sdk",
             answers={"prompt_injection": {"noul": 0.99}},
@@ -315,12 +328,12 @@ class _BlockingLaya(LayaService):
 
 
 class _SilentLaya(LayaService):
-    async def decide(self, state):
+    async def decide(self, state: dict[str, Any]) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 
 
 class TestExecutorGate(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name).resolve()
         self.conn = connect(self.root / "gate.db")
@@ -336,16 +349,16 @@ class TestExecutorGate(unittest.IsolatedAsyncioTestCase):
         self.goals = GoalService(self.conn)
         self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.tmp.cleanup()
 
-    def _executor(self, laya):
+    def _executor(self, laya: LayaService) -> ExecutorService:
         return ExecutorService(
             self.goals, self.workspaces, self.registry, SandboxService(), laya=laya
         )
 
-    async def test_blocked_goal_fails_before_any_planner_call(self):
+    async def test_blocked_goal_fails_before_any_planner_call(self) -> None:
         executor = self._executor(_BlockingLaya())
         goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="evil", description="x"))
         await executor.run_planning(goal.id)
@@ -365,7 +378,7 @@ class TestExecutorGate(unittest.IsolatedAsyncioTestCase):
         error = next(e for e in events if e.type == "error")
         self.assertEqual(error.payload["code"], "laya_blocked")
 
-    async def test_skipped_gate_plans_normally_and_emits_a_log(self):
+    async def test_skipped_gate_plans_normally_and_emits_a_log(self) -> None:
         executor = self._executor(_SilentLaya())
         goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="t", description="d"))
         await executor.run_planning(goal.id)
@@ -376,9 +389,9 @@ class TestExecutorGate(unittest.IsolatedAsyncioTestCase):
         logs = [e for e in events if e.type == "log"]
         self.assertTrue(any("gate skipped" in e.payload["message"] for e in logs))
 
-    async def test_warnings_surface_as_events_without_blocking(self):
+    async def test_warnings_surface_as_events_without_blocking(self) -> None:
         class _WarnLaya(LayaService):
-            async def decide(self, state):
+            async def decide(self, state: dict[str, Any]) -> LayaDecision:
                 return LayaDecision(
                     engine="llm-fallback",
                     answers={"risk": {"score": 2.0}},
@@ -400,9 +413,9 @@ class TestExecutorGate(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(assigned), 1)
 
-    async def test_gate_exception_is_skipped_not_fatal(self):
+    async def test_gate_exception_is_skipped_not_fatal(self) -> None:
         class _Exploding(LayaService):
-            async def decide(self, state):
+            async def decide(self, state: dict[str, Any]) -> LayaDecision:
                 raise RuntimeError("boom")
 
         executor = self._executor(_Exploding())

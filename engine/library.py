@@ -25,6 +25,7 @@ from pathlib import Path
 
 from engine.fs import FileSystemService, PathEscapeError
 from engine.sandbox import CommandNotAllowed, SandboxService
+from typing import Any
 
 # Per-read cap. Big enough for a real source file, small enough that one read
 # cannot fill a context window on its own.
@@ -84,7 +85,7 @@ def _is_outside_symlink(root: Path, path: Path) -> bool:
         return True
 
 
-class ReadResult(dict):
+class ReadResult(dict[str, Any]):
     """A dict, but named, so callers cannot pass the wrong shape by accident."""
 
 
@@ -97,7 +98,7 @@ class LibraryService:
 
     # ── reading ────────────────────────────────────────────────────────────────
 
-    def read(self, path: str, offset: int | None = None, limit: int | None = None) -> dict:
+    def read(self, path: str, offset: int | None = None, limit: int | None = None) -> dict[str, Any]:
         """Read one workspace file, truncated to MAX_READ_CHARS.
 
         Line ranges: `offset` is the 1-based first line, `limit` the number of
@@ -138,7 +139,7 @@ class LibraryService:
 
     def _read_line_window(
         self, resolved: Path, rel: str, total_size: int, start: int, window: int,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """A line window taken from where the lines actually are.
 
         Seeks to the byte where line `start` begins instead of slicing the
@@ -237,7 +238,7 @@ class LibraryService:
             "truncated": True,
         }
 
-    def tree(self, depth: int = 2) -> dict:
+    def tree(self, depth: int = 2) -> dict[str, Any]:
         """A shallow listing, so the first librarian call starts from the real tree.
 
         Cheap orientation instead of a dozen blind reads: which top-level dirs
@@ -274,7 +275,7 @@ class LibraryService:
 
     # ── searching ──────────────────────────────────────────────────────────────
 
-    def search(self, query: str, glob: str | None = None, regex: bool = False) -> dict:
+    def search(self, query: str, glob: str | None = None, regex: bool = False) -> dict[str, Any]:
         """Search across the workspace: literal substring, or bounded regex.
 
         Literal is the default and stays: every real question ("where is this
@@ -290,7 +291,7 @@ class LibraryService:
         if regex:
             return self._search_regex(needle, glob)
         lowered = needle.lower()
-        matches: list[dict] = []
+        matches: list[dict[str, Any]] = []
         files_scanned = 0
         files_skipped = 0
         truncated = False
@@ -342,7 +343,7 @@ class LibraryService:
             "truncated": truncated,
         }
 
-    def _search_regex(self, pattern: str, glob: str | None) -> dict:
+    def _search_regex(self, pattern: str, glob: str | None) -> dict[str, Any]:
         """Bounded regex search: the literal walker with pattern guards.
 
         Same walker shape as `search` — SKIP_DIRS, binary sniff, byte caps — so
@@ -365,7 +366,7 @@ class LibraryService:
         budget_s = PER_LINE_REGEX_SECONDS * 4
         deadline = _time.monotonic() + budget_s
         try:
-            matches: list[dict] = []
+            matches: list[dict[str, Any]] = []
             files_scanned = 0
             files_skipped = 0
             truncated = False
@@ -425,15 +426,15 @@ class LibraryService:
 
     # ── commands (through the one allowlist) ──────────────────────────────
 
-    def git(self, args: list[str]) -> dict:
+    def git(self, args: list[str]) -> dict[str, Any]:
         """Read-only git: history, diffs, blame. Writes are refused by the sandbox."""
         return self._command(["git", *[str(a) for a in args]])
 
-    def run(self, argv: list[str]) -> dict:
+    def run(self, argv: list[str]) -> dict[str, Any]:
         """A read-only inspect command (ls, wc, read-only git)."""
         return self._command([str(a) for a in argv])
 
-    def _command(self, argv: list[str]) -> dict:
+    def _command(self, argv: list[str]) -> dict[str, Any]:
         # Raises CommandNotAllowed; the caller records the refusal and moves on
         # rather than failing the goal, exactly like the verifier's refusals.
         return SandboxService().run_command(
@@ -441,7 +442,7 @@ class LibraryService:
         )
 
 
-def format_read(result: dict) -> str:
+def format_read(result: dict[str, Any]) -> str:
     """Render a read for the model, including the part it must know about."""
     if "offset" in result:
         # A line-range read announces its slice: what it saw, of how many lines.
@@ -462,7 +463,7 @@ def format_read(result: dict) -> str:
     return f"--- {result['path']} ({result['lines']} lines){note}\n{result['text']}"
 
 
-def format_search(result: dict) -> str:
+def format_search(result: dict[str, Any]) -> str:
     kind = "regex" if result.get("regex") else "search"
     # No nested same-quote f-string: the inner expression needs Python 3.12 to
     # parse, while pyproject declares >=3.10 — the engine failed to import at
@@ -483,7 +484,7 @@ def format_search(result: dict) -> str:
     return "\n".join(lines)
 
 
-def format_command(result: dict) -> str:
+def format_command(result: dict[str, Any]) -> str:
     argv = " ".join(result.get("argv") or [])
     out = (result.get("stdout") or "").strip()
     err = (result.get("stderr") or "").strip()

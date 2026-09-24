@@ -30,6 +30,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from engine.stats import build_overview
+from typing import Any
 
 
 def utc_day(ts: float) -> str:
@@ -44,7 +45,7 @@ class StatsSnapshotService:
     def __init__(self, conn: sqlite3.Connection):
         self._db = conn
 
-    def maybe_snapshot(self, conn: sqlite3.Connection, goals: list[dict], events: list[dict], now: float) -> str | None:
+    def maybe_snapshot(self, conn: sqlite3.Connection, goals: list[dict[str, Any]], events: list[dict[str, Any]], now: float) -> str | None:
         """Freeze yesterday's final numbers, the first time anyone looks today.
 
         Yesterday is judged from its own last activity (a goal or event stamped
@@ -80,7 +81,7 @@ class StatsSnapshotService:
             self._db.commit()
         return frozen
 
-    def get_day(self, day: str) -> dict | None:
+    def get_day(self, day: str) -> dict[str, Any] | None:
         row = self._db.execute(
             "SELECT document FROM stats_snapshots WHERE day = ?", (day,)
         ).fetchone()
@@ -104,7 +105,7 @@ class StatsSnapshotService:
             ).fetchall()
         return [r["day"] for r in rows]
 
-    def history(self, limit: int = 120) -> list[dict]:
+    def history(self, limit: int = 120) -> list[dict[str, Any]]:
         """Snapshot rows oldest first, documents already parsed.
 
         A limit of zero means every stored day, for the full-history export;
@@ -122,7 +123,7 @@ class StatsSnapshotService:
                 "SELECT day, document, created_at FROM stats_snapshots ORDER BY day DESC LIMIT ?",
                 (max(1, limit),),
             ).fetchall()
-        out: list[dict] = []
+        out: list[dict[str, Any]] = []
         for row in rows:
             try:
                 doc = json.loads(row["document"])

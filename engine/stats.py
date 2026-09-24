@@ -95,7 +95,7 @@ def _finish(bucket: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def summarize_goals(goals: list[dict], window_days: int = 0, *, now: float | None = None) -> dict[str, Any]:
+def summarize_goals(goals: list[dict[str, Any]], window_days: int = 0, *, now: float | None = None) -> dict[str, Any]:
     """Goal outcomes, totals, and success rate for the window.
 
     The rate is terminal goals only: an active goal has not happened yet, and
@@ -137,7 +137,7 @@ def summarize_goals(goals: list[dict], window_days: int = 0, *, now: float | Non
     }
 
 
-def _nowish(goals: list[dict]) -> float:
+def _nowish(goals: list[dict[str, Any]]) -> float:
     """The newest goal timestamp in the data — the no-clock fallback anchor.
 
     This is what a caller gets when it does not pass `now`, and it exists for
@@ -156,7 +156,7 @@ def _nowish(goals: list[dict]) -> float:
     return max(stamps) if stamps else 0.0
 
 
-def summarize_usage(events: list[dict], window_days: int = 0, *, now: float | None = None) -> dict[str, Any]:
+def summarize_usage(events: list[dict[str, Any]], window_days: int = 0, *, now: float | None = None) -> dict[str, Any]:
     """Token spend and call outcomes for the window, per role and per model.
 
     Expects one dict per `usage` or `agent_call_failed` event, already parsed:
@@ -178,8 +178,8 @@ def summarize_usage(events: list[dict], window_days: int = 0, *, now: float | No
         "failures": 0,
         "durations": [],
     }
-    by_role: dict[str, dict] = {}
-    by_model: dict[str, dict] = {}
+    by_role: dict[str, dict[str, Any]] = {}
+    by_model: dict[str, dict[str, Any]] = {}
 
     for ev in events:
         if not _within(ev.get("timestamp") or 0.0, cutoff):
@@ -223,7 +223,7 @@ def summarize_usage(events: list[dict], window_days: int = 0, *, now: float | No
     }
 
 
-def _nowish_events(events: list[dict]) -> float:
+def _nowish_events(events: list[dict[str, Any]]) -> float:
     """The no-clock fallback anchor for spend — `_nowish` for the event log.
 
     Same caveat and same rule: live callers pass `now`; this is for tests
@@ -233,7 +233,7 @@ def _nowish_events(events: list[dict]) -> float:
     return max(stamps) if stamps else 0.0
 
 
-def daily_trend(goals: list[dict], events: list[dict], window_days: int = 0, *, now: float | None = None) -> list[dict]:
+def daily_trend(goals: list[dict[str, Any]], events: list[dict[str, Any]], window_days: int = 0, *, now: float | None = None) -> list[dict[str, Any]]:
     """Per-day rows for the chart: goals started, outcomes, spend.
 
     Days are UTC. A goal is counted on the day it was created and, separately,
@@ -251,9 +251,9 @@ def daily_trend(goals: list[dict], events: list[dict], window_days: int = 0, *, 
         cutoff = now - chart_days * 86400
     else:
         cutoff = _nowish(goals) - chart_days * 86400
-    rows: dict[str, dict] = {}
+    rows: dict[str, dict[str, Any]] = {}
 
-    def row(day: str) -> dict:
+    def row(day: str) -> dict[str, Any]:
         return rows.setdefault(
             day,
             {"date": day, "created": 0, "succeeded": 0, "failed": 0, "cancelled": 0,
@@ -286,7 +286,7 @@ def daily_trend(goals: list[dict], events: list[dict], window_days: int = 0, *, 
     return [rows[day] for day in sorted(rows)]
 
 
-def build_overview(goals: list[dict], events: list[dict], window_days: int = 0, *, now: float | None = None) -> dict:
+def build_overview(goals: list[dict[str, Any]], events: list[dict[str, Any]], window_days: int = 0, *, now: float | None = None) -> dict[str, Any]:
     """The whole cross-goal document the stats view renders."""
     return {
         "window_days": window_days,

@@ -6,7 +6,8 @@ import os
 import subprocess
 import time
 import uuid
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
 
 from engine.default_prompts import DEFAULT_PROMPTS
 from engine.fs import FileSystemService, PathEscapeError
@@ -20,7 +21,7 @@ from engine.library import (
     format_search,
 )
 from engine.laya import LayaDecision, LayaService, build_state
-from engine.models import AgentRole, Event, EventType, Goal, PlanStep
+from engine.models import AgentConfig, AgentRole, Event, EventType, Goal, PlanStep
 from engine.providers import ProviderError
 from engine.sandbox import CommandNotAllowed, SandboxService
 from engine.services import AgentRegistryService, ApiError, GoalService, WorkspaceService
@@ -231,7 +232,7 @@ class AgentOrchestrator:
         self.registry = registry
         self.goals = goals
 
-    def _event(self, goal_id: str, step_id: str | None, type_: EventType, payload: dict) -> Event:
+    def _event(self, goal_id: str, step_id: str | None, type_: EventType, payload: dict[str, Any]) -> Event:
         return Event(
             id=str(uuid.uuid4()),
             goal_id=goal_id,
@@ -242,7 +243,7 @@ class AgentOrchestrator:
             sequence=self.goals.next_sequence(goal_id),
         )
 
-    def _not_configured(self, role: AgentRole, target, label: str) -> AgentNotConfigured:
+    def _not_configured(self, role: AgentRole, target: AgentConfig, label: str) -> AgentNotConfigured:
         """The failure for a target that has no model to call.
 
         An empty model is the one failure that cannot be diagnosed from the
@@ -256,7 +257,9 @@ class AgentOrchestrator:
             f"currently serves.",
         )
 
-    def _provider_failure(self, role: AgentRole, target, label: str, exc: ProviderError) -> ProviderError:
+    def _provider_failure(
+        self, role: AgentRole, target: AgentConfig, label: str, exc: ProviderError
+    ) -> ProviderError:
         """Name a call failure, keeping configuration gaps distinct from outages.
 
         Only a configuration gap is `agent_not_configured`; a rate limit or an
@@ -277,7 +280,7 @@ class AgentOrchestrator:
         failure.role = role
         return failure
 
-    def _targets(self, role: AgentRole):
+    def _targets(self, role: AgentRole) -> tuple[AgentConfig, list[tuple[str, AgentConfig]]]:
         """The targets this role may be called on, primary first.
 
         The fallback is optional and configured per role (Settings → Agent Roles):
@@ -341,7 +344,7 @@ class AgentOrchestrator:
 
     def _publish_fallback(
         self, goal_id: str, step_id: str | None, role: AgentRole,
-        primary, target, exc: ProviderError | AgentOutputInvalid,
+        primary: AgentConfig, target: AgentConfig, exc: ProviderError | AgentOutputInvalid,
     ) -> None:
         """Say that the primary was skipped, why, and where the call went instead.
 
@@ -361,8 +364,8 @@ class AgentOrchestrator:
 
     def _all_targets_failed(
         self, role: AgentRole,
-        failures: list[tuple[str, str, "ProviderError | AgentOutputInvalid"]],
-    ) -> "ProviderError | AgentOutputInvalid":
+        failures: list[tuple[str, str, ProviderError | AgentOutputInvalid]],
+    ) -> ProviderError | AgentOutputInvalid:
         """One error that names every attempt, or the original failure if there was one.
 
         With no fallback configured this returns exactly what the caller would
@@ -432,7 +435,10 @@ class AgentOrchestrator:
             # answers "is my fixer slow?" without touching a provider.
             call_started = time.monotonic()
 
-            def _record(usage: dict, _role=role, _provider=target.provider, _model=model_name, _started=call_started):
+            def _record(
+                usage: dict[str, Any], _role: AgentRole = role, _provider: str = target.provider,
+                _model: str = model_name, _started: float = call_started,
+            ) -> None:
                 self.goals.publish(self._event(
                     goal_id, step_id, "usage",
                     {
@@ -527,7 +533,7 @@ class ExecutorService:
         # loop, and two loops on one goal re-run the same steps concurrently.
         self._drivers: set[str] = set()
 
-    def _event(self, goal_id: str, step_id: str | None, type_: EventType, payload: dict) -> Event:
+    def _event(self, goal_id: str, step_id: str | None, type_: EventType, payload: dict[str, Any]) -> Event:
         return Event(
             id=str(uuid.uuid4()),
             goal_id=goal_id,
@@ -707,19 +713,19 @@ class ExecutorService:
 
     # ── librarian ──────────────────────────────────────────────────────────────
 
-    def _evidence_for(self, goal_id: str) -> dict:
+    def _evidence_for(self, goal_id: str) -> dict[str, Any]:
         """The evidence pack this goal's librarian produced, read back from events.
 
         From the event log rather than memory: a goal resumed in another process
         must still hand its fixer the same material its planner planned from.
         """
-        latest: dict = {}
+        latest: dict[str, Any] = {}
         for ev in self.goals.events_after(goal_id, 0):
             if ev.type == "library_evidence":
                 latest = ev.payload or {}
         return latest
 
-    async def _librarian(self, goal_id: str, goal: Goal, ws: Any) -> dict:
+    async def _librarian(self, goal_id: str, goal: Goal, ws: Any) -> dict[str, Any]:
         """Look around before anything is planned or changed.
 
         Rounds: the librarian asks for material (reads, searches, read-only git or
@@ -743,7 +749,7 @@ class ExecutorService:
                 f"{', TRUNCATED' if tree['truncated'] else ''}):\n{listing}"
             )
 
-        last: dict = {}
+        last: dict[str, Any] = {}
         rounds_used = 0
         for round_no in range(1, MAX_LIBRARY_ROUNDS + 1):
             rounds_used = round_no
@@ -784,7 +790,7 @@ class ExecutorService:
         )
         return evidence
 
-    def _library_requests(self, out: dict) -> list[tuple[str, Any]]:
+    def _library_requests(self, out: dict[str, Any]) -> list[tuple[str, Any]]:
         """What the librarian wants to see next, trimmed to the per-round caps."""
         caps = (
             ("reads", MAX_LIBRARY_READS_PER_ROUND),
@@ -896,12 +902,12 @@ class ExecutorService:
     def _evidence_pack(
         self,
         goal_id: str,
-        out: dict,
+        out: dict[str, Any],
         opened: set[str],
         matched: set[str],
         listed: set[str],
         rounds_used: int,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Keep only the claims the engine can stand behind.
 
         A path is supported when the librarian actually opened it, when a search
@@ -919,7 +925,7 @@ class ExecutorService:
                 return "listed"
             return None
 
-        files: list[dict] = []
+        files: list[dict[str, Any]] = []
         unsupported: list[str] = []
         for entry in out.get("files") or []:
             if not isinstance(entry, dict):
@@ -939,7 +945,7 @@ class ExecutorService:
                 + ", ".join(unsupported[:5]),
             )
 
-        symbols: list[dict] = []
+        symbols: list[dict[str, Any]] = []
         for s in out.get("symbols") or []:
             if not isinstance(s, dict):
                 continue
@@ -1015,7 +1021,7 @@ class ExecutorService:
             )
         return ctx, note
 
-    def _evidence_text(self, evidence: dict) -> str:
+    def _evidence_text(self, evidence: dict[str, Any]) -> str:
         """Render an evidence pack for a prompt. Never invents a section."""
         if not evidence:
             return (
@@ -1064,7 +1070,7 @@ class ExecutorService:
         """
         return self.goals.get(goal_id).status != "RUNNING"
 
-    async def run_step(self, goal_id: str, step_id: str, stored_files: list[dict] | None = None) -> None:
+    async def run_step(self, goal_id: str, step_id: str, stored_files: list[dict[str, Any]] | None = None) -> None:
         """Run one step. stored_files=None asks the fixer for changes; a list
         (possibly empty) replays those exact file operations without a fixer
         call — used by apply_goal to write reviewed dry-run changes."""
@@ -1084,9 +1090,9 @@ class ExecutorService:
                 # by MAX_FIX_ATTEMPTS. Attempt 1 runs with no feedback; a failed
                 # verification feeds the failure back and tries again; the last
                 # attempt's failure propagates and fails the step as before.
-                outcome: dict | None = None
-                summaries: list[dict] | None = None
-                prior_failure: dict | None = None
+                outcome: dict[str, Any] | None = None
+                summaries: list[dict[str, Any]] | None = None
+                prior_failure: dict[str, Any] | None = None
                 passes_left = MAX_FIXER_PASSES
                 for attempt in range(1, MAX_FIX_ATTEMPTS + 2):  # attempts, plus the final one
                     final = attempt > MAX_FIX_ATTEMPTS
@@ -1222,7 +1228,7 @@ class ExecutorService:
         if not rows:
             raise ApiError(409, "nothing_to_apply", "dry-run produced no proposed changes")
 
-        by_step: dict[str, list[dict]] = {}
+        by_step: dict[str, list[dict[str, Any]]] = {}
         for r in rows:
             by_step.setdefault(r["step_id"], []).append(
                 {"path": r["path"], "action": r["action"], "content": r["content"]}
@@ -1343,7 +1349,7 @@ class ExecutorService:
         return batch
 
     async def _run_parallel(
-        self, goal_id: str, steps: list[PlanStep], stored_files: dict[str, list[dict]] | None,
+        self, goal_id: str, steps: list[PlanStep], stored_files: dict[str, list[dict[str, Any]]] | None,
         paths_for: Any = None,
     ) -> None:
         """Run a path-disjoint batch concurrently; failures and cancels join.
@@ -1414,7 +1420,7 @@ class ExecutorService:
                 )
             raise errors[0]
 
-    def _replay_files(self, goal_id: str, step: PlanStep, fs: FileSystemService, files: list[dict], dry_run: bool) -> list[dict]:
+    def _replay_files(self, goal_id: str, step: PlanStep, fs: FileSystemService, files: list[dict[str, Any]], dry_run: bool) -> list[dict[str, Any]]:
         """Apply stored file operations and emit the same diff events as _fixer."""
         summaries = fs.apply(files, dry_run=dry_run)
         self._publish_changes(goal_id, step.id, summaries, dry_run)
@@ -1455,13 +1461,13 @@ class ExecutorService:
 
     # --- stages -------------------------------------------------------
 
-    def _last_test_result(self, goal_id: str, step_id: str) -> dict:
+    def _last_test_result(self, goal_id: str, step_id: str) -> dict[str, Any]:
         """The verifier's most recent published record for this step.
 
         Read from the event log, not memory, like every other piece of goal
         state — a resumed goal replays the same evidence.
         """
-        latest: dict = {}
+        latest: dict[str, Any] = {}
         for ev in self.goals.events_after(goal_id, 0):
             if ev.type == "test_result" and ev.step_id == step_id:
                 latest = ev.payload or {}
@@ -1473,9 +1479,9 @@ class ExecutorService:
         step: PlanStep,
         fs: FileSystemService,
         dry_run: bool,
-        evidence: dict | None = None,
-        failure_feedback: dict | None = None,
-    ) -> tuple[list[dict], bool]:
+        evidence: dict[str, Any] | None = None,
+        failure_feedback: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], bool]:
         ctx, unreadable = self._suggested_paths_context(fs, step.suggested_paths)
 
         # On a retry, the failed run's evidence is the most important part of
@@ -1539,7 +1545,7 @@ class ExecutorService:
         self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="fixer")
         return summaries, wants_pass
 
-    def _publish_changes(self, goal_id: str, step_id: str, summaries: list[dict], dry_run: bool) -> None:
+    def _publish_changes(self, goal_id: str, step_id: str, summaries: list[dict[str, Any]], dry_run: bool) -> None:
         """Emit one diff per file that actually changed, and say so when none did.
 
         A fixer can propose the contents a file already has (a no-op it does not
@@ -1566,9 +1572,9 @@ class ExecutorService:
         ))
 
     async def _verifier(
-        self, goal_id: str, step: PlanStep, ws: Any, evidence: dict | None = None,
-        prior_failure: dict | None = None,
-    ) -> dict:
+        self, goal_id: str, step: PlanStep, ws: Any, evidence: dict[str, Any] | None = None,
+        prior_failure: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Get a test verdict, treating a refused command as information.
 
         Returns the step's test outcome — the same fields the `test_result`
@@ -1612,7 +1618,7 @@ class ExecutorService:
         # ruling on a step it can no longer see.
         base_prompt = prompt
         argv: list[str] | None = None
-        result: dict | None = None
+        result: dict[str, Any] | None = None
         refusals: list[str] = []
         proposals_left = 1 + MAX_REFUSED_TEST_COMMANDS
         timeout_s = 120
@@ -1743,9 +1749,9 @@ class ExecutorService:
         goal_id: str,
         step: PlanStep,
         fs: FileSystemService,
-        diffs: list[dict],
-        evidence: dict | None = None,
-        test_outcome: dict | None = None,
+        diffs: list[dict[str, Any]],
+        evidence: dict[str, Any] | None = None,
+        test_outcome: dict[str, Any] | None = None,
         ws_root: str = "",
     ) -> None:
         diff_lines = []
@@ -1844,8 +1850,8 @@ class ExecutorService:
             raise AgentOutputInvalid(f"critic decision invalid: {decision!r}", role="critic")
 
     async def _scribe(
-        self, goal_id: str, step: PlanStep, diffs: list[dict], root_path: str = "",
-        dry_run: bool = False, test_outcome: dict | None = None,
+        self, goal_id: str, step: PlanStep, diffs: list[dict[str, Any]], root_path: str = "",
+        dry_run: bool = False, test_outcome: dict[str, Any] | None = None,
     ) -> None:
         # The diffs themselves, not just their file names: the prompt tells the
         # scribe to describe "what changed and why, from the diff you are given",
@@ -1917,7 +1923,7 @@ class ExecutorService:
 
     # --- parsing ------------------------------------------------------
 
-    def _parse_steps(self, out: Any) -> list[dict]:
+    def _parse_steps(self, out: Any) -> list[dict[str, Any]]:
         steps = (out or {}).get("steps")
         if not isinstance(steps, list) or not (1 <= len(steps) <= 20):
             raise AgentOutputInvalid("planner must return 1..20 steps", role="planner")
@@ -1933,7 +1939,7 @@ class ExecutorService:
             parsed.append({"title": title, "description": desc, "suggested_paths": [str(p) for p in paths]})
         return parsed
 
-    def _parse_files(self, out: Any) -> list[dict]:
+    def _parse_files(self, out: Any) -> list[dict[str, Any]]:
         files = (out or {}).get("files")
         if not isinstance(files, list):
             raise AgentOutputInvalid("fixer must return files list", role="fixer")
@@ -1977,7 +1983,7 @@ class ExecutorService:
                 return s
         raise ApiError(404, "unknown_step", f"step {step_id} not found in goal {goal_id}")
 
-    def _insert_steps(self, goal_id: str, steps: list[dict]) -> None:
+    def _insert_steps(self, goal_id: str, steps: list[dict[str, Any]]) -> None:
         for ordinal, s in enumerate(steps):
             self.goals._db.execute(
                 "INSERT INTO plan_steps (id, goal_id, ordinal, title, description, suggested_paths, status, review_notes, commit_message, last_agent_role) "
@@ -1987,7 +1993,7 @@ class ExecutorService:
         self.goals._db.commit()
 
     def _store_proposed_files(
-        self, goal_id: str, step_id: str, files: list[dict], summaries: list[dict] | None = None,
+        self, goal_id: str, step_id: str, files: list[dict[str, Any]], summaries: list[dict[str, Any]] | None = None,
     ) -> None:
         """Persist a dry-run proposal so Apply can replay it byte-identically.
 
@@ -2027,7 +2033,7 @@ class ExecutorService:
         )
         self.goals._db.commit()
 
-    def _set_step(self, goal_id: str, step: PlanStep, status: str, **fields) -> None:
+    def _set_step(self, goal_id: str, step: PlanStep, status: str, **fields: Any) -> None:
         cols = ["status = ?"]
         vals: list[Any] = [status]
         if "last_agent_role" in fields and fields["last_agent_role"] is not None:

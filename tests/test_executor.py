@@ -16,7 +16,16 @@ from engine.git import GitService
 from engine.executor import MAX_LIBRARY_ROUNDS, MAX_REFUSED_TEST_COMMANDS, ExecutorService
 from engine.laya import LayaDecision, LayaService
 from engine.library import LibraryService
-from engine.models import ROLES, AgentConfigUpdate, GoalCreate, WorkspaceCreate
+from engine.models import (
+    ROLES,
+    AgentConfig,
+    AgentConfigUpdate,
+    Event,
+    Goal,
+    GoalCreate,
+    PlanStep,
+    WorkspaceCreate,
+)
 from engine.providers import BaseProvider, Keychain, ProviderError, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.services import AgentRegistryService, GoalService, WorkspaceService
@@ -25,7 +34,7 @@ from engine.services import AgentRegistryService, GoalService, WorkspaceService
 class MockProvider(BaseProvider):
     def __init__(self, responses: dict[str, Any]):
         self.responses = responses
-        self.calls: list[dict] = []
+        self.calls: list[dict[str, Any]] = []
         # Which role's config the factory last built a provider for. Reply routing
         # uses this, not a scan of the system prompt: the prompts mention each
         # other (the planner is handed "the librarian's evidence pack", the scribe
@@ -64,12 +73,12 @@ class MockFactory(ProviderFactory):
     def __init__(self, mock_provider: MockProvider):
         self.mock_provider = mock_provider
 
-    def build(self, config):
+    def build(self, config: AgentConfig) -> MockProvider:
         self.mock_provider.current_role = config.role
         return self.mock_provider
 
 
-def configure_every_role(registry, model: str = "test-model") -> None:
+def configure_every_role(registry: AgentRegistryService, model: str = "test-model") -> None:
     """Give every role a model id.
 
     Seeded roles deliberately carry none (there is no hardcoded model list), and
@@ -85,7 +94,7 @@ class TestPerRoleConfig(unittest.IsolatedAsyncioTestCase):
     max_tokens, system prompt override) — command-bar style overrides must not
     flatten the five roles into one shared model."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -97,11 +106,11 @@ class TestPerRoleConfig(unittest.IsolatedAsyncioTestCase):
         self.executor = ExecutorService(self.goals, self.workspaces, self.registry, SandboxService())
         self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    async def test_each_role_uses_its_own_config(self):
+    async def test_each_role_uses_its_own_config(self) -> None:
         # Configure planner and fixer with distinct models + prompt overrides.
         self.registry.set_config("planner", AgentConfigUpdate(
             model_name="planner-model", temperature=0.7, max_tokens=1234,
@@ -151,7 +160,7 @@ class TestCallLatencyRecording(unittest.IsolatedAsyncioTestCase):
     fixer from a fast one; without a failure record a role that only ever fails
     looks like it never ran."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -166,11 +175,11 @@ class TestCallLatencyRecording(unittest.IsolatedAsyncioTestCase):
         )
         self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    async def test_a_completed_call_records_its_duration_on_the_usage_event(self):
+    async def test_a_completed_call_records_its_duration_on_the_usage_event(self) -> None:
         goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="T", description=""))
         await self.executor.run_planning(goal.id)
         usage = [e.payload for e in self.goals.events_after(goal.id, 0) if e.type == "usage"]
@@ -182,7 +191,7 @@ class TestCallLatencyRecording(unittest.IsolatedAsyncioTestCase):
             self.assertIn("role", p)
             self.assertIn("provider", p)
 
-    async def test_a_provider_failure_records_an_agent_call_failed_event(self):
+    async def test_a_provider_failure_records_an_agent_call_failed_event(self) -> None:
         self.registry.set_config(
             "fixer", AgentConfigUpdate(model_name="fixer-model")
         )
@@ -213,14 +222,14 @@ class TestCallLatencyRecording(unittest.IsolatedAsyncioTestCase):
 
 
 class TestExecutorService(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.db_path = self.root / "test.db"
         self.conn = connect(self.db_path)
         self.keychain = Keychain()
 
-        self.mock_responses: dict[str, dict] = {}
+        self.mock_responses: dict[str, dict[str, Any]] = {}
         self.mock_provider = MockProvider(self.mock_responses)
         self.mock_provider = MockProvider(self.mock_responses)
         self.mock_factory = MockFactory(self.mock_provider)
@@ -234,11 +243,11 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
 
         self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    async def test_planning_flow(self):
+    async def test_planning_flow(self) -> None:
         self.mock_responses["planner"] = {
             "steps": [
                 {"title": "Step 1", "description": "Create hello.py", "suggested_paths": ["hello.py"]}
@@ -258,7 +267,7 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(steps[0].title, "Step 1")
         self.assertEqual(steps[0].status, "PENDING")
 
-    async def test_step_execution_success(self):
+    async def test_step_execution_success(self) -> None:
         self.mock_responses["planner"] = {
             "steps": [
                 {"title": "Step 1", "description": "Create a.py", "suggested_paths": ["a.py"]}
@@ -308,7 +317,7 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         self.assertIn("test_result", types)
         self.assertIn("file_change_summary", types)
 
-    async def test_role_without_a_model_says_so_instead_of_calling_nothing(self):
+    async def test_role_without_a_model_says_so_instead_of_calling_nothing(self) -> None:
         """Seeded roles carry no model id; the failure must name the fix.
 
         Without this guard the role was called with an empty model, the provider
@@ -332,11 +341,11 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(planner_calls, [], "an unconfigured role must not be called")
 
-    async def test_missing_credential_is_reported_as_a_setup_problem(self):
+    async def test_missing_credential_is_reported_as_a_setup_problem(self) -> None:
         """A role whose provider has no key is a configuration gap, not bad output."""
 
         class _NoCredentialFactory(ProviderFactory):
-            def build(self, config):
+            def build(self, config: AgentConfig) -> BaseProvider:
                 raise ProviderError("missing_api_key", "Anthropic API key is not set")
 
         self.registry = AgentRegistryService(self.conn, _NoCredentialFactory(Keychain()), Keychain())
@@ -354,7 +363,7 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Provider Keys", error.payload["message"])
         self.assertEqual(error.payload["role"], "planner")
 
-    async def test_critic_rejection_and_retry(self):
+    async def test_critic_rejection_and_retry(self) -> None:
         self.mock_responses["planner"] = {
             "steps": [{"title": "Step 1", "description": "Do something", "suggested_paths": []}]
         }
@@ -399,7 +408,7 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status, 409)
         self.assertEqual(ctx.exception.code, "step_not_retryable")
 
-    async def test_verifier_fail_marks_step_failed(self):
+    async def test_verifier_fail_marks_step_failed(self) -> None:
         self.mock_responses["planner"] = {
             "steps": [{"title": "Step 1", "description": "Test failure", "suggested_paths": []}]
         }
@@ -436,7 +445,10 @@ class _ScriptedProvider(BaseProvider):
         # corresponds to verifier_prompt_seq[k].
         self.calls_seq: list[str] = []
 
-    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
         role = next(
             (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
         )
@@ -456,18 +468,18 @@ class _ScriptedProvider(BaseProvider):
 
 
 class _ScriptedFactory(ProviderFactory):
-    def __init__(self, provider, keychain):
+    def __init__(self, provider: BaseProvider, keychain: Keychain) -> None:
         super().__init__(keychain)
         self.provider = provider
 
-    def build(self, config):
+    def build(self, config: AgentConfig) -> BaseProvider:
         return self.provider
 
 
 class _SkippedGate(LayaService):
     """The gate is a separate concern; these tests are about the verifier."""
 
-    async def decide(self, state):
+    async def decide(self, state: dict[str, Any]) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 
 
@@ -482,7 +494,7 @@ class TestSandboxRefusalRecovery(unittest.IsolatedAsyncioTestCase):
 
     REFUSED = {"argv": ["touch", "x"], "verdict": None, "explanation": "create a file"}
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -508,7 +520,7 @@ class TestSandboxRefusalRecovery(unittest.IsolatedAsyncioTestCase):
         ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
         self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
@@ -518,12 +530,12 @@ class TestSandboxRefusalRecovery(unittest.IsolatedAsyncioTestCase):
         self.goals.update_status(self.goal.id, self.goal.version + 1, "RUNNING")
         await self.executor.run_step(self.goal.id, step.id)
 
-    def _test_results(self) -> list[dict]:
+    def _test_results(self) -> list[dict[str, Any]]:
         return [
             e.payload for e in self.goals.events_after(self.goal.id, 0) if e.type == "test_result"
         ]
 
-    async def test_refused_command_is_replaced_and_the_step_completes(self):
+    async def test_refused_command_is_replaced_and_the_step_completes(self) -> None:
         self.provider.verifier_replies = [
             self.REFUSED,
             {"argv": ["git", "status"], "verdict": None, "explanation": "an allowed runner"},
@@ -553,7 +565,7 @@ class TestSandboxRefusalRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertIn("warn", levels, "the refusal has to be visible, not silent")
         self.assertTrue((self.root / "x.txt").exists(), "the fixer's work is kept")
 
-    async def test_nothing_runnable_ends_as_a_skip_not_a_dead_goal(self):
+    async def test_nothing_runnable_ends_as_a_skip_not_a_dead_goal(self) -> None:
         """A refusal with no permitted alternative is a verdict, not a failure."""
         self.provider.verifier_replies = [
             self.REFUSED,
@@ -573,7 +585,7 @@ class TestSandboxRefusalRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["argv"])
         self.assertEqual(len(result["refused"]), 1)
 
-    async def test_a_refusal_prompt_keeps_the_step_context(self):
+    async def test_a_refusal_prompt_keeps_the_step_context(self) -> None:
         """The verifier's calls are stateless — the retry prompt after a refusal
         must still name the step it is ruling on, not just the refusal. The
         old feedback REPLACED the prompt, dropping title/description/test
@@ -597,7 +609,7 @@ class TestSandboxRefusalRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Command output", prompts[2])
         self.assertIn("Command ran.", prompts[2])
 
-    async def test_endless_refusals_are_capped(self):
+    async def test_endless_refusals_are_capped(self) -> None:
         """Retrying is bounded — the model cannot loop forever on refusals."""
         self.provider.verifier_replies = [self.REFUSED] * 8
         await self._plan_and_run()
@@ -615,7 +627,7 @@ class TestSandboxRefusalRecovery(unittest.IsolatedAsyncioTestCase):
             1 + MAX_REFUSED_TEST_COMMANDS + 1,
         )
 
-    async def test_proposing_another_command_after_a_run_is_still_rejected(self):
+    async def test_proposing_another_command_after_a_run_is_still_rejected(self) -> None:
         """The single-execution rule survives the retry path."""
         self.provider.verifier_replies = [
             {"argv": ["git", "status"], "verdict": None, "explanation": "run it"},
@@ -633,7 +645,7 @@ class TestEvidencePackPathHandling(unittest.TestCase):
     *characters* '.' and '/', mangling dotfiles (.gitignore → gitignore) so
     the engine dropped evidence it had actually been shown."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -643,11 +655,11 @@ class TestEvidencePackPathHandling(unittest.TestCase):
             SandboxService(), laya=_SkippedGate(),
         )
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    def test_a_cited_dotfile_survives_path_normalization(self):
+    def test_a_cited_dotfile_survives_path_normalization(self) -> None:
         pack = self.executor._evidence_pack(
             "g1",
             {
@@ -667,7 +679,7 @@ class TestEvidencePackPathHandling(unittest.TestCase):
         )
         self.assertEqual(pack["dropped_paths"], [])
 
-    def test_the_rendered_symbol_line_names_each_symbol_and_its_path(self):
+    def test_the_rendered_symbol_line_names_each_symbol_and_its_path(self) -> None:
         """The Symbols line is what the planner and the fixer actually read.
 
         Nothing asserted it, which is how a Python 3.12-only f-string sat in the
@@ -688,7 +700,7 @@ class _HangingSandbox(SandboxService):
 
     def run_command(
         self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test"
-    ) -> dict:
+    ) -> dict[str, Any]:
         self.calls = getattr(self, "calls", 0) + 1
         self.last_timeout = timeout_s
         raise subprocess.TimeoutExpired(argv, timeout_s)
@@ -703,7 +715,7 @@ class TestHungTestCommand(unittest.IsolatedAsyncioTestCase):
     semantics itself: exit 124, output handed back, verdict still owed.
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -729,11 +741,11 @@ class TestHungTestCommand(unittest.IsolatedAsyncioTestCase):
         ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
         self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    async def test_a_hang_reports_exit_124_and_the_goal_reaches_a_verdict(self):
+    async def test_a_hang_reports_exit_124_and_the_goal_reaches_a_verdict(self) -> None:
         self.provider.verifier_replies = [
             {"argv": ["pytest", "-q"], "verdict": None, "explanation": "run the suite"},
             {"argv": None, "verdict": "fail", "explanation": "the run timed out"},
@@ -775,7 +787,10 @@ class _FailingProvider(BaseProvider):
     def __init__(self, fixer_failure: str):
         self.fixer_failure = fixer_failure
 
-    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
         # Real providers report their token usage through the sink the
         # orchestrator attaches; the double does the same so latency tests can
         # read the usage events a goal would actually produce.
@@ -794,7 +809,7 @@ class _FailingProvider(BaseProvider):
 class TestFailureAttribution(unittest.IsolatedAsyncioTestCase):
     """Error events must name the role, or "why did this fail?" is guesswork."""
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -802,11 +817,11 @@ class TestFailureAttribution(unittest.IsolatedAsyncioTestCase):
         self.workspaces = WorkspaceService(self.conn)
         self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    async def _run_a_step_that_fails_in_the_fixer(self, failure: str) -> dict:
+    async def _run_a_step_that_fails_in_the_fixer(self, failure: str) -> dict[str, Any]:
         registry = AgentRegistryService(
             self.conn, _ScriptedFactory(_FailingProvider(failure), Keychain()), Keychain()
         )
@@ -821,12 +836,12 @@ class TestFailureAttribution(unittest.IsolatedAsyncioTestCase):
         await executor.run_step(goal.id, step.id)
         return next(e.payload for e in self.goals.events_after(goal.id, 0) if e.type == "error")
 
-    async def test_invalid_output_names_the_role_that_produced_it(self):
+    async def test_invalid_output_names_the_role_that_produced_it(self) -> None:
         error = await self._run_a_step_that_fails_in_the_fixer("garbage")
         self.assertEqual(error["code"], "agent_output_invalid")
         self.assertEqual(error["role"], "fixer", "a non-JSON fixer reply is the fixer's failure")
 
-    async def test_a_provider_failure_keeps_its_code_and_still_names_the_role(self):
+    async def test_a_provider_failure_keeps_its_code_and_still_names_the_role(self) -> None:
         """A 500 is not a configuration gap; saying so would send users to Settings."""
         error = await self._run_a_step_that_fails_in_the_fixer("http")
         self.assertEqual(error["code"], "provider_http")
@@ -843,7 +858,10 @@ class _QueuedProvider(BaseProvider):
         self.current_role: str | None = None
         self.calls: list[tuple[str, str, str]] = []
 
-    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
         role = self.current_role or "unknown"
         self.calls.append((role, system_prompt, user_prompt))
         queue = self.by_role.setdefault(role, [])
@@ -859,11 +877,11 @@ class _QueuedProvider(BaseProvider):
 
 
 class _QueuedFactory(ProviderFactory):
-    def __init__(self, provider, keychain):
+    def __init__(self, provider: _QueuedProvider, keychain: Keychain) -> None:
         super().__init__(keychain)
         self.provider = provider
 
-    def build(self, config):
+    def build(self, config: AgentConfig) -> BaseProvider:
         self.provider.current_role = config.role
         return self.provider
 
@@ -876,7 +894,7 @@ class TestLibrarianReconnaissance(unittest.IsolatedAsyncioTestCase):
     ever saw the right file.
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         (self.root / "src").mkdir()
@@ -898,16 +916,16 @@ class TestLibrarianReconnaissance(unittest.IsolatedAsyncioTestCase):
         )
         self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    def _goal(self):
+    def _goal(self) -> Goal:
         return self.goals.create(
             GoalCreate(workspace_id=self.ws.id, title="Add greeting", description="make it polite")
         )
 
-    def _events(self, goal_id: str, type_: str) -> list[dict]:
+    def _events(self, goal_id: str, type_: str) -> list[dict[str, Any]]:
         return [e.payload for e in self.goals.events_after(goal_id, 0) if e.type == type_]
 
     def _warnings(self, goal_id: str) -> str:
@@ -919,7 +937,7 @@ class TestLibrarianReconnaissance(unittest.IsolatedAsyncioTestCase):
 
     ONE_STEP = {"steps": [{"title": "S1", "description": "d", "suggested_paths": ["src/app.py"]}]}
 
-    async def test_it_looks_around_then_hands_the_planner_what_it_found(self):
+    async def test_it_looks_around_then_hands_the_planner_what_it_found(self) -> None:
         self.provider.by_role = {
             "librarian": [
                 {"reads": ["src/app.py"], "searches": ["greet"], "enough": False},
@@ -955,7 +973,7 @@ class TestLibrarianReconnaissance(unittest.IsolatedAsyncioTestCase):
         self.assertIn("python3 -m pytest -q", planner_prompt, "the real test command travels with it")
         self.assertEqual(self.goals.get(goal.id).status, "PENDING")
 
-    async def test_a_path_it_never_opened_is_dropped_not_passed_on(self):
+    async def test_a_path_it_never_opened_is_dropped_not_passed_on(self) -> None:
         self.provider.by_role = {
             "librarian": [
                 {
@@ -980,7 +998,7 @@ class TestLibrarianReconnaissance(unittest.IsolatedAsyncioTestCase):
         planner_prompt = self.provider.role_calls("planner")[0][2]
         self.assertIn("do not rely on", planner_prompt, "the planner is told which claims are unverified")
 
-    async def test_asking_forever_is_capped(self):
+    async def test_asking_forever_is_capped(self) -> None:
         self.provider.by_role = {
             "librarian": [{"reads": ["src/app.py"], "enough": False} for _ in range(MAX_LIBRARY_ROUNDS)],
             "planner": [self.ONE_STEP],
@@ -992,7 +1010,7 @@ class TestLibrarianReconnaissance(unittest.IsolatedAsyncioTestCase):
         self.assertIn("round cap", self._warnings(goal.id))
         self.assertEqual(self.goals.get(goal.id).status, "PENDING", "planning still happens")
 
-    async def test_a_refused_request_is_fed_back_instead_of_failing_the_goal(self):
+    async def test_a_refused_request_is_fed_back_instead_of_failing_the_goal(self) -> None:
         self.provider.by_role = {
             "librarian": [
                 {"run": [["rm", "-rf", "src"]], "enough": False},
@@ -1008,7 +1026,7 @@ class TestLibrarianReconnaissance(unittest.IsolatedAsyncioTestCase):
         self.assertIn("may not have", self._warnings(goal.id))
         self.assertEqual(self.goals.get(goal.id).status, "PENDING")
 
-    async def test_an_escape_attempt_is_refused(self):
+    async def test_an_escape_attempt_is_refused(self) -> None:
         self.provider.by_role = {
             "librarian": [
                 {"reads": ["../../etc/passwd"], "enough": False},
@@ -1023,7 +1041,7 @@ class TestLibrarianReconnaissance(unittest.IsolatedAsyncioTestCase):
         self.assertIn("refused", second)
         self.assertNotIn("root:", second, "nothing outside the workspace is ever read")
 
-    async def test_a_librarian_that_cannot_run_leaves_planning_working(self):
+    async def test_a_librarian_that_cannot_run_leaves_planning_working(self) -> None:
         self.provider.by_role = {
             "librarian": [ProviderError("provider_http", "openai_compat 500")],
             "planner": [self.ONE_STEP],
@@ -1036,7 +1054,7 @@ class TestLibrarianReconnaissance(unittest.IsolatedAsyncioTestCase):
         planner_prompt = self.provider.role_calls("planner")[0][2]
         self.assertIn("no reconnaissance", planner_prompt)
 
-    async def test_the_fixer_is_given_the_same_evidence_the_planner_planned_from(self):
+    async def test_the_fixer_is_given_the_same_evidence_the_planner_planned_from(self) -> None:
         self.provider.by_role = {
             "librarian": [{"summary": "app.py is the only module", "enough": True}],
             "planner": [self.ONE_STEP],
@@ -1074,7 +1092,7 @@ class TestWhatAStepChanges(unittest.IsolatedAsyncioTestCase):
         "scribe": {"summary": "did it", "commit_message": "feat: our step"},
     }
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         (self.root / "a.py").write_text("value = 1\n", encoding="utf-8")
@@ -1095,11 +1113,11 @@ class TestWhatAStepChanges(unittest.IsolatedAsyncioTestCase):
         )
         self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    async def _run(self, responses: dict, library: bool = False):
+    async def _run(self, responses: dict[str, Any], library: bool = False) -> tuple[Goal, PlanStep]:
         # Each role answers from its own queue, and a repeated call gets its queue's
         # next entry, so `responses` may supply a list for a multi-round role.
         scripted = {**self.ON_STEP, **responses}
@@ -1114,7 +1132,7 @@ class TestWhatAStepChanges(unittest.IsolatedAsyncioTestCase):
         await self.executor.run_step(goal.id, step.id)
         return goal, step
 
-    def _events(self, goal_id: str, type_: str) -> list[dict]:
+    def _events(self, goal_id: str, type_: str) -> list[dict[str, Any]]:
         return [e.payload for e in self.goals.events_after(goal_id, 0) if e.type == type_]
 
     def _committed(self) -> set[str]:
@@ -1130,7 +1148,7 @@ class TestWhatAStepChanges(unittest.IsolatedAsyncioTestCase):
             cwd=self.root, capture_output=True, text=True, check=False,
         ).stdout
 
-    async def test_a_proposal_identical_to_the_file_is_not_a_change(self):
+    async def test_a_proposal_identical_to_the_file_is_not_a_change(self) -> None:
         goal, _ = await self._run({
             "fixer": {"files": [{"path": "a.py", "action": "update", "content": "value = 1\n"}]},
         })
@@ -1153,7 +1171,7 @@ class TestWhatAStepChanges(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.goals.steps(goal.id)[0].status, "COMPLETED")
 
-    async def test_a_real_change_is_reported_and_committed(self):
+    async def test_a_real_change_is_reported_and_committed(self) -> None:
         goal, _ = await self._run({
             "fixer": {"files": [{"path": "a.py", "action": "update", "content": "value = 2\n"}]},
         })
@@ -1163,7 +1181,7 @@ class TestWhatAStepChanges(unittest.IsolatedAsyncioTestCase):
         self.assertIn("+value = 2", self._events(goal.id, "diff")[0]["unified_diff"])
         self.assertIn("a.py", self._committed())
 
-    async def test_the_commit_leaves_the_users_own_work_alone(self):
+    async def test_the_commit_leaves_the_users_own_work_alone(self) -> None:
         (self.root / "user_wip.py").write_text("half-finished\n", encoding="utf-8")
         (self.root / "user_staged.py").write_text("staged by hand\n", encoding="utf-8")
         subprocess.run(["git", "add", "--", "user_staged.py"], cwd=self.root, check=False)
@@ -1179,7 +1197,7 @@ class TestWhatAStepChanges(unittest.IsolatedAsyncioTestCase):
         self.assertIn("?? user_wip.py", status)
         self.assertIn("A  user_staged.py", status)
 
-    async def test_a_path_the_planner_guessed_badly_does_not_kill_the_step(self):
+    async def test_a_path_the_planner_guessed_badly_does_not_kill_the_step(self) -> None:
         """`suggested_paths` is a guess: it must not fail a step before the fixer runs."""
         (self.root / "blob.bin").write_bytes(b"\x00\x01\x02binary")
         self.ON_STEP = {
@@ -1215,7 +1233,7 @@ class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
     wins over the retry.
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -1243,7 +1261,7 @@ class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
         ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
         self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
@@ -1255,7 +1273,10 @@ class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
         ]
         self.provider.others["fixer"] = replies
 
-        async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
+        async def completing(
+            system_prompt: str, user_prompt: str, model: str,
+            temperature: float, max_tokens: int,
+        ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
             )
@@ -1271,14 +1292,14 @@ class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
     def _fixer_prompts(self) -> list[str]:
         return [p for r, p in self.provider.calls if r == "fixer"]
 
-    def _events(self, type_: str) -> list:
+    def _events(self, type_: str) -> list[Any]:
         return [e for e in self.goals.events_after(self.goal.id, 0) if e.type == type_]
 
     async def _plan(self) -> None:
         await self.executor.run_planning(self.goal.id)
         self.goals.update_status(self.goal.id, self.goals.get(self.goal.id).version, "RUNNING")
 
-    async def test_first_failure_is_retried_and_the_retry_passes(self):
+    async def test_first_failure_is_retried_and_the_retry_passes(self) -> None:
         # Attempt 1 writes broken code; attempt 2 (after the failure feedback) writes good code.
         self._fixer_replies("def broken():\n  assert False\n", "print('hello')\n")
         self.provider.verifier_replies = [
@@ -1312,7 +1333,7 @@ class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
         verdict_events = self._events("test_result")
         self.assertEqual(len(verdict_events), 2, "both verdicts are published")
 
-    async def test_retry_failure_fails_the_step_with_tests_failed(self):
+    async def test_retry_failure_fails_the_step_with_tests_failed(self) -> None:
         self._fixer_replies("bad one\n", "still bad\n")
         self.provider.verifier_replies = [
             {"argv": None, "verdict": "fail", "explanation": "first failure"},
@@ -1331,7 +1352,7 @@ class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self._fixer_prompts()), 2, "bounded: one retry, no more")
         self.assertEqual(len(self._events("fix_retry")), 1)
 
-    async def test_cancel_wins_over_the_retry(self):
+    async def test_cancel_wins_over_the_retry(self) -> None:
         """A cancel landing during the failed verification stops the retry."""
         self._fixer_replies("broken\n", "should never be written\n")
         self.provider.verifier_replies = [
@@ -1343,7 +1364,7 @@ class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
         # hook runs mid-run_step via the fix_retry publication below.
         original_publish = self.goals.publish
 
-        def publish_and_cancel(event):
+        def publish_and_cancel(event: Event) -> Event:
             result = original_publish(event)
             if event.type == "fix_retry":
                 g = self.goals.get(self.goal.id)
@@ -1358,7 +1379,7 @@ class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
                          "the retry's fixer call never ran")
         self.assertEqual(len(self._fixer_prompts()), 1, "no second fixer call after cancel")
 
-    async def test_replay_path_never_loops(self):
+    async def test_replay_path_never_loops(self) -> None:
         """apply_goal replays reviewed files — a failing verdict there is final."""
         self._fixer_replies("content\n")
         self.provider.verifier_replies = [
@@ -1387,7 +1408,7 @@ class TestCancelStopsBeforeCommit(unittest.IsolatedAsyncioTestCase):
     inside the step, then asserts the commit never happens.
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -1423,12 +1444,12 @@ class TestCancelStopsBeforeCommit(unittest.IsolatedAsyncioTestCase):
         ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
         self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.hold.set()  # never leave a parked call parked
         self.conn.close()
         self.temp_dir.cleanup()
 
-    async def test_cancel_during_verifier_stops_review_and_commit(self):
+    async def test_cancel_during_verifier_stops_review_and_commit(self) -> None:
         await self.executor.run_planning(self.goal.id)
         step = self.goals.steps(self.goal.id)[0]
         self.goals.update_status(self.goal.id, self.goal.version + 1, "RUNNING")
@@ -1458,7 +1479,7 @@ class TestCancelStopsBeforeCommit(unittest.IsolatedAsyncioTestCase):
         # The fixer's work itself stays (documented mid-run-cancel semantics):
         self.assertTrue((self.root / "x.txt").exists())
 
-    async def test_cancel_landing_during_critic_still_blocks_the_commit(self):
+    async def test_cancel_landing_during_critic_still_blocks_the_commit(self) -> None:
         """The belt-and-braces guard: a cancel that slips in *after* the critic
         approved must still be caught by the check right before the commit."""
         self.provider.hold_role = "critic"
@@ -1501,7 +1522,10 @@ class _HoldingProvider(BaseProvider):
         self.scribe_calls: list[str] = []
         self.calls: list[tuple[str, str]] = []
 
-    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
         role = next(
             (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
         )
@@ -1519,13 +1543,15 @@ class _HoldingProvider(BaseProvider):
 class _RecordingGit(GitService):
     """Stands in for git so the test can assert the commit never happens."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.commits: list[tuple[str, list[str]]] = []
 
     def is_git_repo(self, root_path: str) -> bool:
         return True
 
-    def commit(self, root_path: str, message: str, paths: list[str], *args, **kwargs) -> str | None:
+    def commit(
+        self, root_path: str, message: str, paths: list[str], *args: Any, **kwargs: Any
+    ) -> str | None:
         self.commits.append((message, paths))
         return "abcd1234"
 
@@ -1541,7 +1567,7 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
     events, and cancel-aware like every other grant of extra work.
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -1569,14 +1595,17 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
         ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
         self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    def _script_fixer(self, replies: list[dict]) -> None:
+    def _script_fixer(self, replies: list[dict[str, Any]]) -> None:
         self.provider.others["fixer"] = replies
 
-        async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
+        async def completing(
+            system_prompt: str, user_prompt: str, model: str,
+            temperature: float, max_tokens: int,
+        ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
             )
@@ -1589,7 +1618,7 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
 
         self.provider.complete = completing  # type: ignore[method-assign]
 
-    def _events(self, type_: str) -> list:
+    def _events(self, type_: str) -> list[Any]:
         return [e for e in self.goals.events_after(self.goal.id, 0) if e.type == type_]
 
     async def _plan_and_run(self) -> None:
@@ -1597,7 +1626,7 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
         self.goals.update_status(self.goal.id, self.goals.get(self.goal.id).version, "RUNNING")
         await self.executor.run_step(self.goal.id, self.goals.steps(self.goal.id)[0].id)
 
-    async def test_two_staged_passes_finish_the_step(self):
+    async def test_two_staged_passes_finish_the_step(self) -> None:
         self._script_fixer([
             {"files": [{"path": "settings.conf", "action": "create", "content": "mode=fast\n"}],
              "needs_another_pass": True},
@@ -1620,7 +1649,7 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
         fixer_prompts = [p for r, p in self.provider.calls if r == "fixer"]
         self.assertEqual(len(fixer_prompts), 2, "pass 2 must actually call the fixer")
 
-    async def test_the_pass_bound_holds(self):
+    async def test_the_pass_bound_holds(self) -> None:
         self._script_fixer([
             {"files": [{"path": f"f{i}.txt", "action": "create", "content": "x\n"}],
              "needs_another_pass": True}
@@ -1641,7 +1670,7 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.provider.verifier_calls()), 1)
         self.assertEqual(self.goals.steps(self.goal.id)[0].status, "COMPLETED")
 
-    async def test_needs_another_pass_without_files_is_a_contract_error(self):
+    async def test_needs_another_pass_without_files_is_a_contract_error(self) -> None:
         self._script_fixer([{"files": [], "needs_another_pass": True}])
 
         await self._plan_and_run()
@@ -1661,7 +1690,7 @@ class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
     immediately never enters the loop at all.
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         (self.root / "src").mkdir()
@@ -1680,14 +1709,14 @@ class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
         ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
         self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
     def _planner_prompts(self) -> list[str]:
         return [p for r, p in self.provider.calls if r == "planner"]
 
-    def _script_planner(self, replies: list[dict]) -> None:
+    def _script_planner(self, replies: list[dict[str, Any]]) -> None:
         # _ScriptedProvider serves each role one static reply from `others`, so
         # successive planner rounds need a queue wrapped over it. The librarian
         # answers {"enough": true} immediately: empty evidence is exactly the
@@ -1695,7 +1724,10 @@ class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
         queue = list(replies)
         original = self.provider.complete
 
-        async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
+        async def completing(
+            system_prompt: str, user_prompt: str, model: str,
+            temperature: float, max_tokens: int,
+        ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
             )
@@ -1707,10 +1739,10 @@ class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
         self.provider.complete = completing  # type: ignore[method-assign]
         self.provider.others["librarian"] = {"enough": True}
 
-    def _events(self, type_: str) -> list:
+    def _events(self, type_: str) -> list[Any]:
         return [e for e in self.goals.events_after(self.goal.id, 0) if e.type == type_]
 
-    async def test_a_consult_reaches_round_two_with_the_material(self):
+    async def test_a_consult_reaches_round_two_with_the_material(self) -> None:
         self._script_planner([
             {"consult": {"reads": ["src/core.py"]}},
             {"steps": [{"title": "S1", "description": "uses VALUE", "suggested_paths": ["src/core.py"]}]},
@@ -1729,7 +1761,7 @@ class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
         self.assertEqual(len(self.goals.steps(self.goal.id)), 1)
 
-    async def test_a_refused_request_is_information_not_a_failure(self):
+    async def test_a_refused_request_is_information_not_a_failure(self) -> None:
         self._script_planner([
             {"consult": {"reads": ["../../etc/passwd"]}},
             {"steps": [{"title": "S1", "description": "d", "suggested_paths": []}]},
@@ -1744,7 +1776,7 @@ class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(consults[0].payload["refused"], 1)
         self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
 
-    async def test_a_second_consult_is_refused(self):
+    async def test_a_second_consult_is_refused(self) -> None:
         self._script_planner([
             {"consult": {"reads": ["src/core.py"]}},
             {"consult": {"reads": ["src/core.py"]}},
@@ -1758,7 +1790,7 @@ class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
         errors = [e.payload for e in self._events("error")]
         self.assertTrue(any("last allowed follow-up" in str(e.get("message")) for e in errors))
 
-    async def test_a_direct_plan_never_consults(self):
+    async def test_a_direct_plan_never_consults(self) -> None:
         self._script_planner([
             {"steps": [{"title": "S1", "description": "d", "suggested_paths": []}]},
         ])
@@ -1769,7 +1801,7 @@ class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._events("plan_consult"), [])
         self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
 
-    async def test_a_consult_with_steps_is_a_contract_error(self):
+    async def test_a_consult_with_steps_is_a_contract_error(self) -> None:
         """steps and consult are mutually exclusive — a reply claiming both is
         not a plan and not a question; it is a malformed reply."""
         self._script_planner([
@@ -1793,7 +1825,7 @@ class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
     that actually served it (so a fallback's usage is billed to the fallback).
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -1806,7 +1838,10 @@ class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
         scripted = self.provider
         real_complete = scripted.complete
 
-        async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
+        async def completing(
+            system_prompt: str, user_prompt: str, model: str,
+            temperature: float, max_tokens: int,
+        ) -> str:
             text = await real_complete(system_prompt, user_prompt, model, temperature, max_tokens)
             scripted._report_usage("ollama", {"response": text, "prompt_eval_count": 10, "eval_count": 5})
             return text
@@ -1824,14 +1859,14 @@ class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
         ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
         self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    def _usage_events(self):
+    def _usage_events(self) -> list[Event]:
         return [e for e in self.goals.events_after(self.goal.id, 0) if e.type == "usage"]
 
-    async def test_every_role_call_reports_attributed_usage(self):
+    async def test_every_role_call_reports_attributed_usage(self) -> None:
         await self.executor.run_planning(self.goal.id)
 
         events = self._usage_events()
@@ -1845,7 +1880,7 @@ class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(e.payload["input_tokens"], 10)
             self.assertEqual(e.payload["output_tokens"], 5)
 
-    async def test_a_provider_without_usage_reports_nothing(self):
+    async def test_a_provider_without_usage_reports_nothing(self) -> None:
         # Strip the reporting wrapper: a silent server must not produce events.
         complete = self.provider.complete
         unwrapped = getattr(complete, "__wrapped__", complete)
@@ -1856,7 +1891,7 @@ class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
         await self.executor.run_planning(self.goal.id)
         self.assertEqual(self._usage_events(), [])
 
-    async def test_normalize_usage_handles_every_provider_dialect(self):
+    async def test_normalize_usage_handles_every_provider_dialect(self) -> None:
         from engine.providers import normalize_usage
         self.assertEqual(
             normalize_usage("anthropic", {"usage": {"input_tokens": 3, "output_tokens": 4}}),
@@ -1888,7 +1923,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
     path a real goal takes.
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -1905,7 +1940,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
         self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
@@ -1928,7 +1963,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         return time.monotonic() - started
 
     def _script_parallel(self, delays: dict[str, float] | None = None,
-                         fail_on: str | None = None, n_steps: int = 2):
+                         fail_on: str | None = None, n_steps: int = 2) -> None:
         """Planner produces n_steps path-disjoint steps (a..z); the fixer
         identifies its step from the prompt's `Step: {title}` line (never from
         suggested-path contents, which don't exist yet for create steps) and
@@ -1945,7 +1980,10 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self._concurrent_peak = 0
         original = self.provider.complete
 
-        async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
+        async def completing(
+            system_prompt: str, user_prompt: str, model: str,
+            temperature: float, max_tokens: int,
+        ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
             )
@@ -1978,10 +2016,10 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
 
         self.provider.complete = completing  # type: ignore[method-assign]
 
-    async def test_independent_batch_rules(self):
+    async def test_independent_batch_rules(self) -> None:
         from engine.models import PlanStep
 
-        def mk(i, title, paths):
+        def mk(i: int, title: str, paths: list[str]) -> PlanStep:
             return PlanStep(
                 id=str(i), goal_id="g", ordinal=i, title=title, description="d",
                 status="PENDING", suggested_paths=paths,
@@ -1997,7 +2035,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         solo = self.executor._independent_batch([mk(0, "solo", ["s.txt"])])
         self.assertEqual([x.title for x in solo], ["solo"])
 
-    async def test_parallel_goal_really_overlaps_and_completes(self):
+    async def test_parallel_goal_really_overlaps_and_completes(self) -> None:
         self.goals.set_parallel(self.goal.id, True)
         self._script_parallel(delays={"a": 0.6, "b": 0.6})
         await self.executor.run_planning(self.goal.id)
@@ -2009,7 +2047,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         for name in ("a.txt", "b.txt"):
             self.assertTrue((self.root / name).exists(), f"{name} missing")
 
-    async def test_sequential_goal_stays_sequential(self):
+    async def test_sequential_goal_stays_sequential(self) -> None:
         # No parallel flag: the same driver must take at least the SUM of the sleeps.
         self._script_parallel(delays={"a": 0.4, "b": 0.4})
         await self.executor.run_planning(self.goal.id)
@@ -2018,7 +2056,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(g.status, "COMPLETED", f"goal status: {g.status}")
         self.assertGreaterEqual(elapsed, 0.8, f"sequential steps unexpectedly overlapped ({elapsed:.2f}s)")
 
-    async def test_parallel_failure_fails_the_goal_after_join(self):
+    async def test_parallel_failure_fails_the_goal_after_join(self) -> None:
         # run_step absorbs a ProviderError into _fail (step FAILED, goal FAILED)
         # rather than raising; _run_parallel must still join the healthy sibling
         # before the driver observes the failure.
@@ -2036,7 +2074,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         # abandoning it the instant b failed.
         self.assertTrue((self.root / "a.txt").exists(), "healthy sibling was abandoned")
 
-    async def test_parallel_width_caps_concurrency_in_waves(self):
+    async def test_parallel_width_caps_concurrency_in_waves(self) -> None:
         """A batch wider than the configured width runs in waves, not all at once.
 
         5 disjoint steps with a width of 2: the peak number of fixers in
@@ -2069,7 +2107,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         fixer_calls = [c for c in self.provider.calls if c[0] == "fixer"]
         self.assertEqual(len(fixer_calls), 5)
 
-    async def test_parallel_width_is_clamped(self):
+    async def test_parallel_width_is_clamped(self) -> None:
         """A nonsense or extreme env value cannot disable the bound."""
         from engine.executor import _env_parallel_width, DEFAULT_PARALLEL_WIDTH
         self.assertEqual(_env_parallel_width() or DEFAULT_PARALLEL_WIDTH, DEFAULT_PARALLEL_WIDTH)
@@ -2078,7 +2116,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(_env_parallel_width(), expected, f"raw={raw!r}")
         os.environ.pop("CODIFY_PARALLEL_WIDTH", None)
 
-    async def test_parallel_width_reads_the_persisted_setting(self):
+    async def test_parallel_width_reads_the_persisted_setting(self) -> None:
         """Without an env override, the width comes from the settings store.
 
         Priority: env (operator override) > persisted setting > default. Read
@@ -2104,7 +2142,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         settings.set_int("parallel_width", 6)
         self.assertEqual(self.executor._parallel_width(), 6, "re-read per batch")
 
-    async def test_batch_refused_when_paths_change_between_batching_and_dispatch(self):
+    async def test_batch_refused_when_paths_change_between_batching_and_dispatch(self) -> None:
         """The dispatch re-check catches a plan edited after batching.
 
         Batch two disjoint steps, then (between batching and gather) rewrite
@@ -2140,7 +2178,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.root / "a.txt").exists())
         self.assertFalse((self.root / "b.txt").exists())
 
-    async def test_driver_recovers_by_rebatching_after_a_refused_batch(self):
+    async def test_driver_recovers_by_rebatching_after_a_refused_batch(self) -> None:
         """A refused batch is not a failure: the driver re-batches from the store.
 
         Same collision as above, but driven through the production loop. The
@@ -2171,7 +2209,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         fixer_calls = [c for c in self.provider.calls if c[0] == "fixer"]
         self.assertEqual(len(fixer_calls), 2)
 
-    async def test_retry_refused_when_edited_paths_collide_with_unfinished_step(self):
+    async def test_retry_refused_when_edited_paths_collide_with_unfinished_step(self) -> None:
         """retry_step re-proves disjointness against unfinished siblings.
 
         Two parallel steps, one failed. Edit the failed step's paths to collide
@@ -2203,7 +2241,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
             await self.executor.retry_step(self.goal.id, steps["a"].id, g.version)
         self.assertEqual(ctx.exception.code, "retry_collides_with_running")
 
-    async def test_apply_batches_on_proposed_paths_not_plan_guesses(self):
+    async def test_apply_batches_on_proposed_paths_not_plan_guesses(self) -> None:
         """apply_goal proves disjointness from the files that will be written.
 
         A dry run stores proposals for paths the plan never named (or stopped
@@ -2233,7 +2271,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(batch), 1, "colliding proposals must never batch")
 
-    async def test_unprovable_head_step_runs_alone(self):
+    async def test_unprovable_head_step_runs_alone(self) -> None:
         """A head step with no provable paths runs alone, not crashes.
 
         _independent_batch returns [] for a step with no paths (its contract:
@@ -2243,7 +2281,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         """
         from engine.models import PlanStep
 
-        def mk(i, title, paths):
+        def mk(i: int, title: str, paths: list[str]) -> PlanStep:
             return PlanStep(
                 id=str(i), goal_id="g", ordinal=i, title=title, description="d",
                 status="PENDING", suggested_paths=paths,
@@ -2267,7 +2305,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(statuses, {"a": "COMPLETED", "b": "COMPLETED"}, f"statuses: {statuses}")
         del elapsed  # only completion matters here
 
-    async def test_second_driver_claim_is_refused(self):
+    async def test_second_driver_claim_is_refused(self) -> None:
         """A retry landing mid-run must not spawn a second driver loop.
 
         start and retry each spawn _run_steps with no mutual exclusion: the
@@ -2307,7 +2345,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.goals.get(self.goal.id).status, "COMPLETED")
         self.assertFalse(self.executor._drivers, "driver claim leaked after completion")
 
-    async def test_apply_recheck_uses_the_batchers_proof(self):
+    async def test_apply_recheck_uses_the_batchers_proof(self) -> None:
         """apply's dispatch re-check must prove the same footprint it batched on.
 
         apply_goal batches on stored-proposal paths but _run_parallel used to
@@ -2350,14 +2388,14 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
                    if e.type == "log" and "batch refused" in e.payload.get("message", "")]
         self.assertEqual(refused, [], "apply hit a refuse/re-batch loop")
 
-    async def test_cancel_fails_the_batch_promptly(self):
+    async def test_cancel_fails_the_batch_promptly(self) -> None:
         self.goals.set_parallel(self.goal.id, True)
         self._script_parallel(delays={"a": 0.35, "b": 0.35})
         await self.executor.run_planning(self.goal.id)
         remaining = [s for s in self.goals.steps(self.goal.id) if s.status != "COMPLETED"]
         self.assertEqual(len(remaining), 2)
 
-        async def cancel_soon():
+        async def cancel_soon() -> None:
             await asyncio.sleep(0.05)
             g = self.goals.get(self.goal.id)
             self.goals.update_status(self.goal.id, g.version, "CANCELLED")
@@ -2380,7 +2418,7 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
     no fragment replay needed.
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         (self.root / "a.py").write_text("value = 1\n", encoding="utf-8")
@@ -2414,7 +2452,7 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
             {"argv": None, "verdict": "pass", "explanation": "nothing to run"},
         ]
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
@@ -2423,11 +2461,14 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
             e for e in self.goals.events_after(goal_id, 0) if e.type == "model_delta"
         ]
 
-    async def test_streaming_role_emits_snapshots_and_a_final_event(self):
+    async def test_streaming_role_emits_snapshots_and_a_final_event(self) -> None:
         # Script the fixer to stream: on_delta fires as the "model" produces.
         original = self.provider.complete
 
-        async def streaming(system_prompt, user_prompt, model, temperature, max_tokens):
+        async def streaming(
+            system_prompt: str, user_prompt: str, model: str,
+            temperature: float, max_tokens: int,
+        ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
             )
@@ -2456,11 +2497,11 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(finals), 1, "exactly one final snapshot for the role")
         self.assertTrue(finals[0].payload["text"].startswith('{"files"'))
         self.assertTrue(
-            all(a.sequence < b.sequence for a, b in zip(fixer, fixer[1:])),
+            all(a.sequence < b.sequence for a, b in zip(fixer, fixer[1:], strict=False)),
             "snapshots must be ordered",
         )
 
-    async def test_non_streaming_provider_still_gets_one_final_card(self):
+    async def test_non_streaming_provider_still_gets_one_final_card(self) -> None:
         # _ScriptedProvider never calls on_delta: the flush must still emit a
         # single final snapshot carrying the complete reply.
         await self.executor.run_planning(self.goal.id)
@@ -2471,14 +2512,17 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(deltas[0].payload["final"])
         self.assertIn("files", deltas[0].payload["text"])
 
-    async def test_failed_call_still_closes_the_stream(self):
+    async def test_failed_call_still_closes_the_stream(self) -> None:
         # The flush must run on the error path too, or the live card would
         # spin forever on a role whose provider just blew up.
         from engine.providers import ProviderError as PE
 
         original = self.provider.complete
 
-        async def failing(system_prompt, user_prompt, model, temperature, max_tokens):
+        async def failing(
+            system_prompt: str, user_prompt: str, model: str,
+            temperature: float, max_tokens: int,
+        ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
             )
@@ -2512,7 +2556,7 @@ class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
     information rather than failing the step, and the whole thing bounded.
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         (self.root / "a.py").write_text("value = 1\n", encoding="utf-8")
@@ -2546,14 +2590,17 @@ class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
             {"argv": None, "verdict": "pass", "explanation": "nothing to run"},
         ]
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    def _script_critic(self, replies: list[dict]) -> None:
+    def _script_critic(self, replies: list[dict[str, Any]]) -> None:
         self.provider.others["critic"] = replies
 
-        async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
+        async def completing(
+            system_prompt: str, user_prompt: str, model: str,
+            temperature: float, max_tokens: int,
+        ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
             )
@@ -2566,7 +2613,7 @@ class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
 
         self.provider.complete = completing  # type: ignore[method-assign]
 
-    def _events(self, type_: str) -> list:
+    def _events(self, type_: str) -> list[Any]:
         return [e for e in self.goals.events_after(self.goal.id, 0) if e.type == type_]
 
     async def _plan_and_run(self) -> None:
@@ -2574,7 +2621,7 @@ class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
         self.goals.update_status(self.goal.id, self.goals.get(self.goal.id).version, "RUNNING")
         await self.executor.run_step(self.goal.id, self.goals.steps(self.goal.id)[0].id)
 
-    async def test_a_requested_command_runs_and_the_output_reaches_the_next_round(self):
+    async def test_a_requested_command_runs_and_the_output_reaches_the_next_round(self) -> None:
         (self.root / "docs").mkdir()
         (self.root / "docs" / "note.txt").write_text("hello docs\n", encoding="utf-8")
         self._script_critic([
@@ -2591,7 +2638,7 @@ class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
         logs = " | ".join(e.payload["message"] for e in self._events("log"))
         self.assertIn("critic inspection: ls -la docs", logs)
 
-    async def test_a_refused_command_is_information_not_a_failure(self):
+    async def test_a_refused_command_is_information_not_a_failure(self) -> None:
         self._script_critic([
             {"decision": None, "reasons": [], "run_command": ["rm", "-rf", "/"]},
             {"decision": "approve", "reasons": []},
@@ -2607,7 +2654,7 @@ class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
         # not a defect in the critic.
         self.assertEqual(self.goals.steps(self.goal.id)[0].status, "COMPLETED")
 
-    async def test_the_command_bound_holds(self):
+    async def test_the_command_bound_holds(self) -> None:
         self._script_critic([
             {"decision": None, "reasons": [], "run_command": ["ls", "-l"]},
             {"decision": None, "reasons": [], "run_command": ["ls", "-a"]},
@@ -2625,7 +2672,7 @@ class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
         errors = [e.payload for e in self._events("error")]
         self.assertTrue(any("kept requesting commands" in str(e.get("message")) for e in errors))
 
-    async def test_a_direct_decision_never_runs_a_command(self):
+    async def test_a_direct_decision_never_runs_a_command(self) -> None:
         self._script_critic([{"decision": "approve", "reasons": []}])
 
         await self._plan_and_run()
@@ -2644,7 +2691,7 @@ class TestCriticAndScribeEvidence(unittest.IsolatedAsyncioTestCase):
     given nothing but file names — so commit subjects were invented.
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -2675,11 +2722,11 @@ class TestCriticAndScribeEvidence(unittest.IsolatedAsyncioTestCase):
         ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
         self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    async def _plan_and_run(self, verifier_reply: dict | None = None) -> None:
+    async def _plan_and_run(self, verifier_reply: dict[str, Any] | None = None) -> None:
         await self.executor.run_planning(self.goal.id)
         step = self.goals.steps(self.goal.id)[0]
         self.goals.update_status(self.goal.id, self.goal.version + 1, "RUNNING")
@@ -2690,7 +2737,7 @@ class TestCriticAndScribeEvidence(unittest.IsolatedAsyncioTestCase):
     def _prompts_for(self, role: str) -> list[str]:
         return [p for r, p in self.provider.calls if r == role]
 
-    async def test_critic_prompt_carries_the_test_verdict(self):
+    async def test_critic_prompt_carries_the_test_verdict(self) -> None:
         await self._plan_and_run(
             {"argv": None, "verdict": "pass", "explanation": "2 passed"}
         )
@@ -2699,7 +2746,7 @@ class TestCriticAndScribeEvidence(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Test verdict: pass", critic_prompt)
         self.assertIn("2 passed", critic_prompt)
 
-    async def test_scribe_prompt_carries_the_actual_diff(self):
+    async def test_scribe_prompt_carries_the_actual_diff(self) -> None:
         await self._plan_and_run(
             {"argv": None, "verdict": "pass", "explanation": "2 passed"}
         )
@@ -2711,7 +2758,7 @@ class TestCriticAndScribeEvidence(unittest.IsolatedAsyncioTestCase):
         self.assertIn("File: a.py (create)", scribe_prompt)
         self.assertIn("+value = 4", scribe_prompt, "the unified diff body must reach the scribe")
 
-    async def test_critic_prompt_says_when_no_verdict_exists(self):
+    async def test_critic_prompt_says_when_no_verdict_exists(self) -> None:
         """A missing verdict must not read as "no tests ran", which a critic
         would treat as harmless — it has to be named as a wiring break."""
         from engine.fs import FileSystemService
@@ -2737,7 +2784,7 @@ class TestEditActionEndToEnd(unittest.IsolatedAsyncioTestCase):
     contract error, not an internal error.
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         (self.root / "a.py").write_text("value = 1\n", encoding="utf-8")
@@ -2770,11 +2817,11 @@ class TestEditActionEndToEnd(unittest.IsolatedAsyncioTestCase):
         ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
         self.goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    def _plan(self):
+    def _plan(self) -> PlanStep:
         g = self.goals.get(self.goal.id)  # fresh version — planning never ran here
         self.goals.update_status(self.goal.id, g.version, "RUNNING")
         self.provider.verifier_replies.append(
@@ -2785,7 +2832,7 @@ class TestEditActionEndToEnd(unittest.IsolatedAsyncioTestCase):
         )
         return self.goals.steps(self.goal.id)[0]
 
-    async def test_a_dry_run_edit_stores_the_resolved_content_not_the_description(self):
+    async def test_a_dry_run_edit_stores_the_resolved_content_not_the_description(self) -> None:
         step = self._plan()
         self.executor.goals.set_dry_run(self.goal.id, True)
 
@@ -2803,7 +2850,7 @@ class TestEditActionEndToEnd(unittest.IsolatedAsyncioTestCase):
         diffs = [e.payload for e in self.goals.events_after(self.goal.id, 0) if e.type == "diff"]
         self.assertIn("+value = 2", diffs[0]["unified_diff"])
 
-    async def test_an_edit_that_cannot_match_fails_the_step_as_invalid_output(self):
+    async def test_an_edit_that_cannot_match_fails_the_step_as_invalid_output(self) -> None:
         self.provider.others["fixer"] = {
             "files": [{"path": "a.py", "action": "edit",
                        "edits": [{"old_text": "NO SUCH LINE", "new_text": "x"}]}]
@@ -2818,7 +2865,7 @@ class TestEditActionEndToEnd(unittest.IsolatedAsyncioTestCase):
         # The user's file is untouched — a refused edit writes nothing.
         self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "value = 1\n")
 
-    async def test_an_edit_with_no_resolved_change_stores_nothing_applyable(self):
+    async def test_an_edit_with_no_resolved_change_stores_nothing_applyable(self) -> None:
         self.provider.others["fixer"] = {
             "files": [{"path": "a.py", "action": "edit",
                        "edits": [{"old_text": "value = 1", "new_text": "value = 1"}]}]
@@ -2843,7 +2890,7 @@ class TestLibrarianLineRangeReads(unittest.IsolatedAsyncioTestCase):
     the file did not exist.
     """
 
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -2859,14 +2906,14 @@ class TestLibrarianLineRangeReads(unittest.IsolatedAsyncioTestCase):
         )
         self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    def _requests(self, out: dict):
+    def _requests(self, out: dict[str, Any]) -> list[tuple[str, Any]]:
         return self.executor._library_requests(out)
 
-    def test_a_range_request_is_parsed_with_normalized_bounds(self):
+    def test_a_range_request_is_parsed_with_normalized_bounds(self) -> None:
         reqs = self._requests({"reads": [
             {"path": "big.py", "offset": "200", "limit": "50"},
             {"path": "big.py", "offset": 0, "limit": 0},
@@ -2877,7 +2924,7 @@ class TestLibrarianLineRangeReads(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reqs[1][1]["offset"], 1)
         self.assertEqual(reqs[2][1]["offset"], 1)
 
-    def test_a_line_range_read_serves_that_slice_of_the_file(self):
+    def test_a_line_range_read_serves_that_slice_of_the_file(self) -> None:
         (self.root / "big.py").write_text(
             "\n".join(f"line {i}" for i in range(1, 51)) + "\n", encoding="utf-8"
         )
@@ -2894,7 +2941,7 @@ class TestLibrarianLineRangeReads(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(opened, {"big.py"})
         self.assertEqual(refused, 0)
 
-    def test_a_beyond_eof_window_reports_an_empty_range_not_a_failure(self):
+    def test_a_beyond_eof_window_reports_an_empty_range_not_a_failure(self) -> None:
         (self.root / "big.py").write_text("only\n", encoding="utf-8")
         lib = LibraryService(self.ws.root_path)
         text, opened, matched, refused = self.executor._serve_library_requests(

@@ -4,12 +4,16 @@ import unittest
 from pathlib import Path
 
 from engine.db import connect
+from typing import Any
+
 from engine.models import (
     AgentConfigUpdate,
     BUILTIN_PROVIDERS,
     Event,
+    Goal,
     GoalCreate,
     ROLES,
+    Workspace,
     WorkspaceCreate,
 )
 from engine.providers import Keychain, ProviderError, ProviderFactory
@@ -23,7 +27,7 @@ from engine.services import (
 
 
 class TestDbAndServices(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "test.db"
         self.conn = connect(self.db_path)
@@ -34,11 +38,11 @@ class TestDbAndServices(unittest.TestCase):
         self.goals = GoalService(self.conn)
         self.settings = SettingsService(self.conn)
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    def _ws_with_goal(self, name: str = "WS", status: str = "COMPLETED"):
+    def _ws_with_goal(self, name: str = "WS", status: str = "COMPLETED") -> tuple[Workspace, Goal]:
         root = Path(self.temp_dir.name) / f"root-{name}"
         root.mkdir(exist_ok=True)
         ws = self.workspaces.create(WorkspaceCreate(name=name, root_path=str(root)))
@@ -49,7 +53,7 @@ class TestDbAndServices(unittest.TestCase):
         goal = self.goals.update_status(goal.id, 1, status)
         return ws, goal
 
-    def test_delete_goal_refuses_in_progress_states_directly(self):
+    def test_delete_goal_refuses_in_progress_states_directly(self) -> None:
         """The service guards itself, not just the HTTP route.
 
         The route re-checks the same rule (and the live driver set) because it
@@ -70,7 +74,7 @@ class TestDbAndServices(unittest.TestCase):
                     1, "a refused delete must leave the row alone",
                 )
 
-    def test_delete_goal_allows_terminal_states(self):
+    def test_delete_goal_allows_terminal_states(self) -> None:
         """Every stopped state is deletable, including a cancelled run."""
         for status in ("COMPLETED", "FAILED", "CANCELLED"):
             with self.subTest(status=status):
@@ -80,7 +84,7 @@ class TestDbAndServices(unittest.TestCase):
                 self.assertFalse(result["files_touched"])
                 self.assertEqual(goal.status, status, "the report names the run it removed")
 
-    def test_workspace_delete_requires_explicit_cascade(self):
+    def test_workspace_delete_requires_explicit_cascade(self) -> None:
         ws, goal = self._ws_with_goal()
         self.assertEqual(self.workspaces.goal_count(ws.id), 1)
 
@@ -98,7 +102,7 @@ class TestDbAndServices(unittest.TestCase):
         with self.assertRaises(ApiError):
             self.goals.get(goal.id)
 
-    def test_workspace_delete_reports_the_underlying_infk_is_never_raised(self):
+    def test_workspace_delete_reports_the_underlying_infk_is_never_raised(self) -> None:
         """A bare IntegrityError here was a 500 with no actionable message."""
         ws, _ = self._ws_with_goal()
         try:
@@ -109,7 +113,7 @@ class TestDbAndServices(unittest.TestCase):
         except Exception as exc:  # pragma: no cover - the regression itself
             self.fail(f"raw DB error leaked: {type(exc).__name__}: {exc}")
 
-    def test_seeded_agent_configs(self):
+    def test_seeded_agent_configs(self) -> None:
         configs = self.registry.list_configs()
         roles = [c.role for c in configs]
         # One config per role, in the canonical ROLES order — including Laya,
@@ -117,7 +121,7 @@ class TestDbAndServices(unittest.TestCase):
         self.assertEqual(roles, list(ROLES))
         self.assertEqual(len(configs), len(ROLES))
 
-    def test_saving_a_key_never_wipes_a_corrupt_store(self):
+    def test_saving_a_key_never_wipes_a_corrupt_store(self) -> None:
         """The file backend's read-before-write must fail loudly on a corrupt
         store: silently treating it as empty makes the atomic replace discard
         every OTHER key the file held."""
@@ -132,7 +136,7 @@ class TestDbAndServices(unittest.TestCase):
         # The corrupt bytes were NOT overwritten by an empty-dict save.
         self.assertEqual(store.read_text(encoding="utf-8"), "{not json at all")
 
-    def test_secrets_temp_file_is_created_0600(self):
+    def test_secrets_temp_file_is_created_0600(self) -> None:
         """No world-readable window: the temp file is created O_CREAT 0600, not
         written with the umask and chmodded afterwards."""
         import stat
@@ -143,7 +147,7 @@ class TestDbAndServices(unittest.TestCase):
         # The final file must be 0600 (the tmp path is gone after replace).
         self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
 
-    def test_workspace_service(self):
+    def test_workspace_service(self) -> None:
         ws_path = Path(self.temp_dir.name) / "workspace1"
         ws_path.mkdir()
 
@@ -168,7 +172,7 @@ class TestDbAndServices(unittest.TestCase):
         all_ws = self.workspaces.list_workspaces()
         self.assertEqual(len(all_ws), 1)
 
-    def test_goal_service_and_concurrency(self):
+    def test_goal_service_and_concurrency(self) -> None:
         ws_path = Path(self.temp_dir.name) / "workspace_goals"
         ws_path.mkdir()
         ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(ws_path)))
@@ -189,7 +193,7 @@ class TestDbAndServices(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 409)
         self.assertEqual(ctx.exception.code, "version_conflict")
 
-    def test_boot_rescue_fails_orphaned_planning_and_running_goals(self):
+    def test_boot_rescue_fails_orphaned_planning_and_running_goals(self) -> None:
         """Goals left PLANNING/RUNNING by a dead process are failed at boot.
 
         Before this existed, a PLANNING goal orphaned by a crash was a dead
@@ -223,7 +227,7 @@ class TestDbAndServices(unittest.TestCase):
         updated = self.goals.update_status(g.id, g.version, "PENDING")
         self.assertEqual(updated.status, "PENDING")
 
-    def test_seeded_roles_name_no_model(self):
+    def test_seeded_roles_name_no_model(self) -> None:
         """A fresh install must not ship hardcoded model ids.
 
         A compiled default is wrong within weeks (retired, renamed) and cannot
@@ -239,7 +243,7 @@ class TestDbAndServices(unittest.TestCase):
             self.assertEqual(cfg.provider, "ollama")
             self.assertEqual(cfg.protocol, "ollama")
 
-    def test_engine_settings_roundtrip_clamp_and_corrupt_value(self):
+    def test_engine_settings_roundtrip_clamp_and_corrupt_value(self) -> None:
         """The persisted settings store: defaults, clamps, and recovery.
 
         The value is read on every parallel batch, so a corrupt or missing row
@@ -259,7 +263,7 @@ class TestDbAndServices(unittest.TestCase):
         )
         self.assertEqual(self.settings.get_int("parallel_width"), 4, "corrupt → default")
 
-    def test_provider_switch_inherits_new_protocol(self):
+    def test_provider_switch_inherits_new_protocol(self) -> None:
         """Regression: switching provider without an explicit protocol used to
         keep the OLD provider's protocol, sending e.g. Anthropic wire format to
         an Ollama endpoint."""
@@ -280,7 +284,7 @@ class TestDbAndServices(unittest.TestCase):
         self.assertEqual(explicit.provider, "openai")
         self.assertEqual(explicit.protocol, "ollama")
 
-    def test_long_prompt_becomes_title_plus_description(self):
+    def test_long_prompt_becomes_title_plus_description(self) -> None:
         """Chat UIs send the whole prompt as `title`; engine must accept >200 chars.
 
         Regression test: GoalCreate used to cap title at 200, so any real
@@ -314,7 +318,7 @@ class TestDbAndServices(unittest.TestCase):
         self.assertEqual(short.title, "Fix flaky test")
         self.assertEqual(short.description, "details")
 
-    def test_event_sequencing(self):
+    def test_event_sequencing(self) -> None:
         ws_path = Path(self.temp_dir.name) / "workspace_events"
         ws_path.mkdir()
         ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(ws_path)))
@@ -342,7 +346,7 @@ class TestDbAndServices(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].id, "e1")
 
-    def test_recent_run_models_reads_what_answered_not_what_was_asked_for(self):
+    def test_recent_run_models_reads_what_answered_not_what_was_asked_for(self) -> None:
         """The model menu's recency signal.
 
         A goal can be created asking for one model and executed by four others, so
@@ -407,7 +411,7 @@ class TestDbAndServices(unittest.TestCase):
         # Limit is respected.
         self.assertEqual(len(self.goals.recent_run_models(limit=1)), 1)
 
-    def test_agent_registry_service(self):
+    def test_agent_registry_service(self) -> None:
         # Update planner
         patch = AgentConfigUpdate(
             display_name="Updated Planner",
@@ -445,7 +449,7 @@ class TestDbAndServices(unittest.TestCase):
         self.assertIn("builtins", catalog)
         self.assertTrue(any(b["slug"] == "anthropic" for b in catalog["builtins"]))
 
-    def test_provider_switch_does_not_keep_the_old_endpoint(self):
+    def test_provider_switch_does_not_keep_the_old_endpoint(self) -> None:
         """Switching provider must move the endpoint with it.
 
         Keeping the previous provider's base_url sent OpenAI wire format to the
@@ -492,14 +496,14 @@ class TestRoleMigration(unittest.TestCase):
     model the user had actually been running.
     """
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "old.db"
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def _seed_legacy_role(self, role: str, **fields) -> None:
+    def _seed_legacy_role(self, role: str, **fields: Any) -> None:
         conn = connect(self.db_path)
         values = {
             "provider": "acme",
@@ -522,7 +526,7 @@ class TestRoleMigration(unittest.TestCase):
         conn.commit()
         conn.close()
 
-    def test_a_configured_legacy_role_moves_onto_its_new_slot(self):
+    def test_a_configured_legacy_role_moves_onto_its_new_slot(self) -> None:
         self._seed_legacy_role("coder")
         moved: list[tuple[str, str]] = []
         conn = connect(self.db_path, on_role_migrated=lambda old, new: moved.append((old, new)))
@@ -544,7 +548,7 @@ class TestRoleMigration(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_a_role_the_user_has_since_configured_wins(self):
+    def test_a_role_the_user_has_since_configured_wins(self) -> None:
         self._seed_legacy_role("tester")
         conn = connect(self.db_path)
         conn.execute(
@@ -565,7 +569,7 @@ class TestRoleMigration(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_running_twice_changes_nothing_the_second_time(self):
+    def test_running_twice_changes_nothing_the_second_time(self) -> None:
         self._seed_legacy_role("summarizer")
         for _ in range(2):
             conn = connect(self.db_path)

@@ -19,7 +19,7 @@ from engine.services import WorkspaceService
 
 
 class TestFreshStartup(unittest.IsolatedAsyncioTestCase):
-    async def test_lifespan_creates_no_workspace(self):
+    async def test_lifespan_creates_no_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = {
                 "CODIFY_DB": str(Path(tmp) / "fresh.db"),
@@ -43,7 +43,7 @@ class TestFreshStartup(unittest.IsolatedAsyncioTestCase):
                     for name, value in saved.items():
                         setattr(app.state, name, value)
 
-    async def test_a_workspace_must_be_chosen_before_it_exists(self):
+    async def test_a_workspace_must_be_chosen_before_it_exists(self) -> None:
         """The store itself stays empty until something asks for a workspace."""
         with tempfile.TemporaryDirectory() as tmp:
             from engine.db import connect

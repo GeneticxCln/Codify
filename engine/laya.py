@@ -247,7 +247,10 @@ class LayaService:
     """Runs the pre-flight gate, preferring the real SDK over the LLM fallback."""
 
     def __init__(self, disabled: bool | None = None, registry: Any = None):
-        self._router = None
+        # Annotated, not inferred: mypy reads the None initializer as "always
+        # None" and then calls the probe branch below unreachable — the SDK
+        # loader assigns a real Router to it at runtime.
+        self._router: Any = None
         self._sdk_error: str | None = None
         self._registry = registry
         env = os.environ.get(SDK_DISABLE_ENV, "").strip().lower()
@@ -268,8 +271,12 @@ class LayaService:
     def sdk_error(self) -> str | None:
         return self._sdk_error
 
-    def _sdk_router(self):
-        """Load the Laya Router once (preloaded, so no per-request reload)."""
+    def _sdk_router(self) -> Any:
+        """Load the Laya Router once (preloaded, so no per-request reload).
+
+        `Any` on purpose: the SDK is optional by design, so its class cannot be
+        imported unconditionally and the router is duck-typed downstream.
+        """
         if self._router is not None:
             return self._router
         if self._sdk_error is not None or self._disabled:
@@ -288,7 +295,7 @@ class LayaService:
 
     # --- decision engines --------------------------------------------------
 
-    def _decide_with_sdk(self, state: dict[str, Any]) -> tuple[dict, dict]:
+    def _decide_with_sdk(self, state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         router = self._sdk_router()
         if router is None:
             raise RuntimeError(self._sdk_error or "laya SDK unavailable")
@@ -297,7 +304,7 @@ class LayaService:
         routing = result.get("routing", {}) if isinstance(result, dict) else {}
         return answers or {}, routing or {}
 
-    async def _decide_with_llm(self, state: dict[str, Any]) -> tuple[dict, str, str]:
+    async def _decide_with_llm(self, state: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
         if self._registry is None:
             raise RuntimeError("no registry configured")
         provider, cfg = self._registry.get_provider_for("laya")

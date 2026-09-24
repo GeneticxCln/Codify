@@ -4,7 +4,10 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, get_args
+from typing import Any, get_args
+from collections.abc import Callable
+
+import sqlite3
 
 from engine.db import dumps, row_to_dict
 from engine.models import (
@@ -22,11 +25,17 @@ from engine.models import (
     Workspace,
     WorkspaceCreate,
 )
-from engine.providers import Keychain, ProviderError, ProviderFactory, validate_local_base_url
+from engine.providers import (
+    BaseProvider,
+    Keychain,
+    ProviderError,
+    ProviderFactory,
+    validate_local_base_url,
+)
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, code: str, message: str, extra: dict | None = None):
+    def __init__(self, status: int, code: str, message: str, extra: dict[str, Any] | None = None):
         # str(exc) must be the message: goal failures, logs, and error cards all
         # stringify the exception, and without super().__init__ every one of them
         # rendered as an empty string with the real message buried in attributes.
@@ -46,6 +55,9 @@ class SettingsService:
     parallel batch.
     """
 
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._db = conn
+
     # Every known key with its (default, clamp). Anything read must be listed
     # here: an unknown key is not a setting, it is a typo.
     SPEC: dict[str, tuple[int, Callable[[int], int]]] = {
@@ -59,10 +71,8 @@ class SettingsService:
         "stats_retention_days": (90, lambda v: max(0, min(v, 730))),
     }
 
-    def __init__(self, conn):
-        self._db = conn
-
     def get_int(self, key: str) -> int:
+        """A known key's value, clamped — the key must exist in SPEC."""
         default, clamp = self.SPEC[key]
         row = self._db.execute(
             "SELECT value FROM engine_settings WHERE key = ?", (key,)
@@ -92,7 +102,9 @@ class SettingsService:
 
 
 class AgentRegistryService:
-    def __init__(self, conn, factory: ProviderFactory, keychain: Keychain):
+    def __init__(
+        self, conn: sqlite3.Connection, factory: ProviderFactory, keychain: Keychain
+    ) -> None:
         self._db = conn
         self._factory = factory
         self._keychain = keychain
@@ -114,8 +126,8 @@ class AgentRegistryService:
 
     @staticmethod
     def _normalize_target(
-        data: dict,
-        updates: dict,
+        data: dict[str, Any],
+        updates: dict[str, Any],
         *,
         provider_field: str,
         protocol_field: str,
@@ -244,11 +256,11 @@ class AgentRegistryService:
         self._db.commit()
         return merged
 
-    def get_provider_for(self, role: AgentRole):
+    def get_provider_for(self, role: AgentRole) -> tuple[BaseProvider, AgentConfig]:
         cfg = self.get_config(role)
         return self._factory.build(cfg), cfg
 
-    def build_provider(self, cfg: AgentConfig):
+    def build_provider(self, cfg: AgentConfig) -> BaseProvider:
         """Build a provider from a config that may not be the stored primary one.
 
         The fallback is the same role with a different target, so it needs the same
@@ -289,7 +301,7 @@ class AgentRegistryService:
 
 
 class WorkspaceService:
-    def __init__(self, conn):
+    def __init__(self, conn: sqlite3.Connection) -> None:
         self._db = conn
 
     def create(self, body: WorkspaceCreate) -> Workspace:
@@ -430,7 +442,7 @@ def split_title_description(title: str, description: str) -> tuple[str, str]:
 
 
 class GoalService:
-    def __init__(self, conn):
+    def __init__(self, conn: sqlite3.Connection) -> None:
         self._db = conn
 
     def create(self, body: GoalCreate) -> Goal:
@@ -520,7 +532,7 @@ class GoalService:
             out.append(Goal.model_validate(data))
         return out
 
-    def recent_run_models(self, limit: int = 5, scan_events: int = 300) -> list[dict]:
+    def recent_run_models(self, limit: int = 5, scan_events: int = 300) -> list[dict[str, Any]]:
         """The models that *actually* answered recently, newest first.
 
         Read from `agent_assigned` events rather than from `goals.provider/model`,
@@ -542,7 +554,7 @@ class GoalService:
                LIMIT ?""",
             (max(1, scan_events),),
         )
-        out: list[dict] = []
+        out: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for row in rows:
             try:
@@ -575,7 +587,7 @@ class GoalService:
             out.append(PlanStep.model_validate(d))
         return out
 
-    def update_step(self, goal_id: str, step_id: str, expected_version: int, patch: dict) -> PlanStep:
+    def update_step(self, goal_id: str, step_id: str, expected_version: int, patch: dict[str, Any]) -> PlanStep:
         """Edit a plan step's title/description/paths before execution.
 
         Only allowed while the goal is PENDING (plan produced, execution not
@@ -609,7 +621,7 @@ class GoalService:
         new_paths = None
         if "suggested_paths" in data:
             new_paths = [p.strip() for p in data["suggested_paths"] if p and p.strip()]
-        changes: dict[str, dict] = {
+        changes: dict[str, dict[str, Any]] = {
             "suggested_paths": {
                 "before": list(step.suggested_paths),
                 "after": new_paths if new_paths is not None else list(step.suggested_paths),
@@ -835,7 +847,7 @@ class GoalService:
             # portable read-modify-write (single-writer engine, same result).
             cur = self._db.execute("SELECT event_seq FROM goals WHERE id = ?", (goal_id,)).fetchone()
             if cur is None:
-                raise ApiError(404, "unknown_goal", "goal not found")
+                raise ApiError(404, "unknown_goal", "goal not found")  # noqa: B904 — API rewrite
             nxt = int(cur[0]) + 1
             self._db.execute("UPDATE goals SET event_seq = ? WHERE id = ?", (nxt, goal_id))
             self._db.commit()

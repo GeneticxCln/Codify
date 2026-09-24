@@ -10,6 +10,7 @@ claim to be.
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
 import unittest
+from typing import Any
 
 from engine.stats import (
     build_overview,
@@ -23,7 +24,7 @@ from engine.stats import (
 NOW = 1_800_000_000.0  # a fixed anchor; without an explicit `now`, windows derive it from the data
 
 
-def goal(status: str, created: float, updated: float | None = None) -> dict:
+def goal(status: str, created: float, updated: float | None = None) -> dict[str, Any]:
     return {
         "id": f"g-{status}-{created}",
         "status": status,
@@ -33,7 +34,7 @@ def goal(status: str, created: float, updated: float | None = None) -> dict:
 
 
 def usage_ev(role: str, provider: str, model: str, tokens: int, ts: float,
-             duration_ms: float | None = 100) -> dict:
+             duration_ms: float | None = 100) -> dict[str, Any]:
     return {
         "type": "usage",
         "timestamp": ts,
@@ -49,7 +50,7 @@ def usage_ev(role: str, provider: str, model: str, tokens: int, ts: float,
     }
 
 
-def failure_ev(role: str, provider: str, model: str, code: str, ts: float) -> dict:
+def failure_ev(role: str, provider: str, model: str, code: str, ts: float) -> dict[str, Any]:
     return {
         "type": "agent_call_failed",
         "timestamp": ts,
@@ -62,7 +63,7 @@ def failure_ev(role: str, provider: str, model: str, code: str, ts: float) -> di
 
 
 class TestSuccessRate(unittest.TestCase):
-    def test_only_completed_counts_as_success(self):
+    def test_only_completed_counts_as_success(self) -> None:
         """Success is COMPLETED. A cancelled goal was stopped, not finished —
         folding it into the rate would flatter a setup that keeps getting
         interrupted, which is the opposite of what a rate is for."""
@@ -78,7 +79,7 @@ class TestSuccessRate(unittest.TestCase):
         self.assertEqual(out["cancelled"], 1)
         self.assertEqual(out["success_rate"], 50)
 
-    def test_active_goals_count_in_totals_but_never_in_the_rate(self):
+    def test_active_goals_count_in_totals_but_never_in_the_rate(self) -> None:
         goals = [
             goal("COMPLETED", NOW - 100),
             goal("RUNNING", NOW - 10),
@@ -92,11 +93,11 @@ class TestSuccessRate(unittest.TestCase):
         self.assertEqual(out["succeeded"], 1)
         self.assertEqual(out["success_rate"], 100, "one terminal goal, and it succeeded")
 
-    def test_no_terminal_goals_means_no_rate(self):
+    def test_no_terminal_goals_means_no_rate(self) -> None:
         out = summarize_goals([goal("RUNNING", NOW - 1)], window_days=0)
         self.assertIsNone(out["success_rate"], "a rate over zero terminal goals is a claim about nothing")
 
-    def test_window_excludes_older_goals(self):
+    def test_window_excludes_older_goals(self) -> None:
         goals = [
             goal("COMPLETED", NOW - 8 * 86400, updated=NOW - 8 * 86400 + 60),
             goal("COMPLETED", NOW - 1 * 86400, updated=NOW - 1 * 86400 + 60),
@@ -105,14 +106,14 @@ class TestSuccessRate(unittest.TestCase):
         self.assertEqual(out["goals"], 1)
         self.assertEqual(out["succeeded"], 1)
 
-    def test_all_time_window_has_no_cutoff(self):
+    def test_all_time_window_has_no_cutoff(self) -> None:
         goals = [goal("FAILED", NOW - 400 * 86400)]
         out = summarize_goals(goals, window_days=0)
         self.assertEqual(out["goals"], 1)
 
 
 class TestUsageAggregation(unittest.TestCase):
-    def test_tokens_split_per_role_and_per_model(self):
+    def test_tokens_split_per_role_and_per_model(self) -> None:
         events = [
             usage_ev("fixer", "anthropic", "claude", 100, NOW - 30, duration_ms=1200),
             usage_ev("fixer", "ollama", "qwen", 10, NOW - 20, duration_ms=8),
@@ -126,7 +127,7 @@ class TestUsageAggregation(unittest.TestCase):
         self.assertEqual(out["by_model"]["anthropic/claude"]["total_tokens"], 225)
         self.assertEqual(out["by_model"]["anthropic/claude"]["calls"], 2)
 
-    def test_average_duration_averages_only_measured_calls(self):
+    def test_average_duration_averages_only_measured_calls(self) -> None:
         events = [
             usage_ev("fixer", "p", "m", 10, NOW - 3, duration_ms=100),
             usage_ev("fixer", "p", "m", 10, NOW - 2, duration_ms=300),
@@ -136,14 +137,14 @@ class TestUsageAggregation(unittest.TestCase):
         self.assertEqual(out["calls"], 3)
         self.assertEqual(out["avg_duration_ms"], 200, "average of the measured calls only")
 
-    def test_no_durations_means_none_never_zero(self):
+    def test_no_durations_means_none_never_zero(self) -> None:
         """Events written before durations existed must read as unknown. A 0ms
         average would be a false claim about a real engine."""
         events = [usage_ev("scribe", "p", "m", 5, NOW - 1, duration_ms=None)]
         out = summarize_usage(events, window_days=0)
         self.assertIsNone(out["avg_duration_ms"])
 
-    def test_failures_are_counted_and_never_add_tokens(self):
+    def test_failures_are_counted_and_never_add_tokens(self) -> None:
         events = [
             usage_ev("fixer", "p", "m", 10, NOW - 3, duration_ms=100),
             failure_ev("fixer", "p", "m", "provider_http", NOW - 2),
@@ -158,7 +159,7 @@ class TestUsageAggregation(unittest.TestCase):
         # A role with only failures has no measured duration — none, not zero.
         self.assertIsNone(out["by_role"]["scribe"]["avg_duration_ms"])
 
-    def test_window_excludes_older_events(self):
+    def test_window_excludes_older_events(self) -> None:
         events = [
             usage_ev("fixer", "p", "m", 1000, NOW - 20 * 86400, duration_ms=1),
             usage_ev("fixer", "p", "m", 10, NOW - 1 * 86400, duration_ms=2),
@@ -169,7 +170,7 @@ class TestUsageAggregation(unittest.TestCase):
 
 
 class TestDailyTrend(unittest.TestCase):
-    def test_rows_are_sparse_sorted_and_split_created_from_outcome(self):
+    def test_rows_are_sparse_sorted_and_split_created_from_outcome(self) -> None:
         day0 = NOW - 2 * 86400  # creation day
         day1 = NOW - 86400      # outcome day (same goal, finished later)
         goals = [goal("COMPLETED", day0, updated=day1)]
@@ -182,7 +183,7 @@ class TestDailyTrend(unittest.TestCase):
         self.assertIsNot(created_row, done_row, "a goal crossing midnight counts on each day it happened")
         self.assertEqual(done_row["total_tokens"], 45)
 
-    def test_failed_and_cancelled_landing_days(self):
+    def test_failed_and_cancelled_landing_days(self) -> None:
         day = NOW - 86400
         goals = [goal("FAILED", day), goal("CANCELLED", day + 60)]
         out = build_overview(goals, [], window_days=0)
@@ -192,7 +193,7 @@ class TestDailyTrend(unittest.TestCase):
 
 
 class TestWindowHandling(unittest.TestCase):
-    def test_normalize_accepts_choices_and_clamps_nonsense(self):
+    def test_normalize_accepts_choices_and_clamps_nonsense(self) -> None:
         self.assertEqual(normalize_window(1), 1)
         self.assertEqual(normalize_window(7), 7)
         self.assertEqual(normalize_window(30), 30)
@@ -200,14 +201,14 @@ class TestWindowHandling(unittest.TestCase):
         self.assertEqual(normalize_window(13), 7)
         self.assertEqual(normalize_window("bogus"), 7)
 
-    def test_overview_carries_window_and_generated_shape(self):
+    def test_overview_carries_window_and_generated_shape(self) -> None:
         out = build_overview([goal("COMPLETED", NOW)], [], window_days=7)
         self.assertEqual(out["window_days"], 7)
         self.assertIn("goals", out)
         self.assertIn("usage", out)
         self.assertIn("daily", out)
 
-    def test_empty_history_is_all_zeros_and_no_claims(self):
+    def test_empty_history_is_all_zeros_and_no_claims(self) -> None:
         out = build_overview([], [], window_days=0)
         self.assertEqual(out["goals"]["goals"], 0)
         self.assertIsNone(out["goals"]["success_rate"])
@@ -227,7 +228,7 @@ class TestWallClockWindowAnchor(unittest.TestCase):
 
     STALE = 90 * 86400  # 90 days ago
 
-    def test_idle_store_reports_an_empty_24h_window(self):
+    def test_idle_store_reports_an_empty_24h_window(self) -> None:
         goals = [goal("COMPLETED", NOW - self.STALE)]
         out = summarize_goals(goals, window_days=1, now=NOW)
 
@@ -239,7 +240,7 @@ class TestWallClockWindowAnchor(unittest.TestCase):
             "reporting 100% for a 90-day-old goal is the exact false claim this fixes",
         )
 
-    def test_wall_clock_anchor_differs_from_the_data_anchor(self):
+    def test_wall_clock_anchor_differs_from_the_data_anchor(self) -> None:
         """The bug itself, asserted in both modes so the fix cannot regress."""
         goals = [goal("COMPLETED", NOW - self.STALE)]
 
@@ -253,7 +254,7 @@ class TestWallClockWindowAnchor(unittest.TestCase):
         honest_claim = summarize_goals(goals, window_days=1, now=NOW)
         self.assertEqual(honest_claim["goals"], 0, "an injected wall clock empties the window")
 
-    def test_recent_goals_are_still_counted_with_a_wall_clock(self):
+    def test_recent_goals_are_still_counted_with_a_wall_clock(self) -> None:
         """The fix must not empty windows that genuinely have work in them."""
         goals = [
             goal("COMPLETED", NOW - 3600, updated=NOW - 3600),
@@ -267,7 +268,7 @@ class TestWallClockWindowAnchor(unittest.TestCase):
         self.assertEqual(out["failed"], 1)
         self.assertEqual(out["success_rate"], 50)
 
-    def test_idle_store_reports_no_spend(self):
+    def test_idle_store_reports_no_spend(self) -> None:
         events = [usage_ev("fixer", "p", "m", 1000, NOW - self.STALE, duration_ms=5)]
         out = summarize_usage(events, window_days=7, now=NOW)
 
@@ -276,7 +277,7 @@ class TestWallClockWindowAnchor(unittest.TestCase):
         self.assertIsNone(out["avg_duration_ms"])
         self.assertEqual(out["by_role"], {})
 
-    def test_recent_spend_is_still_counted_with_a_wall_clock(self):
+    def test_recent_spend_is_still_counted_with_a_wall_clock(self) -> None:
         events = [
             usage_ev("fixer", "p", "m", 1000, NOW - 60, duration_ms=5),
             usage_ev("fixer", "p", "m", 999, NOW - self.STALE, duration_ms=9),
@@ -287,7 +288,7 @@ class TestWallClockWindowAnchor(unittest.TestCase):
         self.assertEqual(out["total_tokens"], 1500)
         self.assertEqual(out["avg_duration_ms"], 5)
 
-    def test_daily_trend_drops_stale_days(self):
+    def test_daily_trend_drops_stale_days(self) -> None:
         goals = [goal("COMPLETED", NOW - self.STALE, updated=NOW - self.STALE)]
         self.assertEqual(
             daily_trend(goals, [], window_days=7, now=NOW), [],
@@ -295,12 +296,12 @@ class TestWallClockWindowAnchor(unittest.TestCase):
         )
         self.assertNotEqual(daily_trend(goals, [], window_days=7), [])
 
-    def test_all_time_ignores_the_anchor_entirely(self):
+    def test_all_time_ignores_the_anchor_entirely(self) -> None:
         """window=0 means "everything", so a stale store still reports."""
         goals = [goal("COMPLETED", NOW - 400 * 86400)]
         self.assertEqual(summarize_goals(goals, window_days=0, now=NOW)["goals"], 1)
 
-    def test_overview_anchors_all_three_sections_consistently(self):
+    def test_overview_anchors_all_three_sections_consistently(self) -> None:
         """One `now` for goals, spend, and the chart — never a mixed window."""
         goals = [goal("COMPLETED", NOW - self.STALE, updated=NOW - self.STALE)]
         events = [usage_ev("fixer", "p", "m", 1000, NOW - self.STALE, duration_ms=5)]

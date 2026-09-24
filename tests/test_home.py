@@ -40,7 +40,7 @@ def _stub_module(name: str, **attrs: Any) -> types.ModuleType:
 class _FakeKeyring:
     """A keyring that *works*, and remembers everything it was asked to do."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.writes: list[tuple[str, str, str]] = []
         self.reads: list[tuple[str, str]] = []
         self.store: dict[tuple[str, str], str] = {}
@@ -86,7 +86,7 @@ class _FakeKeyring:
 class _EnvCase(unittest.TestCase):
     """An environment where the real home is a temp directory, and nothing leaks."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.fake_home = self.root / "real-home"
@@ -94,11 +94,11 @@ class _EnvCase(unittest.TestCase):
         self.scratch = self.root / "scratch"
         self.notices: list[str] = []
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.tmp.cleanup()
 
     @contextlib.contextmanager
-    def env(self, **values):
+    def env(self, **values: str) -> Any:
         """Set CODIFY_* / HOME for a `with` block, and nothing else's opinion in it.
 
         The CODIFY_* variables are *removed* first — including the suite-wide
@@ -118,7 +118,7 @@ class _EnvCase(unittest.TestCase):
                 else:
                     os.environ[name] = value
 
-    def assert_real_home_untouched(self):
+    def assert_real_home_untouched(self) -> None:
         """Nothing was created under the (fake) real home directory. Ever."""
         leftovers = sorted(p.name for p in self.fake_home.rglob("*"))
         self.assertEqual(
@@ -127,7 +127,7 @@ class _EnvCase(unittest.TestCase):
 
 
 class TestHomeResolution(_EnvCase):
-    def test_the_default_store_is_under_the_home_directory(self):
+    def test_the_default_store_is_under_the_home_directory(self) -> None:
         with self.env():
             self.assertEqual(home.codify_home(), self.fake_home / ".codify")
             self.assertEqual(home.db_path(), self.fake_home / ".codify" / "codify.db")
@@ -136,14 +136,14 @@ class TestHomeResolution(_EnvCase):
             )
             self.assertFalse(home.is_isolated())
 
-    def test_one_home_override_moves_both_stores(self):
+    def test_one_home_override_moves_both_stores(self) -> None:
         with self.env(**{home.ENV_HOME: str(self.scratch)}):
             self.assertEqual(home.db_path(), self.scratch / "codify.db")
             self.assertEqual(home.secrets_path(), self.scratch / "secrets.json")
             self.assertTrue(home.is_isolated())
             self.assertEqual(home.codify_home(), self.scratch)
 
-    def test_a_store_specific_override_beats_the_home(self):
+    def test_a_store_specific_override_beats_the_home(self) -> None:
         with self.env(
             **{
                 home.ENV_HOME: str(self.scratch),
@@ -153,7 +153,7 @@ class TestHomeResolution(_EnvCase):
             self.assertEqual(home.db_path(), self.root / "elsewhere.db")
             self.assertEqual(home.secrets_path(), self.scratch / "secrets.json")
 
-    def test_a_database_override_alone_is_not_isolation_but_is_stated(self):
+    def test_a_database_override_alone_is_not_isolation_but_is_stated(self) -> None:
         """Moving the database must not silently relocate a user's credentials.
 
         It also must not silently *look* isolated, which is why the notice for this
@@ -166,7 +166,7 @@ class TestHomeResolution(_EnvCase):
             self.assertIn("warning", notice)
             self.assertIn(home.ENV_HOME, notice)
 
-    def test_an_isolated_run_says_so_at_boot(self):
+    def test_an_isolated_run_says_so_at_boot(self) -> None:
         with self.env(**{home.ENV_HOME: str(self.scratch)}):
             notice = home.startup_notice()
             self.assertIn(str(self.scratch), notice)
@@ -183,7 +183,7 @@ class TestTheSuiteItselfIsHermetic(unittest.TestCase):
     of quietly rewriting a real store on the next `make test`.
     """
 
-    def test_the_suite_runs_against_a_throwaway_store(self):
+    def test_the_suite_runs_against_a_throwaway_store(self) -> None:
         self.assertTrue(home.is_isolated(), "tests/hermetic.py did not activate")
         real = Path.home() / ".codify"
         self.assertNotEqual(home.codify_home(), real)
@@ -193,7 +193,7 @@ class TestTheSuiteItselfIsHermetic(unittest.TestCase):
             home.keyring_allowed(), "the suite must not be able to reach a real keychain"
         )
 
-    def test_a_key_saved_by_a_test_lands_in_the_throwaway_store(self):
+    def test_a_key_saved_by_a_test_lands_in_the_throwaway_store(self) -> None:
         kc = Keychain()
         kc.set_provider_key("ollama", "sk-suite-probe")
         self.assertEqual(kc.backend, "file")
@@ -204,13 +204,13 @@ class TestTheSuiteItselfIsHermetic(unittest.TestCase):
 
 
 class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.keyring = _FakeKeyring()
         self.keyring.install()
         self.addCleanup(self.keyring.uninstall)
 
-    def test_a_normal_run_uses_the_keychain_it_was_not_told_to_avoid(self):
+    def test_a_normal_run_uses_the_keychain_it_was_not_told_to_avoid(self) -> None:
         """Sanity: the stub really is a usable keyring, so the tests below mean something."""
         with self.env():
             kc = Keychain()
@@ -218,7 +218,7 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
             kc.set_provider_key("openai", "sk-real")
             self.assertEqual(len(self.keyring.writes), 1)
 
-    def test_a_redirected_home_keeps_the_keychain_out_of_it(self):
+    def test_a_redirected_home_keeps_the_keychain_out_of_it(self) -> None:
         with self.env(**{home.ENV_HOME: str(self.scratch)}):
             kc = Keychain()
             self.assertEqual(kc.backend, "file")
@@ -232,7 +232,7 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
             self.assertEqual(kc.get_provider_key("google"), "fake-google-key")
             self.assert_real_home_untouched()
 
-    def test_a_redirected_secrets_file_keeps_the_keychain_out_of_it(self):
+    def test_a_redirected_secrets_file_keeps_the_keychain_out_of_it(self) -> None:
         with self.env(**{home.ENV_SECRETS: str(self.scratch / "keys.json")}):
             kc = Keychain()
             self.assertEqual(kc.backend, "file")
@@ -244,7 +244,7 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
             )
             self.assert_real_home_untouched()
 
-    def test_an_injected_store_is_the_store(self):
+    def test_an_injected_store_is_the_store(self) -> None:
         """What the API tests do — and what they were not getting before.
 
         `Keychain(secrets_path=...)` means \"use this file\". It used to still try the
@@ -265,7 +265,7 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
             )
             self.assert_real_home_untouched()
 
-    def test_the_machine_readable_reason_distinguishes_the_three_causes(self):
+    def test_the_machine_readable_reason_distinguishes_the_three_causes(self) -> None:
         """`file` has three causes; only one of them is "this box has no keyring"."""
         with self.env():
             self.assertEqual(Keychain().storage_reason(), "keyring")
@@ -282,7 +282,7 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
             self.assertEqual(Keychain().storage_reason(), "no_keyring")
             self.assertTrue(home.keyring_allowed(), "this is not an isolation case")
 
-    def test_where_and_why_are_two_statements(self):
+    def test_where_and_why_are_two_statements(self) -> None:
         """`storage_detail` says where, `storage_reason` says why.
 
         If the destination also explained itself, the settings screen would state the
@@ -294,7 +294,7 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
             self.assertNotIn("deliberately", kc.describes_backend())
             self.assertEqual(kc.storage_reason(), "isolated_run")
 
-    def test_the_database_lands_in_the_scratch_home_too(self):
+    def test_the_database_lands_in_the_scratch_home_too(self) -> None:
         with self.env(**{home.ENV_HOME: str(self.scratch)}):
             conn = connect()
             try:
@@ -304,7 +304,7 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
             self.assertTrue((self.scratch / "codify.db").exists())
             self.assert_real_home_untouched()
 
-    def test_the_boot_notice_is_a_stderr_line_and_the_handshake_stays_on_stdout(self):
+    def test_the_boot_notice_is_a_stderr_line_and_the_handshake_stays_on_stdout(self) -> None:
         """The Tauri shell scans stdout for `CODIFY_ENGINE token=… port=…`.
 
         So the state notice must not share that channel: a second stdout line is a
@@ -315,13 +315,13 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
 
         import engine.app as app_module
 
-        started: list[tuple] = []
+        started: list[tuple[()]] = []
 
         class FakeServer:
-            def __init__(self, config):
+            def __init__(self, config: Any) -> None:
                 self.config = config
 
-            def run(self, sockets=None):
+            def run(self, sockets: Any = None) -> None:
                 started.append(tuple(sockets or ()))
                 for s in sockets or ():
                     s.close()

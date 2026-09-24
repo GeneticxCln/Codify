@@ -7,20 +7,21 @@ on a working install changes nothing at all.
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import unittest
+from typing import Any
 
 from engine.models import ROLES
 from engine.role_repair import choose_target, plan_role_repair
 
 
-def config(role, provider, model, protocol="ollama", **rest):
+def config(role: str, provider: str, model: str, protocol: str = "ollama", **rest: Any) -> dict[str, Any]:
     return {"role": role, "provider": provider, "model_name": model, "protocol": protocol, **rest}
 
 
-def key(provider, has_key, needs_key):
+def key(provider: str, has_key: bool, needs_key: bool) -> dict[str, Any]:
     return {"provider": provider, "has_key": has_key, "needs_key": needs_key}
 
 
-def status(provider, ok, error=None, count=1):
+def status(provider: str, ok: bool, error: str | None = None, count: int = 1) -> dict[str, Any]:
     return {"provider": provider, "ok": ok, "count": count, "error": error}
 
 
@@ -31,7 +32,7 @@ KEYS = [OLLAMA_KEY, OPENAI_KEY]
 
 
 class TestWhoNeedsRepair(unittest.TestCase):
-    def test_a_role_with_no_model_needs_repair(self):
+    def test_a_role_with_no_model_needs_repair(self) -> None:
         plan = plan_role_repair(
             configs=[config("planner", "ollama", "")],
             key_status=KEYS,
@@ -42,7 +43,7 @@ class TestWhoNeedsRepair(unittest.TestCase):
         self.assertEqual(plan.left_alone, [])
         self.assertTrue(plan.changed)
 
-    def test_a_role_on_a_keyless_provider_with_a_model_is_left_alone(self):
+    def test_a_role_on_a_keyless_provider_with_a_model_is_left_alone(self) -> None:
         plan = plan_role_repair(
             configs=[config("fixer", "ollama", "local-1")],
             key_status=KEYS,
@@ -53,7 +54,7 @@ class TestWhoNeedsRepair(unittest.TestCase):
         self.assertFalse(plan.changed)
         self.assertIn("verified in the catalog", plan.left_alone[0][1])
 
-    def test_a_role_on_a_provider_without_a_key_needs_repair(self):
+    def test_a_role_on_a_provider_without_a_key_needs_repair(self) -> None:
         plan = plan_role_repair(
             configs=[config("tester", "openai", "gpt-4.1-mini", protocol="openai_compat")],
             key_status=KEYS,
@@ -62,7 +63,7 @@ class TestWhoNeedsRepair(unittest.TestCase):
         )
         self.assertEqual(plan.to_repair, [("tester", "openai needs a credential and none is stored")])
 
-    def test_a_role_whose_model_was_retired_needs_repair(self):
+    def test_a_role_whose_model_was_retired_needs_repair(self) -> None:
         plan = plan_role_repair(
             configs=[config("fixer", "ollama", "ghost:latest")],
             key_status=KEYS,
@@ -74,7 +75,7 @@ class TestWhoNeedsRepair(unittest.TestCase):
         )
         self.assertEqual(plan.to_repair, [("fixer", 'ollama no longer reports "ghost:latest"')])
 
-    def test_a_failed_discovery_never_makes_a_role_repairable(self):
+    def test_a_failed_discovery_never_makes_a_role_repairable(self) -> None:
         """An unanswered provider is an unknown, not a fault.
 
         Repointing a role because discovery timed out would be the same false claim
@@ -93,7 +94,7 @@ class TestWhoNeedsRepair(unittest.TestCase):
         self.assertNotIn("usable", reason)
         self.assertTrue(any("did not answer discovery" in n for n in plan.notes))
 
-    def test_an_unreachable_provider_is_reported_once_not_once_per_role(self):
+    def test_an_unreachable_provider_is_reported_once_not_once_per_role(self) -> None:
         """Seven roles on one dead provider is one caveat, not seven."""
         plan = plan_role_repair(
             configs=[config(role, "ollama", "local-1") for role in ROLES],
@@ -106,7 +107,7 @@ class TestWhoNeedsRepair(unittest.TestCase):
         self.assertEqual(len(plan.notes), 1, plan.notes)
         self.assertIn("did not answer discovery", plan.notes[0])
 
-    def test_a_model_the_provider_still_reports_is_never_touched(self):
+    def test_a_model_the_provider_still_reports_is_never_touched(self) -> None:
         plan = plan_role_repair(
             configs=[
                 config("fixer", "ollama", "local-2"),
@@ -124,7 +125,7 @@ class TestWhoNeedsRepair(unittest.TestCase):
 
 
 class TestWhatItPicks(unittest.TestCase):
-    def test_it_prefers_the_model_the_working_roles_already_use(self):
+    def test_it_prefers_the_model_the_working_roles_already_use(self) -> None:
         plan = plan_role_repair(
             configs=[
                 config("fixer", "ollama", "shared-model"),
@@ -141,7 +142,7 @@ class TestWhatItPicks(unittest.TestCase):
         self.assertEqual(plan.target, {"provider": "ollama", "model": "shared-model"})
         self.assertIn("2 of 2 working roles already use", plan.target_reason)
 
-    def test_it_prefers_a_provider_that_needs_no_credential(self):
+    def test_it_prefers_a_provider_that_needs_no_credential(self) -> None:
         keyless, reason = choose_target(
             configs=[config("planner", "openai", "", protocol="openai_compat")],
             working_roles=set(),
@@ -154,7 +155,7 @@ class TestWhatItPicks(unittest.TestCase):
         self.assertEqual(keyless, {"provider": "ollama", "model": "local-1"})
         self.assertIn("needs no credential", reason)
 
-    def test_it_skips_models_the_provider_reports_as_non_chat(self):
+    def test_it_skips_models_the_provider_reports_as_non_chat(self) -> None:
         plan = plan_role_repair(
             configs=[config("planner", "ollama", "")],
             key_status=KEYS,
@@ -166,7 +167,7 @@ class TestWhatItPicks(unittest.TestCase):
         )
         self.assertEqual(plan.target, {"provider": "ollama", "model": "local-1"})
 
-    def test_an_empty_catalog_changes_nothing_and_says_why(self):
+    def test_an_empty_catalog_changes_nothing_and_says_why(self) -> None:
         plan = plan_role_repair(
             configs=[config("planner", "ollama", "")],
             key_status=KEYS,
@@ -193,7 +194,7 @@ class TestFallbackInterplay(unittest.TestCase):
     very choice holding it up.
     """
 
-    def test_a_role_rescued_by_its_fallback_is_left_alone(self):
+    def test_a_role_rescued_by_its_fallback_is_left_alone(self) -> None:
         plan = plan_role_repair(
             configs=[
                 config(
@@ -213,7 +214,7 @@ class TestFallbackInterplay(unittest.TestCase):
         # The reason still says why the primary is not the one being used.
         self.assertIn("needs a credential", reason)
 
-    def test_a_fallback_the_provider_no_longer_serves_does_not_rescue_the_role(self):
+    def test_a_fallback_the_provider_no_longer_serves_does_not_rescue_the_role(self) -> None:
         plan = plan_role_repair(
             configs=[
                 config(
@@ -233,7 +234,7 @@ class TestFallbackInterplay(unittest.TestCase):
         self.assertIn("its fallback ollama/ghost:latest is unusable too", reason)
         self.assertIn('ollama no longer reports "ghost:latest"', reason)
 
-    def test_an_unverifiable_fallback_is_not_a_proven_fault(self):
+    def test_an_unverifiable_fallback_is_not_a_proven_fault(self) -> None:
         """The fallback provider never answered, so nothing is proven about it.
 
         Leaving the role alone is the same restraint the primary gets: the role may
@@ -258,7 +259,7 @@ class TestFallbackInterplay(unittest.TestCase):
         self.assertNotIn("usable:", reason)
         self.assertEqual(len(plan.notes), 1)
 
-    def test_a_rescued_roles_fallback_model_counts_as_the_one_in_use(self):
+    def test_a_rescued_roles_fallback_model_counts_as_the_one_in_use(self) -> None:
         """Repair should meet the install where it is.
 
         The rescued role is running the fallback model, so pointing the broken

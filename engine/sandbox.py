@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from engine.fs import FileSystemService, PathEscapeError
+from typing import Any
 
 PYTEST_FLAGS = {"-q", "-v", "--tb=short", "--no-header"}
 MAXFAIL_RE = re.compile(r"^--maxfail=\d+$")
@@ -164,7 +165,7 @@ def validate_argv(argv: list[str], fs: FileSystemService, mode: str = "test") ->
 class SandboxService:
     def run_command(
         self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test",
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Run one allowlisted command. `mode="read_only"` narrows the allowlist
         to commands that cannot change the workspace (used by the librarian).
 

@@ -32,16 +32,16 @@ def _make_workspace(root: Path) -> None:
 
 
 class TestLibrarianReads(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name).resolve()
         _make_workspace(self.root)
         self.lib = LibraryService(str(self.root))
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def test_read_returns_text_and_reports_truncation(self):
+    def test_read_returns_text_and_reports_truncation(self) -> None:
         res = self.lib.read("src/app.py")
         self.assertIn("def greet", res["text"])
         self.assertFalse(res["truncated"])
@@ -50,15 +50,15 @@ class TestLibrarianReads(unittest.TestCase):
         self.assertTrue(big["truncated"], "a truncating read must say so")
         self.assertEqual(len(big["text"]), MAX_READ_CHARS)
 
-    def test_read_cannot_escape_the_workspace(self):
+    def test_read_cannot_escape_the_workspace(self) -> None:
         with self.assertRaises(PathEscapeError):
             self.lib.read("../../etc/passwd")
 
-    def test_read_of_a_directory_is_refused(self):
+    def test_read_of_a_directory_is_refused(self) -> None:
         with self.assertRaises(IsADirectoryError):
             self.lib.read("src")
 
-    def test_search_is_literal_and_case_insensitive(self):
+    def test_search_is_literal_and_case_insensitive(self) -> None:
         res = self.lib.search("greet")
         paths = {m["path"] for m in res["matches"]}
         self.assertIn("src/app.py", paths)
@@ -66,11 +66,11 @@ class TestLibrarianReads(unittest.TestCase):
         self.assertNotIn("node_modules/dep.js", paths, "package caches are not scanned")
         self.assertNotIn("binary.dat", res["files_scanned"] and paths, "binary files are skipped")
 
-    def test_search_honours_a_glob(self):
+    def test_search_honours_a_glob(self) -> None:
         res = self.lib.search("greet", glob="*.py")
         self.assertTrue(all(m["path"].endswith(".py") for m in res["matches"]))
 
-    def test_search_reports_its_own_limits(self):
+    def test_search_reports_its_own_limits(self) -> None:
         """A partial search must be labelled as partial — silently answering from
         a fraction of the tree is how a confident wrong answer gets produced."""
         res = self.lib.search("greet")
@@ -84,11 +84,11 @@ class TestLibrarianReads(unittest.TestCase):
         res["truncated"] = True
         self.assertIn("TRUNCATED", format_search(res))
 
-    def test_search_rejects_an_empty_query(self):
+    def test_search_rejects_an_empty_query(self) -> None:
         with self.assertRaises(ValueError):
             self.lib.search("   ")
 
-    def test_regex_search_finds_structural_patterns_literal_cannot(self):
+    def test_regex_search_finds_structural_patterns_literal_cannot(self) -> None:
         """Alternation + escaped metachars: no single substring can ask this."""
         res = self.lib.search(r"greet\(|GREETING", regex=True)
         paths = {m["path"] for m in res["matches"]}
@@ -96,21 +96,21 @@ class TestLibrarianReads(unittest.TestCase):
         self.assertIn("src/util.py", paths)
         self.assertTrue(res.get("regex"), "the result must say which mode ran")
 
-    def test_regex_search_rejects_an_invalid_pattern_as_a_valueerror(self):
+    def test_regex_search_rejects_an_invalid_pattern_as_a_valueerror(self) -> None:
         with self.assertRaises(ValueError):
             self.lib.search("([unclosed", regex=True)
 
-    def test_regex_search_rejects_an_oversized_pattern(self):
+    def test_regex_search_rejects_an_oversized_pattern(self) -> None:
         with self.assertRaises(ValueError):
             self.lib.search("a" * 201, regex=True)
 
-    def test_literal_search_is_untouched_by_the_regex_path(self):
+    def test_literal_search_is_untouched_by_the_regex_path(self) -> None:
         res = self.lib.search("def greet")
         self.assertTrue(res["matches"])
         self.assertNotIn("regex", res)
 
 
-    def test_line_range_reaches_past_the_head_cap(self):
+    def test_line_range_reaches_past_the_head_cap(self) -> None:
         """The window is taken where the lines are, not from the first 8K chars:
         a range read exists to reach the bottom half of a large file."""
         lines = [f"line {i}" for i in range(1, 1501)]
@@ -125,14 +125,14 @@ class TestLibrarianReads(unittest.TestCase):
         self.assertEqual(res["total_lines"], 1500)
         self.assertTrue(res["truncated"])
 
-    def test_line_window_on_a_small_file_reports_its_slice(self):
+    def test_line_window_on_a_small_file_reports_its_slice(self) -> None:
         res = self.lib.read("src/app.py", offset=2, limit=1)
         self.assertIn("hello", res["text"])
         self.assertEqual(res["lines"], 1)
         self.assertEqual(res["offset"], 2)
         self.assertEqual(res["total_lines"], 6)
 
-    def test_an_empty_window_is_rendered_as_one(self):
+    def test_an_empty_window_is_rendered_as_one(self) -> None:
         """format_read must not do range math on an empty window — the old
         offset+lines-1 math produced nonsense like "lines 50-49"."""
         rendered = format_read({
@@ -142,11 +142,11 @@ class TestLibrarianReads(unittest.TestCase):
         self.assertIn("empty range", rendered)
         self.assertNotIn("lines 50-49", rendered)
 
-    def test_search_rendering_names_the_glob(self):
+    def test_search_rendering_names_the_glob(self) -> None:
         res = self.lib.search("greet", glob="*.py")
         self.assertIn("glob=", format_search(res))
 
-    def test_tree_skips_caches_and_reports_its_limit(self):
+    def test_tree_skips_caches_and_reports_its_limit(self) -> None:
         tree = self.lib.tree()
         self.assertTrue(any(p.endswith("src/app.py") for p in tree["files"]))
         self.assertFalse(any("node_modules" in p for p in tree["files"]))
@@ -155,49 +155,49 @@ class TestLibrarianReads(unittest.TestCase):
 class TestLibrarianCommands(unittest.TestCase):
     """The read-only mode is the enforcement point: the library delegates to it."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name).resolve()
         _make_workspace(self.root)
         self.lib = LibraryService(str(self.root))
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def test_read_only_git_history_is_allowed(self):
+    def test_read_only_git_history_is_allowed(self) -> None:
         res = SandboxService().run_command(str(self.root), ["git", "status"], mode="read_only")
         self.assertIn("exit_code", res)
 
-    def test_read_only_mode_refuses_writing_git(self):
+    def test_read_only_mode_refuses_writing_git(self) -> None:
         for argv in (["git", "commit", "-m", "x"], ["git", "add", "-A"], ["git", "checkout", "."]):
             with self.assertRaises(CommandNotAllowed, msg=f"{argv} must be refused"):
                 validate_argv(argv, self.lib._fs, mode="read_only")
 
-    def test_read_only_mode_refuses_git_redirects(self):
+    def test_read_only_mode_refuses_git_redirects(self) -> None:
         # `-C` would point git at another directory and `--output` would write a file.
         for argv in (["git", "-C", "/tmp", "status"], ["git", "log", "--output=/tmp/out"]):
             with self.assertRaises(CommandNotAllowed):
                 validate_argv(argv, self.lib._fs, mode="read_only")
 
-    def test_read_only_mode_refuses_binaries_that_can_write(self):
+    def test_read_only_mode_refuses_binaries_that_can_write(self) -> None:
         for argv in (["rm", "-rf", "src"], ["pytest"], ["npm", "test"], ["python3", "x.py"]):
             with self.assertRaises(CommandNotAllowed):
                 validate_argv(argv, self.lib._fs, mode="read_only")
 
-    def test_read_only_mode_allows_ls_but_not_its_recursive_flag(self):
+    def test_read_only_mode_allows_ls_but_not_its_recursive_flag(self) -> None:
         validate_argv(["ls", "-la", "src"], self.lib._fs, mode="read_only")
         with self.assertRaises(CommandNotAllowed):
             validate_argv(["ls", "-R"], self.lib._fs, mode="read_only")
 
-    def test_read_only_mode_still_refuses_paths_outside_the_workspace(self):
+    def test_read_only_mode_still_refuses_paths_outside_the_workspace(self) -> None:
         with self.assertRaises(CommandNotAllowed):
             validate_argv(["ls", "/etc"], self.lib._fs, mode="read_only")
 
-    def test_a_refused_command_reaches_the_caller_as_a_refusal_not_a_crash(self):
+    def test_a_refused_command_reaches_the_caller_as_a_refusal_not_a_crash(self) -> None:
         with self.assertRaises(CommandNotAllowed):
             self.lib.git(["commit", "-m", "nope"])
 
-    def test_read_only_binaries_are_found_on_path(self):
+    def test_read_only_binaries_are_found_on_path(self) -> None:
         """`ls` must exist, or the ability is theoretical on this machine."""
         self.assertTrue(os.path.exists("/bin/ls") or os.path.exists("/usr/bin/ls"))
 

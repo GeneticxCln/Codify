@@ -5,13 +5,16 @@ import json
 import os
 import secrets
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -31,12 +34,16 @@ from engine.models import (
     ROLE_TIMING,
     AgentConfig,
     AgentConfigUpdate,
+    Event,
+    Goal,
     GoalCreate,
     GoalDetail,
+    PlanStep,
     PlanStepUpdate,
     ProviderKeyUpdate,
     ROLES,
     VersionedAction,
+    Workspace,
     WorkspaceCreate,
 )
 from engine.providers import Keychain, ProviderError, ProviderFactory
@@ -57,8 +64,10 @@ def pick_port() -> int:
     if env:
         try:
             port = int(str(env).strip())
-        except (TypeError, ValueError):
-            raise RuntimeError(f"invalid CODIFY_PORT={env!r}: must be an integer 1024-65535")
+        except (TypeError, ValueError) as err:
+            raise RuntimeError(
+                f"invalid CODIFY_PORT={env!r}: must be an integer 1024-65535"
+            ) from err
         if not 1024 <= port <= 65535:
             raise RuntimeError(f"invalid CODIFY_PORT={port}: must be 1024-65535")
         return port
@@ -74,7 +83,7 @@ def pick_port() -> int:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The keychain is built first so a role-id migration (coder→fixer, ...) can
     # carry that role's stored credential onto the new id in the same step.
     keychain = Keychain()
@@ -157,7 +166,7 @@ app = FastAPI(title="Codify Engine", lifespan=lifespan)
 
 
 @app.middleware("http")
-async def auth(request: Request, call_next):
+async def auth(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     # CORS preflights carry no Authorization header; let them through.
     if request.method == "OPTIONS":
         return await call_next(request)
@@ -196,7 +205,7 @@ app.add_middleware(
 
 
 @app.exception_handler(ApiError)
-async def api_error(_req, exc: ApiError):
+async def api_error(_req: Request, exc: ApiError) -> JSONResponse:
     body = {"code": exc.code, "message": exc.message}
     if exc.extra:
         body.update(exc.extra)
@@ -204,7 +213,7 @@ async def api_error(_req, exc: ApiError):
 
 
 @app.get("/health")
-async def health(request: Request):
+async def health(request: Request) -> dict[str, bool]:
     # authenticated=False means the request arrived without a valid bearer
     # token — still proof the engine is up (UI uses this as a fallback when
     # Tauri IPC has not delivered the token yet).
@@ -216,12 +225,12 @@ async def health(request: Request):
 
 
 @app.get("/settings/providers")
-async def list_providers(request: Request):
+async def list_providers(request: Request) -> dict[str, Any]:
     return request.app.state.registry.provider_catalog()
 
 
 @app.get("/settings/laya")
-async def laya_status(request: Request):
+async def laya_status(request: Request) -> dict[str, Any]:
     """Capability report for the System-1 gate (no model weights loaded here).
 
     The UI uses this to say *which* engine is gating goals — the real in-process
@@ -233,7 +242,7 @@ async def laya_status(request: Request):
 
 
 @app.get("/settings/keys")
-async def get_keys(request: Request):
+async def get_keys(request: Request) -> list[dict[str, Any]]:
     keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
 
     # Where a saved key will actually go. The UI has to state this rather than
@@ -260,7 +269,7 @@ async def get_keys(request: Request):
 
 
 @app.post("/settings/keys")
-async def save_key(body: ProviderKeyUpdate, request: Request):
+async def save_key(body: ProviderKeyUpdate, request: Request) -> dict[str, Any]:
     keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
     try:
         keychain.set_provider_key(body.provider, body.api_key)
@@ -282,12 +291,12 @@ async def save_key(body: ProviderKeyUpdate, request: Request):
 
 
 @app.get("/settings/agents", response_model=list[AgentConfig])
-async def list_agents(request: Request):
+async def list_agents(request: Request) -> list[AgentConfig]:
     return request.app.state.registry.list_configs()
 
 
 @app.get("/settings/agents/stats")
-async def agent_call_stats(request: Request, limit: int = Query(20, ge=1, le=100)):
+async def agent_call_stats(request: Request, limit: int = Query(20, ge=1, le=100)) -> dict[str, Any]:
     """What actually happened to each role the last time it ran, and how often.
 
     The roadmap's "per-agent cost/latency stats on Agents settings cards": read
@@ -316,7 +325,7 @@ async def agent_call_stats(request: Request, limit: int = Query(20, ge=1, le=100
         (*types, max(1, int(limit)) * 20),
     ).fetchall()
 
-    stats: dict[str, dict] = {
+    stats: dict[str, dict[str, Any]] = {
         role: {
             "role": role,
             "last_call": None,
@@ -327,7 +336,7 @@ async def agent_call_stats(request: Request, limit: int = Query(20, ge=1, le=100
         for role in ROLES
     }
 
-    def _load(raw) -> dict:
+    def _load(raw: Any) -> dict[str, Any]:
         try:
             return json.loads(raw or "{}")
         except (TypeError, ValueError):
@@ -367,7 +376,7 @@ async def agent_call_stats(request: Request, limit: int = Query(20, ge=1, le=100
 
 
 @app.post("/settings/agents/repair")
-async def repair_agents(request: Request):
+async def repair_agents(request: Request) -> dict[str, Any]:
     """Point the roles that cannot run at a model this engine has discovered.
 
     One action, and deliberately not "apply one model to every role": a role that
@@ -399,12 +408,12 @@ async def repair_agents(request: Request):
         catalog=catalog.get("models") or [],
     )
 
-    repaired: list[dict] = []
+    repaired: list[dict[str, Any]] = []
     # `plan.changed` already means the target is set (see the property in
     # `engine/role_repair.py`); this says so where the target is dereferenced.
     if plan.changed and plan.target is not None:
         for role, reason in plan.to_repair:
-            patch: dict = {"provider": plan.target["provider"], "model_name": plan.target["model"]}
+            patch: dict[str, Any] = {"provider": plan.target["provider"], "model_name": plan.target["model"]}
             # The protocol comes from the catalog entry the engine discovered, so a
             # role moved onto a provider speaks that provider's wire format. The
             # endpoint is deliberately NOT sent: a provider switch resets it to the
@@ -461,7 +470,7 @@ async def repair_agents(request: Request):
 
 
 @app.get("/settings/roles")
-async def list_roles(request: Request):
+async def list_roles(request: Request) -> list[dict[str, Any]]:
     """What each slot is for, and when it runs.
 
     The settings screen shows this instead of keeping its own copy: two lists in
@@ -482,12 +491,12 @@ async def list_roles(request: Request):
 
 
 @app.get("/settings/agents/{role}", response_model=AgentConfig)
-async def get_agent(role: str, request: Request):
+async def get_agent(role: str, request: Request) -> AgentConfig:
     return request.app.state.registry.get_config(role)
 
 
 @app.put("/settings/agents/{role}", response_model=AgentConfig)
-async def put_agent(role: str, patch: AgentConfigUpdate, request: Request):
+async def put_agent(role: str, patch: AgentConfigUpdate, request: Request) -> AgentConfig:
     updated = request.app.state.registry.set_config(role, patch)
     # The role may now point at a different provider/endpoint, which changes
     # which models are discoverable at all.
@@ -498,7 +507,7 @@ async def put_agent(role: str, patch: AgentConfigUpdate, request: Request):
 
 
 @app.post("/settings/agents/{role}/test-connection")
-async def test_agent(role: str, request: Request):
+async def test_agent(role: str, request: Request) -> dict[str, Any]:
     if role not in ROLES:
         raise ApiError(404, "unknown_role", f"Unknown agent role {role}")
     try:
@@ -514,13 +523,13 @@ async def test_agent(role: str, request: Request):
 
 
 @app.post("/workspaces")
-async def create_ws(body: WorkspaceCreate, request: Request):
+async def create_ws(body: WorkspaceCreate, request: Request) -> Workspace:
     return request.app.state.workspaces.create(body)
 
 
 @app.post("/workspaces/browse")
-async def browse_workspace(request: Request):
-    def _pick():
+async def browse_workspace(request: Request) -> dict[str, Any]:
+    def _pick() -> str | None:
         code = """
 import gi
 gi.require_version('Gtk', '3.0')
@@ -556,7 +565,7 @@ while Gtk.events_pending():
 
 
 @app.get("/models")
-async def list_available_models(request: Request, refresh: bool = False):
+async def list_available_models(request: Request, refresh: bool = False) -> dict[str, Any]:
     """The model catalog, discovered live from every configured provider.
 
     `refresh=true` bypasses the short cache; the UI passes it when it opens so a
@@ -572,7 +581,7 @@ async def list_available_models(request: Request, refresh: bool = False):
 
 
 @app.get("/models/recent")
-async def recent_models(request: Request, limit: int = Query(5, ge=1, le=25)):
+async def recent_models(request: Request, limit: int = Query(5, ge=1, le=25)) -> list[dict[str, Any]]:
     """Models that actually answered recently, newest first, from the event log.
 
     What the chat's model menu orders by. It is deliberately *not* derived from
@@ -585,7 +594,7 @@ async def recent_models(request: Request, limit: int = Query(5, ge=1, le=25)):
 
 
 @app.get("/settings/engine")
-async def get_engine_settings(request: Request):
+async def get_engine_settings(request: Request) -> dict[str, Any]:
     """The engine-wide settings screen values, each with its clamp bounds so the
     UI can validate before saving instead of discovering a clamp after."""
     settings: SettingsService = request.app.state.settings
@@ -606,7 +615,7 @@ async def get_engine_settings(request: Request):
 
 
 @app.put("/settings/engine")
-async def put_engine_settings(body: dict, request: Request):
+async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[str, Any]:
     """Persist engine-wide settings. Only known keys are accepted; each clamps
     to its band, and the response echoes what was actually stored so the UI
     shows the truth rather than what the user typed."""
@@ -618,20 +627,20 @@ async def put_engine_settings(body: dict, request: Request):
                 raise ApiError(422, "invalid_value", f"{key} must be an integer, not a boolean")
             try:
                 out[key] = settings.set_int(key, int(value))
-            except (TypeError, ValueError):
-                raise ApiError(422, "invalid_value", f"{key} must be an integer")
+            except (TypeError, ValueError) as err:
+                raise ApiError(422, "invalid_value", f"{key} must be an integer") from err
         else:
             raise ApiError(400, "unknown_setting", f"unknown engine setting: {key}")
     return {"saved": out}
 
 
 @app.get("/workspaces")
-async def list_ws(request: Request):
+async def list_ws(request: Request) -> list[Workspace]:
     return request.app.state.workspaces.list_workspaces()
 
 
 @app.get("/workspaces/{workspace_id}")
-async def get_ws(workspace_id: str, request: Request):
+async def get_ws(workspace_id: str, request: Request) -> Workspace:
     return request.app.state.workspaces.get(workspace_id)
 
 
@@ -640,7 +649,7 @@ async def delete_ws(
     workspace_id: str,
     request: Request,
     delete_goals: bool = False,
-):
+) -> dict[str, Any]:
     """Forget a workspace, and with it the goal history recorded against it.
 
     Declared before nothing in particular (no sibling path shape to shadow) but
@@ -660,7 +669,7 @@ async def delete_ws(
 
 
 @app.post("/goals")
-async def create_goal(body: GoalCreate, request: Request):
+async def create_goal(body: GoalCreate, request: Request) -> Goal:
     goal = request.app.state.goals.create(body)
     _spawn(request.app, request.app.state.executor.run_planning(goal.id), goal.id)
     return goal
@@ -673,7 +682,7 @@ async def list_goals(
     status: str | None = None,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-):
+) -> list[Goal]:
     """Goal history, newest first (active goals lead, so a just-dispatched goal
     never sinks under a wall of finished runs).
 
@@ -689,12 +698,12 @@ async def list_goals(
 
 
 @app.get("/goals/{goal_id}")
-async def get_goal(goal_id: str, request: Request):
+async def get_goal(goal_id: str, request: Request) -> GoalDetail:
     g = request.app.state.goals.get(goal_id)
     return GoalDetail(**g.model_dump(), steps=request.app.state.goals.steps(goal_id))
 
 
-def _parallel_peak_from_events(events: list) -> dict:
+def _parallel_peak_from_events(events: list[Any]) -> dict[str, Any]:
     """Peak step concurrency and wave count, from the step_status log.
 
     Every step's run is bracketed by IN_PROGRESS/terminal step_status events
@@ -734,7 +743,7 @@ def _parallel_peak_from_events(events: list) -> dict:
     return {"peak": peak, "waves": waves}
 
 
-def _usage_from_events(events: list) -> dict:
+def _usage_from_events(events: list[Any]) -> dict[str, Any]:
     """Token totals from the usage events the providers report.
 
     Providers carry usage fields in every response; the orchestrator records
@@ -744,8 +753,8 @@ def _usage_from_events(events: list) -> dict:
     endpoint and the audit export so the two can never disagree.
     """
     totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-    by_role: dict[str, dict] = {}
-    by_model: dict[str, dict] = {}
+    by_role: dict[str, dict[str, Any]] = {}
+    by_model: dict[str, dict[str, Any]] = {}
     calls = 0
     for e in events:
         if e.type != "usage":
@@ -770,7 +779,7 @@ def _usage_from_events(events: list) -> dict:
 
 
 @app.get("/goals/{goal_id}/usage")
-async def get_goal_usage(goal_id: str, request: Request):
+async def get_goal_usage(goal_id: str, request: Request) -> dict[str, Any]:
     """Token totals for a goal, from the usage events the providers report.
 
     The parallel numbers come from the same log: peak steps in flight at once
@@ -792,7 +801,7 @@ async def get_goal_usage(goal_id: str, request: Request):
 
 
 @app.get("/goals/{goal_id}/audit")
-async def get_goal_audit(goal_id: str, request: Request):
+async def get_goal_audit(goal_id: str, request: Request) -> dict[str, Any]:
     """The goal's audit trail as one structured document, for export or review.
 
     Everything auditable about a run, reconstructed from the event log the
@@ -819,7 +828,7 @@ async def get_goal_audit(goal_id: str, request: Request):
     fix_retries = []
     errors = []
     status_timeline = []
-    step_outcomes: dict[str, dict] = {}
+    step_outcomes: dict[str, dict[str, Any]] = {}
     running: set[str] = set()
     for e in events:
         p = e.payload or {}
@@ -898,7 +907,7 @@ async def get_goal_audit(goal_id: str, request: Request):
     # A goal that is still RUNNING gets no verdict yet: its roles may simply
     # not have taken their turn, and calling that "silent" would cry wolf on
     # every healthy in-flight run. Only terminal goals are judged.
-    silent_roles: list[dict] = []
+    silent_roles: list[dict[str, Any]] = []
     if goal.status in ("COMPLETED", "FAILED", "CANCELLED"):
         assigned: dict[str, str] = {}
         for e in events:
@@ -944,7 +953,7 @@ async def get_goal_audit(goal_id: str, request: Request):
     }
 
 
-async def _sweep_stats(conn) -> tuple[list[dict], list[dict]]:
+async def _sweep_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The raw material the stats views aggregate: goal rows and parsed call
     events. One loader for both the live overview and the snapshot writer, so
     the two can never read different worlds."""
@@ -967,7 +976,7 @@ async def _sweep_stats(conn) -> tuple[list[dict], list[dict]]:
 
 
 @app.get("/stats/overview")
-async def stats_overview(request: Request, window: int = Query(0)):
+async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, Any]:
     """Cross-goal statistics: outcomes, success rate, spend, and a daily trend.
 
     The per-goal endpoints answer "what happened in this run"; this answers the
@@ -1017,7 +1026,7 @@ async def stats_overview(request: Request, window: int = Query(0)):
 
 
 @app.get("/stats/history")
-async def stats_history(request: Request, limit: int = Query(120, ge=0, le=730)):
+async def stats_history(request: Request, limit: int = Query(120, ge=0, le=730)) -> dict[str, Any]:
     """One frozen document per past day, oldest first — the long memory.
 
     `limit=0` returns every stored frozen day, which is the full-history export
@@ -1061,7 +1070,7 @@ async def stats_history(request: Request, limit: int = Query(120, ge=0, le=730))
 
 
 @app.get("/stats/import")
-async def get_stats_import(request: Request):
+async def get_stats_import(request: Request) -> dict[str, Any]:
     """The currently-imported stats-history document, if there is one.
 
     This is what makes an import survive a restart: the Stats panel asks for it
@@ -1083,7 +1092,7 @@ async def get_stats_import(request: Request):
 
 
 @app.post("/stats/import")
-async def post_stats_import(body: dict, request: Request):
+async def post_stats_import(body: dict[str, Any], request: Request) -> dict[str, Any]:
     """Validate and persist an exported stats-history document.
 
     The engine re-validates rather than trusting the client: a hand-edited file,
@@ -1108,14 +1117,14 @@ async def post_stats_import(body: dict, request: Request):
 
 
 @app.delete("/stats/import")
-async def delete_stats_import(request: Request):
+async def delete_stats_import(request: Request) -> dict[str, Any]:
     """Forget the current import. Idempotent: clearing an empty import is fine."""
     service: StatsImportService = request.app.state.stats_imports
     return {"imported": False, "cleared": service.clear()}
 
 
 @app.patch("/goals/{goal_id}/steps/{step_id}")
-async def patch_step(goal_id: str, step_id: str, body: PlanStepUpdate, request: Request):
+async def patch_step(goal_id: str, step_id: str, body: PlanStepUpdate, request: Request) -> PlanStep:
     """Edit a plan step's title/description/paths before execution.
 
     Version-protected like start/pause: expected_version is the goal version
@@ -1126,7 +1135,7 @@ async def patch_step(goal_id: str, step_id: str, body: PlanStepUpdate, request: 
 
 
 @app.post("/goals/{goal_id}/steps/{step_id}/retry")
-async def retry_step(goal_id: str, step_id: str, body: VersionedAction, request: Request):
+async def retry_step(goal_id: str, step_id: str, body: VersionedAction, request: Request) -> PlanStep:
     g = request.app.state.goals.get(goal_id)
     if g.status not in ("RUNNING", "PAUSED", "FAILED"):
         raise ApiError(409, "illegal_status", f"cannot retry from {g.status}")
@@ -1136,7 +1145,7 @@ async def retry_step(goal_id: str, step_id: str, body: VersionedAction, request:
 
 
 @app.post("/goals/{goal_id}/pause")
-async def pause_goal(goal_id: str, body: VersionedAction, request: Request):
+async def pause_goal(goal_id: str, body: VersionedAction, request: Request) -> Goal:
     g = request.app.state.goals.get(goal_id)
     if g.status != "RUNNING":
         raise ApiError(409, "illegal_status", f"cannot pause from {g.status}")
@@ -1144,7 +1153,7 @@ async def pause_goal(goal_id: str, body: VersionedAction, request: Request):
 
 
 @app.post("/goals/{goal_id}/cancel")
-async def cancel_goal(goal_id: str, body: VersionedAction, request: Request):
+async def cancel_goal(goal_id: str, body: VersionedAction, request: Request) -> Goal:
     g = request.app.state.goals.get(goal_id)
     # PLANNING is cancellable: planning runs in the background, and a goal stuck
     # there (slow planner, or one orphaned before the boot rescue existed) could
@@ -1157,7 +1166,7 @@ async def cancel_goal(goal_id: str, body: VersionedAction, request: Request):
 
 
 @app.delete("/goals/{goal_id}")
-async def delete_goal(goal_id: str, request: Request):
+async def delete_goal(goal_id: str, request: Request) -> dict[str, Any]:
     """Delete a goal and everything recorded about it.
 
     The event log, plan steps, and dry-run proposals cascade with it. The
@@ -1184,13 +1193,13 @@ async def delete_goal(goal_id: str, request: Request):
 
 
 @app.get("/goals/{goal_id}/events")
-async def goal_events(goal_id: str, request: Request, after: int = Query(0)):
+async def goal_events(goal_id: str, request: Request, after: int = Query(0)) -> list[Event]:
     request.app.state.goals.get(goal_id)
     return request.app.state.goals.events_after(goal_id, after)
 
 
 @app.post("/goals/{goal_id}/start")
-async def start_goal(goal_id: str, body: VersionedAction, request: Request):
+async def start_goal(goal_id: str, body: VersionedAction, request: Request) -> Goal:
     g = request.app.state.goals.get(goal_id)
     if g.plan_only:
         raise ApiError(
@@ -1208,7 +1217,7 @@ async def start_goal(goal_id: str, body: VersionedAction, request: Request):
 
 
 @app.post("/goals/{goal_id}/apply")
-async def apply_goal(goal_id: str, body: VersionedAction, request: Request):
+async def apply_goal(goal_id: str, body: VersionedAction, request: Request) -> dict[str, Any]:
     """Replay a completed dry-run's proposed changes for real.
 
     The guards run here, synchronously, so a request that cannot possibly
@@ -1236,7 +1245,7 @@ async def apply_goal(goal_id: str, body: VersionedAction, request: Request):
 
 
 @app.post("/goals/{goal_id}/enable-execution")
-async def enable_execution(goal_id: str, body: VersionedAction, request: Request):
+async def enable_execution(goal_id: str, body: VersionedAction, request: Request) -> Goal:
     """Lift the plan-only guard on a goal, leaving it ready to start.
 
     plan_only itself is not version-protected (it is a pre-execution toggle,
@@ -1258,7 +1267,9 @@ async def enable_execution(goal_id: str, body: VersionedAction, request: Request
     return request.app.state.goals.get(goal_id)
 
 
-def _spawn(app: FastAPI, coro, goal_id: str | None = None) -> None:
+def _spawn(
+    app: FastAPI, coro: Coroutine[Any, Any, Any], goal_id: str | None = None
+) -> None:
     """Run a pipeline coroutine in the background, without losing its failure.
 
     A bare ``asyncio.create_task`` drops its exception on the floor when nobody
@@ -1353,7 +1364,7 @@ async def _run_steps_locked(app: FastAPI, goal_id: str) -> None:
 
 
 @app.websocket("/ws/goals/{goal_id}")
-async def ws_goal(websocket: WebSocket, goal_id: str):
+async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
     expected_token = getattr(websocket.app.state, "token", None) or BOOT_TOKEN
     auth_header = websocket.headers.get("authorization", "")
     authenticated = secrets.compare_digest(auth_header, f"Bearer {expected_token}")

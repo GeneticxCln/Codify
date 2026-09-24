@@ -5,7 +5,8 @@ import json
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+from collections.abc import AsyncIterator, Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -27,7 +28,9 @@ class ProviderError(Exception):
         self.message = message
 
 
-async def post_json(client: "httpx.AsyncClient", url: str, *, label: str, **kwargs) -> Any:
+async def post_json(
+    client: httpx.AsyncClient, url: str, *, label: str, **kwargs: Any
+) -> Any:
     """POST, check the status, and decode — reporting every failure as ours.
 
     A refused connection, a DNS failure, or a timeout used to escape as a raw
@@ -60,7 +63,7 @@ async def post_json(client: "httpx.AsyncClient", url: str, *, label: str, **kwar
 TEST_CONNECTION_TIMEOUT_S = 15
 
 
-def normalize_usage(provider: str, data: dict) -> dict | None:
+def normalize_usage(provider: str, data: dict[str, Any]) -> dict[str, Any] | None:
     """Pull the token-usage block out of a provider response, normalized.
 
     Every provider names these fields differently and most code just drops
@@ -68,8 +71,10 @@ def normalize_usage(provider: str, data: dict) -> dict | None:
     tokens". Returns None when the response carries no usage at all (some
     local servers do not).
     """
+    # Runtime guard: normalize_usage is called with parsed JSON, and the
+    # isinstance keeps a malformed payload from crashing the recorder.
     if not isinstance(data, dict):
-        return None
+        return None  # type: ignore[unreachable]
     if provider == "anthropic":
         u = data.get("usage") or {}
         return _mk_usage(u.get("input_tokens"), u.get("output_tokens"))
@@ -84,7 +89,7 @@ def normalize_usage(provider: str, data: dict) -> dict | None:
     return None
 
 
-def _mk_usage(inp, out) -> dict | None:
+def _mk_usage(inp: Any, out: Any) -> dict[str, Any] | None:
     try:
         i = int(inp) if inp is not None else 0
         o = int(out) if out is not None else 0
@@ -123,12 +128,12 @@ class BaseProvider(ABC):
     # invoke it with a normalized dict {input_tokens, output_tokens,
     # total_tokens} after each successful call. The orchestrator attaches a
     # recorder; anything else (health probes, settings tests) leaves it None.
-    usage_sink: "Callable[[dict], None] | None" = None
+    usage_sink: Callable[[dict[str, Any]], None] | None = None
     # Optional callback for streamed replies: invoked with the full text
     # accumulated so far, whenever the server yields more. The orchestrator
     # throttles it into chat-visible snapshots; leaving it None (health
     # probes, settings tests) keeps the plain blocking behavior.
-    on_delta: "Callable[[str], None] | None" = None
+    on_delta: Callable[[str], None] | None = None
 
     @abstractmethod
     async def complete(
@@ -137,7 +142,7 @@ class BaseProvider(ABC):
     ) -> str: ...
 
     @staticmethod
-    async def _stream_lines(response: "httpx.Response"):
+    async def _stream_lines(response: httpx.Response) -> AsyncIterator[str]:
         """Yield decoded SSE data payloads from a streaming response body.
 
         Every OpenAI-descended dialect (OpenAI-compat, Google's alt=sse,
@@ -154,7 +159,7 @@ class BaseProvider(ABC):
             if chunk and chunk != "[DONE]":
                 yield chunk
 
-    def _report_usage(self, provider: str, data: dict) -> None:
+    def _report_usage(self, provider: str, data: dict[str, Any]) -> None:
         """Hand the response's token usage to the sink, when one is attached.
 
         Best-effort by design: accounting must never be able to fail a call —
@@ -203,7 +208,10 @@ class AnthropicProvider(BaseProvider):
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
 
-    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
         url = f"{self._base_url}/v1/messages"
         async with httpx.AsyncClient(timeout=120) as client:
             data = await post_json(
@@ -237,7 +245,10 @@ class OpenAICompatProvider(BaseProvider):
         # provider instance so the capability probe runs once, not per call.
         self._json_mode: bool | None = None
 
-    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
         if not self._api_key:
             raise ProviderError("missing_api_key", "API key is not set")
         url = f"{self._base_url}/chat/completions"
@@ -334,11 +345,11 @@ class OpenAICompatProvider(BaseProvider):
         except Exception:
             return False
 
-    async def _complete_streaming(self, payload: dict, headers: dict) -> str:
+    async def _complete_streaming(self, payload: dict[str, Any], headers: dict[str, Any]) -> str:
         """One streaming pass over the SSE body; returns the full reply text."""
         url = f"{self._base_url}/chat/completions"
         text = ""
-        data: dict = {}
+        data: dict[str, Any] = {}
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream("POST", url, headers=headers, json={**payload, "stream": True}) as response:
@@ -387,7 +398,10 @@ class OllamaProvider(BaseProvider):
         validate_local_base_url(base_url)
         self._base_url = base_url.rstrip("/")
 
-    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
         stream = self.on_delta is not None
         async with httpx.AsyncClient(timeout=180) as client:
             if not stream:
@@ -466,7 +480,10 @@ class GoogleProvider(BaseProvider):
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
 
-    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
         url = f"{self._base_url}/models/{model}:generateContent"
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},

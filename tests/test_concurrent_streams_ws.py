@@ -80,7 +80,7 @@ class _FakeAIHandler(BaseHTTPRequestHandler):
     so content crossing the wire is detectable by text, not ids.
     """
 
-    def _post(self):
+    def _post(self) -> None:
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         # Ollama's /api/generate carries the whole prompt in one field.
         prompt = f"{body.get('system', '')}\n{body.get('prompt', body.get('messages', ''))}"
@@ -140,20 +140,20 @@ class _FakeAIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def do_POST(self):  # noqa: N802 — httpx talks to /chat/completions here
+    def do_POST(self) -> None:  # noqa: N802 — httpx talks to /chat/completions here
         self._post()
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         self.send_response(404)
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def log_message(self, *args):  # silence the request log
+    def log_message(self, *args: Any) -> None:  # silence the request log
         pass
 
 
 class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
-    async def test_concurrent_goals_isolated_over_real_websockets(self):
+    async def test_concurrent_goals_isolated_over_real_websockets(self) -> None:
         ai_port = _free_port()
         fake = HTTPServer(("127.0.0.1", ai_port), _FakeAIHandler)
         threading.Thread(target=fake.serve_forever, daemon=True).start()
@@ -162,7 +162,7 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
             home = Path(tmp)
             (home / "ws").mkdir()
 
-            def _spawn_engine():
+            def _spawn_engine() -> subprocess.Popen[bytes]:
                 # A fresh port per attempt: the probe-release-rebind gap is a
                 # TOCTOU we cannot remove, so a boot that loses it must be
                 # retried with a different port, not the same losing one.
@@ -208,7 +208,7 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                         r1.json()["id"], r2.json()["id"], r3.json()["id"], r4.json()["id"],
                     )
 
-                    async def _open(gid: str):
+                    async def _open(gid: str) -> Any:
                         """Connect and authenticate like the UI does — the engine
                         takes the token as an auth *message* (browsers cannot set
                         headers), then replays from 0."""
@@ -284,7 +284,9 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
 
     # --- harness ---------------------------------------------------------
 
-    async def _handshake(self, engine: subprocess.Popen, spawn, timeout: float = 15.0):
+    async def _handshake(
+        self, engine: subprocess.Popen[bytes], spawn: Any, timeout: float = 15.0
+    ) -> tuple[str, int, subprocess.Popen[bytes]]:
         """Read the boot line `CODIFY_ENGINE token=… port=…` from stdout.
 
         A boot death is retried once with a fresh process and a fresh port:
@@ -344,7 +346,9 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
         raise AssertionError("goal did not reach a terminal state in 60s")
 
-    async def _midrun_attach(self, client: "httpx.AsyncClient", goal_id: str, token: str, port: int):
+    async def _midrun_attach(
+        self, client: httpx.AsyncClient, goal_id: str, token: str, port: int
+    ) -> tuple[int, list[dict[str, Any]]]:
         """Open a second WS to a running goal the moment its diff exists.
 
         Watches the REST goal detail until a step has a diff on disk (the
@@ -483,14 +487,16 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
         raise AssertionError("goal did not reach a terminal state in 60s")
 
-    def _assert_pause_survivable(self, frames_b, goal_b) -> None:
+    def _assert_pause_survivable(self, frames_b: list[dict[str, Any]], goal_b: str) -> None:
         """A mid-run PAUSED spell leaves the stream complete and coherent."""
         assert_pause_spell_is_midstream(self, frames_b, "beta")
         # And the goal still finished its actual work.
         text = "\n".join(json.dumps(ev) for ev in frames_b)
         self.assertIn("beta body", text)
 
-    def _assert_midrun(self, frames_g, frames_mid, goal_c, floor) -> None:
+    def _assert_midrun(
+        self, frames_g: list[dict[str, Any]], frames_mid: list[dict[str, Any]], goal_c: str, floor: int
+    ) -> None:
         """The mid-run connection's frames equal the live connection's.
 
         The server replays from 0 on every connect and the client dedups by
@@ -501,9 +507,9 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
         text = "\n".join(json.dumps(ev) for ev in frames_mid)
         self.assertIn("gamma body", text)
 
-    async def _drain(self, wire, marker: str) -> list[dict]:
+    async def _drain(self, wire: Any, marker: str) -> list[dict[str, Any]]:
         """Read frames until the goal is terminal, then a quiet spell for stragglers."""
-        frames: list[dict] = []
+        frames: list[dict[str, Any]] = []
         terminal = False
         quiet = 0
         while quiet < 6:
@@ -523,8 +529,8 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                 terminal = True
         return frames
 
-    async def _drain_until_quiet(self, wire, marker: str) -> list[dict]:
-        frames: list[dict] = []
+    async def _drain_until_quiet(self, wire: Any, marker: str) -> list[dict[str, Any]]:
+        frames: list[dict[str, Any]] = []
         quiet = 0
         while quiet < 6:
             try:
@@ -534,7 +540,10 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                 quiet += 1
         return frames
 
-    async def _assert_isolated(self, frames_a, frames_b, goal_a, goal_b, replay) -> None:
+    async def _assert_isolated(
+        self, frames_a: list[dict[str, Any]], frames_b: list[dict[str, Any]], goal_a: str,
+        goal_b: str, replay: list[dict[str, Any]],
+    ) -> None:
         for name, frames, goal_id in (
             ("alpha", frames_a, goal_a), ("beta", frames_b, goal_b),
         ):

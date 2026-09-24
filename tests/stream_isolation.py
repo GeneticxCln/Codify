@@ -23,7 +23,14 @@ normalizers accept anything with attribute access or a mapping.
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
+
+# The two stream layers hand in different event shapes: the service layer works
+# with Event models, the wire layer with parsed JSON dicts. Both answer the same
+# attribute questions, so the helpers read both through one alias — `Any` is
+# the honest union here, not a shrug.
+Frame = Any
 
 
 def _get(item: Any, key: str) -> Any:
@@ -33,19 +40,19 @@ def _get(item: Any, key: str) -> Any:
     return getattr(item, key)
 
 
-def _as_dicts(frames: Iterable[Any]) -> list[dict]:
+def _as_dicts(frames: Iterable[Any]) -> list[dict[str, Any]]:
     """Normalize frames to plain dicts so json.dumps sees identical bytes."""
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     for f in frames:
         out.append(dict(f) if isinstance(f, Mapping) else f.model_dump())
     return out
 
 
-def _seqs(frames: Iterable[Any]) -> list[int]:
+def _seqs(frames: Iterable[Frame]) -> list[int]:
     return [_get(e, "sequence") for e in frames]
 
 
-def _frame_text(frames: Iterable[Any]) -> str:
+def _frame_text(frames: Iterable[Frame]) -> str:
     # `type` is engine vocabulary (e.g. the `model_delta` event type), not
     # goal content — one of the goals is literally named "delta" — so it is
     # masked before the substring scan.
@@ -55,7 +62,7 @@ def _frame_text(frames: Iterable[Any]) -> str:
     )
 
 
-def assert_stream_pure(tc, frames, goal_id: str, name: str) -> None:
+def assert_stream_pure(tc: Any, frames: Iterable[Frame], goal_id: str, name: str) -> None:
     """1. Purity: every event a reader saw belongs to its goal."""
     for event in frames:
         tc.assertEqual(
@@ -64,7 +71,7 @@ def assert_stream_pure(tc, frames, goal_id: str, name: str) -> None:
         )
 
 
-def assert_dense_from_one(tc, frames, name: str) -> None:
+def assert_dense_from_one(tc: Any, frames: Iterable[Frame], name: str) -> None:
     """2. Integrity: sequences dense and ascending from 1.
 
     The counter is per-goal (UPDATE … RETURNING on the goal row) — a shared
@@ -78,7 +85,9 @@ def assert_dense_from_one(tc, frames, name: str) -> None:
     )
 
 
-def assert_content_separated(tc, streams: dict[str, list], body_markers=None) -> None:
+def assert_content_separated(
+    tc: Any, streams: dict[str, list[Frame]], body_markers: dict[str, str] | None = None
+) -> None:
     """3. Separation by content, pairwise: no byte of one goal's marker
     appears in another's stream, and each stream carries its own body text.
 
@@ -97,7 +106,9 @@ def assert_content_separated(tc, streams: dict[str, list], body_markers=None) ->
             tc.assertIn(body_markers[name], text, f"{name}'s own content is missing")
 
 
-def assert_replay_equals_live(tc, replay_seqs: list[int], live_seqs: list[int], name: str) -> None:
+def assert_replay_equals_live(
+    tc: Any, replay_seqs: list[int], live_seqs: list[int], name: str
+) -> None:
     """4. Replay equality: a subscriber that attaches late (or re-attaches)
     sees exactly what the live subscriber collected, in order."""
     tc.assertEqual(
@@ -107,7 +118,8 @@ def assert_replay_equals_live(tc, replay_seqs: list[int], live_seqs: list[int], 
 
 
 def assert_midrun_resume_is_seamless(
-    tc, live_frames, midrun_frames, floor: int, goal_id: str, name: str,
+    tc: Any, live_frames: Iterable[Frame], midrun_frames: Iterable[Frame],
+    floor: int, goal_id: str, name: str,
 ) -> None:
     """A subscriber attaching mid-run must see a stream with no seam.
 
@@ -133,7 +145,7 @@ def assert_midrun_resume_is_seamless(
     assert_stream_pure(tc, midrun_frames, goal_id, f"{name} (mid-run)")
 
 
-def assert_pause_spell_is_midstream(tc, frames, name: str) -> None:
+def assert_pause_spell_is_midstream(tc: Any, frames: Iterable[Frame], name: str) -> None:
     """A mid-run PAUSED spell leaves the stream complete and coherent.
 
     Density survives the pause; PAUSED and the later RUNNING both reach the
@@ -169,7 +181,9 @@ def assert_pause_spell_is_midstream(tc, frames, name: str) -> None:
     )
 
 
-def assert_cancelled_stream_ends_cleanly(tc, frames, goal_id: str, name: str) -> None:
+def assert_cancelled_stream_ends_cleanly(
+    tc: Any, frames: Iterable[Frame], goal_id: str, name: str
+) -> None:
     """A goal cancelled mid-run ends its stream at the cancel, cleanly.
 
     After the CANCELLED frame the stream must stay silent — the step runner

@@ -11,12 +11,20 @@ from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/herm
 import json
 import tempfile
 import unittest
+from typing import Any
 from pathlib import Path
 
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.laya import LayaDecision, LayaService
-from engine.models import ROLES, AgentConfigUpdate, GoalCreate, WorkspaceCreate
+from engine.models import (
+    ROLES,
+    AgentConfig,
+    AgentConfigUpdate,
+    Goal,
+    GoalCreate,
+    WorkspaceCreate,
+)
 from engine.providers import BaseProvider, Keychain, ProviderError, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.services import AgentRegistryService, GoalService, WorkspaceService
@@ -30,9 +38,12 @@ class TargetProvider(BaseProvider):
         self.fail_with = fail_with
         self.reply = reply
         self.role: str | None = None
-        self.calls: list[dict] = []
+        self.calls: list[dict[str, Any]] = []
 
-    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
         self.calls.append({
             "role": self.role,
             "provider": self.name,
@@ -62,7 +73,7 @@ class FallbackFactory(ProviderFactory):
         self.build_failures: dict[str, ProviderError] = {}
         self.built: list[tuple[str, str]] = []
 
-    def build(self, config):
+    def build(self, config: AgentConfig) -> BaseProvider:
         self.built.append((config.role, config.provider))
         if config.provider in self.build_failures:
             raise self.build_failures[config.provider]
@@ -72,12 +83,12 @@ class FallbackFactory(ProviderFactory):
 
 
 class SkippedGate(LayaService):
-    async def decide(self, state):
+    async def decide(self, state: dict[str, Any]) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 
 
 class FallbackTestCase(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -95,18 +106,17 @@ class FallbackTestCase(unittest.IsolatedAsyncioTestCase):
             self.registry.set_config(role, AgentConfigUpdate(provider="anthropic", model_name="primary-model"))
         self.registry.set_config("planner", AgentConfigUpdate(temperature=0.15, max_tokens=1234))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    def _plan(self):
-        goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="T", description=""))
-        return goal
+    def _plan(self) -> Goal:
+        return self.goals.create(GoalCreate(workspace_id=self.ws.id, title="T", description=""))
 
-    def _events(self, goal_id, type_):
+    def _events(self, goal_id: str, type_: str) -> list[dict[str, Any]]:
         return [e.payload for e in self.goals.events_after(goal_id, 0) if e.type == type_]
 
-    def _errors(self, goal_id):
+    def _errors(self, goal_id: str) -> list[dict[str, Any]]:
         return self._events(goal_id, "error")
 
     def _give_planner_a_fallback(self, model: str = "fallback-model") -> None:
@@ -116,7 +126,7 @@ class FallbackTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class TestItRescuesTheGoal(FallbackTestCase):
-    async def test_a_primary_with_no_credential_runs_on_the_fallback(self):
+    async def test_a_primary_with_no_credential_runs_on_the_fallback(self) -> None:
         """The reported case: the key was never stored, so nothing could run.
 
         The role has a model and a provider; what it lacks is a credential. That is
@@ -145,7 +155,7 @@ class TestItRescuesTheGoal(FallbackTestCase):
         self.assertEqual(payload["code"], "agent_not_configured")
         self.assertIn("Anthropic API key is not set", payload["detail"])
 
-    async def test_a_dead_endpoint_runs_on_the_fallback(self):
+    async def test_a_dead_endpoint_runs_on_the_fallback(self) -> None:
         """`is down` is a transport failure, which used to escape unnamed.
 
         A refused connection reached the goal as `internal_error` — a code that
@@ -165,7 +175,7 @@ class TestItRescuesTheGoal(FallbackTestCase):
         payload = self._events(goal.id, "provider_fallback")[0]
         self.assertEqual(payload["code"], "provider_unreachable")
 
-    async def test_a_reply_the_contract_cannot_parse_runs_on_the_fallback(self):
+    async def test_a_reply_the_contract_cannot_parse_runs_on_the_fallback(self) -> None:
         """A model that answered badly is the other half of "cannot be used"."""
         self.primary.reply = "I am not JSON at all."
         self._give_planner_a_fallback()
@@ -178,7 +188,7 @@ class TestItRescuesTheGoal(FallbackTestCase):
         payload = self._events(goal.id, "provider_fallback")[0]
         self.assertEqual(payload["code"], "agent_output_invalid")
 
-    async def test_a_role_with_no_model_but_a_fallback_still_runs(self):
+    async def test_a_role_with_no_model_but_a_fallback_still_runs(self) -> None:
         self.registry.set_config("planner", AgentConfigUpdate(model_name=""))
         self._give_planner_a_fallback()
 
@@ -190,7 +200,7 @@ class TestItRescuesTheGoal(FallbackTestCase):
         self.assertEqual(payload["from"]["model"], "")
         self.assertEqual(self.second.calls[0]["model"], "fallback-model")
 
-    async def test_the_fallback_keeps_the_roles_temperature_and_max_tokens(self):
+    async def test_the_fallback_keeps_the_roles_temperature_and_max_tokens(self) -> None:
         """Temperature describes the job, not the model answering it.
 
         A second copy of these settings per target would mean the scribe's careful
@@ -206,7 +216,7 @@ class TestItRescuesTheGoal(FallbackTestCase):
         self.assertEqual(call["temperature"], 0.15)
         self.assertEqual(call["max_tokens"], 1234)
 
-    async def test_the_transcript_says_which_model_answered(self):
+    async def test_the_transcript_says_which_model_answered(self) -> None:
         """Both attempts are announced, so the reply is credited to the right one."""
         self.factory.build_failures["anthropic"] = ProviderError("missing_api_key", "no key")
         self._give_planner_a_fallback()
@@ -223,7 +233,7 @@ class TestItRescuesTheGoal(FallbackTestCase):
 
 
 class TestItStaysNarrow(FallbackTestCase):
-    async def test_without_a_fallback_the_failure_is_exactly_what_it_was(self):
+    async def test_without_a_fallback_the_failure_is_exactly_what_it_was(self) -> None:
         """No fallback configured means no change at all: same code, same message."""
         self.factory.build_failures["anthropic"] = ProviderError(
             "missing_api_key", "Anthropic API key is not set"
@@ -241,7 +251,7 @@ class TestItStaysNarrow(FallbackTestCase):
         self.assertEqual(self._events(goal.id, "provider_fallback"), [])
         self.assertEqual(self.second.calls, [])
 
-    async def test_one_fallback_attempt_and_no_more(self):
+    async def test_one_fallback_attempt_and_no_more(self) -> None:
         """Two failures, two calls. An outage must not become a retry loop."""
         self.factory.build_failures["anthropic"] = ProviderError("missing_api_key", "no key")
         self.second.fail_with = ProviderError("provider_http", "ollama 500")
@@ -261,7 +271,7 @@ class TestItStaysNarrow(FallbackTestCase):
         self.assertIn("primary anthropic (agent_not_configured)", errors[0]["message"])
         self.assertIn("fallback ollama (provider_http)", errors[0]["message"])
 
-    async def test_a_failure_that_is_not_the_provider_stops_the_role(self):
+    async def test_a_failure_that_is_not_the_provider_stops_the_role(self) -> None:
         """An unknown failure is a bug; running it on another model hides it."""
         self.primary.fail_with = ProviderError("engine_bug", "something we did wrong")
         self._give_planner_a_fallback()
@@ -275,7 +285,7 @@ class TestItStaysNarrow(FallbackTestCase):
         self.assertEqual(self.second.calls, [], "the fallback must not be reached")
         self.assertEqual(self._events(goal.id, "provider_fallback"), [])
 
-    async def test_an_incomplete_fallback_is_not_promised(self):
+    async def test_an_incomplete_fallback_is_not_promised(self) -> None:
         """Half a fallback fails exactly when it is needed, so it is not one."""
         self.factory.build_failures["anthropic"] = ProviderError("missing_api_key", "no key")
         self.registry.set_config(
@@ -297,16 +307,16 @@ class TestSavingAFallback(unittest.IsolatedAsyncioTestCase):
     format, or keeping the previous provider's endpoint after a switch.
     """
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.conn = connect(Path(self.temp_dir.name) / "t.db")
         self.registry = AgentRegistryService(self.conn, ProviderFactory(Keychain()), Keychain())
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    def test_a_builtin_fallback_inherits_its_protocol_and_endpoint(self):
+    def test_a_builtin_fallback_inherits_its_protocol_and_endpoint(self) -> None:
         cfg = self.registry.set_config(
             "planner", AgentConfigUpdate(fallback_provider="ollama", fallback_model_name="qwen3:8b")
         )
@@ -314,7 +324,7 @@ class TestSavingAFallback(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cfg.fallback_base_url, "http://127.0.0.1:11434")
         self.assertTrue(cfg.has_fallback)
 
-    def test_switching_the_fallback_provider_drops_the_old_endpoint(self):
+    def test_switching_the_fallback_provider_drops_the_old_endpoint(self) -> None:
         self.registry.set_config(
             "planner", AgentConfigUpdate(fallback_provider="ollama", fallback_model_name="qwen3:8b")
         )
@@ -324,7 +334,7 @@ class TestSavingAFallback(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cfg.fallback_base_url, "https://api.groq.com/openai/v1")
         self.assertEqual(cfg.fallback_protocol, "openai_compat")
 
-    def test_a_custom_fallback_needs_a_protocol_and_an_endpoint(self):
+    def test_a_custom_fallback_needs_a_protocol_and_an_endpoint(self) -> None:
         from engine.services import ApiError
 
         with self.assertRaises(ApiError) as caught:
@@ -333,7 +343,7 @@ class TestSavingAFallback(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(caught.exception.code, "invalid_provider")
 
-    def test_a_local_only_provider_stays_local_as_a_fallback(self):
+    def test_a_local_only_provider_stays_local_as_a_fallback(self) -> None:
         from engine.services import ApiError
 
         with self.assertRaises(ApiError) as caught:
@@ -347,7 +357,7 @@ class TestSavingAFallback(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(caught.exception.code, "invalid_base_url")
 
-    def test_clearing_the_provider_clears_the_whole_target(self):
+    def test_clearing_the_provider_clears_the_whole_target(self) -> None:
         self.registry.set_config(
             "planner", AgentConfigUpdate(fallback_provider="ollama", fallback_model_name="qwen3:8b")
         )
@@ -356,7 +366,7 @@ class TestSavingAFallback(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(cfg.fallback_protocol)
         self.assertIsNone(cfg.fallback_base_url)
 
-    def test_the_fallback_is_built_from_the_same_config_without_the_roles_key(self):
+    def test_the_fallback_is_built_from_the_same_config_without_the_roles_key(self) -> None:
         """The role's stored key belongs to its primary provider.
 
         Carrying the ref across would look up a key for the fallback provider
@@ -381,7 +391,7 @@ class TestSavingAFallback(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(target.api_key_ref)
         self.assertEqual(target.temperature, cfg.temperature)
 
-    def test_a_role_without_a_fallback_has_no_second_target(self):
+    def test_a_role_without_a_fallback_has_no_second_target(self) -> None:
         cfg = self.registry.get_config("planner")
         self.assertIsNone(self.registry.fallback_config_for(cfg))
 

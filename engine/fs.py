@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import os
 from pathlib import Path
+from typing import Any
 
 # A unified diff of a multi-megabyte file is not a diff anybody reads, and building
 # one for every step is how a chat panel ends up rendering a 40 MB payload.
@@ -113,7 +114,7 @@ class FileSystemService:
                 except OSError:
                     pass
 
-    def apply(self, files: list[dict], *, dry_run: bool) -> list[dict]:
+    def apply(self, files: list[dict[str, Any]], *, dry_run: bool) -> list[dict[str, Any]]:
         """Write the fixer's file operations, and say what actually changed.
 
         `changed` matters: a fixer that proposes a file whose content is already
@@ -128,7 +129,7 @@ class FileSystemService:
         `apply` replays content, never re-runs edits against a moved file.
         An `edit` that cannot be applied raises ValueError with the reason.
         """
-        summaries: list[dict] = []
+        summaries: list[dict[str, Any]] = []
         for item in files:
             rel = item["path"]
             action = item["action"]
@@ -183,7 +184,7 @@ class FileSystemService:
             )
         return summaries
 
-    def _resolve_edits(self, before: str, target: Path, edits: list[dict]) -> tuple[str, str | None]:
+    def _resolve_edits(self, before: str, target: Path, edits: list[dict[str, Any]]) -> tuple[str, str | None]:
         """Apply search/replace ops in order; (result, error-reason-or-None).
 
         Each op: {old_text, new_text, count}. `old_text` must exist exactly

@@ -29,10 +29,21 @@ import time
 import unittest
 from pathlib import Path
 
+from typing import Any
+from collections.abc import Callable
+
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.laya import LayaDecision, LayaService
-from engine.models import ROLES, AgentConfigUpdate, GoalCreate, WorkspaceCreate
+
+from engine.models import (
+    ROLES,
+    AgentConfig,
+    AgentConfigUpdate,
+    Event,
+    GoalCreate,
+    WorkspaceCreate,
+)
 from engine.providers import BaseProvider, Keychain, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.services import ApiError, AgentRegistryService, GoalService, WorkspaceService
@@ -56,17 +67,20 @@ class _GoalAwareProvider(BaseProvider):
     it), which is exactly the information a real provider has.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
         # Optional in-run hook (marker, role) — lets a test act at a precise
         # moment of the pipeline (e.g. attach a subscriber mid-goal).
-        self.on_call = None
+        self.on_call: Callable[[str, str], None] | None = None
         # (marker, role) pairs whose model call parks on hold_gate — lets a
         # test cancel a goal while one of its calls is genuinely in flight.
         self.hold_keys: set[tuple[str, str]] = set()
         self.hold_gate: asyncio.Event | None = None
 
-    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
         role = next(
             (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
         )
@@ -113,23 +127,23 @@ class _GoalAwareProvider(BaseProvider):
 
 
 class _GoalAwareFactory(ProviderFactory):
-    def __init__(self, provider):
+    def __init__(self, provider: BaseProvider) -> None:
         super().__init__(Keychain())
         self.provider = provider
 
-    def build(self, config):
+    def build(self, config: AgentConfig) -> BaseProvider:
         return self.provider
 
 
 class _SkippedGate(LayaService):
     """The gate is a separate concern; this test is about stream isolation."""
 
-    async def decide(self, state):
+    async def decide(self, state: dict[str, Any]) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 
 
 class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.conn = connect(self.root / "t.db")
@@ -147,11 +161,11 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
         )
         self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
-    async def _collect_stream(self, goal_id: str, start_after: int = 0) -> list:
+    async def _collect_stream(self, goal_id: str, start_after: int = 0) -> list[Event]:
         """Poll like the WebSocket endpoint does until the goal is terminal.
 
         Keeps polling briefly after the terminal status so a straggler event —
@@ -159,7 +173,7 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
         early. `start_after` is the reconnect floor: a subscriber that already
         saw up to N resumes from N and must still get a gapless rest.
         """
-        seen: list = []
+        seen: list[Event] = []
         after = start_after
         terminal = False
         empty_polls_after_terminal = 0
@@ -184,7 +198,9 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.001)
         return seen
 
-    def _attach_resuming_reader(self, goal_id: str):
+    def _attach_resuming_reader(
+        self, goal_id: str,
+    ) -> tuple[list[Event], int, asyncio.Task[list[Event]]]:
         """Snapshot now, then keep reading from the snapshot's floor.
 
         This is the reconnect contract the UI relies on (`goalStream` resumes
@@ -198,7 +214,7 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
         reader = asyncio.create_task(self._collect_stream(goal_id, start_after=floor))
         return snapshot, floor, reader
 
-    async def test_two_concurrent_goals_never_cross_streams(self):
+    async def test_two_concurrent_goals_never_cross_streams(self) -> None:
         goal_a = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="goal-alpha", description="first"))
         goal_b = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="goal-beta", description="second"))
 
@@ -285,7 +301,7 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
         for marker, role in self.provider.calls:
             self.assertIn(marker, ("alpha", "beta"), f"{role} call had no goal marker")
 
-    async def test_three_goals_and_a_mid_run_subscriber(self):
+    async def test_three_goals_and_a_mid_run_subscriber(self) -> None:
         """Three interleaved goals, and one subscriber attaching mid-run.
 
         The attach happens the moment the goal's fixer is invoked — its plan is
@@ -319,7 +335,9 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
             refreshed = self.goals.get(g.id)
             self.goals.update_status(g.id, refreshed.version, "RUNNING")
 
-        async def _wait_then_attach(step_tasks):
+        async def _wait_then_attach(
+            step_tasks: list[asyncio.Task[None]],
+        ) -> tuple[list[Event], int, asyncio.Task[list[Event]]]:
             await attach_signal.wait()
             # The signal fires inside the fixer call, before its diff is
             # written: attaching now means the snapshot ends mid-step. The
@@ -413,7 +431,7 @@ class TestConcurrentGoalsDoNotCrossStreams(unittest.IsolatedAsyncioTestCase):
         for marker, role in self.provider.calls:
             self.assertIn(marker, ("alpha", "beta", "gamma"), f"{role} call had no goal marker")
 
-    async def test_cancelled_goal_ends_its_stream_cleanly(self):
+    async def test_cancelled_goal_ends_its_stream_cleanly(self) -> None:
         """A goal cancelled mid-run ends its stream at the cancel.
 
         The service-layer twin of the wire test's delta: four goals interleave,

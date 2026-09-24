@@ -41,13 +41,13 @@ class RepairPlan:
         return bool(self.to_repair) and self.target is not None
 
 
-def _keys_by_provider(key_status: list[dict]) -> dict[str, dict]:
+def _keys_by_provider(key_status: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     # Rows without a provider are skipped rather than keyed under None: every lookup
     # is by provider name, so a None key is a key nobody can reach.
     return {str(row["provider"]): row for row in key_status or [] if row.get("provider")}
 
 
-def _describe(provider: str, model: str, discovery: dict[str, dict]) -> tuple[str, str]:
+def _describe(provider: str, model: str, discovery: dict[str, dict[str, Any]]) -> tuple[str, str]:
     """How well a target is known to work, plus a caveat worth reporting once.
 
     "We checked and your model is there" is a different assurance from "we could
@@ -68,10 +68,10 @@ def _describe(provider: str, model: str, discovery: dict[str, dict]) -> tuple[st
 
 
 def _fallback_verdict(
-    config: dict,
+    config: dict[str, Any],
     problem: str,
-    keys: dict[str, dict],
-    discovery: dict[str, dict],
+    keys: dict[str, dict[str, Any]],
+    discovery: dict[str, dict[str, Any]],
     catalog_ids: set[tuple[str, str]],
 ) -> tuple[str | None, str]:
     """Why the role's fallback saves it, why it does not, or neither.
@@ -100,7 +100,7 @@ def _fallback_verdict(
     return None, f"its fallback {provider}/{model} is unusable too ({fb_problem})"
 
 
-def _add_note(plan: "RepairPlan", note: str) -> None:
+def _add_note(plan: RepairPlan, note: str) -> None:
     """Record a provider-level caveat once.
 
     Notes are reported per provider, not per role, so seven roles on an unreachable
@@ -111,7 +111,7 @@ def _add_note(plan: "RepairPlan", note: str) -> None:
         plan.notes.append(note)
 
 
-def target_needs_key(provider: str, protocol: str | None, keys: dict[str, dict]) -> bool:
+def target_needs_key(provider: str, protocol: str | None, keys: dict[str, dict[str, Any]]) -> bool:
     """Does this provider require a credential?
 
     The provider's own answer wins when we have one. Falling back to the protocol
@@ -125,7 +125,7 @@ def target_needs_key(provider: str, protocol: str | None, keys: dict[str, dict])
     return (protocol or "") != "ollama"
 
 
-def needs_key(config: dict, keys: dict[str, dict]) -> bool:
+def needs_key(config: dict[str, Any], keys: dict[str, dict[str, Any]]) -> bool:
     return target_needs_key(config.get("provider") or "", config.get("protocol"), keys)
 
 
@@ -133,8 +133,8 @@ def target_problem(
     provider: str | None,
     model: str | None,
     protocol: str | None,
-    keys: dict[str, dict],
-    discovery: dict[str, dict],
+    keys: dict[str, dict[str, Any]],
+    discovery: dict[str, dict[str, Any]],
     catalog_ids: set[tuple[str, str]],
 ) -> str | None:
     """Why this (provider, model) target cannot be called, or None if it can.
@@ -155,14 +155,14 @@ def target_problem(
     return None
 
 
-def provider_is_keyless(provider: str, keys: dict[str, dict]) -> bool:
+def provider_is_keyless(provider: str, keys: dict[str, dict[str, Any]]) -> bool:
     known = keys.get(provider)
     if known is not None:
         return not bool(known.get("needs_key"))
     return False
 
 
-def _usable_candidates(catalog: list[dict]) -> list[dict]:
+def _usable_candidates(catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Discovered models that can actually answer.
 
     A provider's own report is the only reason a model is skipped here — the engine
@@ -173,11 +173,11 @@ def _usable_candidates(catalog: list[dict]) -> list[dict]:
 
 
 def choose_target(
-    configs: list[dict],
+    configs: list[dict[str, Any]],
     working_roles: set[str],
-    catalog: list[dict],
-    keys: dict[str, dict],
-) -> tuple[dict | None, str]:
+    catalog: list[dict[str, Any]],
+    keys: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any] | None, str]:
     """The model to point broken roles at, with the reason for choosing it.
 
     Order of preference:
@@ -202,7 +202,7 @@ def choose_target(
     # A working role counts once, against whichever of its targets is actually in
     # the catalog: a role that runs on its fallback is already running that model,
     # so pointing the others at it introduces nothing new.
-    in_use: Counter = Counter()
+    in_use: Counter[tuple[str | None, str]] = Counter()
     for c in configs:
         if c.get("role") not in working_roles:
             continue
@@ -236,10 +236,10 @@ def choose_target(
 
 
 def plan_role_repair(
-    configs: list[dict],
-    key_status: list[dict],
-    provider_status: list[dict],
-    catalog: list[dict],
+    configs: list[dict[str, Any]],
+    key_status: list[dict[str, Any]],
+    provider_status: list[dict[str, Any]],
+    catalog: list[dict[str, Any]],
 ) -> RepairPlan:
     """Decide which roles cannot run, and what to point them at.
 

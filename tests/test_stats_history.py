@@ -17,6 +17,7 @@ from pathlib import Path
 
 from engine.db import connect
 from engine.stats_history import StatsSnapshotService, utc_day
+from typing import Any
 
 # A day/hour clock anchored at 00:30 UTC so `at(n, h)` provably stays inside
 # calendar day n for every h in 0..23. The freeze boundary is a *calendar*
@@ -30,7 +31,7 @@ def at(day: int, hour: int = 12) -> float:
     return BASE + day * 86400.0 + hour * 3600.0
 
 
-def goal(status: str, created: float, updated: float | None = None) -> dict:
+def goal(status: str, created: float, updated: float | None = None) -> dict[str, Any]:
     return {
         "id": f"g-{status}-{created}",
         "status": status,
@@ -39,7 +40,7 @@ def goal(status: str, created: float, updated: float | None = None) -> dict:
     }
 
 
-def usage_ev(ts: float, tokens: int = 10) -> dict:
+def usage_ev(ts: float, tokens: int = 10) -> dict[str, Any]:
     return {
         "type": "usage",
         "timestamp": ts,
@@ -52,18 +53,18 @@ def usage_ev(ts: float, tokens: int = 10) -> dict:
 
 
 class StatsHistoryTestCase(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.conn = connect(Path(self.temp_dir.name) / "t.db")
         self.snap = StatsSnapshotService(self.conn)
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.conn.close()
         self.temp_dir.cleanup()
 
 
 class TestMaybeSnapshot(StatsHistoryTestCase):
-    def test_first_read_after_a_day_ends_freezes_that_day(self):
+    def test_first_read_after_a_day_ends_freezes_that_day(self) -> None:
         # All of day 0's activity is inside day 0; the read happens on day 1.
         goals = [goal("COMPLETED", at(0, 2), updated=at(0, 9))]
         events = [usage_ev(at(0, 15), tokens=30)]
@@ -75,7 +76,7 @@ class TestMaybeSnapshot(StatsHistoryTestCase):
         self.assertEqual(doc["goals"]["succeeded"], 1)
         self.assertEqual(doc["usage"]["total_tokens"], 45, "the frozen document is the full overview")
 
-    def test_a_frozen_document_does_not_move_when_the_log_is_pruned(self):
+    def test_a_frozen_document_does_not_move_when_the_log_is_pruned(self) -> None:
         """The point of the table: yesterday's numbers survive losing the log
         they were computed from."""
         goals = [goal("COMPLETED", at(0, 2))]
@@ -87,17 +88,17 @@ class TestMaybeSnapshot(StatsHistoryTestCase):
         assert doc is not None, "the frozen row survives losing its source events"
         self.assertEqual(doc["usage"]["total_tokens"], 148)
 
-    def test_nothing_freezes_while_activity_is_still_today(self):
+    def test_nothing_freezes_while_activity_is_still_today(self) -> None:
         now = at(1, 8)
         goals = [goal("RUNNING", now - 100, updated=now - 10)]
         events = [usage_ev(now - 5)]
         self.assertIsNone(self.snap.maybe_snapshot(self.conn, goals, events, now=now))
         self.assertEqual(self.snap.list_days(), [])
 
-    def test_empty_history_freezes_nothing(self):
+    def test_empty_history_freezes_nothing(self) -> None:
         self.assertIsNone(self.snap.maybe_snapshot(self.conn, [], [], now=at(1)))
 
-    def test_freeze_is_idempotent(self):
+    def test_freeze_is_idempotent(self) -> None:
         goals = [goal("FAILED", at(0, 2))]
         events = [usage_ev(at(0, 15))]
         first = self.snap.maybe_snapshot(self.conn, goals, events, now=at(1, 8))
@@ -118,7 +119,7 @@ class TestMaybeSnapshot(StatsHistoryTestCase):
         assert frozen_doc is not None
         self.assertEqual(frozen_doc["usage"]["calls"], 1)
 
-    def test_a_day_with_no_activity_gets_no_row(self):
+    def test_a_day_with_no_activity_gets_no_row(self) -> None:
         """Sparse by design: a gap in the days means nothing happened, which the
         reader can infer without a table of zeroes claiming it as fact."""
         self.snap.maybe_snapshot(
@@ -140,7 +141,7 @@ class TestMaybeSnapshot(StatsHistoryTestCase):
 
 
 class TestHistory(StatsHistoryTestCase):
-    def test_days_are_oldest_first_and_carry_full_documents(self):
+    def test_days_are_oldest_first_and_carry_full_documents(self) -> None:
         for offset, tokens in ((0, 30), (2, 50)):
             self.snap.maybe_snapshot(
                 self.conn,
@@ -158,7 +159,7 @@ class TestHistory(StatsHistoryTestCase):
         self.assertEqual(history[2]["document"]["usage"]["total_tokens"], 75)
         self.assertEqual(history[3]["document"]["usage"]["total_tokens"], 75)
 
-    def test_a_corrupt_document_is_skipped_not_fatal(self):
+    def test_a_corrupt_document_is_skipped_not_fatal(self) -> None:
         self.conn.execute(
             "INSERT INTO stats_snapshots (day, document, created_at) VALUES (?, ?, ?)",
             ("2030-01-01", "{not json", 0.0),
@@ -179,30 +180,30 @@ class TestPrune(StatsHistoryTestCase):
             )
         self.conn.commit()
 
-    def test_keeps_the_newest_n_rows(self):
+    def test_keeps_the_newest_n_rows(self) -> None:
         self._freeze_days(["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04"])
         deleted = self.snap.prune(2)
         self.assertEqual(deleted, 2)
         self.assertEqual(self.snap.list_days(), ["2026-09-03", "2026-09-04"], "the newest survive")
 
-    def test_zero_keeps_everything(self):
+    def test_zero_keeps_everything(self) -> None:
         self._freeze_days(["2026-09-01", "2026-09-02"])
         self.assertEqual(self.snap.prune(0), 0)
         self.assertEqual(len(self.snap.list_days()), 2)
 
-    def test_pruning_more_than_exists_changes_nothing(self):
+    def test_pruning_more_than_exists_changes_nothing(self) -> None:
         self._freeze_days(["2026-09-01"])
         self.assertEqual(self.snap.prune(30), 0)
         self.assertEqual(len(self.snap.list_days()), 1)
 
-    def test_deletion_is_by_count_not_age_so_an_idle_machine_prunes_nothing(self):
+    def test_deletion_is_by_count_not_age_so_an_idle_machine_prunes_nothing(self) -> None:
         """Rows from months ago survive when they are among the newest N: the
         policy bounds the table, not the calendar."""
         self._freeze_days(["2025-01-01", "2026-09-01"])
         self.snap.prune(2)
         self.assertEqual(len(self.snap.list_days()), 2, "two rows, policy of 2 — nothing to do")
 
-    def test_prune_tolerates_rows_a_corrupt_document_would_have_blocked(self):
+    def test_prune_tolerates_rows_a_corrupt_document_would_have_blocked(self) -> None:
         # Prune is a table operation; it must not care whether documents parse.
         self._freeze_days(["2026-09-01", "2026-09-02", "2026-09-03"])
         self.conn.execute("UPDATE stats_snapshots SET document = '{bad' WHERE day = '2026-09-02'")

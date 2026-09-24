@@ -5,10 +5,10 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 
-from engine.providers import OpenAICompatProvider
+from engine.providers import OpenAICompatProvider, OllamaProvider
 
 
-def openai_reply(content: str) -> dict:
+def openai_reply(content: str) -> dict[str, Any]:
     return {"choices": [{"message": {"role": "assistant", "content": content}}]}
 
 
@@ -29,12 +29,12 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
         # finish chunk — the shape real providers produce when the usage
         # counters are computed after the last token.
         self.split_usage = split_usage
-        self.post_bodies: list[dict] = []
+        self.post_bodies: list[dict[str, Any]] = []
         self.models_requests = 0
         class Handler(BaseHTTPRequestHandler):
             # `self.server` is the base server to the type checker; the cast
             # names what it actually is, so the counters below are typed.
-            def do_GET(self):
+            def do_GET(self) -> None:
                 server = cast(_FakeOpenAIServer, self.server)
                 if self.path.endswith("/models"):
                     server.models_requests += 1
@@ -52,7 +52,7 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
                 else:
                     self.send_error(404)
 
-            def do_POST(self):
+            def do_POST(self) -> None:
                 server = cast(_FakeOpenAIServer, self.server)
                 length = int(self.headers.get("content-length", 0))
                 server.post_bodies.append(json.loads(self.rfile.read(length)))
@@ -67,7 +67,7 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
                     self.end_headers()
                     # Usage rides the finish chunk or its own chunk before it,
                     # so the two branches are not the same shape.
-                    chunks: tuple[dict, ...]
+                    chunks: tuple[dict[str, Any], ...]
                     if server.split_usage:
                         chunks = (
                             {"choices": [{"delta": {"content": "hel"}}]},
@@ -94,7 +94,7 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
                 self.end_headers()
                 self.wfile.write(body)
 
-            def log_message(self, *args):  # silence the test log
+            def log_message(self, *args: Any) -> None:  # silence the test log
                 pass
 
         super().__init__(("127.0.0.1", 0), Handler)
@@ -125,7 +125,7 @@ class TestJsonModeCapability(_ServerMixin):
 
         return asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64))
 
-    def test_a_capable_server_gets_response_format_and_the_probe_is_cached(self):
+    def test_a_capable_server_gets_response_format_and_the_probe_is_cached(self) -> None:
         server = self._start(advertise=True)
         provider = self._provider(self.base)
 
@@ -138,7 +138,7 @@ class TestJsonModeCapability(_ServerMixin):
         self.assertTrue(all("response_format" in b for b in server.post_bodies))
         self.assertEqual(server.post_bodies[0]["response_format"], {"type": "json_object"})
 
-    def test_a_server_without_the_capability_is_never_sent_the_field(self):
+    def test_a_server_without_the_capability_is_never_sent_the_field(self) -> None:
         server = self._start(advertise=False)
         provider = self._provider(self.base)
 
@@ -148,7 +148,7 @@ class TestJsonModeCapability(_ServerMixin):
         self.assertTrue(server.post_bodies)
         self.assertFalse(any("response_format" in b for b in server.post_bodies))
 
-    def test_a_server_that_rejects_the_field_is_retried_without_it(self):
+    def test_a_server_that_rejects_the_field_is_retried_without_it(self) -> None:
         """A 400 on response_format must not fail the call — it is a capability
         the probe got wrong, and the fix is to stop sending the field."""
         server = self._start(advertise=True, reject_json_mode=True)
@@ -168,17 +168,17 @@ class TestJsonModeCapability(_ServerMixin):
 class TestOpenAIStreaming(_ServerMixin):
     """With on_delta attached the provider streams SSE and assembles the text."""
 
-    def _run(self, provider: OpenAICompatProvider):
+    def _run(self, provider: OpenAICompatProvider) -> tuple[str, list[str]]:
         import asyncio
         seen: list[str] = []
         provider.on_delta = seen.append
         out = asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64))
         return out, seen
 
-    def test_streamed_text_assembles_in_order_and_reports_usage(self):
+    def test_streamed_text_assembles_in_order_and_reports_usage(self) -> None:
         server = self._start(advertise=False)
         provider = OpenAICompatProvider("test-key", self.base)
-        usage: list[dict] = []
+        usage: list[dict[str, Any]] = []
         provider.usage_sink = usage.append
 
         out, seen = self._run(provider)
@@ -188,13 +188,13 @@ class TestOpenAIStreaming(_ServerMixin):
         self.assertEqual(usage and usage[0], {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7})
         self.assertTrue(all(b.get("stream") is True for b in server.post_bodies))
 
-    def test_usage_on_a_separate_chunk_survives_the_finish_merge(self):
+    def test_usage_on_a_separate_chunk_survives_the_finish_merge(self) -> None:
         """Usage and finish_reason often arrive on different SSE chunks. Over-
         writing the accumulator with the finish chunk dropped the usage block,
         so the usage report saw nothing at all."""
         self._start(advertise=False, split_usage=True)
         provider = OpenAICompatProvider("test-key", self.base)
-        usage: list[dict] = []
+        usage: list[dict[str, Any]] = []
         provider.usage_sink = usage.append
 
         out, _seen = self._run(provider)
@@ -202,7 +202,7 @@ class TestOpenAIStreaming(_ServerMixin):
         self.assertEqual(out, "hello")
         self.assertEqual(usage and usage[0], {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7})
 
-    def test_a_server_that_rejects_streaming_falls_back_to_blocking(self):
+    def test_a_server_that_rejects_streaming_falls_back_to_blocking(self) -> None:
         server = self._start(advertise=False, reject_stream=True)
         provider = OpenAICompatProvider("test-key", self.base)
 
@@ -218,10 +218,10 @@ class TestOpenAIStreaming(_ServerMixin):
 class _FakeOllamaServer(ThreadingHTTPServer):
     """NDJSON-streaming stand-in for /api/generate."""
 
-    def __init__(self):
-        self.post_bodies: list[dict] = []
+    def __init__(self) -> None:
+        self.post_bodies: list[dict[str, Any]] = []
         class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
+            def do_POST(self) -> None:
                 server = cast(_FakeOllamaServer, self.server)
                 length = int(self.headers.get("content-length", 0))
                 server.post_bodies.append(json.loads(self.rfile.read(length)))
@@ -242,13 +242,15 @@ class _FakeOllamaServer(ThreadingHTTPServer):
                         if done else {"response": piece, "done": False}
                     ).encode()
                     self.wfile.write(body + b"\n")
-            def log_message(self, *args):
+            def log_message(self, *args: Any) -> None:
                 pass
         super().__init__(("127.0.0.1", 0), Handler)
 
 
 class TestOllamaStreaming(unittest.TestCase):
-    def _complete(self, attach_delta: bool):
+    def _complete(
+        self, attach_delta: bool,
+    ) -> tuple[OllamaProvider, _FakeOllamaServer, list[str], str]:
         import asyncio
         from engine.providers import OllamaProvider
         server = _FakeOllamaServer()
@@ -263,19 +265,19 @@ class TestOllamaStreaming(unittest.TestCase):
         out = asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64))
         return provider, server, seen, out
 
-    def test_ndjson_stream_assembles_and_reports_usage(self):
+    def test_ndjson_stream_assembles_and_reports_usage(self) -> None:
         provider, server, seen, out = self._complete(True)
         self.assertEqual(out, '{"files": []}')
         self.assertEqual(seen, ['{"fi', '{"files": []}'])
         self.assertEqual(server.post_bodies[0].get("stream"), True)
 
-    def test_without_on_delta_the_request_stays_blocking(self):
+    def test_without_on_delta_the_request_stays_blocking(self) -> None:
         provider, server, seen, out = self._complete(False)
         self.assertEqual(out, '{"files": []}')
         self.assertEqual(seen, [])
         self.assertIs(server.post_bodies[0].get("stream"), False)
 
-    def test_a_dead_endpoint_raises_provider_unreachable_when_streaming(self):
+    def test_a_dead_endpoint_raises_provider_unreachable_when_streaming(self) -> None:
         """A refused connection must not escape as a raw httpx exception.
 
         post_json normalizes transport failures for non-streaming calls, but the
@@ -296,7 +298,7 @@ class TestOllamaStreaming(unittest.TestCase):
             asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64))
         self.assertEqual(ctx.exception.code, "provider_unreachable")
 
-    def test_openai_compat_streaming_dead_endpoint_raises_provider_unreachable(self):
+    def test_openai_compat_streaming_dead_endpoint_raises_provider_unreachable(self) -> None:
         """Same normalization for the openai_compat SSE stream."""
         import asyncio
         from engine.providers import OpenAICompatProvider, ProviderError
@@ -312,13 +314,13 @@ class TestGoogleKeyHeader(unittest.TestCase):
     """The API key must travel in the x-goog-api-key header, never in the URL:
     a query-string credential lands in proxy and server access logs."""
 
-    def test_key_travels_in_the_header_not_the_url(self):
+    def test_key_travels_in_the_header_not_the_url(self) -> None:
         import asyncio
         from engine.providers import GoogleProvider
-        seen: dict = {}
+        seen: dict[str, Any] = {}
 
         class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
+            def do_POST(self) -> None:
                 length = int(self.headers.get("content-length", 0))
                 self.rfile.read(length)
                 seen["path"] = self.path
@@ -332,7 +334,7 @@ class TestGoogleKeyHeader(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(body)
 
-            def log_message(self, *args):  # silence the test log
+            def log_message(self, *args: Any) -> None:  # silence the test log
                 pass
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

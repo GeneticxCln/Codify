@@ -137,7 +137,7 @@ def scan_tree() -> dict[str, list[str]]:
 
 
 class MinPythonSyntaxTest(unittest.TestCase):
-    def test_every_shipped_module_parses_on_the_declared_minimum(self):
+    def test_every_shipped_module_parses_on_the_declared_minimum(self) -> None:
         offenders = scan_tree()
         self.assertEqual(
             [],
@@ -147,14 +147,14 @@ class MinPythonSyntaxTest(unittest.TestCase):
             "fails to import and `make test` cannot run at all",
         )
 
-    def test_the_scan_reaches_the_modules_that_matter(self):
+    def test_the_scan_reaches_the_modules_that_matter(self) -> None:
         """A glob that quietly matches nothing must fail rather than pass."""
         scanned = {str(path.relative_to(ROOT)) for path in _python_files()}
         self.assertIn("engine/executor.py", scanned)
         self.assertIn("engine/app.py", scanned)
         self.assertGreaterEqual(len(scanned), 20, "the scan covered almost nothing")
 
-    def test_the_checker_rejects_the_python_312_only_forms(self):
+    def test_the_checker_rejects_the_python_312_only_forms(self) -> None:
         cases = [
             # a nested f-string reusing the outer quote character
             'value = f"{f\'({d[\'k\']})\'}"',
@@ -172,7 +172,7 @@ class MinPythonSyntaxTest(unittest.TestCase):
                     f"the guard missed 3.12-only syntax: {source}",
                 )
 
-    def test_the_checker_accepts_what_the_minimum_python_allows(self):
+    def test_the_checker_accepts_what_the_minimum_python_allows(self) -> None:
         # Each of these is legal on 3.10 and must stay legal here.
         allowed = [
             'value = f"{d[\'k\']}"',  # a different quote character inside the field
@@ -187,7 +187,7 @@ class MinPythonSyntaxTest(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertEqual([], min_version_problems(source, "x.py"), source)
 
-    def test_a_problem_names_the_file_and_the_line(self):
+    def test_a_problem_names_the_file_and_the_line(self) -> None:
         source = "x = 1\ny = f\"{f'({d['k']})'}\"\n"
         problems = min_version_problems(source, "engine/thing.py")
         self.assertEqual(1, len(problems), problems)

@@ -7,6 +7,7 @@ Run: python3 scripts/fake_ollama.py
 import json
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any
 
 # FAKE_PLANNER_STEPS=2 turns the plan into two path-disjoint steps, so a live
 # parallel goal has something real to overlap.
@@ -113,7 +114,7 @@ def _request_text(prompt: str) -> str:
     return m.group(1) if m else prompt
 
 
-def laya_answers(prompt: str) -> dict:
+def laya_answers(prompt: str) -> dict[str, Any]:
     request = _request_text(prompt)
     lowered = request.lower()
     injection = 0.97 if any(m in lowered for m in INJECTION_MARKERS) else 0.02
@@ -131,10 +132,10 @@ def laya_answers(prompt: str) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):  # quiet
+    def log_message(self, fmt: str, *args: Any) -> None:  # quiet
         pass
 
-    def _send(self, obj, status=200):
+    def _send(self, obj: Any, status: int = 200) -> None:
         body = json.dumps(obj).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -142,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         if self.path.startswith("/v1beta/models"):
             # Google-shaped discovery, so the picker's "the provider reports this
             # cannot hold a conversation" signal can be exercised for real: one
@@ -191,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send({"error": "not found"}, 404)
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length) or b"{}")
         prompt = payload.get("prompt", "")

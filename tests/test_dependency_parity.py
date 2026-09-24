@@ -54,11 +54,11 @@ def _normalise(dep: str) -> str:
 
 
 class TestDependencyParity(unittest.TestCase):
-    def test_both_lists_parse(self):
+    def test_both_lists_parse(self) -> None:
         self.assertTrue(_pyproject_dependencies(), "pyproject.toml has dependencies")
         self.assertTrue(_requirements(), "engine/requirements.txt has requirements")
 
-    def test_the_two_lists_are_identical(self):
+    def test_the_two_lists_are_identical(self) -> None:
         a = sorted(map(_normalise, _pyproject_dependencies()))
         b = sorted(map(_normalise, _requirements()))
         self.assertEqual(

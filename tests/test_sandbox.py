@@ -10,16 +10,16 @@ from engine.sandbox import CommandNotAllowed, SandboxService, validate_argv
 
 
 class TestSandboxService(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.fs = FileSystemService(str(self.root))
         self.sandbox = SandboxService()
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def test_timeout_kills_whole_process_group(self):
+    def test_timeout_kills_whole_process_group(self) -> None:
         # A timed-out command that spawned grandchildren must leave no strays:
         # the kill targets the process group, not just the direct child.
         (self.root / "spawner.py").write_text(
@@ -42,7 +42,7 @@ class TestSandboxService(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(survivors, "", f"stray grandchildren survived: {survivors}")
 
-    def test_empty_and_basename(self):
+    def test_empty_and_basename(self) -> None:
         with self.assertRaises(CommandNotAllowed):
             validate_argv([], self.fs)
 
@@ -52,12 +52,12 @@ class TestSandboxService(unittest.TestCase):
         with self.assertRaises(CommandNotAllowed):
             validate_argv(["./test"], self.fs)
 
-    def test_unallowed_binary(self):
+    def test_unallowed_binary(self) -> None:
         for bin_name in ["sh", "bash", "curl", "wget", "rm", "node"]:
             with self.assertRaises(CommandNotAllowed):
                 validate_argv([bin_name], self.fs)
 
-    def test_pytest_validation(self):
+    def test_pytest_validation(self) -> None:
         # Allowed flags and paths
         (self.root / "test_main.py").write_text("", encoding="utf-8")
         validate_argv(["pytest", "-q", "-v", "--tb=short", "--no-header", "--maxfail=1", "test_main.py"], self.fs)
@@ -70,7 +70,7 @@ class TestSandboxService(unittest.TestCase):
         with self.assertRaises(CommandNotAllowed):
             validate_argv(["pytest", "../other.py"], self.fs)
 
-    def test_python_validation(self):
+    def test_python_validation(self) -> None:
         # python and python3 -m pytest
         validate_argv(["python", "-m", "pytest", "-q"], self.fs)
         validate_argv(["python3", "-m", "pytest", "-v"], self.fs)
@@ -92,7 +92,7 @@ class TestSandboxService(unittest.TestCase):
         with self.assertRaises(CommandNotAllowed):
             validate_argv(["python3", "-m", "http.server"], self.fs)
 
-    def test_npm_pnpm_validation(self):
+    def test_npm_pnpm_validation(self) -> None:
         for cmd in ["npm", "pnpm"]:
             validate_argv([cmd, "test"], self.fs)
             validate_argv([cmd, "run", "test:unit"], self.fs)
@@ -101,13 +101,13 @@ class TestSandboxService(unittest.TestCase):
             with self.assertRaises(CommandNotAllowed):
                 validate_argv([cmd, "run", "semi;bad"], self.fs)
 
-    def test_cargo_validation(self):
+    def test_cargo_validation(self) -> None:
         validate_argv(["cargo", "test"], self.fs)
         validate_argv(["cargo", "test", "--quiet"], self.fs)
         with self.assertRaises(CommandNotAllowed):
             validate_argv(["cargo", "build"], self.fs)
 
-    def test_go_validation(self):
+    def test_go_validation(self) -> None:
         validate_argv(["go", "test"], self.fs)
         validate_argv(["go", "test", "./..."], self.fs)
         # Subpackage recursive patterns: a real workspace prefix plus /...
@@ -125,7 +125,7 @@ class TestSandboxService(unittest.TestCase):
         with self.assertRaises(CommandNotAllowed):
             validate_argv(["go", "run", "main.go"], self.fs)
 
-    def test_git_validation(self):
+    def test_git_validation(self) -> None:
         validate_argv(["git", "status"], self.fs)
         validate_argv(["git", "diff"], self.fs)
         validate_argv(["git", "log", "-1"], self.fs)
@@ -134,7 +134,7 @@ class TestSandboxService(unittest.TestCase):
         with self.assertRaises(CommandNotAllowed):
             validate_argv(["git", "push"], self.fs)
 
-    def test_read_only_git_cannot_mutate_refs(self):
+    def test_read_only_git_cannot_mutate_refs(self) -> None:
         """The librarian's `git branch`/`git tag` are read-only: -d/-D/--delete
         remove refs, and a nominally read-only allowlist that omits them lets
         `git branch -D main` through in read-only mode."""
@@ -154,7 +154,7 @@ class TestSandboxService(unittest.TestCase):
         validate_argv(["git", "branch", "-a"], self.fs, mode="read_only")
         validate_argv(["git", "tag", "-l"], self.fs, mode="read_only")
 
-    def test_read_only_git_grep_cannot_run_a_pager(self):
+    def test_read_only_git_grep_cannot_run_a_pager(self) -> None:
         """`git grep -Opager` executes the named binary as its pager — arbitrary
         code execution from a nominally read-only allowlist."""
         for argv in (
@@ -168,7 +168,7 @@ class TestSandboxService(unittest.TestCase):
         # Plain grep stays allowed.
         validate_argv(["git", "grep", "pattern"], self.fs, mode="read_only")
 
-    def test_timeout_reports_exit_124(self):
+    def test_timeout_reports_exit_124(self) -> None:
         """The documented timeout contract is exit 124 (timeout(1)'s code), not
         the raw -15/-9 signal death."""
         (self.root / "sleeper.py").write_text("import time; time.sleep(60)\n", encoding="utf-8")

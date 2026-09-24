@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 class GitService:
-    def __init__(self):
+    def __init__(self) -> None:
         self._git_bin = shutil.which("git") or "git"
 
     @staticmethod

@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable
 
 import httpx
 
@@ -47,8 +48,11 @@ class _StubKeychain:
 
 
 class _StubConfig:
-    def __init__(self, role, provider, protocol, base_url=None, api_key_ref=None, model_name="m",
-                 fallback_provider=None, fallback_protocol=None, fallback_base_url=None):
+    def __init__(
+        self, role: str, provider: str, protocol: str, base_url: str | None = None,
+        api_key_ref: str | None = None, model_name: str = "m",
+                 fallback_provider: str | None = None, fallback_protocol: str | None = None,
+                 fallback_base_url: str | None = None):
         self.role = role
         self.provider = provider
         self.protocol = protocol
@@ -61,14 +65,16 @@ class _StubConfig:
 
 
 class _StubRegistry:
-    def __init__(self, configs=None):
+    def __init__(self, configs: list[Any] | None = None) -> None:
         self._configs = configs or []
 
-    def list_configs(self):
+    def list_configs(self) -> list[Any]:
         return self._configs
 
 
-def _handler(routes: dict[str, tuple[int, Any]], calls: list[httpx.Request] | None = None):
+def _handler(
+    routes: dict[str, tuple[int, Any]], calls: list[httpx.Request] | None = None
+) -> Callable[[httpx.Request], httpx.Response]:
     """Map path-suffix → (status, json) so a test can assert what was requested.
 
     Suffix matching because the same logical endpoint sits under different
@@ -89,12 +95,14 @@ def _handler(routes: dict[str, tuple[int, Any]], calls: list[httpx.Request] | No
     return handle
 
 
-def _client(routes, calls=None) -> httpx.AsyncClient:
+def _client(
+    routes: dict[str, tuple[int, Any]], calls: list[httpx.Request] | None = None
+) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(_handler(routes, calls)))
 
 
 class TestProtocolDiscovery(unittest.IsolatedAsyncioTestCase):
-    async def test_openai_compat(self):
+    async def test_openai_compat(self) -> None:
         calls: list[httpx.Request] = []
         routes = {
             "/models": (
@@ -128,7 +136,7 @@ class TestProtocolDiscovery(unittest.IsolatedAsyncioTestCase):
         openai_models = [m["id"] for m in payload["models"] if m["provider"] == "openai"]
         self.assertEqual(openai_models, ["o3-mini", "gpt-4o"], "newest first")
 
-    async def test_anthropic_uses_its_own_headers_and_display_name(self):
+    async def test_anthropic_uses_its_own_headers_and_display_name(self) -> None:
         calls: list[httpx.Request] = []
         routes = {
             "/v1/models": (
@@ -146,7 +154,7 @@ class TestProtocolDiscovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0].headers["anthropic-version"], "2023-06-01")
         self.assertIsNotNone(result.models[0]["created"])
 
-    async def test_google_strips_the_resource_prefix_and_follows_pages(self):
+    async def test_google_strips_the_resource_prefix_and_follows_pages(self) -> None:
         seen: list[str] = []
 
         def handle(request: httpx.Request) -> httpx.Response:
@@ -191,7 +199,7 @@ class TestProtocolDiscovery(unittest.IsolatedAsyncioTestCase):
         self.assertIn("gemini-3-pro", [m["id"] for m in result.models], "page 2 was consumed")
         self.assertEqual(len(seen), 2, "exactly two requests: first page, then the next")
 
-    async def test_google_discovery_sends_the_key_in_the_header_not_the_url(self):
+    async def test_google_discovery_sends_the_key_in_the_header_not_the_url(self) -> None:
         """Same credential rule as GoogleProvider.complete(): a query-string key
         lands in proxy and server access logs, so discovery must use the
         x-goog-api-key header too."""
@@ -207,7 +215,7 @@ class TestProtocolDiscovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0].headers["x-goog-api-key"], "goog-key")
         self.assertNotIn("key=", str(calls[0].url), "the key must not ride in the URL query")
 
-    async def test_ollama_lists_local_models(self):
+    async def test_ollama_lists_local_models(self) -> None:
         routes = {
             "/api/tags": (
                 200,
@@ -227,7 +235,7 @@ class TestProtocolDiscovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.models), 2)
         self.assertIn("7B", result.models[0]["description"])
 
-    async def test_no_embedding_name_filtering(self):
+    async def test_no_embedding_name_filtering(self) -> None:
         """Ollama's list is reported as-is: filtering by name is how a hardcoded
         idea of 'a real model' creeps back in."""
         routes = {"/api/tags": (200, {"models": [{"name": "nomic-embed-text:latest"}]})}
@@ -238,7 +246,7 @@ class TestProtocolDiscovery(unittest.IsolatedAsyncioTestCase):
 
 
 class TestProviderFailures(unittest.IsolatedAsyncioTestCase):
-    async def test_missing_key_is_reported_without_a_request(self):
+    async def test_missing_key_is_reported_without_a_request(self) -> None:
         calls: list[httpx.Request] = []
         target = ProviderTarget("openai", "openai_compat", "https://api.openai.com/v1", "")
         async with _client({}, calls) as client:
@@ -248,7 +256,7 @@ class TestProviderFailures(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no API key", result.error)
         self.assertEqual(calls, [], "an unauthenticated provider must not be called")
 
-    async def test_401_explains_itself(self):
+    async def test_401_explains_itself(self) -> None:
         routes = {"/models": (401, {"error": {"message": "invalid api key"}})}
         target = ProviderTarget("openai", "openai_compat", "https://api.openai.com/v1", "bad")
         async with _client(routes) as client:
@@ -258,14 +266,14 @@ class TestProviderFailures(unittest.IsolatedAsyncioTestCase):
         self.assertIn("HTTP 401", result.error)
         self.assertIn("check the API key", result.error)
 
-    async def test_unknown_protocol_is_reported(self):
+    async def test_unknown_protocol_is_reported(self) -> None:
         target = ProviderTarget("weird", "carrier-pigeon", "https://example.com", "k")
         result = await discover_provider(target)
         self.assertFalse(result.ok)
         assert result.error is not None, "a failed discovery says why"
         self.assertIn("unknown protocol", result.error)
 
-    async def test_transport_error_does_not_raise(self):
+    async def test_transport_error_does_not_raise(self) -> None:
         def boom(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("connection refused", request=request)
 
@@ -278,7 +286,7 @@ class TestProviderFailures(unittest.IsolatedAsyncioTestCase):
 
 
 class TestTargets(unittest.TestCase):
-    def test_role_configs_keys_and_locals_are_all_queried(self):
+    def test_role_configs_keys_and_locals_are_all_queried(self) -> None:
         registry = _StubRegistry([
             _StubConfig("planner", "anthropic", "anthropic", api_key_ref="codify/agents/planner"),
             _StubConfig("fixer", "acme", "openai_compat", base_url="https://acme.test/v1", api_key_ref="ref"),
@@ -296,16 +304,16 @@ class TestTargets(unittest.TestCase):
         self.assertFalse(targets["ollama"].needs_key)
         self.assertIn("agent:planner", targets["anthropic"].sources)
 
-    def test_ollama_always_present_even_with_no_configs(self):
+    def test_ollama_always_present_even_with_no_configs(self) -> None:
         targets = _targets(_StubRegistry([]), _StubKeychain())
         self.assertEqual([t.provider for t in targets], ["ollama"])
 
-    def test_builtin_base_url_used_when_config_has_none(self):
+    def test_builtin_base_url_used_when_config_has_none(self) -> None:
         registry = _StubRegistry([_StubConfig("fixer", "deepseek", "openai_compat")])
         targets = {t.provider: t for t in _targets(registry, _StubKeychain(provider_keys={"deepseek": "k"}))}
         self.assertEqual(targets["deepseek"].base_url, "https://api.deepseek.com")
 
-    def test_a_fallback_provider_is_discoverable_too(self):
+    def test_a_fallback_provider_is_discoverable_too(self) -> None:
         """The settings screen flags a stale fallback with the same live-catalog
         rule as a primary. A fallback whose provider was never queried reports
         ok=false / no models, which would dress "we never asked" up as "your
@@ -334,7 +342,7 @@ class TestTargets(unittest.TestCase):
         self.assertEqual(targets["groq"].api_key, "gk", "builtin fallback inherits the keychain key")
         self.assertEqual(targets["groq"].base_url, "https://api.groq.com/openai/v1")
 
-    def test_a_role_set_endpoint_beats_the_seed_defaults(self):
+    def test_a_role_set_endpoint_beats_the_seed_defaults(self) -> None:
         """Discovery must poll the endpoint the roles actually talk to.
 
         list_configs is role-ordered and the seeded laya role has no base_url,
@@ -361,12 +369,15 @@ class TestTargets(unittest.TestCase):
 
 
 class TestCatalogService(unittest.IsolatedAsyncioTestCase):
-    async def _service(self, registry, keychain, routes, calls=None):
+    async def _service(
+        self, registry: Any, keychain: Any, routes: dict[str, tuple[int, Any]],
+        calls: list[httpx.Request] | None = None,
+    ) -> ModelCatalogService:
         return ModelCatalogService(
             registry, keychain, ttl_s=60, transport=httpx.MockTransport(_handler(routes, calls))
         )
 
-    async def test_empty_configuration_yields_no_models(self):
+    async def test_empty_configuration_yields_no_models(self) -> None:
         """The regression test for hardcoded models: nothing configured, ollama
         down → an empty catalog and a reason, not a plausible fake list."""
         calls: list[httpx.Request] = []
@@ -380,7 +391,7 @@ class TestCatalogService(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(statuses["ollama"]["ok"])
         self.assertIn("404", statuses["ollama"]["error"])
 
-    async def test_partial_failure_does_not_empty_the_catalog(self):
+    async def test_partial_failure_does_not_empty_the_catalog(self) -> None:
         routes = {
             "/api/tags": (200, {"models": [{"name": "local-model"}]}),
             "/models": (401, {"error": "bad key"}),
@@ -394,7 +405,7 @@ class TestCatalogService(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(statuses["ollama"]["ok"])
         self.assertFalse(statuses["openai"]["ok"])
 
-    async def test_cache_serves_seconds_calls_and_refresh_bypasses_it(self):
+    async def test_cache_serves_seconds_calls_and_refresh_bypasses_it(self) -> None:
         calls: list[httpx.Request] = []
         routes = {"/api/tags": (200, {"models": [{"name": "m1"}]})}
         service = await self._service(_StubRegistry([]), _StubKeychain(), routes, calls)
@@ -411,7 +422,7 @@ class TestCatalogService(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(third["cached"])
         self.assertGreater(len(calls), after_first, "refresh must re-query")
 
-    async def test_invalidate_forces_a_refetch(self):
+    async def test_invalidate_forces_a_refetch(self) -> None:
         calls: list[httpx.Request] = []
         routes = {"/api/tags": (200, {"models": [{"name": "m1"}]})}
         service = await self._service(_StubRegistry([]), _StubKeychain(), routes, calls)
@@ -421,7 +432,7 @@ class TestCatalogService(unittest.IsolatedAsyncioTestCase):
         await service.get()
         self.assertGreater(len(calls), after_first)
 
-    async def test_new_models_appear_without_a_restart(self):
+    async def test_new_models_appear_without_a_restart(self) -> None:
         """A model released provider-side shows up on the next refresh — the
         whole point of discovering instead of shipping a list."""
         state = {"models": [{"name": "old-model"}]}
@@ -441,7 +452,7 @@ class TestCatalogService(unittest.IsolatedAsyncioTestCase):
         after = await service.get(refresh=True)
         self.assertEqual([m["id"] for m in after["models"]], ["brand-new-model", "old-model"])
 
-    async def test_real_registry_integration(self):
+    async def test_real_registry_integration(self) -> None:
         """End-to-end through the real registry: a saved role config drives
         which provider is queried, with that role's own key and endpoint."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -476,8 +487,8 @@ class TestCatalogService(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSorting(unittest.TestCase):
-    def test_dated_models_come_first_newest_to_oldest(self):
-        models: list[dict] = [
+    def test_dated_models_come_first_newest_to_oldest(self) -> None:
+        models: list[dict[str, Any]] = [
             {"id": "b", "created": 100.0},
             {"id": "undated"},
             {"id": "a", "created": 300.0},
@@ -485,7 +496,7 @@ class TestSorting(unittest.TestCase):
         ]
         self.assertEqual([m["id"] for m in _sorted_models(models)], ["a", "b", "c", "undated"])
 
-    def test_undated_only_lists_sort_by_name(self):
+    def test_undated_only_lists_sort_by_name(self) -> None:
         models = [{"id": "z"}, {"id": "a"}, {"id": "m"}]
         self.assertEqual([m["id"] for m in _sorted_models(models)], ["a", "m", "z"])
 

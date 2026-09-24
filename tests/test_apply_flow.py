@@ -20,7 +20,7 @@ from engine.app import BOOT_TOKEN, app
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.laya import LayaDecision, LayaService
-from engine.models import ROLES, AgentConfigUpdate, Goal
+from engine.models import ROLES, AgentConfig, AgentConfigUpdate, Goal
 from engine.providers import BaseProvider, Keychain, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.services import AgentRegistryService, GoalService, WorkspaceService
@@ -29,16 +29,22 @@ PROPOSED = "hello from a dry run\n"
 
 
 class _StubProvider(BaseProvider):
+    # The factory stamps the last-built role here (see engine's routing contract).
+    current_role: str | None
+
     def __init__(self, **by_role: Any):
         self.by_role = by_role
-        self.calls: list[dict] = []
+        self.calls: list[dict[str, Any]] = []
         # Which role's config the factory last built a provider for. Routing on this
         # instead of scanning the system prompt for a role name: the prompts refer
         # to each other (the planner is given "the librarian's evidence pack"), so a
         # keyword scan answers the wrong role's script.
         self.current_role: str | None = None
 
-    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
         self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt})
         if self.current_role in self.by_role:
             resp = self.by_role[self.current_role]
@@ -53,10 +59,10 @@ class _StubProvider(BaseProvider):
 
 
 class _StubFactory(ProviderFactory):
-    def __init__(self, provider):
+    def __init__(self, provider: _StubProvider) -> None:
         self.provider = provider
 
-    def build(self, config):
+    def build(self, config: AgentConfig) -> BaseProvider:
         self.provider.current_role = config.role
         return self.provider
 
@@ -64,12 +70,12 @@ class _StubFactory(ProviderFactory):
 class _NoGate(LayaService):
     """Skip the pre-flight gate so the pipeline under test is the only variable."""
 
-    async def decide(self, state):
+    async def decide(self, state: dict[str, Any]) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 
 
 class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.ws_dir = self.root / "workspace"
@@ -106,7 +112,7 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         self.client = httpx.AsyncClient(transport=self.transport, base_url="http://test")
         self.headers = {"Authorization": f"Bearer {BOOT_TOKEN}"}
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         await self.client.aclose()
         app.state.conn.close()
         self.temp_dir.cleanup()
@@ -118,7 +124,7 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200, r.text)
         return r.json()["id"]
 
-    async def _mk_goal(self, ws_id: str, *, dry_run: bool) -> dict:
+    async def _mk_goal(self, ws_id: str, *, dry_run: bool) -> dict[str, Any]:
         r = await self.client.post(
             "/goals",
             json={"workspace_id": ws_id, "title": "Add banner", "description": "d", "dry_run": dry_run},
@@ -152,7 +158,7 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         await self._wait_for_status(goal["id"], {"COMPLETED", "FAILED"})
         return ws_id, goal["id"]
 
-    async def test_dry_run_stores_the_proposal_and_writes_nothing(self):
+    async def test_dry_run_stores_the_proposal_and_writes_nothing(self) -> None:
         _, goal_id = await self._run_dry_run()
 
         self.assertFalse((self.ws_dir / "banner.txt").exists(), "dry run must not write files")
@@ -163,7 +169,7 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(diffs), 1)
         self.assertIn(PROPOSED.strip(), diffs[0].payload["unified_diff"])
 
-    async def test_apply_writes_the_exact_proposal_without_re_asking_the_fixer(self):
+    async def test_apply_writes_the_exact_proposal_without_re_asking_the_fixer(self) -> None:
         _, goal_id = await self._run_dry_run()
         fixer_calls_before = self.provider.fixer_calls()
 
@@ -191,7 +197,7 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         # Every step ran for real: no step may be left PENDING.
         self.assertTrue(all(s.status == "COMPLETED" for s in self.goals.steps(goal_id)))
 
-    async def test_apply_guards_answer_409_instead_of_faking_success(self):
+    async def test_apply_guards_answer_409_instead_of_faking_success(self) -> None:
         ws_id = await self._mk_workspace()
 
         # Not a dry run at all.
@@ -224,7 +230,7 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 409)
         self.assertEqual(r.json()["code"], "nothing_to_apply")
 
-    async def test_a_failing_test_suite_is_reported_as_tests_failed(self):
+    async def test_a_failing_test_suite_is_reported_as_tests_failed(self) -> None:
         ws_id = await self._mk_workspace()
         self.provider.by_role["verifier"] = {"argv": None, "verdict": "fail", "explanation": "assertion error"}
         goal = await self._mk_goal(ws_id, dry_run=False)
@@ -240,7 +246,7 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(errors[-1].payload["code"], "tests_failed")
         self.assertIn("assertion error", errors[-1].payload["message"])
 
-    async def test_pause_and_cancel_emit_goal_status_events(self):
+    async def test_pause_and_cancel_emit_goal_status_events(self) -> None:
         ws_id = await self._mk_workspace()
         goal = await self._mk_goal(ws_id, dry_run=False)
         await self._wait_for_status(goal["id"], {"PENDING"})

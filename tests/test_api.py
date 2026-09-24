@@ -22,16 +22,17 @@ from engine.sandbox import SandboxService
 from engine.stats_history import StatsSnapshotService
 from engine.stats_import import StatsImportService
 from engine.services import AgentRegistryService, GoalService, SettingsService, WorkspaceService
+from typing import Any
 
 
 class _StubCatalog:
     """A model catalog with a fixed answer, so repair tests never touch a provider."""
 
-    def __init__(self, payload: dict):
+    def __init__(self, payload: dict[str, Any]):
         self.payload = payload
         self.invalidated = 0
 
-    async def get(self, refresh: bool = False) -> dict:
+    async def get(self, refresh: bool = False) -> dict[str, Any]:
         return self.payload
 
     def invalidate(self) -> None:
@@ -39,7 +40,7 @@ class _StubCatalog:
 
 
 class TestApi(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
         self.db_path = self.root / "test.db"
@@ -80,12 +81,12 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.client = httpx.AsyncClient(transport=self.transport, base_url="http://test")
         self.headers = {"Authorization": f"Bearer {BOOT_TOKEN}"}
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         await self.client.aclose()
         app.state.conn.close()
         self.temp_dir.cleanup()
 
-    async def test_repair_points_only_the_broken_roles_at_a_discovered_model(self):
+    async def test_repair_points_only_the_broken_roles_at_a_discovered_model(self) -> None:
         """One action fixes what cannot run and leaves everything else untouched.
 
         The working role in this test is the point: an install that is partly
@@ -142,7 +143,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(configs["scribe"]["provider"], "ollama")
         self.assertEqual(configs["scribe"]["model_name"], "local-1")
 
-    async def test_repair_is_a_no_op_when_the_catalog_is_empty(self):
+    async def test_repair_is_a_no_op_when_the_catalog_is_empty(self) -> None:
         await self.client.put(
             "/settings/agents/planner",
             headers=self.headers,
@@ -168,7 +169,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         configs = {c["role"]: c for c in (await self.client.get("/settings/agents", headers=self.headers)).json()}
         self.assertEqual(configs["planner"]["model_name"], "", "nothing invented")
 
-    async def test_repair_says_nothing_needed_fixing_when_nothing_was_proven_broken(self):
+    async def test_repair_says_nothing_needed_fixing_when_nothing_was_proven_broken(self) -> None:
         """An unreachable provider is an unknown, not a fault.
 
         Every role here already has a model, so no target is needed and none is
@@ -198,7 +199,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(report["left_alone"]), len(ROLES))
         self.assertTrue(all("not verified" in row["reason"] for row in report["left_alone"]))
 
-    async def test_roles_endpoint_describes_every_slot_and_its_abilities(self):
+    async def test_roles_endpoint_describes_every_slot_and_its_abilities(self) -> None:
         """The settings screen reads the ability list from here, so it cannot
         describe a grant the engine does not make."""
         r = await self.client.get("/settings/roles", headers=self.headers)
@@ -214,7 +215,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_role["fixer"]["timing"], "once per step")
         self.assertEqual(by_role["librarian"]["timing"], "once per goal, before planning")
 
-    async def test_a_renamed_role_is_reported_by_its_new_name(self):
+    async def test_a_renamed_role_is_reported_by_its_new_name(self) -> None:
         await self.client.put(
             "/settings/agents/fixer",
             headers=self.headers,
@@ -224,7 +225,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         by_role = {entry["role"]: entry for entry in r.json()}
         self.assertEqual(by_role["fixer"]["display_name"], "My Fixer")
 
-    async def test_auth_middleware(self):
+    async def test_auth_middleware(self) -> None:
         # No token -> 401
         r = await self.client.get("/health")
         self.assertEqual(r.status_code, 401)
@@ -242,7 +243,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         r = await self.client.get("/health")
         self.assertEqual(r.status_code, 401)
 
-    async def test_models_route_is_discovered_not_hardcoded(self):
+    async def test_models_route_is_discovered_not_hardcoded(self) -> None:
         """No provider reachable → an empty catalog plus reasons. A list of
         plausible model names would be the hardcoded-catalog bug returning."""
         r = await self.client.get("/models", headers=self.headers)
@@ -254,7 +255,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(not p["ok"] for p in body["providers"]))
         self.assertTrue(all(p["error"] for p in body["providers"]), "every failure names a reason")
 
-    async def test_models_route_serves_cache_and_honours_refresh(self):
+    async def test_models_route_serves_cache_and_honours_refresh(self) -> None:
         calls: list[httpx.Request] = []
 
         def handle(request: httpx.Request) -> httpx.Response:
@@ -277,7 +278,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(refreshed["cached"])
         self.assertGreater(len(calls), 1, "refresh must re-query")
 
-    async def test_saving_a_key_invalidates_the_catalog_cache(self):
+    async def test_saving_a_key_invalidates_the_catalog_cache(self) -> None:
         """Adding a provider key must surface its models immediately."""
         app.state.models._cache = {"models": [], "providers": [], "fetched_at": 0, "cached": False}
         app.state.models._cached_at = 10**9
@@ -288,7 +289,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIsNone(app.state.models._cache, "stale catalog must be dropped")
 
-    async def test_saving_a_key_actually_stores_it(self):
+    async def test_saving_a_key_actually_stores_it(self) -> None:
         """The whole point of the key endpoint: the provider can use it afterwards.
 
         Backend-agnostic on purpose — OS keychain where one exists, the local
@@ -315,7 +316,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(openai["storage_detail"])
 
-    async def test_saving_a_key_without_a_keyring_is_a_clear_error(self):
+    async def test_saving_a_key_without_a_keyring_is_a_clear_error(self) -> None:
         """A machine with no OS keyring must get an explained 503, not a 500."""
         from engine.providers import ProviderError
 
@@ -329,7 +330,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.json()["code"], "keyring_unavailable")
         self.assertIn("Secret Service", r.json()["message"])
 
-    async def test_updating_an_agent_config_invalidates_the_catalog_cache(self):
+    async def test_updating_an_agent_config_invalidates_the_catalog_cache(self) -> None:
         app.state.models._cache = {"models": [], "providers": [], "fetched_at": 0, "cached": False}
         app.state.models._cached_at = 10**9
         r = await self.client.put(
@@ -340,7 +341,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertIsNone(app.state.models._cache)
 
-    async def test_settings_endpoints(self):
+    async def test_settings_endpoints(self) -> None:
         # GET /settings/providers
         r = await self.client.get("/settings/providers", headers=self.headers)
         self.assertEqual(r.status_code, 200)
@@ -370,7 +371,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["display_name"], "API Planner")
 
-    async def test_workspace_refuses_the_filesystem_root(self):
+    async def test_workspace_refuses_the_filesystem_root(self) -> None:
         """A workspace at `/` makes every containment check vacuous — refused."""
         r = await self.client.post(
             "/workspaces",
@@ -405,7 +406,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         ))
         return ws_id, goal_id
 
-    async def test_delete_goal_cascades_and_reports_what_it_removed(self):
+    async def test_delete_goal_cascades_and_reports_what_it_removed(self) -> None:
         """Deleting a goal takes its record with it, and says how much."""
         _, goal_id = await self._seed_workspace_with_goal("ws-del-goal")
         events_before = app.state.conn.execute(
@@ -431,7 +432,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual((await self.client.get(f"/goals/{goal_id}", headers=self.headers)).status_code, 404)
 
-    async def test_delete_goal_refuses_while_it_is_in_progress(self):
+    async def test_delete_goal_refuses_while_it_is_in_progress(self) -> None:
         """A live coroutine must not outlive its row."""
         _, goal_id = await self._seed_workspace_with_goal("ws-del-running", terminal="RUNNING")
         r = await self.client.delete(f"/goals/{goal_id}", headers=self.headers)
@@ -440,12 +441,12 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         # Still there: a refusal must not half-delete.
         self.assertEqual((await self.client.get(f"/goals/{goal_id}", headers=self.headers)).status_code, 200)
 
-    async def test_delete_goal_unknown_is_404(self):
+    async def test_delete_goal_unknown_is_404(self) -> None:
         r = await self.client.delete("/goals/does-not-exist", headers=self.headers)
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json()["code"], "unknown_goal")
 
-    async def test_delete_workspace_refuses_to_cascade_implicitly(self):
+    async def test_delete_workspace_refuses_to_cascade_implicitly(self) -> None:
         """The FK used to surface as a bare 500; it is now a 409 that counts."""
         ws_id, goal_id = await self._seed_workspace_with_goal("ws-del-ws")
 
@@ -460,7 +461,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get(f"/goals/{goal_id}", headers=self.headers)).status_code, 200)
         self.assertEqual((await self.client.get(f"/workspaces/{ws_id}", headers=self.headers)).status_code, 200)
 
-    async def test_delete_workspace_cascade_removes_goals_and_their_events(self):
+    async def test_delete_workspace_cascade_removes_goals_and_their_events(self) -> None:
         ws_id, goal_id = await self._seed_workspace_with_goal("ws-del-cascade")
 
         r = await self.client.delete(
@@ -479,7 +480,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         ).fetchone()[0]
         self.assertEqual(rows, 0, "the cascaded goals' events go with them")
 
-    async def test_delete_workspace_refuses_while_a_goal_is_running(self):
+    async def test_delete_workspace_refuses_while_a_goal_is_running(self) -> None:
         """Cascading over live work is the same hazard as deleting a live goal."""
         ws_id, goal_id = await self._seed_workspace_with_goal("ws-del-active", terminal="RUNNING")
         r = await self.client.delete(
@@ -489,7 +490,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.json()["code"], "workspace_has_active_goals")
         self.assertEqual(r.json()["goal_id"], goal_id, "the refusal names what to cancel first")
 
-    async def test_delete_empty_workspace_needs_no_cascade_flag(self):
+    async def test_delete_empty_workspace_needs_no_cascade_flag(self) -> None:
         ws_dir = self.root / "ws-del-empty"
         ws_dir.mkdir()
         r = await self.client.post(
@@ -505,12 +506,12 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         # The directory itself survives: this endpoint forgets a path.
         self.assertTrue(ws_dir.is_dir(), "deleting a workspace must never remove the user's folder")
 
-    async def test_delete_requires_auth(self):
+    async def test_delete_requires_auth(self) -> None:
         ws_id, goal_id = await self._seed_workspace_with_goal("ws-del-auth")
         self.assertEqual((await self.client.delete(f"/goals/{goal_id}")).status_code, 401)
         self.assertEqual((await self.client.delete(f"/workspaces/{ws_id}")).status_code, 401)
 
-    async def test_workspaces_and_goals_lifecycle(self):
+    async def test_workspaces_and_goals_lifecycle(self) -> None:
         ws_dir = self.root / "ws1"
         ws_dir.mkdir()
 
@@ -596,7 +597,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         app.state.conn.execute("UPDATE goals SET created_at = ? WHERE id = ?", (created_at, goal_id))
         app.state.conn.commit()
 
-    async def test_goal_history_lists_goals_newest_first_with_active_goals_leading(self):
+    async def test_goal_history_lists_goals_newest_first_with_active_goals_leading(self) -> None:
         """The restore path's index: every persisted goal, readable after the fact.
 
         Active goals lead (the one just dispatched must not sink under finished
@@ -634,7 +635,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(goals[1]["status"], "FAILED")
         self.assertEqual(goals[2]["status"], "COMPLETED")
 
-    async def test_goal_history_filters_by_workspace_and_status_and_pages(self):
+    async def test_goal_history_filters_by_workspace_and_status_and_pages(self) -> None:
         ws_dir = self.root / "ws_hist2"
         ws_dir.mkdir()
         r = await self.client.post(
@@ -675,7 +676,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         r = await self.client.get("/goals?limit=1&offset=1", headers=self.headers)
         self.assertEqual(len(r.json()), 1)
 
-    async def test_cancel_from_planning_is_accepted(self):
+    async def test_cancel_from_planning_is_accepted(self) -> None:
         """A PLANNING goal can be cancelled.
 
         Planning runs in the background, and a goal stuck there (slow planner,
@@ -707,7 +708,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         # level, where the planner can be parked mid-flight.)
 
 
-    async def test_plan_only_goal_lifecycle(self):
+    async def test_plan_only_goal_lifecycle(self) -> None:
         """plan_only goals must plan, then refuse /start until execution is
         explicitly enabled."""
         ws_dir = self.root / "ws_planonly"
@@ -751,7 +752,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(r.json()["plan_only"])
         version = r.json()["version"]
 
-        async def mock_run_step(gid, sid):
+        async def mock_run_step(gid: str, sid: str) -> None:
             await asyncio.sleep(0)
         app.state.executor.run_step = mock_run_step
 
@@ -762,7 +763,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["status"], "RUNNING")
 
-    async def test_goal_usage_totals_from_usage_events(self):
+    async def test_goal_usage_totals_from_usage_events(self) -> None:
         """GET /goals/{id}/usage sums the usage events providers report."""
         ws_dir = self.root / "ws-usage"
         ws_dir.mkdir()
@@ -802,7 +803,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         r = await self.client.get("/goals/nope/usage", headers=self.headers)
         self.assertEqual(r.status_code, 404)
 
-    async def test_agent_stats_report_last_call_and_last_error_per_role(self):
+    async def test_agent_stats_report_last_call_and_last_error_per_role(self) -> None:
         """The Settings cards' "last call / last error": the newest outcome for
         each role, from the event log. A role that only ever fails shows its
         failure, never a comforting blank."""
@@ -819,7 +820,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         goal_id = r.json()["id"]
 
-        def ev(eid, type_, payload, ts):
+        def ev(eid: str, type_: str, payload: dict[str, Any], ts: float) -> Event:
             return Event(
                 id=eid, goal_id=goal_id, step_id=None, type=type_, payload=payload,
                 timestamp=ts, sequence=app.state.goals.next_sequence(goal_id),
@@ -880,7 +881,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(critic["calls_seen"], 0)
 
     @staticmethod
-    def _export_doc(*days: str, tokens: int = 10) -> dict:
+    def _export_doc(*days: str, tokens: int = 10) -> dict[str, Any]:
         """A minimal but fully valid stats-history export, oldest first."""
         out = []
         for day in days:
@@ -901,7 +902,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
             })
         return {"exported_at": "2026-01-01T00:00:00.000Z", "days": out}
 
-    async def test_stats_import_persists_and_survives_a_service_rebuild(self):
+    async def test_stats_import_persists_and_survives_a_service_rebuild(self) -> None:
         """The whole point: the import is in the engine, not the React state.
 
         Re-reading the store through a *new* service on the same connection is
@@ -929,7 +930,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(r.json()["imported"])
         self.assertEqual(len(r.json()["days"]), 2)
 
-    async def test_stats_import_absent_is_a_normal_state_not_a_404(self):
+    async def test_stats_import_absent_is_a_normal_state_not_a_404(self) -> None:
         r = await self.client.get("/stats/import", headers=self.headers)
         self.assertEqual(r.status_code, 200)
         body = r.json()
@@ -937,7 +938,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["days"], [])
         self.assertIsNone(body["source"])
 
-    async def test_stats_import_replaces_rather_than_accumulates(self):
+    async def test_stats_import_replaces_rather_than_accumulates(self) -> None:
         """One imported file at a time, so the store cannot grow unbounded."""
         await self.client.post(
             "/stats/import", headers=self.headers, json=self._export_doc("2026-01-01", "2026-01-02")
@@ -954,7 +955,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
             app.state.conn.execute("SELECT count(*) FROM stats_imports").fetchone()[0], 1
         )
 
-    async def test_stats_import_clear_is_idempotent(self):
+    async def test_stats_import_clear_is_idempotent(self) -> None:
         await self.client.post(
             "/stats/import", headers=self.headers, json=self._export_doc("2026-01-01")
         )
@@ -968,7 +969,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["cleared"], 0)
 
-    async def test_stats_import_rejects_invalid_documents_with_a_reason(self):
+    async def test_stats_import_rejects_invalid_documents_with_a_reason(self) -> None:
         """The engine re-validates; a client cannot skip the check."""
         cases = [
             ({"exported_at": "x", "days": []}, "empty"),
@@ -986,7 +987,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
                     (await self.client.get("/stats/import", headers=self.headers)).json()["imported"]
                 )
 
-    async def test_stats_import_strips_unknown_keys_from_what_it_stores(self):
+    async def test_stats_import_strips_unknown_keys_from_what_it_stores(self) -> None:
         """Only the known shape is persisted, so a re-export stays clean."""
         doc = self._export_doc("2026-01-01")
         doc["days"][0]["injected"] = "should not be stored"
@@ -995,7 +996,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         assert stored is not None, "the import is readable back"
         self.assertNotIn("injected", stored["days"][0])
 
-    async def test_stats_import_does_not_disturb_engine_snapshots(self):
+    async def test_stats_import_does_not_disturb_engine_snapshots(self) -> None:
         """An imported day is another machine's claim, not a local snapshot.
 
         Retention prunes snapshots by count; if imports shared that table the
@@ -1019,7 +1020,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(StatsImportService(app.state.conn).get())
         self.assertIsNotNone(app.state.stats_snapshots.get_day("2026-01-01"))
 
-    async def test_stats_import_sanitizes_the_source_label(self):
+    async def test_stats_import_sanitizes_the_source_label(self) -> None:
         """The file name is echoed into the UI, so it is not stored raw."""
         r = await self.client.post(
             "/stats/import", headers=self.headers,
@@ -1032,13 +1033,13 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("\n", stored["source"])
         self.assertNotIn("\x00", stored["source"])
 
-    async def test_stats_import_requires_auth(self):
+    async def test_stats_import_requires_auth(self) -> None:
         doc = self._export_doc("2026-01-01")
         self.assertEqual((await self.client.get("/stats/import")).status_code, 401)
         self.assertEqual((await self.client.post("/stats/import", json=doc)).status_code, 401)
         self.assertEqual((await self.client.delete("/stats/import")).status_code, 401)
 
-    async def test_stats_overview_window_anchors_to_the_wall_clock(self):
+    async def test_stats_overview_window_anchors_to_the_wall_clock(self) -> None:
         """The endpoint must inject `now` into the aggregation.
 
         `engine/stats.py` has a data-anchored fallback that a stale store makes
@@ -1100,7 +1101,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         r = await self.client.get("/stats/overview?window=0", headers=self.headers)
         self.assertEqual(r.json()["goals"]["goals"], 1)
 
-    async def test_stats_overview_aggregates_across_goals(self):
+    async def test_stats_overview_aggregates_across_goals(self) -> None:
         """The cross-goal view: rates and spend that no single goal can answer.
 
         Seeded through the real publisher and two real goals, one of them
@@ -1126,7 +1127,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         app.state.goals.update_status(done_id, 1, "COMPLETED")
         app.state.goals.update_status(cancel_id, 0, "CANCELLED")
 
-        def ev(eid, type_, payload):
+        def ev(eid: str, type_: str, payload: dict[str, Any]) -> None:
             app.state.goals.publish(Event(
                 id=eid, goal_id=done_id, step_id=None, type=type_, payload=payload,
                 timestamp=time.time(), sequence=app.state.goals.next_sequence(done_id),
@@ -1168,7 +1169,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         r = await self.client.get("/stats/overview", headers=self.headers)
         self.assertEqual(r.json()["window_days"], 0)
 
-    async def test_stats_retention_setting_round_trips_and_prunes(self):
+    async def test_stats_retention_setting_round_trips_and_prunes(self) -> None:
         """The retention policy is a real setting: clamped at the engine, echoed
         honestly, and actually enforced — a lowered policy takes effect on the
         next read, not on some future freeze."""
@@ -1228,7 +1229,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         expected_oldest = time.strftime("%Y-%m-%d", time.gmtime(now - 4 * 86400))
         self.assertEqual(days[0]["day"], expected_oldest, "and they are the newest two, not any two")
 
-    async def test_stats_history_serves_frozen_days_and_freezes_on_read(self):
+    async def test_stats_history_serves_frozen_days_and_freezes_on_read(self) -> None:
         """The trend that outlives the log: a day's final document freezes on
         the first read after it ends, and /stats/history serves the frozen
         days oldest first while leaving the still-moving today to the live
@@ -1303,7 +1304,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(len(r.json()["days"]), 1)
 
-    async def test_enable_execution_rejects_a_stale_version(self):
+    async def test_enable_execution_rejects_a_stale_version(self) -> None:
         """The route documented a version check it never performed (B5).
 
         A client enabling execution from a stale view must get a 409, not
@@ -1350,7 +1351,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertFalse(r.json()["plan_only"])
 
-    async def test_edit_plan_steps(self):
+    async def test_edit_plan_steps(self) -> None:
         """Plan-only goals: PATCH step before execution, guards after."""
         ws_dir = self.root / "ws-edit"
         ws_dir.mkdir()
@@ -1444,7 +1445,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.json()["code"], "empty_patch")
 
         # Once execution starts (status RUNNING), edits are refused.
-        async def mock_run_step(gid, sid):
+        async def mock_run_step(gid: str, sid: str) -> None:
             await asyncio.sleep(0)
         app.state.executor.run_step = mock_run_step
         r = await self.client.post(
@@ -1464,7 +1465,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 409)
         self.assertEqual(r.json()["code"], "illegal_status")
 
-    async def test_retry_of_an_unknown_step_is_a_404(self):
+    async def test_retry_of_an_unknown_step_is_a_404(self) -> None:
         """A bad step id is a client mistake: 404, not a model-defect retry.
 
         The lookup used to raise AgentOutputInvalid — the class the fallback
@@ -1493,7 +1494,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json()["code"], "unknown_step")
 
-    async def test_recent_models_endpoint_feeds_the_pickers(self):
+    async def test_recent_models_endpoint_feeds_the_pickers(self) -> None:
         """`/models/recent` is what orders and badges the two model menus.
 
         It must answer with something usable on a fresh install (an empty list, not
@@ -1557,7 +1558,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
             status="PENDING", suggested_paths=[],
         )
 
-    async def test_usage_reports_parallel_peak_and_waves(self):
+    async def test_usage_reports_parallel_peak_and_waves(self) -> None:
         """The usage endpoint reconstructs how wide a run was from the log.
 
         A two-step parallel goal with staggered overlap: peak 2, one wave. A
@@ -1598,7 +1599,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["parallel_peak"], 1, body)
         self.assertEqual(body["parallel_waves"], 2, body)
 
-    async def test_audit_trail_collects_edits_fallbacks_and_failures(self):
+    async def test_audit_trail_collects_edits_fallbacks_and_failures(self) -> None:
         """The audit endpoint reconstructs the run's full structured trail.
 
         One goal exercises every auditable lane: a plan edit with real
@@ -1621,7 +1622,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         # document must not report as drift. Sequences come from the store so
         # they interleave with the goal_status/step_status events already
         # published above.
-        def ev(eid, type_, payload, ts):
+        def ev(eid: str, type_: str, payload: dict[str, Any], ts: float) -> Event:
             return Event(
                 id=eid, goal_id=goal.id, step_id="s1", type=type_, payload=payload,
                 timestamp=ts, sequence=app.state.goals.next_sequence(goal.id),
@@ -1755,7 +1756,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s["role"] for s in silent], ["critic"])
         self.assertEqual(silent[0]["assigned_model"], "ollama/qwen3:8b")
 
-    async def test_engine_settings_roundtrip_clamp_and_unknown_key(self):
+    async def test_engine_settings_roundtrip_clamp_and_unknown_key(self) -> None:
         """GET/PUT /settings/engine: values persist, clamp, and reject typos."""
         r = await self.client.get("/settings/engine", headers=self.headers)
         self.assertEqual(r.status_code, 200)
@@ -1786,7 +1787,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["code"], "unknown_setting")
 
-    async def test_provider_switch_does_not_carry_the_key_ref_over(self):
+    async def test_provider_switch_does_not_carry_the_key_ref_over(self) -> None:
         """A credential stored for provider A must never be sent to provider B.
 
         `api_key_ref` is saved under the provider the role had at save time; a
@@ -1821,7 +1822,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["api_key_ref"])
 
-    async def test_apply_rejects_a_stale_version(self):
+    async def test_apply_rejects_a_stale_version(self) -> None:
         """POST /apply is version-guarded like every other mutating goal route."""
         ws_dir = self.root / "ws-applyv"
         ws_dir.mkdir()
@@ -1861,7 +1862,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(r.status_code, 200)
 
-    def test_ws_refuses_an_unknown_goal_after_auth(self):
+    def test_ws_refuses_an_unknown_goal_after_auth(self) -> None:
         """Authenticated socket to a goal that does not exist → close 4404.
 
         The old endpoint accepted every socket and only ever closed 4401, so a

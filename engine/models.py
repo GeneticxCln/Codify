@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -132,9 +132,9 @@ class AgentConfig(BaseModel):
     # compiled model list to default to (see DEFAULT_AGENTS), and the app says so
     # at run time instead of calling an endpoint with an empty id.
     model_name: str = Field("", max_length=128)
-    api_key_ref: Optional[str] = None
-    base_url: Optional[str] = None
-    system_prompt_override: Optional[str] = Field(None, max_length=SYSTEM_PROMPT_OVERRIDE_MAX)
+    api_key_ref: str | None = None
+    base_url: str | None = None
+    system_prompt_override: str | None = Field(None, max_length=SYSTEM_PROMPT_OVERRIDE_MAX)
     temperature: float = Field(0.2, ge=0.0, le=2.0)
     max_tokens: int = Field(4096, gt=0, le=200000)
     # A second target this role may be called on when its primary is unusable —
@@ -143,12 +143,12 @@ class AgentConfig(BaseModel):
     # differs by job: a local model is fine for the scribe and a bad idea for the
     # fixer. Temperature and max_tokens stay the role's own: they describe the
     # job, not the model answering it.
-    fallback_provider: Optional[str] = Field(
+    fallback_provider: str | None = Field(
         None, min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$"
     )
     fallback_model_name: str = Field("", max_length=128)
-    fallback_protocol: Optional[ProviderProtocol] = None
-    fallback_base_url: Optional[str] = None
+    fallback_protocol: ProviderProtocol | None = None
+    fallback_base_url: str | None = None
     updated_at: float = 0
 
     @property
@@ -164,25 +164,25 @@ class AgentConfig(BaseModel):
 
 class AgentConfigUpdate(BaseModel):
     model_config = {"extra": "forbid"}
-    display_name: Optional[str] = Field(None, min_length=1, max_length=80)
-    provider: Optional[str] = Field(None, min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
-    protocol: Optional[ProviderProtocol] = None
-    model_name: Optional[str] = Field(None, max_length=128)
-    api_key: Optional[str] = Field(None, min_length=1, max_length=4096)
-    base_url: Optional[str] = None
-    system_prompt_override: Optional[str] = Field(None, max_length=SYSTEM_PROMPT_OVERRIDE_MAX)
-    temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
-    max_tokens: Optional[int] = Field(None, gt=0, le=200000)
+    display_name: str | None = Field(None, min_length=1, max_length=80)
+    provider: str | None = Field(None, min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
+    protocol: ProviderProtocol | None = None
+    model_name: str | None = Field(None, max_length=128)
+    api_key: str | None = Field(None, min_length=1, max_length=4096)
+    base_url: str | None = None
+    system_prompt_override: str | None = Field(None, max_length=SYSTEM_PROMPT_OVERRIDE_MAX)
+    temperature: float | None = Field(None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(None, gt=0, le=200000)
     # An empty slug is how a client removes a fallback. The desktop shell sends
     # the patch through a typed struct where an explicit `null` and an absent
     # field are the same value, so "no fallback" needs a value of its own — and
     # the pattern allows exactly that one exception.
-    fallback_provider: Optional[str] = Field(
+    fallback_provider: str | None = Field(
         None, max_length=64, pattern=r"^([a-z][a-z0-9_-]*)?$"
     )
-    fallback_model_name: Optional[str] = Field(None, max_length=128)
-    fallback_protocol: Optional[ProviderProtocol] = None
-    fallback_base_url: Optional[str] = None
+    fallback_model_name: str | None = Field(None, max_length=128)
+    fallback_protocol: ProviderProtocol | None = None
+    fallback_base_url: str | None = None
 
 
 class Workspace(BaseModel):
@@ -207,8 +207,8 @@ class Goal(BaseModel):
     version: int = Field(0, ge=0)
     created_at: float
     updated_at: float
-    provider: Optional[str] = None
-    model: Optional[str] = None
+    provider: str | None = None
+    model: str | None = None
 
 
 class PlanStep(BaseModel):
@@ -219,24 +219,24 @@ class PlanStep(BaseModel):
     description: str
     suggested_paths: list[str] = []
     status: StepStatus = "PENDING"
-    review_notes: Optional[str] = None
-    commit_message: Optional[str] = None
-    last_agent_role: Optional[AgentRole] = None
+    review_notes: str | None = None
+    commit_message: str | None = None
+    last_agent_role: AgentRole | None = None
 
 
 class PlanStepUpdate(BaseModel):
     """Patch for a single plan step (pre-execution editing of plan-only goals)."""
     model_config = {"extra": "forbid"}
     expected_version: int
-    title: Optional[str] = Field(None, min_length=1, max_length=200)
-    description: Optional[str] = Field(None, min_length=1, max_length=20000)
-    suggested_paths: Optional[list[str]] = Field(None, max_length=50)
+    title: str | None = Field(None, min_length=1, max_length=200)
+    description: str | None = Field(None, min_length=1, max_length=20000)
+    suggested_paths: list[str] | None = Field(None, max_length=50)
 
 
 class Event(BaseModel):
     id: str
     goal_id: str
-    step_id: Optional[str] = None
+    step_id: str | None = None
     type: EventType
     payload: dict[str, Any]
     timestamp: float
@@ -260,8 +260,8 @@ class GoalCreate(BaseModel):
     dry_run: bool = False
     plan_only: bool = False
     parallel: bool = False
-    provider: Optional[str] = None
-    model: Optional[str] = None
+    provider: str | None = None
+    model: str | None = None
 
 
 class ProviderKeyUpdate(BaseModel):
