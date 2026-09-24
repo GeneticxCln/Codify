@@ -1,6 +1,6 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import asyncio
-import os
+import json
 import tempfile
 import time
 import unittest
@@ -19,6 +19,8 @@ from engine.model_catalog import ModelCatalogService
 from engine.models import Event, PlanStep, ROLES, GoalCreate, WorkspaceCreate
 from engine.providers import Keychain, ProviderFactory
 from engine.sandbox import SandboxService
+from engine.stats_history import StatsSnapshotService
+from engine.stats_import import StatsImportService
 from engine.services import AgentRegistryService, GoalService, SettingsService, WorkspaceService
 
 
@@ -55,6 +57,8 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         app.state.goals = GoalService(conn)
         app.state.sandbox = SandboxService()
         app.state.settings = SettingsService(conn)
+        app.state.stats_snapshots = StatsSnapshotService(conn)
+        app.state.stats_imports = StatsImportService(conn)
         app.state.executor = ExecutorService(app.state.goals, app.state.workspaces, app.state.registry, app.state.sandbox)
         app.state.executor.settings = app.state.settings
         # Mock run_planning so background planning does not call live LLM providers in API tests
@@ -376,6 +380,136 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["code"], "invalid_root")
 
+    async def _seed_workspace_with_goal(self, name: str, *, terminal: str = "COMPLETED") -> tuple[str, str]:
+        """A workspace with one finished goal carrying a full record."""
+        ws_dir = self.root / name
+        ws_dir.mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": name, "root_path": str(ws_dir)},
+        )
+        ws_id = r.json()["id"]
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": f"{name} goal"},
+        )
+        goal_id = r.json()["id"]
+        app.state.goals.update_status(goal_id, 0, "PENDING")
+        app.state.goals.update_status(goal_id, 1, terminal)
+        app.state.goals.publish(Event(
+            id=str(uuid.uuid4()), goal_id=goal_id, step_id=None, type="usage",
+            payload={"role": "fixer", "provider": "p", "model": "m",
+                     "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+                     "duration_ms": 20},
+            timestamp=time.time(), sequence=app.state.goals.next_sequence(goal_id),
+        ))
+        return ws_id, goal_id
+
+    async def test_delete_goal_cascades_and_reports_what_it_removed(self):
+        """Deleting a goal takes its record with it, and says how much."""
+        _, goal_id = await self._seed_workspace_with_goal("ws-del-goal")
+        events_before = app.state.conn.execute(
+            "SELECT count(*) FROM events WHERE goal_id = ?", (goal_id,)
+        ).fetchone()[0]
+        self.assertGreater(events_before, 0, "the seed must leave events behind to cascade")
+
+        r = await self.client.delete(f"/goals/{goal_id}", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body["deleted"])
+        self.assertEqual(body["goal_id"], goal_id)
+        self.assertEqual(body["events"], events_before, "the count is what actually went")
+        # The one thing a user must never have to guess about a delete button.
+        self.assertFalse(body["files_touched"], "deleting a record never deletes files")
+
+        for table in ("goals", "plan_steps", "events", "proposed_files"):
+            rows = app.state.conn.execute(
+                f"SELECT count(*) FROM {table} WHERE " + ("id = ?" if table == "goals" else "goal_id = ?"),
+                (goal_id,),
+            ).fetchone()[0]
+            self.assertEqual(rows, 0, f"{table} rows must cascade with the goal")
+
+        self.assertEqual((await self.client.get(f"/goals/{goal_id}", headers=self.headers)).status_code, 404)
+
+    async def test_delete_goal_refuses_while_it_is_in_progress(self):
+        """A live coroutine must not outlive its row."""
+        _, goal_id = await self._seed_workspace_with_goal("ws-del-running", terminal="RUNNING")
+        r = await self.client.delete(f"/goals/{goal_id}", headers=self.headers)
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.json()["code"], "goal_in_progress")
+        # Still there: a refusal must not half-delete.
+        self.assertEqual((await self.client.get(f"/goals/{goal_id}", headers=self.headers)).status_code, 200)
+
+    async def test_delete_goal_unknown_is_404(self):
+        r = await self.client.delete("/goals/does-not-exist", headers=self.headers)
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.json()["code"], "unknown_goal")
+
+    async def test_delete_workspace_refuses_to_cascade_implicitly(self):
+        """The FK used to surface as a bare 500; it is now a 409 that counts."""
+        ws_id, goal_id = await self._seed_workspace_with_goal("ws-del-ws")
+
+        r = await self.client.delete(f"/workspaces/{ws_id}", headers=self.headers)
+        self.assertEqual(r.status_code, 409)
+        body = r.json()
+        self.assertEqual(body["code"], "workspace_not_empty")
+        # The count is what the UI needs to write an honest confirmation.
+        self.assertEqual(body["goals"], 1)
+
+        # Refused means untouched: the goal is still readable.
+        self.assertEqual((await self.client.get(f"/goals/{goal_id}", headers=self.headers)).status_code, 200)
+        self.assertEqual((await self.client.get(f"/workspaces/{ws_id}", headers=self.headers)).status_code, 200)
+
+    async def test_delete_workspace_cascade_removes_goals_and_their_events(self):
+        ws_id, goal_id = await self._seed_workspace_with_goal("ws-del-cascade")
+
+        r = await self.client.delete(
+            f"/workspaces/{ws_id}?delete_goals=true", headers=self.headers
+        )
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body["deleted"])
+        self.assertEqual(body["goals"], 1)
+        self.assertFalse(body["files_touched"], "the user's directory is never removed")
+
+        self.assertEqual((await self.client.get(f"/goals/{goal_id}", headers=self.headers)).status_code, 404)
+        self.assertEqual((await self.client.get(f"/workspaces/{ws_id}", headers=self.headers)).status_code, 404)
+        rows = app.state.conn.execute(
+            "SELECT count(*) FROM events WHERE goal_id = ?", (goal_id,)
+        ).fetchone()[0]
+        self.assertEqual(rows, 0, "the cascaded goals' events go with them")
+
+    async def test_delete_workspace_refuses_while_a_goal_is_running(self):
+        """Cascading over live work is the same hazard as deleting a live goal."""
+        ws_id, goal_id = await self._seed_workspace_with_goal("ws-del-active", terminal="RUNNING")
+        r = await self.client.delete(
+            f"/workspaces/{ws_id}?delete_goals=true", headers=self.headers
+        )
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.json()["code"], "workspace_has_active_goals")
+        self.assertEqual(r.json()["goal_id"], goal_id, "the refusal names what to cancel first")
+
+    async def test_delete_empty_workspace_needs_no_cascade_flag(self):
+        ws_dir = self.root / "ws-del-empty"
+        ws_dir.mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": "WS-EMPTY", "root_path": str(ws_dir)},
+        )
+        ws_id = r.json()["id"]
+
+        r = await self.client.delete(f"/workspaces/{ws_id}", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["goals"], 0)
+        self.assertEqual((await self.client.get(f"/workspaces/{ws_id}", headers=self.headers)).status_code, 404)
+        # The directory itself survives: this endpoint forgets a path.
+        self.assertTrue(ws_dir.is_dir(), "deleting a workspace must never remove the user's folder")
+
+    async def test_delete_requires_auth(self):
+        ws_id, goal_id = await self._seed_workspace_with_goal("ws-del-auth")
+        self.assertEqual((await self.client.delete(f"/goals/{goal_id}")).status_code, 401)
+        self.assertEqual((await self.client.delete(f"/workspaces/{ws_id}")).status_code, 401)
+
     async def test_workspaces_and_goals_lifecycle(self):
         ws_dir = self.root / "ws1"
         ws_dir.mkdir()
@@ -454,6 +588,92 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["status"], "CANCELLED")
+
+    def _set_goal_created(self, goal_id: str, created_at: float) -> None:
+        """Pin a goal's created_at so ordering assertions don't depend on clock
+        granularity: two goals created in the same second order by id, which is
+        a random UUID and would make the test flaky."""
+        app.state.conn.execute("UPDATE goals SET created_at = ? WHERE id = ?", (created_at, goal_id))
+        app.state.conn.commit()
+
+    async def test_goal_history_lists_goals_newest_first_with_active_goals_leading(self):
+        """The restore path's index: every persisted goal, readable after the fact.
+
+        Active goals lead (the one just dispatched must not sink under finished
+        runs), then terminal goals newest first.
+        """
+        ws_dir = self.root / "ws_hist"
+        ws_dir.mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers, json={"name": "H", "root_path": str(ws_dir)}
+        )
+        ws_id = r.json()["id"]
+
+        ids = {}
+        for name in ("g1", "g2", "g3"):
+            r = await self.client.post(
+                "/goals", headers=self.headers,
+                json={"workspace_id": ws_id, "title": name, "description": ""},
+            )
+            self.assertEqual(r.status_code, 200)
+            ids[name] = r.json()["id"]
+
+        # Deterministic history: g1 finished oldest, g3 failed newest, g2 still active.
+        app.state.goals.update_status(ids["g1"], 0, "PENDING")
+        app.state.goals.update_status(ids["g1"], 1, "COMPLETED")
+        app.state.goals.update_status(ids["g3"], 0, "FAILED")
+        self._set_goal_created(ids["g1"], 1000.0)
+        self._set_goal_created(ids["g2"], 2000.0)
+        self._set_goal_created(ids["g3"], 3000.0)
+
+        r = await self.client.get("/goals", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        goals = r.json()
+        self.assertEqual([g["id"] for g in goals], [ids["g2"], ids["g3"], ids["g1"]])
+        self.assertEqual(goals[0]["status"], "PLANNING")  # active, leads despite age
+        self.assertEqual(goals[1]["status"], "FAILED")
+        self.assertEqual(goals[2]["status"], "COMPLETED")
+
+    async def test_goal_history_filters_by_workspace_and_status_and_pages(self):
+        ws_dir = self.root / "ws_hist2"
+        ws_dir.mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers, json={"name": "H2", "root_path": str(ws_dir)}
+        )
+        ws_id = r.json()["id"]
+        other_dir = self.root / "ws_hist3"
+        other_dir.mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers, json={"name": "H3", "root_path": str(other_dir)}
+        )
+        other_id = r.json()["id"]
+
+        r = await self.client.post(
+            "/goals", headers=self.headers, json={"workspace_id": ws_id, "title": "a", "description": ""}
+        )
+        done_id = r.json()["id"]
+        app.state.goals.update_status(done_id, 0, "PENDING")
+        app.state.goals.update_status(done_id, 1, "COMPLETED")
+        r = await self.client.post(
+            "/goals", headers=self.headers, json={"workspace_id": other_id, "title": "b", "description": ""}
+        )
+        self.assertEqual(r.status_code, 200)
+
+        # Another workspace's goals do not leak into this one's history.
+        r = await self.client.get(f"/goals?workspace_id={ws_id}", headers=self.headers)
+        self.assertEqual([g["id"] for g in r.json()], [done_id])
+
+        r = await self.client.get("/goals?status=COMPLETED", headers=self.headers)
+        self.assertEqual([g["id"] for g in r.json()], [done_id])
+
+        r = await self.client.get("/goals?status=NOT_A_STATUS", headers=self.headers)
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["code"], "invalid_status")
+
+        r = await self.client.get("/goals?limit=1", headers=self.headers)
+        self.assertEqual(len(r.json()), 1)
+        r = await self.client.get("/goals?limit=1&offset=1", headers=self.headers)
+        self.assertEqual(len(r.json()), 1)
 
     async def test_cancel_from_planning_is_accepted(self):
         """A PLANNING goal can be cancelled.
@@ -557,7 +777,6 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         goal_id = r.json()["id"]
         # Seed two usage events through the real publisher.
-        g = app.state.goals.get(goal_id)
         app.state.goals.publish(Event(
             id=str(uuid.uuid4()), goal_id=goal_id, step_id=None, type="usage",
             payload={"role": "librarian", "provider": "ollama", "model": "m",
@@ -582,6 +801,507 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         # Unknown goal is a 404, not an empty report.
         r = await self.client.get("/goals/nope/usage", headers=self.headers)
         self.assertEqual(r.status_code, 404)
+
+    async def test_agent_stats_report_last_call_and_last_error_per_role(self):
+        """The Settings cards' "last call / last error": the newest outcome for
+        each role, from the event log. A role that only ever fails shows its
+        failure, never a comforting blank."""
+        ws_dir = self.root / "ws-stats"
+        ws_dir.mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": "WS-STATS", "root_path": str(ws_dir)},
+        )
+        ws_id = r.json()["id"]
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "Stats"},
+        )
+        goal_id = r.json()["id"]
+
+        def ev(eid, type_, payload, ts):
+            return Event(
+                id=eid, goal_id=goal_id, step_id=None, type=type_, payload=payload,
+                timestamp=ts, sequence=app.state.goals.next_sequence(goal_id),
+            )
+
+        now = time.time()
+        # Fixer: a failure, then a successful call after it — last_call wins,
+        # and the earlier failure is still counted and kept as last_error? No:
+        # "last" is the newest outcome, so the error block must stay. The card
+        # reports both lanes independently.
+        app.state.goals.publish(ev("st1", "agent_call_failed", {
+            "role": "fixer", "provider": "anthropic", "model": "claude",
+            "target": "primary", "code": "provider_http", "message": "429",
+            "duration_ms": 120,
+        }, now - 30))
+        app.state.goals.publish(ev("st2", "usage", {
+            "role": "fixer", "provider": "anthropic", "model": "claude",
+            "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+            "duration_ms": 1400,
+        }, now - 10))
+        # Scribe: only ever failed — no usage event exists for it at all.
+        app.state.goals.publish(ev("st3", "agent_call_failed", {
+            "role": "scribe", "provider": "ollama", "model": "qwen",
+            "target": "primary", "code": "provider_unreachable", "message": "refused",
+            "duration_ms": 5,
+        }, now - 5))
+        # A usage event without duration_ms (written by an older engine): the
+        # call counts, its duration reads as unknown rather than instant.
+        app.state.goals.publish(ev("st4", "usage", {
+            "role": "planner", "provider": "openai", "model": "gpt",
+            "input_tokens": 1, "output_tokens": 1, "total_tokens": 2,
+        }, now - 3))
+
+        r = await self.client.get("/settings/agents/stats", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        by_role = {s["role"]: s for s in body["stats"]}
+        self.assertEqual(len(body["stats"]), len(ROLES), "one entry per role, even the silent ones")
+
+        fixer = by_role["fixer"]
+        self.assertEqual(fixer["calls_seen"], 1)
+        self.assertEqual(fixer["failures_seen"], 1)
+        self.assertEqual(fixer["last_call"]["duration_ms"], 1400)
+        self.assertEqual(fixer["last_error"]["code"], "provider_http")
+
+        scribe = by_role["scribe"]
+        self.assertIsNone(scribe["last_call"])
+        self.assertEqual(scribe["failures_seen"], 1)
+        self.assertEqual(scribe["last_error"]["code"], "provider_unreachable")
+
+        planner = by_role["planner"]
+        self.assertEqual(planner["last_call"]["duration_ms"], None, "a pre-duration event reads as unknown")
+        self.assertEqual(planner["last_error"], None)
+
+        critic = by_role["critic"]
+        self.assertIsNone(critic["last_call"])
+        self.assertIsNone(critic["last_error"])
+        self.assertEqual(critic["calls_seen"], 0)
+
+    @staticmethod
+    def _export_doc(*days: str, tokens: int = 10) -> dict:
+        """A minimal but fully valid stats-history export, oldest first."""
+        out = []
+        for day in days:
+            out.append({
+                "day": day,
+                "day_stats": {
+                    "date": day, "created": 1, "succeeded": 1, "failed": 0,
+                    "cancelled": 0, "total_tokens": tokens, "calls": 1,
+                },
+                "goals": {
+                    "goals": 1, "active": 0, "succeeded": 1, "failed": 0,
+                    "cancelled": 0, "success_rate": 100,
+                },
+                "usage": {
+                    "input_tokens": tokens - 1, "output_tokens": 1,
+                    "total_tokens": tokens, "calls": 1, "avg_duration_ms": 12,
+                },
+            })
+        return {"exported_at": "2026-01-01T00:00:00.000Z", "days": out}
+
+    async def test_stats_import_persists_and_survives_a_service_rebuild(self):
+        """The whole point: the import is in the engine, not the React state.
+
+        Re-reading the store through a *new* service on the same connection is
+        the closest a test gets to an app restart, and it is what a client-state
+        import could never satisfy.
+        """
+        doc = self._export_doc("2026-01-01", "2026-01-02")
+        r = await self.client.post(
+            "/stats/import", headers=self.headers, json={**doc, "source": "history.json"}
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["days"], 2)
+        self.assertEqual(r.json()["source"], "history.json")
+
+        # A fresh service object = a fresh process's view of the same store.
+        reborn = StatsImportService(app.state.conn)
+        stored = reborn.get()
+        assert stored is not None, "an import must outlive the request that created it"
+        self.assertEqual([d["day"] for d in stored["days"]], ["2026-01-01", "2026-01-02"])
+        self.assertEqual(stored["days"][0]["day_stats"]["total_tokens"], 10)
+        self.assertEqual(stored["source"], "history.json")
+
+        # And it is what a client reads back on open.
+        r = await self.client.get("/stats/import", headers=self.headers)
+        self.assertTrue(r.json()["imported"])
+        self.assertEqual(len(r.json()["days"]), 2)
+
+    async def test_stats_import_absent_is_a_normal_state_not_a_404(self):
+        r = await self.client.get("/stats/import", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertFalse(body["imported"])
+        self.assertEqual(body["days"], [])
+        self.assertIsNone(body["source"])
+
+    async def test_stats_import_replaces_rather_than_accumulates(self):
+        """One imported file at a time, so the store cannot grow unbounded."""
+        await self.client.post(
+            "/stats/import", headers=self.headers, json=self._export_doc("2026-01-01", "2026-01-02")
+        )
+        r = await self.client.post(
+            "/stats/import", headers=self.headers, json=self._export_doc("2026-02-01")
+        )
+        self.assertEqual(r.json()["days"], 1)
+
+        body = (await self.client.get("/stats/import", headers=self.headers)).json()
+        self.assertEqual([d["day"] for d in body["days"]], ["2026-02-01"],
+                         "the previous import is replaced, not merged")
+        self.assertEqual(
+            app.state.conn.execute("SELECT count(*) FROM stats_imports").fetchone()[0], 1
+        )
+
+    async def test_stats_import_clear_is_idempotent(self):
+        await self.client.post(
+            "/stats/import", headers=self.headers, json=self._export_doc("2026-01-01")
+        )
+        r = await self.client.delete("/stats/import", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["cleared"], 1)
+        self.assertFalse((await self.client.get("/stats/import", headers=self.headers)).json()["imported"])
+
+        # Clearing again is fine: the panel may race its own request.
+        r = await self.client.delete("/stats/import", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["cleared"], 0)
+
+    async def test_stats_import_rejects_invalid_documents_with_a_reason(self):
+        """The engine re-validates; a client cannot skip the check."""
+        cases = [
+            ({"exported_at": "x", "days": []}, "empty"),
+            ({"days": [self._export_doc("2026-01-01")["days"][0]]}, "missing_exported_at"),
+            (self._export_doc("2026-01-01", "2026-01-01"), "duplicate_day"),
+            (self._export_doc("2026-01-02", "2026-01-01"), "out_of_order"),
+        ]
+        for payload, expected in cases:
+            with self.subTest(expected=expected):
+                r = await self.client.post("/stats/import", headers=self.headers, json=payload)
+                self.assertEqual(r.status_code, 422)
+                self.assertEqual(r.json()["code"], expected)
+                # A rejected document must not become the stored one.
+                self.assertFalse(
+                    (await self.client.get("/stats/import", headers=self.headers)).json()["imported"]
+                )
+
+    async def test_stats_import_strips_unknown_keys_from_what_it_stores(self):
+        """Only the known shape is persisted, so a re-export stays clean."""
+        doc = self._export_doc("2026-01-01")
+        doc["days"][0]["injected"] = "should not be stored"
+        await self.client.post("/stats/import", headers=self.headers, json=doc)
+        stored = StatsImportService(app.state.conn).get()
+        assert stored is not None, "the import is readable back"
+        self.assertNotIn("injected", stored["days"][0])
+
+    async def test_stats_import_does_not_disturb_engine_snapshots(self):
+        """An imported day is another machine's claim, not a local snapshot.
+
+        Retention prunes snapshots by count; if imports shared that table the
+        policy would silently delete data Codify never measured.
+        """
+        doc = self._export_doc("2026-01-01")
+        await self.client.post("/stats/import", headers=self.headers, json=doc)
+        app.state.conn.execute(
+            "INSERT INTO stats_snapshots (day, document, created_at) VALUES (?, ?, ?)",
+            ("2026-01-01", json.dumps({"goals": {"succeeded": 7}}), time.time()),
+        )
+        app.state.conn.commit()
+
+        # Pruning everything but the newest N must not reach the import.
+        app.state.stats_snapshots.prune(keep=0)
+        self.assertEqual(
+            app.state.conn.execute("SELECT count(*) FROM stats_imports").fetchone()[0],
+            1, "pruning snapshots must never delete an imported day",
+        )
+        # And the two stores stay independently readable.
+        self.assertIsNotNone(StatsImportService(app.state.conn).get())
+        self.assertIsNotNone(app.state.stats_snapshots.get_day("2026-01-01"))
+
+    async def test_stats_import_sanitizes_the_source_label(self):
+        """The file name is echoed into the UI, so it is not stored raw."""
+        r = await self.client.post(
+            "/stats/import", headers=self.headers,
+            json={**self._export_doc("2026-01-01"), "source": "../../etc/passwd\n\u0000evil"},
+        )
+        self.assertEqual(r.status_code, 200)
+        stored = StatsImportService(app.state.conn).get()
+        assert stored is not None, "the import is readable back"
+        self.assertNotIn("/", stored["source"])
+        self.assertNotIn("\n", stored["source"])
+        self.assertNotIn("\x00", stored["source"])
+
+    async def test_stats_import_requires_auth(self):
+        doc = self._export_doc("2026-01-01")
+        self.assertEqual((await self.client.get("/stats/import")).status_code, 401)
+        self.assertEqual((await self.client.post("/stats/import", json=doc)).status_code, 401)
+        self.assertEqual((await self.client.delete("/stats/import")).status_code, 401)
+
+    async def test_stats_overview_window_anchors_to_the_wall_clock(self):
+        """The endpoint must inject `now` into the aggregation.
+
+        `engine/stats.py` has a data-anchored fallback that a stale store makes
+        absurd — it slides the window forward until an ancient goal lands inside
+        "last 24 hours". The arithmetic tests cover that helper; this pins the
+        wiring, because a dropped `now=` at the one call site is invisible to
+        every other test in the suite.
+        """
+        ws_dir = self.root / "ws-stale"
+        ws_dir.mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": "WS-STALE", "root_path": str(ws_dir)},
+        )
+        ws_id = r.json()["id"]
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "long ago"},
+        )
+        goal_id = r.json()["id"]
+        app.state.goals.update_status(goal_id, 0, "PENDING")
+        app.state.goals.update_status(goal_id, 1, "COMPLETED")
+        app.state.goals.publish(Event(
+            id=str(uuid.uuid4()), goal_id=goal_id, step_id=None, type="usage",
+            payload={"role": "fixer", "provider": "p", "model": "m",
+                     "input_tokens": 40, "output_tokens": 20, "total_tokens": 60,
+                     "duration_ms": 90},
+            timestamp=time.time(), sequence=app.state.goals.next_sequence(goal_id),
+        ))
+
+        # Backdate 90 days: the store is now idle, the goal is ancient.
+        stale = time.time() - 90 * 86400
+        app.state.conn.execute(
+            "UPDATE goals SET created_at = ?, updated_at = ? WHERE id = ?",
+            (stale, stale, goal_id),
+        )
+        app.state.conn.execute(
+            "UPDATE events SET timestamp = ? WHERE goal_id = ? AND type = 'usage'",
+            (stale, goal_id),
+        )
+        app.state.conn.commit()
+
+        # A bounded window over an idle store is empty, and says so honestly.
+        r = await self.client.get("/stats/overview?window=1", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(
+            body["goals"]["goals"], 0,
+            "a 90-day-old goal is not in the last 24 hours",
+        )
+        self.assertIsNone(
+            body["goals"]["success_rate"],
+            "reporting 100% here would be the false claim this wiring prevents",
+        )
+        self.assertEqual(body["usage"]["calls"], 0)
+        self.assertEqual(body["daily"], [])
+
+        # "All time" still reports it — the window is bounded, not the data.
+        r = await self.client.get("/stats/overview?window=0", headers=self.headers)
+        self.assertEqual(r.json()["goals"]["goals"], 1)
+
+    async def test_stats_overview_aggregates_across_goals(self):
+        """The cross-goal view: rates and spend that no single goal can answer.
+
+        Seeded through the real publisher and two real goals, one of them
+        cancelled — the rate must count COMPLETED only, never "success-ish"."""
+        ws_dir = self.root / "ws-overview"
+        ws_dir.mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": "WS-OV", "root_path": str(ws_dir)},
+        )
+        ws_id = r.json()["id"]
+
+        async def mk(title: str) -> str:
+            r = await self.client.post(
+                "/goals", headers=self.headers,
+                json={"workspace_id": ws_id, "title": title},
+            )
+            return r.json()["id"]
+
+        done_id = await mk("done")
+        cancel_id = await mk("cancelled")
+        app.state.goals.update_status(done_id, 0, "PENDING")
+        app.state.goals.update_status(done_id, 1, "COMPLETED")
+        app.state.goals.update_status(cancel_id, 0, "CANCELLED")
+
+        def ev(eid, type_, payload):
+            app.state.goals.publish(Event(
+                id=eid, goal_id=done_id, step_id=None, type=type_, payload=payload,
+                timestamp=time.time(), sequence=app.state.goals.next_sequence(done_id),
+            ))
+
+        ev("ov1", "usage", {"role": "fixer", "provider": "ollama", "model": "q",
+                            "input_tokens": 20, "output_tokens": 10, "total_tokens": 30,
+                            "duration_ms": 250})
+        ev("ov2", "usage", {"role": "fixer", "provider": "ollama", "model": "q",
+                            "input_tokens": 20, "output_tokens": 10, "total_tokens": 30,
+                            "duration_ms": 750})
+        ev("ov3", "agent_call_failed", {"role": "critic", "provider": "p", "model": "m",
+                                        "target": "primary", "code": "provider_http",
+                                        "message": "500", "duration_ms": 40})
+
+        r = await self.client.get("/stats/overview?window=0", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertIn("generated_at", body)
+        # Two terminal goals, one a cancellation: rate is 1/2, not 2/2.
+        self.assertEqual(body["goals"]["goals"], 2)
+        self.assertEqual(body["goals"]["succeeded"], 1)
+        self.assertEqual(body["goals"]["cancelled"], 1)
+        self.assertEqual(body["goals"]["success_rate"], 50)
+        self.assertEqual(body["usage"]["calls"], 2)
+        self.assertEqual(body["usage"]["failures"], 1)
+        self.assertEqual(body["usage"]["total_tokens"], 60)
+        self.assertEqual(body["usage"]["avg_duration_ms"], 500)
+        self.assertEqual(body["usage"]["by_role"]["fixer"]["avg_duration_ms"], 500)
+        self.assertTrue(body["daily"], "a day with activity produces a row")
+
+        # A nonsense window clamps rather than erroring — a stats view has no
+        # broken state to refuse.
+        r = await self.client.get("/stats/overview?window=999", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["window_days"], 7)
+
+        # The default window is all time.
+        r = await self.client.get("/stats/overview", headers=self.headers)
+        self.assertEqual(r.json()["window_days"], 0)
+
+    async def test_stats_retention_setting_round_trips_and_prunes(self):
+        """The retention policy is a real setting: clamped at the engine, echoed
+        honestly, and actually enforced — a lowered policy takes effect on the
+        next read, not on some future freeze."""
+        # The setting appears with its bounds, and saves echo the clamped truth.
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["stats_retention_days"], {"value": 90, "min": 0, "max": 730})
+
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, json={"stats_retention_days": 2}
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["saved"]["stats_retention_days"], 2)
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, json={"stats_retention_days": 999999}
+        )
+        self.assertEqual(r.json()["saved"]["stats_retention_days"], 730, "a fat-fingered forever clamps to the band")
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, json={"stats_retention_days": 0}
+        )
+        self.assertEqual(r.json()["saved"]["stats_retention_days"], 0, "0 = keep everything is storable")
+
+        # Now the enforcement: three frozen days, retention 2, one read.
+        app.state.settings.set_int("stats_retention_days", 2)
+        (self.root / "ws-ret").mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": "WS-RET", "root_path": str(self.root / "ws-ret")},
+        )
+        ws_id = r.json()["id"]
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "retention source"},
+        )
+        goal_id = r.json()["id"]
+        app.state.goals.update_status(goal_id, 0, "PENDING")
+        app.state.goals.update_status(goal_id, 1, "COMPLETED")
+
+        now = time.time()
+        for offset in (6, 4, 2):  # three distinct past days, oldest first
+            app.state.conn.execute(
+                "UPDATE goals SET created_at = ?, updated_at = ? WHERE id = ?",
+                (now - offset * 86400, now - offset * 86400 + 60, goal_id),
+            )
+            app.state.conn.execute(
+                "UPDATE events SET timestamp = ? WHERE goal_id = ? AND type = 'usage'",
+                (now - offset * 86400 + 120, goal_id),
+            )
+            app.state.conn.commit()
+            r = await self.client.get("/stats/overview", headers=self.headers)
+            self.assertEqual(r.status_code, 200)
+
+        # Only the two most recent frozen days survive the policy.
+        r = await self.client.get("/stats/history", headers=self.headers)
+        days = r.json()["days"]
+        self.assertEqual(len(days), 2, "retention kept the newest two")
+        expected_oldest = time.strftime("%Y-%m-%d", time.gmtime(now - 4 * 86400))
+        self.assertEqual(days[0]["day"], expected_oldest, "and they are the newest two, not any two")
+
+    async def test_stats_history_serves_frozen_days_and_freezes_on_read(self):
+        """The trend that outlives the log: a day's final document freezes on
+        the first read after it ends, and /stats/history serves the frozen
+        days oldest first while leaving the still-moving today to the live
+        overview."""
+        ws_dir = self.root / "ws-stats-history"
+        ws_dir.mkdir()
+        r = await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": "WS-SH", "root_path": str(ws_dir)},
+        )
+        ws_id = r.json()["id"]
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "history source"},
+        )
+        goal_id = r.json()["id"]
+        app.state.goals.update_status(goal_id, 0, "PENDING")
+        app.state.goals.update_status(goal_id, 1, "COMPLETED")
+        app.state.goals.publish(Event(
+            id=str(uuid.uuid4()), goal_id=goal_id, step_id=None, type="usage",
+            payload={"role": "fixer", "provider": "p", "model": "m",
+                     "input_tokens": 40, "output_tokens": 20, "total_tokens": 60,
+                     "duration_ms": 90},
+            timestamp=time.time(), sequence=app.state.goals.next_sequence(goal_id),
+        ))
+
+        # First read: everything happened today, so nothing freezes yet — but
+        # the read itself must not fail on the snapshot path.
+        r = await self.client.get("/stats/overview", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        r = await self.client.get("/stats/history", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["days"], [], "today is still moving and must not appear")
+
+        # The day ends. Force the boundary by rewriting the activity's stamps
+        # into a previous UTC day, then read again — the freeze must happen
+        # without any special endpoint.
+        app.state.conn.execute(
+            "UPDATE goals SET created_at = ?, updated_at = ? WHERE id = ?",
+            (time.time() - 86400 * 2, time.time() - 86400 * 2, goal_id),
+        )
+        app.state.conn.execute(
+            "UPDATE events SET timestamp = ? WHERE goal_id = ? AND type = 'usage'",
+            (time.time() - 86400 * 2, goal_id),
+        )
+        app.state.conn.commit()
+
+        r = await self.client.get("/stats/overview", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        r = await self.client.get("/stats/history", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        days = r.json()["days"]
+        self.assertEqual(len(days), 1, "yesterday froze on the read that noticed it ended")
+        self.assertEqual(days[0]["goals"]["succeeded"], 1)
+        self.assertEqual(days[0]["usage"]["total_tokens"], 60)
+        # day_stats is the frozen day's OWN row, stated explicitly — the
+        # document's top-level blocks are cumulative, and a chart that read
+        # them per-day would redraw history as a running total.
+        self.assertEqual(days[0]["day_stats"]["date"], days[0]["day"])
+        self.assertEqual(days[0]["day_stats"]["succeeded"], 1)
+        self.assertEqual(days[0]["day_stats"]["created"], 1)
+        self.assertEqual(days[0]["day_stats"]["total_tokens"], 60)
+
+        # The freeze is idempotent: another read neither duplicates nor rewrites.
+        await self.client.get("/stats/overview", headers=self.headers)
+        r = await self.client.get("/stats/history", headers=self.headers)
+        self.assertEqual(len(r.json()["days"]), 1)
+
+        # The export asks for every stored day explicitly; zero is the sentinel
+        # for that unbounded request, not the same as a one-row limit.
+        r = await self.client.get("/stats/history?limit=0", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.json()["days"]), 1)
 
     async def test_enable_execution_rejects_a_stale_version(self):
         """The route documented a version check it never performed (B5).

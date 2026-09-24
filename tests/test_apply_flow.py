@@ -20,7 +20,7 @@ from engine.app import BOOT_TOKEN, app
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.laya import LayaDecision, LayaService
-from engine.models import ROLES, AgentConfigUpdate
+from engine.models import ROLES, AgentConfigUpdate, Goal
 from engine.providers import BaseProvider, Keychain, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.services import AgentRegistryService, GoalService, WorkspaceService
@@ -127,7 +127,9 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200, r.text)
         return r.json()
 
-    async def _wait_for_status(self, goal_id: str, wanted: set[str], timeout: float = 5.0) -> dict:
+    async def _wait_for_status(
+        self, goal_id: str, wanted: set[str], timeout: float = 5.0
+    ) -> Goal:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         g = self.goals.get(goal_id)

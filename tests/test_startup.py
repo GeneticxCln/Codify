@@ -35,7 +35,7 @@ class TestFreshStartup(unittest.IsolatedAsyncioTestCase):
                 try:
                     async with lifespan(app):
                         self.assertEqual(
-                            app.state.workspaces.list(),
+                            app.state.workspaces.list_workspaces(),
                             [],
                             "a fresh engine must not invent a workspace",
                         )
@@ -50,7 +50,7 @@ class TestFreshStartup(unittest.IsolatedAsyncioTestCase):
 
             conn = connect(Path(tmp) / "fresh.db")
             try:
-                self.assertEqual(WorkspaceService(conn).list(), [])
+                self.assertEqual(WorkspaceService(conn).list_workspaces(), [])
             finally:
                 conn.close()
 

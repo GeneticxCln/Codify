@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from abc import ABC, abstractmethod
@@ -14,6 +15,12 @@ from engine.models import AgentConfig, BUILTIN_PROVIDERS
 
 
 class ProviderError(Exception):
+    # Which role was being called when this failed. Declared rather than left to the
+    # assignment in `engine/executor.py`: without it the attribute exists only on
+    # errors that happened to be routed through that one path, which is why readers
+    # had to reach for `getattr(exc, "role", None)` to stay safe.
+    role: str | None = None
+
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
@@ -45,6 +52,12 @@ async def post_json(client: "httpx.AsyncClient", url: str, *, label: str, **kwar
             "provider_bad_response",
             f"{label} answered with a body that is not JSON (HTTP {response.status_code})",
         ) from exc
+
+
+# The liveness-probe deadline, from `01` §3: max_tokens=8, prompt `ping`, 15s.
+# Deliberately far below the generation clients' timeouts — a probe that hangs
+# for minutes is the settings screen hanging, not a test.
+TEST_CONNECTION_TIMEOUT_S = 15
 
 
 def normalize_usage(provider: str, data: dict) -> dict | None:
@@ -84,7 +97,22 @@ def _mk_usage(inp, out) -> dict | None:
 
 def validate_local_base_url(url: str) -> None:
     parsed = urlparse(url)
-    if parsed.hostname not in ("127.0.0.1", "localhost"):
+    host = (parsed.hostname or "").lower().strip("[]")
+    # All of 127/8 is loopback, plus IPv6 ::1 and the name forms.
+    is_loopback = (
+        host in ("localhost", "::1")
+        or host.startswith("127.")
+    )
+    if not is_loopback:
+        # Plain IP without brackets already handled; dotted check above covers
+        # 127.0.0.1 through 127.255.255.255.
+        try:
+            import ipaddress
+            if ipaddress.ip_address(host).is_loopback:
+                is_loopback = True
+        except ValueError:
+            pass
+    if not is_loopback:
         raise ProviderError("invalid_base_url", "Local provider base_url must point at localhost")
     if parsed.scheme != "http":
         raise ProviderError("invalid_base_url", "Local provider must use http (loopback only)")
@@ -144,9 +172,24 @@ class BaseProvider(ABC):
             pass
 
     async def test_connection(self, model: str) -> tuple[bool, str]:
+        """One tiny completion, on a deadline: this is a liveness probe, not a
+        generation run.
+
+        The probe rides the provider's own `complete`, whose HTTP client is
+        sized for real replies (120s here, 180s for a local Ollama loading a
+        model from disk). Left unbounded it inherited that budget, and a hung
+        endpoint held the settings screen for minutes before reporting what the
+        user only needed to know after 15: the provider is not answering.
+        `asyncio.wait_for` draws the documented line and reports the timeout in
+        the same shape as any other failure, so the button always comes back.
+        """
         try:
-            await self.complete("ping", "ping", model, 0.0, 8)
+            await asyncio.wait_for(
+                self.complete("ping", "ping", model, 0.0, 8), timeout=TEST_CONNECTION_TIMEOUT_S
+            )
             return True, "ok"
+        except asyncio.TimeoutError:
+            return False, f"no answer within {TEST_CONNECTION_TIMEOUT_S}s"
         except ProviderError as exc:
             return False, exc.message
         except Exception as exc:
@@ -366,7 +409,7 @@ class OllamaProvider(BaseProvider):
                 # Same reply, just delivered in pieces — the accumulated text
                 # is byte-identical to what stream=false returns.
                 text = ""
-                data: dict = {}
+                data = {}
                 try:
                     async with client.stream(
                         "POST",
@@ -582,9 +625,23 @@ class Keychain:
         # process umask (typically 0644), leaving a window where the plaintext
         # secrets sit world-readable before the chmod below runs.
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(data, indent=2, sort_keys=True))
-        tmp.replace(path)  # atomic: a crash mid-write cannot truncate the store
+        try:
+            # Best-effort inter-process lock: concurrent saves last-writer-wins
+            # without it, and the loser drops the winner's key.
+            try:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except (ImportError, OSError):
+                pass
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(data, indent=2, sort_keys=True))
+            tmp.replace(path)  # atomic: a crash mid-write cannot truncate the store
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
 
     # ── generic ref access ──────────────────────────────────────────────────
 

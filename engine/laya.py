@@ -222,7 +222,13 @@ def build_state(goal: Any, workspace_root: str | None = None) -> dict[str, Any]:
         ),
     }
     if workspace_root:
-        state["workspace"] = workspace_root
+        # Basename only: the LLM fallback must not receive the absolute local
+        # path (minor path disclosure to a third-party endpoint).
+        from pathlib import Path as _Path
+        try:
+            state["workspace"] = _Path(workspace_root).name or "workspace"
+        except Exception:
+            state["workspace"] = "workspace"
     return state
 
 
@@ -269,7 +275,7 @@ class LayaService:
         if self._sdk_error is not None or self._disabled:
             return None
         try:
-            from laya import Router  # type: ignore[import-not-found]
+            from laya import Router
 
             # preload=True keeps every checkpoint resident: without it, traffic
             # that alternates languages rebuilds a model on each request

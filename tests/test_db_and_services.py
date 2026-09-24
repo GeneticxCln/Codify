@@ -38,6 +38,77 @@ class TestDbAndServices(unittest.TestCase):
         self.conn.close()
         self.temp_dir.cleanup()
 
+    def _ws_with_goal(self, name: str = "WS", status: str = "COMPLETED"):
+        root = Path(self.temp_dir.name) / f"root-{name}"
+        root.mkdir(exist_ok=True)
+        ws = self.workspaces.create(WorkspaceCreate(name=name, root_path=str(root)))
+        goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="g"))
+        self.goals.update_status(goal.id, 0, "PENDING")
+        # Re-read: update_status returns a new object, so the local handle would
+        # still be the PLANNING snapshot it was created as.
+        goal = self.goals.update_status(goal.id, 1, status)
+        return ws, goal
+
+    def test_delete_goal_refuses_in_progress_states_directly(self):
+        """The service guards itself, not just the HTTP route.
+
+        The route re-checks the same rule (and the live driver set) because it
+        owns the race window, so the HTTP tests pass either way. This one pins
+        the service contract on its own — a caller reaching for `goals.delete`
+        directly must not be able to delete a goal a coroutine is still driving.
+        """
+        for status in ("PLANNING", "RUNNING"):
+            with self.subTest(status=status):
+                _, goal = self._ws_with_goal(f"WS-{status}", status=status)
+                with self.assertRaises(ApiError) as ctx:
+                    self.goals.delete(goal.id)
+                self.assertEqual(ctx.exception.code, "goal_in_progress")
+                self.assertEqual(
+                    self.conn.execute(
+                        "SELECT count(*) FROM goals WHERE id = ?", (goal.id,)
+                    ).fetchone()[0],
+                    1, "a refused delete must leave the row alone",
+                )
+
+    def test_delete_goal_allows_terminal_states(self):
+        """Every stopped state is deletable, including a cancelled run."""
+        for status in ("COMPLETED", "FAILED", "CANCELLED"):
+            with self.subTest(status=status):
+                _, goal = self._ws_with_goal(f"WS-{status}", status=status)
+                result = self.goals.delete(goal.id)
+                self.assertTrue(result["deleted"])
+                self.assertFalse(result["files_touched"])
+                self.assertEqual(goal.status, status, "the report names the run it removed")
+
+    def test_workspace_delete_requires_explicit_cascade(self):
+        ws, goal = self._ws_with_goal()
+        self.assertEqual(self.workspaces.goal_count(ws.id), 1)
+
+        with self.assertRaises(ApiError) as ctx:
+            self.workspaces.delete(ws.id)
+        self.assertEqual(ctx.exception.code, "workspace_not_empty")
+        self.assertEqual(ctx.exception.extra["goals"], 1)
+        self.assertEqual(self.workspaces.goal_count(ws.id), 1, "refused means untouched")
+
+        result = self.workspaces.delete(ws.id, delete_goals=True)
+        self.assertEqual(result["goals"], 1)
+        self.assertEqual(self.workspaces.goal_count(ws.id), 0)
+        with self.assertRaises(ApiError):
+            self.workspaces.get(ws.id)
+        with self.assertRaises(ApiError):
+            self.goals.get(goal.id)
+
+    def test_workspace_delete_reports_the_underlying_infk_is_never_raised(self):
+        """A bare IntegrityError here was a 500 with no actionable message."""
+        ws, _ = self._ws_with_goal()
+        try:
+            self.workspaces.delete(ws.id)
+            self.fail("expected a refusal, not a cascade")
+        except ApiError as exc:
+            self.assertIn("goal", exc.message.lower())
+        except Exception as exc:  # pragma: no cover - the regression itself
+            self.fail(f"raw DB error leaked: {type(exc).__name__}: {exc}")
+
     def test_seeded_agent_configs(self):
         configs = self.registry.list_configs()
         roles = [c.role for c in configs]
@@ -94,7 +165,7 @@ class TestDbAndServices(unittest.TestCase):
         # Get and list
         fetched = self.workspaces.get(ws.id)
         self.assertEqual(fetched.id, ws.id)
-        all_ws = self.workspaces.list()
+        all_ws = self.workspaces.list_workspaces()
         self.assertEqual(len(all_ws), 1)
 
     def test_goal_service_and_concurrency(self):

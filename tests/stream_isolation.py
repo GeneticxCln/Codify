@@ -35,7 +35,10 @@ def _get(item: Any, key: str) -> Any:
 
 def _as_dicts(frames: Iterable[Any]) -> list[dict]:
     """Normalize frames to plain dicts so json.dumps sees identical bytes."""
-    return [f if isinstance(f, Mapping) else f.model_dump() for f in frames]
+    out: list[dict] = []
+    for f in frames:
+        out.append(dict(f) if isinstance(f, Mapping) else f.model_dump())
+    return out
 
 
 def _seqs(frames: Iterable[Any]) -> list[int]:

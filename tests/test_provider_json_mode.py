@@ -3,6 +3,7 @@ import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, cast
 
 from engine.providers import OpenAICompatProvider
 
@@ -31,11 +32,16 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
         self.post_bodies: list[dict] = []
         self.models_requests = 0
         class Handler(BaseHTTPRequestHandler):
+            # `self.server` is the base server to the type checker; the cast
+            # names what it actually is, so the counters below are typed.
             def do_GET(self):
+                server = cast(_FakeOpenAIServer, self.server)
                 if self.path.endswith("/models"):
-                    self.server.models_requests += 1
-                    data = {"data": [{"id": "m1"}]}
-                    if self.server.advertise:
+                    server.models_requests += 1
+                    # `capabilities` is attached only when advertised, so the
+                    # reply is deliberately not uniformly shaped.
+                    data: dict[str, Any] = {"data": [{"id": "m1"}]}
+                    if server.advertise:
                         data["data"][0]["capabilities"] = {"json_object": True}
                     body = json.dumps(data).encode()
                     self.send_response(200)
@@ -47,10 +53,11 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
                     self.send_error(404)
 
             def do_POST(self):
+                server = cast(_FakeOpenAIServer, self.server)
                 length = int(self.headers.get("content-length", 0))
-                self.server.post_bodies.append(json.loads(self.rfile.read(length)))
-                if self.server.post_bodies[-1].get("stream"):
-                    if self.server.reject_stream:
+                server.post_bodies.append(json.loads(self.rfile.read(length)))
+                if server.post_bodies[-1].get("stream"):
+                    if server.reject_stream:
                         self.send_error(400, "streaming is not supported")
                         return
                     # SSE: content chunks, then usage and the finish chunk —
@@ -58,7 +65,10 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
                     self.send_response(200)
                     self.send_header("content-type", "text/event-stream")
                     self.end_headers()
-                    if self.server.split_usage:
+                    # Usage rides the finish chunk or its own chunk before it,
+                    # so the two branches are not the same shape.
+                    chunks: tuple[dict, ...]
+                    if server.split_usage:
                         chunks = (
                             {"choices": [{"delta": {"content": "hel"}}]},
                             {"usage": {"prompt_tokens": 5, "completion_tokens": 2}},
@@ -74,7 +84,7 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
                         self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
                     self.wfile.write(b"data: [DONE]\n\n")
                     return
-                if self.server.reject_json_mode and "response_format" in self.server.post_bodies[-1]:
+                if server.reject_json_mode and "response_format" in server.post_bodies[-1]:
                     self.send_error(400, "response_format is not supported")
                     return
                 body = json.dumps(openai_reply("ok")).encode()
@@ -120,7 +130,8 @@ class TestJsonModeCapability(_ServerMixin):
         provider = self._provider(self.base)
 
         out = self._complete(provider)
-        out2 = self._complete(provider)
+        # Second call, deliberately unasserted: it must reuse the cached probe.
+        self._complete(provider)
 
         self.assertEqual(out, "ok")
         self.assertEqual(server.models_requests, 1, "the capability probe must run once, not per call")
@@ -181,7 +192,7 @@ class TestOpenAIStreaming(_ServerMixin):
         """Usage and finish_reason often arrive on different SSE chunks. Over-
         writing the accumulator with the finish chunk dropped the usage block,
         so the usage report saw nothing at all."""
-        server = self._start(advertise=False, split_usage=True)
+        self._start(advertise=False, split_usage=True)
         provider = OpenAICompatProvider("test-key", self.base)
         usage: list[dict] = []
         provider.usage_sink = usage.append
@@ -211,9 +222,10 @@ class _FakeOllamaServer(ThreadingHTTPServer):
         self.post_bodies: list[dict] = []
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
+                server = cast(_FakeOllamaServer, self.server)
                 length = int(self.headers.get("content-length", 0))
-                self.server.post_bodies.append(json.loads(self.rfile.read(length)))
-                if not self.server.post_bodies[-1].get("stream"):
+                server.post_bodies.append(json.loads(self.rfile.read(length)))
+                if not server.post_bodies[-1].get("stream"):
                     body = json.dumps({"response": '{"files": []}', "prompt_eval_count": 9, "eval_count": 4}).encode()
                     self.send_response(200)
                     self.send_header("content-type", "application/json")

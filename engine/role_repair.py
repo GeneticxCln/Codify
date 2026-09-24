@@ -42,7 +42,9 @@ class RepairPlan:
 
 
 def _keys_by_provider(key_status: list[dict]) -> dict[str, dict]:
-    return {row.get("provider"): row for row in key_status or []}
+    # Rows without a provider are skipped rather than keyed under None: every lookup
+    # is by provider name, so a None key is a key nobody can reach.
+    return {str(row["provider"]): row for row in key_status or [] if row.get("provider")}
 
 
 def _describe(provider: str, model: str, discovery: dict[str, dict]) -> tuple[str, str]:
@@ -247,8 +249,16 @@ def plan_role_repair(
     could not be reached at all, which is an unknown, not a fault.
     """
     keys = _keys_by_provider(key_status)
-    discovery = {row.get("provider"): row for row in provider_status or []}
-    catalog_ids = {(m.get("provider"), m.get("id")) for m in _usable_candidates(catalog)}
+    # Both are looked up by a real provider/id, so a row missing one is skipped
+    # rather than keyed under None (which nothing can ever match).
+    discovery = {
+        str(row["provider"]): row for row in provider_status or [] if row.get("provider")
+    }
+    catalog_ids = {
+        (str(m["provider"]), str(m["id"]))
+        for m in _usable_candidates(catalog)
+        if m.get("provider") and m.get("id")
+    }
 
     plan = RepairPlan()
     for config in configs:

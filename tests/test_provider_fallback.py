@@ -374,7 +374,7 @@ class TestSavingAFallback(unittest.IsolatedAsyncioTestCase):
         )
         cfg = self.registry.set_config("planner", AgentConfigUpdate(api_key="sk-role-secret"))
         target = self.registry.fallback_config_for(cfg)
-        self.assertIsNotNone(target)
+        assert target is not None, "the role has a fallback configured"
         self.assertEqual(target.provider, "ollama")
         self.assertEqual(target.protocol, "ollama")
         self.assertEqual(target.model_name, "qwen3:8b")

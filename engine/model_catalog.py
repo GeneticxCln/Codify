@@ -431,33 +431,40 @@ class ModelCatalogService:
         self._transport = transport
         self._cache: dict[str, Any] | None = None
         self._cached_at = 0.0
+        self._lock = asyncio.Lock()
 
     async def get(self, refresh: bool = False) -> dict[str, Any]:
-        fresh = self._cache is not None and (time.time() - self._cached_at) < self._ttl_s
-        if fresh and not refresh:
-            return {**self._cache, "cached": True}  # type: ignore[dict-item]
+        async with self._lock:
+            fresh = self._cache is not None and (time.time() - self._cached_at) < self._ttl_s
+            if fresh and not refresh:
+                return {**self._cache, "cached": True}  # type: ignore[dict-item]
 
-        targets = _targets(self._registry, self._keychain)
-        async with httpx.AsyncClient(
-            timeout=DISCOVERY_TIMEOUT_S, transport=self._transport
-        ) as client:
-            results = await asyncio.gather(
-                *(discover_provider(t, client=client) for t in targets)
-            )
+            targets = _targets(self._registry, self._keychain)
+            async with httpx.AsyncClient(
+                timeout=DISCOVERY_TIMEOUT_S, transport=self._transport
+            ) as client:
+                try:
+                    results = await asyncio.gather(
+                        *(discover_provider(t, client=client) for t in targets)
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    results = []
 
-        models: list[dict[str, Any]] = []
-        for result in results:
-            models.extend(_sorted_models(result.models))
+            models: list[dict[str, Any]] = []
+            for result in results:
+                models.extend(_sorted_models(result.models))
 
-        payload = {
-            "models": models,
-            "providers": [r.to_payload() for r in sorted(results, key=lambda r: r.provider)],
-            "fetched_at": time.time(),
-            "cached": False,
-        }
-        self._cache = payload
-        self._cached_at = time.time()
-        return payload
+            payload = {
+                "models": models,
+                "providers": [r.to_payload() for r in sorted(results, key=lambda r: r.provider)],
+                "fetched_at": time.time(),
+                "cached": False,
+            }
+            self._cache = payload
+            self._cached_at = time.time()
+            return payload
 
     def invalidate(self) -> None:
         self._cache = None

@@ -44,6 +44,14 @@ READ_ONLY_GIT_SUBCOMMANDS = {
 LS_FLAGS = {"-l", "-a", "-h", "-1", "-la", "-al", "-lh", "-lah", "-alh", "-s", "-t"}
 WC_FLAGS = {"-l", "-w", "-c", "-m", "-L"}
 MAX_READ_ONLY_ARGS = 8
+# Stored command output is capped so a verbose suite cannot bloat memory/DB.
+MAX_COMMAND_OUTPUT_CHARS = 200_000
+
+
+def _cap_output(text: str) -> str:
+    if len(text) > MAX_COMMAND_OUTPUT_CHARS:
+        return text[:MAX_COMMAND_OUTPUT_CHARS] + "\n… (output truncated)"
+    return text
 # `-C` / `--git-dir` point git somewhere else; `--output` writes a file; `-o` is
 # shorthand for it; `--ext-diff` and `--no-index` run external readers.
 # `-d`/`-D`/`--delete` remove refs; `-m`/`-M`/`-f`/`--force` let the other
@@ -165,6 +173,8 @@ class SandboxService:
         (pytest spawning workers, npm spawning node) must not leave strays
         behind holding ports or writing files after the engine moved on.
         """
+        if not isinstance(timeout_s, (int, float)) or timeout_s <= 0 or timeout_s > 600:
+            raise CommandNotAllowed(f"invalid timeout: {timeout_s!r}")
         fs = FileSystemService(root_path)
         validate_argv(argv, fs, mode=mode)
         resolved = shutil.which(argv[0])
@@ -210,11 +220,13 @@ class SandboxService:
         # the transcript) reason about "timed out" as a distinct outcome, and
         # the executor's documented timeout contract expects 124 specifically.
         # The real signal stays visible in stderr above.
+        # Cap stored output: a verbose suite must not bloat memory or the DB.
+        stdout, stderr = _cap_output(stdout or ""), _cap_output(stderr or "")
         return {
             "argv": argv,
             "exit_code": 124 if timed_out else proc.returncode,
-            "stdout": stdout or "",
-            "stderr": stderr or "",
+            "stdout": stdout,
+            "stderr": stderr,
         }
 
     @staticmethod

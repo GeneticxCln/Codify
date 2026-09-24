@@ -1,4 +1,3 @@
-from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 """Two goals running concurrently against one workspace must never cross streams.
 
 The chat renders one timeline per goal by replaying `events_after(goal_id, …)`
@@ -20,6 +19,8 @@ helper:
 4. Reachability — a late subscriber replaying from 0 gets exactly what the
                   live reader collected, nothing more.
 """
+
+from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
 import asyncio
 import json

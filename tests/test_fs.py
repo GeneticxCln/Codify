@@ -42,8 +42,9 @@ class TestFileSystemService(unittest.TestCase):
         self.assertEqual(self.fs.read_text("hello.txt"), "hello world")
 
     def test_apply_create_update_delete(self):
-        # Create
-        files = [{"path": "new_file.txt", "action": "create", "content": "line 1\nline 2\n"}]
+        # Create. `list[dict]` on purpose: a delete carries `content: None`
+        # while the other actions carry text, so the values are not uniformly str.
+        files: list[dict] = [{"path": "new_file.txt", "action": "create", "content": "line 1\nline 2\n"}]
         summaries = self.fs.apply(files, dry_run=False)
         self.assertEqual(len(summaries), 1)
         self.assertTrue((self.root / "new_file.txt").exists())

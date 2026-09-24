@@ -31,6 +31,7 @@ EventType = Literal[
     "fix_retry",
     "fixer_pass",
     "plan_consult",
+    "agent_call_failed",
     "usage",
     "model_delta",
     "error",
@@ -265,8 +266,8 @@ class GoalCreate(BaseModel):
 
 class ProviderKeyUpdate(BaseModel):
     model_config = {"extra": "forbid"}
-    provider: str
-    api_key: str
+    provider: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
+    api_key: str = Field(..., min_length=1, max_length=4096)
 
 
 class VersionedAction(BaseModel):

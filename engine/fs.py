@@ -43,6 +43,9 @@ class FileSystemService:
         path = self.resolve(rel)
         if not path.is_file():
             return ""
+        size = path.stat().st_size
+        if size > MAX_DIFF_BYTES:
+            return path.read_bytes()[:MAX_DIFF_BYTES].decode("utf-8", errors="replace")
         return path.read_text(encoding="utf-8")
 
     def read_text_or_none(self, rel: str) -> str | None:
@@ -57,7 +60,11 @@ class FileSystemService:
             path = self.resolve(rel)
             if not path.is_file():
                 return None
-            raw = path.read_bytes()
+            size = path.stat().st_size
+            if size > MAX_DIFF_BYTES:
+                raw = path.read_bytes()[:MAX_DIFF_BYTES]
+            else:
+                raw = path.read_bytes()
             if looks_binary(raw):
                 return None
             return raw.decode("utf-8")
@@ -88,11 +95,17 @@ class FileSystemService:
 
     def _write_atomic(self, target: Path, text: str) -> None:
         """Write via a temp file + rename, so a crash cannot truncate the target."""
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(target.name + ".codify-tmp")
+        # The target itself was resolved through containment, but its parents
+        # were not: a symlinked directory inside the workspace would redirect
+        # the write outside it. Resolve the parent and re-check containment.
+        real_parent = target.parent.resolve()
+        if real_parent != self.root and self.root not in real_parent.parents:
+            raise PathEscapeError(str(target))
+        real_parent.mkdir(parents=True, exist_ok=True)
+        tmp = real_parent / (target.name + ".codify-tmp")
         try:
             tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, target)
+            os.replace(tmp, real_parent / target.name)
         finally:
             if tmp.exists():
                 try:
@@ -133,6 +146,8 @@ class FileSystemService:
                     raise ValueError(f"edit failed for {rel}: {edit_note}")
                 note = None
             else:
+                if action not in ("create", "update", "delete"):
+                    raise ValueError(f"unknown file action for {rel}: {action!r}")
                 after = "" if action == "delete" else (content or "")
             # A delete changes the tree iff the file is there — an *empty* file
             # still disappears, which `before != after` alone would miss.

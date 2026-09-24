@@ -1,6 +1,5 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import subprocess
-import sys
 import tempfile
 import time
 import unittest

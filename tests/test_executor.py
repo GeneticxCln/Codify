@@ -144,6 +144,74 @@ class TestPerRoleConfig(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.goals.steps(goal.id)[0].status, "COMPLETED")
 
 
+class TestCallLatencyRecording(unittest.IsolatedAsyncioTestCase):
+    """The Settings screen's "last call / last error" reads the goal event log,
+    so the log has to carry what happened: how long a completed call took, and
+    that a failed one failed. Without the duration a card cannot tell a slow
+    fixer from a fast one; without a failure record a role that only ever fails
+    looks like it never ran."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.conn = connect(self.root / "t.db")
+        self.registry = AgentRegistryService(
+            self.conn, _ScriptedFactory(_FailingProvider("none"), Keychain()), Keychain()
+        )
+        configure_every_role(self.registry)
+        self.workspaces = WorkspaceService(self.conn)
+        self.goals = GoalService(self.conn)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(), laya=_SkippedGate()
+        )
+        self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+
+    def tearDown(self):
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    async def test_a_completed_call_records_its_duration_on_the_usage_event(self):
+        goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="T", description=""))
+        await self.executor.run_planning(goal.id)
+        usage = [e.payload for e in self.goals.events_after(goal.id, 0) if e.type == "usage"]
+        self.assertTrue(usage, "planning must produce at least one usage event")
+        for p in usage:
+            self.assertIn("duration_ms", p, "duration rides on the same event as the tokens")
+            self.assertIsInstance(p["duration_ms"], int)
+            self.assertGreaterEqual(p["duration_ms"], 0)
+            self.assertIn("role", p)
+            self.assertIn("provider", p)
+
+    async def test_a_provider_failure_records_an_agent_call_failed_event(self):
+        self.registry.set_config(
+            "fixer", AgentConfigUpdate(model_name="fixer-model")
+        )
+        # Swap in a factory whose provider breaks the fixer with a 500.
+        self.executor.orchestrator.registry._factory = _ScriptedFactory(
+            _FailingProvider("http"), Keychain()
+        )
+        goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="T", description=""))
+        await self.executor.run_planning(goal.id)
+        step = self.goals.steps(goal.id)[0]
+        self.goals.update_status(goal.id, goal.version + 1, "RUNNING")
+        await self.executor.run_step(goal.id, step.id)
+
+        failures = [
+            e.payload for e in self.goals.events_after(goal.id, 0)
+            if e.type == "agent_call_failed"
+        ]
+        self.assertTrue(failures, "a failed provider call must leave its own record")
+        fixer_failures = [p for p in failures if p["role"] == "fixer"]
+        self.assertTrue(fixer_failures)
+        p = fixer_failures[0]
+        self.assertEqual(p["code"], "provider_http")
+        self.assertEqual(p["target"], "primary")
+        self.assertIn("duration_ms", p)
+        self.assertIsInstance(p["duration_ms"], int)
+        self.assertIn("model", p)
+        self.assertIn("message", p)
+
+
 class TestExecutorService(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -152,7 +220,8 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         self.conn = connect(self.db_path)
         self.keychain = Keychain()
 
-        self.mock_responses = {}
+        self.mock_responses: dict[str, dict] = {}
+        self.mock_provider = MockProvider(self.mock_responses)
         self.mock_provider = MockProvider(self.mock_responses)
         self.mock_factory = MockFactory(self.mock_provider)
 
@@ -598,11 +667,28 @@ class TestEvidencePackPathHandling(unittest.TestCase):
         )
         self.assertEqual(pack["dropped_paths"], [])
 
+    def test_the_rendered_symbol_line_names_each_symbol_and_its_path(self):
+        """The Symbols line is what the planner and the fixer actually read.
+
+        Nothing asserted it, which is how a Python 3.12-only f-string sat in the
+        renderer unnoticed — it parsed on the developer's interpreter and would
+        have been a SyntaxError on the 3.10 minimum (`tests/test_min_python_syntax.py`).
+        A symbol without a path is still listed, and one with a path says so.
+        """
+        text = self.executor._evidence_text(
+            {"symbols": [{"name": "greet", "path": "src/foo.py"}, {"name": "banner"}]}
+        )
+        self.assertIn("Symbols: greet (src/foo.py), banner", text)
+
 
 class _HangingSandbox(SandboxService):
     """Every command hangs until the timeout — no real process, no real wait."""
 
-    def run_command(self, root_path, argv, timeout_s=None):
+    last_timeout: int
+
+    def run_command(
+        self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test"
+    ) -> dict:
         self.calls = getattr(self, "calls", 0) + 1
         self.last_timeout = timeout_s
         raise subprocess.TimeoutExpired(argv, timeout_s)
@@ -676,7 +762,7 @@ class TestHungTestCommand(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["argv"], ["pytest", "-q"])
         self.assertEqual(result["exit_code"], 124, "timeout(1)'s code for a killed run")
         self.assertTrue(result["ran"])
-        self.assertEqual(self.executor.sandbox.last_timeout, 120, "the hang is bounded")
+        self.assertEqual(self.executor.sandbox.last_timeout, 120, "the hang is bounded")  # type: ignore[attr-defined]
 
         # The verifier saw what happened, exactly like ordinary command output.
         self.assertIn("timed out after", self.provider.verifier_prompt_seq[1])
@@ -690,6 +776,10 @@ class _FailingProvider(BaseProvider):
         self.fixer_failure = fixer_failure
 
     async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+        # Real providers report their token usage through the sink the
+        # orchestrator attaches; the double does the same so latency tests can
+        # read the usage events a goal would actually produce.
+        self._report_usage("openai_compat", {"usage": {"prompt_tokens": 5, "completion_tokens": 7}})
         if "You are Codify Fixer" in system_prompt:
             if self.fixer_failure == "garbage":
                 return "I am not JSON at all."
@@ -1163,19 +1253,18 @@ class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
             {"files": [{"path": "greet.py", "action": "create", "content": c}]}
             for c in contents
         ]
-        self.provider.others["fixer"] = replies  # type: ignore[attr-defined]
-        original = self.provider.complete
+        self.provider.others["fixer"] = replies
 
         async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
             )
             self.provider.calls.append((role, user_prompt))
-            if role == "fixer" and self.provider.others["fixer"]:  # type: ignore[attr-defined]
-                return json.dumps(self.provider.others["fixer"].pop(0))  # type: ignore[attr-defined]
+            if role == "fixer" and self.provider.others["fixer"]:
+                return json.dumps(self.provider.others["fixer"].pop(0))
             if role == "verifier" and self.provider.verifier_replies:
                 return json.dumps(self.provider.verifier_replies.pop(0))
-            return json.dumps(self.provider.others.get(role, {}))  # type: ignore[attr-defined]
+            return json.dumps(self.provider.others.get(role, {}))
 
         self.provider.complete = completing  # type: ignore[method-assign]
 
@@ -1364,7 +1453,7 @@ class TestCancelStopsBeforeCommit(unittest.IsolatedAsyncioTestCase):
                          "the critic must not judge a cancelled step")
         self.assertEqual([], self.provider.scribe_calls,
                          "the scribe must not run for a cancelled step")
-        self.assertEqual([], self.executor.git.commits,
+        self.assertEqual([], self.executor.git.commits,  # type: ignore[attr-defined]
                          "nothing may be committed after a cancel")
         # The fixer's work itself stays (documented mid-run-cancel semantics):
         self.assertTrue((self.root / "x.txt").exists())
@@ -1391,7 +1480,7 @@ class TestCancelStopsBeforeCommit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.goals.get(self.goal.id).status, "CANCELLED")
         self.assertEqual([], self.provider.scribe_calls,
                          "the scribe must not run for a cancelled step")
-        self.assertEqual([], self.executor.git.commits,
+        self.assertEqual([], self.executor.git.commits,  # type: ignore[attr-defined]
                          "nothing may be committed after a cancel, even from the late guard")
 
 
@@ -1485,19 +1574,18 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
         self.temp_dir.cleanup()
 
     def _script_fixer(self, replies: list[dict]) -> None:
-        self.provider.others["fixer"] = replies  # type: ignore[attr-defined]
-        original = self.provider.complete
+        self.provider.others["fixer"] = replies
 
         async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
             )
             self.provider.calls.append((role, user_prompt))
-            if role == "fixer" and self.provider.others["fixer"]:  # type: ignore[attr-defined]
-                return json.dumps(self.provider.others["fixer"].pop(0))  # type: ignore[attr-defined]
+            if role == "fixer" and self.provider.others["fixer"]:
+                return json.dumps(self.provider.others["fixer"].pop(0))
             if role == "verifier" and self.provider.verifier_replies:
                 return json.dumps(self.provider.verifier_replies.pop(0))
-            return json.dumps(self.provider.others.get(role, {}))  # type: ignore[attr-defined]
+            return json.dumps(self.provider.others.get(role, {}))
 
         self.provider.complete = completing  # type: ignore[method-assign]
 
@@ -1759,8 +1847,11 @@ class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_provider_without_usage_reports_nothing(self):
         # Strip the reporting wrapper: a silent server must not produce events.
-        self.provider.complete = self.provider.complete.__wrapped__ if hasattr(self.provider.complete, "__wrapped__") else self.provider.complete
+        complete = self.provider.complete
+        unwrapped = getattr(complete, "__wrapped__", complete)
+        self.provider.complete = unwrapped  # type: ignore[method-assign]
         self.provider._report_usage = lambda *a, **k: None  # type: ignore[method-assign]
+
 
         await self.executor.run_planning(self.goal.id)
         self.assertEqual(self._usage_events(), [])
@@ -1824,7 +1915,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         from engine.app import _run_steps
 
         class _App:
-            pass
+            state: Any
 
         app = _App()
         app.state = _App()
@@ -1833,7 +1924,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         g = self.goals.get(self.goal.id)
         self.goals.update_status(self.goal.id, g.version, "RUNNING")
         started = time.monotonic()
-        await _run_steps(app, self.goal.id)
+        await _run_steps(app, self.goal.id)  # type: ignore[arg-type]
         return time.monotonic() - started
 
     def _script_parallel(self, delays: dict[str, float] | None = None,
@@ -1889,10 +1980,12 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
 
     async def test_independent_batch_rules(self):
         from engine.models import PlanStep
-        mk = lambda i, title, paths: PlanStep(
-            id=str(i), goal_id="g", ordinal=i, title=title, description="d",
-            status="PENDING", suggested_paths=paths,
-        )
+
+        def mk(i, title, paths):
+            return PlanStep(
+                id=str(i), goal_id="g", ordinal=i, title=title, description="d",
+                status="PENDING", suggested_paths=paths,
+            )
         batch = self.executor._independent_batch([
             mk(0, "a", ["a.txt"]),
             mk(1, "b", ["b.txt"]),
@@ -1932,7 +2025,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self.goals.set_parallel(self.goal.id, True)
         self._script_parallel(delays={"a": 0.4}, fail_on="b")
         await self.executor.run_planning(self.goal.id)
-        elapsed = await self._drive()
+        await self._drive()
         g = self.goals.get(self.goal.id)
         self.assertEqual(g.status, "FAILED", f"expected FAILED, got {g.status}")
         steps = self.goals.steps(self.goal.id)
@@ -1995,8 +2088,9 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.executor._parallel_width(), 4, "no setting → default")
 
-        self.executor.settings = SettingsService(self.conn)
-        self.executor.settings.set_int("parallel_width", 3)
+        settings = SettingsService(self.conn)
+        self.executor.settings = settings
+        settings.set_int("parallel_width", 3)
         self.assertEqual(self.executor._parallel_width(), 3, "persisted setting wins over default")
 
         # The env var is the operator's explicit override of the field.
@@ -2007,7 +2101,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
             os.environ.pop("CODIFY_PARALLEL_WIDTH", None)
 
         # Changing the setting again is picked up immediately (same instance).
-        self.executor.settings.set_int("parallel_width", 6)
+        settings.set_int("parallel_width", 6)
         self.assertEqual(self.executor._parallel_width(), 6, "re-read per batch")
 
     async def test_batch_refused_when_paths_change_between_batching_and_dispatch(self):
@@ -2148,10 +2242,12 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         of range`, and a goal that died with nothing on screen explaining why.
         """
         from engine.models import PlanStep
-        mk = lambda i, title, paths: PlanStep(
-            id=str(i), goal_id="g", ordinal=i, title=title, description="d",
-            status="PENDING", suggested_paths=paths,
-        )
+
+        def mk(i, title, paths):
+            return PlanStep(
+                id=str(i), goal_id="g", ordinal=i, title=title, description="d",
+                status="PENDING", suggested_paths=paths,
+            )
         self.assertEqual(self.executor._independent_batch([mk(0, "vague", [])]), [])
 
         self.goals.set_parallel(self.goal.id, True)
@@ -2187,7 +2283,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         from engine.app import _run_steps
 
         class _App:
-            pass
+            state: Any
 
         app = _App()
         app.state = _App()
@@ -2196,10 +2292,11 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         g = self.goals.get(self.goal.id)
         self.goals.update_status(self.goal.id, g.version, "RUNNING")
 
-        first = asyncio.create_task(_run_steps(app, self.goal.id))
+        first = asyncio.create_task(_run_steps(app, self.goal.id))  # type: ignore[arg-type]
         await asyncio.sleep(0.05)  # let the first driver claim and enter its wave
         started = time.monotonic()
-        await _run_steps(app, self.goal.id)  # second claim: must return promptly, run nothing
+        # second claim: must return promptly, run nothing
+        await _run_steps(app, self.goal.id)  # type: ignore[arg-type]  # noqa: E501
         second_elapsed = time.monotonic() - started
         await first
 
@@ -2237,7 +2334,6 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         elapsed = await self._drive()
         del elapsed
         self.assertEqual(self.goals.get(self.goal.id).status, "COMPLETED")
-        steps = self.goals.steps(self.goal.id)
         stored = self.conn.execute(
             "SELECT DISTINCT step_id FROM proposed_files WHERE goal_id = ?", (self.goal.id,)
         ).fetchall()
@@ -2397,7 +2493,7 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
 
         if "provider_unreachable" not in FALLBACK_TRIGGER_CODES:
             with self.assertRaises(PE):
-                await self.executor.run_step(self.goal.id, 1)
+                await self.executor.run_step(self.goal.id, "1")
             deltas = [d for d in self._deltas(self.goal.id) if d.payload["role"] == "fixer"]
             self.assertTrue(deltas, "the failed call must still have closed its stream")
             self.assertTrue(
@@ -2455,19 +2551,18 @@ class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
         self.temp_dir.cleanup()
 
     def _script_critic(self, replies: list[dict]) -> None:
-        self.provider.others["critic"] = replies  # type: ignore[attr-defined]
-        original = self.provider.complete
+        self.provider.others["critic"] = replies
 
         async def completing(system_prompt, user_prompt, model, temperature, max_tokens):
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
             )
             self.provider.calls.append((role, user_prompt))
-            if role == "critic" and self.provider.others["critic"]:  # type: ignore[attr-defined]
-                return json.dumps(self.provider.others["critic"].pop(0))  # type: ignore[attr-defined]
+            if role == "critic" and self.provider.others["critic"]:
+                return json.dumps(self.provider.others["critic"].pop(0))
             if role == "verifier" and self.provider.verifier_replies:
                 return json.dumps(self.provider.verifier_replies.pop(0))
-            return json.dumps(self.provider.others.get(role, {}))  # type: ignore[attr-defined]
+            return json.dumps(self.provider.others.get(role, {}))
 
         self.provider.complete = completing  # type: ignore[method-assign]
 

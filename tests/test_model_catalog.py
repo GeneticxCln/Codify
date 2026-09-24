@@ -244,6 +244,7 @@ class TestProviderFailures(unittest.IsolatedAsyncioTestCase):
         async with _client({}, calls) as client:
             result = await discover_provider(target, client=client)
         self.assertFalse(result.ok)
+        assert result.error is not None, "a failed discovery says why"
         self.assertIn("no API key", result.error)
         self.assertEqual(calls, [], "an unauthenticated provider must not be called")
 
@@ -253,6 +254,7 @@ class TestProviderFailures(unittest.IsolatedAsyncioTestCase):
         async with _client(routes) as client:
             result = await discover_provider(target, client=client)
         self.assertFalse(result.ok)
+        assert result.error is not None, "a failed discovery says why"
         self.assertIn("HTTP 401", result.error)
         self.assertIn("check the API key", result.error)
 
@@ -260,6 +262,7 @@ class TestProviderFailures(unittest.IsolatedAsyncioTestCase):
         target = ProviderTarget("weird", "carrier-pigeon", "https://example.com", "k")
         result = await discover_provider(target)
         self.assertFalse(result.ok)
+        assert result.error is not None, "a failed discovery says why"
         self.assertIn("unknown protocol", result.error)
 
     async def test_transport_error_does_not_raise(self):
@@ -270,6 +273,7 @@ class TestProviderFailures(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(boom)) as client:
             result = await discover_provider(target, client=client)
         self.assertFalse(result.ok)
+        assert result.error is not None, "a failed discovery says why"
         self.assertIn("connection refused", result.error)
 
 
@@ -473,7 +477,7 @@ class TestCatalogService(unittest.IsolatedAsyncioTestCase):
 
 class TestSorting(unittest.TestCase):
     def test_dated_models_come_first_newest_to_oldest(self):
-        models = [
+        models: list[dict] = [
             {"id": "b", "created": 100.0},
             {"id": "undated"},
             {"id": "a", "created": 300.0},

@@ -18,11 +18,23 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from engine import home
 from engine.db import connect
 from engine.providers import Keychain
+
+
+def _stub_module(name: str, **attrs: Any) -> types.ModuleType:
+    """A throwaway module for `sys.modules`, carrying arbitrary attributes.
+
+    `types.ModuleType` declares none of the attributes a faked package needs,
+    so the stubs are written through `__dict__` rather than by assignment.
+    """
+    module = types.ModuleType(name)
+    module.__dict__.update(attrs)
+    return module
 
 
 class _FakeKeyring:
@@ -36,19 +48,20 @@ class _FakeKeyring:
     def install(self, usable: bool = True) -> None:
         """Install the stub. `usable=False` mimics a machine whose keyring is a stub."""
         backends = types.ModuleType("keyring.backends")
-        fail = types.ModuleType("keyring.backends.fail")
 
         class FailKeyring:  # the class the engine probes for and refuses
             pass
 
-        fail.Keyring = FailKeyring  # type: ignore[attr-defined]
+        fail = _stub_module("keyring.backends.fail", Keyring=FailKeyring)
 
-        pkg = types.ModuleType("keyring")
-        pkg.__path__ = []  # type: ignore[attr-defined]
-        # Anything that is not the fail backend counts as usable.
-        pkg.get_keyring = (lambda: self) if usable else (lambda: FailKeyring())
-        pkg.set_password = self.set_password
-        pkg.get_password = self.get_password
+        pkg = _stub_module(
+            "keyring",
+            __path__=[],
+            # Anything that is not the fail backend counts as usable.
+            get_keyring=(lambda: self) if usable else (lambda: FailKeyring()),
+            set_password=self.set_password,
+            get_password=self.get_password,
+        )
 
         self._modules = {
             "keyring": pkg,
@@ -303,8 +316,6 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
         import engine.app as app_module
 
         started: list[tuple] = []
-        fake_uvicorn = types.ModuleType("uvicorn")
-        fake_uvicorn.Config = lambda *a, **k: types.SimpleNamespace()
 
         class FakeServer:
             def __init__(self, config):
@@ -315,7 +326,9 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
                 for s in sockets or ():
                     s.close()
 
-        fake_uvicorn.Server = FakeServer
+        fake_uvicorn = _stub_module(
+            "uvicorn", Config=lambda *a, **k: types.SimpleNamespace(), Server=FakeServer
+        )
 
         out, err = io.StringIO(), io.StringIO()
         with self.env(**{home.ENV_HOME: str(self.scratch)}), patch.dict(

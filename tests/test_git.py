@@ -48,7 +48,7 @@ class TestGitService(GitTestBase):
         self.assertIn("hello.py", self.git.get_status(str(self.root)))
 
         rev = self.git.commit(str(self.root), "feat: initial commit", ["hello.py"])
-        self.assertIsNotNone(rev)
+        assert rev is not None, "the commit must report its revision"
         self.assertEqual(len(rev), 40)
         self.assertEqual(self.git.get_status(str(self.root)).strip(), "")
 
@@ -84,8 +84,6 @@ class TestGitService(GitTestBase):
                 captured.update(kwargs.get("env") or {})
             return real_run(argv, **kwargs)
 
-        with tempfile.TemporaryDirectory() as td:
-            pass
         import os as _os
         _os.environ["ANTHROPIC_API_KEY"] = "sk-leak-check"
         _os.environ["OPENAI_API_KEY"] = "sk-leak-check-2"

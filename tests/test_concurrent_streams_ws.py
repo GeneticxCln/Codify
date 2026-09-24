@@ -1,4 +1,3 @@
-from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 """The same isolation proof, over the wire.
 
 `test_concurrent_streams.py` proves the service layer never crosses two
@@ -30,9 +29,13 @@ asserting what arrives on each wire:
 
 All isolation guarantees live in `tests/stream_isolation.py` exactly once,
 shared with the service-layer twin (`test_concurrent_streams.py`) so the two
-layers cannot drift. Skipped (not failed) when the `websockets` client is
-unavailable, so the suite still runs in bare environments.
+layers cannot drift. `websockets` is a declared dependency rather than an optional
+one: uvicorn resolves its ws implementation to `None` when none is importable and
+then serves no WebSocket at all, so an install missing it has no chat to isolate —
+a test that skipped here would hide exactly the gap worth catching.
 """
+
+from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
 import asyncio
 import json
@@ -46,12 +49,10 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Any
 
-try:
-    import websockets
-except ImportError:  # pragma: no cover - environment-dependent
-    websockets = None
+import httpx
+import websockets  # hard dependency: uvicorn serves no WebSocket without one
 
 from tests.stream_isolation import (
     assert_cancelled_stream_ends_cleanly,
@@ -90,6 +91,9 @@ class _FakeAIHandler(BaseHTTPRequestHandler):
             else "none"
         )
         prompt_l = prompt.lower()
+        # One field of the reply is the whole payload and it differs per role
+        # (answers, steps, files, …), so the shape is genuinely untyped here.
+        payload: dict[str, Any]
         if "prompt_injection" in prompt:  # the Laya gate's typed-questions contract
             payload = {"answers": {
                 "intent": "code_change", "risk": 0,
@@ -122,7 +126,8 @@ class _FakeAIHandler(BaseHTTPRequestHandler):
             out = json.dumps(payload)
             third = max(1, len(out) // 2)
             for i, piece in enumerate((out[:third], out[third:])):
-                line = {"response": piece, "done": i == 1}
+                # Counters appear only on the final line.
+                line: dict[str, Any] = {"response": piece, "done": i == 1}
                 if i == 1:
                     line["prompt_eval_count"] = 10
                     line["eval_count"] = 5
@@ -148,7 +153,6 @@ class _FakeAIHandler(BaseHTTPRequestHandler):
 
 
 class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
-    @unittest.skipIf(websockets is None, "websockets client not installed")
     async def test_concurrent_goals_isolated_over_real_websockets(self):
         ai_port = _free_port()
         fake = HTTPServer(("127.0.0.1", ai_port), _FakeAIHandler)
@@ -294,6 +298,8 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
         loop = asyncio.get_running_loop()
         for attempt in (1, 2):
             deadline = loop.time() + timeout
+            stdout = engine.stdout
+            assert stdout is not None, "the engine is spawned with a stdout pipe"
             died = False
             while loop.time() < deadline:
                 if engine.poll() is not None:
@@ -303,7 +309,7 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                         raise AssertionError(f"engine died at boot:\n{detail}")
                     died = True  # retry with a fresh process and port
                     break
-                line = await loop.run_in_executor(None, engine.stdout.readline)
+                line = await loop.run_in_executor(None, stdout.readline)
                 text = line.decode(errors="replace").strip()
                 if text.startswith("CODIFY_ENGINE"):
                     fields = dict(p.split("=", 1) for p in text.split()[1:])

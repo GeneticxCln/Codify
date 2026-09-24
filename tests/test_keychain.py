@@ -8,14 +8,16 @@ providers' requests, and never take the engine down when the store is corrupt.
 """
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import asyncio
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from engine.providers import Keychain
+from engine.providers import BaseProvider, Keychain
 
 
 def file_backed(**kwargs) -> Keychain:
@@ -166,6 +168,29 @@ class TestRoleKeyRename(unittest.TestCase):
         kc.set("reviewer", "sk-role")
         kc.rename_role_key("reviewer", "critic")
         self.assertEqual(kc.get_provider_key("openai"), "sk-provider")
+
+
+class _HangingProvider(BaseProvider):
+    """A provider whose complete() outlives any sane probe deadline."""
+
+    async def complete(self, system_prompt, user_prompt, model, temperature, max_tokens) -> str:
+        await asyncio.sleep(60)
+        return "never"
+
+
+class TestConnectionProbeDeadline(unittest.IsolatedAsyncioTestCase):
+    async def test_a_hung_endpoint_is_reported_within_the_documented_15s(self):
+        """`01` §3 promises `ping` at 15s. The probe shares `complete` with real
+        generation, whose HTTP client waits 120s (180s for Ollama) — without a
+        deadline of its own, a hung endpoint held the settings screen for that
+        whole budget before saying what the user needed to know at 15."""
+        started = time.monotonic()
+        ok, message = await _HangingProvider().test_connection("any-model")
+        waited = time.monotonic() - started
+        self.assertFalse(ok)
+        self.assertIn("15s", message)
+        self.assertLess(waited, 20, "the probe must cut off well inside the generation budget")
+        self.assertGreater(waited, 14, "and must actually have waited the documented window")
 
 
 if __name__ == "__main__":

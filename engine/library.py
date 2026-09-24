@@ -68,6 +68,22 @@ def looks_binary(sample: bytes) -> bool:
     return b"\x00" in sample
 
 
+def _is_outside_symlink(root: Path, path: Path) -> bool:
+    """True when path is a symlink escaping the workspace root.
+
+    os.walk does not follow dir symlinks by default, but a symlinked *file*
+    is still opened and read — leaking /etc/passwd into match events. Skip
+    those; read() already refuses them via fs.resolve().
+    """
+    try:
+        if not path.is_symlink():
+            return False
+        real = path.resolve()
+        return real != root and root not in real.parents
+    except OSError:
+        return True
+
+
 class ReadResult(dict):
     """A dict, but named, so callers cannot pass the wrong shape by accident."""
 
@@ -230,8 +246,20 @@ class LibraryService:
         entries: list[str] = []
         truncated = False
         base_depth = len(Path(self.root).parts)
+        root = Path(self.root).resolve()
         for dirpath, dirnames, filenames in os.walk(self.root):
             dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            # Never descend through a symlink pointing outside the workspace.
+            kept = []
+            for d in dirnames:
+                full = Path(dirpath) / d
+                try:
+                    if full.is_symlink() and full.resolve() != root and root not in full.resolve().parents:
+                        continue
+                except OSError:
+                    continue
+                kept.append(d)
+            dirnames[:] = kept
             here = Path(dirpath)
             if len(here.parts) - base_depth >= depth:
                 dirnames[:] = []
@@ -266,11 +294,17 @@ class LibraryService:
         files_scanned = 0
         files_skipped = 0
         truncated = False
+        root = Path(self.root).resolve()
 
         for dirpath, dirnames, filenames in os.walk(self.root):
             dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
             for name in sorted(filenames):
-                rel = str((Path(dirpath) / name).relative_to(self.root))
+                full = Path(dirpath) / name
+                if _is_outside_symlink(root, full):
+                    files_skipped += 1
+                    continue
+                rel = str(full.relative_to(self.root))
                 if glob and not fnmatch.fnmatch(rel, glob):
                     continue
                 if files_scanned >= MAX_FILES_SCANNED:
@@ -312,13 +346,13 @@ class LibraryService:
         """Bounded regex search: the literal walker with pattern guards.
 
         Same walker shape as `search` — SKIP_DIRS, binary sniff, byte caps — so
-        the two report identically. A pattern that runs over the per-line
-        deadline aborts the whole search with ValueError (reported to the model
+        the two report identically. A pattern that runs over the time budget
+        aborts the whole search with ValueError (reported to the model
         as a refusal, the same way an invalid pattern is) rather than hanging
         the engine or silently returning partial results.
         """
         import re as _re
-        import signal
+        import time as _time
 
         if len(pattern) > MAX_REGEX_PATTERN:
             raise ValueError(f"regex pattern too long (>{MAX_REGEX_PATTERN} chars)")
@@ -328,20 +362,25 @@ class LibraryService:
         except _re.error as exc:
             raise ValueError(f"invalid regex: {exc}") from exc
 
-        def _deadline(_signum, _frame):
-            raise TimeoutError()
-
-        old = signal.signal(signal.SIGALRM, _deadline)
-        signal.setitimer(signal.ITIMER_REAL, PER_LINE_REGEX_SECONDS * 4)
+        budget_s = PER_LINE_REGEX_SECONDS * 4
+        deadline = _time.monotonic() + budget_s
         try:
             matches: list[dict] = []
             files_scanned = 0
             files_skipped = 0
             truncated = False
+            root = Path(self.root).resolve()
             for dirpath, dirnames, filenames in os.walk(self.root):
                 dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+                dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
                 for name in sorted(filenames):
-                    rel = str((Path(dirpath) / name).relative_to(self.root))
+                    if _time.monotonic() > deadline:
+                        raise TimeoutError()
+                    full = Path(dirpath) / name
+                    if _is_outside_symlink(root, full):
+                        files_skipped += 1
+                        continue
+                    rel = str(full.relative_to(self.root))
                     if glob and not fnmatch.fnmatch(rel, glob):
                         continue
                     if files_scanned >= MAX_FILES_SCANNED:
@@ -373,9 +412,6 @@ class LibraryService:
             raise ValueError(
                 f"regex took over {PER_LINE_REGEX_SECONDS * 4:.1f}s — pattern too expensive"
             ) from None
-        finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, old)
 
         return {
             "query": pattern,

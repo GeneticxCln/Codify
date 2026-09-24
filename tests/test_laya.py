@@ -45,6 +45,7 @@ class TestPolicy(unittest.TestCase):
             "prompt_injection": {"noul": 0.91},
         })
         self.assertTrue(blocked)
+        assert reason is not None, "a block explains itself"
         self.assertIn("0.91", reason)
         self.assertEqual(warnings, [])
 
@@ -88,7 +89,7 @@ class TestState(unittest.TestCase):
         state = build_state(goal, "/tmp/ws")
         self.assertEqual(state["request"], "d")
         self.assertEqual(state["mode"], "plan-only")
-        self.assertEqual(state["workspace"], "/tmp/ws")
+        self.assertEqual(state["workspace"], "ws")
 
     def test_dry_run_mode_reported(self):
         goal = types.SimpleNamespace(title="t", description="d", plan_only=False, dry_run=True)
@@ -145,6 +146,19 @@ def _registry_with(provider, tmp: Path, model: str = "stub-model"):
     return conn, registry
 
 
+def _install_fake_sdk(router: object) -> None:
+    """Stub the Laya SDK on `sys.modules`.
+
+    The real SDK is optional by design (docs/05) and is not installed here, so the
+    SDK code path is exercised against a module built in the test. `setattr` rather
+    than `module.Router = ...` because a `ModuleType` declares no attributes for the
+    checker to see.
+    """
+    module = types.ModuleType("laya")
+    setattr(module, "Router", router)
+    sys.modules["laya"] = module
+
+
 class TestLayaService(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -187,6 +201,7 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         finally:
             conn.close()
         self.assertTrue(decision.blocked)
+        assert decision.block_reason is not None, "a block explains itself"
         self.assertIn("prompt-injection", decision.block_reason)
 
     async def test_fallback_prose_with_fences_is_tolerated(self):
@@ -210,6 +225,7 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
             conn.close()
         self.assertEqual(decision.engine, "skipped")
         self.assertFalse(decision.blocked)
+        assert decision.skipped_reason is not None, "a skipped gate says why"
         self.assertIn("connection refused", decision.skipped_reason)
 
     async def test_no_registry_and_no_sdk_is_skipped(self):
@@ -231,8 +247,7 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
                     "routing": {"model": "laya-noul-de", "repo": "NandhaKishorM/laya"},
                 }
 
-        sys.modules["laya"] = types.ModuleType("laya")
-        sys.modules["laya"].Router = Router
+        _install_fake_sdk(Router)
         provider = _StubProvider({"prompt_injection": {"noul": 0.0}})
         conn, registry = _registry_with(provider, self.root)
         try:
@@ -254,8 +269,7 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
             def predict(self, state, questions):
                 raise RuntimeError("weights missing")
 
-        sys.modules["laya"] = types.ModuleType("laya")
-        sys.modules["laya"].Router = Router
+        _install_fake_sdk(Router)
         provider = _StubProvider({"intent": {"choice": "question"}})
         conn, registry = _registry_with(provider, self.root)
         try:
@@ -265,11 +279,12 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
             conn.close()
         self.assertEqual(decision.engine, "llm-fallback")
         self.assertFalse(decision.blocked)
-        self.assertIn("weights missing", service.sdk_error())
+        sdk_error = service.sdk_error()
+        assert sdk_error is not None, "a fallback off the SDK reports the SDK's error"
+        self.assertIn("weights missing", sdk_error)
 
     def test_sdk_disable_env_forces_the_fallback(self):
-        sys.modules["laya"] = types.ModuleType("laya")
-        sys.modules["laya"].Router = object
+        _install_fake_sdk(object)
         import os
 
         os.environ["CODIFY_LAYA_SDK"] = "0"
