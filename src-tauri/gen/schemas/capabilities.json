@@ -1,1 +1,1 @@
-{}
+{"default":{"identifier":"default","description":"Default capability: the main window may invoke the engine-bridge commands. No shell or filesystem scope is granted — the frontend only uses `invoke`, and the engine is spawned by the Rust backend over tokio, not through the shell plugin.","local":true,"windows":["main"],"permissions":["core:default"]}}

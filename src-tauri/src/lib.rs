@@ -92,9 +92,7 @@ pub struct EngineInfo {
 async fn engine_url(state: &SharedEngineState) -> Result<(String, String), String> {
     let s = state.lock().await;
     match (&s.token, &s.port) {
-        (Some(token), Some(port)) => {
-            Ok((format!("http://127.0.0.1:{}", port), token.clone()))
-        }
+        (Some(token), Some(port)) => Ok((format!("http://127.0.0.1:{}", port), token.clone())),
         _ => Err("Engine not ready".to_string()),
     }
 }
@@ -143,14 +141,14 @@ async fn codify_get_engine_info(state: State<'_, SharedEngineState>) -> Result<E
     }
 }
 
-/// List all five agent configs from the engine.
+/// List all seven agent configs from the engine.
 #[tauri::command]
 async fn codify_list_agent_configs(
     state: State<'_, SharedEngineState>,
+    http: State<'_, reqwest::Client>,
 ) -> Result<Vec<AgentConfig>, String> {
     let (base, token) = engine_url(&state).await?;
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http
         .get(format!("{}/settings/agents", base))
         .bearer_auth(&token)
         .send()
@@ -169,11 +167,11 @@ async fn codify_update_agent_config(
     role: String,
     patch: AgentConfigPatch,
     state: State<'_, SharedEngineState>,
+    http: State<'_, reqwest::Client>,
 ) -> Result<AgentConfig, String> {
     let (base, token) = engine_url(&state).await?;
     valid_role(&role)?;
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http
         .put(format!("{}/settings/agents/{}", base, role))
         .bearer_auth(&token)
         .json(&patch)
@@ -195,10 +193,10 @@ async fn codify_update_agent_config(
 #[tauri::command]
 async fn codify_repair_agent_configs(
     state: State<'_, SharedEngineState>,
+    http: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let (base, token) = engine_url(&state).await?;
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http
         .post(format!("{}/settings/agents/repair", base))
         .bearer_auth(&token)
         .send()
@@ -216,11 +214,11 @@ async fn codify_repair_agent_configs(
 async fn codify_test_agent_connection(
     role: String,
     state: State<'_, SharedEngineState>,
+    http: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
     let (base, token) = engine_url(&state).await?;
     valid_role(&role)?;
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http
         // BUG-03 fix: correct endpoint is /test-connection not /test
         .post(format!("{}/settings/agents/{}/test-connection", base, role))
         .bearer_auth(&token)
@@ -271,7 +269,12 @@ async fn launch_engine(shared: SharedEngineState) {
         }
     };
 
-    let stdout = child.stdout.take().expect("child stdout");
+    // The pipe was requested above (`Stdio::piped`), so `take()` can only fail if
+    // the handle was already taken — either way there is no handshake to read.
+    let Some(stdout) = child.stdout.take() else {
+        eprintln!("[Codify] Engine spawned without a readable stdout pipe — cannot read handshake; engine state not parked");
+        return;
+    };
     // Suspenders: park the handle where the exit handler can reach it.
     {
         let mut s = shared.lock().await;
@@ -336,6 +339,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(engine_state)
+        // One shared HTTP client for every engine-bridge command: `Client` is
+        // cheaply cloneable over an internal connection pool, while
+        // `Client::new()` per call re-resolves and re-handshakes every time.
+        .manage(reqwest::Client::new())
         .setup(move |_app| {
             // Launch engine asynchronously so the window appears immediately.
             let shared = state_clone.clone();
