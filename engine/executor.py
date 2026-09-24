@@ -6,8 +6,7 @@ import os
 import subprocess
 import time
 import uuid
-from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from engine.default_prompts import DEFAULT_PROMPTS
 from engine.fs import FileSystemService, PathEscapeError
@@ -21,10 +20,13 @@ from engine.library import (
     format_search,
 )
 from engine.laya import LayaDecision, LayaService, build_state
-from engine.models import AgentRole, Event, EventType, PlanStep
+from engine.models import AgentRole, Event, EventType, Goal, PlanStep
 from engine.providers import ProviderError
 from engine.sandbox import CommandNotAllowed, SandboxService
 from engine.services import AgentRegistryService, ApiError, GoalService, WorkspaceService
+
+if TYPE_CHECKING:
+    from engine.services import SettingsService
 
 
 class AgentOutputInvalid(Exception):
@@ -103,6 +105,11 @@ MAX_PLANNER_CONSULTS = 1
 # cannot parse. A failure that is not here (a bug in our own code) stops the role
 # instead of silently running it somewhere else, because pointing an unknown
 # failure at a second model is how a real defect gets buried under a retry.
+# The codes the executor treats as provider/protocol faults: a call that fails
+# with one of these may be retried on the role's fallback target. The test
+# `test_failed_call_still_closes_the_stream` covers the opposite branch — a code
+# outside this set surfaces as a raised ProviderError — so re-adding a code that
+# belongs here flips that test's condition and fails it loudly.
 FALLBACK_TRIGGER_CODES = frozenset({
     "missing_api_key",
     "unknown_protocol",
@@ -161,6 +168,26 @@ class CriticRejection(AgentOutputInvalid):
     def __init__(self, message: str, reasons: list[str], role: str | None = "critic"):
         super().__init__(message, role)
         self.reasons = reasons
+
+
+def _norm_path(p: str) -> str:
+    """Normalize a suggested path for disjointness checks.
+
+    Raw strings diverge for the same file (`a/b` vs `./a/b` vs `a//b`);
+    normpath + casefold closes the cheap aliases. Absolute spellings that
+    stay inside the workspace are reduced to their relative form. Anything
+    unparseable falls back to the stripped raw string — a conservative
+    mismatch (refuse the batch) beats a torn write.
+    """
+    s = (p or "").strip()
+    if not s:
+        return ""
+    if s.startswith("/"):
+        s = s.lstrip("/")
+    norm = os.path.normpath(s)
+    if norm == ".":
+        return ""
+    return norm.casefold()
 
 
 def _as_read_int(value: Any, default: int | None) -> int | None:
@@ -267,7 +294,10 @@ class AgentOrchestrator:
     def _delta_publisher(
         self, goal_id: str, step_id: str | None, role: AgentRole,
         provider_name: str, model_name: str,
-    ) -> tuple[Callable[[str], None], Callable[[], None]]:
+    # The flush takes an optional final text, which `Callable[[], None]` cannot
+    # express — the kind of annotation that reads right and contradicts the call at
+    # `flush_deltas(raw)`.
+    ) -> tuple[Callable[[str], None], Callable[..., None]]:
         """A sink for provider token deltas plus the flush to call at the end.
 
         Model replies stream in fast; the chat's WebSocket polls the event
@@ -278,7 +308,7 @@ class AgentOrchestrator:
         current text correctly instead of replaying overlapping fragments).
         A final event carries the complete text and `final: true`.
         """
-        state = {"buf": "", "dirty": False, "last": 0.0}
+        state: dict[str, Any] = {"buf": "", "dirty": False, "last": 0.0}
 
         def on_delta(text: str) -> None:
             state["buf"] = text
@@ -311,7 +341,7 @@ class AgentOrchestrator:
 
     def _publish_fallback(
         self, goal_id: str, step_id: str | None, role: AgentRole,
-        primary, target, exc: ProviderError,
+        primary, target, exc: ProviderError | AgentOutputInvalid,
     ) -> None:
         """Say that the primary was skipped, why, and where the call went instead.
 
@@ -329,7 +359,10 @@ class AgentOrchestrator:
             },
         ))
 
-    def _all_targets_failed(self, role: AgentRole, failures: list[tuple[str, str, ProviderError]]) -> ProviderError:
+    def _all_targets_failed(
+        self, role: AgentRole,
+        failures: list[tuple[str, str, "ProviderError | AgentOutputInvalid"]],
+    ) -> "ProviderError | AgentOutputInvalid":
         """One error that names every attempt, or the original failure if there was one.
 
         With no fallback configured this returns exactly what the caller would
@@ -372,7 +405,7 @@ class AgentOrchestrator:
         _ = goal  # kept for interface symmetry; config comes from the registry
         cfg, targets = self._targets(role)
         system = cfg.system_prompt_override or DEFAULT_PROMPTS[role]
-        failures: list[tuple[str, str, ProviderError]] = []
+        failures: list[tuple[str, str, ProviderError | AgentOutputInvalid]] = []
 
         for label, target in targets:
             model_name = (target.model_name or "").strip()
@@ -394,13 +427,19 @@ class AgentOrchestrator:
             # here, attributed to the role and the target that served it. A
             # fresh closure per target so a fallback's usage is labeled with
             # the provider that actually ran, not the one that was asked first.
-            def _record(usage: dict, _role=role, _provider=target.provider, _model=model_name):
+            # duration_ms rides along on the same event: the response time the
+            # Settings screen reports as "last call", and the one number that
+            # answers "is my fixer slow?" without touching a provider.
+            call_started = time.monotonic()
+
+            def _record(usage: dict, _role=role, _provider=target.provider, _model=model_name, _started=call_started):
                 self.goals.publish(self._event(
                     goal_id, step_id, "usage",
                     {
                         "role": _role,
                         "provider": _provider,
                         "model": _model,
+                        "duration_ms": round((time.monotonic() - _started) * 1000),
                         **usage,
                     },
                 ))
@@ -417,6 +456,24 @@ class AgentOrchestrator:
                 )
             except ProviderError as exc:
                 flush_deltas()
+                # The call's outcome, kept with the goal it failed in: the
+                # Settings card reports the *last* thing that happened to a
+                # role, and "last" needs a record of failures too — a role that
+                # only ever fails leaves no usage event to read. A 429 that
+                # succeeded on the fallback is exactly what a user needs to see
+                # when their fixer has been "slow".
+                self.goals.publish(self._event(
+                    goal_id, step_id, "agent_call_failed",
+                    {
+                        "role": role,
+                        "provider": target.provider,
+                        "model": model_name,
+                        "target": label,
+                        "code": exc.code,
+                        "message": exc.message,
+                        "duration_ms": round((time.monotonic() - call_started) * 1000),
+                    },
+                ))
                 failures.append((label, target.provider, self._provider_failure(role, target, label, exc)))
                 if exc.code not in FALLBACK_TRIGGER_CODES:
                     break
@@ -463,7 +520,9 @@ class ExecutorService:
         self._git_lock = asyncio.Lock()
         # Optional settings store (SettingsService). Attached by app lifespan
         # when present; tests without one just get the default width.
-        self.settings = None
+        # Annotated at the field so the None default is the *documented* empty
+        # state, not a type the checker reads out of one constructor.
+        self.settings: SettingsService | None = None
         # One driver per goal: start, retry, and apply each spawn a driver
         # loop, and two loops on one goal re-run the same steps concurrently.
         self._drivers: set[str] = set()
@@ -494,6 +553,16 @@ class ExecutorService:
         return DEFAULT_PARALLEL_WIDTH
 
     # --- public -------------------------------------------------------
+
+    def is_driving(self, goal_id: str) -> bool:
+        """Is a coroutine currently driving this goal's steps?
+
+        The authoritative "something is still running" signal, as opposed to the
+        status column, which a goal can leave while a driver is still between
+        steps. Delete uses it to close the window between reading the status
+        and removing the row.
+        """
+        return goal_id in self._drivers
 
     def claim_driver(self, goal_id: str) -> bool:
         """Take exclusive right to drive this goal's steps.
@@ -675,6 +744,7 @@ class ExecutorService:
             )
 
         last: dict = {}
+        rounds_used = 0
         for round_no in range(1, MAX_LIBRARY_ROUNDS + 1):
             rounds_used = round_no
             out = await self.orchestrator.run_agent("librarian", goal_id, None, prompt)
@@ -961,8 +1031,14 @@ class ExecutorService:
             lines += [f"- {f['path']} [{f['evidence']}] — {f['why']}" for f in files]
         symbols = evidence.get("symbols") or []
         if symbols:
+            # The parenthesised path is built from a string literal rather than a
+            # nested f-string quoting itself with the outer one's character: reusing
+            # the outer quote is PEP 701, which only Python 3.12+ accepts, and this
+            # module has to import on the 3.10 minimum pyproject.toml declares.
+            # `tests/test_min_python_syntax.py` guards the rule.
             lines.append("Symbols: " + ", ".join(
-                f"{s['name']}{f' ({s['path']})' if s.get('path') else ''}" for s in symbols
+                f"{s['name']}" + (f" ({s['path']})" if s.get("path") else "")
+                for s in symbols
             ))
         if evidence.get("conventions"):
             lines.append("Conventions: " + "; ".join(evidence["conventions"]))
@@ -1084,6 +1160,10 @@ class ExecutorService:
             if self._cancelled(goal_id):
                 self._log(goal_id, step.id, "info", "cancelled — skipping review and commit for this step")
                 return
+            # Every path that reaches the review phase assigned them: the fixer
+            # loop sets `summaries`, the replay branch sets it, and a failure
+            # returns instead of falling through.
+            assert summaries is not None
             await self._critic(goal_id, step, fs, summaries, evidence, outcome, ws_root=ws.root_path)
             if self._cancelled(goal_id):
                 self._log(goal_id, step.id, "info", "cancelled — skipping the summary for this step")
@@ -1105,6 +1185,15 @@ class ExecutorService:
             return
         except PathEscapeError as exc:
             self._fail(goal_id, step_id, "path_escape", str(exc), role="fixer")
+            return
+        except ApiError as exc:
+            self._fail(goal_id, step_id, exc.code, exc.message, role=getattr(exc, "role", None))
+            return
+        except (ValueError, OSError) as exc:
+            # Replay path (stored_files) surfaces fs.apply errors as
+            # ValueError/OSError; a corrupt stored proposal must fail the step
+            # loudly, not escape as internal_error.
+            self._fail(goal_id, step_id, "replay_failed", str(exc), role="fixer")
             return
         self._set_step(goal_id, step, "COMPLETED")
 
@@ -1159,13 +1248,13 @@ class ExecutorService:
             its verifier/critic/scribe tail, so it needs *some* footprint to be
             provable). Steps are looked up from the store each call — a step
             deleted mid-run must yield an empty set, not an AttributeError."""
-            paths = {f["path"] for f in by_step.get(step_id, []) if f.get("path")}
+            paths = {_norm_path(f["path"]) for f in by_step.get(step_id, []) if f.get("path") and _norm_path(f["path"])}
             if paths:
                 return paths
             step = next((s for s in self.goals.steps(goal_id) if s.id == step_id), None)
             if step is None:
                 return set()
-            return {p.strip() for p in (step.suggested_paths or []) if p.strip()}
+            return {_norm_path(p) for p in (step.suggested_paths or []) if _norm_path(p)}
 
         remaining = list(self.goals.steps(goal_id))
         while remaining:
@@ -1239,7 +1328,7 @@ class ExecutorService:
         def paths(s: PlanStep) -> set[str]:
             if paths_for is not None:
                 return set(paths_for(s.id))
-            return {p.strip() for p in (s.suggested_paths or []) if p.strip()}
+            return {_norm_path(p) for p in (s.suggested_paths or []) if _norm_path(p)}
 
         batch: list[PlanStep] = []
         taken: set[str] = set()
@@ -1293,9 +1382,9 @@ class ExecutorService:
                     f"step {snap.id} disappeared between batching and dispatch",
                 )
             if paths_for is not None:
-                mine = {p.strip() for p in paths_for(step.id) if p and p.strip()}
+                mine = {_norm_path(p) for p in paths_for(step.id) if p and _norm_path(p)}
             else:
-                mine = {p.strip() for p in (step.suggested_paths or []) if p.strip()}
+                mine = {_norm_path(p) for p in (step.suggested_paths or []) if _norm_path(p)}
             if not mine or mine & taken:
                 # The proof is stale: this step now shares a path with a batch
                 # sibling (or has no provable paths). Refuse the whole batch —
@@ -1317,6 +1406,12 @@ class ExecutorService:
         results = await asyncio.gather(*(run_one(s) for s in resolved), return_exceptions=True)
         errors = [r for r in results if isinstance(r, BaseException)]
         if errors:
+            if len(errors) > 1:
+                self._log(
+                    goal_id, None, "warn",
+                    f"parallel batch had {len(errors)} failures — reporting the first: "
+                    + "; ".join(f"{type(e).__name__}: {e}" for e in errors[1:4]),
+                )
             raise errors[0]
 
     def _replay_files(self, goal_id: str, step: PlanStep, fs: FileSystemService, files: list[dict], dry_run: bool) -> list[dict]:
@@ -1334,19 +1429,19 @@ class ExecutorService:
         # on siblings batched against the OLD suggested_paths. Re-prove
         # disjointness against every still-unfinished step: a plan edit that made
         # this step collide with a running sibling must not turn the retry into
-        # the torn write parallelism exists to prevent. (Sequential goals have no
-        # wave in flight — the driver awaits each step — so the check is a no-op
-        # there and skipped.)
+        # the torn write parallelism exists to prevent.
+        if goal_id in self._drivers:
+            raise ApiError(409, "driver_busy", "another driver is already running this goal")
         goal = self.goals.get(goal_id)
         if goal.parallel:
             others = {
-                p.strip()
+                _norm_path(p)
                 for s in self.goals.steps(goal_id)
                 if s.id != step_id and s.status != "COMPLETED"
                 for p in (s.suggested_paths or [])
-                if p.strip()
+                if _norm_path(p)
             }
-            mine = {p.strip() for p in (step.suggested_paths or []) if p.strip()}
+            mine = {_norm_path(p) for p in (step.suggested_paths or []) if _norm_path(p)}
             if mine & others:
                 raise ApiError(
                     409, "retry_collides_with_running",
@@ -1380,7 +1475,7 @@ class ExecutorService:
         dry_run: bool,
         evidence: dict | None = None,
         failure_feedback: dict | None = None,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], bool]:
         ctx, unreadable = self._suggested_paths_context(fs, step.suggested_paths)
 
         # On a retry, the failed run's evidence is the most important part of
@@ -1394,8 +1489,10 @@ class ExecutorService:
                 str(failure_feedback.get("explanation", "")),
             ]
             if outcome.get("argv"):
+                argv_out = outcome["argv"]
+                argv_str = " ".join(argv_out) if isinstance(argv_out, list) else str(argv_out)
                 lines.append(
-                    f"Command that was run: {' '.join(outcome['argv'])} (exit {outcome.get('exit_code')})"
+                    f"Command that was run: {argv_str} (exit {outcome.get('exit_code')})"
                 )
             lines.append(
                 "Fix what the failure describes. Do not start over from scratch — "
@@ -1555,6 +1652,8 @@ class ExecutorService:
                 )
             proposals_left -= 1
 
+            if not isinstance(proposed, list) or not proposed or not all(isinstance(a, str) for a in proposed):
+                raise AgentOutputInvalid(f"verifier argv must be a non-empty string list, got {proposed!r}", role="verifier")
             try:
                 # The sandbox is shared: under a parallel goal another step's
                 # test must not run in the tree this command is measuring.
