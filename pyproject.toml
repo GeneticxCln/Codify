@@ -6,11 +6,19 @@ build-backend = "setuptools.build_meta"
 name = "codify-engine"
 version = "0.2.0"
 description = "Codify Multi-Agent Engine"
-readme = "docs/00-codify-architecture-overview.md"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.32",
+    # Not optional, and not only a test dependency: uvicorn resolves its WebSocket
+    # implementation to None when neither `websockets` nor `wsproto` is importable
+    # (uvicorn/protocols/websockets/auto.py), and then it serves no WebSocket at all.
+    # Every goal's transcript arrives over `/ws/goals/{id}`, so an install without
+    # this opens a chat that can never receive an event. uvicorn's own [standard]
+    # extra pins the same floor, which is the version it is tested against.
+    "websockets>=13",
     "pydantic>=2.10",
     "httpx>=0.28",
     "keyring>=25.0",
@@ -20,7 +28,10 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
 ]
+
 
 [tool.setuptools.packages.find]
 include = ["engine*"]

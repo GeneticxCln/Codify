@@ -1,5 +1,8 @@
 fastapi>=0.115
 uvicorn>=0.32
+# Kept in step with pyproject.toml: uvicorn serves no WebSocket without a ws
+# implementation, and the chat depends on /ws/goals/{id}.
+websockets>=13
 pydantic>=2.10
 httpx>=0.28
 keyring>=25.0
