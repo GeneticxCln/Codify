@@ -504,6 +504,30 @@ class TestSandboxRefusalRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["argv"])
         self.assertEqual(len(result["refused"]), 1)
 
+    async def test_a_refusal_prompt_keeps_the_step_context(self):
+        """The verifier's calls are stateless — the retry prompt after a refusal
+        must still name the step it is ruling on, not just the refusal. The
+        old feedback REPLACED the prompt, dropping title/description/test
+        command, so the verifier re-decided from one sentence."""
+        self.provider.verifier_replies = [
+            self.REFUSED,
+            {"argv": ["git", "status"], "verdict": None, "explanation": "an allowed runner"},
+            {"argv": None, "verdict": "pass", "explanation": "nothing to run; working tree checked"},
+        ]
+        await self._plan_and_run()
+
+        prompts = self.provider.verifier_prompt_seq
+        self.assertEqual(len(prompts), 3)
+        for prompt in prompts:
+            self.assertIn("Step 1", prompt, "every verifier call carries the step title")
+            self.assertIn("create x.txt", prompt, "and the step description")
+        # The refusal feedback is appended, not substituted.
+        self.assertIn("was NOT run", prompts[1])
+        self.assertIn("binary not allowed: touch", prompts[1])
+        # The run feedback rides on the context too.
+        self.assertIn("Command output", prompts[2])
+        self.assertIn("Command ran.", prompts[2])
+
     async def test_endless_refusals_are_capped(self):
         """Retrying is bounded — the model cannot loop forever on refusals."""
         self.provider.verifier_replies = [self.REFUSED] * 8
@@ -533,6 +557,46 @@ class TestSandboxRefusalRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.goals.get(self.goal.id).status, "FAILED")
         error = next(e for e in self.goals.events_after(self.goal.id, 0) if e.type == "error")
         self.assertIn("argv null", error.payload["message"])
+
+
+class TestEvidencePackPathHandling(unittest.TestCase):
+    """Cited paths survive normalization. The old `lstrip("./")` stripped the
+    *characters* '.' and '/', mangling dotfiles (.gitignore → gitignore) so
+    the engine dropped evidence it had actually been shown."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.conn = connect(self.root / "t.db")
+        self.registry = AgentRegistryService(self.conn, ProviderFactory(Keychain()), Keychain())
+        self.executor = ExecutorService(
+            GoalService(self.conn), WorkspaceService(self.conn), self.registry,
+            SandboxService(), laya=_SkippedGate(),
+        )
+
+    def tearDown(self):
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    def test_a_cited_dotfile_survives_path_normalization(self):
+        pack = self.executor._evidence_pack(
+            "g1",
+            {
+                "files": [{"path": ".gitignore", "why": "ignore rules"}],
+                "symbols": [{"name": "X", "path": "./src/x.py"}],
+            },
+            opened={".gitignore", "src/x.py"},
+            matched=set(),
+            listed={".gitignore", "src/x.py"},
+            rounds_used=1,
+        )
+        self.assertEqual([f["path"] for f in pack["files"]], [".gitignore"])
+        self.assertEqual(pack["files"][0]["evidence"], "opened")
+        self.assertEqual(
+            [s["path"] for s in pack["symbols"]], ["src/x.py"],
+            "a true ./ prefix is stripped; the file's own leading dots are not",
+        )
+        self.assertEqual(pack["dropped_paths"], [])
 
 
 class _HangingSandbox(SandboxService):

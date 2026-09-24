@@ -810,6 +810,19 @@ class ExecutorService:
 
         return "\n\n".join(chunks), opened, matched, refused
 
+    @staticmethod
+    def _clean_cited_path(raw: Any) -> str:
+        """Normalize a model-cited path without eating its leading dots.
+
+        `lstrip("./")` strips *characters*, not the prefix: `.gitignore` came
+        back as `gitignore` and `..env` as `env`, so a cited dotfile never
+        matched what the librarian actually opened and was dropped as unseen —
+        or planned under a name that does not exist. Only a true `./` prefix
+        is removed.
+        """
+        text = str(raw or "").strip()
+        return text[2:] if text.startswith("./") else text
+
     def _evidence_pack(
         self,
         goal_id: str,
@@ -841,7 +854,7 @@ class ExecutorService:
         for entry in out.get("files") or []:
             if not isinstance(entry, dict):
                 continue
-            path = str(entry.get("path") or "").strip().lstrip("./")
+            path = self._clean_cited_path(entry.get("path"))
             how = strength(path)
             if how:
                 files.append(
@@ -861,7 +874,7 @@ class ExecutorService:
             if not isinstance(s, dict):
                 continue
             name = str(s.get("name") or "").strip()
-            path = str(s.get("path") or "").strip().lstrip("./")
+            path = self._clean_cited_path(s.get("path"))
             if name and (not path or strength(path)):
                 symbols.append({"name": name[:120], "path": path})
 
@@ -1496,6 +1509,11 @@ class ExecutorService:
                 f"\n\nNote: a previous attempt at this step failed ({prior_failure.get('explanation', '')}). "
                 "The code has just been changed in response. Verify it afresh."
             )
+        # Every call is stateless (no conversation memory between calls), so the
+        # refusal/run feedback below must ride on this context rather than
+        # replace it — a prompt that is only the refusal leaves the verifier
+        # ruling on a step it can no longer see.
+        base_prompt = prompt
         argv: list[str] | None = None
         result: dict | None = None
         refusals: list[str] = []
@@ -1568,23 +1586,27 @@ class ExecutorService:
                     f"test command refused by the sandbox, nothing was run: "
                     f"{' '.join(proposed)} ({refused_because})",
                 )
+                refusal_note = (
+                    f"The command {proposed!r} was NOT run: the sandbox refused it "
+                    f"({refused_because}). Propose a different command from the allowed set, or "
+                    "return the verdict with argv null and say that no permitted test "
+                    "command exists. Allowed: pytest, python -m pytest, npm test, pnpm test, "
+                    "cargo test, go test ./..., read-only git status/diff/log -1."
+                )
                 if proposals_left <= 0:
-                    prompt = (
+                    refusal_note = (
                         f"The command was NOT run — the sandbox refused it ({refused_because}). "
                         "It was your last attempt. Return the verdict with argv null."
                     )
-                else:
-                    prompt = (
-                        f"The command {proposed!r} was NOT run: the sandbox refused it "
-                        f"({refused_because}). Propose a different command from the allowed set, or "
-                        "return the verdict with argv null and say that no permitted test "
-                        "command exists. Allowed: pytest, python -m pytest, npm test, pnpm test, "
-                        "cargo test, go test ./..., read-only git status/diff/log -1."
-                    )
+                prompt = f"{base_prompt}\n\n{refusal_note}"
                 continue
 
             argv = proposed
+            # Same statelessness rule as the refusal path: the run feedback
+            # rides on the step context, so the verdict call can still name
+            # what it judged.
             prompt = (
+                f"{base_prompt}\n\n--- Command output ---\n"
                 f"Command ran. exit_code={result['exit_code']}\nstdout:\n{result['stdout']}\n"
                 f"stderr:\n{result['stderr']}\nNow return the verdict with argv null."
             )
