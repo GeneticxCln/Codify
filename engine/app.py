@@ -146,7 +146,7 @@ async def auth(request: Request, call_next):
         return await call_next(request)
     expected = getattr(request.app.state, "token", None) or BOOT_TOKEN
     header = request.headers.get("authorization", "")
-    if not expected or header != f"Bearer {expected}":
+    if not expected or not secrets.compare_digest(header, f"Bearer {expected}"):
         return JSONResponse({"code": "unauthorized", "message": "missing or invalid token"}, status_code=401)
     return await call_next(request)
 
@@ -193,7 +193,9 @@ async def health(request: Request):
     # Tauri IPC has not delivered the token yet).
     expected = getattr(request.app.state, "token", None) or BOOT_TOKEN
     header = request.headers.get("authorization", "")
-    return {"ok": True, "authenticated": header == f"Bearer {expected}"}
+    # Constant-time compare: /health is reachable by any local process, so its
+    # answer must not leak the token a character at a time via timing.
+    return {"ok": True, "authenticated": secrets.compare_digest(header, f"Bearer {expected}")}
 
 
 @app.get("/settings/providers")
@@ -250,12 +252,16 @@ async def save_key(body: ProviderKeyUpdate, request: Request):
         # Service, `keyring` not installed) gets a clear, actionable error
         # instead of an unhandled 500 from inside the settings screen.
         raise ApiError(503, exc.code, exc.message) from exc
+    # Where the key ACTUALLY landed — the configured backend can throw at write
+    # time and the save silently falls through to the file. `backend` alone
+    # would let the UI promise "OS keychain" about a key in a JSON file.
+    actual = keychain.last_write_backend()
     # A new key can unlock a whole provider's model list, so don't let the
     # catalog serve the pre-key answer from cache.
     catalog: ModelCatalogService | None = getattr(request.app.state, "models", None)
     if catalog:
         catalog.invalidate()
-    return {"ok": True, "provider": body.provider}
+    return {"ok": True, "provider": body.provider, "storage": actual}
 
 
 @app.get("/settings/agents", response_model=list[AgentConfig])
@@ -851,13 +857,18 @@ async def start_goal(goal_id: str, body: VersionedAction, request: Request):
 
 
 @app.post("/goals/{goal_id}/apply")
-async def apply_goal(goal_id: str, request: Request):
+async def apply_goal(goal_id: str, body: VersionedAction, request: Request):
     """Replay a completed dry-run's proposed changes for real.
 
     The guards run here, synchronously, so a request that cannot possibly
     succeed answers 409 — the previous shape started a background task and
     returned success unconditionally, so "apply" on a goal with nothing
     proposed looked like it worked and quietly did nothing.
+
+    `expected_version` closes the double-apply window: applying flips the
+    goal's version (stored proposals are cleared, status moves), so a second
+    apply from a client that planned against the pre-apply view must 409, not
+    re-run — two applies would mark a healthy goal FAILED via the guard below.
     """
     goals = request.app.state.goals
     g = goals.get(goal_id)
@@ -865,6 +876,8 @@ async def apply_goal(goal_id: str, request: Request):
         raise ApiError(409, "not_dry_run", "only dry-run goals can be applied")
     if g.status not in ("COMPLETED", "FAILED"):
         raise ApiError(409, "illegal_status", f"cannot apply from {g.status}")
+    if body.expected_version != g.version:
+        raise ApiError(409, "version_conflict", "version mismatch", {"current": g.model_dump()})
     if not goals.has_proposed_files(goal_id):
         raise ApiError(409, "nothing_to_apply", "dry-run produced no proposed changes")
     _spawn(request.app, request.app.state.executor.apply_goal(goal_id), goal_id)
@@ -927,7 +940,24 @@ async def _run_steps(app: FastAPI, goal_id: str) -> None:
     and each batch runs concurrently; the shared resources — sandbox and git —
     are serialized inside run_step. A COMPLETED step is skipped in both modes
     (a resumed goal replays only what is left).
+
+    Only one driver may run a goal at a time: the retry endpoint spawns this
+    coroutine too, and two concurrent drivers would re-run the same IN_PROGRESS
+    steps — two fixers on the same files, the exact torn write the batching
+    gate exists to prevent. The executor's `claim_driver` guard makes a second
+    claim a no-op.
     """
+    executor = app.state.executor
+    if not executor.claim_driver(goal_id):
+        executor._log(goal_id, None, "info", "driver already running — join skipped")
+        return
+    try:
+        await _run_steps_locked(app, goal_id)
+    finally:
+        executor.release_driver(goal_id)
+
+
+async def _run_steps_locked(app: FastAPI, goal_id: str) -> None:
     executor = app.state.executor
     remaining = [s for s in app.state.goals.steps(goal_id) if s.status != "COMPLETED"]
     while remaining:
@@ -949,8 +979,12 @@ async def _run_steps(app: FastAPI, goal_id: str) -> None:
                     executor._log(goal_id, None, "warn", f"batch refused, re-batching: {exc.message}")
                     remaining = [s for s in app.state.goals.steps(goal_id) if s.status != "COMPLETED"]
                     continue
-            else:
+            elif batch:
                 await executor.run_step(goal_id, batch[0].id)
+            else:
+                # An unprovable head step (no suggested paths) runs alone rather
+                # than crashing the driver with an IndexError.
+                await executor.run_step(goal_id, remaining.pop(0).id)
         else:
             step = remaining.pop(0)
             await executor.run_step(goal_id, step.id)
@@ -969,7 +1003,7 @@ async def _run_steps(app: FastAPI, goal_id: str) -> None:
 async def ws_goal(websocket: WebSocket, goal_id: str):
     expected_token = getattr(websocket.app.state, "token", None) or BOOT_TOKEN
     auth_header = websocket.headers.get("authorization", "")
-    authenticated = auth_header == f"Bearer {expected_token}"
+    authenticated = secrets.compare_digest(auth_header, f"Bearer {expected_token}")
 
     await websocket.accept()
 
@@ -986,6 +1020,15 @@ async def ws_goal(websocket: WebSocket, goal_id: str):
         await websocket.close(code=4401)
         return
 
+    # Authenticated, but the goal must exist too — checking only after auth so
+    # an unauthenticated peer can't probe goal ids by watching which close code
+    # comes back (4401 before auth, 4404 after).
+    try:
+        websocket.app.state.goals.get(goal_id)
+    except ApiError:
+        await websocket.close(code=4404)
+        return
+
     after = 0
     try:
         while True:
@@ -998,6 +1041,8 @@ async def ws_goal(websocket: WebSocket, goal_id: str):
 
 
 def main() -> None:
+    import socket
+
     import uvicorn
 
     port = pick_port()
@@ -1006,8 +1051,21 @@ def main() -> None:
     # being discovered later by finding a smoke-test key in a real keychain.
     # stderr, because the Tauri shell parses stdout for the boot handshake.
     print(home.startup_notice(), file=sys.stderr, flush=True)
+    # Bind and LISTEN before announcing readiness. The handshake is the boot
+    # contract: whoever reads `CODIFY_ENGINE token=… port=…` is promised a
+    # connectable socket, and announcing before `listen()` left a window where
+    # that promise was false — the desktop shell read "ready", connected, and
+    # hit connection-refused (also the source of a 1-in-5 flake in the
+    # wire-level stream tests). uvicorn serves the pre-bound socket, so the
+    # port is owned by this process end to end.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", port))
+    sock.listen(128)
     print(f"CODIFY_ENGINE token={BOOT_TOKEN} port={port}", flush=True)
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    server.run(sockets=[sock])
 
 
 if __name__ == "__main__":

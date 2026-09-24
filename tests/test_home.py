@@ -304,7 +304,18 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
 
         started: list[tuple] = []
         fake_uvicorn = types.ModuleType("uvicorn")
-        fake_uvicorn.run = lambda *a, **k: started.append((a, k))
+        fake_uvicorn.Config = lambda *a, **k: types.SimpleNamespace()
+
+        class FakeServer:
+            def __init__(self, config):
+                self.config = config
+
+            def run(self, sockets=None):
+                started.append(tuple(sockets or ()))
+                for s in sockets or ():
+                    s.close()
+
+        fake_uvicorn.Server = FakeServer
 
         out, err = io.StringIO(), io.StringIO()
         with self.env(**{home.ENV_HOME: str(self.scratch)}), patch.dict(
@@ -319,6 +330,11 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
         self.assertIn("isolated", err.getvalue())
         self.assertIn(str(self.scratch), err.getvalue())
         self.assertEqual(len(started), 1, "the server is still started")
+        # Bind-then-announce: the handshake may only print once the socket is
+        # listening, so the server receives a pre-bound socket instead of a
+        # port to bind later (the old announce-then-bind left a
+        # connection-refused window right after "ready").
+        self.assertEqual(len(started[0]), 1, "uvicorn is handed the pre-bound socket")
 
 
 if __name__ == "__main__":

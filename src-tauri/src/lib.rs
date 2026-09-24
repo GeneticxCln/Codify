@@ -101,6 +101,35 @@ async fn engine_url(state: &SharedEngineState) -> Result<(String, String), Strin
 
 // ── Tauri commands ──────────────────────────────────────────────────────────
 
+/// Surface engine errors as engine errors. Without this, a 401/404/409/5xx body
+/// dies inside `resp.json()` as "error decoding response body" — the UI then
+/// shows a decode bug where the engine cleanly reported, say, a version
+/// conflict. Pass every response through here before decoding.
+async fn check_engine(resp: reqwest::Response) -> Result<reqwest::Response, String> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let body = resp.text().await.unwrap_or_default();
+    Err(format!("engine returned {status}: {body}"))
+}
+
+/// The role name goes into a URL path; a frontend bug (or a compromise) must
+/// not be able to traverse into other engine endpoints via `..%2f`-style
+/// sequences. Roles are lowercase slugs — anything else is refused here.
+fn valid_role(role: &str) -> Result<(), String> {
+    let ok = !role.is_empty()
+        && role.len() <= 64
+        && role
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    if ok {
+        Ok(())
+    } else {
+        Err("invalid role identifier".to_string())
+    }
+}
+
 /// Return the current engine connection info so the UI can build its HTTP client.
 #[tauri::command]
 async fn codify_get_engine_info(state: State<'_, SharedEngineState>) -> Result<EngineInfo, String> {
@@ -127,7 +156,9 @@ async fn codify_list_agent_configs(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    resp.json::<Vec<AgentConfig>>()
+    check_engine(resp)
+        .await?
+        .json::<Vec<AgentConfig>>()
         .await
         .map_err(|e| e.to_string())
 }
@@ -140,6 +171,7 @@ async fn codify_update_agent_config(
     state: State<'_, SharedEngineState>,
 ) -> Result<AgentConfig, String> {
     let (base, token) = engine_url(&state).await?;
+    valid_role(&role)?;
     let client = reqwest::Client::new();
     let resp = client
         .put(format!("{}/settings/agents/{}", base, role))
@@ -148,7 +180,9 @@ async fn codify_update_agent_config(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    resp.json::<AgentConfig>()
+    check_engine(resp)
+        .await?
+        .json::<AgentConfig>()
         .await
         .map_err(|e| e.to_string())
 }
@@ -170,7 +204,9 @@ async fn codify_repair_agent_configs(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    resp.json::<serde_json::Value>()
+    check_engine(resp)
+        .await?
+        .json::<serde_json::Value>()
         .await
         .map_err(|e| e.to_string())
 }
@@ -182,6 +218,7 @@ async fn codify_test_agent_connection(
     state: State<'_, SharedEngineState>,
 ) -> Result<serde_json::Value, String> {
     let (base, token) = engine_url(&state).await?;
+    valid_role(&role)?;
     let client = reqwest::Client::new();
     let resp = client
         // BUG-03 fix: correct endpoint is /test-connection not /test
@@ -190,7 +227,9 @@ async fn codify_test_agent_connection(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    resp.json::<serde_json::Value>()
+    check_engine(resp)
+        .await?
+        .json::<serde_json::Value>()
         .await
         .map_err(|e| e.to_string())
 }
@@ -240,9 +279,10 @@ async fn launch_engine(shared: SharedEngineState) {
     }
     let mut lines = BufReader::new(stdout).lines();
 
+    let mut handshake_done = false;
     while let Ok(Some(line)) = lines.next_line().await {
         // Parse: CODIFY_ENGINE token=<hex> port=<int>
-        if line.starts_with("CODIFY_ENGINE") {
+        if !handshake_done && line.starts_with("CODIFY_ENGINE") {
             let mut token = None;
             let mut port: Option<u16> = None;
 
@@ -259,9 +299,26 @@ async fn launch_engine(shared: SharedEngineState) {
                 s.token = Some(t);
                 s.port = Some(p);
                 println!("[Codify] Engine ready on port {p}");
+                handshake_done = true;
+                // No `break` here. Breaking drops this reader end of the pipe,
+                // and a later stdout write from the engine then dies with EPIPE
+                // (SIGPIPE kills a Python process outright). Keep draining —
+                // the lines are simply no longer parsed.
             }
-            break;
         }
+    }
+
+    // The loop above ends only when the pipe closes — i.e. the engine process
+    // exited. The connection info it handed out is now a lie, so clear it:
+    // without this, the UI keeps a stale port/token and reports confusing
+    // connection errors instead of a clean "engine is down".
+    {
+        let mut s = shared.lock().await;
+        if s.token.is_some() || s.port.is_some() {
+            println!("[Codify] Engine process exited — clearing connection info");
+        }
+        s.token = None;
+        s.port = None;
     }
 
     // No `child.wait()` here: the handle lives in shared state and tokio's
@@ -302,9 +359,22 @@ pub fn run() {
             // holding the port, the DB, and any writes it was mid-way through.
             if let tauri::RunEvent::Exit = event {
                 let shared = app.state::<SharedEngineState>();
-                let mut guard = match shared.try_lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
+                // This kill is not optional — a silently-skipped kill leaks a
+                // stray engine holding the port and DB. Every lock holder holds
+                // it across a short synchronous section only, so a bounded wait
+                // always lands; the old `try_lock → return` skipped the kill
+                // whenever another task happened to hold the lock at exit.
+                let mut guard = None;
+                for _ in 0..500 {
+                    if let Ok(g) = shared.try_lock() {
+                        guard = Some(g);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                let Some(mut guard) = guard else {
+                    eprintln!("[Codify] engine state lock still held at exit — engine process may be leaked");
+                    return;
                 };
                 if let Some(child) = guard.child.as_mut() {
                     let _ = child.start_kill();
