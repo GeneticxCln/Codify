@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS workspaces (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   root_path TEXT NOT NULL UNIQUE,
+  -- Workspace-relative path of the pinned brand contract, '' when unpinned.
+  design_contract_path TEXT NOT NULL DEFAULT '',
   created_at REAL NOT NULL
 );
 
@@ -28,6 +30,9 @@ CREATE TABLE IF NOT EXISTS goals (
   dry_run INTEGER NOT NULL DEFAULT 0,
   plan_only INTEGER NOT NULL DEFAULT 0,
   parallel INTEGER NOT NULL DEFAULT 0,
+  -- What the goal is for: 'normal' pipeline or 'design' (the brand contract
+  -- itself is the deliverable). One row, one mode; see docs/04 §4.0a.2.
+  mode TEXT NOT NULL DEFAULT 'normal',
   version INTEGER NOT NULL DEFAULT 0,
   event_seq INTEGER NOT NULL DEFAULT 0,
   created_at REAL NOT NULL,
@@ -157,6 +162,23 @@ def connect(
         pass
     try:
         conn.execute("ALTER TABLE goals ADD COLUMN parallel INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
+    # A workspace's brand contract is a column on the workspace row, not a second
+    # table: one row, one pin. An existing install gains it unset, so nothing is
+    # requoted and no workspace loses its name or root.
+    try:
+        conn.execute(
+            "ALTER TABLE workspaces ADD COLUMN design_contract_path TEXT NOT NULL DEFAULT ''"
+        )
+    except Exception:
+        pass
+    # Goal mode rides the same rule: an existing database gains the column
+    # defaulted, so every old goal stays a 'normal' run.
+    try:
+        conn.execute(
+            "ALTER TABLE goals ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'"
+        )
     except Exception:
         pass
     # Adding a fallback target must not require wiping an install: an existing

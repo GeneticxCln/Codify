@@ -40,6 +40,7 @@ import {
   enableExecution,
   applyGoal,
 } from "./api";
+import { runGoalAction } from "./goalActions";
 import { BottomCommandBar, ExecutionMode } from "./components/BottomCommandBar";
 import { StatsPanel } from "./components/StatsPanel";
 import { ChatTimeline } from "./components/ChatTimeline";
@@ -738,42 +739,67 @@ export const App: React.FC = () => {
   // blocking OS dialog is unstyled, unselectable, and invisible in a screenshot the
   // moment it is dismissed — and every other failure in this file already uses the
   // banner.
-  const handleStartGoal = async (goalId: string, version: number) => {
+  // Start, pause and cancel are version-protected, and the version a card
+  // holds can go stale between render and click — the engine legally moves a
+  // RUNNING goal under you (a step finished, an event bumped the version).
+  // runGoalAction retries exactly those races, treats a state that no longer
+  // needs the action as a refresh rather than an error, and surfaces anything
+  // else through the banner with the engine's own words. The same policy the
+  // wire tests pin, applied where the user feels the difference.
+  const handleStartGoal = async (goalId: string, _version: number) => {
     setError(null);
-    try {
-      await startGoal(goalId, version);
-      const refreshed = await getGoal(goalId);
+    const outcome = await runGoalAction({
+      action: "start",
+      attempt: (v) => startGoal(goalId, v),
+      observe: () =>
+        getGoal(goalId).then((g) => ({ status: g.status, version: g.version })),
+    });
+    const refreshed = await getGoal(goalId).catch(() => null);
+    if (refreshed) {
       setMessages((prev) =>
         prev.map((m) => (m.goal?.id === goalId ? { ...m, goal: refreshed } : m))
       );
-    } catch (err: any) {
-      setError(err?.message || "Failed to start goal");
+    }
+    if (outcome.kind === "refused") {
+      setError(outcome.message || "Failed to start goal");
     }
   };
 
-  const handlePauseGoal = async (goalId: string, version: number) => {
+  const handlePauseGoal = async (goalId: string, _version: number) => {
     setError(null);
-    try {
-      await pauseGoal(goalId, version);
-      const refreshed = await getGoal(goalId);
+    const outcome = await runGoalAction({
+      action: "pause",
+      attempt: (v) => pauseGoal(goalId, v),
+      observe: () =>
+        getGoal(goalId).then((g) => ({ status: g.status, version: g.version })),
+    });
+    const refreshed = await getGoal(goalId).catch(() => null);
+    if (refreshed) {
       setMessages((prev) =>
         prev.map((m) => (m.goal?.id === goalId ? { ...m, goal: refreshed } : m))
       );
-    } catch (err: any) {
-      setError(err?.message || "Failed to pause goal");
+    }
+    if (outcome.kind === "refused") {
+      setError(outcome.message || "Failed to pause goal");
     }
   };
 
-  const handleCancelGoal = async (goalId: string, version: number) => {
+  const handleCancelGoal = async (goalId: string, _version: number) => {
     setError(null);
-    try {
-      await cancelGoal(goalId, version);
-      const refreshed = await getGoal(goalId);
+    const outcome = await runGoalAction({
+      action: "cancel",
+      attempt: (v) => cancelGoal(goalId, v),
+      observe: () =>
+        getGoal(goalId).then((g) => ({ status: g.status, version: g.version })),
+    });
+    const refreshed = await getGoal(goalId).catch(() => null);
+    if (refreshed) {
       setMessages((prev) =>
         prev.map((m) => (m.goal?.id === goalId ? { ...m, goal: refreshed } : m))
       );
-    } catch (err: any) {
-      setError(err?.message || "Failed to cancel goal");
+    }
+    if (outcome.kind === "refused") {
+      setError(outcome.message || "Failed to cancel goal");
     }
   };
 

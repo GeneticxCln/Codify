@@ -20,6 +20,22 @@ _PLANS = {
     ],
 }
 PLANNER = json.dumps({"steps": _PLANS.get(_PLANNER_STEPS, _PLANS[1])})
+# FAKE_DESIGN_GOAL=1 plans the design deliverable's write step. A design-mode
+# goal's brand contract IS the artifact, so the plan has to realize it — the
+# step names DESIGN.md, which is the signal the fixer and the verifier read.
+DESIGN_PLAN = json.dumps(
+    {
+        "steps": [
+            {
+                "title": "Write DESIGN.md",
+                "description": "Publish the reviewed brand contract as the workspace's DESIGN.md",
+                "suggested_paths": ["DESIGN.md"],
+            }
+        ]
+    }
+)
+# The plan a live design-mode run needs; every other run gets the canned one.
+PLAN_FOR_RUN = DESIGN_PLAN if os.environ.get("FAKE_DESIGN_GOAL") == "1" else PLANNER
 CODER = json.dumps(
     {"files": [{"path": "banner.txt", "action": "create", "content": "hello from codify\n"}]}
 )
@@ -28,6 +44,16 @@ VERIFIER_1 = json.dumps(
 )
 VERIFIER_2 = json.dumps(
     {"argv": None, "verdict": "pass", "explanation": "no tests found; trivially passing"}
+)
+# A design deliverable has no code to falsify: the artifact is prose on disk, so
+# the engine asks for a verdict directly (argv null). Answering with a command
+# here would make a live design run exercise the run path instead of the review.
+VERIFIER_DELIVERABLE = json.dumps(
+    {
+        "argv": None,
+        "verdict": "pass",
+        "explanation": "DESIGN.md is a complete, faithful realization of the contract",
+    }
 )
 # What the verifier proposes after being told its command was refused. The engine
 # feeds a refusal back exactly like command output, so the E2E for refusal
@@ -41,6 +67,35 @@ VERIFIER_REFUSED = json.dumps(
 CRITIC = json.dumps({"decision": "approve", "reasons": []})
 SCRIBE = json.dumps(
     {"summary": "Created banner.txt with a greeting line.", "commit_message": "feat: add banner file"}
+)
+
+# ── design ─────────────────────────────────────────────────────────────────
+# The design agent locks a direction before the planner runs, so every E2E that
+# plans a goal passes through it. The contract names a brand the workspace does
+# not have (source null) and one acceptance line, so a run's transcript shows a
+# real contract instead of an empty stub.
+DESIGN_MARKER = "You are Codify Design"
+DESIGN = json.dumps(
+    {
+        "applies": True,
+        "artifact": "web_prototype",
+        "direction": "One plain monochrome page: a single banner line, no chrome.",
+        "design_system": {"name": "fake-brand", "source": None},
+        "tokens": {
+            "colors": [
+                {"name": "ink", "value": "#0d1117"},
+                {"name": "accent", "value": "#2f81f7"},
+            ],
+            "typography": [{"name": "body", "value": "system-ui, sans-serif"}],
+            "spacing": ["4px", "8px", "16px"],
+            "radii": ["6px"],
+        },
+        "components": [{"name": "Banner", "purpose": "the one greeting line"}],
+        "conventions": ["plain text files, one line"],
+        "constraints": ["no new dependencies"],
+        "acceptance": ["banner.txt exists and holds one greeting line"],
+        "design_md": "# fake-brand\n\nink #0d1117, accent #2f81f7.\n",
+    }
 )
 
 # ── librarian ────────────────────────────────────────────────────────────────
@@ -131,6 +186,77 @@ def laya_answers(prompt: str) -> dict[str, Any]:
     }
 
 
+def scribe_reply(prompt: str) -> str:
+    """Name the files the engine actually showed the scribe.
+
+    The canned reply named a file from an older fixture ("banner.txt"), so a
+    live run's transcript showed a commit subject contradicting the diff printed
+    directly above it. The engine hands the scribe the diffs; the fake reads the
+    same lines, so a smoke test reports what it was given rather than what some
+    previous fixture happened to write.
+
+    Only the `Diffs:` block is read. `File:`-shaped lines turn up elsewhere in a
+    real prompt — the librarian's evidence, a step description quoting a diff —
+    and naming one of those would attribute a file to a step that never touched
+    it, which is the same class of lie as the canned reply, just harder to spot.
+    """
+    import re
+
+    sections = re.split(r"^Diffs:[ \t]*$", prompt, flags=re.M)
+    diffs = sections[-1] if len(sections) > 1 else ""
+    changes = re.findall(r"^File: (\S+) \((\w+)\)", diffs, re.M)
+    if not changes:
+        return SCRIBE
+    paths = [p for p, _ in changes]
+    what = paths[0] if len(paths) == 1 else f"{len(paths)} files"
+    if any(action == "delete" for _, action in changes):
+        return json.dumps({
+            "summary": f"Removed {what}.",
+            "commit_message": f"chore: remove {what}",
+        })
+    if all(action == "update" for _, action in changes):
+        return json.dumps({
+            "summary": f"Updated {what}.",
+            "commit_message": f"chore: update {what}",
+        })
+    return json.dumps({
+        "summary": f"Added {what}.",
+        "commit_message": f"feat: add {what}",
+    })
+
+
+def fixer_files(prompt: str) -> str:
+    """The fixer's reply for one prompt: the first suggested path, filled in.
+
+    Dynamic rather than canned so Edit-Plan E2Es can prove that edited plan
+    values actually drive what gets written — the target is read out of the
+    prompt, not invented.
+    """
+    import re
+
+    # The real fixer prompt embeds "Suggested paths (current contents):" then
+    # either readable lines `- path: text` or the unreadable note
+    # `- path (not readable as text)`. Search only that section — the evidence
+    # section above it also contains `- path:` shapes, and matching those wrote
+    # the wrong file.
+    section = prompt.split("Suggested paths (current contents):", 1)[-1]
+    m = re.search(r"- ([^\s:()]+)(?: |:| \(not readable\))", section)
+    target = m.group(1) if m else "banner.txt"
+    # A design deliverable's write step is handed the reviewed draft verbatim
+    # ("write exactly this"): a fake fixer that wrote its canned line instead
+    # would make a live design run look like it had drifted from its own
+    # contract. Echo the draft back, as instructed.
+    draft = re.search(
+        r"--- DESIGN\.md \(write exactly this\) ---\n(.*?)\n--- end DESIGN\.md ---",
+        prompt,
+        re.S,
+    )
+    content = draft.group(1) if draft else "hello from codify"
+    if not content.endswith("\n"):
+        content += "\n"
+    return json.dumps({"files": [{"path": target, "action": "create", "content": content}]})
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:  # quiet
         pass
@@ -202,6 +328,8 @@ class Handler(BaseHTTPRequestHandler):
         # chosen to be unique per role's user prompt; order matters.
         if LAYA_MARKER in prompt:
             out = json.dumps(laya_answers(prompt))
+        elif DESIGN_MARKER in prompt:
+            out = DESIGN
         elif LIBRARIAN_FOLLOWUP_MARKER in prompt:
             # Second reconnaissance round: answer with the evidence pack.
             out = librarian_pack(prompt)
@@ -217,7 +345,7 @@ class Handler(BaseHTTPRequestHandler):
         elif "Diffs:" in prompt and "You are Codify Critic" in prompt:
             out = CRITIC
         elif "You are Codify Scribe" in prompt:
-            out = SCRIBE
+            out = scribe_reply(prompt)
         elif "Diffs:" in prompt:
             # Legacy shape: a critic-shaped prompt without the role marker.
             out = CRITIC
@@ -227,29 +355,19 @@ class Handler(BaseHTTPRequestHandler):
             if os.environ.get("FAKE_BROKEN") == "1":
                 out = "I am not JSON at all."
             else:
-                # Dynamic fixer: echo the FIRST suggested path from the step
-                # prompt, so Edit-Plan E2Es can prove edited plan values
-                # actually drive what gets written.
-                import re
-                # The real fixer prompt embeds "Suggested paths (current
-                # contents):" then either readable lines `- path: text` or the
-                # unreadable note `- path (not readable as text)`. Search only
-                # that section — the evidence section above it also contains
-                # `- path:` shapes, and matching those wrote the wrong file.
-                section = prompt.split("Suggested paths (current contents):", 1)[-1]
-                m = re.search(r"- ([^\s:()]+)(?: |:| \(not readable\))", section)
-                target = m.group(1) if m else "banner.txt"
-                out = json.dumps(
-                    {"files": [{"path": target, "action": "create", "content": "hello from codify\n"}]}
-                )
+                out = fixer_files(prompt)
         elif "Title:" in prompt and "The librarian answered your follow-up" in prompt:
             # Round 2 after a consult: plan, citing the material that came back.
-            out = PLANNER
+            out = PLAN_FOR_RUN
         elif "Title:" in prompt:
             if os.environ.get("FAKE_PLANNER_CONSULT") == "1":
                 out = json.dumps({"consult": {"reads": ["greet.py"]}})
             else:
-                out = PLANNER
+                out = PLAN_FOR_RUN
+        elif "do not run a command" in prompt:
+            # A design deliverable: the verifier reviews the written file and
+            # returns a verdict rather than proposing a command.
+            out = VERIFIER_DELIVERABLE
         elif "Step:" in prompt:
             # Every role prompt carries "Step: <title>", so this branch sits below
             # the critic/scribe/fixer matchers. The verifier is the only role

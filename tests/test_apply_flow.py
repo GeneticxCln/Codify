@@ -24,6 +24,7 @@ from engine.models import ROLES, AgentConfig, AgentConfigUpdate, Goal
 from engine.providers import BaseProvider, Keychain, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.services import AgentRegistryService, GoalService, WorkspaceService
+from tests.versioned import post_versioned_async
 
 PROPOSED = "hello from a dry run\n"
 
@@ -151,12 +152,9 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         ws_id = await self._mk_workspace()
         goal = await self._mk_goal(ws_id, dry_run=True)
         await self._wait_for_status(goal["id"], {"PENDING"})
-        r = await self.client.post(
-            f"/goals/{goal['id']}/start",
-            json={"expected_version": self.goals.get(goal["id"]).version},
-            headers=self.headers,
-        )
-        self.assertEqual(r.status_code, 200, r.text)
+        # The planner is a live background task here, so quoting a version read a
+        # moment earlier is a race; the helper re-reads if it loses one.
+        await post_versioned_async(self.client, goal["id"], "start", headers=self.headers)
         await self._wait_for_status(goal["id"], {"COMPLETED", "FAILED"})
         return ws_id, goal["id"]
 
@@ -175,12 +173,12 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         _, goal_id = await self._run_dry_run()
         fixer_calls_before = self.provider.fixer_calls()
 
-        r = await self.client.post(
-            f"/goals/{goal_id}/apply", headers=self.headers,
-            json={"expected_version": self.goals.get(goal_id).version},
+        applied = await post_versioned_async(
+            self.client, goal_id, "apply", headers=self.headers
         )
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(r.json(), {"applied": True, "goal_id": goal_id})
+        self.assertEqual(
+            applied.response.json(), {"applied": True, "goal_id": goal_id}
+        )
 
         goal = await self._wait_for_status(goal_id, {"COMPLETED", "FAILED"})
         self.assertEqual(goal.status, "COMPLETED")
@@ -237,11 +235,7 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         self.provider.by_role["verifier"] = {"argv": None, "verdict": "fail", "explanation": "assertion error"}
         goal = await self._mk_goal(ws_id, dry_run=False)
         await self._wait_for_status(goal["id"], {"PENDING"})
-        await self.client.post(
-            f"/goals/{goal['id']}/start",
-            json={"expected_version": self.goals.get(goal["id"]).version},
-            headers=self.headers,
-        )
+        await post_versioned_async(self.client, goal["id"], "start", headers=self.headers)
         await self._wait_for_status(goal["id"], {"FAILED"})
 
         errors = [e for e in self.goals.events_after(goal["id"], 0) if e.type == "error"]
@@ -255,12 +249,9 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
 
         # /cancel goes through GoalService.update_status, which must announce the
         # change — an open chat should never have to poll to notice it.
-        r = await self.client.post(
-            f"/goals/{goal['id']}/cancel",
-            json={"expected_version": self.goals.get(goal["id"]).version},
-            headers=self.headers,
-        )
-        self.assertEqual(r.status_code, 200, r.text)
+        # Deliberately after the plan: /cancel is legal from PLANNING too, and this
+        # test is about the event a cancel of a *planned* goal publishes.
+        await post_versioned_async(self.client, goal["id"], "cancel", headers=self.headers)
         status_events = [e for e in self.goals.events_after(goal["id"], 0) if e.type == "goal_status"]
         self.assertEqual(status_events[-1].payload["status"], "CANCELLED")
 

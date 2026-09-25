@@ -95,7 +95,7 @@ class TestWhoNeedsRepair(unittest.TestCase):
         self.assertTrue(any("did not answer discovery" in n for n in plan.notes))
 
     def test_an_unreachable_provider_is_reported_once_not_once_per_role(self) -> None:
-        """Seven roles on one dead provider is one caveat, not seven."""
+        """Eight roles on one dead provider is one caveat, not eight."""
         plan = plan_role_repair(
             configs=[config(role, "ollama", "local-1") for role in ROLES],
             key_status=[OLLAMA_KEY],

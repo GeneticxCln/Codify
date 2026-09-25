@@ -47,6 +47,7 @@ from engine.models import (
     VersionedAction,
     Workspace,
     WorkspaceCreate,
+    WorkspaceDesignContract,
 )
 from engine.providers import Keychain, ProviderError, ProviderFactory
 from engine.sandbox import SandboxService
@@ -692,6 +693,20 @@ async def list_ws(request: Request) -> list[Workspace]:
 async def get_ws(workspace_id: str, request: Request) -> Workspace:
     workspaces: WorkspaceService = request.app.state.workspaces
     return workspaces.get(workspace_id)
+
+
+@app.put("/workspaces/{workspace_id}/design-contract", response_model=Workspace)
+async def put_workspace_design_contract(
+    workspace_id: str, body: WorkspaceDesignContract, request: Request
+) -> Workspace:
+    """Pin the brand contract the design agent must obey (`""` clears it).
+
+    A workspace property rather than an agent one: the right `DESIGN.md` is a
+    fact about the repository, so two workspaces pointing at different repos can
+    hold different brand contracts while the design role keeps one config.
+    """
+    workspaces: WorkspaceService = request.app.state.workspaces
+    return workspaces.set_design_contract(workspace_id, body.path)
 
 
 @app.delete("/workspaces/{workspace_id}")

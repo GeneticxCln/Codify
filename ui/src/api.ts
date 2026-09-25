@@ -581,6 +581,57 @@ export async function createGoal(
   return res.json();
 }
 
+/**
+ * The engine answered a request with a coded refusal, and the code survived:
+ * `version_conflict` and `illegal_status` are the two 409 codes that mean "the
+ * goal moved under you" — a race the client lost, not a bug. The generic
+ * failures this file used to throw flattened every refusal to `message`, so
+ * the UI could not tell a lost race from a real one. `goalActions.ts` keys the
+ * retry policy on this code.
+ */
+export class ApiRequestError extends Error {
+  status: number;
+  code: string | null;
+
+  constructor(status: number, code: string | null, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/**
+ * One versioned action POST with the engine's coded refusal preserved.
+ *
+ * The policy lives in `goalActions.ts` (retry the races, treat a state that no
+ * longer needs the action as moot, surface the rest); this is the wire half it
+ * drives. Returns the parsed response on success; throws ApiRequestError with
+ * the body's `code` intact on refusal.
+ */
+export async function requestGoalAction(
+  path: string,
+  body: { expected_version: number },
+): Promise<Goal> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${currentEngine.token}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({} as { code?: unknown; message?: unknown }));
+    throw new ApiRequestError(
+      res.status,
+      typeof err.code === "string" ? err.code : null,
+      typeof err.message === "string" ? err.message : `HTTP ${res.status}`,
+    );
+  }
+  return res.json();
+}
+
 export async function getGoal(goal_id: string): Promise<Goal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/goals/${goal_id}`, {
@@ -629,54 +680,15 @@ export async function getGoalAudit(goal_id: string): Promise<Record<string, unkn
 }
 
 export async function startGoal(goal_id: string, expected_version: number): Promise<Goal> {
-  const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/start`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${currentEngine.token}`,
-    },
-    body: JSON.stringify({ expected_version }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || `HTTP ${res.status}`);
-  }
-  return res.json();
+  return requestGoalAction(`/goals/${goal_id}/start`, { expected_version });
 }
 
 export async function pauseGoal(goal_id: string, expected_version: number): Promise<Goal> {
-  const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/pause`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${currentEngine.token}`,
-    },
-    body: JSON.stringify({ expected_version }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || `HTTP ${res.status}`);
-  }
-  return res.json();
+  return requestGoalAction(`/goals/${goal_id}/pause`, { expected_version });
 }
 
 export async function cancelGoal(goal_id: string, expected_version: number): Promise<Goal> {
-  const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/cancel`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${currentEngine.token}`,
-    },
-    body: JSON.stringify({ expected_version }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || `HTTP ${res.status}`);
-  }
-  return res.json();
+  return requestGoalAction(`/goals/${goal_id}/cancel`, { expected_version });
 }
 
 export interface HealthStatus {

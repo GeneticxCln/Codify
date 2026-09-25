@@ -13,6 +13,10 @@ class Workspace(BaseModel):
     id: str
     name: str = Field(..., min_length=1, max_length=120)
     root_path: str  # absolute, realpath'd, must exist and be a directory
+    # Workspace-relative path of the pinned brand contract, "" when unpinned.
+    # A column on this row, not a second table: one row, one pin, and an existing
+    # install gains it unset (see §4.0a for how a contract is resolved).
+    design_contract_path: str = ""
     created_at: float
 ```
 
@@ -29,6 +33,11 @@ folder, so a fresh install has none and the UI asks for one before it will send 
 ```python
 GoalStatus = Literal["PLANNING", "PENDING", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"]
 
+# What the goal is for. "design" makes the workspace's own brand contract the
+# deliverable — the design agent authors DESIGN.md instead of deriving a
+# direction from one (§4.0a.2).
+GoalMode = Literal["normal", "design"]
+
 class Goal(BaseModel):
     id: str
     workspace_id: str
@@ -36,10 +45,16 @@ class Goal(BaseModel):
     description: str = Field("", max_length=20000)
     status: GoalStatus
     dry_run: bool = False
+    mode: GoalMode = "normal"
     version: int = Field(0, ge=0)
     created_at: float
     updated_at: float
 ```
+
+`mode` is orthogonal to `dry_run` and `plan_only`: it says what the goal is *for*, not how it
+executes. `GoalCreate.mode` defaults to `"normal"` and is validated by the model, so a client cannot
+send a third value and get a goal that quietly runs the default pipeline — the literal rejects it
+with a `422`.
 
 `update_goal(id, expected_version, **fields)`:
 
@@ -92,7 +107,7 @@ Unique `(goal_id, ordinal)`. Max 20 steps per goal (planner contract).
 EventType = Literal[
     "goal_status", "step_status", "log", "diff", "test_result",
     "file_change_summary", "agent_assigned", "provider_fallback",
-    "library_evidence", "plan_updated", "laya_decision",
+    "library_evidence", "design_contract", "plan_updated", "laya_decision",
     "fix_retry", "fixer_pass", "plan_consult",
     "agent_call_failed", "usage", "model_delta", "error",
 ]
@@ -117,11 +132,12 @@ before, so a new event type means a new row here in the same change):
 | `step_status` | step | `{status, review_notes?, commit_message?}` — republished with `status: "IN_PROGRESS"` at every role transition inside a step (fixer → verifier → critic → scribe); only a start from a not-running state is a real attempt |
 | `log` | any | `{level: "info"\|"warn"\|"error", message}` |
 | `diff` | step | `{path, unified_diff, note?}` — `note` says why a real change has an empty diff (binary, or over the 1 MB cap) |
-| `test_result` | step | `{argv, verdict, explanation, exit_code?, refused: [str], ran: bool}` — `ran: false` with `argv: null` means nothing executed; `refused` lists every command the sandbox rejected |
+| `test_result` | step | `{argv, verdict, explanation, exit_code?, refused: [str], ran: bool, brand_drifts: [str]}` — `ran: false` with `argv: null` means nothing executed; `refused` lists every command the sandbox rejected; `brand_drifts` lists the engine's mechanical findings against a binding brand contract (empty unless one governs — see §4.3) |
 | `file_change_summary` | step | `{paths: [str], dry_run: bool, unchanged: [str]}` — `unchanged` are paths whose proposal already matched the file ("already matched — left alone") |
 | `agent_assigned` | any (`null` for laya) | `{role, provider, model}` — the model about to be called, published before the call |
 | `provider_fallback` | any | `{role, from: {provider, model}, to: {provider, model}, code, detail}` |
 | `library_evidence` | — | the checked evidence pack: `{summary, files: [{path, why, evidence}], symbols, conventions, test_command, risks, rounds, counts: {opened, matched, considered}, dropped_paths}` (`04` §4.0) |
+| `design_contract` | — | the locked direction: `{applies, artifact, direction, design_system: {name, source, origin}, tokens: {colors: [{name, value}], typography: [{name, value}], spacing: [str], radii: [str]}, components: [{name, purpose}], conventions, constraints, acceptance, design_md, mode?}` — `origin` is `pinned`\|"discovered"\|`null` (`04` §4.0a). `mode: "design"` and a non-empty `design_md` mark a design-deliverable goal, where the body is the artifact rather than advice (`04` §4.0a.2) |
 | `plan_updated` | step | `{step_id, step_title, fields: [str], changes: {field: {before, after}}}` — only fields the patch edited, only those whose value actually changed |
 | `laya_decision` | — | the gate's full verdict: `{engine, answers, routing, blocked, block_reason, warnings, skipped_reason, provider, model, policy: {injection_block_threshold, risk_warn_level, clarify_warn_threshold}}` (`05`) |
 | `fix_retry` | step | `{attempt, max_attempts, reason}` — a failing test run fed back to the fixer (bounded by `MAX_FIX_ATTEMPTS`) |
@@ -195,6 +211,10 @@ CREATE TABLE workspaces (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   root_path TEXT NOT NULL UNIQUE,
+  -- Workspace-relative brand contract path, '' when unpinned. Added by
+  -- ALTER TABLE for an existing database, keeping every workspace's name and
+  -- root: a pin is an addition to a row, never a reason to rebuild it.
+  design_contract_path TEXT NOT NULL DEFAULT '',
   created_at REAL NOT NULL
 );
 
@@ -205,6 +225,12 @@ CREATE TABLE goals (
   description TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,
   dry_run INTEGER NOT NULL DEFAULT 0,
+  plan_only INTEGER NOT NULL DEFAULT 0,
+  parallel INTEGER NOT NULL DEFAULT 0,
+  -- What the goal is for: 'normal' pipeline or 'design' (the brand contract
+  -- itself is the deliverable, §4.0a.2). Added by ALTER TABLE for an existing
+  -- database — every old goal stays a 'normal' run.
+  mode TEXT NOT NULL DEFAULT 'normal',
   version INTEGER NOT NULL DEFAULT 0,
   event_seq INTEGER NOT NULL DEFAULT 0,
   created_at REAL NOT NULL,
@@ -308,8 +334,9 @@ Error body: `{ "code": str, "message": str }`.
 | `POST` | `/workspaces/browse` | — | `{cancelled} \| {cancelled:false, workspace}` (native folder picker) |
 | `GET` | `/workspaces` | — | `Workspace[]` |
 | `GET` | `/workspaces/{id}` | — | `Workspace` |
+| `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
 | `DELETE` | `/workspaces/{id}?delete_goals={bool}` | — | forgets the folder; **never touches `root_path`**. 409 `workspace_not_empty` (with the goal count) unless the cascade is requested, 409 `workspace_has_active_goals` if anything is PLANNING/RUNNING |
-| `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, provider?, model?}` extra=forbid | `Goal` |
+| `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, mode?, provider?, model?}` extra=forbid — `mode` is `"normal"` \| `"design"` (`04` §4.0a.2) | `Goal` |
 | `GET` | `/goals` | query: `workspace_id?`, `status?`, `limit` (1–200, default 50), `offset` | `Goal[]` — active goals first, then newest |
 | `GET` | `/goals/{id}` | — | `Goal` + `steps: PlanStep[]` |
 | `DELETE` | `/goals/{id}` | — | deletes the run record; events/steps/proposals cascade, counts returned. 409 `goal_in_progress` while PLANNING/RUNNING or a driver holds it. Never touches files |
@@ -413,7 +440,7 @@ The response reports what it did **and** what it skipped, because an action that
 
 `unfixable` is what keeps the report from lying. Roles that **need** a model but that no discovered model can be pointed at appear there with their reasons; without it, a broken install with an empty catalog and a healthy install look identical, because both have `changed: false` and `repaired: []`. When nothing was proven broken (every role has a model and a usable provider) `target_reason` is empty — a target only matters to roles that need one, so its absence explains nothing.
 
-`notes` entries are per provider, not per role: seven roles on an unreachable provider produce one caveat, not seven. An unverified role reads `left as configured: <provider>/<model> (not verified — <error>)`, never `usable` — the provider never said it works.
+`notes` entries are per provider, not per role: eight roles on an unreachable provider produce one caveat, not eight. An unverified role reads `left as configured: <provider>/<model> (not verified — <error>)`, never `usable` — the provider never said it works.
 
 A successful repair **invalidates the model catalog cache** (the catalog is keyed by role configs) and bumps `version` on every changed role, so the `409` version guard still protects concurrent updates. Only `provider`, `model_name`, and the protocol the catalog reports are written; `temperature`, `max_tokens`, `base_url`, and any system-prompt override are preserved. The endpoint is deliberately **not** sent, so an unchanged provider keeps the endpoint the user configured (a proxy, say) while a provider switch resets it to that provider's default.
 
@@ -478,13 +505,171 @@ context, not a substitute for the file itself.
 A librarian that fails (provider error, malformed reply) does **not** fail the goal: it is logged as a
 warning and the planner is told there is no reconnaissance.
 
+### 4.0a Design
+
+```json
+{"applies":true,"artifact":"web_prototype","direction":"…",
+ "design_system":{"name":"acme-brand","source":null},
+ "tokens":{"colors":[{"name":"ink","value":"#0d1117"}],
+           "typography":[{"name":"body","value":"Inter, system-ui, sans-serif"}],
+           "spacing":["4px","8px"],"radii":["6px"]},
+ "components":[{"name":"KpiTile","purpose":"one metric with its trend"}],
+ "conventions":["…"],"constraints":["…"],"acceptance":["…"],
+ "design_md":"# acme-brand\n…"}
+```
+
+Runs once per goal, after the librarian and before the planner, so it locks a direction from evidence
+rather than from a blank page. It has no tools: it decides, it does not touch the disk, so the fixer
+stays the only writer. `applies: false`, or a reply that names no `direction`, is a legitimate answer
+meaning *this goal changes no rendered surface* — the engine publishes nothing and the planner is told
+there is no direction rather than handed an invented one.
+
+**A brand contract the workspace already has wins over a proposal.** Resolution order, and the
+`design_system.origin` each state publishes:
+
+| `origin` | where it came from |
+|---|---|
+| `pinned` | `workspaces.design_contract_path` — a workspace-relative path set through `PUT /workspaces/{id}/design-contract`. Validated at set time, while the settings screen is open: an escape, a path that is not a file, or a binary blob is refused (`design_contract_escape` / `design_contract_missing` / `design_contract_binary`) rather than surfacing mid-goal as a mysterious absence of brand |
+| `discovered` | a non-empty `DESIGN.md` at the workspace root, with nothing pinned. Zero-config is the point — a repository that already documents its brand should not have to be told twice — and one name in one place keeps it predictable: anything else (another name, a nested path, a tokens JSON) is what the pin is for |
+| `null` | neither. The agent proposes a brand, and `design_md` may carry a body for the fixer to write |
+
+The file's own text is handed over in full (`MAX_CONTRACT_FILE_CHARS`, truncation logged) and framed
+as binding. Two things are then the engine's fact rather than the model's claim:
+
+1. `design_system.source` is **stamped** with the path the engine resolved — a reply naming some
+   other file does not get to relabel where the brand came from.
+2. `design_md` is **dropped** whenever a contract file governs. A goal cannot answer a contract that
+   exists as a file by writing a second one over it, which is exactly the drift the pin exists to
+   stop.
+
+A *pinned* path that has since become unreadable is a `warn` and a fall back to proposing (origin
+`null`) — never a silent downgrade to convention, and never a failed goal. The planner, the fixer and
+the critic all read the resolved contract through `_design_text`, where `pinned` and `discovered` are
+labelled differently: one is the user's instruction, the other is a convention the engine noticed. The
+**verifier** additionally checks the written artifacts against the binding contract mechanically (see
+§4.3), so a drift is caught by evidence rather than by the critic's judgment alone.
+
+Bounds — each list is trimmed, never dropped whole (`MAX_DESIGN_*` in `engine/executor.py`): 24 colors,
+12 typography entries, 12 spacing steps, 8 radii, 40 components, 12 each of `conventions` /
+`constraints` / `acceptance`, and `design_md` at 8000 chars. `artifact` is one of
+`web_prototype|page|dashboard|deck|mobile|document|component|style_system|other`; anything else reads
+as `other`, because that vocabulary is rendered by the app and is not a place to pass a model's
+invention through. A row with no `name` is dropped — an unnamed token is a value nothing can
+reference — and `design_system.source` is `null`, never `""`, when the workspace has no brand
+contract, because "there is none" and "one I did not record" are different claims.
+
+The normalized contract is published as a `design_contract` event and read back from the event log by
+every step (`_design_for`), so the direction a step was written against survives the planning prompt —
+including across processes. `_design_text(contract)` renders it for the roles that need it:
+
+- the **planner** plans the steps that realize it, `DESIGN.md` step included when `design_md` is set;
+- the **fixer** is told its tokens, components and `conventions` are binding;
+- the **critic** judges the diff against `acceptance`, not against its own taste;
+- the **verifier** is the one that checks the artifacts against it mechanically (§4.3), so the
+  critic's review starts from the facts the engine already proved or disproved.
+
+A design call that fails (provider error, malformed reply) does **not** fail the goal: it is logged as a
+warning and the planner proceeds without a contract — the same rule the librarian gets. The design
+agent cannot write, so a `DESIGN.md` body it emits is a file the fixer writes in its own step.
+
+A goal whose `mode` is `"design"` inverts this relationship rather than varying it: the contract is
+the deliverable, so the design agent authors the file instead of deriving a direction from one. That
+path has its own rules — see §4.0a.2.
+
+#### 4.0a.1 The verifier's mechanical check (`_brand_drifts`)
+
+The verifier is the role that finds out what actually happened, so it is also the one that compares the
+written artifacts against the contract — mechanically, engine-side, published on the same `test_result`
+record as the verdict. Only what text comparison can *prove* is reported; everything else stays the
+critic's judgment. The check runs when `design_system.origin` is `pinned` or `discovered` (the engine
+resolved that file; a source the model merely claimed — origin `null` — is not enforced) and reads what
+the fixer actually wrote: the applied diffs, falling back to the artifacts on disk when a change's diff
+carries no text (a binary write), per-file bounded by `MAX_DRIFT_DIFF_CHARS` and capped at
+`MAX_BRAND_DRIFTS` findings. The evidence is the *changes*, never the whole tree: a workspace already
+full of the brand does not pass a step for that reason.
+
+What it reports, each as a string in `brand_drifts`:
+
+| Finding | When |
+|---|---|
+| `token color <name> <value> appears nowhere in the changes` | a contract color's value is absent from every written file (case-insensitive) |
+| `typography <name> (<stack>) appears nowhere in the changes` | no word of the type stack (nor the token's name) appears |
+| `none of the contract's spacing/radius tokens appear in the changes` | not one spacing or radius token is present |
+| `acceptance not evidenced by any change: <line>` | no substantive word of the line (stopwords and ≤2-char tokens dropped, contract token names excluded) appears in any change |
+| `constraint not evidenced by any change: <line>` | the same, for a constraint line |
+
+**Advisory, by design.** The findings are stated — a `log` event at level `warn`, the `test_result`
+payload, and the critic's prompt ("already checked — do not re-litigate") — but they never flip the
+verdict: only the tests (or the critic) fail a step, and a text-matching heuristic is not the evidence
+that should stop one. A proposed brand (origin `null`) is advice, not law, and draws no mechanical
+findings.
+
+#### 4.0a.2 Design-deliverable goals (`Goal.mode = "design"`)
+
+A normal goal's design stage declares a direction the work realizes. A **design-deliverable goal**
+inverts that: the workspace's own brand contract *is* what the goal produces, and the design agent is
+its author. `POST /goals` with `mode: "design"` runs the same pipeline with four differences, all of
+them in `engine/executor.py`:
+
+| Stage | What changes |
+|---|---|
+| design | `_design_deliverable` runs instead of `_design`, with `DESIGN_BRIEF_PROMPT` (exported from `engine/default_prompts.py`) appended to the goal, the evidence pack, and — when `_brand_contract` resolves one — the current contract's text as *revision material*, not a law to obey. `_design_contract(out)` is called **without** the brand argument, so `design_md` survives: the body is the deliverable. A non-empty `design_md` is mandatory here — without one the stage raises `AgentOutputInvalid`, which the caller converts to the usual non-fatal `warn`, so the goal still plans but publishes no `design_contract` event. The event it does publish carries `mode: "design"`, and that is what every later stage keys on |
+| planner | unchanged except for what it is handed: `_design_text` renders the body ("write it verbatim in its own step, do not paste it into other files"), so the plan includes the step that writes it |
+| fixer | the step whose `suggested_paths` names a `design.md` path is handed the reviewed draft verbatim, with an explicit "write exactly this — add, drop or reword nothing" instruction. `suggested_paths` is the only honest signal a plan gives about intent, and it is the same signal the verifier reads |
+| verifier | reviews the artifact instead of proposing a command: the librarian's `test_command` is not offered at all (there is no code to falsify), the DESIGN.md content is included in the prompt capped at `MAX_DESIGN_MD_CHARS`, and the verdict is asked for directly — `pass` when it is a complete, faithful realization of the contract, `fail` with the specific gaps when it is not, or `skip` when nothing was written *and* nothing proposed. The content comes from disk when it is there, and otherwise from the step's stored proposal (`GoalService.proposed_content`) — the same bytes Apply replays. Reviewing prose runs nothing, so the step still records `ran: false` with `argv: null` |
+| critic | told the step delivers the workspace's DESIGN.md itself and that its approval is what puts the draft in front of the user — and **given the full content**, not only the diff, because a `+`-prefixed unified diff is a poor thing to approve a document from. It is read through the same helper the verifier uses (§4.0a.2), so the role that decides the step and the role that reports on it judge the same bytes. Brand drifts the verifier already proved are still handed over as settled (§4.0a.1) |
+
+**The pin stays a user action.** Nothing in this pipeline writes `workspaces.design_contract_path`: the
+engine drafts the file, a step writes it, the critic reviews it, and the user pins it
+(`PUT /workspaces/{id}/design-contract`, §3) — review before authority, never a model awarding itself
+one. The app holds the same line rather than trusting the pipeline to: the `design_contract` card
+carries the draft and the pin action, and that action stays disabled until a step whose
+`suggested_paths` names the file has reached `COMPLETED` — which is a state only the critic's approval
+produces, since `request-changes` leaves the step `IN_PROGRESS` and pauses the goal. That covers the
+*review*; the other precondition — that there is a file to bind — is checked separately, and both the
+UI and the engine say so:
+
+| State | What the card offers |
+|---|---|
+| no completed step naming the file | pin disabled, *"waiting on the review — a step must write it and the critic must approve it first"* |
+| reviewed, but the goal was a dry run | pin disabled, *"this run proposed `<path>` without writing it — apply the goal, then pin it"* |
+| reviewed and written | pin offered |
+
+The two blocked states are deliberately distinct: the first is waiting, the second has a next action,
+and one message for both would leave the user looking for a review that already happened. The engine
+is still the authority — a path that is not a readable file in the workspace is refused
+(`design_contract_missing`) whether the UI asked or a client did. A design goal in a workspace that already has a pinned or discovered contract is a *revision*: it
+is shown what the workspace has today and may replace it, which is precisely what a normal goal may
+not do (there, `design_md` is dropped so a goal cannot answer an existing brand with a competing
+file, §4.0a).
+
+Everything else holds unchanged: the design call is one bounded model call with no tools, the fixer is
+still the only writer, and the critic is still the only role that can stop a step.
+
+**A dry run reaches the disk not at all**, and a design goal makes that visible rather than subtle: the
+draft is authored and planned as usual, but there is no file on disk to read. Neither judge is told to
+skip, though — `_store_proposed_files` already persisted this step's proposal, so it is read back
+(`GoalService.proposed_content`) and reviewed under a heading that says what it is: `DESIGN.md as
+proposed by this step (nothing was written to disk)`. **Both judges read it that way**, through the one
+helper `_deliverable_artifact(goal_id, step, ws_root)`: it returns the content and where it came from
+(`"written"` or `"proposed"`), or `None` when there is genuinely nothing. The critic gets the full
+content beside the diff, because the diff is the only place a dry run's content otherwise appears and
+approving a document from `+`-prefixed lines is not a review. The reviewed bytes are byte-for-byte what
+`POST /goals/{id}/apply` writes, so the review is of the real deliverable; `skip` is reserved for the
+genuine absence, when the step wrote nothing *and* proposed nothing (an empty proposal is still a
+proposal — an empty contract is a failure the reviewer has to be able to state). The change is recorded as a
+proposal (`file_change_summary` with `dry_run: true`) and **nothing is committed** — Apply is what
+writes the reviewed content and commits it, and only then does the pin hold. Pinning before that fails
+the same way it fails mid-planning: `design_contract_missing`.
+
 ### 4.1 Planner
 
 ```json
 {"steps":[{"title":"…","description":"…","suggested_paths":["src/foo.py"]}]}
 ```
 
-`1 ≤ len(steps) ≤ 20`. Paths relative, no `..`.
+`1 ≤ len(steps) ≤ 20`. Paths relative, no `..`. When a design contract is present it is binding
+(§4.0a): the plan must realize its direction and tokens rather than substitute its own.
 
 ### 4.2 Fixer
 
@@ -504,7 +689,9 @@ If `argv` non-null, Engine runs it **once** then calls the verifier again with o
 
 When the evidence pack carries a `test_command`, the verifier is offered it as *"the librarian reports
 this repository's test command as … (unverified)"* — reading it out of a manifest is not proof it runs,
-and the verifier is the role that finds out.
+and the verifier is the role that finds out. **A design-deliverable step is the exception**: there is
+no code to falsify, so no command is offered or allowed and the verifier reviews the DESIGN.md content
+instead (§4.0a.2).
 
 **A command the sandbox refuses is not a test failure — it is feedback.** Nothing ran, so the refusal is
 handed back to the verifier exactly like command output is, and the verifier may propose a permitted
@@ -520,12 +707,17 @@ The `test_result` payload records what really happened:
 
 ```json
 {"argv":["git","status"],"verdict":"pass","explanation":"…","exit_code":0,
- "refused":["touch marker — binary not allowed: touch"],"ran":true}
+ "refused":["touch marker — binary not allowed: touch"],"ran":true,
+ "brand_drifts":[]}
 ```
 
 `ran` is `false` and `argv` `null` when nothing executed, and `refused` lists every rejected command — so
 a "pass" with no command behind it is distinguishable from a suite that actually ran. Each refusal also
 emits a `log` event at level `warn`.
+
+`brand_drifts` is the engine's mechanical check of the written artifacts against a binding brand
+contract (§4.0a.1): advisory findings, never a verdict change, and `[]` unless the contract's origin is
+`pinned` or `discovered`.
 
 ### 4.4 Critic
 
@@ -628,11 +820,11 @@ Engine stdout, first line, exactly:
 CODIFY_ENGINE token=<hex> port=<int>
 ```
 
-`token` = 32 bytes CSPRNG hex (64 chars). Desktop reads this line, then attaches `Authorization: Bearer <token>` to HTTP and `?token=` is **forbidden** (query leakage). WS: first text frame from client `{"type":"auth","token":"<hex>"}` or HTTP header on the Upgrade.
+`token` = 32 bytes CSPRNG hex (64 chars), created once and kept at `<state dir>/boot_token` (`0600`). Desktop reads this line, then attaches `Authorization: Bearer <token>` to HTTP and `?token=` is **forbidden** (query leakage). WS: first text frame from client `{"type":"auth","token":"<hex>"}` or HTTP header on the Upgrade.
 
 WS URL: `ws://127.0.0.1:<port>/ws/goals/{id}`. After auth, server sends events with `sequence > 0` live; client SHOULD `GET /goals/{id}/events?after=` for gap fill.
 
-Token lives one Engine process. Rotated every spawn. Not written to disk.
+Token lifetime is the state directory, not the process. It is written once, with `O_EXCL`, so two engines booting against the same state dir converge on one value rather than each minting its own. This replaced a per-spawn rotation: a client that cached the token was rejected with 401 after every restart, and only the desktop shell could recover, by re-reading the live handshake over IPC — a browser tab pointed at a dev engine has no shell to ask and stayed broken until a human reloaded it. The cost is a longer-lived credential, affordable only because the socket is `127.0.0.1`: anything able to present this token could read the file, and the database beside it, without it. `CODIFY_BOOT_TOKEN` overrides the value for a caller that wants a token scoped to one process, and a state directory that cannot be written falls back to a per-boot token rather than refusing to boot.
 
 ## 7. Key storage
 

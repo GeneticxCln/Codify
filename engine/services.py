@@ -10,6 +10,7 @@ from collections.abc import Callable
 import sqlite3
 
 from engine.db import dumps, row_to_dict
+from engine.fs import BINARY_SNIFF_BYTES, FileSystemService, PathEscapeError, looks_binary
 from engine.models import (
     BUILTIN_PROVIDERS,
     PROVIDER_SLUG_RE,
@@ -347,6 +348,54 @@ class WorkspaceService:
         ).fetchone()
         return int(row[0]) if row else 0
 
+    def set_design_contract(self, workspace_id: str, path: str) -> Workspace:
+        """Pin the brand contract the design agent must obey, or clear it with "".
+
+        Validated here rather than at read time because this is a settings action
+        with a user watching: an escape is refused, and a path that is not a
+        readable text file is refused, while the screen is still open. A pin that
+        only failed mid-goal would surface as a mysterious absence of brand, in a
+        transcript nowhere near the setting that caused it.
+
+        The directory is never modified — pinning reads the file once to prove it
+        is usable, and the engine re-reads it per goal.
+        """
+        workspace = self.get(workspace_id)  # 404 if unknown
+        relative = (path or "").strip()
+        if relative:
+            fs = FileSystemService(workspace.root_path)
+            try:
+                target = fs.resolve(relative)
+            except PathEscapeError as exc:
+                raise ApiError(
+                    400, "design_contract_escape",
+                    f"{relative!r} resolves outside this workspace — a brand contract "
+                    f"must be a file inside {workspace.root_path}",
+                ) from exc
+            if not target.is_file():
+                raise ApiError(
+                    400, "design_contract_missing",
+                    f"no file at {relative!r} in this workspace — pin a contract that exists",
+                )
+            try:
+                sniff = target.read_bytes()[:BINARY_SNIFF_BYTES]
+            except OSError as exc:
+                raise ApiError(
+                    400, "design_contract_unreadable",
+                    f"{relative!r} could not be read: {exc}",
+                ) from exc
+            if looks_binary(sniff):
+                raise ApiError(
+                    400, "design_contract_binary",
+                    f"{relative!r} is not text — a brand contract must be readable as text",
+                )
+        self._db.execute(
+            "UPDATE workspaces SET design_contract_path = ? WHERE id = ?",
+            (relative, workspace_id),
+        )
+        self._db.commit()
+        return self.get(workspace_id)
+
     def delete(self, workspace_id: str, *, delete_goals: bool = False) -> dict[str, Any]:
         """Forget a workspace, and optionally the goal history recorded against it.
 
@@ -460,6 +509,7 @@ class GoalService:
             dry_run=body.dry_run,
             plan_only=body.plan_only,
             parallel=body.parallel,
+            mode=body.mode,
             version=0,
             created_at=now,
             updated_at=now,
@@ -467,9 +517,9 @@ class GoalService:
             model=body.model,
         )
         self._db.execute(
-            """INSERT INTO goals (id, workspace_id, title, description, status, dry_run, plan_only, parallel, version, event_seq, created_at, updated_at, provider, model)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)""",
-            (goal.id, goal.workspace_id, goal.title, goal.description, goal.status, int(goal.dry_run), int(goal.plan_only), int(goal.parallel), now, now, goal.provider, goal.model),
+            """INSERT INTO goals (id, workspace_id, title, description, status, dry_run, plan_only, parallel, mode, version, event_seq, created_at, updated_at, provider, model)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)""",
+            (goal.id, goal.workspace_id, goal.title, goal.description, goal.status, int(goal.dry_run), int(goal.plan_only), int(goal.parallel), goal.mode, now, now, goal.provider, goal.model),
         )
         self._db.commit()
         return goal
@@ -788,6 +838,32 @@ class GoalService:
             "SELECT 1 FROM proposed_files WHERE goal_id = ? LIMIT 1", (goal_id,)
         ).fetchone()
         return row is not None
+
+    def proposed_content(self, goal_id: str, step_id: str, path: str) -> str | None:
+        """The content a dry run proposed for one path, or None if it proposed none.
+
+        The bytes Apply replays, read back for the one consumer that has to judge
+        an artifact that is not on disk: the verifier reviewing a design
+        deliverable that was planned but never written. Reading it here rather
+        than from a diff is the point — the stored proposal is the full final
+        content (`_store_proposed_files` resolves an edit before storing it), so
+        what the verifier reviews is byte-for-byte what Apply will write.
+
+        The path is matched case-insensitively, the same rule the rest of the
+        engine uses to recognise a `DESIGN.md`, so a plan that capitalized the
+        name still finds its own proposal. A step stores at most one proposal per
+        path (`_store_proposed_files` clears its own rows first), so the ordering
+        here is only there to make that independent of insertion order.
+        """
+        row = self._db.execute(
+            "SELECT content FROM proposed_files WHERE goal_id = ? AND step_id = ?"
+            " AND lower(path) = lower(?) ORDER BY rowid DESC LIMIT 1",
+            (goal_id, step_id, path),
+        ).fetchone()
+        if row is None:
+            return None
+        content = row["content"]
+        return str(content) if content is not None else None
 
     # Statuses with a live coroutine attached: a planning run, or a step driver.
     # Deleting one of these leaves that coroutine publishing events for a row

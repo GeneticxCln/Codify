@@ -35,11 +35,11 @@ Codify follows a strict two-tier architecture:
 │  │  intent · risk · prompt-injection → block before LLMs │  │
 │  └──────────────────────────┬────────────────────────────┘  │
 │  ┌──────────────────────────┴────────────────────────────┐  │
-│  │       Subagent Orchestrator (6 pipeline stages)       │  │
-│  │  Librarian ─► Planner ─► [ Fixer ─► Verifier ─►       │  │
-│  │   read only     no tools   writer    runs commands   │  │
-│  │                            Critic  ─► Scribe ]        │  │
-│  │                            judge      record   /step  │  │
+│  │       Subagent Orchestrator (7 pipeline stages)       │  │
+│  │  Librarian ─► Design ─► Planner ─► [ Fixer ─►         │  │
+│  │   read only    direction  no tools    writer          │  │
+│  │                       Verifier ─► Critic ─► Scribe ]  │  │
+│  │                        runs         judge     record  │  │
 │  └──────┬──────────────────────┬─────────────────────────┘  │
 │         ▼                      ▼                            │
 │  ┌──────────────┐       ┌──────────────┐     ┌───────────┐  │
@@ -101,7 +101,7 @@ is never dressed up as *"your model was retired"*. Every finding that has a fix 
 screen that holds it: **Add a key for openai** opens Provider Keys, **Choose a current model** opens
 that role's card in Agent Roles.
 
-### The System-1 Gate + 6 Pipeline Roles
+### The System-1 Gate + 7 Pipeline Roles
 
 Before any LLM is called, every goal passes a **pre-flight gate**: [Laya](https://github.com/NandhaKishorM/laya),
 a non-generative decision engine that answers typed questions (`choice` / `score` / `noul`) about the
@@ -109,8 +109,8 @@ request in a single forward pass — intent, risk, and a **calibrated** prompt-i
 Injection at `≥ 0.85` fails the goal before the planner runs; softer signals only warn. See
 [`docs/05-laya-system-1-gate.md`](docs/05-laya-system-1-gate.md).
 
-Then Codify runs a sequential subagent pipeline over 6 stages. Together with the gate that is
-**7 roles** (`laya`, `librarian`, `planner`, `fixer`, `verifier`, `critic`, `scribe` — see
+Then Codify runs a sequential subagent pipeline over 7 stages. Together with the gate that is
+**8 roles** (`laya`, `librarian`, `design`, `planner`, `fixer`, `verifier`, `critic`, `scribe` — see
 `engine/models.py` `ROLES`). Independent steps of a `parallel` goal run concurrently, bounded by the
 configurable parallel width (default 4, `parallel_width` setting, 1–16 — see `engine/executor.py`
 `DEFAULT_PARALLEL_WIDTH`), not by a slot count. Each role is a **different ability**, enforced by the
@@ -120,6 +120,7 @@ engine rather than requested of the prompt:
 |---|---|---|---|
 | **Laya** (gate) | once per goal, before any model call | typed decisions | Intent, risk, prompt-injection / sandbox-escape probability. Blocks high-confidence hostile requests; never writes files. |
 | **Librarian** | once per goal, before planning | **read only** — files, literal search, git history, inspect commands | Reads the workspace and returns a checked evidence pack: paths it actually opened, conventions, the command this repo really runs, risks. Paths it never opened are dropped and logged. |
+| **Design** | once per goal, after the librarian | reasons only, no tools | Locks the direction the rest of the goal is built against: artifact, design system, tokens, components, constraints, and what makes the result right. Obeys the workspace's **brand contract** when it has one (pinned, or a `DESIGN.md` found at the root) and otherwise proposes one, emitting the `DESIGN.md` body as text for the fixer to write — it never writes a file itself. |
 | **Planner** | once per goal | reasons only, no tools | Decomposes the goal plus the evidence pack into 1–20 actionable steps with target paths. |
 | **Fixer** | once per step | **the only writer** | Proposes concrete file creates, updates, or deletions. Matching the evidence pack's conventions is part of the job. |
 | **Verifier** | once per step | **the only role that runs a command** | Runs one allowlisted command and reports what actually happened (`ran`, `refused`, exit code), or says `skip` when nothing could run. |
@@ -131,12 +132,37 @@ and the fixer read only the paths that blind planner guessed — so a wrong gues
 the right file. See [`docs/01`](docs/01-subagent-orchestration-spec.md) §1.1 and
 [`docs/04`](docs/04-engine-data-and-runtime.md) §4.0.
 
+Why a design agent exists: the same failure one level up. With no locked direction, every step
+invented its own palette, type scale and component names, so a multi-step UI goal drifted step to
+step — the first step's `#2f81f7` and the fourth step's `#3b82f6` were both "the accent". One contract,
+decided once and published (`design_contract`), is handed to the planner, the fixer and the critic, so
+the direction is something a step can be judged against instead of remembered. A goal whose reply says
+it changes no rendered surface (`applies: false`) gets no contract and the pipeline continues — and a
+design call that fails at all is a warning, never a failed goal. See
+[`docs/04`](docs/04-engine-data-and-runtime.md) §4.0a.
+
+**The repository's own brand wins.** A workspace can **pin** the file that documents it (the palette
+button in the workspace picker, `PUT /workspaces/{id}/design-contract`), and failing that a `DESIGN.md`
+at the workspace root is found on its own — zero-config, because a repo that already documents its
+brand should not have to be told twice. The engine hands the file over in full and marks it binding,
+then makes two things its own fact rather than the model's claim: the published `source` is the path
+it resolved, and the `design_md` body is dropped, so a goal cannot answer a contract that exists by
+writing a second one over it. A pin whose file has since vanished says so and falls back to proposing
+— it never silently stops applying, and it never fails the goal.
+
+**A goal can write that file instead.** The `Design Deliverable` toggle on the command bar sends the
+goal in **design mode**: the design agent authors the workspace's `DESIGN.md` — a first draft when
+there is none, a revision when there is — a planned step writes it verbatim, and the critic reviews
+the written file before anything is offered to pin. Review before authority: the pin is still the
+user's click on the run's own transcript card, and nothing in the engine ever sets it from a model's
+output. See [`docs/04`](docs/04-engine-data-and-runtime.md) §4.0a.2.
+
 ---
 
 ## 🔒 Security & Invariants
 
 1. **Loopback Only**: The engine binds strictly to `127.0.0.1` on ports `7430–7440`.
-2. **Ephemeral Boot Token**: On launch, the engine generates a 32-byte CSPRNG token (`CODIFY_ENGINE token=<hex> port=<int>`). All HTTP and WebSocket requests require `Authorization: Bearer <token>`.
+2. **Boot Token**: The engine uses a 32-byte CSPRNG token (`CODIFY_ENGINE token=<hex> port=<int>`), and all HTTP and WebSocket requests require `Authorization: Bearer <token>`. It is created once per state directory and kept at `~/.codify/boot_token` (`0600`) so a client stays authenticated across engine restarts — a per-boot token locked out anything that had cached one, and only the desktop shell could recover by re-reading the handshake. `CODIFY_BOOT_TOKEN` overrides it.
 3. **Workspace Path Containment**: All file operations verify paths with realpath containment (`FileSystemService.resolve`). Path escapes outside workspace roots raise `PathEscapeError`.
 4. **Command Sandboxing**: Shell commands pass through `SandboxService`, which strictly enforces an allowlisted binary set (`pytest`, `python`/`python3 -m pytest`, `npm test`, `pnpm test`, `cargo test`, `go test`, and read-only `git status`/`diff`/`log -1`). The librarian's commands use the same validator in `read_only` mode (`ls`, `wc`, a read-only git subcommand allowlist), so a reconnaissance request can never change the workspace.
 5. **Human-in-the-Loop Rejection**: When the Critic requests changes, the step halts in `IN_PROGRESS` with review notes and the goal transitions to `PAUSED`. Execution resumes only when a human user reviews and explicitly triggers a retry.
@@ -186,9 +212,20 @@ This executes:
 6. UI TypeScript validation and Vite production build
 7. Tauri Rust crate typecheck via `cargo check`, plus `cargo fmt --check`
 
-CI runs those same targets on every push and pull request — Python on **3.10 and 3.14**, Node 22, and
-stable Rust (`.github/workflows/check.yml`). 3.10 matters: a construct that only 3.12+ parses is
-invisible on a modern interpreter and fatal on the declared minimum.
+The gate is `make ci`, which covers every toolchain:
+
+```
+make ci
+```
+
+`make check` only ever runs the interpreter you have installed, so `make ci` runs the same Python
+targets again on the **declared minimum (3.10)** — fetching that interpreter on demand (`uv`, or a
+`python3.10` you already have) instead of skipping the leg — with the UI and stable-Rust legs riding
+along in the same pass. 3.10 matters: a construct that only 3.12+ parses is invisible on a modern
+interpreter and fatal on the declared minimum.
+
+Run `make hooks` once per clone and the cheap checks (lint, typecheck) run at commit time, with the
+full gate running before every push.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the rules of the road — what needs a
 test, where the isolation guarantees live, and how to run hermetically.
@@ -251,7 +288,7 @@ Codify/
 │   ├── model_catalog.py   # Live model discovery per provider (no hardcoded lists)
 │   ├── db.py              # SQLite connection, WAL configuration, and seeders
 │   ├── home.py            # Where state lives (CODIFY_HOME) + the isolated-run guarantee
-│   └── default_prompts.py # System prompts for all 7 roles
+│   └── default_prompts.py # System prompts for all 8 roles
 ├── ui/                    # React 19 + TypeScript desktop frontend
 │   ├── src/
 │   │   ├── components/    # ChatTimeline, BottomCommandBar, SettingsModal, AgentConfigCard, …

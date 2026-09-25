@@ -1,15 +1,43 @@
+"""The goal pipeline: plan, write, verify, judge, record.
+
+**Part of this file is a DRAFT RECONSTRUCTION, not the original code.** The
+design work below — the design stage in `run_planning`, the `_design*` /
+`_brand_contract` / `_brand_drifts` helpers, and the deliverable paths in
+`_fixer` / `_verifier` / `_critic` — was written uncommitted and lost before it
+reached a commit. Every block marked "DRAFT RECONSTRUCTION" was rebuilt from
+its *specification*:
+
+  * `tests/test_design_role.py` (72 tests), which pins the behaviour;
+  * `scripts/fake_ollama.py`, whose prompt parser pins the exact fixer framing
+    (`--- DESIGN.md (write exactly this) ---` … `--- end DESIGN.md ---`);
+  * docs/01 §1.1a and docs/04 §4.0a, §4.0a.1, §4.0a.2, which specify the
+    origin table, the stamping and body-dropping rules, the drift rules, and
+    the four design-deliverable deltas.
+
+What that buys is behaviour, not authorship. The original author's structure,
+helper decomposition, prompt wording and reasoning are gone and are *not*
+reproduced here; three constants (`MAX_CONTRACT_FILE_CHARS`,
+`MAX_DRIFT_DIFF_CHARS`, `MAX_BRAND_DRIFTS`) have no documented value and carry
+plausible guesses, since no test pins them. Treat this as a proposal for their
+review rather than as their work restored: if the original returns, prefer it,
+and expect to reconcile rather than to discard.
+
+Everything else in this file is unmodified.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import re
 import subprocess
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
 from collections.abc import Callable
 
-from engine.default_prompts import DEFAULT_PROMPTS
+from engine.default_prompts import DEFAULT_PROMPTS, DESIGN_BRIEF_PROMPT
 from engine.fs import FileSystemService, PathEscapeError
 from engine.git import GitService
 from engine.library import (
@@ -140,6 +168,65 @@ MAX_LIBRARY_READS_PER_ROUND = 12
 MAX_LIBRARY_SEARCHES_PER_ROUND = 6
 MAX_LIBRARY_GIT_PER_ROUND = 6
 MAX_LIBRARY_RUNS_PER_ROUND = 4
+
+# ── design (DRAFT RECONSTRUCTION — see docs/04 §4.0a) ───────────────────────
+# The direction one goal is built against. Every list is trimmed rather than
+# dropped whole — a malformed row is prompt material, not a broken goal — and
+# `artifact` is a closed vocabulary because the app renders it: this is not a
+# place to pass a model's invention through, so anything else reads as "other".
+DESIGN_ARTIFACTS = (
+    "web_prototype", "page", "dashboard", "deck", "mobile",
+    "document", "component", "style_system", "other",
+)
+# The one shape convention gets for free: a non-empty DESIGN.md at the
+# workspace root is the brand contract, with nothing pinned. Zero-config is the
+# point — a repository that already documents its brand should not have to be
+# told twice — and one name in one place keeps it predictable. Everything else
+# (another name, a nested path, a tokens JSON) is what the pin is for.
+ROOT_DESIGN_MD = "DESIGN.md"
+MAX_DESIGN_COLORS = 24
+MAX_DESIGN_TYPOGRAPHY = 12
+MAX_DESIGN_SPACING = 12
+MAX_DESIGN_RADII = 8
+MAX_DESIGN_COMPONENTS = 40
+# conventions / constraints / acceptance: the three lists a human reads to judge
+# the result, so they stay short enough to read.
+MAX_DESIGN_LINES = 12
+MAX_DESIGN_MD_CHARS = 8000
+# A pinned brand contract is handed over whole, bounded. It is prose, not a
+# corpus, and an unbounded read is an unbounded prompt — truncation is logged
+# rather than silent, so a half-brand is visible in the transcript.
+MAX_CONTRACT_FILE_CHARS = 20000
+# The verifier's mechanical brand check (docs/04 §4.0a.1): how much of each
+# changed file is read as evidence, and how many findings one step may publish.
+# The check is advisory, and a transcript of forty findings is a finding nobody
+# reads.
+MAX_DRIFT_DIFF_CHARS = 20000
+MAX_BRAND_DRIFTS = 8
+
+# How a deliverable is labelled to the two roles that judge it. The difference
+# between these two strings is the difference between "this is the file" and
+# "this is what the file will be" — and a role that guesses wrong is reviewing
+# bytes that do not exist.
+ARTIFACT_WRITTEN = "as written"
+ARTIFACT_PROPOSED = "as proposed by this step (nothing was written to disk)"
+
+# Function words carry no evidence. An acceptance line is prose ("every KPI
+# renders in its own tile"), and matching its "in" and "its" against a diff
+# would evidence a claim nothing in the change actually addressed.
+_DRIFT_STOPWORDS = frozenset({
+    "and", "are", "as", "at", "be", "been", "but", "by", "can", "for", "from",
+    "has", "have", "into", "its", "may", "must", "not", "of", "on", "only",
+    "or", "over", "should", "than", "that", "the", "their", "them", "then",
+    "there", "these", "they", "this", "those", "use", "used", "using", "was",
+    "were", "what", "when", "where", "which", "while", "with", "without",
+    "you", "your",
+})
+
+
+def _text_words(text: str) -> list[str]:
+    """Casefolded alphanumeric words, for evidence matching."""
+    return re.findall(r"[a-z0-9]+", text.casefold())
 
 # How many steps of a parallel goal may run at once. Each running step is a
 # streaming model session plus its verifier/critic/scribe tail, so an unbounded
@@ -634,9 +721,31 @@ class ExecutorService:
             )
             evidence = {}
 
+        # ── Design: the direction, locked before anything is planned ───
+        # DRAFT RECONSTRUCTION (docs/04 §4.0a, §4.0a.2). After the librarian
+        # — it cannot lock a direction from a blank page — and before the
+        # planner, which plans against whatever it is handed. It is an aid, so
+        # it gets the librarian's rule: a failure here is a warning and
+        # planning continues without a contract, because an aid that can kill a
+        # goal is a liability rather than an aid.
+        try:
+            design = await (
+                self._design_deliverable(goal_id, goal, ws, evidence)
+                if goal.mode == "design"
+                else self._design(goal_id, goal, ws, evidence)
+            )
+        except (AgentOutputInvalid, ProviderError, ValueError) as exc:
+            self._log(
+                goal_id, None, "warn",
+                f"design unavailable ({getattr(exc, 'code', 'error')}: {exc}) — "
+                "planning without a design contract",
+            )
+            design = {}
+
         prompt = (
             f"Title: {goal.title}\nDescription:\n{goal.description}\n\n"
-            f"Librarian evidence:\n{self._evidence_text(evidence)}"
+            f"Librarian evidence:\n{self._evidence_text(evidence)}\n"
+            f"Design direction:\n{self._design_text(design)}"
         )
         try:
             # A plan built on a blind spot is worse than a late question: the
@@ -1059,6 +1168,510 @@ class ExecutorService:
             )
         return "\n".join(lines)
 
+    # ── design (DRAFT RECONSTRUCTION — see docs/04 §4.0a) ───────────────────
+    #
+    # One bounded call, no tools: the design agent decides and the fixer stays
+    # the only role whose changes reach the disk. The contract it locks is
+    # published (`design_contract`) and read back per step (`_design_for`), so
+    # the planner, the fixer and the critic work from the same direction rather
+    # than from whichever prompt happened to produce it — including when a step
+    # is driven in another process.
+
+    def _design_for(self, goal_id: str) -> dict[str, Any]:
+        """The contract this goal locked, read back from its event log.
+
+        From events rather than memory, for the same reason `_evidence_for` is:
+        a step driven in another process must be handed the direction its
+        planner planned from. A goal planned before this stage existed has no
+        contract, and an empty lookup is the answer, never a failure.
+        """
+        latest: dict[str, Any] = {}
+        for ev in self.goals.events_after(goal_id, 0):
+            if ev.type == "design_contract":
+                latest = ev.payload or {}
+        return latest
+
+    async def _design(
+        self, goal_id: str, goal: Goal, ws: Any, evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Lock the direction this goal is built against, and publish it.
+
+        A brand contract the workspace already has wins over a proposal: it is
+        handed over whole and framed as binding, and a reply cannot relabel
+        where it came from. `applies: false` — or a reply naming no direction —
+        is an answer, not a failure, and publishes nothing.
+        """
+        brand = self._brand_contract(goal_id, ws)
+        prompt = self._design_prompt(goal, evidence, brand, deliverable=False)
+        out = await self.orchestrator.run_agent("design", goal_id, None, prompt)
+        contract = self._design_contract(out, brand)
+        if not contract:
+            self._log(
+                goal_id, None, "info",
+                "design: this goal locks no visual direction — the planner is told so "
+                "rather than handed an invented one",
+            )
+            return {}
+        self.goals.publish(self._event(
+            goal_id, None, "design_contract", {**contract, "mode": goal.mode},
+        ))
+        return contract
+
+    async def _design_deliverable(
+        self, goal_id: str, goal: Goal, ws: Any, evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        """A design-deliverable goal: the design agent authors the file.
+
+        Same slot, same single bounded call, same no-tools rule — only the
+        relationship inverts. The contract the workspace already has is shown as
+        *revision material* rather than as a law, and `_design_contract` is
+        called WITHOUT the brand so the draft's body survives: dropping it is
+        right for a normal goal (a second body would compete with a contract
+        that exists as a file) and fatal here, since the body is the deliverable.
+
+        A body is mandatory. A goal with nothing written has nothing to deliver,
+        and that is the one thing this stage is loud about — the caller turns
+        the raise into the usual non-fatal warning, so the goal still plans.
+        """
+        brand = self._brand_contract(goal_id, ws)
+        prompt = self._design_prompt(goal, evidence, brand, deliverable=True)
+        out = await self.orchestrator.run_agent("design", goal_id, None, prompt)
+        contract = self._design_contract(out)
+        if not (contract.get("design_md") or "").strip():
+            raise AgentOutputInvalid(
+                "a design-deliverable goal must author the complete DESIGN.md body in "
+                "design_md — without one there is nothing to deliver",
+                role="design",
+            )
+        self.goals.publish(self._event(
+            goal_id, None, "design_contract", {**contract, "mode": "design"},
+        ))
+        return contract
+
+    def _design_prompt(
+        self, goal: Goal, evidence: dict[str, Any], brand: dict[str, Any] | None,
+        *, deliverable: bool,
+    ) -> str:
+        """The design call's prompt: the goal, what is known, and the contract.
+
+        Two shapes, because the two goals want opposite things from the same
+        file. A normal goal is *bound* by a contract the workspace already has;
+        a design goal is writing it, so the same text is revision material and
+        must not be mistaken for a law to obey.
+        """
+        parts = [
+            f"Goal: {goal.title}\nDescription:\n{goal.description}",
+            f"What the librarian found:\n{self._evidence_text(evidence)}",
+        ]
+        if deliverable:
+            parts += [
+                DESIGN_BRIEF_PROMPT,
+                "Your draft is the deliverable, so it has to stand on its own. If the "
+                "workspace already documents a brand it is shown below as revision "
+                "material: write the one it should have, and put it in design_md.",
+            ]
+        if brand:
+            if deliverable:
+                parts.append(
+                    f"--- current brand contract ({brand['origin']}) at {brand['path']} "
+                    "— revision material, not a law to obey ---\n"
+                    f"{brand['text']}\n"
+                    "--- end brand contract ---\n"
+                    "The workspace already documents a brand: revise or replace it. The "
+                    "body you return is the draft a step will write, and the user pins it "
+                    "from there — do not answer 'no change', because the deliverable is a "
+                    "file."
+                )
+            else:
+                parts.append(
+                    f"--- Workspace brand contract ({brand['origin']}) at {brand['path']} "
+                    "— BINDING ---\n"
+                    f"{brand['text']}\n"
+                    "--- end brand contract ---\n"
+                    "That file is the workspace's own contract and is BINDING. Derive the "
+                    "design system, tokens and components from it rather than inventing "
+                    "new ones, and return the direction the rest of this goal obeys."
+                )
+        elif deliverable:
+            parts.append(
+                "The workspace has no brand contract today. That is the file this goal "
+                "writes, so design_md must be a complete, standalone contract."
+            )
+        else:
+            parts.append(
+                "The workspace has no brand contract. Propose one, and put the DESIGN.md "
+                "body a step should publish in design_md so the file exists to be pinned."
+            )
+        return "\n\n".join(parts)
+
+    def _brand_contract(self, goal_id: str, ws: Any) -> dict[str, Any] | None:
+        """The brand contract this workspace already has, or None.
+
+        Resolution order (docs/04 §4.0a): the user's pin first, then a non-empty
+        `DESIGN.md` at the workspace root. The pin wins outright — naming a file
+        convention would not find is the whole reason to pin one.
+
+        A pin whose file has gone missing is a warning and a fall back to
+        proposing, never a silent downgrade to convention: the `origin` published
+        with the contract says which of the two the result actually is, so nobody
+        reads the answer as "the pinned brand was used".
+        """
+        fs = FileSystemService(ws.root_path)
+        pinned = str(getattr(ws, "design_contract_path", "") or "").strip()
+        if pinned:
+            text = fs.read_text_or_none(pinned)
+            if not text or not text.strip():
+                self._log(
+                    goal_id, None, "warn",
+                    f"pinned brand contract {pinned!r} is not readable as text in this "
+                    "workspace — proposing a brand instead, and the published contract "
+                    "will not claim the pin",
+                )
+                return None
+            return self._brand_file(goal_id, pinned, "pinned", text)
+        text = fs.read_text_or_none(ROOT_DESIGN_MD)
+        # An empty file is not a brand. Binding every goal to nothing would also
+        # silently drop the body a fixer was supposed to write.
+        if not text or not text.strip():
+            return None
+        return self._brand_file(goal_id, ROOT_DESIGN_MD, "discovered", text)
+
+    def _brand_file(
+        self, goal_id: str, path: str, origin: str, text: str,
+    ) -> dict[str, Any]:
+        """A resolved contract file, truncated to a prompt-safe bound and said so."""
+        if len(text) > MAX_CONTRACT_FILE_CHARS:
+            self._log(
+                goal_id, None, "warn",
+                f"brand contract {path!r} is {len(text)} chars — using the first "
+                f"{MAX_CONTRACT_FILE_CHARS}",
+            )
+            text = text[:MAX_CONTRACT_FILE_CHARS]
+        return {"path": path, "origin": origin, "text": text}
+
+    def _design_contract(
+        self, raw: object, brand: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Normalize one design reply into the contract the engine publishes.
+
+        Trims rather than fails: this is prompt material, and a row the model
+        got slightly wrong should not cost the goal its direction. Two things
+        are the engine's fact rather than the model's claim — where the brand
+        came from (`source`), and whether a body may compete with a contract
+        file that already exists.
+        """
+        if not isinstance(raw, dict):
+            raise AgentOutputInvalid(
+                f"design contract must be a JSON object, got {type(raw).__name__}",
+                role="design",
+            )
+        if not raw.get("applies"):
+            # "This goal changes no rendered surface" is a real answer.
+            return {}
+        direction = str(raw.get("direction") or "").strip()
+        if not direction:
+            # `applies: true` with nothing to say is a decline, not a contract:
+            # the planner plans against values, not against a heading.
+            return {}
+
+        artifact = str(raw.get("artifact") or "").strip()
+        if artifact not in DESIGN_ARTIFACTS:
+            artifact = "other"
+        tokens_in = raw.get("tokens")
+        if not isinstance(tokens_in, dict):
+            tokens_in = {}
+        system_in = raw.get("design_system")
+        if not isinstance(system_in, dict):
+            system_in = {}
+
+        name = str(system_in.get("name") or "").strip()
+        source: str | None = None
+        origin: str | None = None
+        if brand:
+            source = str(brand.get("path") or "") or None
+            origin = str(brand.get("origin") or "") or None
+            if not name:
+                # A pinned file must render as *something*: the filename is a
+                # fact, where a made-up label would not be.
+                name = os.path.splitext(os.path.basename(source or ""))[0]
+        # The body is passed on as written: it is a file, and a file whose
+        # trailing newline the engine decided to trim is a file that differs
+        # from the one the agent authored.
+        body_raw = raw.get("design_md")
+        body = body_raw if isinstance(body_raw, str) else ""
+        if brand:
+            # A goal cannot answer a contract that exists as a file by writing a
+            # second one over it — the exact drift the pin exists to stop.
+            body = ""
+        elif len(body) > MAX_DESIGN_MD_CHARS:
+            body = body[:MAX_DESIGN_MD_CHARS]
+
+        return {
+            "applies": True,
+            "artifact": artifact,
+            "direction": direction,
+            "design_system": {"name": name, "source": source, "origin": origin},
+            "tokens": {
+                "colors": self._design_rows(tokens_in.get("colors"), MAX_DESIGN_COLORS),
+                "typography": self._design_rows(
+                    tokens_in.get("typography"), MAX_DESIGN_TYPOGRAPHY,
+                ),
+                "spacing": self._design_lines(tokens_in.get("spacing"), MAX_DESIGN_SPACING),
+                "radii": self._design_lines(tokens_in.get("radii"), MAX_DESIGN_RADII),
+            },
+            "components": [
+                {"name": row["name"], "purpose": str(row.get("purpose") or "").strip()}
+                for row in self._design_rows(raw.get("components"), MAX_DESIGN_COMPONENTS)
+            ],
+            "conventions": self._design_lines(raw.get("conventions"), MAX_DESIGN_LINES),
+            "constraints": self._design_lines(raw.get("constraints"), MAX_DESIGN_LINES),
+            "acceptance": self._design_lines(raw.get("acceptance"), MAX_DESIGN_LINES),
+            "design_md": body or None,
+        }
+
+    @staticmethod
+    def _design_rows(raw: Any, cap: int) -> list[dict[str, Any]]:
+        """Named rows from a reply's list, trimmed to `cap`.
+
+        A row with no `name` is dropped: an unnamed token is a value nothing can
+        reference, so passing it on only gives the roles noise to be told to
+        ignore.
+        """
+        rows: list[dict[str, Any]] = []
+        if not isinstance(raw, list):
+            return rows
+        for item in raw[:cap]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            rows.append({**item, "name": name})
+        return rows
+
+    @staticmethod
+    def _design_lines(raw: Any, cap: int) -> list[str]:
+        """Non-empty strings from a reply's list, trimmed to `cap`."""
+        lines: list[str] = []
+        if not isinstance(raw, list):
+            return lines
+        for item in raw[:cap]:
+            text = str(item or "").strip()
+            if text:
+                lines.append(text)
+        return lines
+
+    def _design_text(self, contract: dict[str, Any]) -> str:
+        """Render a contract for the roles that must work from it.
+
+        One renderer for the planner, the fixer and the critic, so three roles
+        cannot end up with three different descriptions of one direction. An
+        empty contract says so rather than saying nothing: "no direction" is
+        information, and the alternative is each role inventing one.
+
+        `pinned` and `discovered` are labelled differently on purpose. One is
+        the user's instruction, the other a convention the engine noticed, and
+        the roles' weight for it follows from which one it is.
+        """
+        if not contract:
+            return (
+                "Design contract: (none — this goal locked no visual direction). There "
+                "is nothing to obey, so invent no visual direction: follow the "
+                "repository's own conventions and keep every step's look consistent "
+                "with the others."
+            )
+        system = contract.get("design_system") or {}
+        source = str(system.get("source") or "")
+        name = str(system.get("name") or "").strip() or "unnamed"
+        if system.get("origin") == "pinned" and source:
+            where = f"{name} (pinned at {source} — binding)"
+        elif source:
+            where = f"{name} (found at {source} — binding)"
+        else:
+            where = f"{name} (proposed by this run, not yet the workspace's)"
+
+        lines = [
+            "Design contract — locked before this plan was made, and binding for it.",
+            f"Design system: {where}",
+            f"Direction: {contract.get('direction', '')}",
+        ]
+        tokens = contract.get("tokens") or {}
+        colors = [
+            f"{c.get('name')} {c.get('value')}".strip() for c in tokens.get("colors") or []
+        ]
+        if colors:
+            lines.append("Colors: " + ", ".join(colors))
+        type_rows = [
+            f"{t.get('name')} = {t.get('value')}".strip() for t in tokens.get("typography") or []
+        ]
+        if type_rows:
+            lines.append("Typography: " + ", ".join(type_rows))
+        scale = [*(tokens.get("spacing") or []), *(tokens.get("radii") or [])]
+        if scale:
+            lines.append("Spacing and radii: " + ", ".join(str(s) for s in scale))
+        components = [
+            f"{c.get('name')} — {c.get('purpose')}".strip(" —")
+            for c in contract.get("components") or []
+        ]
+        if components:
+            lines.append("Components: " + "; ".join(components))
+        for label, key in (
+            ("Conventions", "conventions"),
+            ("Constraints", "constraints"),
+            ("Acceptance", "acceptance"),
+        ):
+            rows = contract.get(key) or []
+            if rows:
+                lines.append(f"{label}: " + "; ".join(str(r) for r in rows))
+        body = str(contract.get("design_md") or "")
+        if body:
+            lines += [
+                "",
+                "--- DESIGN.md body (the file a step must produce) ---",
+                body,
+                "--- end DESIGN.md body ---",
+                "One planned step writes that file: write it verbatim in its own step, "
+                "do not paste it into other files, and do not substitute a summary for it.",
+            ]
+        return "\n".join(lines)
+
+    def _design_write_path(self, step: PlanStep) -> str:
+        """The DESIGN.md a step means to write, recognized by its own plan.
+
+        `suggested_paths` is the only honest signal a plan gives about intent,
+        and it is the same signal for all three roles that care — so one helper
+        recognizes it for the fixer, the verifier and the critic rather than
+        three that could disagree.
+        """
+        for raw in step.suggested_paths or []:
+            path = str(raw or "").strip()
+            if os.path.basename(path.replace("\\", "/")).casefold() == ROOT_DESIGN_MD.casefold():
+                return path
+        return ""
+
+    def _deliverable_artifact(
+        self, goal_id: str, step: PlanStep, ws_root: str, path: str,
+    ) -> tuple[str | None, str]:
+        """(content, "as written" | "as proposed") for a deliverable step.
+
+        A dry run reaches the disk not at all, so there is no file for the
+        verifier to read — but the step's proposal is stored, and it is exactly
+        the bytes Apply replays. Reading it here, rather than re-rendering the
+        diff, is what makes "reviewed" a fact about the deliverable instead of a
+        claim about the pipeline. Both judges come through this one helper, so
+        the role that decides the step and the role that reports on it cannot be
+        reading different things.
+        """
+        if not path:
+            return (None, "")
+        written = FileSystemService(ws_root).read_text_or_none(path)
+        if written is not None:
+            return (written, ARTIFACT_WRITTEN)
+        proposed = self.goals.proposed_content(goal_id, step.id, path)
+        if proposed is not None:
+            return (proposed, ARTIFACT_PROPOSED)
+        return (None, "")
+
+    def _brand_drifts(
+        self, diffs: list[dict[str, Any]], design: dict[str, Any], root_path: str,
+    ) -> list[str]:
+        """What the written artifacts fail to evidence about a binding contract.
+
+        Only what text comparison can prove is reported; everything else stays
+        the critic's judgment. The evidence is the *changes*, never the whole
+        tree — a workspace already full of the brand must not pass a step for
+        that reason. A proposed brand draws nothing at all: enforcement is for
+        what a workspace signed, not for advice.
+
+        Advisory by construction: these findings ride on the verifier's own
+        record and never flip the verdict. Only the tests (or the critic) fail a
+        step, and a text-matching heuristic is not the evidence that should stop
+        one.
+        """
+        system = design.get("design_system") or {}
+        if system.get("origin") not in ("pinned", "discovered"):
+            return []
+        corpus = self._brand_corpus(diffs, root_path)
+        if not corpus:
+            # Nothing readable to check is not evidence of anything. A step that
+            # wrote a binary blob, or wrote nothing, is reported as silent rather
+            # than as a contract the whole workspace failed.
+            return []
+
+        tokens = design.get("tokens") or {}
+        colors = [c for c in (tokens.get("colors") or []) if isinstance(c, dict)]
+        faces = [t for t in (tokens.get("typography") or []) if isinstance(t, dict)]
+        # The contract's own token names are not evidence of it: an acceptance
+        # line naming `accent` must not pass because `accent` appears in the diff
+        # as an identifier.
+        token_names = {
+            str(c.get("name") or "").casefold() for c in colors
+        } | {str(t.get("name") or "").casefold() for t in faces}
+
+        drifts: list[str] = []
+        for color in colors:
+            value = str(color.get("value") or "").strip()
+            if value and value.casefold() not in corpus:
+                drifts.append(
+                    f"token color {color.get('name')} {value} appears nowhere in the changes"
+                )
+        for face in faces:
+            stack = str(face.get("value") or "").strip()
+            words = [
+                w for w in _text_words(f"{stack} {face.get('name') or ''}") if len(w) > 2
+            ]
+            if words and not any(w in corpus for w in words):
+                drifts.append(
+                    f"typography {face.get('name')} ({stack}) appears nowhere in the changes"
+                )
+        scale = [
+            str(s).strip() for s in (tokens.get("spacing") or []) + (tokens.get("radii") or [])
+            if str(s).strip()
+        ]
+        if scale and not any(s.casefold() in corpus for s in scale):
+            drifts.append("none of the contract's spacing/radius tokens appear in the changes")
+        for label, key in (("acceptance", "acceptance"), ("constraint", "constraints")):
+            for raw in design.get(key) or []:
+                line = str(raw).strip()
+                if line and not self._line_evidenced(line, corpus, token_names):
+                    drifts.append(f"{label} not evidenced by any change: {line}")
+        return drifts[:MAX_BRAND_DRIFTS]
+
+    def _brand_corpus(self, diffs: list[dict[str, Any]], root_path: str) -> str:
+        """The text this step wrote, casefolded, each file bounded.
+
+        The applied content first (it is what a replay will write), then the
+        diff, then the artifact on disk for a change whose diff carries no text —
+        a binary write is still subject to the contract. A file that cannot be
+        decoded contributes nothing rather than an empty string: absence of
+        evidence is not evidence of absence.
+        """
+        fs = FileSystemService(root_path)
+        chunks: list[str] = []
+        for d in diffs:
+            text = d.get("resolved_content")
+            if not isinstance(text, str) or not text:
+                text = d.get("unified_diff")
+            if not isinstance(text, str) or not text:
+                text = fs.read_text_or_none(str(d.get("path") or ""))
+            if isinstance(text, str) and text:
+                chunks.append(text[:MAX_DRIFT_DIFF_CHARS])
+        return "\n".join(chunks).casefold()
+
+    @staticmethod
+    def _line_evidenced(line: str, corpus: str, token_names: set[str]) -> bool:
+        """Does any substantive word of this line appear in what was written?"""
+        words = [
+            w for w in _text_words(line)
+            if len(w) > 2 and w not in _DRIFT_STOPWORDS and w not in token_names
+        ]
+        if not words:
+            # Nothing checkable in the line: not reportable as unaddressed
+            # either, because a finding the checker cannot support is worse than
+            # no finding at all.
+            return True
+        return any(w in corpus for w in words)
+
     def _cancelled(self, goal_id: str) -> bool:
         """True when the goal was cancelled (or otherwise left RUNNING) mid-step.
 
@@ -1126,6 +1739,7 @@ class ExecutorService:
                             )
                         outcome = await self._verifier(
                             goal_id, step, ws, evidence, prior_failure=prior_failure,
+                            diffs=summaries,
                         )
                     except TestsFailed as exc:
                         if final:
@@ -1156,7 +1770,7 @@ class ExecutorService:
                 # A replay is a reviewed decision, not a fresh attempt: there is
                 # nothing for a retry loop to fix, so it never runs on this path.
                 summaries = self._replay_files(goal_id, step, fs, stored_files, dry_run=goal.dry_run)
-                outcome = await self._verifier(goal_id, step, ws, evidence)
+                outcome = await self._verifier(goal_id, step, ws, evidence, diffs=summaries)
             # The fixer has already written by the time the verifier runs, so
             # those stages are not cancel-safe and cancelling mid-flight leaves
             # their work on disk (documented behavior of a mid-run cancel).
@@ -1505,12 +2119,33 @@ class ExecutorService:
                 "edit your previous approach."
             )
             feedback_text = "\n".join(lines) + "\n\n"
+        # The locked direction, so this step's files match the other steps'
+        # rather than each inventing its own palette. A design-deliverable
+        # goal's write step is a special case: it is handed the draft itself,
+        # because "write a DESIGN.md matching this contract" invites exactly the
+        # paraphrase that would make the deliverable drift from its own brief.
+        design = self._design_for(goal_id)
+        design_section = ""
+        if design:
+            design_section = f"\n\n{self._design_text(design)}"
+            write_path = self._design_write_path(step) if design.get("mode") == "design" else ""
+            body = str(design.get("design_md") or "")
+            if write_path and body:
+                design_section += (
+                    f"\n\nPlan note: this step writes the design deliverable itself — the "
+                    f"workspace's brand contract, the file every later goal is planned "
+                    f"against. Add, drop or reword nothing: write it to {write_path} "
+                    f"verbatim.\n"
+                    f"--- {write_path} (write exactly this) ---\n{body}\n"
+                    f"--- end {write_path} ---"
+                )
         out = await self.orchestrator.run_agent(
             "fixer", goal_id, step.id,
             f"Step: {step.title}\n{step.description}\n\n"
             f"{feedback_text}"
             f"What the librarian found:\n{self._evidence_text(evidence or {})}\n"
-            f"Suggested paths (current contents):\n{ctx}{unreadable}",
+            f"Suggested paths (current contents):\n{ctx}{unreadable}"
+            f"{design_section}",
         )
         files = self._parse_files(out)
         # The fixer may declare itself unfinished: multi-stage changes (a config
@@ -1573,7 +2208,7 @@ class ExecutorService:
 
     async def _verifier(
         self, goal_id: str, step: PlanStep, ws: Any, evidence: dict[str, Any] | None = None,
-        prior_failure: dict[str, Any] | None = None,
+        prior_failure: dict[str, Any] | None = None, diffs: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Get a test verdict, treating a refused command as information.
 
@@ -1597,6 +2232,20 @@ class ExecutorService:
         capped — after `MAX_REFUSED_TEST_COMMANDS` the verifier must answer with a
         verdict.
         """
+        # DRAFT RECONSTRUCTION (docs/04 §4.0a.1, §4.0a.2). The mechanical brand
+        # check is the engine's own finding about the bytes on disk, not the
+        # model's, so it runs whatever this step is about to verify and rides on
+        # the same `test_result` record as the verdict.
+        design = self._design_for(goal_id)
+        brand_drifts = self._brand_drifts(diffs or [], design, ws.root_path)
+        for drift in brand_drifts:
+            self._log(goal_id, step.id, "warn", f"brand contract drift: {drift}")
+        write_path = self._design_write_path(step) if design.get("mode") == "design" else ""
+        if write_path:
+            return await self._verifier_deliverable(
+                goal_id, step, ws.root_path, write_path, brand_drifts,
+            )
+
         prompt = f"Step: {step.title}\n{step.description}"
         found_test_command = (evidence or {}).get("test_command")
         if found_test_command:
@@ -1637,6 +2286,7 @@ class ExecutorService:
                     "exit_code": result["exit_code"] if result else None,
                     "refused": refusals or [],
                     "ran": argv is not None,
+                    "brand_drifts": brand_drifts,
                 }
                 # Explicit fields rather than **-splatting: `outcome` also
                 # carries `ran`/`refused` (event-payload keys the critic's
@@ -1645,6 +2295,7 @@ class ExecutorService:
                     goal_id, step, argv=outcome["argv"],
                     verdict=outcome["verdict"], explanation=outcome["explanation"],
                     exit_code=outcome["exit_code"], refusals=outcome["refused"],
+                    brand_drifts=brand_drifts,
                 )
                 self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="verifier")
                 return outcome
@@ -1716,6 +2367,74 @@ class ExecutorService:
                 f"stderr:\n{result['stderr']}\nNow return the verdict with argv null."
             )
 
+    async def _verifier_deliverable(
+        self,
+        goal_id: str,
+        step: PlanStep,
+        ws_root: str,
+        path: str,
+        brand_drifts: list[str],
+    ) -> dict[str, Any]:
+        """Review a document instead of running something (docs/04 §4.0a.2).
+
+        There is no code here to falsify: the artifact is prose, and a command
+        would be a guess that costs a round to discover it cannot judge. The
+        content is the file on disk when it is there and the step's stored
+        proposal when it is not — the same bytes Apply replays, read through the
+        same helper the critic uses, so the two judges cannot disagree about
+        what they reviewed.
+
+        `skip` is reserved for the genuine absence. A step that proposed
+        nothing *and* wrote nothing has delivered no file, and saying so is the
+        honest verdict; an empty draft is a proposal, and an empty contract is a
+        failure a reviewer must be able to state.
+        """
+        artifact, where = self._deliverable_artifact(goal_id, step, ws_root, path)
+        lines = [
+            f"Step: {step.title}\n{step.description}",
+            "",
+            "This step delivers a document, not code. There is nothing here to falsify "
+            "with a command: do not run a command, and do not answer 'skip' because it "
+            "is not on disk. Review the artifact below as prose and return your verdict "
+            "directly, with argv null.",
+        ]
+        if artifact is None:
+            lines += [
+                "",
+                f"No {path} was found on disk, and this step proposed none either, so "
+                f"there is nothing to review. Answer with verdict 'skip' and name what is "
+                f"missing — do not pass a step that delivered no {path}.",
+            ]
+        else:
+            lines += [
+                "",
+                f"--- {path} {where} ---",
+                artifact[:MAX_DESIGN_MD_CHARS],
+                f"--- end {path} ---",
+                "",
+                "Answer 'pass' when it is a complete, faithful realization of the "
+                "contract, and 'fail' naming the specific gaps when it is not.",
+            ]
+        out = await self.orchestrator.run_agent(
+            "verifier", goal_id, step.id, "\n".join(lines),
+        )
+        outcome = {
+            "argv": None,
+            "verdict": out.get("verdict"),
+            "explanation": out.get("explanation"),
+            "exit_code": None,
+            "refused": [],
+            "ran": False,
+            "brand_drifts": brand_drifts,
+        }
+        self._test_result(
+            goal_id, step, argv=None, verdict=outcome["verdict"],
+            explanation=outcome["explanation"], exit_code=None, refusals=[],
+            brand_drifts=brand_drifts,
+        )
+        self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="verifier")
+        return outcome
+
     def _test_result(
         self,
         goal_id: str,
@@ -1725,6 +2444,7 @@ class ExecutorService:
         explanation: str | None,
         exit_code: int | None = None,
         refusals: list[str] | None = None,
+        brand_drifts: list[str] | None = None,
     ) -> None:
         if verdict not in ("pass", "fail", "skip"):
             raise AgentOutputInvalid(f"verifier verdict invalid: {verdict!r}", role="verifier")
@@ -1739,6 +2459,10 @@ class ExecutorService:
                 # distinguishable from a pass that actually ran a suite.
                 "refused": refusals or [],
                 "ran": argv is not None,
+                # The engine's mechanical findings against a binding brand
+                # contract. Advisory: they are on the record the critic reads
+                # and they never change the verdict, which stays the tests'.
+                "brand_drifts": brand_drifts or [],
             },
         ))
         if verdict == "fail":
@@ -1789,6 +2513,10 @@ class ExecutorService:
             f"Step: {step.title}\n{step.description}\n\n"
             f"{verdict_text}\n\n"
             f"What the librarian found:\n{self._evidence_text(evidence or {})}\n\nDiffs:\n{diff_text}"
+            # The contract, so the judgment is against acceptance rather than
+            # taste — and the mechanical findings the verifier already proved,
+            # so this review does not re-litigate what text comparison settled.
+            + self._critic_design_section(goal_id, step, ws_root, test_outcome)
         )
         commands_left = MAX_CRITIC_COMMANDS
         prompt = base_prompt
@@ -1848,6 +2576,47 @@ class ExecutorService:
                 self._set_status(goal_id, "PAUSED", step.id)
                 raise CriticRejection("critic requested changes; human retry required", reasons)
             raise AgentOutputInvalid(f"critic decision invalid: {decision!r}", role="critic")
+
+    def _critic_design_section(
+        self, goal_id: str, step: PlanStep, ws_root: str, test_outcome: dict[str, Any] | None,
+    ) -> str:
+        """What the critic is told about the design contract, and the artifact.
+
+        Three things ride on the review. The contract, so the decision is made
+        against its acceptance lines. The findings the engine's own text
+        comparison already produced, marked as settled — they are facts about
+        the bytes, and the critic's judgment is better spent elsewhere. And, for
+        a design deliverable, the document itself: a `+`-prefixed unified diff
+        is a poor thing to approve a prose contract from, so the approver reads
+        the same bytes the verifier reviewed.
+        """
+        design = self._design_for(goal_id)
+        section = f"\n\n{self._design_text(design)}" if design else ""
+        drifts = (test_outcome or {}).get("brand_drifts") or []
+        if drifts:
+            section += (
+                "\n\nMechanical brand-contract findings — the engine already compared the "
+                "written text against the binding contract. These are facts about the "
+                "bytes, not opinions, so do not re-litigate them; spend your judgment on "
+                "what text comparison cannot prove:\n"
+                + "\n".join(f"- {d}" for d in drifts)
+            )
+        write_path = self._design_write_path(step) if design.get("mode") == "design" else ""
+        if not write_path:
+            return section
+        artifact, where = self._deliverable_artifact(goal_id, step, ws_root, write_path)
+        if artifact is None:
+            return section
+        section += (
+            f"\n\nThis step delivers the workspace's DESIGN.md itself — the contract every "
+            f"later goal is planned against. Read it below, not only the diff above: a "
+            f"`+`-prefixed unified diff is a poor thing to approve a document from, and "
+            f"only your approval puts it in front of them. Request-changes sends it back to "
+            f"be revised instead; the user pins the file from here either way.\n\n"
+            f"--- {write_path} {where} ---\n{artifact[:MAX_DESIGN_MD_CHARS]}\n"
+            f"--- end {write_path} ---"
+        )
+        return section
 
     async def _scribe(
         self, goal_id: str, step: PlanStep, diffs: list[dict[str, Any]], root_path: str = "",

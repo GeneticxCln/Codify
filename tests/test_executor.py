@@ -92,7 +92,7 @@ def configure_every_role(registry: AgentRegistryService, model: str = "test-mode
 class TestPerRoleConfig(unittest.IsolatedAsyncioTestCase):
     """The executor must honor each role's own AgentConfig (model, temperature,
     max_tokens, system prompt override) — command-bar style overrides must not
-    flatten the five roles into one shared model."""
+    flatten the roles into one shared model."""
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -336,8 +336,12 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Settings", error.payload["message"])
         # Named, so "why did this fail?" can open the right role's config.
         self.assertEqual(error.payload["role"], "planner")
+        # Matched on the role marker, not on the word "planner" appearing
+        # somewhere in the prompt: the prompts name each other on purpose (the
+        # design agent is told the planner plans against its decision), so a
+        # bare keyword scan counts another role's call as this one's.
         planner_calls = [
-            c for c in self.mock_provider.calls if "planner" in c["system_prompt"].lower()
+            c for c in self.mock_provider.calls if "You are Codify Planner" in c["system_prompt"]
         ]
         self.assertEqual(planner_calls, [], "an unconfigured role must not be called")
 

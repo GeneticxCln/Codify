@@ -209,11 +209,22 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([entry["order"] for entry in roles], list(range(len(ROLES))))
         for entry in roles:
             self.assertTrue(entry["job"], f"{entry['role']} must say what it does")
-            self.assertIn(entry["timing"], ("once per goal, before any model call", "once per goal, before planning", "once per goal", "once per step"))
+            self.assertIn(
+                entry["timing"],
+                (
+                    "once per goal, before any model call",
+                    "once per goal, before planning",
+                    "once per goal, after the librarian",
+                    "once per goal",
+                    "once per step",
+                ),
+            )
         by_role = {entry["role"]: entry for entry in roles}
         self.assertIn("Never writes", by_role["librarian"]["job"])
+        self.assertIn("fixer still writes", by_role["design"]["job"])
         self.assertEqual(by_role["fixer"]["timing"], "once per step")
         self.assertEqual(by_role["librarian"]["timing"], "once per goal, before planning")
+        self.assertEqual(by_role["design"]["timing"], "once per goal, after the librarian")
 
     async def test_a_renamed_role_is_reported_by_its_new_name(self) -> None:
         await self.client.put(
@@ -510,6 +521,131 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         ws_id, goal_id = await self._seed_workspace_with_goal("ws-del-auth")
         self.assertEqual((await self.client.delete(f"/goals/{goal_id}")).status_code, 401)
         self.assertEqual((await self.client.delete(f"/workspaces/{ws_id}")).status_code, 401)
+
+    async def test_pinning_a_brand_contract_round_trips_and_clears(self) -> None:
+        """The pin is a workspace property, so it comes back on the workspace."""
+        ws_dir = self.root / "ws-brand"
+        ws_dir.mkdir()
+        (ws_dir / "DESIGN.md").write_text("# brand\n", encoding="utf-8")
+        r = await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": "BRAND", "root_path": str(ws_dir)},
+        )
+        ws_id = r.json()["id"]
+        self.assertEqual(r.json()["design_contract_path"], "", "a new workspace is unpinned")
+
+        r = await self.client.put(
+            f"/workspaces/{ws_id}/design-contract",
+            headers=self.headers, json={"path": "DESIGN.md"},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["design_contract_path"], "DESIGN.md")
+
+        # Every read of a workspace carries it, so a picker can show the pin
+        # without a second request per row.
+        listed = (await self.client.get("/workspaces", headers=self.headers)).json()
+        self.assertEqual(
+            [w["design_contract_path"] for w in listed if w["id"] == ws_id], ["DESIGN.md"]
+        )
+
+        r = await self.client.put(
+            f"/workspaces/{ws_id}/design-contract",
+            headers=self.headers, json={"path": ""},
+        )
+        self.assertEqual(r.json()["design_contract_path"], "")
+
+    async def test_pinning_refuses_what_it_cannot_read(self) -> None:
+        """An escape or a typo is refused while the screen is open, not discovered
+        as a mysterious absence of brand mid-goal."""
+        ws_dir = self.root / "ws-brand-refuse"
+        ws_dir.mkdir()
+        ws_id = (
+            await self.client.post(
+                "/workspaces", headers=self.headers,
+                json={"name": "BRAND-REFUSE", "root_path": str(ws_dir)},
+            )
+        ).json()["id"]
+
+        r = await self.client.put(
+            f"/workspaces/{ws_id}/design-contract",
+            headers=self.headers, json={"path": "../outside.md"},
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["code"], "design_contract_escape")
+
+        r = await self.client.put(
+            f"/workspaces/{ws_id}/design-contract",
+            headers=self.headers, json={"path": "nope.md"},
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["code"], "design_contract_missing")
+
+        # Refused means untouched, and an unknown workspace is a 404, not a 500.
+        self.assertEqual(
+            (await self.client.get(f"/workspaces/{ws_id}", headers=self.headers)).json()[
+                "design_contract_path"
+            ],
+            "",
+        )
+        r = await self.client.put(
+            "/workspaces/does-not-exist/design-contract",
+            headers=self.headers, json={"path": "DESIGN.md"},
+        )
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.json()["code"], "unknown_workspace")
+
+    async def test_pinning_rejects_unknown_fields(self) -> None:
+        ws_dir = self.root / "ws-brand-extra"
+        ws_dir.mkdir()
+        ws_id = (
+            await self.client.post(
+                "/workspaces", headers=self.headers,
+                json={"name": "BRAND-EXTRA", "root_path": str(ws_dir)},
+            )
+        ).json()["id"]
+        r = await self.client.put(
+            f"/workspaces/{ws_id}/design-contract",
+            headers=self.headers, json={"path": "", "brand": "sneaky"},
+        )
+        self.assertEqual(r.status_code, 422)
+
+    async def test_a_design_goal_mode_round_trips_and_an_unknown_one_is_refused(self) -> None:
+        """A goal's mode is what the client asked for and what storage keeps.
+
+        `mode` is a `Literal`, so a client inventing a third value gets a 422
+        rather than a goal that quietly runs the default pipeline — a goal that
+        silently is not what you asked for is worse than a refused request.
+        """
+        ws_dir = self.root / "ws-design"
+        ws_dir.mkdir()
+        ws_id = (
+            await self.client.post(
+                "/workspaces", headers=self.headers,
+                json={"name": "DESIGN-MODE", "root_path": str(ws_dir)},
+            )
+        ).json()["id"]
+
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "Draft the brand", "mode": "design"},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["mode"], "design")
+        goal_id = r.json()["id"]
+        r = await self.client.get(f"/goals/{goal_id}", headers=self.headers)
+        self.assertEqual(r.json()["mode"], "design", "the mode must survive storage")
+
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "Fix a bug"},
+        )
+        self.assertEqual(r.json()["mode"], "normal")
+
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "Rebrand", "mode": "brand"},
+        )
+        self.assertEqual(r.status_code, 422)
 
     async def test_workspaces_and_goals_lifecycle(self) -> None:
         ws_dir = self.root / "ws1"

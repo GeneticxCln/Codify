@@ -2,27 +2,29 @@
 
 Normative for agent slots, providers, registry, and `/settings/agents`. Persistence: `04`. Security: `03`.
 
-## 1. The 6 fixed pipeline slots + the gate slot
+## 1. The 7 fixed pipeline slots + the gate slot
 
-Exactly 6 pipeline slots, plus one pre-flight **gate** slot (`laya`). Users cannot add or remove
+Exactly 7 pipeline slots, plus one pre-flight **gate** slot (`laya`). Users cannot add or remove
 **roles**. Provider/model/key/`base_url` per slot are Settings-only.
 
-A slot is a **different ability**, not a different persona. One role reads the workspace, one writes
-it, one runs commands, one judges, one records — and the engine enforces that split rather than
-asking the prompts to be well behaved:
+A slot is a **different ability**, not a different persona. One role reads the workspace, one locks a
+direction, one writes it, one runs commands, one judges, one records — and the engine enforces that
+split rather than asking the prompts to be well behaved:
 
 | Slot (`role` id) | Ability | Job | Output schema |
 |---|---|---|---|
 | `laya` | typed decisions only | Typed pre-flight decisions (intent / risk / injection) — may fail the goal | `05` §5 |
 | `librarian` | **read** files, **search** the tree, read-only git, read-only inspect commands. Cannot write. | The evidence pack everything downstream plans from | `04` §4.0 |
+| `design` | reasons only, no tools; cannot write | The locked direction (artifact, design system, tokens, components, acceptance) that the planner plans against and the fixer obeys — or, in a design-deliverable goal, the workspace's own `DESIGN.md` in draft | `04` §4.0a, §4.0a.2 |
 | `planner` | reasons only, no tools | Ordered `PlanStep[]` from the goal + the evidence pack | `04` §4.1 |
 | `fixer` | **the only writer** | File edits | `04` §4.2 |
 | `verifier` | **the only role that executes a command** | Argv + verdict + what actually ran | `04` §4.3 |
 | `critic` | judgement only; **the only role that can stop a step** | approve / request-changes | `04` §4.4 |
 | `scribe` | wording only | summary + commit | `04` §4.5 |
 
-Timing: `laya`, `librarian` and `planner` run **once per goal**; `fixer`, `verifier`, `critic` and
-`scribe` run **once per step**. `GET /settings/roles` returns each slot's `job` and `timing`, and the
+Timing: `laya`, `librarian`, `design` and `planner` run **once per goal** (the design agent after the
+librarian, so it locks a direction from evidence rather than from a blank page); `fixer`, `verifier`,
+`critic` and `scribe` run **once per step**. `GET /settings/roles` returns each slot's `job` and `timing`, and the
 settings screen renders that rather than keeping its own description — a second copy is how a screen
 ends up promising an ability the engine no longer grants.
 
@@ -48,6 +50,37 @@ Two rules make its evidence usable:
    logged (`librarian cited N path(s) it never saw`). A confident list of files that do not exist is
    how "planning from the repository" becomes planning from a hallucination.
 
+### 1.1a Why the design agent exists
+
+The librarian fixed the *where*; the design agent fixes the *what it should look like*. Without it,
+each step's fixer invented its own palette, type scale and component names, so a multi-step UI goal
+drifted — the first step's `#2f81f7` and the fourth step's `#3b82f6` were both "the accent" — and the
+critic had no standard to judge against beyond the request's wording.
+
+It is one bounded call between the librarian and the planner, with no tools: it decides, it writes
+nothing, so the fixer stays the only role whose changes reach the disk. The contract it locks is
+published (`design_contract`) and read back per step (`_design_for`), so the planner, the fixer and
+the critic work from the same direction rather than from the prompt that happened to produce it.
+
+Two rules keep it from becoming a tax on goals with no visual surface:
+
+1. **It may decline.** `applies: false` (or any reply that names no direction) is an answer, not a
+   failure: nothing is published, and the planner is told there is no direction instead of being
+   handed an invented one.
+2. **It can never fail a goal.** A provider error or a malformed reply is logged as a warning and
+   planning continues without a contract — the same rule the librarian gets, for the same reason: an
+   aid that can kill the goal is a liability, not an aid.
+
+Its output contract, vocabulary and bounds live in `04` §4.0a.
+
+**One goal mode inverts this without changing the slot.** A goal created with `mode: "design"`
+(`04` §4.0a.2) makes the workspace's brand contract the deliverable: the same agent, the same single
+bounded call, the same no-tools rule — but its `design_md` body is what a planned step writes to
+`DESIGN.md`, verbatim and whole. The invariants are untouched, which is the point: the fixer is still
+the only writer, the verifier still reviews instead of running something it does not have, the critic
+still decides whether the step stands, and the pin is still the user's own action. Nothing in the
+engine ever sets `workspaces.design_contract_path` from a model's output.
+
 ### 1.2 Legacy role ids
 
 An earlier build shipped `planner` / `coder` / `tester` / `reviewer` / `summarizer`. On startup
@@ -65,7 +98,7 @@ model the user had actually been running.
 `provider` is a **slug string**, not a closed enum. Engine ships four **built-in** slugs. Settings MAY save any other slug if `protocol` + `base_url` are set.
 
 ```python
-AgentRole = Literal["laya", "librarian", "planner", "fixer", "verifier", "critic", "scribe"]
+AgentRole = Literal["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"]
 ProviderProtocol = Literal["anthropic", "openai_compat", "ollama"]
 SYSTEM_PROMPT_OVERRIDE_MAX = 32768
 
@@ -198,6 +231,7 @@ an existing database gains them by `ALTER TABLE`, keeping every configured role)
 DEFAULT_AGENTS = [
     _role("laya",       "Laya — System-1 Gate", 0.0,  512),
     _role("librarian",  "Librarian Agent",     0.1, 8192),
+    _role("design",     "Design Agent",        0.4, 8192),
     _role("planner",    "Planner Agent",       0.3, 4096),
     _role("fixer",      "Fixer Agent",         0.1, 8192),
     _role("verifier",   "Verifier Agent",      0.0, 2048),
@@ -232,7 +266,7 @@ Adding a **harness** later = one catalog row, not a new class. Adding a new **wi
 
 ## 4. Registry / Orchestrator / API
 
-`AgentRegistryService` only mutator. `list_configs` = 7 rows (gate + 6 pipeline slots), fixed role
+`AgentRegistryService` only mutator. `list_configs` = 8 rows (gate + 7 pipeline slots), fixed role
 order as in `ROLES`.
 
 `GET /settings/providers` → `{builtins: [...], custom: [slugs on rows not in builtins]}`.

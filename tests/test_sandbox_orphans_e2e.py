@@ -12,11 +12,20 @@ module drives both paths for real, against a real `python3 -m engine` subprocess
     POST /workspaces → POST /goals → (planning) → POST /goals/{id}/start
 
 with a fake provider registered as the roles' Ollama `base_url` — real HTTP over real
-sockets, no engine code patched or imported by the test. Two scenarios, one fixture:
+sockets, no engine code patched or imported by the test. Three scenarios, one fixture:
 
 * the **verifier** asks the sandbox to run a workspace script (the model-driven path);
 * the workspace's **post-commit hook** execs the same script (the engine's own path:
-  a commit runs hooks, git waits for them, and hooks are workspace content).
+  a commit runs hooks, git waits for them, and hooks are workspace content);
+* a client calls `POST /workspaces/browse` while a goal runs (the engine's own GUI
+  spawn: the native folder picker, `python3 -c <GTK source>`, which lives until a
+  human answers it). A real dialog can neither be driven headlessly nor be allowed
+  to pop on the user's screen, so the engine's `PATH` is prefixed with a shim whose
+  `python3` *is* the probe: the route's own `shutil.which` resolves it, the shim
+  answers exactly the invocation whose `-c` source carries the engine's picker
+  marker (`engine/app.py::PICKER_MARKER`), and every other `python3` call — sandbox
+  commands, git — is forwarded to the real interpreter unchanged. The hijack is
+  scoped to the one spawn under test.
 
 The script writes a heartbeat to disk and leaves a long-sleeping grandchild on the
 process table. The moment that grandchild exists — proving the process is *running*,
@@ -59,6 +68,7 @@ from tests.process_probe import (
     wait_for_text,
     wait_until,
 )
+from tests.versioned import post_versioned
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -79,6 +89,13 @@ COMMIT_MARKER = "test: codify-live-engine-commit-marker"
 GUARDED_SLEEPER = f"spawn_guard\\.py.*{SLEEPER}"
 GUARDED_COMMIT = f"spawn_guard\\.py.*{COMMIT_MARKER}"
 
+# The folder-picker scenario. The shim directory's *name* is the picker process's
+# marker (the guard's argv carries the shim path, so one ERE names "the guard, with
+# this picker"); the grandchild reuses ORPHAN_PROBE and the heartbeat reuses the
+# same probe script as the other scenarios — one vocabulary, three spawns.
+PICKER_PROBE = "codify-live-picker-probe"
+GUARDED_PICKER = f"spawn_guard\\.py.*{PICKER_PROBE}"
+
 # What the engine ends up running. The heartbeat is the "is anything still writing?"
 # half; the grandchild is the "did anything outlive the engine?" half. Its 300s sleep is
 # longer than every timeout in this test, so it can only stop by being killed.
@@ -95,6 +112,20 @@ while True:
     with heartbeat.open("a", encoding="utf-8") as handle:
         handle.write("beat\\n")
     time.sleep(0.2)
+"""
+
+
+# The picker scenario's shim: a `python3` the engine resolves instead of the real
+# interpreter. The route's GTK source announces itself with the marker hardcoded in
+# engine/app.py::PICKER_MARKER — if that marker ever changes, this scenario fails at
+# its "the picker never opened" precondition rather than passing silently. Everything
+# else is forwarded to the real python3, so the goal running alongside is unaffected.
+_SHIM_SOURCE = """\
+#!/bin/sh
+case "$2" in
+  *codify-folder-picker*) exec "{realpy}" "{workspace}/{sleeper}" ;;
+  *) exec "{realpy}" "$@" ;;
+esac
 """
 
 
@@ -123,14 +154,21 @@ def _pump_lines(pipe: IO[bytes]) -> queue.Queue[bytes]:
     return lines
 
 
-def _spawn_engine(home: Path) -> subprocess.Popen[bytes]:
+def _spawn_engine(
+    home: Path, extra_env: dict[str, str] | None = None
+) -> subprocess.Popen[bytes]:
     # A fresh port per attempt: the probe-release-rebind gap is a TOCTOU we cannot
     # remove, so a boot that loses it must be retried with a different port, not the
     # same losing one (the same shape as tests/test_concurrent_streams_ws.py).
     return subprocess.Popen(
         [sys.executable, "-m", "engine"],
         cwd=str(PROJECT_ROOT),
-        env={**os.environ, "CODIFY_HOME": str(home), "CODIFY_PORT": str(_free_port())},
+        env={
+            **os.environ,
+            "CODIFY_HOME": str(home),
+            "CODIFY_PORT": str(_free_port()),
+            **(extra_env or {}),
+        },
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -153,7 +191,9 @@ def _kill_and_collect(engine: subprocess.Popen[bytes]) -> str:
     return stderr.decode(errors="replace")[-800:]
 
 
-def _boot_engine(home: Path, timeout: float = 20.0) -> tuple[subprocess.Popen[bytes], str, int]:
+def _boot_engine(
+    home: Path, timeout: float = 20.0, extra_env: dict[str, str] | None = None
+) -> tuple[subprocess.Popen[bytes], str, int]:
     """Boot a real engine and read `CODIFY_ENGINE token=… port=…` off its stdout.
 
     A boot death — or a handshake that never arrives — is retried once with a fresh
@@ -161,7 +201,7 @@ def _boot_engine(home: Path, timeout: float = 20.0) -> tuple[subprocess.Popen[by
     stderr, which is the only thing a dead boot leaves behind.
     """
     for attempt in (1, 2):
-        engine = _spawn_engine(home)
+        engine = _spawn_engine(home, extra_env)
         stdout = engine.stdout
         assert stdout is not None, "the engine is spawned with a stdout pipe"
         lines = _pump_lines(stdout)
@@ -411,6 +451,123 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
         )
         self.assert_workspace_froze(heartbeat)
 
+    def test_killing_the_engine_takes_an_open_folder_picker_with_it(self) -> None:
+        """The engine's own GUI spawn: the native folder picker behind /workspaces/browse.
+
+        The picker is `python3 -c <GTK source>` resolved by `shutil.which` — a dialog
+        that lives until a human answers it, so the 120 s timeout never fires in the
+        case that matters, and nothing but the guard closes it when the engine dies.
+        A real dialog can neither be driven headlessly nor be allowed to pop on the
+        user's screen, so the engine's `PATH` is prefixed with a shim whose `python3`
+        *is* the probe: the route's own `shutil.which` resolves it (the argv keeps its
+        guarded shape — `[python, spawn_guard.py, <shim>, "-c", <GTK source>]`), and
+        the shim answers only the invocation whose `-c` source carries the engine's
+        own picker marker, forwarding every other `python3` call — sandbox commands,
+        git — to the real interpreter, so the engine works exactly as it always does.
+        The browse call runs on a thread, the way a user clicks it while a goal runs;
+        the engine is SIGKILLed while the "dialog" is open.
+        """
+        workspace = self._scenario_workspace()
+        (workspace / SLEEPER).write_text(SLEEPER_SOURCE, encoding="utf-8")
+        heartbeat = workspace / HEARTBEAT
+
+        # The shim: a directory whose `python3` is the probe. Its path carries the
+        # picker marker (the guard's argv names it, so one ERE matches "the guard,
+        # with this picker" and nothing else), and it hands off to the real
+        # interpreter for every invocation that is not the picker itself.
+        shim_tmp = tempfile.TemporaryDirectory(prefix=f"{PICKER_PROBE}-")
+        self.addCleanup(shim_tmp.cleanup)
+        shim_dir = Path(shim_tmp.name).resolve()
+        real_python = subprocess.run(
+            ["sh", "-c", "command -v python3"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        assert real_python, "a real python3 must exist for the shim to forward to"
+        shim = shim_dir / "python3"
+        shim.write_text(
+            _SHIM_SOURCE.format(
+                realpy=real_python, workspace=str(workspace), sleeper=SLEEPER
+            ),
+            encoding="utf-8",
+        )
+        shim.chmod(0o755)
+
+        # The engine inherits the shim-prefixed PATH and nothing else unusual; it
+        # boots, plans and runs goals exactly as in the other scenarios.
+        home_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(home_tmp.cleanup)  # last: the engine's state lives here while it dies
+        engine, token, port = _boot_engine(
+            Path(home_tmp.name).resolve(),
+            extra_env={"PATH": f"{shim_dir}:{os.environ['PATH']}"},
+        )
+        # Cleanups run last-registered-first, so the engine is SIGKILLed before the
+        # sweeps — the sweeps only ever find what a *broken* guard left behind.
+        self.addCleanup(sigkill_matching, PICKER_PROBE)  # the shim process
+        self.addCleanup(sigkill_matching, GUARDED_PICKER)  # the guard
+        self.addCleanup(sigkill_matching, ORPHAN_PROBE)  # the grandchild
+        self.addCleanup(_kill_and_collect, engine)
+        client = httpx.Client(
+            base_url=f"http://127.0.0.1:{port}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=10,
+        )
+        self.addCleanup(client.close)
+
+        result: dict[str, Any] = {}
+
+        def browse() -> None:
+            try:
+                response = client.post("/workspaces/browse", timeout=30)
+                result["status"] = response.status_code
+                result["body"] = response.json()
+            except Exception as exc:  # the expected outcome is the request dying
+                result["error"] = repr(exc)
+
+        thread = threading.Thread(target=browse, daemon=True)
+        thread.start()
+
+        self.assertTrue(
+            wait_until(PICKER_PROBE, matches=True, timeout=30),
+            "the engine never opened the folder picker — the route's shutil.which must "
+            f"resolve the shimmed python3 (engine alive: {engine.poll() is None}, "
+            f"shim at {shim_dir}, browse answered: {result})",
+        )
+        # The "dialog" is open: the half-finished state the guard is claimed to clean
+        # up. Every survivor pattern must be live *now*, or the "gone afterwards"
+        # assertions below would pass for processes that were never there.
+        self.assertNotEqual(
+            [], pids_matching(GUARDED_PICKER),
+            "the engine opened the picker with no guard in front of it",
+        )
+        self.assertNotEqual(
+            [], pids_matching(ORPHAN_PROBE),
+            "the picker never spawned its grandchild",
+        )
+        before = wait_for_text(heartbeat)
+        self.assertNotEqual("", before, "the open picker never wrote a heartbeat")
+
+        engine.kill()  # SIGKILL: exactly what closing the desktop window does
+        engine.wait(timeout=10)
+
+        self.assertTrue(
+            wait_until(ORPHAN_PROBE, matches=False, timeout=15),
+            "the picker's grandchild outlived the engine that opened the dialog",
+        )
+        self.assertTrue(
+            wait_until(PICKER_PROBE, matches=False, timeout=15),
+            "the picker process outlived the engine that opened it",
+        )
+        self.assertTrue(
+            wait_until(GUARDED_PICKER, matches=False, timeout=15),
+            "the guard process itself outlived the engine it was watching",
+        )
+        self.assert_workspace_froze(heartbeat)
+        # The request half: the browse caller must not hang forever on a dialog whose
+        # engine is gone. The guard's group kill closes the request one way or
+        # another — a broken pipe here, an answered (or failed) response there — and
+        # any of those is the caller returning; only a hang is the bug.
+        thread.join(timeout=15)
+        self.assertFalse(thread.is_alive(), "the browse request never came back")
+
     def assert_workspace_froze(self, heartbeat: Path) -> None:
         """The filesystem half: a process that is gone cannot append another line.
 
@@ -488,7 +645,7 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
         self._configure_roles(client, ai_port)
         workspace_id = self._create_workspace(client, workspace)
         goal_id = self._create_goal(client, workspace_id)
-        self._start_goal(client, goal_id)
+        self._start_goal(client, goal_id, engine)
         return client, goal_id, engine
 
     def _configure_roles(self, client: httpx.Client, ai_port: int) -> None:
@@ -516,24 +673,25 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
         self.assertEqual(200, response.status_code, response.text)
         return str(response.json()["id"])
 
-    def _start_goal(self, client: httpx.Client, goal_id: str) -> None:
-        """Wait for the background planning pass, then start the goal exactly like the
-        chat does: /start is version-protected, so the version must be the server's
-        latest — a stale one is a 409 (same dance as test_concurrent_streams_ws.py)."""
-        deadline = time.monotonic() + 30
-        while True:
-            goal = client.get(f"/goals/{goal_id}").json()
-            if goal["status"] == "PENDING":
-                break
-            if goal["status"] in ("FAILED", "CANCELLED"):
-                raise AssertionError(f"planning did not produce a startable goal: {_diagnose(client, goal_id)}")
-            if time.monotonic() > deadline:
-                raise AssertionError(f"the goal never got a plan: {_diagnose(client, goal_id)}")
-            time.sleep(0.05)
-        response = client.post(
-            f"/goals/{goal_id}/start", json={"expected_version": goal["version"]}
+    def _start_goal(
+        self, client: httpx.Client, goal_id: str, engine: subprocess.Popen[bytes] | None = None
+    ) -> None:
+        """Wait for the plan, then start the goal exactly like the chat does.
+
+        Both halves are the same problem. `/start` is version-protected, so the
+        version has to be the one the engine holds *when the request lands* — and
+        planning is still running when this is called, so the goal is PLANNING (which
+        the engine answers 409 to) long before it is startable. `tests/versioned.py`
+        owns that reading: it waits the goal out, quotes the version it just read,
+        re-reads and re-sends if the version moved under it, and says which of the
+        four ways this failed — with the engine's own stderr and the goal's event log
+        attached — if it did not work. The hand-rolled loop this replaced reported
+        the same two failures as a bare `assertEqual(200, ...)` with a 409 body.
+        """
+        post_versioned(
+            client, goal_id, "start", timeout=30.0,
+            diagnose=lambda: _diagnose(client, goal_id, engine),
         )
-        self.assertEqual(200, response.status_code, response.text)
 
 
 if __name__ == "__main__":

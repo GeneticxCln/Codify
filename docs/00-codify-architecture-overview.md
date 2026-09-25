@@ -1,13 +1,13 @@
 # Codify — Architecture Overview (v2)
 
-Normative. If a later doc contradicts this file on product shape (7 roles, Settings-only mutation, loopback Engine), this file wins. Field-level contracts live in `01`–`04`.
+Normative. If a later doc contradicts this file on product shape (8 roles, Settings-only mutation, loopback Engine), this file wins. Field-level contracts live in `01`–`04`.
 
 ## 1. What changed from the original OCDify/Codify draft
 
 The original design was solid for a single-LLM, single-agent tool. The v2 requirement changes the core execution model:
 
-- One orchestrating AI controls **7 roles**: the `laya` pre-flight gate plus 6 pipeline stages
-  (`librarian`, `planner`, `fixer`, `verifier`, `critic`, `scribe`).
+- One orchestrating AI controls **8 roles**: the `laya` pre-flight gate plus 7 pipeline stages
+  (`librarian`, `design`, `planner`, `fixer`, `verifier`, `critic`, `scribe`).
 - Each sub-agent MAY be assigned a different model from a different provider.
 - Sub-agents are configurable **only** from the Settings screen. Nowhere else in the app MAY change which model a sub-agent uses.
 
@@ -37,7 +37,7 @@ The original design was solid for a single-LLM, single-agent tool. The v2 requir
 | **Codify Desktop** | Rust + Tauri | UI, Engine HTTP/WS client, exclusive Settings/Agents screen |
 | **Codify Engine** | Python + FastAPI | Workspace/goal registry, planning, execution, file/git/sandbox ops, event streaming |
 | **Codify Orchestrator** | Inside Engine | Decomposes a goal into phases; dispatches each phase to the slot that has the ability for it |
-| **Sub-Agents** | Fixed set of 6 (+ gate) | `librarian`, `planner`, `fixer`, `verifier`, `critic`, `scribe` |
+| **Sub-Agents** | Fixed set of 7 (+ gate) | `librarian`, `design`, `planner`, `fixer`, `verifier`, `critic`, `scribe` |
 | **Provider Adapters** | Inside Engine | OpenAI, Anthropic, Google, local/Ollama |
 
 ## 4. High-level flow (updated)
@@ -52,7 +52,10 @@ Engine: GoalService.create → Goal(status=PLANNING, version=0)
 Orchestrator.plan(goal) → Librarian Agent (reconnaissance, ≤3 rounds, read-only)
         │                    evidence pack, checked against what it actually read
         ▼
-                         Planner Agent (goal + evidence)
+                         Design Agent (lock the direction, no tools)
+        │                    design contract, published and read back per step
+        ▼
+                         Planner Agent (goal + evidence + contract)
         │
         ▼
 Goal has PlanStep[]  (goal.status=PENDING)
@@ -70,7 +73,8 @@ Orchestrator.run(goal)
         │
         ▼
 WS events: goal_status, step_status, log, diff, test_result,
-           file_change_summary, agent_assigned, library_evidence, error
+           file_change_summary, agent_assigned, library_evidence,
+           design_contract, error
 ```
 
 Critic rejection: Desktop click required to retry the step (`04` §4.3). Settings never appears on this path.
@@ -87,7 +91,7 @@ Critic rejection: Desktop click required to retry the step (`04` §4.3). Setting
 
 ## 6. Invariants (non-negotiable)
 
-1. Exactly seven `AgentRole` values (`laya`, `librarian`, `planner`, `fixer`, `verifier`,
+1. Exactly eight `AgentRole` values (`laya`, `librarian`, `design`, `planner`, `fixer`, `verifier`,
    `critic`, `scribe`). No create/delete of slots.
 2. Only `PUT /settings/agents/{role}` mutates agent config. `POST /goals` and `POST /goals/{id}/start` MUST reject unknown fields including `agent_config`.
 3. Engine binds `127.0.0.1`. Every HTTP/WS request requires `Authorization: Bearer <boot_token>`.

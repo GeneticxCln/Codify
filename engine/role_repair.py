@@ -103,8 +103,8 @@ def _fallback_verdict(
 def _add_note(plan: RepairPlan, note: str) -> None:
     """Record a provider-level caveat once.
 
-    Notes are reported per provider, not per role, so seven roles on an unreachable
-    provider must not produce the same sentence seven times — a wall of identical
+    Notes are reported per provider, not per role, so eight roles on an unreachable
+    provider must not produce the same sentence eight times — a wall of identical
     warnings is how a real one gets skimmed past.
     """
     if note not in plan.notes:

@@ -6,12 +6,28 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 # The pipeline slots. Each one has a different *ability*, not a different
-# persona: the librarian is the only role that reads the workspace, the fixer the
-# only one that writes it, the verifier the only one that runs a command, and the
-# critic the only one that can stop a step. `laya` is the pre-flight gate, not a
-# pipeline stage (see docs/05).
-AgentRole = Literal["laya", "librarian", "planner", "fixer", "verifier", "critic", "scribe"]
+# persona: the librarian is the only role that reads the workspace, the design
+# agent the only one that locks a direction, the fixer the only one that writes
+# it, the verifier the only one that runs a command, and the critic the only one
+# that can stop a step. `laya` is the pre-flight gate, not a pipeline stage (see
+# docs/05).
+AgentRole = Literal[
+    "laya",
+    "librarian",
+    "design",
+    "planner",
+    "fixer",
+    "verifier",
+    "critic",
+    "scribe",
+]
 ProviderProtocol = Literal["anthropic", "openai_compat", "ollama", "google"]
+# What a goal is for. "design" inverts the design role's usual relationship to
+# the brand file: instead of deriving a contract from an existing one (or from
+# nothing), its output becomes the workspace's DESIGN.md — reviewed by the
+# critic before it is offered to be pinned.
+GoalMode = Literal["normal", "design"]
+
 GoalStatus = Literal[
     "PLANNING", "PENDING", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"
 ]
@@ -26,6 +42,7 @@ EventType = Literal[
     "agent_assigned",
     "provider_fallback",
     "library_evidence",
+    "design_contract",
     "plan_updated",
     "laya_decision",
     "fix_retry",
@@ -42,6 +59,7 @@ PROVIDER_SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 ROLES: tuple[AgentRole, ...] = (
     "laya",
     "librarian",
+    "design",
     "planner",
     "fixer",
     "verifier",
@@ -55,6 +73,7 @@ ROLES: tuple[AgentRole, ...] = (
 ROLE_JOB: dict[str, str] = {
     "laya": "Typed pre-flight decisions (intent, risk, injection). Can stop the goal before any model runs.",
     "librarian": "Reads the workspace: file reads, pattern search, git history, read-only inspect commands. Never writes, never commits.",
+    "design": "Locks the creative direction a goal is built against: artifact, design system, tokens, components, acceptance. Reasons only — the fixer still writes the files.",
     "planner": "Turns the goal plus the librarian's evidence into ordered steps. Reasons only — no tools.",
     "fixer": "Writes the file edits a step asks for. The only role whose changes reach the disk.",
     "verifier": "Runs one allowlisted command and reports what actually happened. Can run commands nothing else may.",
@@ -67,6 +86,7 @@ ROLE_JOB: dict[str, str] = {
 ROLE_TIMING: dict[str, str] = {
     "laya": "once per goal, before any model call",
     "librarian": "once per goal, before planning",
+    "design": "once per goal, after the librarian",
     "planner": "once per goal",
     "fixer": "once per step",
     "verifier": "once per step",
@@ -189,7 +209,20 @@ class Workspace(BaseModel):
     id: str
     name: str = Field(..., min_length=1, max_length=120)
     root_path: str
+    # The workspace's brand contract: a path *relative to the root*, or "" for
+    # unpinned. When set, the design agent reads it before deciding a direction
+    # and must obey it instead of proposing one of its own. Convention is the
+    # fallback — a `DESIGN.md` at the workspace root is discovered without being
+    # pinned — so this field records a deliberate choice, not the only way to have
+    # a contract. See docs/04 §4.0a.
+    design_contract_path: str = ""
     created_at: float
+
+
+class WorkspaceDesignContract(BaseModel):
+    """Pin, or (with an empty path) unpin, a workspace's brand contract."""
+    model_config = {"extra": "forbid"}
+    path: str = Field("", max_length=400)
 
 
 class Goal(BaseModel):
@@ -204,6 +237,11 @@ class Goal(BaseModel):
     plan_only: bool = False
     # parallel: independent steps of this goal may run concurrently.
     parallel: bool = False
+    # mode: what this goal is *for*. "normal" is the default pipeline; "design"
+    # makes the workspace's own brand contract the deliverable — the design
+    # agent proposes/revises DESIGN.md, a step writes it for real, and the
+    # critic reviews it before anyone pins it. See docs/04 §4.0a.2.
+    mode: GoalMode = "normal"
     version: int = Field(0, ge=0)
     created_at: float
     updated_at: float
@@ -260,6 +298,10 @@ class GoalCreate(BaseModel):
     dry_run: bool = False
     plan_only: bool = False
     parallel: bool = False
+    # Which pipeline this goal runs. Only "normal" and "design" exist; a client
+    # sending anything else gets a 422 from the model itself, not a goal that
+    # quietly runs the default.
+    mode: GoalMode = "normal"
     provider: str | None = None
     model: str | None = None
 
@@ -322,11 +364,16 @@ DEFAULT_AGENTS: list[AgentConfig] = [
     # no tokens); otherwise this role's LLM answers the same typed contract as a
     # documented fallback. See engine/laya.py.
     _role("laya", "Laya — System-1 Gate", temperature=0.0, max_tokens=512),
-    # The six pipeline roles, in execution order. Token budgets follow the job:
+    # The seven pipeline roles, in execution order. Token budgets follow the job:
     # the librarian answers with evidence packs rather than prose but needs room
     # for what it quotes, the fixer emits whole files (largest), and the verifier
     # and scribe answer with a few lines.
     _role("librarian", "Librarian Agent", temperature=0.1, max_tokens=8192),
+    # Direction-setting is the most open-ended reasoning job in the pipeline, so
+    # it runs warmer than the planner; and it can hand back a whole DESIGN.md
+    # body for the fixer to write, which is why its budget is the librarian's
+    # rather than the critic's.
+    _role("design", "Design Agent", temperature=0.4, max_tokens=8192),
     _role("planner", "Planner Agent", temperature=0.3, max_tokens=4096),
     _role("fixer", "Fixer Agent", temperature=0.1, max_tokens=8192),
     _role("verifier", "Verifier Agent", temperature=0.0, max_tokens=2048),

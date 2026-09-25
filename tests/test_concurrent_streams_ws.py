@@ -33,6 +33,18 @@ layers cannot drift. `websockets` is a declared dependency rather than an option
 one: uvicorn resolves its ws implementation to `None` when none is importable and
 then serves no WebSocket at all, so an install missing it has no chat to isolate —
 a test that skipped here would hide exactly the gap worth catching.
+
+Two flakes this suite refuses, and how. A pause or cancel can lose a race
+against the executor's own status transitions: the status check and the version
+check are two reads the test cannot make atomic, so the engine can legally
+answer 409 (`version_conflict` or `illegal_status`) to a request whose *moment*
+was valid. The lifecycle tasks retry exactly those two codes — re-read the
+version, re-send, deadline-bounded; any other refusal, or a goal that reached a
+terminal state before the request could matter, still fails loudly. Pacing makes
+the window; nothing here depends on winning a lottery. And a WebSocket that
+dies mid-drain is diagnosed rather than divined: the close names itself in the
+assertion, and the engine's stderr tail is printed whenever the test fails,
+because the cause of a 1011 lives on the server side.
 """
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
@@ -47,7 +59,7 @@ import tempfile
 import threading
 import time
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -63,8 +75,25 @@ from tests.stream_isolation import (
     assert_replay_equals_live,
     assert_stream_pure,
 )
+from tests.versioned import post_versioned_async
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Every goal here is tiny — one planner step, a handful of role calls — so a fake
+# provider that answers instantly finishes a goal in a few milliseconds, and
+# "pause/cancel mid-run" becomes a lottery: by the time the request lands, the goal
+# is COMPLETED and /pause correctly answers 409 (that is how this test failed on
+# 3.10, whose slower startup lost a race the 3.14 box won). Holding each reply
+# briefly makes the mid-run window deterministic instead of a race, and the server
+# is threaded so the four goals still work concurrently, as they do against a real
+# provider — a serialising fake would make the goals take turns, which is not the
+# interleaving this test claims to isolate.
+_REPLY_PACE_SECONDS = 0.2
+
+# The races a mid-run interaction can lose against the executor, and what the
+# engine answers when one is lost. Both refusals are 409; the body's code says
+# which check refused, so a retry can be aimed at exactly the legal races.
+_RACE_CODES = ("version_conflict", "illegal_status")
 
 
 def _free_port() -> int:
@@ -83,6 +112,9 @@ class _FakeAIHandler(BaseHTTPRequestHandler):
 
     def _post(self) -> None:
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        # See _REPLY_PACE_SECONDS: the delay is what keeps a goal RUNNING long
+        # enough for a mid-run pause or cancel to be a certainty, not a coin flip.
+        time.sleep(_REPLY_PACE_SECONDS)
         # Ollama's /api/generate carries the whole prompt in one field.
         prompt = f"{body.get('system', '')}\n{body.get('prompt', body.get('messages', ''))}"
         marker = (
@@ -156,7 +188,7 @@ class _FakeAIHandler(BaseHTTPRequestHandler):
 class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_goals_isolated_over_real_websockets(self) -> None:
         ai_port = _free_port()
-        fake = HTTPServer(("127.0.0.1", ai_port), _FakeAIHandler)
+        fake = ThreadingHTTPServer(("127.0.0.1", ai_port), _FakeAIHandler)
         threading.Thread(target=fake.serve_forever, daemon=True).start()
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -185,7 +217,7 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                     # The engine's Ollama base_url is a config field, so the fake
                     # AI server is registered like a user's local endpoint would
                     # be — no code is patched, the engine talks over real HTTP.
-                    for role in ("planner", "fixer", "verifier", "critic", "scribe", "librarian", "laya"):
+                    for role in ("planner", "fixer", "verifier", "critic", "scribe", "design", "librarian", "laya"):
                         r = await client.put(f"/settings/agents/{role}", json={
                             "provider": "ollama",
                             "base_url": f"http://127.0.0.1:{ai_port}",
@@ -277,6 +309,13 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                 # Popen warns "subprocess still running" at collection time.
                 engine.kill()
                 engine.wait()
+                # A WebSocket that dies with 1011 is the client seeing the
+                # symptom; the cause is in the engine's stderr, which used to
+                # die unprinted with the test. A failure gets its diagnosis in
+                # the output; the pass path leaves the pipe unread.
+                if engine.stderr and sys.exc_info()[0] is not None:
+                    tail = engine.stderr.read().decode(errors="replace")[-3000:]
+                    print(f"=== engine stderr tail ===\n{tail}", file=sys.stderr, flush=True)
                 for stream in (engine.stdout, engine.stderr):
                     if stream:
                         stream.close()
@@ -323,21 +362,67 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
             engine = spawn()
         raise AssertionError("unreachable")
 
-    async def _run_to_completion(self, client: "httpx.AsyncClient", goal_id: str) -> None:
-        """Start through the API the way the chat does: planning runs in the
-        background after POST /goals, so poll until the plan exists (PENDING),
-        then start with the version the server reports — /start is
-        version-protected and a stale version is a 409."""
-        deadline = time.monotonic() + 30
-        while True:
-            g = (await client.get(f"/goals/{goal_id}")).json()
-            if g["status"] == "PENDING":
-                break
-            if time.monotonic() > deadline:
-                raise AssertionError(f"goal never got a plan (status={g['status']})")
+    @staticmethod
+    async def _versioned(
+        client: "httpx.AsyncClient", goal_id: str, action: str,
+    ) -> httpx.Response:
+        """POST a version-protected action, re-reading and re-sending on 409.
+
+        `expected_version` closes the engine's double-apply window, which makes
+        it a race for everyone else: between reading the version and the request
+        landing, the executor may legally bump the goal (a step finished, an
+        event published). Only the two codes that mean "the goal moved under
+        you" are retried — read fresh, re-send, bounded by a deadline. Any other
+        status is returned for the caller to judge.
+        """
+        deadline = time.monotonic() + 15
+        r = await client.post(
+            f"/goals/{goal_id}/{action}",
+            json={"expected_version": (await client.get(f"/goals/{goal_id}")).json()["version"]},
+        )
+        while (
+            r.status_code == 409
+            and r.json().get("code") in _RACE_CODES
+            and time.monotonic() < deadline
+        ):
             await asyncio.sleep(0.05)
-        r = await client.post(f"/goals/{goal_id}/start", json={"expected_version": g["version"]})
-        self.assertEqual(r.status_code, 200, "goal must start")
+            r = await client.post(
+                f"/goals/{goal_id}/{action}",
+                json={"expected_version": (await client.get(f"/goals/{goal_id}")).json()["version"]},
+            )
+        return r
+
+    @staticmethod
+    async def _await_step_started(
+        client: "httpx.AsyncClient", goal_id: str, timeout: float = 30.0,
+    ) -> str:
+        """Wait until a step is no longer PENDING, and return the goal's status.
+
+        The mid-run moment a pause or cancel aims at. Returning the status (not
+        a bare signal) lets the caller tell a running goal from one that went
+        terminal inside the window — the caller decides whether that is a lost
+        race or a broken premise, instead of the 409 deciding it opaquely.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            detail = (await client.get(f"/goals/{goal_id}")).json()
+            steps = detail.get("steps") or []
+            if any(s.get("status") != "PENDING" for s in steps):
+                return str(detail["status"])
+            await asyncio.sleep(0.01)
+        raise AssertionError("the goal never started a step")
+
+    async def _run_to_completion(self, client: "httpx.AsyncClient", goal_id: str) -> None:
+        """Start through the API the way the chat does, then wait it out.
+
+        Planning runs in the background after POST /goals, and `/start` is
+        version-protected, so "wait for a plan, then quote the version you just
+        read" is the whole shape. `tests/versioned.py` owns that now for the same
+        reason the mid-run helper below does: the version has to be the one the
+        engine holds when the request lands, and only the engine can say whether a
+        refusal was a lost race or a broken premise.
+        """
+        await post_versioned_async(client, goal_id, "start", timeout=30.0)
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             g = (await client.get(f"/goals/{goal_id}")).json()
@@ -388,31 +473,15 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
         checks the status between steps and stops, so the stream must end at
         the cancel with nothing dribbling out afterwards.
         """
-        deadline = time.monotonic() + 30
-        while True:
-            g = (await client.get(f"/goals/{goal_id}")).json()
-            if g["status"] == "PENDING":
-                break
-            if time.monotonic() > deadline:
-                raise AssertionError(f"goal never got a plan (status={g['status']})")
-            await asyncio.sleep(0.05)
-        r = await client.post(f"/goals/{goal_id}/start", json={"expected_version": g["version"]})
-        self.assertEqual(r.status_code, 200, "goal must start")
+        await post_versioned_async(client, goal_id, "start", timeout=30.0)
 
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            detail = (await client.get(f"/goals/{goal_id}")).json()
-            steps = detail.get("steps") or []
-            if any(s.get("status") != "PENDING" for s in steps):
-                break
-            await asyncio.sleep(0.01)
-        else:
-            raise AssertionError("delta never started a step — nothing to cancel")
-
-        r = await client.post(
-            f"/goals/{goal_id}/cancel",
-            json={"expected_version": (await client.get(f"/goals/{goal_id}")).json()["version"]},
-        )
+        status = await self._await_step_started(client, goal_id)
+        r = await self._versioned(client, goal_id, "cancel")
+        # A terminal status here is a failure, not a lost race: delta cannot
+        # finish in this window by design, so only a broken premise or a real
+        # bug lands it anywhere but RUNNING at this point.
+        if status in ("COMPLETED", "FAILED", "CANCELLED"):
+            self.fail(f"delta reached {status} before the cancel could land")
         self.assertEqual(r.status_code, 200, "cancel must be accepted mid-run")
 
         deadline = time.monotonic() + 20
@@ -434,31 +503,15 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
         """
         # Start it (this task owns beta's lifecycle; the main flow deliberately
         # leaves beta out of its completion gather).
-        deadline = time.monotonic() + 30
-        while True:
-            g = (await client.get(f"/goals/{goal_id}")).json()
-            if g["status"] == "PENDING":
-                break
-            if time.monotonic() > deadline:
-                raise AssertionError(f"goal never got a plan (status={g['status']})")
-            await asyncio.sleep(0.05)
-        r = await client.post(f"/goals/{goal_id}/start", json={"expected_version": g["version"]})
-        self.assertEqual(r.status_code, 200, "goal must start")
+        await post_versioned_async(client, goal_id, "start", timeout=30.0)
 
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            detail = (await client.get(f"/goals/{goal_id}")).json()
-            steps = detail.get("steps") or []
-            if any(s.get("status") != "PENDING" for s in steps):
-                break
-            await asyncio.sleep(0.01)
-        else:
-            raise AssertionError("beta never started a step — nothing to pause")
-
-        r = await client.post(
-            f"/goals/{goal_id}/pause",
-            json={"expected_version": (await client.get(f"/goals/{goal_id}")).json()["version"]},
-        )
+        status = await self._await_step_started(client, goal_id)
+        r = await self._versioned(client, goal_id, "pause")
+        # Beta pausing mid-run is the point of the scenario: a goal that went
+        # terminal before the pause landed means the pacing guarantee broke
+        # (the fake stopped holding replies), not that a race was lost.
+        if status in ("COMPLETED", "FAILED", "CANCELLED"):
+            self.fail(f"beta reached {status} before the pause could land")
         self.assertEqual(r.status_code, 200, "pause must be accepted mid-run")
         paused_at = time.monotonic()
         while time.monotonic() - paused_at < 20:
@@ -520,6 +573,11 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                 if terminal:
                     quiet += 1
                 continue
+            except websockets.ConnectionClosed as exc:
+                raise AssertionError(
+                    f"the {marker} wire closed mid-drain ({exc}) — the engine's stderr "
+                    "tail, printed on failure, carries the server-side cause"
+                ) from exc
             event = json.loads(raw)
             frames.append(event)
             # Same terminal set as the UI (goalStream.ts): a cancelled goal's
@@ -539,6 +597,11 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                 quiet = 0
             except asyncio.TimeoutError:
                 quiet += 1
+            except websockets.ConnectionClosed as exc:
+                raise AssertionError(
+                    f"the {marker} wire closed mid-drain ({exc}) — the engine's stderr "
+                    "tail, printed on failure, carries the server-side cause"
+                ) from exc
         return frames
 
     async def _assert_isolated(

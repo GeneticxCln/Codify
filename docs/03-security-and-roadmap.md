@@ -28,6 +28,8 @@ Without this, a malicious or careless `base_url` could turn Coder/Tester/etc. in
 
 On boot, the Engine generates a random token, writes it to stdout, and requires `Authorization: Bearer <token>` on every request. Desktop reads it from the child process stdout when it spawns the Engine and attaches it to every `BackendClient` call — including `/settings/agents/*`, the most sensitive routes (attacker-controlled local `base_url`, key-reference overwrite).
 
+The token is created once per state directory and persisted at `<state dir>/boot_token` (`0600`), not rotated per spawn: a client holding it then survives an engine restart, which per-spawn rotation broke for every client that could not re-read the handshake itself. `CODIFY_BOOT_TOKEN` overrides the value for a caller that wants a per-process token. Lifetime, and what a longer-lived credential costs, are in `04` §6.
+
 ### 1.4 Retained from v1
 
 - Command allowlist in `SandboxService` — additionally per-agent-scoped: only the Tester Agent's proposed commands ever reach `SandboxService.run_command`, never Coder or Planner raw output.
@@ -48,6 +50,7 @@ Single file. **No `agents.db`.**
 
 ```
 ~/.codify/codify.db   # workspaces, goals, plan_steps, events, agent_configs
+~/.codify/boot_token  # loopback bearer token, owner-only (0600), created once per state dir
 ~/.codify/secrets.json  # only when no OS keyring is usable (0600)
 ```
 

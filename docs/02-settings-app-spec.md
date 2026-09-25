@@ -30,7 +30,8 @@ ui/src/
 
 ## 3. Screen
 
-Seven cards, fixed order as in `ROLES`: laya, librarian, planner, fixer, verifier, critic, scribe. No
+Eight cards, fixed order as in `ROLES`: laya, librarian, design, planner, fixer, verifier, critic,
+scribe. No
 add/remove. Each card shows what the slot is for and when it runs, read from `GET /settings/roles` —
 the ability text lives in the engine (`models.ROLE_JOB` / `ROLE_TIMING`), so the screen cannot describe
 a grant the engine no longer makes.
