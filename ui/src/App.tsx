@@ -5,6 +5,7 @@ import {
   EngineInfo,
   Event,
   Goal,
+  GoalMode,
   ModelCatalog,
   ModelOption,
   AgentConfig,
@@ -16,6 +17,7 @@ import {
   fetchAgentConfigs,
   fetchRecentRunModels,
   createWorkspace,
+  setWorkspaceDesignContract,
   createGoal,
   getGoal,
   listGoals,
@@ -34,6 +36,7 @@ import {
   fetchModelCatalog,
   checkEngineHealth,
   refreshEngineInfoFromIpc,
+  engineFailureReason,
   enableExecution,
   applyGoal,
 } from "./api";
@@ -63,6 +66,9 @@ export const App: React.FC = () => {
   const [agentConfigs, setAgentConfigs] = useState<AgentConfig[]>([]);
   const [recentRuns, setRecentRuns] = useState<RecentRunModel[]>([]);
   const [mode, setMode] = useState<ExecutionMode>("direct");
+  // What the goal is for, orthogonal to how it executes: a design deliverable
+  // drafts or revises the workspace's own brand contract.
+  const [goalMode, setGoalMode] = useState<GoalMode>("normal");
   // Opt-in parallelism: independent (path-disjoint) steps of a goal run concurrently.
   const [parallel, setParallel] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -153,11 +159,18 @@ export const App: React.FC = () => {
           loadWorkspacesRef.current?.();
           loadModelsRef.current?.(true);
         })
-        .catch(() => {
+        .catch(async () => {
           attempts++;
           if (attempts < 10) {
             setTimeout(fetchInfo, 500);
+            return;
           }
+          // Out of retries. The pill can only say "offline", but the shell knows
+          // *why* — started outside the checkout, no `python3`, or a process that
+          // died before its handshake — so ask it once and let the banner carry the
+          // reason. This is the difference between a permanent red dot and a fix.
+          const reason = await engineFailureReason();
+          if (reason) setError(reason);
         });
     };
     fetchInfo();
@@ -279,6 +292,36 @@ export const App: React.FC = () => {
       throw err;
     }
   };
+
+  /**
+   * Pin (or, with "", unpin) the workspace's brand contract.
+   *
+   * The selected workspace is held as its own copy, so both lists have to be
+   * refreshed — otherwise the picker keeps showing the pin that was just cleared.
+   * Errors are rethrown for the dialog to show: the engine's refusal names the
+   * file it could not use, and that message is the whole point of validating here.
+   */
+  // Both the settings pin and a design goal's transcript card land here: the pin
+  // is one engine call and one piece of state either way, and the engine's own
+  // validation is what decides whether the file can govern.
+  const handleSetDesignContract = async (workspaceId: string, path: string) => {
+    const updated = await setWorkspaceDesignContract(workspaceId, path);
+    setWorkspaces((prev) => prev.map((w) => (w.id === updated.id ? updated : w)));
+    setSelectedWs((current) => (current?.id === updated.id ? updated : current));
+  };
+
+  // Which brand contract each workspace currently obeys, for the deliverable
+  // card. Derived from the list rather than tracked as its own state, so the two
+  // cannot disagree: pinning from the card, from the workspace picker, or in
+  // another tab all land in the same place, and a reloaded tab reads the pin
+  // instead of forgetting it.
+  const pinnedContracts = useMemo(() => {
+    const byWorkspace: Record<string, string> = {};
+    for (const ws of workspaces) {
+      if (ws.design_contract_path) byWorkspace[ws.id] = ws.design_contract_path;
+    }
+    return byWorkspace;
+  }, [workspaces]);
 
   // Subscribe to live goal events via WebSocket (reconnects with backoff,
   // closes itself when the goal reaches a terminal status).
@@ -584,8 +627,13 @@ export const App: React.FC = () => {
         selectedModel.provider,
         selectedModel.id,
         isPlanOnly,
-        parallelEnabled
+        parallelEnabled,
+        goalMode
       );
+      // Cleared once dispatched: a design deliverable is what THIS goal is for,
+      // not a standing preference — leaving it armed would quietly draft a
+      // DESIGN.md for the next prompt the user only meant to be code.
+      setGoalMode("normal");
 
       const fullGoal = await getGoal(goal.id);
       setMessages((prev) =>
@@ -961,6 +1009,8 @@ export const App: React.FC = () => {
           onQuickPrompt={(text) => handleSendMessage(text)}
           onOpenSettings={openSettings}
           onImportAudit={handleImportAudit}
+          onPinDesignContract={handleSetDesignContract}
+          pinnedContracts={pinnedContracts}
         />
 
         {/* Cross-goal statistics drawer: the wide-angle lens over the same
@@ -1066,6 +1116,7 @@ export const App: React.FC = () => {
           onBrowseWorkspace={handleBrowseWorkspace}
           onCreateWorkspace={handleCreateWorkspace}
           onDeleteWorkspace={handleDeleteWorkspace}
+          onSetDesignContract={handleSetDesignContract}
           availableModels={modelCatalog.models}
           selectedModel={selectedModel}
           onSelectModel={setSelectedModel}
@@ -1075,6 +1126,8 @@ export const App: React.FC = () => {
           onRefreshModels={() => loadModels(true)}
           mode={mode}
           onChangeMode={setMode}
+          goalMode={goalMode}
+          onChangeGoalMode={setGoalMode}
           parallel={parallel}
           onToggleParallel={setParallel}
           onSubmit={handleSendMessage}

@@ -17,8 +17,18 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"
+# Single instance: the guard is claimed against the session bus on Linux, and the
+# second launch has to exit before this shell's `setup` spawns a rival engine.
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+# Only what lib.rs names: `process` for the engine subprocess, `io-util` for the
+# stdout reader, `sync` for the state mutex, `time` to bound the login-shell PATH
+# lookup. It used to ask for `full`, which also pulls fs, io-std, macros, net,
+# parking_lot and signal into the build.
+# The runtime features this crate actually runs on come from the dependencies that
+# own them — tauri enables rt, rt-multi-thread, sync, fs and io-util, reqwest
+# enables net, time and macros — and cargo unifies features across the graph, so
+# naming them again here would only make this list stop describing the code.
+tokio = { version = "1", features = ["process", "io-util", "sync", "time"] }
 reqwest = { version = "0.12", features = ["json"] }

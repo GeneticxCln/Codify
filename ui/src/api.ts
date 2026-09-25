@@ -4,12 +4,14 @@ import type {
   DeletedGoal,
   DeletedWorkspace,
   EngineInfo,
+  EngineStatus,
   StatsHistoryDay,
   StatsImportState,
   StatsOverview,
   EngineSettings,
   Event,
   Goal,
+  GoalMode,
   GoalStatus,
   LayaStatus,
   ModelCatalog,
@@ -55,6 +57,30 @@ export async function refreshEngineInfoFromIpc(): Promise<EngineInfo | null> {
     if (info.token === currentEngine.token && info.port === currentEngine.port) return null;
     setEngineInfo(info);
     return info;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ask the desktop shell why the engine is not running, or null when there is
+ * nothing to report.
+ *
+ * `codify_get_engine_info` can only say "not ready", which is indistinguishable
+ * from "still starting" — so a launch that already failed showed up as a red pill
+ * with no reason. The shell is the only party that knows (it chose the working
+ * directory and read, or failed to read, the handshake), and this is how its
+ * diagnosis reaches the banner.
+ *
+ * Outside Tauri there is no shell to ask — the standalone browser build talks to
+ * an engine it did not spawn — so this returns null and the caller keeps whatever
+ * message it already had.
+ */
+export async function engineFailureReason(): Promise<string | null> {
+  if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return null;
+  try {
+    const status = await tauriInvoke<EngineStatus>("codify_engine_status");
+    return status?.error ?? null;
   } catch {
     return null;
   }
@@ -492,6 +518,33 @@ export async function createWorkspace(name: string, root_path: string): Promise<
   return res.json();
 }
 
+/**
+ * Pin the brand contract the design agent must obey, or clear it with `""`.
+ *
+ * A workspace property, not an agent one: the right `DESIGN.md` is a fact about
+ * the repository, so two projects can hold different brand contracts while the
+ * design role keeps one config. The engine refuses an escape
+ * (`design_contract_escape`) and a path that is not a readable text file
+ * (`design_contract_missing` / `design_contract_binary`) while this screen is
+ * still open, rather than mid-goal where the setting is nowhere in sight.
+ */
+export async function setWorkspaceDesignContract(
+  workspace_id: string,
+  path: string,
+): Promise<Workspace> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/workspaces/${workspace_id}/design-contract`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${currentEngine.token}`,
+    },
+    body: JSON.stringify({ path }),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to pin the brand contract");
+  return res.json();
+}
+
 export async function createGoal(
   workspace_id: string,
   title: string,
@@ -500,13 +553,18 @@ export async function createGoal(
   provider?: string,
   model?: string,
   plan_only: boolean = false,
-  parallel: boolean = false
+  parallel: boolean = false,
+  /** `design` makes the workspace's own brand contract the deliverable. */
+  mode: GoalMode = "normal"
 ): Promise<Goal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const payload: Record<string, any> = { workspace_id, title, description, dry_run, plan_only };
   if (provider) payload.provider = provider;
   if (model) payload.model = model;
   if (parallel) payload.parallel = true;
+  // Sent only when it is not the default: an older engine validating the body
+  // strictly would reject an unknown key, and "normal" is what it assumes.
+  if (mode !== "normal") payload.mode = mode;
 
   const res = await fetch(`${base}/goals`, {
     method: "POST",
