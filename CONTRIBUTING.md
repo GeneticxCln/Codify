@@ -18,13 +18,43 @@ runs everything in one pass:
 | `make build-ui` | TypeScript check + Vite production build |
 | `make check-tauri` | `cargo check` + `cargo fmt --check` on the desktop shell |
 
-CI runs those same targets on every push and pull request, split by toolchain
-(`.github/workflows/check.yml`). The Python suite runs on **3.10 and 3.14** — 3.10
-because `pyproject.toml` declares it and the desktop shell boots the engine with
-whatever `python3` is on `PATH`, 3.14 because that is what the newest interpreter
-does with this code. A version-specific break has shipped before: a PEP 701
-f-string parsed on 3.14 and was a `SyntaxError` on 3.10, in a module no test could
-even import.
+The Python suite must run on **3.10 and 3.14** — 3.10 because `pyproject.toml`
+declares it and the desktop shell boots the engine with whatever `python3` is on
+`PATH`, 3.14 because that is what the newest interpreter does with this code. A
+version-specific break has shipped before: a PEP 701 f-string parsed on 3.14 and was
+a `SyntaxError` on 3.10, in a module no test could even import.
+
+`make check` only ever exercises the interpreter you happen to have installed, so the
+gate that covers both ends is:
+
+```
+make ci
+```
+
+which runs everything above and then the same Python targets again on the declared
+minimum, bringing that interpreter up on demand (it downloads one with `uv`, or uses a
+`python3.10` you already have). The floor leg never skips: if it cannot be provisioned,
+`make ci` fails and says what to install. `.github/workflows/check.yml` describes the
+same targets split by toolchain, but GitHub Actions is not available to this
+repository — **`make ci` is the gate.**
+
+Install the hooks once per clone and the cheap failures stop reaching a push:
+
+```
+make hooks
+```
+
+| Hook | Runs | Why |
+|---|---|---|
+| `pre-commit` | `make lint typecheck` | seconds, so the obvious failure lands while the change is still in your hands — it checks the working tree, so pre-push remains the real proof |
+| `pre-push` | `make ci` | the whole gate, every toolchain |
+
+Both are versioned in `.githooks/` (`core.hooksPath` is the whole install, `git config
+--unset core.hooksPath` the whole uninstall), so they work on a fresh clone instead of
+living in one person's `.git/hooks`. `git commit --no-verify` and `git push
+--no-verify` are the deliberate escape hatches — neither hook skips a leg to be
+convenient, and a linter that cannot be found is a refusal with install instructions,
+never a pass.
 
 ## Rules of thumb
 

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Fast feedback at commit time: ruff and mypy, the two cheap legs of `make ci`.
+#
+# The gate is pre-push (the whole thing, every toolchain). This exists so the obvious
+# failure shows up while the change is still in your hands, instead of two minutes into
+# a push — and it runs the gate's *same* targets, so a green commit cannot mean
+# something different from a green gate.
+#
+# Install once per clone:      make hooks
+# Commit anyway, when needed:  git commit --no-verify
+#
+# Two limits, both of them covered by pre-push:
+#   * it checks the working tree, not the staged snapshot, so a partially staged file
+#     can commit a state this never saw;
+#   * a merge or rebase that has stopped on conflicts leaves conflict markers in the
+#     tree, which are syntax errors — so it stands down there rather than block a merge
+#     over a conflict git is still working through.
+
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+for marker in MERGE_HEAD rebase-merge rebase-apply; do
+  if [ -e "$(git rev-parse --git-path "$marker")" ]; then
+    echo "pre-commit: $marker in progress — skipping lint/typecheck, which would read"
+    echo "            conflict markers as syntax errors. Pre-push still runs 'make ci'."
+    exit 0
+  fi
+done
+
+# The Makefile falls back to .venv/bin/mypy when mypy is not on PATH; extend the same
+# courtesy to ruff, so the hook works from a plain shell with the project venv
+# unactivated.
+if [ -d .venv/bin ]; then
+  PATH="$PWD/.venv/bin:$PATH"
+fi
+
+# A missing linter must never look like a passing check, and it must not fail with
+# make's bare "ruff: No such file or directory" either — the dev tools are not engine
+# dependencies, so say where they come from.
+missing=""
+command -v ruff >/dev/null 2>&1 || missing="ruff"
+command -v mypy >/dev/null 2>&1 || missing="${missing:+$missing and }mypy"
+if [ -n "$missing" ]; then
+  cat >&2 <<EOF
+pre-commit: $missing not found, so nothing was checked.
+
+Install the dev tools:  pip install -e ".[dev]"
+                        (or: pip install "ruff>=0.6" "mypy>=1.11")
+Commit without the check:  git commit --no-verify
+EOF
+  exit 1
+fi
+
+echo "pre-commit: 'make lint typecheck' (the full gate still runs at pre-push)"
+if ! make lint typecheck; then
+  cat >&2 <<'EOF'
+
+pre-commit: BLOCKED — lint/typecheck failed, so nothing was committed.
+
+Pushing this would fail the gate for the same reason. To commit anyway:
+
+  git commit --no-verify
+EOF
+  exit 1
+fi

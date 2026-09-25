@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Block a push that fails the local CI gate.
+#
+# GitHub Actions is unavailable to this repository, so nothing checks the code after it
+# leaves the machine that wrote it — which is how a PEP 701 f-string from a 3.14 laptop
+# reached the repository and was a `SyntaxError` on the declared 3.10 minimum, in a
+# module the suite could not even import. `make ci` is the gate (see CONTRIBUTING.md);
+# this runs it where a gate is worth running, before the commit is shared.
+#
+# Install once per clone:      make hooks
+# Push anyway, when you must:  git push --no-verify
+#
+# Git passes the remote name and URL as arguments and feeds the refs being pushed on
+# stdin; this script's exit status decides whether the push proceeds.
+
+set -euo pipefail
+
+remote="${1:-origin}"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+# Only branch content is gated: a tag-only push, or a push that is nothing but
+# deletions, adds no source for the suite to have an opinion on. Say so out loud
+# rather than exiting quietly — a gate that skips silently is the failure mode this
+# hook exists to prevent.
+#
+# The ref that decides this is the *remote* one: `git push origin HEAD:branch` sends
+# `HEAD` as the local ref, so keying on the local ref silently skips every push made
+# that way. The local sha is how a deletion is told apart from an update — it is all
+# zeros (40 of them for sha1, 64 for sha256, hence the pattern rather than a literal).
+gated=0
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+  case "$local_sha" in
+    *[!0]*) ;;
+    *) continue ;;  # all zeros: a deletion, nothing added to the remote
+  esac
+  case "$remote_ref" in
+    refs/heads/*) gated=1 ;;
+  esac
+done
+
+if [ "$gated" -eq 0 ]; then
+  echo "pre-push: no branch content in this push (tags or deletions only)"
+  echo "          — nothing for 'make ci' to gate"
+  exit 0
+fi
+
+echo "pre-push: running 'make ci' — ruff, mypy, the UI, the Rust shell, and the"
+echo "          declared-minimum Python. The first run fetches that interpreter."
+echo "          Pushing to $remote; 'git push --no-verify' skips this gate."
+echo
+
+if ! make ci; then
+  cat >&2 <<'EOF'
+
+pre-push: BLOCKED — the CI gate failed, so nothing was pushed.
+
+Fix what failed above, then push again. If this push has to go out anyway:
+
+  git push --no-verify
+EOF
+  exit 1
+fi

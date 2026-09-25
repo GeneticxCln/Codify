@@ -11,6 +11,12 @@ name: check
 # f-string that parsed on 3.14 and was a SyntaxError on the declared 3.10 minimum,
 # and a WebSocket isolation test that skipped itself (passing) whenever an
 # undeclared `websockets` package was missing.
+#
+# NOTE: GitHub Actions is not available to this repository, so this workflow does
+# not run — the gate is `make ci` in the Makefile, which runs these same targets
+# locally on the host toolchain and on the declared-minimum Python (provisioning it
+# rather than skipping it). Keep the two in step, or fold this file into `make ci`
+# and drop the duplicate definition.
 
 on:
   push:
