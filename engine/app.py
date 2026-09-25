@@ -537,10 +537,28 @@ async def create_ws(body: WorkspaceCreate, request: Request) -> Workspace:
     return workspaces.create(body)
 
 
-@app.post("/workspaces/browse")
-async def browse_workspace(request: Request) -> dict[str, Any]:
-    def _pick() -> str | None:
-        code = """
+# Inside the picker's own `-c` source, so the process can be told apart from every
+# other `python3 -c` on the box: a `-c` process advertises no file path, only its
+# source, and `pgrep -f` reads exactly that (unquoted) out of /proc/<pid>/cmdline.
+PICKER_MARKER = "codify-folder-picker"
+
+
+def _picker_command() -> tuple[list[str], dict[str, str]]:
+    """The guarded argv and environment the folder picker runs under.
+
+    The GTK dialog is deliberately a subprocess — GTK is never imported into the
+    engine, and a dialog that outlives its request is not the engine's memory to
+    hold — but a subprocess outliving the *engine* is exactly the stray the guard
+    exists for (see engine/spawn_guard.py): a native dialog lives until a human
+    chooses, and a closed window used to leave it running against an engine that
+    is gone. The timeout still bounds the engine-alive case; the guard covers the
+    one the timeout cannot see. The environment is inherited unchanged (the guard
+    only adds the pid handover) because DISPLAY/WAYLAND are what put the dialog on
+    the user's screen. Its own function so tests can spawn the exact command the
+    route runs without opening GTK.
+    """
+    code = f"""
+# {PICKER_MARKER}
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk
@@ -552,8 +570,27 @@ dialog.destroy()
 while Gtk.events_pending():
     Gtk.main_iteration_do(False)
 """
+    return (
+        guarded_argv([shutil.which("python3") or sys.executable, "-c", code]),
+        guarded_env(),
+    )
+
+
+@app.post("/workspaces/browse")
+async def browse_workspace(request: Request) -> dict[str, Any]:
+    def _pick() -> str | None:
+        argv, env = _picker_command()
         try:
-            p = subprocess.run(["python3", "-c", code], capture_output=True, text=True, timeout=120)
+            p = subprocess.run(
+                argv,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                # The caller's half of the guard contract (see spawn_guard.py): the
+                # guard must lead the session — and so the group — it kills.
+                start_new_session=True,
+            )
             if p.returncode == 0 and p.stdout.strip():
                 return p.stdout.strip()
         except Exception:

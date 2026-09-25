@@ -8,12 +8,13 @@ import time
 import unittest
 from pathlib import Path
 
+from engine.app import PICKER_MARKER, _picker_command
 from engine.fs import FileSystemService
 from engine.sandbox import CommandNotAllowed, SandboxService, validate_argv
 from engine.spawn_guard import ENV_PARENT_PID, Guard, parent_pid_from_env
 # The process-table vocabulary, shared verbatim with the live-engine twin
 # (tests/test_sandbox_orphans_e2e.py) so the two layers cannot drift.
-from tests.process_probe import sigkill_matching, wait_until
+from tests.process_probe import file_text, pids_matching, sigkill_matching, wait_for_text, wait_until
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -299,6 +300,114 @@ class TestGuardedCommands(unittest.TestCase):
         finally:
             engine.kill()
             for pattern in (str(self.root), ORPHAN_PROBE):
+                sigkill_matching(pattern)
+
+
+# The stand-in grandchild's marker: a sleeper the survivor probes below hunt for.
+# The picker's own marker is engine/app.py's PICKER_MARKER, imported above — the
+# test greps for the same string the route injects, so the two cannot drift.
+PICKER_PROBE = "codify-picker-orphan-probe"
+
+
+class TestGuardedFolderPicker(unittest.TestCase):
+    """The engine's own GUI spawn: the native folder picker behind /workspaces/browse.
+
+    The picker is `python3 -c <GTK source>` — no script file, so nothing in its
+    command line names a path and `pgrep -f` would have nothing to hold on to; the
+    marker lives in a comment inside the source itself (engine/app.py::PICKER_MARKER).
+    It is also the one engine spawn whose normal lifetime is *a human thinking*: the
+    dialog stays open until answered, so the 120 s timeout never fires in the case
+    that matters — the engine dying (closed window) while the dialog is still on
+    screen. The stand-in below keeps the guarded shape (same argv prefix, same pid
+    handover, same `start_new_session`) and swaps only the GTK half for a heartbeat
+    and a sleeping grandchild, the two things a stray picker was ever caught doing.
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_an_open_picker_dies_with_the_engine_that_opened_it(self) -> None:
+        # The exact command the route runs — the seam exists so a test can hold it
+        # without opening GTK. Its preconditions are asserted here, not trusted:
+        # the guard in front, the `-c` shape with its marker, the pid handover.
+        argv, env = _picker_command()
+        self.assertTrue(
+            argv[1].endswith("spawn_guard.py"), "the picker ran with no guard in front of it"
+        )
+        self.assertEqual(argv[3], "-c")
+        self.assertIn(PICKER_MARKER, argv[4], "the `-c` source lost its only pgrep marker")
+        self.assertIn("Gtk.FileChooserNative", argv[4])
+        self.assertEqual(env[ENV_PARENT_PID], str(os.getpid()))
+
+        # The stand-in: same guarded shape, the GTK half replaced by a heartbeat and
+        # a sleeping grandchild. Its source travels by *file*, not in the driver's
+        # command line: the driver is an ancestor of the tree, and a marker in an
+        # ancestor's cmdline makes `pgrep -f` see a survivor for exactly as long as
+        # the test itself lives — a false one (the probes must only ever match the
+        # tree the guard owns).
+        heartbeat = self.root / "picker-heartbeat.txt"
+        stand_in_path = self.root / "picker_stand_in.py"
+        stand_in_path.write_text(
+            f"# {PICKER_MARKER}\n"
+            "import subprocess, sys, time\n"
+            "from pathlib import Path\n"
+            f"HEARTBEAT = Path({str(heartbeat)!r})\n"
+            f"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)  # {PICKER_PROBE}'])\n"
+            "while True:\n"
+            "    with HEARTBEAT.open('a', encoding='utf-8') as handle:\n"
+            "        handle.write('beat\\n')\n"
+            "    time.sleep(0.2)\n",
+            encoding="utf-8",
+        )
+        driver = (
+            "import subprocess\n"
+            "from engine.app import _picker_command\n"
+            "argv, env = _picker_command()\n"
+            f"with open({str(stand_in_path)!r}, encoding='utf-8') as handle:\n"
+            "    argv[-1] = handle.read()\n"
+            "subprocess.run(argv, env=env, capture_output=True, timeout=120, start_new_session=True)\n"
+        )
+        engine = subprocess.Popen(
+            [sys.executable, "-c", driver],
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.assertTrue(
+                wait_until(PICKER_MARKER, matches=True, timeout=30),
+                "the stand-in picker never started",
+            )
+            self.assertNotEqual(
+                [], pids_matching(PICKER_PROBE), "the picker never spawned its grandchild"
+            )
+            before = wait_for_text(heartbeat, timeout=30)
+            self.assertNotEqual("", before, "the picker never wrote its heartbeat")
+
+            engine.kill()  # SIGKILL: exactly what closing the window does
+            engine.wait(timeout=10)
+
+            self.assertTrue(
+                wait_until(PICKER_PROBE, matches=False, timeout=15),
+                "the picker's grandchild outlived the engine that opened the dialog",
+            )
+            self.assertTrue(
+                wait_until(PICKER_MARKER, matches=False, timeout=15),
+                "the picker, or the guard in front of it, outlived the engine",
+            )
+            frozen = file_text(heartbeat)
+            time.sleep(1.0)
+            self.assertEqual(
+                frozen, file_text(heartbeat),
+                "the picker kept writing after the engine died",
+            )
+        finally:
+            engine.kill()
+            for pattern in (PICKER_PROBE, PICKER_MARKER):
                 sigkill_matching(pattern)
 
 
