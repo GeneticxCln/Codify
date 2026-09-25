@@ -1,18 +1,23 @@
 """Where this engine keeps its state — resolved in exactly one place.
 
-Codify writes two things outside the project: the SQLite store and, when no OS
-keyring is usable, the secrets file. Each used to resolve `~/.codify` on its own,
-which made a "scratch" run only *half* hermetic. Pointing `CODIFY_DB` at a temp
-directory still let a saved API key reach the developer's real OS keychain, and
-`CODIFY_SECRETS` said nothing about the database — so a verification run could
-believe it was isolated while writing a fake provider key into the real store. It
-did exactly that during the model-menu work.
+Codify writes three things outside the project: the SQLite store, the loopback
+boot token, and — when no OS keyring is usable — the secrets file. Each used to
+resolve `~/.codify` on its own, which made a "scratch" run only *half* hermetic.
+Pointing `CODIFY_DB` at a temp directory still let a saved API key reach the
+developer's real OS keychain, and `CODIFY_SECRETS` said nothing about the
+database — so a verification run could believe it was isolated while writing a
+fake provider key into the real store. It did exactly that during the model-menu
+work.
 
 Precedence, narrowest first:
 
 1. the store's own override — `CODIFY_DB`, `CODIFY_SECRETS`,
 2. `CODIFY_HOME` — the whole state directory,
 3. `~/.codify`.
+
+The boot token follows the same directory, with one override of its own:
+`CODIFY_BOOT_TOKEN` replaces the token's value rather than relocating it. The
+token is state, and where a *default* lives is this module's business.
 
 A redirected run also stops using the OS keychain (`keyring_allowed`), because a
 scratch run that can still read or write the real credential store is not a
@@ -26,11 +31,13 @@ leaving it implicit.
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
 ENV_HOME = "CODIFY_HOME"
 ENV_DB = "CODIFY_DB"
 ENV_SECRETS = "CODIFY_SECRETS"
+ENV_BOOT_TOKEN = "CODIFY_BOOT_TOKEN"  # noqa: S105 — a variable name, not a credential
 DEFAULT_DIR = ".codify"
 
 
@@ -58,6 +65,67 @@ def secrets_path() -> Path:
     """The file backend for credentials: `CODIFY_SECRETS`, else inside the home."""
     override = _env(ENV_SECRETS)
     return Path(override).expanduser() if override else codify_home() / "secrets.json"
+
+
+def boot_token_path() -> Path:
+    """The persisted boot token: inside the state directory, like the database.
+
+    `CODIFY_BOOT_TOKEN` is not consulted here. That variable overrides the
+    token's *value* (see `boot_token`); where a default lives is this module's
+    job, and the token is state.
+    """
+    return codify_home() / "boot_token"
+
+
+def boot_token() -> str:
+    """The loopback bearer token, stable across restarts of this state dir.
+
+    The engine announces `CODIFY_ENGINE token=…` on stdout and every request has
+    to present it. A fresh token per boot meant that any client which cached one
+    was rejected with 401 after every restart, and a client with no way to read
+    the new handshake — a browser tab pointed at a dev engine, say — stayed
+    broken until it was reloaded by hand. The desktop shell papers over this by
+    re-reading the handshake from the live process over IPC; nothing can do that
+    for a standalone tab. So the token is created once and kept beside the
+    database.
+
+    A stable token is a longer-lived credential than a per-boot one. That is
+    affordable because the server only ever binds `127.0.0.1`: anything able to
+    present this token could read this file, and the database next to it, without
+    it. `CODIFY_BOOT_TOKEN` still overrides the value for a caller that wants a
+    token scoped to a single process.
+
+    Failing to persist is not fatal. A state directory that cannot be created or
+    written must not stop the engine booting; that run gets a per-boot token,
+    which is exactly what every run used to get.
+    """
+    path = boot_token_path()
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        existing = ""
+    if existing:
+        return existing
+    fresh = secrets.token_hex(32)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # O_EXCL: two engines booting at once have to present one token, so
+            # the loser adopts the winner's file rather than replacing it.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            adopted = path.read_text(encoding="utf-8").strip()
+            if adopted:
+                return adopted
+            # An empty file is a boot that died between creating and filling
+            # it. No client can have read one, so repairing it invalidates
+            # nothing.
+            fd = os.open(path, os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(fresh)
+    except OSError:
+        return fresh
+    return fresh
 
 
 def is_isolated() -> bool:
