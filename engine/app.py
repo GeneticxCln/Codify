@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import secrets
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -18,11 +19,12 @@ from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisco
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from engine import home
+from engine import home, watchdog
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.laya import LayaService
 from engine.role_repair import plan_role_repair
+from engine.spawn_guard import guarded_argv, guarded_env
 from engine.stats import build_overview, normalize_window
 from engine.stats_history import StatsSnapshotService
 from engine.stats_import import StatsImportInvalid, StatsImportService
@@ -56,7 +58,9 @@ from engine.services import (
     WorkspaceService,
 )
 
-BOOT_TOKEN = os.environ.get("CODIFY_BOOT_TOKEN") or secrets.token_hex(32)
+# Stable across restarts of the same state directory, so a client that cached
+# it stays authenticated; `home.boot_token` says why, and what it costs.
+BOOT_TOKEN = os.environ.get(home.ENV_BOOT_TOKEN) or home.boot_token()
 
 
 def pick_port() -> int:
@@ -1450,6 +1454,10 @@ def main() -> None:
     # being discovered later by finding a smoke-test key in a real keychain.
     # stderr, because the Tauri shell parses stdout for the boot handshake.
     print(home.startup_notice(), file=sys.stderr, flush=True)
+    # Armed before the port is claimed: a shell that dies while this engine is
+    # binding must not be the reason the next launch finds the port taken. Inert
+    # unless the desktop shell set `CODIFY_PARENT_PID` — see engine/watchdog.py.
+    watchdog.start_parent_watchdog()
     # Bind and LISTEN before announcing readiness. The handshake is the boot
     # contract: whoever reads `CODIFY_ENGINE token=… port=…` is promised a
     # connectable socket, and announcing before `listen()` left a window where
