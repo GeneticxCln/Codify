@@ -3,10 +3,23 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
+
+from engine.spawn_guard import guarded_argv, guarded_env
 
 
 class GitService:
+    """The engine's git, one process deeper than it looks.
+
+    Every git command runs under `engine/spawn_guard.py`, exactly like a sandboxed
+    command does: kill the engine — a closed window SIGKILLs it — and git takes its
+    whole tree with it. That is not a theoretical stray. A `git commit` runs the
+    repository's hooks, which are workspace content: a hook that hangs (or a hook
+    whose child keeps writing) used to live on after the engine that ran the commit
+    was gone, with the repository still mutating under a closed window.
+    """
+
     def __init__(self) -> None:
         self._git_bin = shutil.which("git") or "git"
 
@@ -28,28 +41,55 @@ class GitService:
         git_dir = Path(root_path).resolve() / ".git"
         return git_dir.exists()
 
+    # ── the one way this class starts a process ─────────────────────────
+
+    def _run_bytes(
+        self, args: list[str], *, cwd: str, env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
+        """Run one git command under the guard, capturing raw output.
+
+        `env=None` means "inherit this process's environment", which is what the
+        read-only callers have always done; the guard still gets the pid handover.
+        """
+        return subprocess.run(
+            guarded_argv([self._git_bin, *args]),
+            cwd=cwd,
+            env=guarded_env(env),
+            capture_output=True,
+            check=False,
+            # The guard must lead the session it kills (see spawn_guard.py), exactly
+            # as SandboxService.run_command does it.
+            start_new_session=True,
+        )
+
+    def _run_text(
+        self, args: list[str], *, cwd: str, env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """Same, as text — deliberately decoding UTF-8 with replacement.
+
+        Not `subprocess.run(text=True)`: that decodes with the *locale* encoding, and
+        a repository whose status output carries a filename outside it would raise
+        `UnicodeDecodeError` out of a read. Git writes paths as UTF-8 bytes (that is
+        also why `_tracked_files` reads them itself).
+        """
+        res = self._run_bytes(args, cwd=cwd, env=env)
+        return subprocess.CompletedProcess(
+            res.args,
+            res.returncode,
+            res.stdout.decode("utf-8", errors="replace"),
+            res.stderr.decode("utf-8", errors="replace"),
+        )
+
     def init_repo(self, root_path: str) -> bool:
         try:
-            res = subprocess.run(
-                [self._git_bin, "init"],
-                cwd=str(Path(root_path).resolve()),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            res = self._run_text(["init"], cwd=str(Path(root_path).resolve()))
             return res.returncode == 0
         except (OSError, subprocess.SubprocessError):
             return False
 
     def _tracked_files(self, cwd: str, env: dict[str, str]) -> list[str]:
         """Workspace-relative paths git already knows about (used for deletions)."""
-        res = subprocess.run(
-            [self._git_bin, "ls-files", "-z"],
-            cwd=cwd,
-            env=env,
-            capture_output=True,
-            check=False,
-        )
+        res = self._run_bytes(["ls-files", "-z"], cwd=cwd, env=env)
         if res.returncode != 0:
             return []
         # Binary mode: -z output is NUL-separated raw bytes, and decoding with
@@ -63,13 +103,7 @@ class GitService:
     def get_status(self, root_path: str) -> str:
         if not self.is_git_repo(root_path):
             return ""
-        res = subprocess.run(
-            [self._git_bin, "status", "--porcelain"],
-            cwd=str(Path(root_path).resolve()),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        res = self._run_text(["status", "--porcelain"], cwd=str(Path(root_path).resolve()))
         return res.stdout
 
     def commit(
@@ -120,27 +154,15 @@ class GitService:
 
         # New paths must be known to git before a pathspec commit can name them;
         # `-A` also records deletions. Only these paths are touched in the index.
-        added = subprocess.run(
-            [self._git_bin, "add", "-A", "--", *stageable],
-            cwd=cwd,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        added = self._run_text(["add", "-A", "--", *stageable], cwd=cwd, env=env)
         if added.returncode != 0:
             return None
 
         # Commit *with the pathspec*, so a file the user had staged for their own
         # commit stays staged instead of riding along in this one. Git takes the
         # worktree contents of the named paths, which is exactly what was written.
-        res = subprocess.run(
-            [self._git_bin, "commit", "--no-verify", "-m", message, "--", *stageable],
-            cwd=cwd,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
+        res = self._run_text(
+            ["commit", "--no-verify", "-m", message, "--", *stageable], cwd=cwd, env=env,
         )
         if res.returncode != 0:
             # Exit 1 means "nothing to commit" for these paths — the step's files
@@ -148,12 +170,5 @@ class GitService:
             return None
 
         # Return hash
-        rev = subprocess.run(
-            [self._git_bin, "rev-parse", "HEAD"],
-            cwd=cwd,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        rev = self._run_text(["rev-parse", "HEAD"], cwd=cwd, env=env)
         return rev.stdout.strip() if rev.returncode == 0 else None
