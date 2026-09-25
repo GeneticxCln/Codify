@@ -1,12 +1,14 @@
 /**
  * The pipeline slots. Each is a different ability, not a different persona:
- * librarian reads but never writes, fixer is the only writer, verifier is the only
- * role that runs a command, critic is the only one that can stop a step. `laya` is
- * the pre-flight gate, not a pipeline stage.
+ * librarian reads but never writes, design locks a direction and writes nothing,
+ * fixer is the only writer, verifier is the only role that runs a command, critic
+ * is the only one that can stop a step. `laya` is the pre-flight gate, not a
+ * pipeline stage.
  */
 export type AgentRole =
   | "laya"
   | "librarian"
+  | "design"
   | "planner"
   | "fixer"
   | "verifier"
@@ -50,6 +52,12 @@ export type GoalStatus =
 
 export type StepStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
 
+/** What a goal is for. `design` inverts the design agent's usual relationship
+ * to the brand file: instead of deriving a direction from an existing
+ * contract, it authors DESIGN.md — a step writes it, the critic reviews it
+ * before it is pinned, and the pin stays a user action. */
+export type GoalMode = "normal" | "design";
+
 export type EventType =
   | "goal_status"
   | "step_status"
@@ -62,6 +70,7 @@ export type EventType =
   | "plan_updated"
   | "laya_decision"
   | "library_evidence"
+  | "design_contract"
   | "fix_retry"
   | "agent_call_failed"
   | "fixer_pass"
@@ -124,6 +133,12 @@ export interface Workspace {
   id: string;
   name: string;
   root_path: string;
+  /**
+   * Workspace-relative path of the pinned brand contract, `""` when unpinned.
+   * Unpinned is not "no brand": a `DESIGN.md` at the root is discovered by
+   * convention, and the transcript says which of the two happened.
+   */
+  design_contract_path: string;
   created_at: number;
 }
 
@@ -151,6 +166,9 @@ export interface Goal {
   plan_only: boolean;
   /** Independent (path-disjoint) steps may run concurrently. */
   parallel: boolean;
+  /** What the goal is for. Optional: an engine predating the mode omits it,
+   * and the UI reads an absent value as the normal pipeline. */
+  mode?: GoalMode;
   version: number;
   /** Optional: older engines omit this; the UI derives startability from status. */
   canStart?: boolean;
@@ -309,6 +327,19 @@ export interface ProviderCatalog {
 export interface EngineInfo {
   port: number;
   token: string;
+}
+
+/**
+ * The desktop shell's view of the engine it spawned.
+ *
+ * `error` is why it is not running, in the shell's own words — the only place
+ * that reason exists, since it is the shell that guessed the working directory
+ * and read (or failed to read) the handshake.
+ */
+export interface EngineStatus {
+  running: boolean;
+  port: number | null;
+  error: string | null;
 }
 
 export interface ProviderKeyStatus {

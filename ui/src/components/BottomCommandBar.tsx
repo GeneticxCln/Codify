@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { Workspace, ModelOption, ProviderModelStatus } from "../types";
+import { Workspace, ModelOption, ProviderModelStatus, GoalMode } from "../types";
 import {
   EMPTY_SIGNALS,
   ModelSection,
@@ -21,6 +21,7 @@ import {
   AlertCircle,
   Workflow,
   Trash2,
+  Palette,
 } from "lucide-react";
 
 export type ExecutionMode = "direct" | "dry_run" | "plan_only";
@@ -36,6 +37,12 @@ interface BottomCommandBarProps {
   onCreateWorkspace: (name: string, root_path: string) => Promise<void>;
   /** Confirms, then forgets the workspace and (after a second confirm) its goals. */
   onDeleteWorkspace: (workspaceId: string, name: string) => void;
+  /**
+   * Pin the workspace's brand contract, or clear it with `""`. Rejects with the
+   * engine's own message when the path escapes the workspace or is not a
+   * readable text file, so the dialog can say which file and why.
+   */
+  onSetDesignContract: (workspaceId: string, path: string) => Promise<void>;
   availableModels: ModelOption[];
   selectedModel?: ModelOption;
   onSelectModel: (model: ModelOption) => void;
@@ -47,6 +54,9 @@ interface BottomCommandBarProps {
   onRefreshModels: () => void;
   mode: ExecutionMode;
   onChangeMode: (mode: ExecutionMode) => void;
+  /** What the goal is *for* — orthogonal to how it executes. */
+  goalMode: GoalMode;
+  onChangeGoalMode: (mode: GoalMode) => void;
   /** Opt-in: independent (path-disjoint) steps of the goal run concurrently. */
   parallel?: boolean;
   onToggleParallel?: (on: boolean) => void;
@@ -66,6 +76,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   onBrowseWorkspace,
   onCreateWorkspace,
   onDeleteWorkspace,
+  onSetDesignContract,
   availableModels,
   selectedModel,
   onSelectModel,
@@ -75,6 +86,8 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   onRefreshModels,
   mode,
   onChangeMode,
+  goalMode,
+  onChangeGoalMode,
   parallel = false,
   onToggleParallel,
   onSubmit,
@@ -93,6 +106,13 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   const [modelFilter, setModelFilter] = useState("");
   // Guards the window between "send pressed" and "isLoading is true".
   const submitInFlight = useRef(false);
+  // Which workspace's brand contract the dialog is editing, and its draft. Held
+  // separately from the workspace list so a refused save leaves the typed path on
+  // screen to correct instead of discarding it into an error toast.
+  const [contractWs, setContractWs] = useState<Workspace | null>(null);
+  const [contractDraft, setContractDraft] = useState("");
+  const [contractError, setContractError] = useState<string | null>(null);
+  const [contractSaving, setContractSaving] = useState(false);
 
   useEffect(() => {
     if (!isModelOpen) setModelFilter("");
@@ -295,6 +315,47 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
     }
   };
 
+  const openContractDialog = (ws: Workspace) => {
+    setContractWs(ws);
+    setContractDraft(ws.design_contract_path || "");
+    setContractError(null);
+    setIsFolderOpen(false);
+  };
+
+  const handleSaveContract = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!contractWs) return;
+    setContractSaving(true);
+    setContractError(null);
+    try {
+      await onSetDesignContract(contractWs.id, contractDraft.trim());
+      setContractWs(null);
+    } catch (err: any) {
+      // The engine's refusal names the file and the reason; keep the dialog open
+      // with the typed path so it can be corrected rather than re-typed.
+      setContractError(err?.message || "Failed to pin the brand contract");
+    } finally {
+      setContractSaving(false);
+    }
+  };
+
+  /** Unpinning is its own button, not "clear the field and remember to save": a
+   *  half-applied setting is how a workspace keeps obeying a contract the user
+   *  thought they had removed. */
+  const handleUnpinContract = async () => {
+    if (!contractWs) return;
+    setContractSaving(true);
+    setContractError(null);
+    try {
+      await onSetDesignContract(contractWs.id, "");
+      setContractWs(null);
+    } catch (err: any) {
+      setContractError(err?.message || "Failed to unpin the brand contract");
+    } finally {
+      setContractSaving(false);
+    }
+  };
+
   const handleCustomModelSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setCustomModelError(null);
@@ -430,6 +491,23 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                           {selectedWorkspace?.id === ws.id && (
                             <Check className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
                           )}
+                          <button
+                            type="button"
+                            onClick={() => openContractDialog(ws)}
+                            className={`p-1 rounded-lg transition-colors flex-shrink-0 ${
+                              ws.design_contract_path
+                                ? "text-pink-400 hover:text-pink-300"
+                                : "text-gray-500 hover:text-gray-300"
+                            }`}
+                            title={
+                              ws.design_contract_path
+                                ? `${ws.name} obeys ${ws.design_contract_path}`
+                                : `Pin a brand contract for ${ws.name} (e.g. DESIGN.md)`
+                            }
+                            aria-label={`Brand contract for ${ws.name}`}
+                          >
+                            <Palette className="w-3.5 h-3.5" />
+                          </button>
                           <button
                             type="button"
                             onClick={() => onDeleteWorkspace(ws.id, ws.name)}
@@ -768,6 +846,27 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
               <Workflow className="w-3.5 h-3.5" />
               <span>Parallel</span>
             </button>
+
+            {/* Design deliverable: this goal produces the workspace's own brand
+                contract. Orthogonal to the execution mode above — a draft can
+                still be reviewed before it is written, or planned and not run —
+                and distinct from the workspace pin, which is the user's own
+                action on a file that exists. Here the design agent authors
+                DESIGN.md, a step writes it, and the critic reviews it first. */}
+            <button
+              type="button"
+              onClick={() => onChangeGoalMode(goalMode === "design" ? "normal" : "design")}
+              title="Design deliverable — draft or revise this workspace's DESIGN.md, reviewed by the critic before you pin it"
+              aria-pressed={goalMode === "design"}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
+                goalMode === "design"
+                  ? "bg-pink-600/20 border-pink-500/50 text-pink-300 hover:bg-pink-600/30"
+                  : "bg-[#21262d] border-[#30363d] text-gray-400 hover:bg-[#30363d]"
+              }`}
+            >
+              <Palette className="w-3.5 h-3.5" />
+              <span>Design Deliverable</span>
+            </button>
           </div>
 
           {/* Right Action: Submit */}
@@ -841,6 +940,70 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   className="px-3 py-1 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-500"
                 >
                   Add Directory
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Which file in this workspace the design agent must obey. Blank is a real
+          answer — it means "only the conventional DESIGN.md, if the repo has one"
+          — so it is offered as its own action rather than a cleared text field. */}
+      {contractWs && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Brand contract file"
+            className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 max-w-md w-full shadow-2xl"
+          >
+            <h3 className="text-sm font-bold text-gray-100 mb-1 flex items-center gap-2">
+              <Palette className="w-4 h-4 text-pink-400" /> Brand Contract
+            </h3>
+            <p className="text-[11px] text-gray-500 mb-3 leading-relaxed">
+              The design agent reads this before it decides a direction, and treats it as
+              binding. Leave it unpinned to let a{" "}
+              <span className="font-mono">DESIGN.md</span> at the workspace root be found on
+              its own.
+            </p>
+            <form onSubmit={handleSaveContract} className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">
+                  Path relative to <span className="font-mono">{contractWs.root_path}</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="docs/DESIGN.md"
+                  value={contractDraft}
+                  onChange={(e) => setContractDraft(e.target.value)}
+                  className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
+                  aria-label="Brand contract path"
+                />
+              </div>
+              {contractError && <p className="text-xs text-red-400">{contractError}</p>}
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setContractWs(null)}
+                  className="px-3 py-1 bg-[#21262d] text-gray-300 text-xs rounded-lg hover:bg-[#30363d]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleUnpinContract}
+                  disabled={contractSaving || !contractWs.design_contract_path}
+                  className="px-3 py-1 bg-[#21262d] text-gray-300 text-xs rounded-lg hover:bg-[#30363d] disabled:opacity-40"
+                >
+                  Unpin
+                </button>
+                <button
+                  type="submit"
+                  disabled={contractSaving}
+                  className="px-3 py-1 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-500 disabled:opacity-40"
+                >
+                  {contractSaving ? "Saving..." : "Save"}
                 </button>
               </div>
             </form>

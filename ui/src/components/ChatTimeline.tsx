@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from "react";
-import { AgentRole, ChatMessage, Event, PlanStep } from "../types";
+import { AgentRole, ChatMessage, Event, Goal, PlanStep } from "../types";
+import { deliverablePath, pinReadiness } from "../designDeliverable";
 import { FailureDiagnosisPanel } from "./FailureDiagnosisPanel";
 import { DiffViewer } from "./DiffViewer";
 import { LayaDecision } from "../types";
@@ -21,6 +22,8 @@ import {
   XCircle,
   FileCode,
   BookOpen,
+  Palette,
+  Pin,
   ShieldCheck,
   ShieldAlert,
   Check,
@@ -546,6 +549,78 @@ function auditSummary(events: Event[] | undefined): {
   return { edits, fallbacks, errors };
 }
 
+/** The outcome of the last pin attempt, per goal card. */
+interface PinOutcome {
+  goalId: string;
+  ok: boolean;
+  message: string;
+}
+
+/**
+ * The pin action for a design deliverable.
+ *
+ * The two reasons it can be unavailable are rendered as text rather than only a
+ * `title`: a disabled button does not reliably surface a tooltip, and "why can't
+ * I pin this" is the question the card exists to answer. The body stays
+ * collapsible so a full contract does not swallow the transcript.
+ *
+ * A workspace that already obeys this file gets a state instead of an action.
+ * The pin is workspace state — it can be set from the workspace picker, or by an
+ * earlier goal, or before this tab was reloaded — so the card reads it from the
+ * workspace rather than from whether this transcript happened to watch it
+ * happen. Offering the pin again there would be asking the user to do something
+ * they have already done.
+ */
+const DesignDeliverablePin: React.FC<{
+  goal: Goal;
+  path: string;
+  body: string;
+  outcome: PinOutcome | null;
+  /** The file this workspace already obeys, if any. */
+  pinnedPath?: string;
+  onPin: (goalId: string, workspaceId: string, path: string) => Promise<void>;
+}> = ({ goal, path, body, outcome, pinnedPath, onPin }) => {
+  const readiness = pinReadiness(goal, path, pinnedPath);
+  return (
+    <div className="flex flex-col gap-1.5 mt-0.5 pt-1.5 border-t border-[#21262d]">
+      <div className="flex items-center gap-2 flex-wrap">
+        {readiness.pinned ? (
+          <span className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-pink-500/10 border border-pink-500/30 text-pink-200/90 text-[11px]">
+            <Check className="w-3 h-3" />
+            {path} is this workspace&rsquo;s brand contract
+          </span>
+        ) : (
+          <button
+            type="button"
+            disabled={!readiness.ready}
+            onClick={() => void onPin(goal.id, goal.workspace_id, path)}
+            className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-pink-600/20 border border-pink-500/50 text-pink-300 hover:bg-pink-600/30 text-[11px] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-pink-600/20"
+          >
+            <Pin className="w-3 h-3" />
+            Pin as brand contract
+          </button>
+        )}
+        {!readiness.ready && readiness.reason && (
+          <span className="text-[10px] text-gray-500">{readiness.reason}</span>
+        )}
+        {readiness.ready && outcome !== null && outcome.goalId === goal.id && (
+          <span className={`text-[10px] ${outcome.ok ? "text-green-400" : "text-red-400"}`}>
+            {outcome.message}
+          </span>
+        )}
+      </div>
+      <details className="text-[11px] text-gray-400">
+        <summary className="cursor-pointer text-gray-500">
+          {path} ({body.length} chars) — {readiness.bodyLabel}
+        </summary>
+        <pre className="mt-1.5 p-2 rounded bg-[#161b22] border border-[#21262d] text-[10px] text-gray-300 whitespace-pre-wrap max-h-64 overflow-auto">
+          {body}
+        </pre>
+      </details>
+    </div>
+  );
+};
+
 interface ChatTimelineProps {
   messages: ChatMessage[];
   onStartGoal: (goalId: string, version: number) => void;
@@ -567,6 +642,22 @@ interface ChatTimelineProps {
   onOpenSettings: (tab: "keys" | "agents") => void;
   /** Opens a file picker and imports an exported audit JSON as a report message. */
   onImportAudit: () => void;
+  /**
+   * Pin a design goal's written deliverable as the workspace's brand contract.
+   * Rejects with the engine's own message when the path escapes the workspace,
+   * is missing, or is not readable text — so a draft that was never written
+   * comes back as the reason it was refused rather than as a silent no-op.
+   */
+  onPinDesignContract: (workspaceId: string, path: string) => Promise<void>;
+  /**
+   * The brand contract each workspace currently obeys, keyed by workspace id.
+   *
+   * Read from `GET /workspaces` rather than from a click this transcript
+   * remembers: a pin set from the workspace picker, or before a reload, is just
+   * as real as one set here, and a card that only remembered its own clicks
+   * would offer a pin that is already in force.
+   */
+  pinnedContracts: Record<string, string>;
 }
 
 export const ChatTimeline: React.FC<ChatTimelineProps> = ({
@@ -582,9 +673,37 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   onQuickPrompt,
   onOpenSettings,
   onImportAudit,
+  onPinDesignContract,
+  pinnedContracts,
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState<{ goalId: string; stepId: string } | null>(null);
+  // Outcome of a "pin this deliverable" click, keyed by goal. Pinning is a
+  // settings change made from a transcript card, so the card has to say it
+  // landed rather than send the user hunting in another screen for proof.
+  const [pinState, setPinState] = useState<PinOutcome | null>(null);
+
+  const handlePinDeliverable = async (
+    goalId: string,
+    workspaceId: string,
+    path: string
+  ) => {
+    try {
+      await onPinDesignContract(workspaceId, path);
+      // Success is not reported from here. The card now renders the pinned
+      // state from the workspace the engine just returned, which is the same
+      // claim and survives a reload; a message held in this component's state
+      // would say it twice now and outlive an unpin made from the workspace
+      // picker, still claiming a contract that is gone.
+      setPinState(null);
+    } catch (err: any) {
+      setPinState({
+        goalId,
+        ok: false,
+        message: err?.message || `could not pin ${path}`,
+      });
+    }
+  };
   // Transcript-wide "issues only" mode: long runs render hundreds of telemetry
   // entries, and the review question is usually just "what went wrong". One
   // toggle for the whole transcript — a filter that had to be found per card
@@ -1287,6 +1406,128 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             </div>
                           )}
 
+                          {/* The direction the planner planned against and the fixer
+                              was told to obey: locked once, before any step exists,
+                              and published so a step can be judged against the
+                              contract that shaped it rather than from memory. */}
+                          {ev.type === "design_contract" && (
+                            <div className="p-2.5 rounded-lg bg-[#0d1117] border border-[#30363d] flex flex-col gap-1.5">
+                              <div className="flex items-center gap-1.5">
+                                <Palette className="w-3.5 h-3.5 text-pink-400" />
+                                <span className="font-semibold text-[11px] uppercase tracking-wider text-gray-400">
+                                  {/* A design-mode goal's contract is the artifact
+                                      itself, not the direction a step is written
+                                      against: the difference between input and
+                                      deliverable, so it is named. */}
+                                  {ev.payload.mode === "design"
+                                    ? "Design deliverable"
+                                    : "Design direction"}
+                                </span>
+                                <span className="text-[10px] font-mono text-gray-500">
+                                  {ev.payload.artifact}
+                                </span>
+                              </div>
+                              {ev.payload.direction && (
+                                <p className="text-[11px] text-gray-300 leading-relaxed">
+                                  {ev.payload.direction}
+                                </p>
+                              )}
+                              {ev.payload.design_system?.name && (
+                                <div className="text-[11px] text-gray-400">
+                                  design system:{" "}
+                                  <span className="font-mono text-gray-300">
+                                    {ev.payload.design_system.name}
+                                  </span>
+                                  {/* Three states, said differently on purpose: a pin
+                                      is the user's instruction, a discovery is a
+                                      convention the engine noticed, and a proposal
+                                      exists because there was nothing to obey. */}
+                                  {ev.payload.design_system.origin === "pinned" ? (
+                                    <span className="text-pink-300/90">
+                                      {" "}
+                                      — pinned at {ev.payload.design_system.source}
+                                    </span>
+                                  ) : ev.payload.design_system.origin === "discovered" ? (
+                                    <span className="text-gray-500">
+                                      {" "}
+                                      — found at {ev.payload.design_system.source}
+                                    </span>
+                                  ) : ev.payload.design_system.source ? (
+                                    <span className="text-gray-500">
+                                      {" "}
+                                      — from {ev.payload.design_system.source}
+                                    </span>
+                                  ) : (
+                                    <span className="text-gray-500"> — proposed, no existing contract</span>
+                                  )}
+                                </div>
+                              )}
+                              {(ev.payload.tokens?.colors?.length ?? 0) > 0 && (
+                                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                                  {ev.payload.tokens.colors.map(
+                                    (c: { name: string; value: string }, i: number) => (
+                                      <span key={i} className="text-[11px] flex items-center gap-1">
+                                        <span
+                                          className="w-2.5 h-2.5 rounded-sm border border-[#30363d]"
+                                          style={{ background: c.value }}
+                                        />
+                                        <span className="font-mono text-gray-400">{c.name}</span>
+                                        <span className="font-mono text-gray-500">{c.value}</span>
+                                      </span>
+                                    )
+                                  )}
+                                </div>
+                              )}
+                              {(ev.payload.tokens?.typography?.length ?? 0) > 0 && (
+                                <div className="text-[11px] text-gray-400">
+                                  type:{" "}
+                                  {ev.payload.tokens.typography
+                                    .map((t: { name: string; value: string }) => `${t.name} ${t.value}`)
+                                    .join(" · ")}
+                                </div>
+                              )}
+                              {(ev.payload.components?.length ?? 0) > 0 && (
+                                <div className="flex flex-col gap-0.5">
+                                  {ev.payload.components.map(
+                                    (c: { name: string; purpose?: string }, i: number) => (
+                                      <div key={i} className="text-[11px] flex items-start gap-1.5">
+                                        <span className="font-mono text-pink-300/90">{c.name}</span>
+                                        {c.purpose && <span className="text-gray-400">— {c.purpose}</span>}
+                                      </div>
+                                    )
+                                  )}
+                                </div>
+                              )}
+                              {(ev.payload.acceptance?.length ?? 0) > 0 && (
+                                <div className="text-[11px] text-gray-400">
+                                  acceptance: {ev.payload.acceptance.join("; ")}
+                                </div>
+                              )}
+                              {(ev.payload.constraints?.length ?? 0) > 0 && (
+                                <div className="text-[11px] text-amber-400/90">
+                                  constraints: {ev.payload.constraints.join("; ")}
+                                </div>
+                              )}
+                              {/* The deliverable's own body, and the one action
+                                  that gives it authority. The engine drafts it
+                                  and a step writes it; only the user can make
+                                  it binding, and this is where the file they
+                                  were just shown becomes the contract. */}
+                              {ev.payload.mode === "design" &&
+                                ev.payload.design_md &&
+                                msg.goal && (
+                                  <DesignDeliverablePin
+                                    goal={msg.goal}
+                                    path={deliverablePath(msg.goal)}
+                                    body={ev.payload.design_md}
+                                    outcome={pinState?.goalId === msg.goal.id ? pinState : null}
+                                    pinnedPath={pinnedContracts[msg.goal.workspace_id]}
+                                    onPin={handlePinDeliverable}
+                                  />
+                                )}
+                            </div>
+                          )}
+
                           {ev.type === "test_result" && (
                             <div className="p-2.5 rounded-lg bg-[#0d1117] border border-[#30363d] flex flex-col gap-1">
                               <div className="flex items-center gap-2">
@@ -1309,6 +1550,22 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               </div>
                               {ev.payload.explanation && (
                                 <p className="text-gray-400 pl-1">{ev.payload.explanation}</p>
+                              )}
+                              {/* What the engine itself found comparing the written
+                                  artifacts against a binding brand contract — advisory,
+                                  so it renders as findings, never as the verdict. */}
+                              {ev.payload.brand_drifts && ev.payload.brand_drifts.length > 0 && (
+                                <div className="flex flex-col gap-0.5 pt-0.5">
+                                  {ev.payload.brand_drifts.map((d: string, i: number) => (
+                                    <div
+                                      key={i}
+                                      className="flex items-start gap-1.5 text-[11px] text-amber-400/90"
+                                    >
+                                      <Palette className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                                      <span className="font-mono">{d}</span>
+                                    </div>
+                                  ))}
+                                </div>
                               )}
                               {/* A verdict with no command behind it must not read like a
                                   run suite: say that the sandbox refused the command. */}

@@ -673,7 +673,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       </div>
 
       {/* Summary first: the role cards live in a scroll container, so a warning
-          on the fifth of six cards is invisible without knowing to look. */}
+          on the fifth of eight cards is invisible without knowing to look. */}
       {staleRoles.length > 0 && (
         <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg p-3">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />

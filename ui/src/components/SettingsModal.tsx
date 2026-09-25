@@ -25,7 +25,7 @@ interface SettingsModalProps {
 /**
  * The settings screen.
  *
- * It is a full-height panel, not a dialog: six role cards and seven providers do
+ * It is a full-height panel, not a dialog: eight role cards and seven providers do
  * not fit in a 2xl box with a 26rem scroll region, and shrinking them into one
  * made every card half cut off. Left column = where credentials live, right
  * column = which agent gets which model, both scrolling independently.

@@ -23,6 +23,7 @@ import {
   Check,
   BookOpen,
   Hammer,
+  Palette,
   PenLine,
   Sparkles,
   PlayCircle,
@@ -77,11 +78,12 @@ function formatCallDuration(durationMs: number | null): string {
   return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
-// One icon per ability: the librarian reads, the fixer writes, the verifier runs,
-// the critic judges, the scribe records.
+// One icon per ability: the librarian reads, the design agent locks a direction,
+// the fixer writes, the verifier runs, the critic judges, the scribe records.
 const ROLE_ICONS: Record<AgentRole, React.ReactNode> = {
   laya: <Zap className="w-5 h-5 text-emerald-400" />,
   librarian: <BookOpen className="w-5 h-5 text-cyan-400" />,
+  design: <Palette className="w-5 h-5 text-pink-400" />,
   planner: <Sparkles className="w-5 h-5 text-purple-400" />,
   fixer: <Hammer className="w-5 h-5 text-blue-400" />,
   verifier: <PlayCircle className="w-5 h-5 text-green-400" />,
@@ -90,7 +92,7 @@ const ROLE_ICONS: Record<AgentRole, React.ReactNode> = {
 };
 
 /** Roles whose work happens before planning, so the card can label them. */
-const GOAL_LEVEL: AgentRole[] = ["laya", "librarian", "planner"];
+const GOAL_LEVEL: AgentRole[] = ["laya", "librarian", "design", "planner"];
 
 const BUILTINS = new Set(["anthropic", "openai", "deepseek", "ollama", "google"]);
 
