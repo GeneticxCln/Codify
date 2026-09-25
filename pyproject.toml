@@ -124,6 +124,7 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 "engine/git.py" = ["S603"]
 "engine/providers.py" = ["S110"]
 "engine/sandbox.py" = ["S603"]
+"engine/spawn_guard.py" = ["S603"]
 "engine/services.py" = ["S608", "S112"]
 "engine/stats_history.py" = ["S608"]
 

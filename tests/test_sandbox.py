@@ -1,5 +1,8 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import os
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -7,6 +10,16 @@ from pathlib import Path
 
 from engine.fs import FileSystemService
 from engine.sandbox import CommandNotAllowed, SandboxService, validate_argv
+from engine.spawn_guard import ENV_PARENT_PID, Guard, parent_pid_from_env
+# The process-table vocabulary, shared verbatim with the live-engine twin
+# (tests/test_sandbox_orphans_e2e.py) so the two layers cannot drift.
+from tests.process_probe import sigkill_matching, wait_until
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# A string that appears in exactly one process's command line: the grandchild the
+# survivor probes below look for. Nothing else in this file may contain it.
+ORPHAN_PROBE = "codify-sandbox-orphan-probe"
 
 
 class TestSandboxService(unittest.TestCase):
@@ -177,6 +190,116 @@ class TestSandboxService(unittest.TestCase):
         )
         self.assertEqual(result["exit_code"], 124)
         self.assertIn("timed out after 1s", result["stderr"])
+
+
+class TestGuardDecisions(unittest.TestCase):
+    """Who the guard watches, and how it tells a dead engine from a live parent."""
+
+    def test_the_engine_pid_is_read_from_the_environment(self) -> None:
+        self.assertEqual(4321, parent_pid_from_env({ENV_PARENT_PID: "4321"}))
+        for value in ("", "   ", "not-a-pid", "0", "-2", "1e3"):
+            self.assertIsNone(parent_pid_from_env({ENV_PARENT_PID: value}), value)
+
+    def test_a_guard_started_by_an_already_dead_engine_knows_it(self) -> None:
+        """The fork/exec window: no signal can arrive for a parent that is gone, and
+        no reparenting will happen later — the pid the engine passed is the only way
+        this window is visible at all."""
+        self.assertTrue(Guard(expected_parent=1).started_after_the_engine_died())
+        self.assertFalse(Guard(expected_parent=os.getppid()).started_after_the_engine_died())
+        # No pid handed over (a guard run by hand): the live parent is all there is.
+        self.assertFalse(Guard().started_after_the_engine_died())
+
+    def test_a_live_parent_is_not_a_dead_engine(self) -> None:
+        self.assertFalse(Guard().engine_is_gone())
+
+
+class TestGuardedCommands(unittest.TestCase):
+    """The command the guard runs: its status, and its tree dying with the engine."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.sandbox = SandboxService()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_a_normal_exit_is_reported_as_its_own_code(self) -> None:
+        (self.root / "exits.py").write_text("import sys\nsys.exit(3)\n", encoding="utf-8")
+        result = self.sandbox.run_command(str(self.root), ["python3", "exits.py"], timeout_s=30)
+        self.assertEqual(3, result["exit_code"])
+        self.assertEqual("", result["stderr"], "the guard must not add output of its own")
+
+    def test_a_command_killed_by_a_signal_still_reports_that_signal(self) -> None:
+        """The contract the guard has to keep: the engine reads -15, not 143.
+
+        The verdict text quotes the exit code, so a guard that exited 143 where the
+        command was killed by 15 would change what the transcript says happened.
+        """
+        (self.root / "suicide.py").write_text(
+            "import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n", encoding="utf-8"
+        )
+        result = self.sandbox.run_command(str(self.root), ["python3", "suicide.py"], timeout_s=30)
+        self.assertEqual(-signal.SIGTERM, result["exit_code"])
+
+    def test_a_command_taken_by_sigkill_is_reported_as_sigkill(self) -> None:
+        """The one signal whose disposition cannot be reset.
+
+        `signal.signal(SIGKILL, ...)` raises, so the naive "reset then re-raise" turns
+        a command the OOM killer took into exit 1. This is the case that pins the
+        exception: the guard has to re-raise without touching the disposition.
+        """
+        (self.root / "rampage.py").write_text(
+            "import os, signal\nos.kill(os.getpid(), signal.SIGKILL)\n", encoding="utf-8"
+        )
+        result = self.sandbox.run_command(str(self.root), ["python3", "rampage.py"], timeout_s=30)
+        self.assertEqual(-signal.SIGKILL, result["exit_code"])
+
+    def test_the_command_tree_dies_with_the_engine_that_started_it(self) -> None:
+        """The stray this exists for: a command still writing to the workspace after
+        the engine is gone.
+
+        A killed window SIGKILLs the engine, so nothing inside it runs another line —
+        the only thing left that can take the command's session down is the guard, so
+        the kill here is SIGKILL rather than a polite TERM.
+        """
+        (self.root / "spawner.py").write_text(
+            "import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', "
+            f"'import time; time.sleep(120)  # {ORPHAN_PROBE}'])\n"
+            "time.sleep(120)\n",
+            encoding="utf-8",
+        )
+        driver = (
+            "from engine.sandbox import SandboxService\n"
+            f"SandboxService().run_command({str(self.root)!r}, ['python3', 'spawner.py'],"
+            " timeout_s=120)\n"
+        )
+        engine = subprocess.Popen(
+            [sys.executable, "-c", driver],
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.assertTrue(
+                wait_until(ORPHAN_PROBE, matches=True, timeout=10),
+                "the command never got as far as spawning its grandchild",
+            )
+            engine.kill()  # SIGKILL: exactly what closing the window does
+            engine.wait(timeout=10)
+            self.assertTrue(
+                wait_until(ORPHAN_PROBE, matches=False, timeout=10),
+                "the grandchild outlived the engine that started the command",
+            )
+            self.assertTrue(
+                wait_until(str(self.root), matches=False, timeout=5),
+                "the command (or its guard) outlived the engine",
+            )
+        finally:
+            engine.kill()
+            for pattern in (str(self.root), ORPHAN_PROBE):
+                sigkill_matching(pattern)
 
 
 if __name__ == "__main__":

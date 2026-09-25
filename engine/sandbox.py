@@ -8,6 +8,10 @@ import subprocess
 from pathlib import Path
 
 from engine.fs import FileSystemService, PathEscapeError
+# The guard that makes "this command dies with the engine" true (see
+# engine/spawn_guard.py), including how it is launched: the argv shape and the pid
+# handover are the guard's own contract, so they are written down once, next to it.
+from engine.spawn_guard import guarded_argv, guarded_env
 from typing import Any
 
 PYTEST_FLAGS = {"-q", "-v", "--tb=short", "--no-header"}
@@ -173,6 +177,11 @@ class SandboxService:
         group, not just the direct child: a test command that spawns children
         (pytest spawning workers, npm spawning node) must not leave strays
         behind holding ports or writing files after the engine moved on.
+
+        That group outlives the engine only as long as its leader lets it: the leader
+        is `engine/spawn_guard.py`, which kills the group when the engine that
+        spawned it is gone. A command still running when the window is closed is the
+        same stray as a timed-out one, and the timeout cannot catch it.
         """
         if not isinstance(timeout_s, (int, float)) or timeout_s <= 0 or timeout_s > 600:
             raise CommandNotAllowed(f"invalid timeout: {timeout_s!r}")
@@ -181,10 +190,15 @@ class SandboxService:
         resolved = shutil.which(argv[0])
         if not resolved:
             raise CommandNotAllowed(f"{argv[0]} not found on PATH")
-        env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME") if k in os.environ}
+        env = guarded_env({k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME") if k in os.environ})
         try:
             proc = subprocess.Popen(
-                [resolved, *argv[1:]],
+                # One process deeper than the command itself: the guard leads the new
+                # session (below) and is what removes the command's *whole tree* when
+                # this engine is gone. A timeout reads exactly as it did before — the
+                # guard is in the group being signalled and reproduces the command's
+                # own exit status.
+                guarded_argv([resolved, *argv[1:]]),
                 cwd=str(Path(root_path).resolve()),
                 env=env,
                 stdout=subprocess.PIPE,
