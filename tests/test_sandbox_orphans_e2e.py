@@ -68,6 +68,7 @@ from tests.process_probe import (
     wait_for_text,
     wait_until,
 )
+from tests.versioned import post_versioned
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -644,7 +645,7 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
         self._configure_roles(client, ai_port)
         workspace_id = self._create_workspace(client, workspace)
         goal_id = self._create_goal(client, workspace_id)
-        self._start_goal(client, goal_id)
+        self._start_goal(client, goal_id, engine)
         return client, goal_id, engine
 
     def _configure_roles(self, client: httpx.Client, ai_port: int) -> None:
@@ -672,24 +673,25 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
         self.assertEqual(200, response.status_code, response.text)
         return str(response.json()["id"])
 
-    def _start_goal(self, client: httpx.Client, goal_id: str) -> None:
-        """Wait for the background planning pass, then start the goal exactly like the
-        chat does: /start is version-protected, so the version must be the server's
-        latest — a stale one is a 409 (same dance as test_concurrent_streams_ws.py)."""
-        deadline = time.monotonic() + 30
-        while True:
-            goal = client.get(f"/goals/{goal_id}").json()
-            if goal["status"] == "PENDING":
-                break
-            if goal["status"] in ("FAILED", "CANCELLED"):
-                raise AssertionError(f"planning did not produce a startable goal: {_diagnose(client, goal_id)}")
-            if time.monotonic() > deadline:
-                raise AssertionError(f"the goal never got a plan: {_diagnose(client, goal_id)}")
-            time.sleep(0.05)
-        response = client.post(
-            f"/goals/{goal_id}/start", json={"expected_version": goal["version"]}
+    def _start_goal(
+        self, client: httpx.Client, goal_id: str, engine: subprocess.Popen[bytes] | None = None
+    ) -> None:
+        """Wait for the plan, then start the goal exactly like the chat does.
+
+        Both halves are the same problem. `/start` is version-protected, so the
+        version has to be the one the engine holds *when the request lands* — and
+        planning is still running when this is called, so the goal is PLANNING (which
+        the engine answers 409 to) long before it is startable. `tests/versioned.py`
+        owns that reading: it waits the goal out, quotes the version it just read,
+        re-reads and re-sends if the version moved under it, and says which of the
+        four ways this failed — with the engine's own stderr and the goal's event log
+        attached — if it did not work. The hand-rolled loop this replaced reported
+        the same two failures as a bare `assertEqual(200, ...)` with a 409 body.
+        """
+        post_versioned(
+            client, goal_id, "start", timeout=30.0,
+            diagnose=lambda: _diagnose(client, goal_id, engine),
         )
-        self.assertEqual(200, response.status_code, response.text)
 
 
 if __name__ == "__main__":

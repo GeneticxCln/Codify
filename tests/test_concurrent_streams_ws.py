@@ -75,6 +75,7 @@ from tests.stream_isolation import (
     assert_replay_equals_live,
     assert_stream_pure,
 )
+from tests.versioned import post_versioned_async
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -412,20 +413,16 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
         raise AssertionError("the goal never started a step")
 
     async def _run_to_completion(self, client: "httpx.AsyncClient", goal_id: str) -> None:
-        """Start through the API the way the chat does: planning runs in the
-        background after POST /goals, so poll until the plan exists (PENDING),
-        then start with the version the server reports — /start is
-        version-protected and a stale version is a 409."""
-        deadline = time.monotonic() + 30
-        while True:
-            g = (await client.get(f"/goals/{goal_id}")).json()
-            if g["status"] == "PENDING":
-                break
-            if time.monotonic() > deadline:
-                raise AssertionError(f"goal never got a plan (status={g['status']})")
-            await asyncio.sleep(0.05)
-        r = await client.post(f"/goals/{goal_id}/start", json={"expected_version": g["version"]})
-        self.assertEqual(r.status_code, 200, "goal must start")
+        """Start through the API the way the chat does, then wait it out.
+
+        Planning runs in the background after POST /goals, and `/start` is
+        version-protected, so "wait for a plan, then quote the version you just
+        read" is the whole shape. `tests/versioned.py` owns that now for the same
+        reason the mid-run helper below does: the version has to be the one the
+        engine holds when the request lands, and only the engine can say whether a
+        refusal was a lost race or a broken premise.
+        """
+        await post_versioned_async(client, goal_id, "start", timeout=30.0)
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             g = (await client.get(f"/goals/{goal_id}")).json()
@@ -476,16 +473,7 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
         checks the status between steps and stops, so the stream must end at
         the cancel with nothing dribbling out afterwards.
         """
-        deadline = time.monotonic() + 30
-        while True:
-            g = (await client.get(f"/goals/{goal_id}")).json()
-            if g["status"] == "PENDING":
-                break
-            if time.monotonic() > deadline:
-                raise AssertionError(f"goal never got a plan (status={g['status']})")
-            await asyncio.sleep(0.05)
-        r = await client.post(f"/goals/{goal_id}/start", json={"expected_version": g["version"]})
-        self.assertEqual(r.status_code, 200, "goal must start")
+        await post_versioned_async(client, goal_id, "start", timeout=30.0)
 
         status = await self._await_step_started(client, goal_id)
         r = await self._versioned(client, goal_id, "cancel")
@@ -515,16 +503,7 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
         """
         # Start it (this task owns beta's lifecycle; the main flow deliberately
         # leaves beta out of its completion gather).
-        deadline = time.monotonic() + 30
-        while True:
-            g = (await client.get(f"/goals/{goal_id}")).json()
-            if g["status"] == "PENDING":
-                break
-            if time.monotonic() > deadline:
-                raise AssertionError(f"goal never got a plan (status={g['status']})")
-            await asyncio.sleep(0.05)
-        r = await client.post(f"/goals/{goal_id}/start", json={"expected_version": g["version"]})
-        self.assertEqual(r.status_code, 200, "goal must start")
+        await post_versioned_async(client, goal_id, "start", timeout=30.0)
 
         status = await self._await_step_started(client, goal_id)
         r = await self._versioned(client, goal_id, "pause")
