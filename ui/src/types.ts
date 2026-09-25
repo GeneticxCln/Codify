@@ -198,6 +198,17 @@ export interface AgentCallStat {
     model: string | null;
     at: number;
   } | null;
+  /** Measured stage runs for this role (docs/04 §4.4), over every run the log
+   * still holds. Absent on an engine too old to measure stages, which is why
+   * every read of it is optional. */
+  runs?: number;
+  /** Did the role do its job, percent of finished runs — not did the goal
+   * succeed. Null when nothing has finished: 0% would be a claim about a role
+   * that has never been asked. */
+  success_rate?: number | null;
+  /** The evidence for the rate: outcome → count, always shipped with it. */
+  outcomes?: Record<string, number>;
+  tokens?: number;
 }
 
 /** One per-role (or per-model) lane of the cross-goal usage rollup. */
@@ -211,6 +222,75 @@ export interface UsageLane {
   avg_duration_ms: number | null;
 }
 
+/** One stage of a goal's pipeline, as measured by the engine's
+ * `stage_result` events (docs/04 §4.4): what it achieved, what it spent, and
+ * how long it took. `avg`/`p95` are over the *stage's* wall clock — the model
+ * call plus the engine work around it — so they are not the mean of the
+ * `usage` events' durations. */
+export interface StageCost {
+  stage: string;
+  role: string;
+  runs: number;
+  tokens: number;
+  calls: number;
+  /** Mean and 95th-percentile stage wall clock, ms. Null when no run
+   * measured one: unknown, never "instant". */
+  avg_duration_ms: number | null;
+  p95_duration_ms: number | null;
+  /** Whole percent of the window's stage spend. The rows sum to 100. */
+  token_share: number;
+  /** Outcome → count, always shipped beside the rate so a percentage can be
+   * checked against what produced it. */
+  outcomes: Record<string, number>;
+}
+
+/** How often one role did its job, and what that cost. The rate is about the
+ * ROLE (a verifier that reported `fail` did its job), not about the goal —
+ * the goal-level rate is `StatsGoals.success_rate`. `outcomes` is the
+ * evidence for the rate, and `cancelled` is deliberately outside the
+ * denominator: an unfinished run has not happened yet. */
+export interface RoleOutcome {
+  role: string;
+  runs: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  /** Percent of finished runs. Null when the role has never finished one. */
+  success_rate: number | null;
+  outcomes: Record<string, number>;
+  avg_duration_ms: number | null;
+  p95_duration_ms: number | null;
+  tokens: number;
+}
+
+/** One cause of failure, most recent message and timestamp, ranked by count. */
+export interface FailureCause {
+  code: string;
+  count: number;
+  message: string;
+  last_seen: number | null;
+}
+
+/** The engine's GET /stats/failures response: what went wrong, and how much
+ * of it the retry loops got back. An install that has never failed has
+ * `total: 0` and no rows — the empty state is stated, not rendered as a table
+ * of zeros that reads as "nothing is wrong". */
+export interface FailureBreakdown {
+  window_days: number;
+  generated_at: number;
+  total: number;
+  by_code: Record<string, number>;
+  by_role: Record<string, number>;
+  by_stage: Record<string, { stage: string; failed: number; outcomes: Record<string, number> }>;
+  causes: FailureCause[];
+  /** Steps the fix→verify loop retried, and how many it then got past. */
+  retries: number;
+  recovered: number;
+  /** Percent of retries recovered. Null when nothing was retried: no retries
+   * is not a perfect record, it is no evidence. */
+  recovery_rate: number | null;
+}
+
 /** The engine's GET /stats/overview response: cross-goal outcomes, spend, and
  * a sparse daily trend, all read from the persisted goal and event stores. */
 export interface StatsOverview {
@@ -218,6 +298,11 @@ export interface StatsOverview {
   generated_at: number;
   goals: StatsGoals;
   usage: UsageLane & { failures: number; by_role: Record<string, UsageLane>; by_model: Record<string, UsageLane> };
+  /** Per-stage cost and latency. Absent on an engine too old to measure
+   * stages, which is why every read of it is optional. */
+  by_stage?: StageCost[];
+  /** Per-role success and cost, keyed by role. */
+  by_role_outcome?: Record<string, RoleOutcome>;
   /** Sparse UTC days (only days with activity), oldest first. */
   daily: {
     date: string;

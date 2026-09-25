@@ -26,6 +26,7 @@ from engine.laya import LayaService
 from engine.role_repair import plan_role_repair
 from engine.spawn_guard import guarded_argv, guarded_env
 from engine.stats import build_overview, normalize_window
+from engine.metrics import failure_breakdown, role_success_rate, stage_costs
 from engine.stats_history import StatsSnapshotService
 from engine.stats_import import StatsImportInvalid, StatsImportService
 from engine.model_catalog import ModelCatalogService
@@ -380,7 +381,31 @@ async def agent_call_stats(request: Request, limit: int = Query(20, ge=1, le=100
                     "at": happened_at,
                 }
 
-    return {"stats": [stats[role] for role in ROLES], "scanned_events": len(rows)}
+    # How often the role did its job, over every run the log still holds — not
+    # over the same bounded scan above, which is about "what happened last" and
+    # would make a rate depend on how many events happen to fit in the limit.
+    # The rate is about the ROLE (a verifier that reported `fail` worked), and
+    # it rides on this card because that is where someone decides whether to
+    # re-prompt a role. Null when the role has never finished a run, so a card
+    # for an unused role reads as unknown rather than as broken.
+    try:
+        measured = await _sweep_metrics(conn)
+        outcomes = role_success_rate(measured, now=time.time())
+    except Exception:
+        outcomes = {}
+    for role in ROLES:
+        measured_role: dict[str, Any] | None = outcomes.get(role)
+        if not measured_role:
+            continue
+        stats[role]["runs"] = measured_role["runs"]
+        stats[role]["success_rate"] = measured_role["success_rate"]
+        stats[role]["outcomes"] = measured_role["outcomes"]
+        stats[role]["tokens"] = measured_role["tokens"]
+
+    return {
+        "stats": [{**stats[role], **outcomes.get(role, {})} for role in ROLES],
+        "scanned_events": len(rows),
+    }
 
 
 @app.post("/settings/agents/repair")
@@ -1043,6 +1068,49 @@ async def _sweep_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], 
     return [dict(r) for r in goal_rows], parsed
 
 
+# The event types the stage/role metrics are computed from. A separate loader
+# from `_sweep_stats` on purpose: that one feeds the frozen daily snapshot,
+# whose document shape is already stored per day, while these are the
+# measurement events (what each stage achieved, and what failed). Rewriting the
+# snapshot's inputs would silently change what a stored day means.
+_METRIC_EVENT_TYPES = (
+    "usage", "agent_call_failed", "stage_result", "error",
+    "fix_retry", "test_result", "step_status",
+)
+
+
+async def _sweep_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every measurement event, with the ids recovery counting needs.
+
+    `goal_id`/`step_id` are included because "did the retry get the step past
+    its failure" is a question about one step of one goal; the per-goal
+    aggregation that answers it cannot group on a list that has thrown the ids
+    away.
+    """
+    placeholders = ",".join("?" for _ in _METRIC_EVENT_TYPES)
+    rows = conn.execute(
+        f"""SELECT type, payload, timestamp, goal_id, step_id, sequence FROM events
+            WHERE type IN ({placeholders})
+            ORDER BY timestamp, sequence LIMIT 20000""",
+        _METRIC_EVENT_TYPES,
+    ).fetchall()
+    parsed = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        parsed.append({
+            "type": row["type"],
+            "payload": payload,
+            "timestamp": row["timestamp"],
+            "goal_id": row["goal_id"],
+            "step_id": row["step_id"],
+            "sequence": row["sequence"],
+        })
+    return parsed
+
+
 @app.get("/stats/overview")
 async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, Any]:
     """Cross-goal statistics: outcomes, success rate, spend, and a daily trend.
@@ -1090,7 +1158,48 @@ async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, 
 
     window_days = normalize_window(window)
     overview = build_overview(goals, parsed, window_days=window_days, now=now)
-    return {**overview, "generated_at": now}
+    # The per-stage and per-role view (docs/04 §4.4). Read from a second sweep
+    # over the measurement events, and failing that read is not allowed to take
+    # the overview down with it: the goal-level numbers above are the ones
+    # people have relied on longest, and a metrics problem should degrade this
+    # view rather than remove the other.
+    try:
+        measured = await _sweep_metrics(conn)
+        stages = stage_costs(measured, window_days, now=now)
+        roles = role_success_rate(measured, window_days, now=now)
+    except Exception:
+        stages, roles = [], {}
+    return {
+        **overview,
+        "by_stage": stages,
+        "by_role_outcome": roles,
+        "generated_at": now,
+    }
+
+
+@app.get("/stats/failures")
+async def stats_failures(request: Request, window: int = Query(0)) -> dict[str, Any]:
+    """What went wrong across every goal: by cause, by role, by stage.
+
+    The aggregation lives in `engine/metrics.py` as a pure function, for the
+    same reason `engine/stats.py` does: the numbers are the product here, so
+    they are tested directly rather than through HTTP.
+
+    Unlike the overview, a failure view over an install that has never failed
+    is *empty*, and it says so: `total: 0` with no rows, never a table of
+    zeros that reads as "nothing is going wrong" when the truth is "there is
+    nothing to know yet". The recovery rate is null for the same reason — no
+    retries is not a perfect record, it is no evidence.
+    """
+    conn = request.app.state.conn
+    window_days = normalize_window(window)
+    now = time.time()
+    events = await _sweep_metrics(conn)
+    return {
+        **failure_breakdown(events, window_days, now=now),
+        "window_days": window_days,
+        "generated_at": now,
+    }
 
 
 @app.get("/stats/history")

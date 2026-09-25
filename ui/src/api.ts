@@ -5,6 +5,7 @@ import type {
   DeletedWorkspace,
   EngineInfo,
   EngineStatus,
+  FailureBreakdown,
   StatsHistoryDay,
   StatsImportState,
   StatsOverview,
@@ -302,6 +303,22 @@ export async function fetchRoles(): Promise<RoleInfo[]> {
 export async function fetchStatsOverview(windowDays: number): Promise<StatsOverview> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/stats/overview?window=${windowDays}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/** What went wrong across every goal: by cause, by role, by stage, and how
+ * many of the fix→verify retries the pipeline got back. Read-only and
+ * windowed like the overview; the aggregation is the engine's
+ * `engine/metrics.py`, tested there. */
+export async function fetchFailureBreakdown(windowDays: number): Promise<FailureBreakdown> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/stats/failures?window=${windowDays}`, {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) {

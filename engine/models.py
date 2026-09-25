@@ -43,6 +43,7 @@ EventType = Literal[
     "provider_fallback",
     "library_evidence",
     "design_contract",
+    "stage_result",
     "plan_updated",
     "laya_decision",
     "fix_retry",

@@ -112,6 +112,8 @@ Imported only by Settings components. Goal UI never imports this hook.
 
 `PromptOverrideEditor`: free-text, `maxLength={32768}`. Blank/whitespace on Save → `null` inherit. No `max_calls_per_goal` field.
 
+**The card also states how the role has been doing**, from the engine's measured stage results (`04` §4.7): `did its job <rate> over N runs`, with the outcome histogram as the tooltip and `runs`/`success_rate` optional in the type so an engine that does not measure stages still renders. Three rules the view inherits and must not re-invent: a role that never ran shows no rate at all rather than 0%, the rate is about the *role* (a verifier that reported `fail` worked), and the histogram travels with the rate so the percentage can be checked rather than trusted. This is on the card because that is where someone decides whether to re-prompt a role.
+
 `BaseUrlField` client-side: hostname `127.0.0.1` or `localhost`, scheme `http`. Engine re-validates.
 
 ## 5. Tauri

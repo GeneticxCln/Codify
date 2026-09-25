@@ -28,6 +28,7 @@ Everything else in this file is unmodified.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -35,7 +36,7 @@ import subprocess
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 
 from engine.default_prompts import DEFAULT_PROMPTS, DESIGN_BRIEF_PROMPT
 from engine.fs import FileSystemService, PathEscapeError
@@ -228,6 +229,69 @@ def _text_words(text: str) -> list[str]:
     """Casefolded alphanumeric words, for evidence matching."""
     return re.findall(r"[a-z0-9]+", text.casefold())
 
+
+# ── stage outcomes (docs/04 §4.4) ───────────────────────────────────────────
+# One closed vocabulary for "what did this stage achieve", so a per-role
+# success rate is a count of declared outcomes rather than a guess at what a
+# missing event meant. The eight stages, and nothing outside them:
+#
+#   laya        skipped | allow | block | cancelled | unavailable
+#   librarian   pack | incomplete | invalid | cancelled | unavailable
+#   design      contract | declined | invalid | cancelled | unavailable
+#   planner     plan | consult | invalid | cancelled | unavailable
+#   fixer       wrote | no_change | replayed | invalid | cancelled | unavailable
+#   verifier    pass | fail | skip | refused | invalid | cancelled | unavailable
+#   critic      approve | request_changes | invalid | cancelled | unavailable
+#   scribe      committed | nothing_to_commit | not_a_repo | invalid | cancelled | unavailable
+#
+# `invalid` is a reply the engine could not use; `unavailable` is a call that
+# could not be made or completed. They are different failures to the person
+# choosing what to fix, and a per-role rate that merged them would hide a role
+# whose prompt needs work behind a role that has no key.
+STAGE_OUTCOMES: dict[str, tuple[str, ...]] = {
+    "laya": ("skipped", "allow", "block", "cancelled", "unavailable"),
+    "librarian": ("pack", "incomplete", "invalid", "cancelled", "unavailable"),
+    "design": ("contract", "declined", "invalid", "cancelled", "unavailable"),
+    "planner": ("plan", "consult", "invalid", "cancelled", "unavailable"),
+    "fixer": ("wrote", "no_change", "replayed", "invalid", "cancelled", "unavailable"),
+    "verifier": ("pass", "fail", "skip", "refused", "invalid", "cancelled", "unavailable"),
+    "critic": ("approve", "request_changes", "invalid", "cancelled", "unavailable"),
+    "scribe": ("committed", "nothing_to_commit", "not_a_repo", "skipped", "invalid", "cancelled", "unavailable"),
+}
+# What a stage that never declared publishes when it raised instead, mapped
+# below `_stage_failure_outcome` (which needs `CriticRejection`, defined
+# further down).
+
+
+class _Stage:
+    """The handle a stage uses to say what it achieved.
+
+    First declaration wins, so a stage with several exit paths (the planner
+    consults, the critic's inspection rounds) can declare from whichever branch
+    it leaves by without the later ones overwriting the truth.
+    """
+
+    __slots__ = ("name", "role", "step_id", "ordinal", "outcome", "detail", "_declared")
+
+    def __init__(self, name: str, role: str, step_id: str | None, ordinal: int) -> None:
+        self.name = name
+        self.role = role
+        self.step_id = step_id
+        self.ordinal = ordinal
+        # The default a stage that never declared is published under: it
+        # reached the end of the block without saying what it achieved.
+        self.outcome = "unavailable"
+        self.detail: str | None = None
+        self._declared = False
+
+    def record(self, outcome: str, detail: str | None = None) -> None:
+        """Declare this stage's outcome (docs/04 §4.4)."""
+        if self._declared:
+            return
+        self.outcome = outcome
+        self.detail = detail
+        self._declared = True
+
 # How many steps of a parallel goal may run at once. Each running step is a
 # streaming model session plus its verifier/critic/scribe tail, so an unbounded
 # batch against a plan with many independent steps would open every session
@@ -256,6 +320,40 @@ class CriticRejection(AgentOutputInvalid):
     def __init__(self, message: str, reasons: list[str], role: str | None = "critic"):
         super().__init__(message, role)
         self.reasons = reasons
+
+
+# What a stage that never declared publishes when it raised instead. Two of
+# these exceptions are not failures at all: `TestsFailed` and `CriticRejection`
+# are how a verifier says "fail" and a critic says "request-changes" — a stage
+# that did its job and is raising on the way out has succeeded at being that
+# role, and a rate that counted those as invalid replies would say the verifier
+# is broken precisely when it is working. Ordered, because both subclass
+# AgentOutputInvalid.
+_STAGE_EXCEPTIONS: tuple[tuple[type[BaseException], str], ...] = (
+    (TestsFailed, "fail"),
+    (CriticRejection, "request_changes"),
+    (AgentOutputInvalid, "invalid"),
+)
+
+
+def _stage_failure_outcome(exc: Exception) -> str:
+    """The outcome a stage that raised without declaring is published under."""
+    for exc_type, outcome in _STAGE_EXCEPTIONS:
+        if isinstance(exc, exc_type):
+            return outcome
+    return "unavailable"
+
+
+def _verifier_outcome(result: dict[str, Any]) -> str:
+    """The verifier's stage outcome, from the verdict it published.
+
+    Checked against the vocabulary rather than passed through: a verdict the
+    engine did not already reject (`_test_result` refuses anything outside
+    pass/fail/skip) would otherwise put a name in the metrics that no reader
+    of the table can interpret, which is how a rate stops meaning anything.
+    """
+    verdict = str((result or {}).get("verdict") or "")
+    return verdict if verdict in STAGE_OUTCOMES["verifier"] else "invalid"
 
 
 def _norm_path(p: str) -> str:
@@ -631,6 +729,98 @@ class ExecutorService:
             sequence=self.goals.next_sequence(goal_id),
         )
 
+    # ── stage measurement (docs/04 §4.4) ───────────────────────────────
+    #
+    # One `stage_result` event per role stage: what the stage was for, whether
+    # it achieved it, what it cost, and how long it took. Everything downstream
+    # — the per-role success rate, the per-stage cost table, the failure
+    # breakdown — is arithmetic over these events, so the measurement is taken
+    # where the stage actually runs rather than reconstructed from whatever
+    # side effects it happened to leave behind.
+    #
+    # `duration_ms` is wall clock across the whole stage, not the sum of its
+    # model calls: a stage's cost is the calls *and* the engine's own work
+    # between them (diff rendering, `fs.apply`, a sandboxed command). Tokens are
+    # read back from the `usage` events the orchestrator published during the
+    # stage, so spend is attributed from the one record that already exists
+    # rather than counted twice.
+
+    @contextlib.asynccontextmanager
+    async def _stage(
+        self, goal_id: str, stage: str, role: str, step_id: str | None = None,
+        ordinal: int = 0,
+    ) -> AsyncIterator[_Stage]:
+        """Time and account one role stage, publishing what it measured.
+
+        Transparent to control flow by design: it publishes in a `finally`, so
+        a stage that raised is still measured and the outcome says which kind
+        of failure it was, and it neither raises nor swallows anything of its
+        own. A measurement that could fail a goal would quietly make the thing
+        it measures worth avoiding.
+
+        An exception does not overwrite an outcome the stage already declared:
+        `TestsFailed` and `CriticRejection` are how a verifier says "fail" and a
+        critic says "request-changes" — a stage that did its job and is raising
+        on the way out is a success at being that role, not an invalid reply.
+        """
+        handle = _Stage(stage, role, step_id, ordinal)
+        try:
+            # A goal deleted from another process has nowhere to publish to.
+            # That is not this stage's failure, so it is measured and dropped.
+            before: int | None = self.goals.current_sequence(goal_id)
+        except ApiError:
+            before = None
+        started = time.monotonic()
+        try:
+            yield handle
+        except asyncio.CancelledError:
+            handle.outcome = "cancelled"
+            raise
+        except Exception as exc:
+            if not handle._declared:
+                handle.outcome = _stage_failure_outcome(exc)
+            raise
+        finally:
+            if before is not None:
+                self._publish_stage_result(goal_id, handle, before, started)
+
+    def _publish_stage_result(
+        self, goal_id: str, handle: _Stage, before: int, started: float,
+    ) -> None:
+        """Publish one stage's outcome, cost and wall clock.
+
+        Spend is summed from this stage's own `usage` events, matched on role
+        *and* step: under a parallel goal another step's calls land in the same
+        goal's log between the same two sequence numbers, and attributing them
+        here would move cost between steps that ran at the same time.
+        """
+        tokens = 0
+        calls = 0
+        for ev in self.goals.events_after(goal_id, before):
+            if ev.type != "usage" or ev.step_id != handle.step_id:
+                continue
+            payload = ev.payload or {}
+            if payload.get("role") != handle.role:
+                continue
+            calls += 1
+            for key in ("input_tokens", "output_tokens"):
+                value = payload.get(key)
+                if isinstance(value, (int, float)):
+                    tokens += int(value)
+        self.goals.publish(self._event(
+            goal_id, handle.step_id, "stage_result",
+            {
+                "stage": handle.name,
+                "role": handle.role,
+                "ordinal": handle.ordinal,
+                "outcome": handle.outcome,
+                "detail": handle.detail,
+                "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+                "tokens": tokens,
+                "calls": calls,
+            },
+        ))
+
     def _parallel_width(self) -> int:
         """The configured parallel width: env override, then persisted setting,
         then the built-in default. Read per batch, so a settings change lands
@@ -681,10 +871,18 @@ class ExecutorService:
         # ── Laya: System-1 pre-flight gate ──────────────────────────────
         # Cheap typed decisions (intent / risk / injection probability) before
         # any LLM call. High-confidence injection stops the goal here.
-        try:
-            decision = await self.laya.decide(build_state(goal, ws.root_path))
-        except Exception as exc:  # pragma: no cover - decide() already guards
-            decision = LayaDecision(engine="skipped", skipped_reason=f"gate error: {exc}")
+        async with self._stage(goal_id, "laya", "laya") as laya_stage:
+            try:
+                decision = await self.laya.decide(build_state(goal, ws.root_path))
+                if decision.blocked:
+                    laya_stage.record("block", decision.block_reason or None)
+                elif decision.engine == "skipped":
+                    laya_stage.record("skipped", decision.skipped_reason or None)
+                else:
+                    laya_stage.record("allow")
+            except Exception as exc:  # pragma: no cover - decide() already guards
+                decision = LayaDecision(engine="skipped", skipped_reason=f"gate error: {exc}")
+                laya_stage.record("skipped", decision.skipped_reason)
         if decision.engine != "skipped":
             self.goals.publish(self._event(
                 goal_id, None, "agent_assigned",
@@ -710,7 +908,9 @@ class ExecutorService:
         # so its steps were guesses; the fixer then read only the paths it had
         # guessed. One bounded reconnaissance pass fixes that for the whole goal.
         try:
-            evidence = await self._librarian(goal_id, goal, ws)
+            async with self._stage(goal_id, "librarian", "librarian") as lib_stage:
+                evidence = await self._librarian(goal_id, goal, ws)
+                lib_stage.record("incomplete" if evidence.get("capped") else "pack")
         except (AgentOutputInvalid, ProviderError, ValueError) as exc:
             # A librarian that cannot run must not kill a goal that might still
             # work: the planner is told there is no evidence and proceeds.
@@ -729,11 +929,13 @@ class ExecutorService:
         # planning continues without a contract, because an aid that can kill a
         # goal is a liability rather than an aid.
         try:
-            design = await (
-                self._design_deliverable(goal_id, goal, ws, evidence)
-                if goal.mode == "design"
-                else self._design(goal_id, goal, ws, evidence)
-            )
+            async with self._stage(goal_id, "design", "design") as design_stage:
+                if goal.mode == "design":
+                    design = await self._design_deliverable(goal_id, goal, ws, evidence)
+                    design_stage.record("contract")
+                else:
+                    design = await self._design(goal_id, goal, ws, evidence)
+                    design_stage.record("contract" if design else "declined")
         except (AgentOutputInvalid, ProviderError, ValueError) as exc:
             self._log(
                 goal_id, None, "warn",
@@ -754,12 +956,36 @@ class ExecutorService:
             # misses what a step needs. The reply merges into the prompt and
             # planning continues; a second ask is refused as a contract error.
             consults_left = MAX_PLANNER_CONSULTS
+            round_no = 0
             while True:
-                out = await self.orchestrator.run_agent("planner", goal_id, None, prompt)
-                # A cancel that landed while the planner was thinking must win: a
-                # goal the user cancelled must not reappear as PENDING with a plan
-                # they explicitly stopped. (PLANNING is a legal cancel state.)
-                if self.goals.get(goal_id).status == "CANCELLED":
+                round_no += 1
+                cancelled = False
+                async with self._stage(goal_id, "planner", "planner", ordinal=round_no) as plan_stage:
+                    out = await self.orchestrator.run_agent("planner", goal_id, None, prompt)
+                    # A cancel that landed while the planner was thinking must
+                    # win: a goal the user cancelled must not reappear as PENDING
+                    # with a plan they explicitly stopped. (PLANNING is a legal
+                    # cancel state.) Declared here so the discarded plan is not
+                    # measured as a produced one.
+                    if self.goals.get(goal_id).status == "CANCELLED":
+                        cancelled = True
+                        plan_stage.record("cancelled")
+                    else:
+                        # Declared from the reply rather than after the decision
+                        # block below, so the measurement covers the call that
+                        # produced the outcome without re-indenting the
+                        # bookkeeping that follows it. A consult is a real
+                        # answer, not a failure: the planner asked for what it
+                        # was missing and got it.
+                        consult = out.get("consult") if isinstance(out, dict) else None
+                        plan_stage.record(
+                            "consult"
+                            if not out.get("steps") and isinstance(consult, dict)
+                            and (consult.get("reads") or consult.get("searches")
+                                 or consult.get("git") or consult.get("run"))
+                            else "plan"
+                        )
+                if cancelled:
                     self._log(goal_id, None, "info", "cancelled during planning — discarding the plan")
                     return
                 consult = out.get("consult") if isinstance(out, dict) else None
@@ -860,6 +1086,7 @@ class ExecutorService:
 
         last: dict[str, Any] = {}
         rounds_used = 0
+        capped = False
         for round_no in range(1, MAX_LIBRARY_ROUNDS + 1):
             rounds_used = round_no
             out = await self.orchestrator.run_agent("librarian", goal_id, None, prompt)
@@ -873,6 +1100,11 @@ class ExecutorService:
                     f"librarian reached the {MAX_LIBRARY_ROUNDS}-round cap with "
                     f"{len(requests)} request(s) still pending — using what it has",
                 )
+                # The pack is real but partial, and the difference matters: this
+                # is the difference between "the workspace had nothing more" and
+                # "the engine stopped asking", which the metrics read as two
+                # different outcomes.
+                capped = True
                 break
             text, opened_now, matched_now, refused = self._serve_library_requests(goal_id, lib, requests)
             opened |= opened_now
@@ -889,7 +1121,9 @@ class ExecutorService:
                 "the goal needs, or keep asking by filling reads/searches/git/run."
             )
 
-        evidence = self._evidence_pack(goal_id, last, opened, matched, listed, rounds_used)
+        evidence = self._evidence_pack(
+            goal_id, last, opened, matched, listed, rounds_used, capped=capped,
+        )
         self.goals.publish(self._event(goal_id, None, "library_evidence", evidence))
         self._log(
             goal_id, None, "info",
@@ -1016,6 +1250,7 @@ class ExecutorService:
         matched: set[str],
         listed: set[str],
         rounds_used: int,
+        capped: bool = False,
     ) -> dict[str, Any]:
         """Keep only the claims the engine can stand behind.
 
@@ -1094,6 +1329,11 @@ class ExecutorService:
                 "considered": len(listed),
             },
             "dropped_paths": unsupported[:5],
+            # True when the round cap stopped the search with material still
+            # outstanding (docs/04 §4.0). It is the difference between "this
+            # workspace has no more to say" and "the engine stopped asking",
+            # and it is worth knowing in the pack rather than only in a log line.
+            "capped": capped,
         }
 
     def _suggested_paths_context(
@@ -1707,13 +1947,25 @@ class ExecutorService:
                 summaries: list[dict[str, Any]] | None = None
                 prior_failure: dict[str, Any] | None = None
                 passes_left = MAX_FIXER_PASSES
+                # One counter across attempts and the fixer's own extra passes,
+                # so every fixer call this step makes is a distinct measured
+                # stage rather than two rows claiming to be attempt 1.
+                fixer_calls = 0
                 for attempt in range(1, MAX_FIX_ATTEMPTS + 2):  # attempts, plus the final one
                     final = attempt > MAX_FIX_ATTEMPTS
                     try:
-                        summaries, wants_pass = await self._fixer(
-                            goal_id, step, fs, goal.dry_run, evidence,
-                            failure_feedback=prior_failure,
-                        )
+                        fixer_calls += 1
+                        async with self._stage(
+                            goal_id, "fixer", "fixer", step.id, ordinal=fixer_calls,
+                        ) as fix_stage:
+                            summaries, wants_pass = await self._fixer(
+                                goal_id, step, fs, goal.dry_run, evidence,
+                                failure_feedback=prior_failure,
+                            )
+                            fix_stage.record(
+                                "wrote" if any(s.get("changed", True) for s in summaries)
+                                else "no_change"
+                            )
                         # The fixer declared the change multi-stage. Passes are
                         # the fixer's own budget, granted BEFORE verifying (a
                         # test run against admittedly half-written work is a
@@ -1733,14 +1985,31 @@ class ExecutorService:
                             if self._cancelled(goal_id):
                                 self._log(goal_id, step.id, "info", "cancelled — not running the fixer's next pass")
                                 return
-                            summaries, wants_pass = await self._fixer(
-                                goal_id, step, fs, goal.dry_run, evidence,
-                                failure_feedback=prior_failure,
+                            fixer_calls += 1
+                            async with self._stage(
+                                goal_id, "fixer", "fixer", step.id, ordinal=fixer_calls,
+                            ) as pass_stage:
+                                summaries, wants_pass = await self._fixer(
+                                    goal_id, step, fs, goal.dry_run, evidence,
+                                    failure_feedback=prior_failure,
+                                )
+                                pass_stage.record(
+                                    "wrote" if any(s.get("changed", True) for s in summaries)
+                                    else "no_change"
+                                )
+                        # The verifier publishes its verdict and raises it as
+                        # control flow when the tests failed, so its outcome is
+                        # recorded from the exception on that path
+                        # (see `_stage_failure_outcome`) and from the verdict it
+                        # returns on the others.
+                        async with self._stage(
+                            goal_id, "verifier", "verifier", step.id, ordinal=attempt,
+                        ) as verify_stage:
+                            outcome = await self._verifier(
+                                goal_id, step, ws, evidence, prior_failure=prior_failure,
+                                diffs=summaries,
                             )
-                        outcome = await self._verifier(
-                            goal_id, step, ws, evidence, prior_failure=prior_failure,
-                            diffs=summaries,
-                        )
+                            verify_stage.record(_verifier_outcome(outcome))
                     except TestsFailed as exc:
                         if final:
                             raise
@@ -1770,7 +2039,20 @@ class ExecutorService:
                 # A replay is a reviewed decision, not a fresh attempt: there is
                 # nothing for a retry loop to fix, so it never runs on this path.
                 summaries = self._replay_files(goal_id, step, fs, stored_files, dry_run=goal.dry_run)
-                outcome = await self._verifier(goal_id, step, ws, evidence, diffs=summaries)
+                # A replay wrote what a reviewed fixer pass already wrote, so the
+                # fixer stage is recorded as the replay it was — not as a second
+                # attempt to write, which would double the fixer's measured cost.
+                self.goals.publish(self._event(
+                    goal_id, step.id, "stage_result",
+                    {
+                        "stage": "fixer", "role": "fixer", "ordinal": 1,
+                        "outcome": "replayed", "detail": None,
+                        "duration_ms": 0, "tokens": 0, "calls": 0,
+                    },
+                ))
+                async with self._stage(goal_id, "verifier", "verifier", step.id) as replay_verify:
+                    outcome = await self._verifier(goal_id, step, ws, evidence, diffs=summaries)
+                    replay_verify.record(_verifier_outcome(outcome))
             # The fixer has already written by the time the verifier runs, so
             # those stages are not cancel-safe and cancelling mid-flight leaves
             # their work on disk (documented behavior of a mid-run cancel).
@@ -1784,11 +2066,19 @@ class ExecutorService:
             # loop sets `summaries`, the replay branch sets it, and a failure
             # returns instead of falling through.
             assert summaries is not None
-            await self._critic(goal_id, step, fs, summaries, evidence, outcome, ws_root=ws.root_path)
+            # The critic approves by returning and rejects by raising, so its two
+            # outcomes come from the two ways out of this block rather than from
+            # a value it hands back.
+            async with self._stage(goal_id, "critic", "critic", step.id) as critic_stage:
+                await self._critic(goal_id, step, fs, summaries, evidence, outcome, ws_root=ws.root_path)
+                critic_stage.record("approve")
             if self._cancelled(goal_id):
                 self._log(goal_id, step.id, "info", "cancelled — skipping the summary for this step")
                 return
-            await self._scribe(goal_id, step, summaries, ws.root_path, goal.dry_run, outcome)
+            async with self._stage(goal_id, "scribe", "scribe", step.id) as scribe_stage:
+                scribe_stage.record(
+                    await self._scribe(goal_id, step, summaries, ws.root_path, goal.dry_run, outcome)
+                )
         except CriticRejection:
             # Step remains IN_PROGRESS with review_notes, goal is PAUSED; human retry required
             return
@@ -2621,7 +2911,7 @@ class ExecutorService:
     async def _scribe(
         self, goal_id: str, step: PlanStep, diffs: list[dict[str, Any]], root_path: str = "",
         dry_run: bool = False, test_outcome: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> str:
         # The diffs themselves, not just their file names: the prompt tells the
         # scribe to describe "what changed and why, from the diff you are given",
         # and a bare path list made that a promise the executor never kept —
@@ -2659,36 +2949,45 @@ class ExecutorService:
         self._set_step(goal_id, step, "IN_PROGRESS", commit_message=commit_message, last_agent_role="scribe")
         self._log(goal_id, step.id, "info", summary)
 
-        if not dry_run and root_path and self.git.is_git_repo(root_path):
-            # The last guard before the one irreversible act. A cancel that
-            # landed during the critic's call must not end in a commit the user
-            # asked to stop; the summary above still records what was done.
-            if self._cancelled(goal_id):
-                self._log(
-                    goal_id, step.id, "info",
-                    "cancelled — skipping the commit for this step",
-                )
-            else:
-                # Only what this step wrote. A bare `git add -A` would commit the
-                # user's own half-finished work under this step's message. The git
-                # lock serializes the index: two parallel steps committing at once
-                # would otherwise interleave their staged paths.
-                paths = [d["path"] for d in diffs]
-                async with self._git_lock:
-                    commit_hash = await asyncio.to_thread(
-                        self.git.commit, root_path, commit_message, paths,
-                    )
-                if commit_hash:
-                    self._log(goal_id, step.id, "info", f"git committed {commit_hash[:7]}: {commit_message}")
-                elif paths:
-                    # Non-empty paths and no commit: either there was nothing left to
-                    # record (the files matched what is already committed) or git
-                    # refused. Silence here reads as "committed" to anyone watching.
-                    self._log(
-                        goal_id, step.id, "warn",
-                        "git commit produced nothing — the step's files match the last commit, "
-                        "or git refused (check its user.name/user.email config)",
-                    )
+        if dry_run or not root_path or not self.git.is_git_repo(root_path):
+            # A dry run commits nothing by design, and a workspace that is not a
+            # repository has nothing to commit into. Both are the scribe doing its
+            # job, so neither is reported as a failure — a per-role rate that
+            # counted "not a repo" as a broken scribe would punish every user whose
+            # workspace is a plain directory.
+            return "skipped" if dry_run else "not_a_repo"
+        # The last guard before the one irreversible act. A cancel that
+        # landed during the critic's call must not end in a commit the user
+        # asked to stop; the summary above still records what was done.
+        if self._cancelled(goal_id):
+            self._log(
+                goal_id, step.id, "info",
+                "cancelled — skipping the commit for this step",
+            )
+            return "cancelled"
+        # Only what this step wrote. A bare `git add -A` would commit the
+        # user's own half-finished work under this step's message. The git
+        # lock serializes the index: two parallel steps committing at once
+        # would otherwise interleave their staged paths.
+        paths = [d["path"] for d in diffs]
+        async with self._git_lock:
+            commit_hash = await asyncio.to_thread(
+                self.git.commit, root_path, commit_message, paths,
+            )
+        if commit_hash:
+            self._log(goal_id, step.id, "info", f"git committed {commit_hash[:7]}: {commit_message}")
+            return "committed"
+        if paths:
+            # Non-empty paths and no commit: either there was nothing left to
+            # record (the files matched what is already committed) or git
+            # refused. Silence here reads as "committed" to anyone watching.
+            self._log(
+                goal_id, step.id, "warn",
+                "git commit produced nothing — the step's files match the last commit, "
+                "or git refused (check its user.name/user.email config)",
+            )
+            return "nothing_to_commit"
+        return "nothing_to_commit"
 
     # --- parsing ------------------------------------------------------
 

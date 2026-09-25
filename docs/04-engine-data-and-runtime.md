@@ -136,8 +136,9 @@ before, so a new event type means a new row here in the same change):
 | `file_change_summary` | step | `{paths: [str], dry_run: bool, unchanged: [str]}` — `unchanged` are paths whose proposal already matched the file ("already matched — left alone") |
 | `agent_assigned` | any (`null` for laya) | `{role, provider, model}` — the model about to be called, published before the call |
 | `provider_fallback` | any | `{role, from: {provider, model}, to: {provider, model}, code, detail}` |
-| `library_evidence` | — | the checked evidence pack: `{summary, files: [{path, why, evidence}], symbols, conventions, test_command, risks, rounds, counts: {opened, matched, considered}, dropped_paths}` (`04` §4.0) |
+| `library_evidence` | — | the checked evidence pack: `{summary, files: [{path, why, evidence}], symbols, conventions, test_command, risks, rounds, counts: {opened, matched, considered}, dropped_paths, capped}` (`04` §4.0) — `capped` is true when the round cap stopped the search with material still outstanding, the difference between "this workspace had nothing more to say" and "the engine stopped asking" |
 | `design_contract` | — | the locked direction: `{applies, artifact, direction, design_system: {name, source, origin}, tokens: {colors: [{name, value}], typography: [{name, value}], spacing: [str], radii: [str]}, components: [{name, purpose}], conventions, constraints, acceptance, design_md, mode?}` — `origin` is `pinned`\|"discovered"\|`null` (`04` §4.0a). `mode: "design"` and a non-empty `design_md` mark a design-deliverable goal, where the body is the artifact rather than advice (`04` §4.0a.2) |
+| `stage_result` | any | `{stage, role, step_id, ordinal, outcome, detail, duration_ms, tokens, calls}` — what one role stage achieved, what it spent, and how long it took (§4.7). `ordinal` disambiguates repeated stages in one scope: librarian rounds, planner consults, fixer attempts and passes. `outcome` is from the closed per-stage vocabulary in §4.7; `detail` is a short engine-authored note (a skip reason, a block reason), never model prose |
 | `plan_updated` | step | `{step_id, step_title, fields: [str], changes: {field: {before, after}}}` — only fields the patch edited, only those whose value actually changed |
 | `laya_decision` | — | the gate's full verdict: `{engine, answers, routing, blocked, block_reason, warnings, skipped_reason, provider, model, policy: {injection_block_threshold, risk_warn_level, clarify_warn_threshold}}` (`05`) |
 | `fix_retry` | step | `{attempt, max_attempts, reason}` — a failing test run fed back to the fixer (bounded by `MAX_FIX_ATTEMPTS`) |
@@ -350,7 +351,8 @@ Error body: `{ "code": str, "message": str }`.
 | `GET` | `/goals/{id}/audit` | — | the goal's audit document (plan edits, fallbacks, fix retries, errors, outcomes, usage, silent roles) |
 | `POST` | `/goals/{id}/apply` | `{expected_version}` | replays a completed dry-run's stored proposals for real |
 | `POST` | `/goals/{id}/enable-execution` | `{expected_version}` | lifts the `plan_only` guard (`Goal`) |
-| `GET` | `/stats/overview?window={1\|7\|30\|0}` | — | cross-goal outcomes, success rate, spend, daily trend (`engine/stats.py`). Bounded windows are anchored to the request's wall clock, so an idle install sees an empty window rather than its last run relabelled as recent |
+| `GET` | `/stats/overview?window={1\|7\|30\|0}` | — | cross-goal outcomes, success rate, spend, daily trend (`engine/stats.py`), plus `by_stage` and `by_role_outcome` from the `stage_result` events (`engine/metrics.py`, §4.7). Bounded windows are anchored to the request's wall clock, so an idle install sees an empty window rather than its last run relabelled as recent. Both stage blocks are optional and their absence degrades the view rather than failing the read |
+| `GET` | `/stats/failures?window={1\|7\|30\|0}` | — | what went wrong: `by_code`, `by_role`, `by_stage`, the ranked `causes` with their most recent message, and how many `fix_retry` steps the loop then got past (`recovery_rate` is `null` with no retries — no retries is not a perfect record). An install that has never failed reads `total: 0` with no rows, never a table of zeros |
 | `GET` | `/stats/history?limit={0..730}` | — | frozen daily stats documents, oldest first; `limit=0` returns every stored day for JSON export |
 | `GET` | `/stats/import` | — | the currently-imported history document (`{imported: false, days: []}` when none — a normal state, not a 404) |
 | `POST` | `/stats/import` | `{exported_at, days[], source?}` | validates and **replaces** the stored import (`engine/stats_import.py`). 422 with a specific `code` (`duplicate_day`, `out_of_order`, `bad_day`, `empty`, `too_many_days`, `missing_exported_at`, `storage_failed`). Stored separately from `stats_snapshots` so retention can never prune imported data |
@@ -360,7 +362,7 @@ Error body: `{ "code": str, "message": str }`.
 | `GET` | `/settings/keys` | — | per-provider key status + `storage`/`storage_detail`/`storage_reason` (`04` §7) |
 | `POST` | `/settings/keys` | `{provider, api_key}` | `{ok, provider, storage}` |
 | `GET` | `/settings/agents` | — | `AgentConfig[]`, fixed role order |
-| `GET` | `/settings/agents/stats` | query: `limit` | per-role last call / last error / counts, from the event log |
+| `GET` | `/settings/agents/stats` | query: `limit` | per-role last call / last error / counts, from the event log, plus `runs` / `success_rate` / `outcomes` / `tokens` measured over every run the log holds (§4.7). The rate is about the *role* — did it do its job — not about the goal, which is the other question and is answered by `/stats/overview` |
 | `POST` | `/settings/agents/repair` | — | `RepairReport` (`04` §3.1) |
 | `GET` | `/settings/agents/{role}` | — | `AgentConfig` |
 | `PUT` | `/settings/agents/{role}` | `AgentConfigUpdate` | `AgentConfig` |
@@ -495,7 +497,8 @@ The pack is published as a `library_evidence` event:
 {"summary":"…","files":[{"path":"README.md","why":"…","evidence":"opened"}],
  "symbols":[{"name":"banner","path":"README.md"}],"conventions":["…"],
  "test_command":["python","-m","pytest","-q"],"risks":["…"],"rounds":2,
- "counts":{"opened":1,"matched":1,"considered":3},"dropped_paths":["src/ghost.py"]}
+ "counts":{"opened":1,"matched":1,"considered":3},"dropped_paths":["src/ghost.py"],
+ "capped":false}
 ```
 
 The planner and the fixer both receive `_evidence_text(pack)`, so a step is written against what the
@@ -782,6 +785,71 @@ message included.
 connection used to escape as a raw `httpx` exception and reach the goal as `internal_error` — a code
 that blames Codify for a provider that is merely not listening. `providers.post_json` is the single
 transport path that names both.
+
+### 4.7 Measuring the stages
+
+Every role stage publishes one `stage_result` when it finishes — including when
+it raised, because a stage that cannot run is one of the answers a per-role
+number has to contain. The measurement is taken where the stage runs, not
+reconstructed afterwards from whatever side effects it left behind.
+
+**What a stage covers** is the awaited role call and the engine work inside it:
+for the fixer, the `fs.apply` and the writes; for the verifier, the sandboxed
+command; for the librarian, its bounded rounds. The status writes and summary
+logs that follow are not counted — they are microseconds, and including them
+would make the number depend on where the stage boundary was drawn rather than
+on what the stage did.
+
+**`duration_ms` is wall clock, not the sum of its model calls.** A stage's cost
+is the call *and* the work around it, so the per-stage latency is larger than
+the per-call `duration_ms` on the `usage` events, and both are labelled for
+what they measure. **`tokens` and `calls` are read back from the `usage` events
+the orchestrator published during the stage**, matched on role *and* step: under
+a parallel goal another step's calls land in the same goal's log between the
+same two sequence numbers, and attributing them here would move cost between
+steps that ran at the same time.
+
+**`outcome` is a closed vocabulary**, so a per-role rate is a count of declared
+outcomes rather than a guess at what a missing event meant:
+
+| stage | outcomes |
+|---|---|
+| `laya` | `skipped` \| `allow` \| `block` \| `cancelled` \| `unavailable` |
+| `librarian` | `pack` \| `incomplete` \| `invalid` \| `cancelled` \| `unavailable` |
+| `design` | `contract` \| `declined` \| `invalid` \| `cancelled` \| `unavailable` |
+| `planner` | `plan` \| `consult` \| `invalid` \| `cancelled` \| `unavailable` |
+| `fixer` | `wrote` \| `no_change` \| `replayed` \| `invalid` \| `cancelled` \| `unavailable` |
+| `verifier` | `pass` \| `fail` \| `skip` \| `refused` \| `invalid` \| `cancelled` \| `unavailable` |
+| `critic` | `approve` \| `request_changes` \| `invalid` \| `cancelled` \| `unavailable` |
+| `scribe` | `committed` \| `nothing_to_commit` \| `not_a_repo` \| `skipped` \| `invalid` \| `cancelled` \| `unavailable` |
+
+`invalid` is a reply the engine could not use; `unavailable` is a call that
+could not be made or completed. They are different problems to the person
+choosing what to fix, and a rate that merged them would hide a role whose
+prompt needs work behind a role that has no key. `incomplete` and `skipped` are
+outcomes the stage chose, not failures: a librarian stopped by its round cap
+looked and ran out of budget, and a scribe in a dry run was told not to commit.
+
+**A stage that raises still publishes.** `TestsFailed` and `CriticRejection` are
+control flow rather than faults — a verifier that returned `fail` and a critic
+that requested changes have both done their job — so a stage that declared
+nothing and raised one of those is published as `fail` / `request_changes`, not
+as `invalid`. A rate that counted those as broken replies would report a
+healthy pipeline as broken precisely when it is working.
+
+`engine/metrics.py` aggregates these into what the settings and stats views
+render, as pure functions over parsed events (the same shape and the same
+reason as `engine/stats.py`). Three rules govern every number it produces:
+
+1. **A rate is never computed from a denominator that has not finished.**
+   `cancelled` is reported on its own, exactly as an active goal is (§3), so
+   the number moves only for reasons that have to do with the role working.
+2. **A rate is never the only number.** The outcome histogram ships with every
+   rate, so "the verifier did its job 91% of the time" can be checked against
+   `fail: 9` rather than taken on trust.
+3. **Tokens are tokens.** There is no price table and no currency on any
+   surface that reads these numbers, because a price that silently stops
+   matching the provider is worse than no price at all.
 
 ## 5. Sandbox argv allowlist
 

@@ -933,6 +933,21 @@ class GoalService:
         self._db.commit()
         return int(row[0])
 
+    def current_sequence(self, goal_id: str) -> int:
+        """The goal's highest event sequence, without consuming one.
+
+        The stage timer needs a watermark to ask "what was published while this
+        stage ran" without allocating a sequence number it will not use — and
+        `next_sequence` cannot be pressed for that, because a gap in the log
+        would be a hole in the transcript's ordering.
+        """
+        row = self._db.execute(
+            "SELECT event_seq FROM goals WHERE id = ?", (goal_id,)
+        ).fetchone()
+        if row is None:
+            raise ApiError(404, "unknown_goal", "goal not found")
+        return int(row[0])
+
     def publish(self, event: Event) -> Event:
         self._db.execute(
             "INSERT INTO events (id, goal_id, step_id, type, payload, timestamp, sequence) VALUES (?, ?, ?, ?, ?, ?, ?)",

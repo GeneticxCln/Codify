@@ -259,8 +259,34 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
                 </span>
               </p>
             )}
-            {callStat && (callStat.last_call || callStat.last_error) && (
+            {callStat && (callStat.last_call || callStat.last_error || (callStat.runs ?? 0) > 0) && (
               <p className="text-[11px] text-gray-500 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                {(callStat.runs ?? 0) > 0 && (
+                  <span
+                    className="whitespace-nowrap text-gray-500"
+                    title={
+                      Object.entries(callStat.outcomes ?? {})
+                        .map(([name, n]) => `${n} ${name.replace(/_/g, " ")}`)
+                        .join(" · ") || undefined
+                    }
+                  >
+                    · did its job{" "}
+                    <span
+                      className={`font-mono ${
+                        (callStat.success_rate ?? 0) >= 90
+                          ? "text-green-400/90"
+                          : (callStat.success_rate ?? 0) >= 60
+                            ? "text-amber-300/90"
+                            : "text-red-300/90"
+                      }`}
+                    >
+                      {callStat.success_rate == null ? "—" : `${callStat.success_rate}%`}
+                    </span>{" "}
+                    <span className="text-gray-600">
+                      over {callStat.runs} run{callStat.runs === 1 ? "" : "s"}
+                    </span>
+                  </span>
+                )}
                 {callStat.last_call && (
                   <span className="whitespace-nowrap text-gray-400">
                     · last call {formatCallDuration(callStat.last_call.duration_ms)}

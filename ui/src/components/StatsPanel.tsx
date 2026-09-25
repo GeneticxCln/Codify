@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
-import { UsageLane, StatsOverview, StatsHistoryDay } from "../types";
+import { UsageLane, StatsOverview, StatsHistoryDay, StageCost, RoleOutcome, FailureBreakdown } from "../types";
 import {
   clearStatsImport,
+  fetchFailureBreakdown,
   fetchStatsHistory,
   fetchStatsImport,
   fetchStatsOverview,
@@ -14,6 +15,18 @@ import {
   validateStatsHistoryDocument,
   type MergedDay,
 } from "../statsHistory";
+import {
+  describeOutcomes,
+  failureEmptyMessage,
+  hasStageData,
+  recoveryLabel,
+  roleRateLabel,
+  roleRateTone,
+  roleRunSummary,
+  shareWidth,
+  topFailure,
+  STAGE_LABELS,
+} from "../stageMetrics";
 import { CheckCircle2, Coins, XCircle, Ban, Zap, TrendingUp, FileDown, FileUp } from "lucide-react";
 
 /**
@@ -179,6 +192,149 @@ const SuccessRateChart: React.FC<{ days: MergedDay[] }> = ({ days }) => {
   );
 };
 
+/**
+ * Per stage: runs, tokens, its share of the window's spend, and the stage's own
+ * wall clock. A *stage* is not a call — it is the model call plus the engine
+ * work around it (diff rendering, `fs.apply`, a sandboxed command) — so these
+ * latencies are larger than the per-call averages above, and both are labelled
+ * for what they measure.
+ */
+const StageTable: React.FC<{ rows: StageCost[] }> = ({ rows }) => {
+  if (!hasStageData(rows)) {
+    return (
+      <div className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3">
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-1">
+          By stage
+        </div>
+        <p className="text-[11px] text-gray-500">
+          No stage has been measured in this window. A goal has to run first.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3">
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-2">
+        By stage
+        <span className="normal-case font-normal text-gray-500">
+          {" "}
+          · wall clock per stage, not per model call
+        </span>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {rows.map((row) => (
+          <div key={row.stage} className="flex items-center gap-2 text-[11px]">
+            <span
+              className="text-gray-300 w-28 flex-shrink-0 truncate"
+              title={describeOutcomes(row.outcomes)}
+            >
+              {STAGE_LABELS[row.stage] ?? row.stage}
+            </span>
+            <div className="h-1.5 w-20 bg-[#161b22] rounded-full overflow-hidden flex-shrink-0">
+              <div
+                className="h-full bg-emerald-600 rounded-full"
+                style={{ width: shareWidth(row.token_share) }}
+              />
+            </div>
+            <span className="font-mono text-gray-400 w-14 text-right flex-shrink-0">
+              {row.token_share}%
+            </span>
+            <span className="font-mono text-gray-400 w-16 text-right flex-shrink-0">
+              {fmtTokens(row.tokens)}
+            </span>
+            <span className="text-gray-500 flex-shrink-0">
+              {row.runs} run{row.runs === 1 ? "" : "s"} · avg {fmtDuration(row.avg_duration_ms)}
+              {row.p95_duration_ms != null && ` · p95 ${fmtDuration(row.p95_duration_ms)}`}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+/**
+ * Per role: did it do its job. A verifier that reported `fail` and a critic
+ * that asked for changes have both worked exactly as specified, so neither is
+ * counted against its role — the goal-level rate above answers the other
+ * question. The run summary under each rate is the evidence for it, and a role
+ * that never ran says so instead of showing 0%.
+ */
+const RoleOutcomeTable: React.FC<{ roles: Record<string, RoleOutcome> }> = ({ roles }) => {
+  const entries = Object.values(roles ?? {});
+  if (entries.length === 0) return null;
+  return (
+    <div className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3">
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-1">
+        Per role
+        <span className="normal-case font-normal text-gray-500">
+          {" "}
+          · did the role do its job, not did the goal succeed
+        </span>
+      </div>
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-x-4 gap-y-1.5">
+        {entries.map((role) => (
+          <div key={role.role} className="flex flex-col gap-0.5 min-w-0">
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-[11px] text-gray-300 truncate">{role.role}</span>
+              <span className={`text-[11px] font-mono ${roleRateTone(role)}`}>
+                {roleRateLabel(role)}
+              </span>
+              <span className="text-[10px] text-gray-600 font-mono ml-auto">
+                {fmtTokens(role.tokens)}
+              </span>
+            </div>
+            <span className="text-[10px] text-gray-600 truncate" title={roleRunSummary(role)}>
+              {roleRunSummary(role)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+/**
+ * What went wrong, and how much of it the retry loops got back. The empty
+ * state is a sentence, not a table of zeros: an install with no failures has
+ * no evidence about whether failures are handled, and rendering "0 failures"
+ * would claim otherwise.
+ */
+const FailureView: React.FC<{ breakdown: FailureBreakdown | null }> = ({ breakdown }) => {
+  if (!breakdown) return null;
+  const empty = failureEmptyMessage(breakdown.total, breakdown.retries);
+  return (
+    <div className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3">
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-2">
+        Failures
+        {topFailure(breakdown) && (
+          <span className="normal-case font-normal text-gray-400"> · {topFailure(breakdown)}</span>
+        )}
+      </div>
+      {empty ? (
+        <p className="text-[11px] text-gray-500">{empty}</p>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {breakdown.causes.slice(0, 6).map((cause) => (
+            <div key={cause.code} className="flex items-center gap-2 text-[11px]">
+              <span className="font-mono text-red-300 w-44 flex-shrink-0 truncate">
+                {cause.code}
+              </span>
+              <span className="font-mono text-gray-400 w-8 text-right flex-shrink-0">
+                {cause.count}
+              </span>
+              <span className="text-gray-500 truncate min-w-0" title={cause.message}>
+                {cause.message}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="text-[10px] text-gray-600 mt-2">{recoveryLabel(breakdown)}</p>
+    </div>
+  );
+};
+
 export const StatsPanel: React.FC = () => {
   const [windowDays, setWindowDays] = useState(0);
   const [stats, setStats] = useState<StatsOverview | null>(null);
@@ -189,6 +345,7 @@ export const StatsPanel: React.FC = () => {
   const [importBusy, setImportBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [failures, setFailures] = useState<FailureBreakdown | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -199,6 +356,23 @@ export const StatsPanel: React.FC = () => {
       })
       .catch(() => {
         if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [windowDays]);
+
+  // The failure view is a separate read from a separate endpoint. It is
+  // allowed to be missing: an engine too old to serve it, or one whose metrics
+  // read failed, must not take the rest of this panel down with it.
+  useEffect(() => {
+    let cancelled = false;
+    fetchFailureBreakdown(windowDays)
+      .then((f) => {
+        if (!cancelled) setFailures(f);
+      })
+      .catch(() => {
+        if (!cancelled) setFailures(null);
       });
     return () => {
       cancelled = true;
@@ -453,6 +627,9 @@ export const StatsPanel: React.FC = () => {
           {/* Where the tokens went */}
           <UsageTable title="By role" lanes={stats.usage.by_role} />
           <UsageTable title="By model" lanes={stats.usage.by_model} />
+          {stats.by_stage && <StageTable rows={stats.by_stage} />}
+          {stats.by_role_outcome && <RoleOutcomeTable roles={stats.by_role_outcome} />}
+          <FailureView breakdown={failures} />
 
           {stats.usage.calls === 0 && stats.usage.failures === 0 && stats.goals.goals > 0 && (
             <p className="text-[11px] text-gray-500 px-0.5 flex items-center gap-1.5">
