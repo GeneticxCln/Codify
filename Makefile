@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams test-ui lint typecheck build-ui dev-ui check-tauri build-tauri run-engine run-engine-scratch check ci ci-python-floor hooks clean
+.PHONY: help test test-engine test-streams test-ui lint typecheck build-ui dev-ui check-tauri build-tauri run-engine run-engine-scratch check ci ci-python-floor hooks clean bench bench-smoke
 
 # mypy is a dev tool, installed like ruff (`pip install mypy` or `pip install -e ".[dev]"`);
 # when it is only in the project venv, fall back to that so `make check` works unactivated.
@@ -28,6 +28,8 @@ help:
 	@echo "  make build-tauri  - Build Tauri desktop application"
 	@echo "  make run-engine   - Start Codify Python engine standalone"
 	@echo "  make run-engine-scratch - Start an engine isolated under $(SCRATCH_HOME) (real ~/.codify untouched)"
+	@echo "  make bench-smoke  - Run the hermetic benchmark tier (no network, no models, no spend)"
+	@echo "  make bench        - Run the repo_scale tier against your configured models (spends tokens)"
 	@echo "  make check        - Run all verifications (ruff + UI tests + Python tests + stream tests + UI build + Tauri check)"
 	@echo "  make ci           - Run the whole CI gate locally: make check plus the declared $(PY_MIN) leg"
 	@echo "  make ci-python-floor - Run only the $(PY_MIN) leg (uv or a system python$(PY_MIN) covers it)"
@@ -66,7 +68,7 @@ test-ui:
 # tests/ and scripts/ too: a dead local in a test is a lost assertion, and this
 # project's whole bar is what the suite proves.
 lint:
-	ruff check engine tests scripts
+	ruff check engine tests scripts benchmarks
 
 # Same scope as lint (engine, tests, scripts) — ruff sees the syntax and the dead
 # names, mypy sees the annotated-but-wrong types neither it nor the tests catch
@@ -109,6 +111,15 @@ run-engine-scratch:
 # The fastest checks first, so the cheap failure is the one you read. These are the
 # same targets the CI workflow names, split by toolchain (.github/workflows/check.yml),
 # but only on the host interpreter.
+# Benchmarks stay out of `check` and `ci` on purpose. The smoke tier is hermetic,
+# but the configured tier spends real tokens on real models, and a gate that costs
+# money on every push is a gate people learn to bypass. Run these deliberately.
+bench:
+	python3 -m benchmarks.runner --tier repo_scale
+
+bench-smoke:
+	python3 -m benchmarks.runner --tier smoke
+
 check: lint typecheck test-ui test test-streams build-ui check-tauri
 	@echo "All verifications passed successfully!"
 

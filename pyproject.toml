@@ -40,7 +40,7 @@ python_version = "3.10"
 # Everything the project ships, tests included: the suite is the only thing holding
 # most of these contracts, and a test that indexes an Optional or unpacks a value
 # into the wrong shape is a failing assertion waiting to happen.
-files = ["engine", "tests", "scripts"]
+files = ["engine", "tests", "scripts", "benchmarks"]
 # pydantic v2 models are not understood without it. Without the plugin a field
 # declared `fallback_model_name: str = Field("", ...)` reads as a *required*
 # argument, so every model constructor reports missing arguments it does not have —

@@ -53,7 +53,7 @@ short the grace a test runner deliberately gets to shut its workers down, so a
 TERM whose sender is still alive forwards nothing — the command answers it. A TERM
 that arrives because the engine died is the one case that gets the group kill.
 
-### The four guarded spawn sites
+### The five guarded spawn sites
 
 One table in the code (`tests/test_no_unguarded_spawns.py::GUARDED_SPAWN_SITES`)
 freezes them, each with its justification and its dynamic test:
@@ -64,6 +64,13 @@ freezes them, each with its justification and its dynamic test:
 | `engine/git.py` `_run_bytes` | every git command the engine runs | same, through the single choke point all callers route through | `tests/test_git.py`, the commit-hook e2e |
 | `engine/app.py` `_picker_command` | the GTK folder picker behind `POST /workspaces/browse` | same; env inherited because DISPLAY/WAYLAND put the dialog on screen | `tests/test_sandbox.py`, the picker e2e |
 | `engine/spawn_guard.py` `main` | the guard's own `Popen` of the command | is the guard | every one of the above |
+| `benchmarks/runner.py` | a benchmark task's `test_command`, taken from the manifest | same, plus a whole-group kill on timeout | `tests/test_benchmark_runner.py` |
+
+The benchmark site is deliberately **not** routed through `SandboxService`. That
+allowlist is a security boundary for model-proposed argv; widening it to let a
+reviewed manifest run would weaken it for every agent in the pipeline. It is guarded
+by the same launcher instead, because the property being bought is the same one — a
+process that cannot outlive whatever started it — not the same boundary.
 
 The e2e scenarios in `tests/test_sandbox_orphans_e2e.py` run the same proofs
 through a real `python3 -m engine` subprocess: a fake Ollama provider drives a
@@ -74,9 +81,14 @@ because a dead engine cannot report anything.
 
 ## 2. The static freeze: a spawn cannot appear unannounced
 
-`tests/test_no_unguarded_spawns.py` parses every `engine/**/*.py` (AST only — no
-import, no execution) and fails on any process-starting call outside the frozen
-table. It resolves all three spellings (`subprocess.run`, `import subprocess as
+`tests/test_no_unguarded_spawns.py` parses every `engine/**/*.py`,
+`benchmarks/**/*.py` and `scripts/**/*.py` (AST only — no import, no execution) and
+fails on any process-starting call outside the frozen table. `benchmarks` and
+`scripts` are scanned for the same reason the engine is: a benchmark that shells out
+unguarded leaves a hung test suite writing into a scratch tree, and a freeze scoped
+to one directory is a freeze the next directory walks around.
+
+The scan resolves all three spellings (`subprocess.run`, `import subprocess as
 sp`, `from subprocess import run`), the bypass family that never spells
 "subprocess" (`os.system/popen/spawn*/exec*/posix_spawn*/fork*`,
 `asyncio.create_subprocess_*`), and rejects star-imports of those modules.

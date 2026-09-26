@@ -56,9 +56,19 @@ Thumbs.db
 
 # Tooling state (not project code)
 .freebuff/
+# The agent scratch directory. The rest of .claude/ IS tracked — it is project
+# code, reviewed like anything else — but this one is per-machine and mode 700.
+# It is also covered by a global ignore in ~/.config/git/ignore, and a global
+# ignore is a property of one machine: on any clone without it, this private
+# directory would be committed by accident.
+.claude/.cc-writes/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+# Third-party benchmark snapshots. Absent until `python3 -m benchmarks.vendor` is
+# run deliberately, and never committed by accident: the manifest entry (upstream,
+# SHA, licence, reason) is the reproducible half. See docs/08-benchmarks.md.
+benchmarks/repos/
 graphify-out/
 coverage/
 

@@ -10,7 +10,7 @@ runs everything in one pass:
 
 | Step | What it does |
 |---|---|
-| `make lint` | `ruff check engine tests scripts` — rules and target Python pinned in `pyproject.toml` |
+| `make lint` | `ruff check engine tests scripts benchmarks` — rules and target Python pinned in `pyproject.toml` |
 | `make typecheck` | `mypy` over the same files — config (3.10 floor, pydantic plugin) pinned in `pyproject.toml` |
 | `make test-ui` | the React/TypeScript unit tests in `ui/tests/` (needs Node 22.6+) |
 | `make test` | full Python suite (411 tests today — the number moves, so trust the run) |
@@ -80,6 +80,30 @@ cannot drift apart.
 credentials with `CODIFY_HOME` and disables the OS keychain (see
 `engine/home.py`). If your change needs state, put it under `CODIFY_HOME`.
 
+**`CLAUDE.md` is a distillation, not a second source of truth.** It is the
+agent-facing version of this file and `docs/00`–`08`, and it is deliberately
+short: depth is a pointer, not a copy. When the two disagree, this file and
+`docs/` win and `CLAUDE.md` is the bug —
+`tests/test_claude_md_contracts.py` fails if the invariants it quotes drift
+from `docs/00` §6. The agent definitions in `.claude/agents/` and the commands
+in `.claude/commands/` are hand-written from the contracts above for the same
+reason: the `claude-code-templates` catalog was deliberately *not* installed,
+because it ships a competing role taxonomy next to the eight `ROLES` in
+`engine/models.py` and would need third-party source committed against the
+stance in `benchmarks/manifest.json`.
+
+**No third-party source in this repository, and no benchmark that needs it to
+pass.** `benchmarks/manifest.json` ships with `repos: []`, and
+`benchmarks/vendor.py` is the only way a snapshot gets here: a permissive
+SPDX licence named by a person, a pinned commit SHA, a recorded reason, and a
+`NOTICE.md` per repository. A task whose repository has not been fetched fails
+with that instruction rather than scoring an empty run as perfect. See
+`docs/08-benchmarks.md`.
+
+**Benchmarks are not in the gate.** `make bench-smoke` is hermetic; `make bench`
+spends real tokens on real models. A gate that costs money on every push is a
+gate people learn to bypass. Run them deliberately.
+
 **No hardcoded model lists.** Models come from live provider discovery
 (`docs/06-model-discovery.md`). "The provider knows its models" is a design
 decision, not an oversight.
@@ -127,7 +151,9 @@ then point the roles' base_url at `http://127.0.0.1:11435` in Settings.
 
 ## Docs
 
-Architecture lives in `docs/00`–`06`. If your change alters a documented
-contract — orchestration, settings, security, model discovery, the Laya gate —
-update the matching doc in the same PR. The docs have lied before; don't add to
-it.
+Architecture lives in `docs/00`–`08` (`07` is the spawn guard and the
+deterministic tests; `08` is the benchmark harness and the vendoring policy). If
+your change alters a documented contract — orchestration, settings, security,
+model discovery, the Laya gate, the spawn guard, what a benchmark number is
+allowed to claim — update the matching doc in the same PR. The docs have lied
+before; don't add to it.

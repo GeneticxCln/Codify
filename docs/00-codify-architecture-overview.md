@@ -87,7 +87,11 @@ Critic rejection: Desktop click required to retry the step (`04` §4.3). Setting
 | `01-subagent-orchestration-spec.md` | Roles, `AgentConfig`, providers, registry, orchestrator, `/settings/agents` |
 | `02-settings-app-spec.md` | Settings UI + Tauri; only mutator |
 | `03-security-and-roadmap.md` | Keyring, SSRF, boot token, persistence, phases, settled defaults |
-| `04-engine-data-and-runtime.md` | Workspace/Goal/PlanStep/Event SQL, HTTP+WS, sandbox argv, boot handshake, errors |
+| `04-engine-data-and-runtime.md` | Workspace/Goal/PlanStep/Event SQL, HTTP+WS, sandbox argv, boot handshake, errors, stage measurement, traces |
+| `05-laya-system-1-gate.md` | The System-1 gate, its typed questions, and its thresholds |
+| `06-model-discovery.md` | Live model discovery — why there is no catalog |
+| `07-spawn-guard-and-deterministic-tests.md` | The spawn guard, the guarded choke points, the freeze that keeps them honest |
+| `08-benchmarks.md` | The benchmark harness, what a number may claim, and the no-third-party-source policy |
 
 ## 6. Invariants (non-negotiable)
 

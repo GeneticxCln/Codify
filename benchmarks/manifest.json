@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "_read_this_first": "No third-party source is committed to this repository. `repos` is empty until someone deliberately runs benchmarks/vendor.py, which fetches permissively licensed code only on explicit invocation and writes a NOTICE.md per repo. See docs/08-benchmarks.md.",
+
+  "tiers": {
+    "smoke": {
+      "description": "Hermetic pipeline check: fast, deterministic, no network, no third-party code. Proves the engine and the harness — never model quality.",
+      "provider": "canned"
+    },
+    "repo_scale": {
+      "description": "Multi-step, cross-file tasks with a test_command at the end. Meaningful only when run with a real provider; under the canned provider its quality checks are reported as skipped rather than passed.",
+      "provider": "configured"
+    }
+  },
+
+  "repos": [],
+
+  "tasks": [
+    {
+      "id": "smoke-add-banner",
+      "tier": "smoke",
+      "repo": "synthetic-repo",
+      "title": "Add a banner file",
+      "description": "Create banner.txt at the repository root containing the word BENCH.",
+      "canned_write": [{ "path": "banner.txt", "content": "BENCH\n" }],
+      "checks": [
+        { "type": "goal_completed" },
+        { "type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"] },
+        { "type": "files_written", "min": 1 },
+        { "type": "file_exists", "path": "banner.txt" }
+      ]
+    },
+    {
+      "id": "smoke-record-usage",
+      "tier": "smoke",
+      "repo": "synthetic-repo",
+      "title": "Write a NOTES.md",
+      "description": "Create NOTES.md at the repository root summarising the module.",
+      "canned_write": [{ "path": "NOTES.md", "content": "# Notes\n\nThe module greets.\n" }],
+      "checks": [
+        { "type": "goal_completed" },
+        { "type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"] },
+        { "type": "file_exists", "path": "NOTES.md" },
+        { "type": "file_contains", "path": "NOTES.md", "text": "greets" },
+        { "type": "test_command", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"] }
+      ]
+    },
+    {
+      "id": "repo-rename-greeting",
+      "tier": "repo_scale",
+      "repo": "synthetic-repo",
+      "title": "Rename greet to welcome everywhere",
+      "description": "Rename the function greet to welcome across src/app.py and tests/test_app.py. Both call sites and the import must be updated, and the test suite must still pass afterwards.",
+      "canned_write": [{ "path": "BENCHMARK_NOTE.md", "content": "Renamed greet to welcome.\n" }],
+      "checks": [
+        { "type": "goal_completed" },
+        { "type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"] },
+        { "type": "test_command", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"] },
+        { "type": "file_contains", "path": "src/app.py", "text": "def welcome" },
+        { "type": "file_contains", "path": "tests/test_app.py", "text": "welcome" }
+      ]
+    },
+    {
+      "id": "repo-close-the-gap",
+      "tier": "repo_scale",
+      "repo": "synthetic-repo",
+      "title": "Make shout lowercase-tolerant",
+      "description": "Add a module-level __all__ to src/app.py listing greet and shout, and keep the test suite green.",
+      "canned_write": [{ "path": "BENCHMARK_NOTE.md", "content": "Added __all__.\n" }],
+      "checks": [
+        { "type": "goal_completed" },
+        { "type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"] },
+        { "type": "test_command", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"] },
+        { "type": "file_contains", "path": "src/app.py", "text": "__all__" }
+      ]
+    }
+  ]
+}

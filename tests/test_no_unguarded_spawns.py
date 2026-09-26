@@ -7,8 +7,8 @@ list those tests cover. `subprocess.Popen` in a fresh helper — a one-line
 convenience, exactly how the next unguarded spawn arrives — would be invisible to
 every dynamic test, because none of them greps for new spawns. This scan does:
 
-* every `engine/**/*.py` is parsed (no import, no execution), and every call that
-  resolves to the `subprocess` module — attribute form (`subprocess.run`), aliased
+* every `engine/**/*.py`, `benchmarks/**/*.py` and `scripts/**/*.py` is parsed (no
+  import, no execution), and every call that resolves to the `subprocess` module — attribute form (`subprocess.run`), aliased
   imports (`import subprocess as sp`), or `from subprocess import run` — is a
   finding unless its (file, call) site is allowlisted below with a justification;
 * the same walk flags the process-starting members of `os` (`system`, `popen`,
@@ -22,6 +22,11 @@ spawn is written down where the change happens: route it through an existing
 choke point, or justify a new one here and give it a dynamic test. An entry no
 longer backed by code is reported as stale, so the table cannot quietly outlive
 the spawns it names.
+
+`benchmarks` and `scripts` are scanned for the same reason: a benchmark that
+shells out unguarded leaves a hung test suite writing into a scratch tree, and
+it lives outside `engine/` only by accident of layout. A freeze scoped to one
+directory is a freeze the next directory walks around.
 
 A static scan cannot prove semantics; it freezes decision sites. That is the
 point: a spawn that cannot appear unannounced cannot silently regress to
@@ -53,6 +58,9 @@ GUARDED_SPAWN_SITES: dict[str, dict[str, str]] = {
     "engine/app.py": {
         "run": "the folder picker: _picker_command's guarded_argv/guarded_env + start_new_session, pinned by tests/test_sandbox.py and the live-engine e2e",
     },
+    "benchmarks/runner.py": {
+        "Popen": "a task's test command: manifest-owned argv, guarded_argv/guarded_env + start_new_session + a whole-group kill on timeout, pinned by tests/test_benchmark_runner.py. Deliberately NOT routed through SandboxService: that allowlist is a security boundary for model-proposed argv, and widening it for a reviewed manifest would weaken it for every agent in the pipeline",
+    },
 }
 
 # The subprocess members that actually start a process. The module also carries
@@ -78,10 +86,17 @@ DIRECT_OS_SPAWN_CALLS = {
 }
 
 
-def _iter_engine_files() -> Iterator[Path]:
-    for path in sorted((PROJECT_ROOT / "engine").rglob("*.py")):
-        if "__pycache__" not in path.parts:
-            yield path
+# Every package whose Python is reviewed alongside the engine. `benchmarks` and
+# `scripts` are here because they start processes, not because they are adjacent
+# to one that does.
+SPAWN_SCAN_ROOTS = ("engine", "benchmarks", "scripts")
+
+
+def _iter_source_files() -> Iterator[Path]:
+    for root in SPAWN_SCAN_ROOTS:
+        for path in sorted((PROJECT_ROOT / root).rglob("*.py")):
+            if "__pycache__" not in path.parts:
+                yield path
 
 
 def _spawn_findings(tree: ast.AST, rel: str) -> list[tuple[int, str]]:
@@ -132,11 +147,11 @@ def _spawn_findings(tree: ast.AST, rel: str) -> list[tuple[int, str]]:
 
 
 class NoUnguardedSpawns(unittest.TestCase):
-    """The freeze: every spawn site in engine/ is enumerated and justified."""
+    """The freeze: every spawn site in the reviewed packages is justified."""
 
     def test_every_spawn_is_a_guarded_allowlisted_site(self) -> None:
         unexpected: list[str] = []
-        for path in _iter_engine_files():
+        for path in _iter_source_files():
             rel = str(path.relative_to(PROJECT_ROOT))
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
             for line, dotted in _spawn_findings(tree, rel):
