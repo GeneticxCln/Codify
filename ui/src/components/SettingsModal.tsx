@@ -131,9 +131,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   return (
     <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-[#161b22] border border-[#30363d] rounded-2xl shadow-2xl w-full max-w-6xl h-[90vh] flex flex-col overflow-hidden">
+      <div className="bg-codify-surface border border-codify-border rounded-2xl shadow-2xl w-full max-w-6xl h-[90vh] flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="flex items-start justify-between border-b border-[#30363d] px-6 py-4 flex-shrink-0">
+        <div className="flex items-start justify-between border-b border-codify-border px-6 py-4 flex-shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
               <Key className="w-4 h-4" />
@@ -152,7 +152,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="text-gray-400 hover:text-gray-200 p-1.5 rounded-lg hover:bg-[#21262d] transition-colors"
+            className="text-gray-400 hover:text-gray-200 p-1.5 rounded-lg hover:bg-codify-raised transition-colors"
             title="Close (Esc)"
           >
             <X className="w-5 h-5" />
@@ -166,13 +166,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             onClick={() => setTab("keys")}
             className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "keys"
-                ? "bg-[#21262d] text-gray-100 border border-[#30363d]"
+                ? "bg-codify-raised text-gray-100 border border-codify-border"
                 : "text-gray-400 hover:text-gray-200"
             }`}
           >
             <Key className="w-3.5 h-3.5" /> Provider Keys
             {needsKeyCount > 0 && (
-              <span className="ml-0.5 text-[10px] px-1.5 rounded-full bg-amber-950/60 border border-amber-800/60 text-amber-300">
+              <span className="ml-0.5 text-2xs px-1.5 rounded-full bg-amber-950/60 border border-amber-800/60 text-amber-300">
                 {needsKeyCount}
               </span>
             )}
@@ -182,7 +182,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             onClick={() => setTab("agents")}
             className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "agents"
-                ? "bg-[#21262d] text-gray-100 border border-[#30363d]"
+                ? "bg-codify-raised text-gray-100 border border-codify-border"
                 : "text-gray-400 hover:text-gray-200"
             }`}
           >
@@ -210,7 +210,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {/* Where a key actually goes. Saying "your OS keychain" when the key
                   is really written to a file would be a lie the user cannot see. */}
               {storage && (
-                <div className="flex items-start gap-2 text-[11px] text-gray-400 bg-[#0d1117] border border-[#30363d] rounded-xl px-3.5 py-2.5">
+                <div className="flex items-start gap-2 text-xs text-gray-400 bg-codify-bg border border-codify-border rounded-xl px-3.5 py-2.5">
                   {storage === "keyring" ? (
                     <Lock className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-green-400" />
                   ) : (
@@ -245,7 +245,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 {keys.map((k) => (
                   <div
                     key={k.provider}
-                    className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3.5 space-y-2"
+                    className="bg-codify-bg border border-codify-border rounded-xl p-3.5 space-y-2"
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2 min-w-0">
@@ -253,7 +253,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         <span className="font-semibold text-xs text-gray-200 capitalize truncate">
                           {k.provider}
                         </span>
-                        <span className="text-[10px] text-gray-500 font-mono truncate">
+                        <span className="text-2xs text-gray-500 font-mono truncate">
                           ({k.protocol})
                         </span>
 
@@ -263,14 +263,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                               const status = modelStatus.find((p) => p.provider === k.provider);
                               if (status?.ok) {
                                 return (
-                                  <span className="text-[10px] text-gray-500 flex-shrink-0">
+                                  <span className="text-2xs text-gray-500 flex-shrink-0">
                                     {status.count} models
                                   </span>
                                 );
                               }
                               if (status?.error) {
                                 return (
-                                  <span className="text-[10px] text-amber-400/90 truncate">
+                                  <span className="text-2xs text-amber-400/90 truncate">
                                     — {status.error}
                                   </span>
                                 );
@@ -281,15 +281,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </div>
 
                       {k.has_key ? (
-                        <span className="flex items-center gap-1 text-[11px] font-medium text-green-400 bg-green-950/40 border border-green-800/60 px-2 py-0.5 rounded-full flex-shrink-0">
+                        <span className="flex items-center gap-1 text-xs font-medium text-green-400 bg-green-950/40 border border-green-800/60 px-2 py-0.5 rounded-full flex-shrink-0">
                           <ShieldCheck className="w-3 h-3" /> Configured
                         </span>
                       ) : k.needs_key ? (
-                        <span className="text-[11px] text-gray-500 bg-[#161b22] px-2 py-0.5 rounded-full border border-[#30363d] flex-shrink-0">
+                        <span className="text-xs text-gray-500 bg-codify-surface px-2 py-0.5 rounded-full border border-codify-border flex-shrink-0">
                           Missing Key
                         </span>
                       ) : (
-                        <span className="text-[11px] text-blue-400 bg-blue-950/40 border border-blue-800/60 px-2 py-0.5 rounded-full flex-shrink-0">
+                        <span className="text-xs text-blue-400 bg-blue-950/40 border border-blue-800/60 px-2 py-0.5 rounded-full flex-shrink-0">
                           Local / No Key
                         </span>
                       )}
@@ -304,7 +304,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           onChange={(e) =>
                             setInputValues((prev) => ({ ...prev, [k.provider]: e.target.value }))
                           }
-                          className="flex-1 min-w-0 bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
+                          className="flex-1 min-w-0 bg-codify-surface border border-codify-border rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
                         />
                         <button
                           type="button"
@@ -330,7 +330,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     )}
 
                     {!k.needs_key && (
-                      <p className="text-[10px] text-gray-500 pl-6">
+                      <p className="text-2xs text-gray-500 pl-6">
                         Local server at <span className="font-mono">{k.base_url}</span> — its downloaded
                         models are discovered automatically, no key.
                       </p>
@@ -354,8 +354,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="border-t border-[#30363d] px-6 py-3 flex items-center justify-between flex-shrink-0">
-          <span className="flex items-center gap-2 text-[11px] text-gray-500">
+        <div className="border-t border-codify-border px-6 py-3 flex items-center justify-between flex-shrink-0">
+          <span className="flex items-center gap-2 text-xs text-gray-500">
             {models.length} models discovered across {modelStatus.filter((s) => s.ok).length} providers
             <button
               type="button"
@@ -371,7 +371,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-1.5 bg-[#21262d] hover:bg-[#30363d] text-gray-200 rounded-lg text-xs font-semibold transition-colors"
+            className="px-4 py-1.5 bg-codify-raised hover:bg-codify-border text-gray-200 rounded-lg text-xs font-semibold transition-colors"
           >
             Done
           </button>

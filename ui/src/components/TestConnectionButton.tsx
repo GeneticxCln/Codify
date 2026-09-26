@@ -28,7 +28,7 @@ export const TestConnectionButton: React.FC<TestConnectionButtonProps> = ({ onTe
         type="button"
         onClick={handleClick}
         disabled={testing}
-        className="flex items-center gap-1.5 px-3 py-1.5 bg-[#21262d] hover:bg-[#30363d] text-gray-200 text-xs font-semibold rounded border border-[#30363d] transition-colors disabled:opacity-50"
+        className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-raised hover:bg-codify-border text-gray-200 text-xs font-semibold rounded border border-codify-border transition-colors disabled:opacity-50"
       >
         {testing ? (
           <Loader2 className="w-3.5 h-3.5 animate-spin" />

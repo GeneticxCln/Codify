@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
 import {
   Workspace,
   ChatMessage,
@@ -40,14 +46,28 @@ import {
   enableExecution,
   applyGoal,
 } from "./api";
-import { runGoalAction } from "./goalActions";
+import { runGoalAction, canStopGoal, isGoalActive } from "./goalActions";
+import { Badge } from "./components/ui/Badge";
+import { Button } from "./components/ui/Button";
+import { IconButton } from "./components/ui/IconButton";
+import { Toggle } from "./components/ui/Toggle";
+import { statusTone } from "./statusTone";
 import { BottomCommandBar, ExecutionMode } from "./components/BottomCommandBar";
 import { StatsPanel } from "./components/StatsPanel";
 import { ChatTimeline } from "./components/ChatTimeline";
 import { looksLikeAudit } from "./components/AuditReport";
 import { SettingsModal } from "./components/SettingsModal";
 import { openGoalStream, GoalStreamHandle } from "./goalStream";
-import { Code, Settings, FolderGit2, AlertCircle, History, BarChart3 } from "lucide-react";
+import {
+  Code,
+  Settings,
+  FolderGit2,
+  AlertCircle,
+  History,
+  BarChart3,
+  X,
+  RefreshCw,
+} from "lucide-react";
 
 export const App: React.FC = () => {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -79,6 +99,12 @@ export const App: React.FC = () => {
   const [record, setRecord] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  // The goal currently in flight, so the command bar can offer to stop it. This is
+  // deliberately not `isLoading`: that flag is set while a goal is being *dispatched*
+  // and cleared in the same `finally` block, so it describes a network round trip and
+  // not a run. Nothing here was tracking a live goal at all, which is why the only
+  // control in reach was a Send button that was idle almost all the time.
+  const [activeGoalId, setActiveGoalId] = useState<string | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   // Which settings tab to land on. A failure diagnosis sends the user straight
   // to the screen that holds the fix instead of making them find it.
@@ -200,7 +226,7 @@ export const App: React.FC = () => {
       // Backend might still be starting — App also retries engine info above.
       setError(
         `Cannot reach the Codify engine at 127.0.0.1:${getEngineInfo().port}. ` +
-        "Start it with `make run-engine` (or relaunch the desktop app)."
+          "Start it with `make run-engine` (or relaunch the desktop app).",
       );
     }
   }, []);
@@ -217,11 +243,19 @@ export const App: React.FC = () => {
         // Keep the user's pick while it still exists. Ids repeat across
         // providers (e.g. a model served both locally and via an API), so the
         // pair is what identifies a choice.
-        if (prev && catalog.models.some((m) => m.id === prev.id && m.provider === prev.provider)) {
+        if (
+          prev &&
+          catalog.models.some(
+            (m) => m.id === prev.id && m.provider === prev.provider,
+          )
+        ) {
           return prev;
         }
         // Otherwise prefer a local model: no tokens, no latency, no surprise.
-        return catalog.models.find((m) => m.protocol === "ollama") ?? catalog.models[0];
+        return (
+          catalog.models.find((m) => m.protocol === "ollama") ??
+          catalog.models[0]
+        );
       });
     } catch (err: any) {
       // Discovery failure must not wedge the picker: keep the last catalog
@@ -253,7 +287,7 @@ export const App: React.FC = () => {
   // screen, so a second copy would only be a way for the two pickers to disagree.
   const modelSignals = useMemo(
     () => buildModelSignals(agentConfigs, recentRuns),
-    [agentConfigs, recentRuns]
+    [agentConfigs, recentRuns],
   );
 
   // A goal's stream closes on its own (see `onTerminal`), so the refresh there
@@ -312,8 +346,12 @@ export const App: React.FC = () => {
   // validation is what decides whether the file can govern.
   const handleSetDesignContract = async (workspaceId: string, path: string) => {
     const updated = await setWorkspaceDesignContract(workspaceId, path);
-    setWorkspaces((prev) => prev.map((w) => (w.id === updated.id ? updated : w)));
-    setSelectedWs((current) => (current?.id === updated.id ? updated : current));
+    setWorkspaces((prev) =>
+      prev.map((w) => (w.id === updated.id ? updated : w)),
+    );
+    setSelectedWs((current) =>
+      current?.id === updated.id ? updated : current,
+    );
   };
 
   // Which brand contract each workspace currently obeys, for the deliverable
@@ -344,22 +382,28 @@ export const App: React.FC = () => {
               return msg;
             }
             const updatedEvents = [...existingEvents, ev].sort(
-              (a, b) => a.sequence - b.sequence
+              (a, b) => a.sequence - b.sequence,
             );
             return { ...msg, events: updatedEvents };
-          })
+          }),
         );
 
-        if (ev.type === "goal_status" || ev.type === "step_status" || ev.type === "plan_updated") {
-          getGoal(goalId).then((refreshed) => {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === messageId ? { ...msg, goal: refreshed } : msg
-              )
-            );
-          }).catch((err: any) => {
-            setError(err?.message || "Failed to refresh goal");
-          });
+        if (
+          ev.type === "goal_status" ||
+          ev.type === "step_status" ||
+          ev.type === "plan_updated"
+        ) {
+          getGoal(goalId)
+            .then((refreshed) => {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === messageId ? { ...msg, goal: refreshed } : msg,
+                ),
+              );
+            })
+            .catch((err: any) => {
+              setError(err?.message || "Failed to refresh goal");
+            });
         }
       };
 
@@ -369,6 +413,10 @@ export const App: React.FC = () => {
         sinceSequence,
         // Terminal status: flush one final goal close, then stop streaming.
         onTerminal: () => {
+          // This goal is done, so it is no longer the one the command bar offers to
+          // stop. Cleared before the refresh below so a new goal dispatched in the
+          // same tick is not cleared by this older goal's ending.
+          setActiveGoalId((current) => (current === goalId ? null : current));
           // The goal just ran models, so "ran recently" is now stale. Refreshing
           // here is what makes the menu learn from the run you just watched
           // instead of from the run before it.
@@ -377,19 +425,21 @@ export const App: React.FC = () => {
           // every future subscribeToGoal() for this goal a silent no-op (so a
           // retried or re-applied goal streamed no events).
           delete goalStreams.current[goalId];
-          getGoal(goalId).then((refreshed) => {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === messageId ? { ...msg, goal: refreshed } : msg
-              )
-            );
-          }).catch((err: any) => {
-            setError(err?.message || "Failed to refresh goal");
-          });
+          getGoal(goalId)
+            .then((refreshed) => {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === messageId ? { ...msg, goal: refreshed } : msg,
+                ),
+              );
+            })
+            .catch((err: any) => {
+              setError(err?.message || "Failed to refresh goal");
+            });
         },
       });
     },
-    []
+    [],
   );
 
   // Goal history: every goal the engine has persisted for the selected
@@ -408,7 +458,10 @@ export const App: React.FC = () => {
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
     try {
-      const goals = await listGoals({ workspace_id: selectedWs?.id, limit: 50 });
+      const goals = await listGoals({
+        workspace_id: selectedWs?.id,
+        limit: 50,
+      });
       setHistory(goals ?? []);
     } catch (err: any) {
       setError(err?.message || "Failed to load goal history");
@@ -433,7 +486,10 @@ export const App: React.FC = () => {
       setRestoring(true);
       setError(null);
       try {
-        const [goal, events] = await Promise.all([getGoal(goalId), getGoalEvents(goalId)]);
+        const [goal, events] = await Promise.all([
+          getGoal(goalId),
+          getGoalEvents(goalId),
+        ]);
         const userMsg: ChatMessage = {
           id: `user-${goalId}`,
           role: "user",
@@ -451,7 +507,9 @@ export const App: React.FC = () => {
           isStreaming: false,
         };
         setMessages((prev) => [
-          ...prev.filter((m) => m.id !== userMsg.id && m.id !== assistantMsg.id),
+          ...prev.filter(
+            (m) => m.id !== userMsg.id && m.id !== assistantMsg.id,
+          ),
           userMsg,
           assistantMsg,
         ]);
@@ -466,7 +524,7 @@ export const App: React.FC = () => {
         setRestoring(false);
       }
     },
-    [restoring, subscribeToGoal]
+    [restoring, subscribeToGoal],
   );
 
   // Goals whose execution we have already kicked off in direct mode. Without
@@ -479,7 +537,7 @@ export const App: React.FC = () => {
   const polling = useRef(false);
   const TERMINAL_STATUSES = useMemo(
     () => new Set(["COMPLETED", "FAILED", "CANCELLED"]),
-    []
+    [],
   );
 
   // Poll active goals periodically
@@ -488,50 +546,57 @@ export const App: React.FC = () => {
       if (polling.current) return;
       polling.current = true;
       (async () => {
-      // Prune entries for goals that already reached a terminal status so
-      // the set cannot grow without bound across a long session.
-      for (const m of messages) {
-        if (m.goal && TERMINAL_STATUSES.has(m.goal.status)) {
-          autoStartedGoals.current.delete(m.goal.id);
-        }
-      }
-      if (autoStartedGoals.current.size > 200) {
-        const ids = [...autoStartedGoals.current].slice(0, autoStartedGoals.current.size - 200);
-        for (const id of ids) autoStartedGoals.current.delete(id);
-      }
-      for (const msg of messages) {
-        if (
-          msg.goal &&
-          (msg.goal.status === "PLANNING" ||
-            msg.goal.status === "RUNNING" ||
-            (mode === "direct" && msg.goal.status === "PENDING"))
-        ) {
-          const goalId = msg.goal.id;
-          try {
-            const refreshed = await getGoal(goalId);
-            setMessages((prev) =>
-              prev.map((m) => (m.id === msg.id ? { ...m, goal: refreshed } : m))
-            );
-
-            // Direct mode means direct: start as soon as the plan is ready,
-            // whatever we happened to observe first.
-            if (
-              mode === "direct" &&
-              refreshed.status === "PENDING" &&
-              !autoStartedGoals.current.has(goalId)
-            ) {
-              autoStartedGoals.current.add(goalId);
-              await startGoal(refreshed.id, refreshed.version);
-              const running = await getGoal(refreshed.id);
-              setMessages((prev) =>
-                prev.map((m) => (m.id === msg.id ? { ...m, goal: running } : m))
-              );
-            }
-          } catch (e) {
-            // Ignore polling errors
+        // Prune entries for goals that already reached a terminal status so
+        // the set cannot grow without bound across a long session.
+        for (const m of messages) {
+          if (m.goal && TERMINAL_STATUSES.has(m.goal.status)) {
+            autoStartedGoals.current.delete(m.goal.id);
           }
         }
-      }
+        if (autoStartedGoals.current.size > 200) {
+          const ids = [...autoStartedGoals.current].slice(
+            0,
+            autoStartedGoals.current.size - 200,
+          );
+          for (const id of ids) autoStartedGoals.current.delete(id);
+        }
+        for (const msg of messages) {
+          if (
+            msg.goal &&
+            (msg.goal.status === "PLANNING" ||
+              msg.goal.status === "RUNNING" ||
+              (mode === "direct" && msg.goal.status === "PENDING"))
+          ) {
+            const goalId = msg.goal.id;
+            try {
+              const refreshed = await getGoal(goalId);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === msg.id ? { ...m, goal: refreshed } : m,
+                ),
+              );
+
+              // Direct mode means direct: start as soon as the plan is ready,
+              // whatever we happened to observe first.
+              if (
+                mode === "direct" &&
+                refreshed.status === "PENDING" &&
+                !autoStartedGoals.current.has(goalId)
+              ) {
+                autoStartedGoals.current.add(goalId);
+                await startGoal(refreshed.id, refreshed.version);
+                const running = await getGoal(refreshed.id);
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === msg.id ? { ...m, goal: running } : m,
+                  ),
+                );
+              }
+            } catch (e) {
+              // Ignore polling errors
+            }
+          }
+        }
       })().finally(() => {
         polling.current = false;
       });
@@ -555,7 +620,7 @@ export const App: React.FC = () => {
         const doc = JSON.parse(text);
         if (!looksLikeAudit(doc)) {
           setError(
-            `"${file.name}" is not a Codify audit export — expected a JSON document with plan_edits / fallbacks / step_outcomes.`
+            `"${file.name}" is not a Codify audit export — expected a JSON document with plan_edits / fallbacks / step_outcomes.`,
           );
           return;
         }
@@ -570,7 +635,7 @@ export const App: React.FC = () => {
         setMessages((prev) => [...prev, imported]);
       } catch (err) {
         setError(
-          `Could not read "${file.name}": ${err instanceof Error ? err.message : String(err)}`
+          `Could not read "${file.name}": ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     };
@@ -584,13 +649,15 @@ export const App: React.FC = () => {
    */
   const handleSendMessage = async (promptText: string): Promise<boolean> => {
     if (!selectedWs) {
-      setError("Select a project folder first (folder button in the command bar).");
+      setError(
+        "Select a project folder first (folder button in the command bar).",
+      );
       return false;
     }
     if (!selectedModel) {
       setError(
         "No model available. Add an API key in Settings → Provider Keys (or start Ollama) " +
-        "and the provider's models will load automatically."
+          "and the provider's models will load automatically.",
       );
       return false;
     }
@@ -635,7 +702,7 @@ export const App: React.FC = () => {
         isPlanOnly,
         parallelEnabled,
         goalMode,
-        record
+        record,
       );
       // Cleared once dispatched: a design deliverable is what THIS goal is for,
       // not a standing preference — leaving it armed would quietly draft a
@@ -647,11 +714,16 @@ export const App: React.FC = () => {
 
       const fullGoal = await getGoal(goal.id);
       setMessages((prev) =>
-        prev.map((m) => (m.id === assistantMsgId ? { ...m, goal: fullGoal } : m))
+        prev.map((m) =>
+          m.id === assistantMsgId ? { ...m, goal: fullGoal } : m,
+        ),
       );
 
       // Connect WebSocket telemetry
       subscribeToGoal(goal.id, assistantMsgId);
+      // The goal now exists, so there is something to stop. Set after dispatch
+      // rather than before: before it, there is no id to cancel.
+      setActiveGoalId(goal.id);
     } catch (err: any) {
       const detail = err?.message || "Failed to dispatch agent";
       setError(detail);
@@ -663,8 +735,8 @@ export const App: React.FC = () => {
                 content: `Execution failed: ${detail}`,
                 isStreaming: false,
               }
-            : m
-        )
+            : m,
+        ),
       );
     } finally {
       setIsLoading(false);
@@ -682,7 +754,9 @@ export const App: React.FC = () => {
         refreshed = await getGoal(goalId);
       }
       setMessages((prev) =>
-        prev.map((m) => (m.goal?.id === goalId ? { ...m, goal: refreshed } : m))
+        prev.map((m) =>
+          m.goal?.id === goalId ? { ...m, goal: refreshed } : m,
+        ),
       );
     } catch (err: any) {
       setError(err?.message || "Failed to enable execution");
@@ -707,12 +781,17 @@ export const App: React.FC = () => {
         delete goalStreams.current[goalId];
         // Floor the replay at the last event already rendered so the server's
         // event replay can't close the stream before live events arrive.
-        const lastSeq = Math.max(0, ...(msg.events || []).map((e) => e.sequence));
+        const lastSeq = Math.max(
+          0,
+          ...(msg.events || []).map((e) => e.sequence),
+        );
         subscribeToGoal(goalId, msg.id, lastSeq);
       }
       const refreshed = await getGoal(goalId);
       setMessages((prev) =>
-        prev.map((m) => (m.goal?.id === goalId ? { ...m, goal: refreshed } : m))
+        prev.map((m) =>
+          m.goal?.id === goalId ? { ...m, goal: refreshed } : m,
+        ),
       );
     } catch (err: any) {
       setError(err?.message || "Failed to apply changes");
@@ -724,14 +803,20 @@ export const App: React.FC = () => {
       goalId: string,
       stepId: string,
       expectedVersion: number,
-      patch: { title?: string; description?: string; suggested_paths?: string[] }
+      patch: {
+        title?: string;
+        description?: string;
+        suggested_paths?: string[];
+      },
     ): Promise<boolean> => {
       setError(null);
       try {
         await patchStep(goalId, stepId, expectedVersion, patch);
         const refreshed = await getGoal(goalId);
         setMessages((prev) =>
-          prev.map((m) => (m.goal?.id === goalId ? { ...m, goal: refreshed } : m))
+          prev.map((m) =>
+            m.goal?.id === goalId ? { ...m, goal: refreshed } : m,
+          ),
         );
         return true;
       } catch (err: any) {
@@ -741,7 +826,7 @@ export const App: React.FC = () => {
         return false;
       }
     },
-    []
+    [],
   );
 
   // These four report through the app's error banner rather than `alert()`: a
@@ -766,7 +851,9 @@ export const App: React.FC = () => {
     const refreshed = await getGoal(goalId).catch(() => null);
     if (refreshed) {
       setMessages((prev) =>
-        prev.map((m) => (m.goal?.id === goalId ? { ...m, goal: refreshed } : m))
+        prev.map((m) =>
+          m.goal?.id === goalId ? { ...m, goal: refreshed } : m,
+        ),
       );
     }
     if (outcome.kind === "refused") {
@@ -785,7 +872,9 @@ export const App: React.FC = () => {
     const refreshed = await getGoal(goalId).catch(() => null);
     if (refreshed) {
       setMessages((prev) =>
-        prev.map((m) => (m.goal?.id === goalId ? { ...m, goal: refreshed } : m))
+        prev.map((m) =>
+          m.goal?.id === goalId ? { ...m, goal: refreshed } : m,
+        ),
       );
     }
     if (outcome.kind === "refused") {
@@ -804,11 +893,50 @@ export const App: React.FC = () => {
     const refreshed = await getGoal(goalId).catch(() => null);
     if (refreshed) {
       setMessages((prev) =>
-        prev.map((m) => (m.goal?.id === goalId ? { ...m, goal: refreshed } : m))
+        prev.map((m) =>
+          m.goal?.id === goalId ? { ...m, goal: refreshed } : m,
+        ),
       );
     }
     if (outcome.kind === "refused") {
       setError(outcome.message || "Failed to cancel goal");
+    }
+  };
+
+  /**
+   * Stopping the goal the command bar is currently running. Same policy as the goal
+   * card's Cancel — `runGoalAction` retries the version race and treats a status
+   * that no longer needs the action as *moot* — so a goal that finished a beat
+   * before the click refreshes the card instead of reporting a failure. A goal that
+   * finished has nothing to fail at, and saying "Failed to stop" would be inventing
+   * a problem the user did not have.
+   */
+  const handleStopGoal = async () => {
+    if (!activeGoalId) return;
+    setError(null);
+    const outcome = await runGoalAction({
+      action: "cancel",
+      attempt: (v) => cancelGoal(activeGoalId, v),
+      observe: () =>
+        getGoal(activeGoalId).then((g) => ({
+          status: g.status,
+          version: g.version,
+        })),
+    });
+    const refreshed = await getGoal(activeGoalId).catch(() => null);
+    if (refreshed) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.goal?.id === activeGoalId ? { ...m, goal: refreshed } : m,
+        ),
+      );
+      // The stream may not have reached its terminal event yet, so Stop can still be
+      // on screen over a goal the engine has already stopped. Hiding it the moment
+      // the answer arrives is correct: there is nothing left to stop.
+      if (!canStopGoal(refreshed.status)) setActiveGoalId(null);
+    }
+    if (outcome.kind === "refused") {
+      setError(outcome.message || "Failed to stop goal");
     }
   };
 
@@ -845,10 +973,12 @@ export const App: React.FC = () => {
   };
 
   const handleDeleteWorkspace = async (workspaceId: string, name: string) => {
-    if (!window.confirm(
-      `Remove "${name}" from Codify?\n\n` +
-        `This forgets the folder. Your files stay exactly where they are.`,
-    )) {
+    if (
+      !window.confirm(
+        `Remove "${name}" from Codify?\n\n` +
+          `This forgets the folder. Your files stay exactly where they are.`,
+      )
+    ) {
       return;
     }
     setError(null);
@@ -856,14 +986,18 @@ export const App: React.FC = () => {
       await deleteWorkspace(workspaceId);
       // Deleting the selected workspace leaves the picker pointing at a
       // workspace that no longer exists, so clear the selection with it.
-      setSelectedWs((current) => (current?.id === workspaceId ? undefined : current));
+      setSelectedWs((current) =>
+        current?.id === workspaceId ? undefined : current,
+      );
       await loadWorkspacesRef.current?.();
     } catch (err: any) {
       // The engine refuses a workspace that still has goals, and hands back
       // the count. That is a question, not a failure: ask it before deleting
       // anyone's history.
       const code = (err as { code?: string })?.code;
-      const goals = Number((err as { extra?: { goals?: number } })?.extra?.goals ?? NaN);
+      const goals = Number(
+        (err as { extra?: { goals?: number } })?.extra?.goals ?? NaN,
+      );
       if (code === "workspace_not_empty" && Number.isFinite(goals)) {
         const go = window.confirm(
           `"${name}" has ${goals} goal${goals === 1 ? "" : "s"} recorded against it.\n\n` +
@@ -874,9 +1008,13 @@ export const App: React.FC = () => {
         setError(null);
         try {
           await deleteWorkspace(workspaceId, { deleteGoals: true });
-          setSelectedWs((current) => (current?.id === workspaceId ? undefined : current));
+          setSelectedWs((current) =>
+            current?.id === workspaceId ? undefined : current,
+          );
           // A cascade removed goals the transcript may still be showing.
-          setMessages((prev) => prev.filter((m) => !m.goal || m.goal.workspace_id !== workspaceId));
+          setMessages((prev) =>
+            prev.filter((m) => !m.goal || m.goal.workspace_id !== workspaceId),
+          );
           await loadWorkspacesRef.current?.();
         } catch (retryErr: any) {
           setError(retryErr?.message || "Failed to delete workspace");
@@ -887,7 +1025,11 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleRetryStep = async (goalId: string, stepId: string, version: number) => {
+  const handleRetryStep = async (
+    goalId: string,
+    stepId: string,
+    version: number,
+  ) => {
     setError(null);
     try {
       await retryStep(goalId, stepId, version);
@@ -899,23 +1041,38 @@ export const App: React.FC = () => {
       const msg = messages.find((m) => m.goal?.id === goalId);
       if (msg) {
         delete goalStreams.current[goalId];
-        const lastSeq = Math.max(0, ...(msg.events || []).map((e) => e.sequence));
+        const lastSeq = Math.max(
+          0,
+          ...(msg.events || []).map((e) => e.sequence),
+        );
         subscribeToGoal(goalId, msg.id, lastSeq);
       }
       const refreshed = await getGoal(goalId);
       setMessages((prev) =>
-        prev.map((m) => (m.goal?.id === goalId ? { ...m, goal: refreshed } : m))
+        prev.map((m) =>
+          m.goal?.id === goalId ? { ...m, goal: refreshed } : m,
+        ),
       );
     } catch (err: any) {
       setError(err?.message || "Failed to retry step");
     }
   };
 
+  // Whether Stop is on screen, and therefore whether the command bar's right-hand
+  // slot is a Stop or a Send. Derived from the goal's *status* rather than tracked
+  // as a second piece of state, so it cannot disagree with what the card shows: one
+  // source, one answer. `PLANNING` counts, because a goal still being planned is the
+  // cheapest possible moment to stop it — nothing has been written yet.
+  const activeGoal = activeGoalId
+    ? messages.find((m) => m.goal?.id === activeGoalId)?.goal
+    : undefined;
+  const canStop = canStopGoal(activeGoal?.status);
+
   return (
     // select-none REMOVED so text cursor and selection work normally in WebKitGTK
-    <div className="flex flex-col h-screen bg-[#0d1117] text-gray-200 font-sans">
+    <div className="flex flex-col h-screen bg-codify-bg text-gray-200 font-sans">
       {/* Top Header Bar */}
-      <header className="bg-[#161b22] border-b border-[#30363d] px-4 py-2.5 flex items-center justify-between z-10 flex-shrink-0">
+      <header className="bg-codify-surface border-b border-codify-border px-4 py-2.5 flex items-center justify-between z-10 flex-shrink-0">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 font-bold text-sm tracking-tight text-white">
             <div className="w-6 h-6 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow">
@@ -925,10 +1082,10 @@ export const App: React.FC = () => {
           </div>
 
           {selectedWs && (
-            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#21262d] border border-[#30363d] text-xs text-gray-300">
+            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-codify-raised border border-codify-border text-xs text-codify-secondary">
               <FolderGit2 className="w-3.5 h-3.5 text-blue-400" />
               <span className="font-semibold">{selectedWs.name}</span>
-              <span className="text-[10px] text-gray-500 font-mono hidden md:inline truncate max-w-xs">
+              <span className="text-2xs text-codify-muted font-mono hidden md:inline truncate max-w-xs">
                 ({selectedWs.root_path})
               </span>
             </div>
@@ -944,170 +1101,214 @@ export const App: React.FC = () => {
               engineUp === false
                 ? "Engine is not responding — click to check settings"
                 : engineUp && authOk === false
-                ? "Engine is up but the auth token is not accepted — click to check settings"
-                : "Engine connected"
+                  ? "Engine is up but the auth token is not accepted — click to check settings"
+                  : "Engine connected"
             }
-            className={`flex items-center gap-1.5 text-[11px] font-mono px-2.5 py-1 rounded-full border transition-colors cursor-pointer ${
+            className={`flex items-center gap-1.5 text-xs font-mono px-2.5 py-1 rounded-full border transition-colors cursor-pointer ${
               engineUp === false
                 ? "bg-red-950/40 text-red-400 border-red-800"
                 : engineUp && authOk === false
-                ? "bg-amber-950/40 text-amber-400 border-amber-800"
-                : "bg-[#0d1117] text-gray-400 border-[#30363d]"
+                  ? "bg-amber-950/40 text-amber-400 border-amber-800"
+                  : "bg-codify-bg text-gray-400 border-codify-border"
             }`}
           >
+            {/* Not a `<Button>`: this is a *status* pill that happens to be
+                clickable, and the three fills above are connection states
+                (`offline` / `auth stale` / `ok`) rather than button tones. A tone
+                here would be claiming a button state the control does not have.
+
+                The dot is steady, not pulsing. DESIGN.md §7: nothing pulses to look
+                alive — and the colour already says healthy, so the loop was carrying
+                no information a reduced-motion user could get. */}
             <span
               className={`w-2 h-2 rounded-full ${
                 engineUp === false
                   ? "bg-red-500"
                   : engineUp && authOk === false
-                  ? "bg-amber-500"
-                  : "bg-green-500 animate-pulse"
+                    ? "bg-amber-500"
+                    : "bg-green-500"
               }`}
             />
             <span>
               {engineUp === false
                 ? "Engine Offline"
                 : engineUp && authOk === false
-                ? "Auth Stale"
-                : `Port ${engine.port}`}
+                  ? "Auth Stale"
+                  : `Port ${engine.port}`}
             </span>
           </button>
 
           {/* Goal history: everything this workspace ever ran, restorable into
               the transcript. Fetched when opened, so a restart can never show a
-              stale list. */}
-          <button
-            type="button"
+              stale list.
+
+              `Toggle` because these are exactly what it is for: armed, or at rest.
+              The armed classes they hand-typed are `Toggle`'s accent arm byte for
+              byte, so the look is unchanged and `aria-pressed` comes free. */}
+          <Toggle
+            armed={statsOpen}
+            tone="accent"
             onClick={() => {
               setStatsOpen(!statsOpen);
               if (!statsOpen) setHistoryOpen(false);
             }}
             title="Cross-goal statistics — success rate, token spend, daily trend"
-            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
-              statsOpen
-                ? "bg-blue-950/40 text-blue-300 border-blue-800"
-                : "bg-[#21262d] hover:bg-[#30363d] text-gray-200 border-[#30363d]"
-            }`}
           >
-            <BarChart3 className="w-3.5 h-3.5 text-gray-400" />
+            <BarChart3 className="w-3.5 h-3.5" />
             <span>Stats</span>
-          </button>
+          </Toggle>
 
-          <button
-            type="button"
+          <Toggle
+            armed={historyOpen}
+            tone="accent"
             onClick={() => {
               setHistoryOpen(!historyOpen);
               if (!historyOpen) setStatsOpen(false);
             }}
             title="Goal history — reopen a past goal with its full transcript"
-            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
-              historyOpen
-                ? "bg-blue-950/40 text-blue-300 border-blue-800"
-                : "bg-[#21262d] hover:bg-[#30363d] text-gray-200 border-[#30363d]"
-            }`}
           >
-            <History className="w-3.5 h-3.5 text-gray-400" />
+            <History className="w-3.5 h-3.5" />
             <span>History</span>
-          </button>
+          </Toggle>
 
-          <button
-            type="button"
-            onClick={() => setIsSettingsOpen(true)}
-            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg bg-[#21262d] hover:bg-[#30363d] text-gray-200 border border-[#30363d] transition-colors cursor-pointer"
-          >
-            <Settings className="w-3.5 h-3.5 text-gray-400" />
-            <span>Keys & Endpoints</span>
-          </button>
+          <Button tone="subtle" onClick={() => setIsSettingsOpen(true)}>
+            <Settings className="w-3.5 h-3.5" />
+            <span>Keys &amp; Endpoints</span>
+          </Button>
         </div>
       </header>
 
-      {/* Center Chat View */}
-      <main className="flex-1 flex flex-col overflow-hidden relative">
-        {error && (
-          <div className="mx-auto mt-3 mb-1 w-full max-w-4xl px-4">
-            <div className="flex items-start gap-2 p-2.5 rounded-xl bg-red-950/40 border border-red-800 text-xs text-red-300">
-              <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-red-400" />
-              <span className="leading-relaxed">{error}</span>
+      {/* Chat column and the drawers are SIBLINGS, not an overlay.
+
+          The drawers used to be `absolute top-0 right-0 bottom-0` on top of the chat
+          column, which was wrong twice over and looked it. The command bar is centred
+          at `max-w-*`, so a 384px drawer slid underneath its right-hand edge and left
+          the send button unreachable with no scroll to reach it; and the transcript
+          kept its full width behind an opaque panel, so a user reading a goal had a
+          third of their sentence removed with nothing indicating it was removed.
+
+          A flex sibling shrinks the column instead of covering it. The transcript
+          reflows, the command bar stays whole, and the boundary is a visible border
+          rather than an occlusion. */}
+      <main className="flex-1 flex overflow-hidden">
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
+          {error && (
+            <div className="mx-auto mt-3 mb-1 w-full max-w-4xl px-4">
+              <div className="flex items-start gap-2 p-2.5 rounded-xl bg-red-950/40 border border-red-800 text-xs text-red-300">
+                <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-red-400" />
+                <span className="leading-relaxed">{error}</span>
+              </div>
             </div>
-          </div>
-        )}
-        <ChatTimeline
-          messages={messages}
-          onStartGoal={handleStartGoal}
-          onEnableExecution={handleEnableExecution}
-          onApplyGoal={handleApplyGoal}
-          onEditStep={handleEditStep}
-          onPauseGoal={handlePauseGoal}
-          onCancelGoal={handleCancelGoal}
-          onRetryStep={handleRetryStep}
-          onDeleteGoal={handleDeleteGoal}
-          onQuickPrompt={(text) => handleSendMessage(text)}
-          onOpenSettings={openSettings}
-          onImportAudit={handleImportAudit}
-          onPinDesignContract={handleSetDesignContract}
-          pinnedContracts={pinnedContracts}
-        />
+          )}
+          <ChatTimeline
+            messages={messages}
+            onStartGoal={handleStartGoal}
+            onEnableExecution={handleEnableExecution}
+            onApplyGoal={handleApplyGoal}
+            onEditStep={handleEditStep}
+            onPauseGoal={handlePauseGoal}
+            onCancelGoal={handleCancelGoal}
+            onRetryStep={handleRetryStep}
+            onDeleteGoal={handleDeleteGoal}
+            onQuickPrompt={(text) => handleSendMessage(text)}
+            onOpenSettings={openSettings}
+            onImportAudit={handleImportAudit}
+            onPinDesignContract={handleSetDesignContract}
+            pinnedContracts={pinnedContracts}
+          />
+
+          <BottomCommandBar
+            workspaces={workspaces}
+            selectedWorkspace={selectedWs}
+            onSelectWorkspace={setSelectedWs}
+            onBrowseWorkspace={handleBrowseWorkspace}
+            onCreateWorkspace={handleCreateWorkspace}
+            onDeleteWorkspace={handleDeleteWorkspace}
+            onSetDesignContract={handleSetDesignContract}
+            availableModels={modelCatalog.models}
+            selectedModel={selectedModel}
+            onSelectModel={setSelectedModel}
+            modelStatus={modelCatalog.providers}
+            modelSignals={modelSignals}
+            modelsLoading={modelsLoading}
+            onRefreshModels={() => loadModels(true)}
+            mode={mode}
+            onChangeMode={setMode}
+            goalMode={goalMode}
+            onChangeGoalMode={setGoalMode}
+            parallel={parallel}
+            onToggleParallel={setParallel}
+            record={record}
+            onToggleRecord={setRecord}
+            onSubmit={handleSendMessage}
+            isLoading={isLoading}
+            onStop={handleStopGoal}
+            canStop={canStop}
+            isRunning={isGoalActive(activeGoal?.status)}
+            onOpenSettings={() => openSettings("keys")}
+          />
+        </div>
 
         {/* Cross-goal statistics drawer: the wide-angle lens over the same
-            log the per-goal cards render. Independent of workspace on purpose —
-            "is this setup working" spans workspaces. */}
+              log the per-goal cards render. Independent of workspace on purpose —
+              "is this setup working" spans workspaces.
+
+              `28rem`, not the `w-96` (24rem) it shipped with: StatsPanel's stage
+              table measured 500px of content inside a 384px drawer, so it scrolled
+              sideways and clipped its own last column. */}
         {statsOpen && (
-          <aside className="absolute top-0 right-0 bottom-0 z-20 w-96 max-w-full bg-[#161b22] border-l border-[#30363d] shadow-2xl flex flex-col">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
-              <div className="flex items-center gap-2 text-sm font-semibold text-gray-200">
+          <aside className="w-[28rem] max-w-[60%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-codify-border">
+              <div className="flex items-center gap-2 text-sm font-semibold text-codify-primary">
                 <BarChart3 className="w-4 h-4 text-blue-400" />
                 Statistics
               </div>
-              <button
-                type="button"
+              <IconButton
+                label="Close statistics"
                 onClick={() => setStatsOpen(false)}
-                aria-label="Close statistics"
-                className="text-gray-400 hover:text-gray-200 text-sm cursor-pointer"
               >
-                ✕
-              </button>
+                <X className="w-4 h-4" />
+              </IconButton>
             </div>
-            <div className="flex-1 overflow-y-auto p-3">
+            <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
               <StatsPanel />
             </div>
           </aside>
         )}
 
-        {/* Goal history drawer: a right-side overlay so the transcript stays in
-            place behind it. Empty only when this workspace never ran a goal. */}
+        {/* Goal history drawer. Empty only when this workspace never ran a goal. */}
         {historyOpen && (
-          <aside className="absolute top-0 right-0 bottom-0 z-20 w-80 max-w-full bg-[#161b22] border-l border-[#30363d] shadow-2xl flex flex-col">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
-              <div className="flex items-center gap-2 text-sm font-semibold text-gray-200">
+          <aside className="w-80 max-w-[50%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-codify-border">
+              <div className="flex items-center gap-2 text-sm font-semibold text-codify-primary">
                 <History className="w-4 h-4 text-blue-400" />
                 Goal history
               </div>
               <div className="flex items-center gap-2">
-                <button
-                  type="button"
+                <IconButton
+                  label="Reload goal history"
                   onClick={loadHistory}
                   disabled={historyLoading}
-                  title="Reload from the engine"
-                  aria-label="Reload goal history"
-                  className="text-gray-400 hover:text-gray-200 disabled:opacity-50 cursor-pointer"
                 >
-                  {historyLoading ? "…" : "↻"}
-                </button>
-                <button
-                  type="button"
+                  {historyLoading ? (
+                    <div className="w-3.5 h-3.5 border-2 border-current/30 border-t-current rounded-full animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-3.5 h-3.5" />
+                  )}
+                </IconButton>
+                <IconButton
+                  label="Close goal history"
                   onClick={() => setHistoryOpen(false)}
-                  aria-label="Close goal history"
-                  className="text-gray-400 hover:text-gray-200 text-sm cursor-pointer"
                 >
-                  ✕
-                </button>
+                  <X className="w-4 h-4" />
+                </IconButton>
               </div>
             </div>
-            <div className="flex-1 overflow-y-auto p-2 space-y-1">
+            <div className="flex-1 overflow-y-auto overflow-x-hidden p-2 space-y-1">
               {history.length === 0 && !historyLoading && (
-                <p className="text-xs text-gray-500 px-2 py-4 leading-relaxed">
-                  No goals for this workspace yet. Everything you run — including
-                  goals from previous sessions — appears here.
+                <p className="text-xs text-codify-muted px-2 py-4 leading-relaxed">
+                  No goals for this workspace yet. Everything you run —
+                  including goals from previous sessions — appears here.
                 </p>
               )}
               {history.map((g) => (
@@ -1115,25 +1316,15 @@ export const App: React.FC = () => {
                   key={g.id}
                   type="button"
                   onClick={() => restoreGoal(g.id)}
-                  className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-[#21262d] transition-colors cursor-pointer"
+                  className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-codify-raised transition-colors cursor-pointer"
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-medium text-gray-200 truncate">{g.title}</span>
-                    <span
-                      className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full border flex-shrink-0 ${
-                        g.status === "COMPLETED"
-                          ? "bg-green-950/40 text-green-400 border-green-800"
-                          : g.status === "RUNNING" || g.status === "PLANNING" || g.status === "PAUSED"
-                          ? "bg-blue-950/40 text-blue-400 border-blue-800"
-                          : g.status === "FAILED"
-                          ? "bg-red-950/40 text-red-400 border-red-800"
-                          : "bg-[#21262d] text-gray-400 border-[#30363d]"
-                      }`}
-                    >
-                      {g.status}
+                    <span className="text-xs font-medium text-codify-primary truncate">
+                      {g.title}
                     </span>
+                    <Badge tone={statusTone(g.status)}>{g.status}</Badge>
                   </div>
-                  <div className="text-[10px] text-gray-500 mt-0.5">
+                  <div className="text-2xs text-codify-muted mt-0.5">
                     {new Date(g.created_at * 1000).toLocaleString()}
                   </div>
                 </button>
@@ -1141,37 +1332,10 @@ export const App: React.FC = () => {
             </div>
           </aside>
         )}
-
-        {/* Bottom Pinned Command Center — pickers live on the toolbar's left
-            edge; their menus open UP over the chat, never over the textarea. */}
-        <BottomCommandBar
-          workspaces={workspaces}
-          selectedWorkspace={selectedWs}
-          onSelectWorkspace={setSelectedWs}
-          onBrowseWorkspace={handleBrowseWorkspace}
-          onCreateWorkspace={handleCreateWorkspace}
-          onDeleteWorkspace={handleDeleteWorkspace}
-          onSetDesignContract={handleSetDesignContract}
-          availableModels={modelCatalog.models}
-          selectedModel={selectedModel}
-          onSelectModel={setSelectedModel}
-          modelStatus={modelCatalog.providers}
-          modelSignals={modelSignals}
-          modelsLoading={modelsLoading}
-          onRefreshModels={() => loadModels(true)}
-          mode={mode}
-          onChangeMode={setMode}
-          goalMode={goalMode}
-          onChangeGoalMode={setGoalMode}
-          parallel={parallel}
-          onToggleParallel={setParallel}
-          record={record}
-          onToggleRecord={setRecord}
-          onSubmit={handleSendMessage}
-          isLoading={isLoading}
-          onOpenSettings={() => openSettings("keys")}
-        />
       </main>
+
+      {/* Bottom Pinned Command Center — pickers live on the toolbar's left
+            edge; their menus open UP over the chat, never over the textarea. */}
 
       {/* Global Settings Modal */}
       <SettingsModal

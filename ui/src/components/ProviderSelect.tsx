@@ -31,7 +31,7 @@ export const ProviderSelect: React.FC<ProviderSelectProps> = ({
               onChange(e.target.value);
             }
           }}
-          className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
+          className="flex-1 bg-codify-bg border border-codify-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
         >
           {builtins.map((b) => (
             <option key={b} value={b}>
@@ -46,7 +46,7 @@ export const ProviderSelect: React.FC<ProviderSelectProps> = ({
             placeholder="slug (e.g. openrouter, groq)"
             value={value}
             onChange={(e) => onChange(e.target.value.toLowerCase().trim())}
-            className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
+            className="flex-1 bg-codify-bg border border-codify-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
           />
         )}
       </div>

@@ -48,10 +48,10 @@ export const BaseUrlField: React.FC<BaseUrlFieldProps> = ({
         placeholder={localOnly ? "http://127.0.0.1:11434" : "https://api.example.com/v1"}
         value={value}
         onChange={handleChange}
-        className={`bg-[#0d1117] border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none font-mono ${
+        className={`bg-codify-bg border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none font-mono ${
           warning
             ? "border-amber-500 focus:border-amber-500"
-            : "border-[#30363d] focus:border-blue-500"
+            : "border-codify-border focus:border-blue-500"
         }`}
       />
       {warning && (

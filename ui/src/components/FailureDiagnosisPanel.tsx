@@ -36,15 +36,15 @@ const LEVEL_STYLE: Record<Verdict["level"], { wrap: string; icon: React.ReactNod
     icon: <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />,
   },
   info: {
-    wrap: "bg-[#0d1117] border-[#30363d] text-gray-300",
+    wrap: "bg-codify-bg border-codify-border text-gray-300",
     icon: <Info className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />,
   },
 };
 
 const Fact: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
-  <div className="flex items-baseline justify-between gap-3 py-1 border-b border-[#21262d] last:border-b-0">
-    <span className="text-[11px] text-gray-500 uppercase tracking-wider">{label}</span>
-    <span className="text-[11px] font-mono text-gray-200 text-right break-all">{value}</span>
+  <div className="flex items-baseline justify-between gap-3 py-1 border-b border-codify-raised last:border-b-0">
+    <span className="text-xs text-gray-500 uppercase tracking-wider">{label}</span>
+    <span className="text-xs font-mono text-gray-200 text-right break-all">{value}</span>
   </div>
 );
 
@@ -112,15 +112,15 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
         role="dialog"
         aria-modal="true"
         aria-label="Failure diagnosis"
-        className="bg-[#161b22] border border-[#30363d] rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col"
+        className="bg-codify-surface border border-codify-border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col"
       >
-        <div className="flex items-start justify-between gap-3 border-b border-[#30363d] px-5 py-3.5">
+        <div className="flex items-start justify-between gap-3 border-b border-codify-border px-5 py-3.5">
           <div className="flex flex-col gap-0.5 min-w-0">
             <h3 className="text-sm font-bold text-gray-100 flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 text-red-400" />
               Why did this fail?
             </h3>
-            <p className="text-[11px] text-gray-400 break-words">
+            <p className="text-xs text-gray-400 break-words">
               <span className="font-mono">{error.code}</span>
               {error.role && (
                 <>
@@ -137,7 +137,7 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
               disabled={loading}
               title="Re-read the engine's current state"
               aria-label="Re-read the engine's current state"
-              className="text-gray-400 hover:text-gray-200 p-1.5 rounded-lg hover:bg-[#21262d] disabled:opacity-40"
+              className="text-gray-400 hover:text-gray-200 p-1.5 rounded-lg hover:bg-codify-raised disabled:opacity-40"
             >
               <RefreshCw className={loading ? "w-4 h-4 animate-spin" : "w-4 h-4"} />
             </button>
@@ -145,7 +145,7 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
               type="button"
               onClick={onClose}
               aria-label="Close failure diagnosis"
-              className="text-gray-400 hover:text-gray-200 p-1.5 rounded-lg hover:bg-[#21262d]"
+              className="text-gray-400 hover:text-gray-200 p-1.5 rounded-lg hover:bg-codify-raised"
             >
               <X className="w-4 h-4" />
             </button>
@@ -175,12 +175,12 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
                     {LEVEL_STYLE[v.level].icon}
                     <div className="flex flex-col gap-1 min-w-0">
                       <span className="text-xs font-semibold">{v.title}</span>
-                      <span className="text-[11px] leading-relaxed opacity-90">{v.detail}</span>
+                      <span className="text-xs leading-relaxed opacity-90">{v.detail}</span>
                       {v.fix && (
                         <button
                           type="button"
                           onClick={() => onOpenSettings(v.fix!.tab)}
-                          className="mt-1 flex w-fit items-center gap-1.5 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold rounded-lg transition-colors"
+                          className="mt-1 flex w-fit items-center gap-1.5 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors"
                         >
                           <Wand2 className="w-3 h-3" />
                           {v.fix.label}
@@ -191,8 +191,8 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
                 </div>
               ))}
 
-              <div className="bg-[#0d1117] border border-[#30363d] rounded-xl px-3.5 py-2.5 flex flex-col gap-2">
-                <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+              <div className="bg-codify-bg border border-codify-border rounded-xl px-3.5 py-2.5 flex flex-col gap-2">
+                <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
                   What the engine holds
                 </span>
                 {config ? (
@@ -243,14 +243,14 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
                     />
                   </div>
                 ) : (
-                  <span className="text-[11px] text-gray-500 flex items-center gap-1.5">
+                  <span className="text-xs text-gray-500 flex items-center gap-1.5">
                     <CheckCircle2 className="w-3.5 h-3.5" />
                     No role attribution on this failure — nothing to look up.
                   </span>
                 )}
               </div>
 
-              <p className="text-[11px] text-gray-500 leading-relaxed">
+              <p className="text-xs text-gray-500 leading-relaxed">
                 Engine said: <span className="font-mono text-gray-400">{error.message}</span>
               </p>
             </>

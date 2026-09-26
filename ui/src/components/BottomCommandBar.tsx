@@ -1,5 +1,10 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { Workspace, ModelOption, ProviderModelStatus, GoalMode } from "../types";
+import {
+  Workspace,
+  ModelOption,
+  ProviderModelStatus,
+  GoalMode,
+} from "../types";
 import {
   EMPTY_SIGNALS,
   ModelSection,
@@ -24,9 +29,34 @@ import {
   Trash2,
   BookOpen,
   Palette,
+  Square,
 } from "lucide-react";
 
+import { Toggle } from "./ui/Toggle";
+import { Button } from "./ui/Button";
+import { IconButton } from "./ui/IconButton";
+
 export type ExecutionMode = "direct" | "dry_run" | "plan_only";
+
+/**
+ * A hairline between clusters of controls, carrying the cluster's meaning on hover.
+ *
+ * The toolbar sets seven controls in one row at identical weight, which read as seven
+ * independent knobs. They are not peers: there is one orchestrator, and these differ
+ * in *kind* — what to work on (workspace, model), what the fixer may do (mode), how
+ * work is scheduled (`Parallel`, the only one that changes the executor's topology),
+ * and what the run keeps or produces (Record, the two deliverables). A divider is the
+ * cheapest thing that says "these are not the same kind of thing", and it costs no
+ * width, which a caption in a toolbar this size would.
+ */
+const Divider: React.FC<{ title: string }> = ({ title }) => (
+  <span
+    role="separator"
+    aria-orientation="vertical"
+    title={title}
+    className="w-px self-stretch min-h-[1.25rem] my-0.5 bg-codify-border flex-shrink-0"
+  />
+);
 
 // Ordering and badges come from `modelSignals`, which is pure and shared with the
 // Settings field — so an id sits in the same place in both pickers.
@@ -71,6 +101,16 @@ interface BottomCommandBarProps {
    */
   onSubmit: (prompt: string) => boolean | void | Promise<boolean | void>;
   isLoading: boolean;
+  /**
+   * Stop the goal that is running. Absent means this app has no way to stop work,
+   * and the button stays a Send — so the prop is optional rather than a required
+   * callback that silently does nothing.
+   */
+  onStop?: () => void;
+  /** A goal is in a state that can be stopped, so the right slot offers Stop. */
+  canStop?: boolean;
+  /** A goal is actively being worked on — drives the "running" affordance. */
+  isRunning?: boolean;
   onOpenSettings: () => void;
 }
 
@@ -99,6 +139,9 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   onToggleRecord,
   onSubmit,
   isLoading,
+  onStop,
+  canStop = false,
+  isRunning = false,
   onOpenSettings,
 }) => {
   const [prompt, setPrompt] = useState("");
@@ -139,7 +182,10 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
     [availableModels, modelFilter, selectedModel, modelSignals],
   );
 
-  const shownModelCount = modelSections.reduce((n, s) => n + s.models.length, 0);
+  const shownModelCount = modelSections.reduce(
+    (n, s) => n + s.models.length,
+    0,
+  );
 
   // Manual workspace path dialog fallback
   const [isManualWsModal, setIsManualWsModal] = useState(false);
@@ -158,7 +204,9 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   // DOM before paint, and re-measured on resize/scroll.
   type PickerKey = "folder" | "model" | "mode";
   // Viewport-anchored position for each open menu; null until measured.
-  const [menuPos, setMenuPos] = useState<Record<PickerKey, { left: number; bottom: number } | null>>({
+  const [menuPos, setMenuPos] = useState<
+    Record<PickerKey, { left: number; bottom: number } | null>
+  >({
     folder: null,
     model: null,
     mode: null,
@@ -208,7 +256,9 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
       setMenuPos((prev) => {
         const next = { left, bottom };
         const p = prev[key];
-        return p && p.left === next.left && p.bottom === next.bottom ? prev : { ...prev, [key]: next };
+        return p && p.left === next.left && p.bottom === next.bottom
+          ? prev
+          : { ...prev, [key]: next };
       });
 
       if (list) {
@@ -220,12 +270,20 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
         // that grows to fill the screen buries the chat behind it. Small list,
         // scroll inside it.
         const next = Math.max(120, Math.min(cap, 320));
-        setMenuMax((prev) => (prev[key] === next ? prev : { ...prev, [key]: next }));
+        setMenuMax((prev) =>
+          prev[key] === next ? prev : { ...prev, [key]: next },
+        );
       }
     });
     // openState is rebuilt every render; depend on the individual flags.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isFolderOpen, isModelOpen, isModeOpen, availableModels.length, workspaces.length]);
+  }, [
+    isFolderOpen,
+    isModelOpen,
+    isModeOpen,
+    availableModels.length,
+    workspaces.length,
+  ]);
 
   useLayoutEffect(() => {
     measure();
@@ -276,6 +334,23 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSubmit();
+      return;
+    }
+    // Escape closes an open picker before it will stop anything. The menus open over
+    // the chat, so a user reaching for Escape to dismiss one is not reaching for it
+    // to kill a run — and stopping a goal is far too expensive a thing to trigger by
+    // a key that usually means "dismiss this".
+    if (e.key === "Escape") {
+      if (isFolderOpen || isModelOpen || isModeOpen) {
+        setIsFolderOpen(false);
+        setIsModelOpen(false);
+        setIsModeOpen(false);
+        return;
+      }
+      if (canStop && onStop && !isLoading) {
+        e.preventDefault();
+        onStop();
+      }
     }
   };
 
@@ -373,13 +448,17 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
     // so the goal failed later, far from the field that caused it.
     const slash = raw.indexOf("/");
     if (slash <= 0 || slash === raw.length - 1) {
-      setCustomModelError('Use the form provider/model, e.g. "ollama/qwen2.5-coder:7b".');
+      setCustomModelError(
+        'Use the form provider/model, e.g. "ollama/qwen2.5-coder:7b".',
+      );
       return;
     }
     const provider = raw.slice(0, slash).trim();
     const id = raw.slice(slash + 1).trim();
     if (!provider || !id) {
-      setCustomModelError('Use the form provider/model, e.g. "ollama/qwen2.5-coder:7b".');
+      setCustomModelError(
+        'Use the form provider/model, e.g. "ollama/qwen2.5-coder:7b".',
+      );
       return;
     }
     const custom: ModelOption = {
@@ -395,25 +474,22 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
 
   return (
     <div className="w-full max-w-4xl mx-auto p-4 z-20">
-      <div ref={barRef} className="bg-[#161b22] border border-[#30363d] rounded-2xl shadow-2xl overflow-visible focus-within:border-blue-500/80 transition-all duration-200">
-        {/* Main Textarea - NEVER disabled so cursor is always responsive */}
-        <div className="p-3.5 pb-2">
-          <textarea
-            ref={textareaRef}
-            rows={1}
-            autoFocus
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={handleKeyDown}
-            disabled={isLoading}
-            placeholder="Ask Codify to build, edit files, fix tests, or refactor code..."
-            aria-label="Chat prompt"
-            className="w-full bg-transparent text-gray-100 placeholder-gray-500 text-sm resize-none focus:outline-none leading-relaxed cursor-text"
-          />
-        </div>
+      <div
+        ref={barRef}
+        className="bg-codify-surface border border-codify-border rounded-2xl shadow-2xl overflow-visible focus-within:border-blue-500/80 transition-all duration-200"
+      >
+        {/* The pickers sit ABOVE the input, and the submit control sits at the END
+            of it.
 
-        {/* Toolbar — pickers on the left edge of the prompt card, submit on the right. */}
-        <div className="px-3 py-2 bg-[#0d1117]/60 border-t border-[#30363d]/60 flex flex-wrap items-center justify-between gap-2 text-xs">
+            The card used to be textarea-then-toolbar, which reads as "this toolbar
+            belongs to the text above it". It does not: these controls describe the
+            *run* — what to work on, with what, under what policy — not the sentence
+            being typed. Putting them first says so, and it leaves the input area as
+            one uninterrupted block with nothing competing for its right edge.
+
+            The divider between clusters carries that cluster's meaning on hover; a
+            caption would not fit at this width without forcing a second row. */}
+        <div className="px-3 pt-3 flex flex-wrap items-center gap-2 text-xs">
           {/* Left Pickers */}
           <div className="flex items-center gap-2 flex-wrap">
             {/* Folder Picker */}
@@ -427,14 +503,16 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 }}
                 className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
                   selectedWorkspace
-                    ? "bg-[#21262d] border-[#30363d] text-gray-200 hover:bg-[#30363d]"
+                    ? "bg-codify-raised border-codify-border text-gray-200 hover:bg-codify-border"
                     : "bg-blue-950/40 border-blue-800 text-blue-300 hover:bg-blue-900/50"
                 }`}
                 title={selectedWorkspace?.root_path || "Select project folder"}
               >
                 <Folder className="w-3.5 h-3.5 text-blue-400" />
                 <span className="font-medium max-w-[150px] truncate">
-                  {selectedWorkspace ? selectedWorkspace.name : "Select Project Folder"}
+                  {selectedWorkspace
+                    ? selectedWorkspace.name
+                    : "Select Project Folder"}
                 </span>
                 <ChevronDown className="w-3 h-3 text-gray-400" />
               </button>
@@ -445,12 +523,16 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   ref={menuRefs.folder}
                   style={
                     menuPos.folder
-                      ? { position: "fixed", left: menuPos.folder.left, bottom: menuPos.folder.bottom }
+                      ? {
+                          position: "fixed",
+                          left: menuPos.folder.left,
+                          bottom: menuPos.folder.bottom,
+                        }
                       : undefined
                   }
-                  className="absolute left-0 bottom-full mb-2 w-80 bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl p-2 z-50"
+                  className="absolute left-0 bottom-full mb-2 w-80 bg-codify-surface border border-codify-border rounded-xl shadow-2xl p-2 z-50"
                 >
-                  <div className="text-[11px] font-semibold text-gray-400 px-2 py-1 uppercase tracking-wider">
+                  <div className="text-xs font-semibold text-gray-400 px-2 py-1 uppercase tracking-wider">
                     Workspaces
                   </div>
 
@@ -460,14 +542,19 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                       onClick={handleNativeBrowse}
                       className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition-colors shadow"
                     >
-                      <FolderOpen className="w-4 h-4" /> Open Folder in File Manager...
+                      <FolderOpen className="w-4 h-4" /> Open Folder in File
+                      Manager...
                     </button>
                   </div>
 
                   {workspaces.length > 0 && (
                     <div
                       ref={listRefs.folder}
-                      style={menuMax.folder != null ? { maxHeight: menuMax.folder } : undefined}
+                      style={
+                        menuMax.folder != null
+                          ? { maxHeight: menuMax.folder }
+                          : undefined
+                      }
                       className="max-h-40 overflow-y-auto space-y-1 my-1"
                     >
                       {workspaces.map((ws) => (
@@ -479,7 +566,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                           className={`w-full flex items-center gap-1 rounded-lg transition-colors ${
                             selectedWorkspace?.id === ws.id
                               ? "bg-blue-600/20 text-blue-400 border border-blue-500/30"
-                              : "text-gray-300 hover:bg-[#21262d]"
+                              : "text-gray-300 hover:bg-codify-raised"
                           }`}
                         >
                           <button
@@ -491,8 +578,12 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                             className="flex-1 min-w-0 text-left px-2.5 py-1.5 text-xs"
                           >
                             <div className="truncate">
-                              <div className="font-semibold truncate">{ws.name}</div>
-                              <div className="text-[10px] text-gray-500 truncate font-mono">{ws.root_path}</div>
+                              <div className="font-semibold truncate">
+                                {ws.name}
+                              </div>
+                              <div className="text-2xs text-gray-500 truncate font-mono">
+                                {ws.root_path}
+                              </div>
                             </div>
                           </button>
                           {selectedWorkspace?.id === ws.id && (
@@ -529,14 +620,14 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                     </div>
                   )}
 
-                  <div className="pt-1.5 border-t border-[#30363d]">
+                  <div className="pt-1.5 border-t border-codify-border">
                     <button
                       type="button"
                       onClick={() => {
                         setIsFolderOpen(false);
                         setIsManualWsModal(true);
                       }}
-                      className="w-full text-center text-[11px] text-gray-400 hover:text-gray-200 py-1"
+                      className="w-full text-center text-xs text-gray-400 hover:text-gray-200 py-1"
                     >
                       Enter path manually...
                     </button>
@@ -554,7 +645,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   setIsFolderOpen(false);
                   setIsModeOpen(false);
                 }}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#21262d] border border-[#30363d] text-gray-200 hover:bg-[#30363d] transition-colors cursor-pointer"
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-codify-raised border border-codify-border text-gray-200 hover:bg-codify-border transition-colors cursor-pointer"
               >
                 <Cpu className="w-3.5 h-3.5 text-purple-400" />
                 <span className="font-medium truncate max-w-[150px]">
@@ -569,14 +660,21 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   ref={menuRefs.model}
                   style={
                     menuPos.model
-                      ? { position: "fixed", left: menuPos.model.left, bottom: menuPos.model.bottom }
+                      ? {
+                          position: "fixed",
+                          left: menuPos.model.left,
+                          bottom: menuPos.model.bottom,
+                        }
                       : undefined
                   }
-                  className="absolute left-0 bottom-full mb-2 w-80 bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl p-2.5 z-50"
+                  className="absolute left-0 bottom-full mb-2 w-80 bg-codify-surface border border-codify-border rounded-xl shadow-2xl p-2.5 z-50"
                 >
                   <div className="flex items-center justify-between px-2 py-1 mb-1">
-                    <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                      Models{availableModels.length > 0 ? ` (${availableModels.length})` : ""}
+                    <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                      Models
+                      {availableModels.length > 0
+                        ? ` (${availableModels.length})`
+                        : ""}
                     </span>
                     <div className="flex items-center gap-2">
                       <button
@@ -584,9 +682,13 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                         onClick={onRefreshModels}
                         disabled={modelsLoading}
                         title="Ask every configured provider what it serves right now"
-                        className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-200 disabled:opacity-50 cursor-pointer"
+                        className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-200 disabled:opacity-50 cursor-pointer"
                       >
-                        <RefreshCw className={modelsLoading ? "w-3 h-3 animate-spin" : "w-3 h-3"} />
+                        <RefreshCw
+                          className={
+                            modelsLoading ? "w-3 h-3 animate-spin" : "w-3 h-3"
+                          }
+                        />
                         Refresh
                       </button>
                       <button
@@ -595,7 +697,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                           setIsModelOpen(false);
                           onOpenSettings();
                         }}
-                        className="text-[11px] text-blue-400 hover:underline cursor-pointer"
+                        className="text-xs text-blue-400 hover:underline cursor-pointer"
                       >
                         API Keys
                       </button>
@@ -609,18 +711,22 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                         value={modelFilter}
                         onChange={(e) => setModelFilter(e.target.value)}
                         placeholder={`Filter ${availableModels.length} models…`}
-                        className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-2.5 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-purple-500"
+                        className="w-full bg-codify-bg border border-codify-border rounded-lg px-2.5 py-1 text-xs text-gray-200 focus:outline-none focus:border-purple-500"
                       />
                     </div>
                   )}
 
                   <div
                     ref={listRefs.model}
-                    style={menuMax.model != null ? { maxHeight: menuMax.model } : undefined}
+                    style={
+                      menuMax.model != null
+                        ? { maxHeight: menuMax.model }
+                        : undefined
+                    }
                     className="max-h-60 overflow-y-auto space-y-0.5 my-1"
                   >
                     {availableModels.length === 0 && (
-                      <div className="px-2.5 py-3 text-[11px] text-gray-400 leading-relaxed">
+                      <div className="px-2.5 py-3 text-xs text-gray-400 leading-relaxed">
                         {modelsLoading
                           ? "Asking each provider what it serves..."
                           : "No models yet. Add an API key under API Keys, or start a local Ollama server — its models appear automatically."}
@@ -628,9 +734,10 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                     )}
 
                     {availableModels.length > 0 && shownModelCount === 0 && (
-                      <div className="px-2.5 py-3 text-[11px] text-gray-400">
-                        Nothing matches “{modelFilter.trim()}”. Every discovered model is listed — clear
-                        the filter to see them, or set the id below.
+                      <div className="px-2.5 py-3 text-xs text-gray-400">
+                        Nothing matches “{modelFilter.trim()}”. Every discovered
+                        model is listed — clear the filter to see them, or set
+                        the id below.
                       </div>
                     )}
 
@@ -638,8 +745,10 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                       <div key={section.id} className="pb-1">
                         <div
                           className={
-                            "px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider " +
-                            (section.pinned ? "text-purple-300/80" : "text-gray-500")
+                            "px-2.5 pt-1.5 pb-0.5 text-2xs font-semibold uppercase tracking-wider " +
+                            (section.pinned
+                              ? "text-purple-300/80"
+                              : "text-gray-500")
                           }
                         >
                           {section.label} ({section.models.length})
@@ -656,8 +765,12 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                               type="button"
                               title={
                                 `${m.id}` +
-                                (badges.rolesTitle ? `\n${badges.rolesTitle}` : "") +
-                                (badges.lastRunTitle ? `\n${badges.lastRunTitle}` : "") +
+                                (badges.rolesTitle
+                                  ? `\n${badges.rolesTitle}`
+                                  : "") +
+                                (badges.lastRunTitle
+                                  ? `\n${badges.lastRunTitle}`
+                                  : "") +
                                 (m.description ? `\n${m.description}` : "")
                               }
                               onClick={() => {
@@ -668,34 +781,40 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                                 "w-full text-left px-2.5 py-1 rounded-lg flex items-center gap-2 text-xs transition-colors cursor-pointer " +
                                 (isCurrent
                                   ? "bg-purple-600/20 text-purple-300 border border-purple-500/30 font-medium"
-                                  : "text-gray-300 hover:bg-[#21262d]")
+                                  : "text-gray-300 hover:bg-codify-raised")
                               }
                             >
-                              <span className="font-semibold truncate flex-1 min-w-0">{m.name}</span>
+                              <span className="font-semibold truncate flex-1 min-w-0">
+                                {m.name}
+                              </span>
                               {badges.roles && (
                                 <span
-                                  className="text-[10px] text-teal-300/90 flex-shrink-0 max-w-[9rem] truncate"
+                                  className="text-2xs text-teal-300/90 flex-shrink-0 max-w-[9rem] truncate"
                                   title={badges.rolesTitle}
                                 >
                                   {badges.roles}
                                 </span>
                               )}
                               {badges.lastRun && (
-                                <span className="text-[10px] text-blue-300/90 flex-shrink-0">last run</span>
+                                <span className="text-2xs text-blue-300/90 flex-shrink-0">
+                                  last run
+                                </span>
                               )}
                               {badges.notChat ? (
-                                <span className="text-[10px] text-amber-400/80 flex-shrink-0">
+                                <span className="text-2xs text-amber-400/80 flex-shrink-0">
                                   not a chat model
                                 </span>
                               ) : (
                                 !badges.roles &&
                                 m.description && (
-                                  <span className="text-[10px] text-gray-500 truncate max-w-[110px] flex-shrink-0">
+                                  <span className="text-2xs text-gray-500 truncate max-w-[110px] flex-shrink-0">
                                     {m.description}
                                   </span>
                                 )
                               )}
-                              {isCurrent && <Check className="w-3 h-3 text-purple-400 flex-shrink-0" />}
+                              {isCurrent && (
+                                <Check className="w-3 h-3 text-purple-400 flex-shrink-0" />
+                              )}
                             </button>
                           );
                         })}
@@ -709,19 +828,25 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                       .map((p) => (
                         <div
                           key={"status:" + p.provider}
-                          className="flex items-start gap-1.5 px-2.5 py-1 text-[10px] text-amber-400/90"
+                          className="flex items-start gap-1.5 px-2.5 py-1 text-2xs text-amber-400/90"
                         >
                           <AlertCircle className="w-3 h-3 flex-shrink-0 mt-0.5" />
                           <span className="truncate">
-                            <span className="font-semibold">{p.provider}</span> — {p.error}
+                            <span className="font-semibold">{p.provider}</span>{" "}
+                            — {p.error}
                           </span>
                         </div>
                       ))}
                   </div>
 
                   {/* Custom Model Input */}
-                  <form onSubmit={handleCustomModelSubmit} className="pt-2 border-t border-[#30363d] mt-1">
-                    <div className="text-[10px] text-gray-400 mb-1 px-1">Use Any Custom Model:</div>
+                  <form
+                    onSubmit={handleCustomModelSubmit}
+                    className="pt-2 border-t border-codify-border mt-1"
+                  >
+                    <div className="text-2xs text-gray-400 mb-1 px-1">
+                      Use Any Custom Model:
+                    </div>
                     <div className="flex items-center gap-1.5">
                       <input
                         type="text"
@@ -732,7 +857,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                           setCustomModelError(null);
                         }}
                         aria-label="Custom model in provider/model form"
-                        className="flex-1 bg-[#0d1117] border border-[#30363d] rounded-lg px-2.5 py-1 text-xs text-gray-200 focus:outline-none focus:border-purple-500 font-mono"
+                        className="flex-1 bg-codify-bg border border-codify-border rounded-lg px-2.5 py-1 text-xs text-gray-200 focus:outline-none focus:border-purple-500 font-mono"
                       />
                       <button
                         type="submit"
@@ -743,7 +868,9 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                       </button>
                     </div>
                     {customModelError && (
-                      <p className="text-[10px] text-red-400 px-1 mt-1">{customModelError}</p>
+                      <p className="text-2xs text-red-400 px-1 mt-1">
+                        {customModelError}
+                      </p>
                     )}
                   </form>
                 </div>
@@ -759,11 +886,17 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   setIsFolderOpen(false);
                   setIsModelOpen(false);
                 }}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#21262d] border border-[#30363d] text-gray-300 hover:bg-[#30363d] transition-colors cursor-pointer"
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-codify-raised border border-codify-border text-gray-300 hover:bg-codify-border transition-colors cursor-pointer"
               >
-                {mode === "direct" && <Sparkles className="w-3.5 h-3.5 text-green-400" />}
-                {mode === "dry_run" && <Shield className="w-3.5 h-3.5 text-amber-400" />}
-                {mode === "plan_only" && <Layers className="w-3.5 h-3.5 text-blue-400" />}
+                {mode === "direct" && (
+                  <Sparkles className="w-3.5 h-3.5 text-green-400" />
+                )}
+                {mode === "dry_run" && (
+                  <Shield className="w-3.5 h-3.5 text-amber-400" />
+                )}
+                {mode === "plan_only" && (
+                  <Layers className="w-3.5 h-3.5 text-blue-400" />
+                )}
                 <span>
                   {mode === "direct" && "Direct Apply"}
                   {mode === "dry_run" && "Review Diffs"}
@@ -777,10 +910,14 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   ref={menuRefs.mode}
                   style={
                     menuPos.mode
-                      ? { position: "fixed", left: menuPos.mode.left, bottom: menuPos.mode.bottom }
+                      ? {
+                          position: "fixed",
+                          left: menuPos.mode.left,
+                          bottom: menuPos.mode.bottom,
+                        }
                       : undefined
                   }
-                  className="absolute left-0 bottom-full mb-2 w-56 bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl p-1.5 z-50"
+                  className="absolute left-0 bottom-full mb-2 w-56 bg-codify-surface border border-codify-border rounded-xl shadow-2xl p-1.5 z-50"
                 >
                   <button
                     type="button"
@@ -789,14 +926,20 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                       setIsModeOpen(false);
                     }}
                     className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between cursor-pointer ${
-                      mode === "direct" ? "bg-green-600/20 text-green-300 font-medium" : "text-gray-300 hover:bg-[#21262d]"
+                      mode === "direct"
+                        ? "bg-green-600/20 text-green-300 font-medium"
+                        : "text-gray-300 hover:bg-codify-raised"
                     }`}
                   >
                     <div>
                       <div className="font-semibold">Direct Apply</div>
-                      <div className="text-[10px] text-gray-500">Edit files & run tests automatically</div>
+                      <div className="text-2xs text-gray-500">
+                        Edit files & run tests automatically
+                      </div>
                     </div>
-                    {mode === "direct" && <Check className="w-3.5 h-3.5 text-green-400" />}
+                    {mode === "direct" && (
+                      <Check className="w-3.5 h-3.5 text-green-400" />
+                    )}
                   </button>
 
                   <button
@@ -806,14 +949,22 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                       setIsModeOpen(false);
                     }}
                     className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between mt-1 cursor-pointer ${
-                      mode === "dry_run" ? "bg-amber-600/20 text-amber-300 font-medium" : "text-gray-300 hover:bg-[#21262d]"
+                      mode === "dry_run"
+                        ? "bg-amber-600/20 text-amber-300 font-medium"
+                        : "text-gray-300 hover:bg-codify-raised"
                     }`}
                   >
                     <div>
-                      <div className="font-semibold">Review Diffs (Dry Run)</div>
-                      <div className="text-[10px] text-gray-500">Simulate changes without writing disk</div>
+                      <div className="font-semibold">
+                        Review Diffs (Dry Run)
+                      </div>
+                      <div className="text-2xs text-gray-500">
+                        Simulate changes without writing disk
+                      </div>
                     </div>
-                    {mode === "dry_run" && <Check className="w-3.5 h-3.5 text-amber-400" />}
+                    {mode === "dry_run" && (
+                      <Check className="w-3.5 h-3.5 text-amber-400" />
+                    )}
                   </button>
 
                   <button
@@ -823,119 +974,208 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                       setIsModeOpen(false);
                     }}
                     className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between mt-1 cursor-pointer ${
-                      mode === "plan_only" ? "bg-blue-600/20 text-blue-300 font-medium" : "text-gray-300 hover:bg-[#21262d]"
+                      mode === "plan_only"
+                        ? "bg-blue-600/20 text-blue-300 font-medium"
+                        : "text-gray-300 hover:bg-codify-raised"
                     }`}
                   >
                     <div>
                       <div className="font-semibold">Plan Only</div>
-                      <div className="text-[10px] text-gray-500">Show the plan; you approve execution</div>
+                      <div className="text-2xs text-gray-500">
+                        Show the plan; you approve execution
+                      </div>
                     </div>
-                    {mode === "plan_only" && <Check className="w-3.5 h-3.5 text-blue-400" />}
+                    {mode === "plan_only" && (
+                      <Check className="w-3.5 h-3.5 text-blue-400" />
+                    )}
                   </button>
                 </div>
               )}
             </div>
 
+            <Divider title="Execution policy — whether the fixer may write, and whether steps run concurrently" />
+
             {/* Parallel toggle: independent (path-disjoint) steps run concurrently.
                 Safe by construction — steps that touch the same files still go
-                in order, and the sandbox/git stay serialized inside the engine. */}
-            <button
-              type="button"
+                in order, and the sandbox/git stay serialized inside the engine.
+
+                This is the one control here that changes the *orchestration topology*
+                rather than a setting of it: the executor switches from a sequential
+                walk to `asyncio.gather` over path-disjoint steps, with sandbox
+                commands and git commits serialized behind locks. That is why it sits
+                on its own rather than in the cluster of flags beside it. */}
+            <Toggle
+              armed={parallel}
               onClick={() => onToggleParallel?.(!parallel)}
               disabled={!onToggleParallel}
               title="Run independent steps concurrently — steps that touch the same files still go in order"
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors cursor-pointer disabled:opacity-40 ${
-                parallel
-                  ? "bg-purple-600/20 border-purple-500/50 text-purple-300 hover:bg-purple-600/30"
-                  : "bg-[#21262d] border-[#30363d] text-gray-400 hover:bg-[#30363d]"
-              }`}
             >
               <Workflow className="w-3.5 h-3.5" />
               <span>Parallel</span>
-            </button>
+            </Toggle>
+
+            <Divider title="What this run keeps, and what it produces" />
 
             {/* Recording: keep a copy of every model call this run makes, so the
                 run can be replayed later with no provider in the loop. Off by
                 default and never automatic — a recording is a copy of the
                 model's output about the user's code, so it is something they
                 ask for while chasing a bad run and can delete at any time. */}
-            <button
-              type="button"
+            <Toggle
+              armed={record}
+              tone="warning"
               onClick={() => onToggleRecord?.(!record)}
               disabled={!onToggleRecord}
-              aria-pressed={record}
               title="Record every model call this run makes, so it can be replayed later without a provider"
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors cursor-pointer disabled:opacity-40 ${
-                record
-                  ? "bg-amber-600/20 border-amber-500/50 text-amber-300 hover:bg-amber-600/30"
-                  : "bg-[#21262d] border-[#30363d] text-gray-400 hover:bg-[#30363d]"
-              }`}
             >
               <Radio className="w-3.5 h-3.5" />
               <span>Record</span>
-            </button>
+            </Toggle>
 
-            {/* Design deliverable: this goal produces the workspace's own brand
-                contract. Orthogonal to the execution mode above — a draft can
-                still be reviewed before it is written, or planned and not run —
-                and distinct from the workspace pin, which is the user's own
-                action on a file that exists. Here the design agent authors
-                DESIGN.md, a step writes it, and the critic reviews it first. */}
-            <button
-              type="button"
-              onClick={() => onChangeGoalMode(goalMode === "design" ? "normal" : "design")}
-              title="Design deliverable — draft or revise this workspace's DESIGN.md, reviewed by the critic before you pin it"
-              aria-pressed={goalMode === "design"}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
-                goalMode === "design"
-                  ? "bg-pink-600/20 border-pink-500/50 text-pink-300 hover:bg-pink-600/30"
-                  : "bg-[#21262d] border-[#30363d] text-gray-400 hover:bg-[#30363d]"
-              }`}
+            {/* Design and Knowledge are ONE choice, not two switches.
+
+                `goalMode` is a single value — `normal | design | knowledge` — and both
+                buttons write to it, so arming one disarms the other. They were drawn
+                as two independent toggles, which promised a combination the state
+                cannot hold: a user could read two armed pills as "this run produces
+                both files", and the engine would only ever write one.
+
+                So they share a container. The border between them is a seam, not a
+                gap, so the pair reads as one segmented control with a single armed
+                position — which is what it is. `role="radiogroup"` says the same thing
+                to a screen reader, and each button keeps `aria-pressed` from `Toggle`
+                because that is the honest state: neither is "selected" in a group
+                whose value may legitimately be neither. */}
+            <div
+              role="radiogroup"
+              aria-label="Deliverable"
+              title="This run produces one deliverable file, or none"
+              className="flex items-center rounded-lg border border-codify-border bg-codify-raised overflow-hidden"
             >
-              <Palette className="w-3.5 h-3.5" />
-              <span>Design Deliverable</span>
-            </button>
+              <Toggle
+                armed={goalMode === "design"}
+                tone="design"
+                onClick={() =>
+                  onChangeGoalMode(goalMode === "design" ? "normal" : "design")
+                }
+                title="Design deliverable — draft or revise this workspace's DESIGN.md, reviewed by the critic before you pin it"
+                className="rounded-none border-0 border-r border-codify-border"
+              >
+                <Palette className="w-3.5 h-3.5" />
+                <span>Design</span>
+              </Toggle>
+
+              <Toggle
+                armed={goalMode === "knowledge"}
+                tone="knowledge"
+                onClick={() =>
+                  onChangeGoalMode(
+                    goalMode === "knowledge" ? "normal" : "knowledge",
+                  )
+                }
+                title="Knowledge deliverable — draft or revise this workspace's CODIFY.md, which later runs read as a prior"
+                className="rounded-none border-0"
+              >
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>Knowledge</span>
+              </Toggle>
+            </div>
 
             {/* Knowledge deliverable: the same shape pointed at a different
                 file. CODIFY.md is what every later run's librarian reads first
                 — as a prior, never as evidence — so the reviewer here is
                 approving a description of the repository that will aim every
                 future run at files. A goal-mode toggle rather than a workspace
-                setting because it is a one-off rewrite, not a standing one. */}
-            <button
-              type="button"
-              onClick={() => onChangeGoalMode(goalMode === "knowledge" ? "normal" : "knowledge")}
-              title="Knowledge deliverable — draft or revise this workspace's CODIFY.md, which later runs read as a prior"
-              aria-pressed={goalMode === "knowledge"}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
-                goalMode === "knowledge"
-                  ? "bg-amber-600/20 border-amber-500/50 text-amber-300 hover:bg-amber-600/30"
-                  : "bg-[#21262d] border-[#30363d] text-gray-400 hover:bg-[#30363d]"
-              }`}
-            >
-              <BookOpen className="w-3.5 h-3.5" />
-              <span>Knowledge Deliverable</span>
-            </button>
-          </div>
+                setting because it is a one-off rewrite, not a standing one.
 
-          {/* Right Action: Submit */}
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-gray-500 hidden sm:inline">
-              ⏎ to send
-            </span>
-            <button
-              type="button"
-              onClick={handleSubmit}
-              disabled={!prompt.trim() || isLoading}
-              aria-label="Send prompt"
-              className="w-8 h-8 rounded-xl bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center transition-all disabled:opacity-40 disabled:hover:bg-blue-600 shadow-md cursor-pointer"
-            >
-              {isLoading ? (
-                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              ) : (
-                <ArrowUp className="w-4 h-4" />
-              )}
-            </button>
+                Knowledge's own hue, not Record's amber. The two were byte-identical
+                here, which meant two unrelated features armed the same colour in the
+                same toolbar. See `Toggle`. */}
+          </div>
+        </div>
+
+        {/* The input area, with submit at its end.
+
+            `items-end` pins the button to the LAST line of the text as the textarea
+            grows, rather than letting it float beside line one of a five-line
+            prompt — the auto-resize here runs to 180px, so that gap is reachable. */}
+        <div className="p-3.5 pt-2 flex items-end gap-2">
+          {/* NEVER disabled so the cursor is always responsive. */}
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            autoFocus
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={isLoading}
+            placeholder="Ask Codify to build, edit files, fix tests, or refactor code..."
+            aria-label="Chat prompt"
+            className="flex-1 min-w-0 bg-transparent text-gray-100 placeholder-gray-500 text-sm resize-none focus:outline-none leading-relaxed cursor-text"
+          />
+
+          {/* Right Action: Send, or Stop when a goal is in flight.
+
+              The same slot for both, deliberately. The right-hand control is where
+              the user already looks for "what does this do next", and swapping a
+              disabled spinner for an enabled Stop puts the stop exactly where the
+              send was — so the muscle memory for pressing it needs no new thought.
+              Two buttons would have meant the stop sitting somewhere new, unpressed.
+
+              `danger` because Stop ends a run that may be writing files, and the
+              colour is the only warning it gets: there is no confirm dialog, because
+              a confirmation on the one control that is already hard to reach is a
+              second chance to lose the run, not a safety. The goal card keeps a
+              quieter Cancel for when the user is looking at the goal rather than the
+              bar. */}
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {/* The shortcut hint appears only when there is a destructive action to
+                shortcut, and it sits BESIDE the button rather than above it.
+
+                Two things were wrong with it stacked on top. "⏎ to send" said nothing
+                a user of a chat box does not already know, and as a caption floating
+                over a lone blue square it read as a label for something above the
+                button rather than a hint about the one below it. "esc to stop" earns
+                its place — Stop ends a run that may be writing files, and Esc is
+                not a shortcut anyone discovers — so that one stays, inline, where it
+                reads as belonging to the control it describes.
+
+                Wording still follows the goal's real state: `canStop` is wider than
+                `isRunning` on purpose, because a paused goal can still be ended, and
+                a hint reading "esc to stop" over a goal nobody is working on would
+                be claiming work that is not happening. */}
+            {canStop && (
+              <span className="text-2xs text-codify-muted hidden sm:inline">
+                {isRunning ? "esc to stop" : "esc to cancel"}
+              </span>
+            )}
+            {canStop ? (
+              <Button
+                tone="danger"
+                size="md"
+                onClick={onStop}
+                disabled={!onStop || isLoading}
+                title="Stop this goal. Work already written to your files is kept."
+              >
+                <Square className="w-3 h-3 fill-current" />
+                <span>Stop</span>
+              </Button>
+            ) : (
+              <IconButton
+                label="Send prompt"
+                tone="primary"
+                size="md"
+                onClick={handleSubmit}
+                disabled={!prompt.trim() || isLoading}
+                className="w-8 h-8 shadow"
+              >
+                {isLoading ? (
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <ArrowUp className="w-4 h-4" />
+                )}
+              </IconButton>
+            )}
           </div>
         </div>
       </div>
@@ -947,31 +1187,35 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
             role="dialog"
             aria-modal="true"
             aria-label="Enter workspace path"
-            className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 max-w-md w-full shadow-2xl"
+            className="bg-codify-surface border border-codify-border rounded-xl p-5 max-w-md w-full shadow-2xl"
           >
             <h3 className="text-sm font-bold text-gray-100 mb-3 flex items-center gap-2">
               <Folder className="w-4 h-4 text-blue-400" /> Enter Workspace Path
             </h3>
             <form onSubmit={handleCreateManualWs} className="space-y-3">
               <div>
-                <label className="text-xs text-gray-400 block mb-1">Project Name</label>
+                <label className="text-xs text-gray-400 block mb-1">
+                  Project Name
+                </label>
                 <input
                   type="text"
                   placeholder="e.g. My Next.js App"
                   value={wsName}
                   onChange={(e) => setWsName(e.target.value)}
-                  className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+                  className="w-full bg-codify-bg border border-codify-border rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500"
                   required
                 />
               </div>
               <div>
-                <label className="text-xs text-gray-400 block mb-1">Absolute Directory Path</label>
+                <label className="text-xs text-gray-400 block mb-1">
+                  Absolute Directory Path
+                </label>
                 <input
                   type="text"
                   placeholder="/home/you/Projects/my-app"
                   value={wsPath}
                   onChange={(e) => setWsPath(e.target.value)}
-                  className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
+                  className="w-full bg-codify-bg border border-codify-border rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
                   required
                 />
               </div>
@@ -980,7 +1224,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsManualWsModal(false)}
-                  className="px-3 py-1 bg-[#21262d] text-gray-300 text-xs rounded-lg hover:bg-[#30363d]"
+                  className="px-3 py-1 bg-codify-raised text-gray-300 text-xs rounded-lg hover:bg-codify-border"
                 >
                   Cancel
                 </button>
@@ -1005,37 +1249,40 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
             role="dialog"
             aria-modal="true"
             aria-label="Brand contract file"
-            className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 max-w-md w-full shadow-2xl"
+            className="bg-codify-surface border border-codify-border rounded-xl p-5 max-w-md w-full shadow-2xl"
           >
             <h3 className="text-sm font-bold text-gray-100 mb-1 flex items-center gap-2">
               <Palette className="w-4 h-4 text-pink-400" /> Brand Contract
             </h3>
-            <p className="text-[11px] text-gray-500 mb-3 leading-relaxed">
-              The design agent reads this before it decides a direction, and treats it as
-              binding. Leave it unpinned to let a{" "}
-              <span className="font-mono">DESIGN.md</span> at the workspace root be found on
-              its own.
+            <p className="text-xs text-gray-500 mb-3 leading-relaxed">
+              The design agent reads this before it decides a direction, and
+              treats it as binding. Leave it unpinned to let a{" "}
+              <span className="font-mono">DESIGN.md</span> at the workspace root
+              be found on its own.
             </p>
             <form onSubmit={handleSaveContract} className="space-y-3">
               <div>
                 <label className="text-xs text-gray-400 block mb-1">
-                  Path relative to <span className="font-mono">{contractWs.root_path}</span>
+                  Path relative to{" "}
+                  <span className="font-mono">{contractWs.root_path}</span>
                 </label>
                 <input
                   type="text"
                   placeholder="docs/DESIGN.md"
                   value={contractDraft}
                   onChange={(e) => setContractDraft(e.target.value)}
-                  className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
+                  className="w-full bg-codify-bg border border-codify-border rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
                   aria-label="Brand contract path"
                 />
               </div>
-              {contractError && <p className="text-xs text-red-400">{contractError}</p>}
+              {contractError && (
+                <p className="text-xs text-red-400">{contractError}</p>
+              )}
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"
                   onClick={() => setContractWs(null)}
-                  className="px-3 py-1 bg-[#21262d] text-gray-300 text-xs rounded-lg hover:bg-[#30363d]"
+                  className="px-3 py-1 bg-codify-raised text-gray-300 text-xs rounded-lg hover:bg-codify-border"
                 >
                   Cancel
                 </button>
@@ -1043,7 +1290,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   type="button"
                   onClick={handleUnpinContract}
                   disabled={contractSaving || !contractWs.design_contract_path}
-                  className="px-3 py-1 bg-[#21262d] text-gray-300 text-xs rounded-lg hover:bg-[#30363d] disabled:opacity-40"
+                  className="px-3 py-1 bg-codify-raised text-gray-300 text-xs rounded-lg hover:bg-codify-border disabled:opacity-40"
                 >
                   Unpin
                 </button>

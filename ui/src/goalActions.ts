@@ -32,11 +32,40 @@ export const RACE_CODES = ["version_conflict", "illegal_status"] as const;
 export type GoalActionKind = "start" | "pause" | "cancel";
 
 /** The statuses each action is meaningful from — anything else is moot. */
-const MEANINGFUL_FROM: Record<GoalActionKind, string[]> = {
+export const MEANINGFUL_FROM: Record<GoalActionKind, string[]> = {
   start: ["PENDING", "PAUSED"],
   pause: ["RUNNING"],
   cancel: ["PLANNING", "PENDING", "RUNNING", "PAUSED"],
 };
+
+/**
+ * Whether a goal in `status` can still be stopped.
+ *
+ * One question with two honest answers that used to be conflated. "Is the engine
+ * working on this?" is `ACTIVE_STATUSES` — planning or running, the states that
+ * report progress. "Can the user stop it?" is the cancel set above, and it is
+ * strictly wider: a `PAUSED` goal is not being worked on but can still be ended, and
+ * a `PLANNING` goal is the *best* moment to stop it, because no fixer has written a
+ * file yet.
+ *
+ * The command bar's Stop asks the second question, so it lives here beside the list
+ * it has to agree with. A second, hand-kept copy of these statuses is how the goal
+ * card ended up hiding Cancel during `PLANNING` — the engine permitted it, this
+ * policy permitted it, and the button that should have offered it was not rendered.
+ */
+export function canStopGoal(status: string | null | undefined): boolean {
+  return !!status && MEANINGFUL_FROM.cancel.includes(status);
+}
+
+/**
+ * Whether the engine is still doing work on this goal, so a card should show it as
+ * in flight rather than settled.
+ */
+export const ACTIVE_STATUSES: readonly string[] = ["PLANNING", "RUNNING"];
+
+export function isGoalActive(status: string | null | undefined): boolean {
+  return !!status && ACTIVE_STATUSES.includes(status);
+}
 
 /** What one action run saw. `refused` carries the engine's own words. */
 export type GoalActionOutcome<GoalT> =

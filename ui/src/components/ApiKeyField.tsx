@@ -40,7 +40,7 @@ export const ApiKeyField: React.FC<ApiKeyFieldProps> = ({
           }
           value={val}
           onChange={handleChange}
-          className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500 font-mono pr-10"
+          className="w-full bg-codify-bg border border-codify-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500 font-mono pr-10"
         />
         <button
           type="button"

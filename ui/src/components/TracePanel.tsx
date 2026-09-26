@@ -64,9 +64,9 @@ export const TracePanel: React.FC<{
   };
 
   return (
-    <div className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3 mt-2">
+    <div className="bg-codify-bg border border-codify-border rounded-xl p-3 mt-2">
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+        <div className="flex items-center gap-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
           <Radio className="w-3.5 h-3.5 text-amber-400" />
           {summary ? traceHeadline(summary) : "Recording"}
         </div>
@@ -124,7 +124,7 @@ export const TracePanel: React.FC<{
             {traceRoles(summary).map(([role, n]) => (
               <span
                 key={role}
-                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#161b22] border border-[#30363d] text-gray-300"
+                className="text-2xs font-mono px-1.5 py-0.5 rounded bg-codify-surface border border-codify-border text-gray-300"
                 title={`${n} call${n === 1 ? "" : "s"} from the ${role}`}
               >
                 {role} × {n}
@@ -132,12 +132,12 @@ export const TracePanel: React.FC<{
             ))}
           </div>
 
-          <p className="mt-2 text-[11px] text-gray-500">
+          <p className="mt-2 text-xs text-gray-500">
             {promptStorageNote(summary.prompts_kept)}
           </p>
 
           <div className="mt-2 max-h-48 overflow-y-auto">
-            <table className="w-full text-[11px] font-mono">
+            <table className="w-full text-xs font-mono">
               <thead className="text-gray-500 text-left">
                 <tr>
                   <th className="pr-2 py-0.5 font-normal">#</th>
@@ -150,7 +150,7 @@ export const TracePanel: React.FC<{
               </thead>
               <tbody className="text-gray-300">
                 {summary.recorded.map((call) => (
-                  <tr key={call.seq} className="border-t border-[#161b22]">
+                  <tr key={call.seq} className="border-t border-codify-surface">
                     <td className="pr-2 py-0.5 text-gray-500">{call.seq}</td>
                     <td className="pr-2 py-0.5">{call.role}</td>
                     <td className="pr-2 py-0.5 text-gray-500">{call.model}</td>

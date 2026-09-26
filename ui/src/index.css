@@ -2,11 +2,30 @@
 @tailwind components;
 @tailwind utilities;
 
+/* The palette, once, for the handful of places CSS rather than a utility needs a
+   colour: the body, the scrollbars, the audit-flash keyframes below. Tailwind reads
+   the same values from `tailwind.config.js`, and `DESIGN.md` at the repository root
+   is what both quote — so this block is a *fourth* copy of five hexes, and it is
+   written as a reference to the contract rather than as a place to invent one.
+
+   Before it, the same five values were retyped in `body`, in both scrollbar rules,
+   and in 242 utility classes. */
+:root {
+  --codify-bg: #0d1117;
+  --codify-surface: #161b22;
+  --codify-raised: #21262d;
+  --codify-border: #30363d;
+  --codify-border-strong: #484f58;
+  --codify-primary: #e6edf3;
+  --codify-secondary: #c9d1d9;
+  --codify-muted: #8b949e;
+}
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  background-color: #0d1117;
-  color: #c9d1d9;
+  background-color: var(--codify-bg);
+  color: var(--codify-secondary);
 }
 
 ::-webkit-scrollbar {
@@ -15,23 +34,23 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #0d1117;
+  background: var(--codify-bg);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #30363d;
+  background: var(--codify-border);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #484f58;
+  background: var(--codify-border-strong);
 }
 
 /* Firefox doesn't support the -webkit-* pseudo-elements; these standard
    properties give it the same thin, dark scrollbar. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #30363d #0d1117;
+  scrollbar-color: var(--codify-border) var(--codify-bg);
 }
 
 /* Clicking an audit badge on a goal card scrolls to the matching transcript

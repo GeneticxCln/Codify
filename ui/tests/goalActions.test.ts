@@ -9,6 +9,10 @@ import assert from "node:assert/strict";
 
 import {
   RACE_CODES,
+  MEANINGFUL_FROM,
+  canStopGoal,
+  isGoalActive,
+  ACTIVE_STATUSES,
   runGoalAction,
   type GoalActionArgs,
 } from "../src/goalActions.ts";
@@ -171,4 +175,81 @@ test("defaults: three attempts, 150 ms apart", async () => {
   );
   assert.equal(outcome.kind, "refused");
   assert.deepEqual(clock, [150, 150]);
+});
+
+// ── Can this goal be stopped? ──────────────────────────────────────────────────
+//
+// The command bar's Stop and the goal card's Cancel both ask this question, and
+// they used to answer it differently: the engine permits cancel from PLANNING, and
+// `MEANINGFUL_FROM.cancel` says so, but the card's button was rendered from a
+// hand-written list that had PLANNING missing. The state that went missing is the
+// one worth stopping most — nothing has been written yet. These tests exist so a
+// fourth copy of the list cannot appear quietly.
+
+const EVERY_STATUS = [
+  "PENDING",
+  "PLANNING",
+  "RUNNING",
+  "PAUSED",
+  "COMPLETED",
+  "FAILED",
+  "CANCELLED",
+];
+
+test("canStopGoal is true for exactly the statuses a cancel is meaningful from", () => {
+  for (const status of EVERY_STATUS) {
+    const expected = MEANINGFUL_FROM.cancel.includes(status);
+    assert.equal(
+      canStopGoal(status),
+      expected,
+      `${status}: the button and the policy it must agree with disagree`,
+    );
+  }
+});
+
+test("a planning goal can be stopped, which is when stopping costs least", () => {
+  // The regression this pins: PLANNING was absent from the card's button condition
+  // even though the engine and the policy both allow it.
+  assert.ok(
+    canStopGoal("PLANNING"),
+    "a planning goal must be stoppable — no fixer has written a file yet, so this " +
+      "is the cheapest possible moment for a user to change their mind",
+  );
+});
+
+test("a settled goal cannot be stopped", () => {
+  for (const status of ["COMPLETED", "FAILED", "CANCELLED"]) {
+    assert.equal(
+      canStopGoal(status),
+      false,
+      `${status} is settled; offering to stop it would be offering to do nothing`,
+    );
+  }
+});
+
+test("an absent status is not stoppable, and does not throw", () => {
+  // A goal id can be tracked before its first status arrives, so the bar asks this
+  // question about `undefined` on a real code path. A throw there would blank the
+  // command bar during dispatch.
+  for (const missing of [null, undefined, ""]) {
+    assert.equal(canStopGoal(missing), false);
+    assert.equal(isGoalActive(missing), false);
+  }
+});
+
+test("being stoppable and being worked on are different questions", () => {
+  // A paused goal is not being worked on, and can still be ended. Conflating the two
+  // is what would make the bar claim "esc to stop" over a goal nobody is running, so
+  // the two predicates are pinned apart.
+  assert.equal(isGoalActive("PAUSED"), false);
+  assert.equal(canStopGoal("PAUSED"), true);
+  assert.equal(isGoalActive("PENDING"), false);
+  assert.equal(canStopGoal("PENDING"), true);
+  for (const status of ACTIVE_STATUSES) {
+    assert.equal(isGoalActive(status), true, `${status} should read as in flight`);
+  }
+});
+
+test("only PLANNING and RUNNING count as in flight", () => {
+  assert.deepEqual([...ACTIVE_STATUSES], ["PLANNING", "RUNNING"]);
 });

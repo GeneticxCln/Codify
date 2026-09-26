@@ -15,7 +15,7 @@ export const ProtocolSelect: React.FC<ProtocolSelectProps> = ({ value, onChange 
       <select
         value={value}
         onChange={(e) => onChange(e.target.value as ProviderProtocol)}
-        className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
+        className="bg-codify-bg border border-codify-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
       >
         <option value="openai_compat">OpenAI Compatible (chat/completions)</option>
         <option value="anthropic">Anthropic (v1/messages)</option>

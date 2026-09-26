@@ -10,8 +10,8 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ path, diffText }) => {
   const lines = diffText.split("\n");
 
   return (
-    <div className="bg-[#0d1117] border border-[#30363d] rounded-lg overflow-hidden my-2 font-mono text-xs">
-      <div className="bg-[#161b22] px-3 py-2 border-b border-[#30363d] flex items-center gap-2 text-gray-300 font-medium">
+    <div className="bg-codify-bg border border-codify-border rounded-lg overflow-hidden my-2 font-mono text-xs">
+      <div className="bg-codify-surface px-3 py-2 border-b border-codify-border flex items-center gap-2 text-gray-300 font-medium">
         <FileCode className="w-4 h-4 text-blue-400" />
         <span>{path}</span>
       </div>

@@ -1,5 +1,12 @@
 import React, { useEffect, useState } from "react";
-import { UsageLane, StatsOverview, StatsHistoryDay, StageCost, RoleOutcome, FailureBreakdown } from "../types";
+import {
+  UsageLane,
+  StatsOverview,
+  StatsHistoryDay,
+  StageCost,
+  RoleOutcome,
+  FailureBreakdown,
+} from "../types";
 import {
   clearStatsImport,
   fetchFailureBreakdown,
@@ -27,7 +34,16 @@ import {
   topFailure,
   STAGE_LABELS,
 } from "../stageMetrics";
-import { CheckCircle2, Coins, XCircle, Ban, Zap, TrendingUp, FileDown, FileUp } from "lucide-react";
+import {
+  CheckCircle2,
+  Coins,
+  XCircle,
+  Ban,
+  Zap,
+  TrendingUp,
+  FileDown,
+  FileUp,
+} from "lucide-react";
 
 /**
  * Cross-goal statistics: what the whole history adds up to.
@@ -81,8 +97,8 @@ const StatCard: React.FC<{
   sub: string;
   tone?: string;
 }> = ({ icon, value, sub, tone = "text-gray-100" }) => (
-  <div className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3.5 flex flex-col gap-1 min-w-0">
-    <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+  <div className="bg-codify-bg border border-codify-border rounded-xl p-3.5 flex flex-col gap-1 min-w-0">
+    <div className="flex items-center gap-1.5 text-2xs font-semibold uppercase tracking-wider text-gray-500">
       {icon}
       {sub}
     </div>
@@ -91,28 +107,34 @@ const StatCard: React.FC<{
 );
 
 /** The per-role / per-model table: one row per lane, spend and calls. */
-const UsageTable: React.FC<{ title: string; lanes: Record<string, UsageLane> }> = ({
-  title,
-  lanes,
-}) => {
-  const entries = Object.entries(lanes).sort((a, b) => b[1].total_tokens - a[1].total_tokens);
+const UsageTable: React.FC<{
+  title: string;
+  lanes: Record<string, UsageLane>;
+}> = ({ title, lanes }) => {
+  const entries = Object.entries(lanes).sort(
+    (a, b) => b[1].total_tokens - a[1].total_tokens,
+  );
   if (entries.length === 0) return null;
   return (
-    <div className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3">
-      <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-2">
+    <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
+      <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
         {title}
       </div>
       <div className="flex flex-col gap-1.5">
         {entries.map(([name, lane]) => (
-          <div key={name} className="flex items-center gap-2 text-[11px]">
-            <span className="font-mono text-gray-300 truncate min-w-0 flex-1">{name}</span>
-            <div className="h-1.5 w-24 bg-[#161b22] rounded-full overflow-hidden flex-shrink-0">
+          <div key={name} className="flex items-center gap-2 text-xs">
+            <span className="font-mono text-gray-300 truncate min-w-0 flex-1">
+              {name}
+            </span>
+            <div className="h-1.5 w-24 bg-codify-surface rounded-full overflow-hidden flex-shrink-0">
               <div
                 className="h-full bg-blue-600 rounded-full"
                 style={{
                   width: `${Math.max(
                     2,
-                    (lane.total_tokens / Math.max(...entries.map(([, l]) => l.total_tokens))) * 100
+                    (lane.total_tokens /
+                      Math.max(...entries.map(([, l]) => l.total_tokens))) *
+                      100,
                   )}%`,
                 }}
               />
@@ -121,7 +143,8 @@ const UsageTable: React.FC<{ title: string; lanes: Record<string, UsageLane> }> 
               {fmtTokens(lane.total_tokens)}
             </span>
             <span className="text-gray-500 w-20 text-right flex-shrink-0">
-              {lane.calls} call{lane.calls === 1 ? "" : "s"} · {fmtDuration(lane.avg_duration_ms)}
+              {lane.calls} call{lane.calls === 1 ? "" : "s"} ·{" "}
+              {fmtDuration(lane.avg_duration_ms)}
             </span>
           </div>
         ))}
@@ -140,8 +163,8 @@ const SuccessRateChart: React.FC<{ days: MergedDay[] }> = ({ days }) => {
   if (days.length === 0) return null;
   const today = new Date().toISOString().slice(0, 10);
   return (
-    <div className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3">
-      <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-2">
+    <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
+      <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
         <TrendingUp className="w-3.5 h-3.5 text-blue-400" />
         Day by day
         {days.some((d) => d.source === "snapshot") && (
@@ -153,35 +176,46 @@ const SuccessRateChart: React.FC<{ days: MergedDay[] }> = ({ days }) => {
       <div className="flex flex-col gap-1">
         {days.map((d) => {
           const terminal = d.succeeded + d.failed + d.cancelled;
-          const rate = terminal > 0 ? Math.round((100 * d.succeeded) / terminal) : null;
+          const rate =
+            terminal > 0 ? Math.round((100 * d.succeeded) / terminal) : null;
           const isToday = d.date === today;
           return (
-            <div key={d.date} className="flex items-center gap-2 text-[11px]">
+            <div key={d.date} className="flex items-center gap-2 text-xs">
               <span className="font-mono text-gray-500 w-20 flex-shrink-0">
                 {isToday ? "today" : d.date.slice(5)}
               </span>
-              <div className="flex-1 h-2 bg-[#161b22] rounded-full overflow-hidden min-w-0">
+              <div className="flex-1 h-2 bg-codify-surface rounded-full overflow-hidden min-w-0">
                 <div
                   className={`h-full rounded-full ${
                     rate == null
                       ? "bg-gray-600/60"
                       : rate < 50
-                      ? "bg-amber-600/80"
-                      : "bg-green-600/70"
+                        ? "bg-amber-600/80"
+                        : "bg-green-600/70"
                   }`}
                   style={{ width: `${rate == null ? 2 : Math.max(4, rate)}%` }}
                 />
               </div>
               <span className="text-gray-400 w-56 text-right flex-shrink-0 truncate">
                 {isToday && <span className="text-blue-300 mr-1">●</span>}
-                {rate == null
-                  ? "no terminal goals"
-                  : `${rate}% ok`}
-                {" · "}{d.created} started
-                {d.failed > 0 && <span className="text-red-400/80"> · {d.failed} failed</span>}
-                {d.cancelled > 0 && <span className="text-amber-400/80"> · {d.cancelled} cancelled</span>}
+                {rate == null ? "no terminal goals" : `${rate}% ok`}
+                {" · "}
+                {d.created} started
+                {d.failed > 0 && (
+                  <span className="text-red-400/80"> · {d.failed} failed</span>
+                )}
+                {d.cancelled > 0 && (
+                  <span className="text-amber-400/80">
+                    {" "}
+                    · {d.cancelled} cancelled
+                  </span>
+                )}
                 {d.total_tokens > 0 && (
-                  <span className="text-gray-500"> · {fmtTokens(d.total_tokens)} tok · {d.calls} call{d.calls === 1 ? "" : "s"}</span>
+                  <span className="text-gray-500">
+                    {" "}
+                    · {fmtTokens(d.total_tokens)} tok · {d.calls} call
+                    {d.calls === 1 ? "" : "s"}
+                  </span>
                 )}
               </span>
             </div>
@@ -202,50 +236,64 @@ const SuccessRateChart: React.FC<{ days: MergedDay[] }> = ({ days }) => {
 const StageTable: React.FC<{ rows: StageCost[] }> = ({ rows }) => {
   if (!hasStageData(rows)) {
     return (
-      <div className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3">
-        <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-1">
+      <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
+        <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">
           By stage
         </div>
-        <p className="text-[11px] text-gray-500">
+        <p className="text-xs text-codify-muted">
           No stage has been measured in this window. A goal has to run first.
         </p>
       </div>
     );
   }
   return (
-    <div className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3">
-      <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-2">
+    <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
+      <div className="text-xs font-semibold uppercase tracking-wider text-codify-secondary mb-2">
         By stage
-        <span className="normal-case font-normal text-gray-500">
+        <span className="normal-case font-normal text-codify-muted">
           {" "}
           · wall clock per stage, not per model call
         </span>
       </div>
-      <div className="flex flex-col gap-1.5">
+      {/* Two lines per row, not one wide one.
+
+          This was a single flex line whose last child — "3 runs · avg 2.6s · p95
+          3.1s" — had no width and no `shrink`, so it set the row's minimum. Measured:
+          499px of content inside a 384px drawer, which meant the drawer scrolled
+          sideways and the p95 column was unreachable without scrolling to find it.
+
+          The fix is not a smaller font or a wider drawer. The detail line moves under
+          the row it describes, so every number stays readable and the row's width is
+          bounded by the four fixed columns instead of by a sentence. */}
+      <div className="flex flex-col gap-2.5">
         {rows.map((row) => (
-          <div key={row.stage} className="flex items-center gap-2 text-[11px]">
-            <span
-              className="text-gray-300 w-28 flex-shrink-0 truncate"
-              title={describeOutcomes(row.outcomes)}
-            >
-              {STAGE_LABELS[row.stage] ?? row.stage}
-            </span>
-            <div className="h-1.5 w-20 bg-[#161b22] rounded-full overflow-hidden flex-shrink-0">
-              <div
-                className="h-full bg-emerald-600 rounded-full"
-                style={{ width: shareWidth(row.token_share) }}
-              />
+          <div key={row.stage} className="flex flex-col gap-0.5">
+            <div className="flex items-center gap-2 text-xs">
+              <span
+                className="text-codify-primary w-28 flex-shrink-0 truncate"
+                title={describeOutcomes(row.outcomes)}
+              >
+                {STAGE_LABELS[row.stage] ?? row.stage}
+              </span>
+              <div className="h-1.5 w-20 bg-codify-surface rounded-full overflow-hidden flex-shrink-0">
+                <div
+                  className="h-full bg-emerald-600 rounded-full"
+                  style={{ width: shareWidth(row.token_share) }}
+                />
+              </div>
+              <span className="font-mono text-codify-muted w-14 text-right flex-shrink-0">
+                {row.token_share}%
+              </span>
+              <span className="font-mono text-codify-muted w-16 text-right flex-shrink-0">
+                {fmtTokens(row.tokens)}
+              </span>
             </div>
-            <span className="font-mono text-gray-400 w-14 text-right flex-shrink-0">
-              {row.token_share}%
-            </span>
-            <span className="font-mono text-gray-400 w-16 text-right flex-shrink-0">
-              {fmtTokens(row.tokens)}
-            </span>
-            <span className="text-gray-500 flex-shrink-0">
-              {row.runs} run{row.runs === 1 ? "" : "s"} · avg {fmtDuration(row.avg_duration_ms)}
-              {row.p95_duration_ms != null && ` · p95 ${fmtDuration(row.p95_duration_ms)}`}
-            </span>
+            <div className="text-2xs text-codify-muted pl-[7.5rem]">
+              {row.runs} run{row.runs === 1 ? "" : "s"} · avg{" "}
+              {fmtDuration(row.avg_duration_ms)}
+              {row.p95_duration_ms != null &&
+                ` · p95 ${fmtDuration(row.p95_duration_ms)}`}
+            </div>
           </div>
         ))}
       </div>
@@ -260,12 +308,14 @@ const StageTable: React.FC<{ rows: StageCost[] }> = ({ rows }) => {
  * question. The run summary under each rate is the evidence for it, and a role
  * that never ran says so instead of showing 0%.
  */
-const RoleOutcomeTable: React.FC<{ roles: Record<string, RoleOutcome> }> = ({ roles }) => {
+const RoleOutcomeTable: React.FC<{ roles: Record<string, RoleOutcome> }> = ({
+  roles,
+}) => {
   const entries = Object.values(roles ?? {});
   if (entries.length === 0) return null;
   return (
-    <div className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3">
-      <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-1">
+    <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
+      <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">
         Per role
         <span className="normal-case font-normal text-gray-500">
           {" "}
@@ -276,15 +326,20 @@ const RoleOutcomeTable: React.FC<{ roles: Record<string, RoleOutcome> }> = ({ ro
         {entries.map((role) => (
           <div key={role.role} className="flex flex-col gap-0.5 min-w-0">
             <div className="flex items-baseline gap-1.5">
-              <span className="text-[11px] text-gray-300 truncate">{role.role}</span>
-              <span className={`text-[11px] font-mono ${roleRateTone(role)}`}>
+              <span className="text-xs text-gray-300 truncate">
+                {role.role}
+              </span>
+              <span className={`text-xs font-mono ${roleRateTone(role)}`}>
                 {roleRateLabel(role)}
               </span>
-              <span className="text-[10px] text-gray-600 font-mono ml-auto">
+              <span className="text-2xs text-gray-600 font-mono ml-auto">
                 {fmtTokens(role.tokens)}
               </span>
             </div>
-            <span className="text-[10px] text-gray-600 truncate" title={roleRunSummary(role)}>
+            <span
+              className="text-2xs text-gray-600 truncate"
+              title={roleRunSummary(role)}
+            >
               {roleRunSummary(role)}
             </span>
           </div>
@@ -300,37 +355,45 @@ const RoleOutcomeTable: React.FC<{ roles: Record<string, RoleOutcome> }> = ({ ro
  * no evidence about whether failures are handled, and rendering "0 failures"
  * would claim otherwise.
  */
-const FailureView: React.FC<{ breakdown: FailureBreakdown | null }> = ({ breakdown }) => {
+const FailureView: React.FC<{ breakdown: FailureBreakdown | null }> = ({
+  breakdown,
+}) => {
   if (!breakdown) return null;
   const empty = failureEmptyMessage(breakdown.total, breakdown.retries);
   return (
-    <div className="bg-[#0d1117] border border-[#30363d] rounded-xl p-3">
-      <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-2">
+    <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
+      <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
         Failures
         {topFailure(breakdown) && (
-          <span className="normal-case font-normal text-gray-400"> · {topFailure(breakdown)}</span>
+          <span className="normal-case font-normal text-gray-400">
+            {" "}
+            · {topFailure(breakdown)}
+          </span>
         )}
       </div>
       {empty ? (
-        <p className="text-[11px] text-gray-500">{empty}</p>
+        <p className="text-xs text-gray-500">{empty}</p>
       ) : (
         <div className="flex flex-col gap-1.5">
           {breakdown.causes.slice(0, 6).map((cause) => (
-            <div key={cause.code} className="flex items-center gap-2 text-[11px]">
+            <div key={cause.code} className="flex items-center gap-2 text-xs">
               <span className="font-mono text-red-300 w-44 flex-shrink-0 truncate">
                 {cause.code}
               </span>
               <span className="font-mono text-gray-400 w-8 text-right flex-shrink-0">
                 {cause.count}
               </span>
-              <span className="text-gray-500 truncate min-w-0" title={cause.message}>
+              <span
+                className="text-gray-500 truncate min-w-0"
+                title={cause.message}
+              >
                 {cause.message}
               </span>
             </div>
           ))}
         </div>
       )}
-      <p className="text-[10px] text-gray-600 mt-2">{recoveryLabel(breakdown)}</p>
+      <p className="text-2xs text-gray-600 mt-2">{recoveryLabel(breakdown)}</p>
     </div>
   );
 };
@@ -420,7 +483,10 @@ export const StatsPanel: React.FC = () => {
   // One continuous series: frozen history under the live tail. Computed once
   // per render of both feeds; the merge rule (snapshot wins a shared day)
   // lives with the data, in mergeDays.
-  const mergedDays = mergeDays([...importedHistory, ...history], stats?.daily ?? []);
+  const mergedDays = mergeDays(
+    [...importedHistory, ...history],
+    stats?.daily ?? [],
+  );
   const importSummary = summarizeStatsHistoryImport(importedHistory, history);
   const matchedLocalDays = importSummary.matchedLocal;
   const addedHistoryDays = importSummary.added;
@@ -509,17 +575,17 @@ export const StatsPanel: React.FC = () => {
             key={w.days}
             type="button"
             onClick={() => setWindowDays(w.days)}
-            className={`px-2.5 py-1 text-[11px] font-semibold rounded-lg border transition-colors cursor-pointer ${
+            className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
               windowDays === w.days
                 ? "bg-blue-950/40 text-blue-300 border-blue-800"
-                : "bg-[#0d1117] text-gray-400 border-[#30363d] hover:text-gray-200"
+                : "bg-codify-bg text-gray-400 border-codify-border hover:text-gray-200"
             }`}
           >
             {w.label}
           </button>
         ))}
         {stats && (
-          <span className="ml-auto text-[10px] text-gray-500">
+          <span className="ml-auto text-2xs text-gray-500">
             {stats.goals.goals} goal{stats.goals.goals === 1 ? "" : "s"} in view
           </span>
         )}
@@ -539,8 +605,8 @@ export const StatsPanel: React.FC = () => {
         <button
           type="button"
           onClick={importHistory}
-        disabled={importBusy}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[#30363d] bg-[#0d1117] text-[11px] text-gray-400 hover:text-blue-400 hover:border-blue-500/40 transition-colors"
+          disabled={importBusy}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-codify-border bg-codify-bg text-xs text-gray-400 hover:text-blue-400 hover:border-blue-500/40 transition-colors"
           title="Open a Codify stats-history JSON export and add its frozen days to this view"
         >
           <FileUp className="w-3.5 h-3.5" />
@@ -550,7 +616,7 @@ export const StatsPanel: React.FC = () => {
           <button
             type="button"
             onClick={clearImportedHistory}
-            className="px-2.5 py-1.5 rounded-lg border border-[#30363d] bg-[#0d1117] text-[11px] text-gray-400 hover:text-red-300 hover:border-red-500/40 transition-colors"
+            className="px-2.5 py-1.5 rounded-lg border border-codify-border bg-codify-bg text-xs text-gray-400 hover:text-red-300 hover:border-red-500/40 transition-colors"
             title="Remove the stored imported history from the engine and this view"
           >
             Clear imported
@@ -559,8 +625,10 @@ export const StatsPanel: React.FC = () => {
         <button
           type="button"
           onClick={exportHistory}
-          disabled={(history.length === 0 && importedHistory.length === 0) || exporting}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[#30363d] bg-[#0d1117] text-[11px] text-gray-400 hover:text-blue-400 hover:border-blue-500/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          disabled={
+            (history.length === 0 && importedHistory.length === 0) || exporting
+          }
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-codify-border bg-codify-bg text-xs text-gray-400 hover:text-blue-400 hover:border-blue-500/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           title="Export every frozen statistics day as one JSON file"
         >
           <FileDown className="w-3.5 h-3.5" />
@@ -568,10 +636,12 @@ export const StatsPanel: React.FC = () => {
         </button>
       </div>
       {importedFileName && (
-        <p className="text-[10px] text-blue-300/80 text-right leading-relaxed">
-          Imported {importedHistory.length} frozen day{importedHistory.length === 1 ? "" : "s"} from{" "}
-          {importedFileName} and stored it in the engine, so it survives a restart. Merge: {addedHistoryDays} added
-          to the loaded history, {matchedLocalDays} matching local snapshot{matchedLocalDays === 1 ? "" : "s"}
+        <p className="text-2xs text-blue-300/80 text-right leading-relaxed">
+          Imported {importedHistory.length} frozen day
+          {importedHistory.length === 1 ? "" : "s"} from {importedFileName} and
+          stored it in the engine, so it survives a restart. Merge:{" "}
+          {addedHistoryDays} added to the loaded history, {matchedLocalDays}{" "}
+          matching local snapshot{matchedLocalDays === 1 ? "" : "s"}
           {matchedLocalDays > 0 ? " (local wins)" : ""}.
         </p>
       )}
@@ -589,7 +659,11 @@ export const StatsPanel: React.FC = () => {
             <StatCard
               icon={<CheckCircle2 className="w-3 h-3 text-green-400" />}
               sub="Success rate"
-              value={stats.goals.success_rate == null ? "—" : `${stats.goals.success_rate}%`}
+              value={
+                stats.goals.success_rate == null
+                  ? "—"
+                  : `${stats.goals.success_rate}%`
+              }
               tone="text-green-400"
             />
             <StatCard
@@ -612,31 +686,39 @@ export const StatsPanel: React.FC = () => {
             />
           </div>
 
-          <p className="text-[11px] text-gray-500 leading-relaxed px-0.5">
+          <p className="text-xs text-gray-500 leading-relaxed px-0.5">
             {stats.goals.goals === 0
               ? "No goals in this window yet."
               : `${stats.goals.active} still active · ${stats.usage.calls} model call${
                   stats.usage.calls === 1 ? "" : "s"
                 }${stats.usage.failures > 0 ? ` · ${stats.usage.failures} failed` : ""} · avg ${fmtDuration(
-                  stats.usage.avg_duration_ms
+                  stats.usage.avg_duration_ms,
                 )}`}
             {". "}
-            <span className="text-gray-600">Success counts completed goals only — cancelled and failed are kept apart.</span>
+            <span className="text-gray-600">
+              Success counts completed goals only — cancelled and failed are
+              kept apart.
+            </span>
           </p>
 
           {/* Where the tokens went */}
           <UsageTable title="By role" lanes={stats.usage.by_role} />
           <UsageTable title="By model" lanes={stats.usage.by_model} />
           {stats.by_stage && <StageTable rows={stats.by_stage} />}
-          {stats.by_role_outcome && <RoleOutcomeTable roles={stats.by_role_outcome} />}
+          {stats.by_role_outcome && (
+            <RoleOutcomeTable roles={stats.by_role_outcome} />
+          )}
           <FailureView breakdown={failures} />
 
-          {stats.usage.calls === 0 && stats.usage.failures === 0 && stats.goals.goals > 0 && (
-            <p className="text-[11px] text-gray-500 px-0.5 flex items-center gap-1.5">
-              <Zap className="w-3 h-3" />
-              No model calls recorded in this window (plan-only, or an engine run before usage was logged).
-            </p>
-          )}
+          {stats.usage.calls === 0 &&
+            stats.usage.failures === 0 &&
+            stats.goals.goals > 0 && (
+              <p className="text-xs text-gray-500 px-0.5 flex items-center gap-1.5">
+                <Zap className="w-3 h-3" />
+                No model calls recorded in this window (plan-only, or an engine
+                run before usage was logged).
+              </p>
+            )}
         </>
       )}
     </div>

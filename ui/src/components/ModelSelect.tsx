@@ -160,23 +160,23 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
         width: placement.width,
         maxHeight: placement.maxHeight,
       }}
-      className="z-[60] bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl p-1.5 overflow-y-auto"
+      className="z-[60] bg-codify-surface border border-codify-border rounded-xl shadow-2xl p-1.5 overflow-y-auto"
     >
       {options.length === 0 ? (
-        <div className="px-2 py-2 text-[11px] text-gray-400 leading-relaxed">
+        <div className="px-2 py-2 text-xs text-gray-400 leading-relaxed">
           {discovery && !discovery.ok
             ? `Nothing to pick from: ${discovery.error}`
             : "This provider reports no models. Type the id and press Enter if you know it."}
         </div>
       ) : matches.length === 0 ? (
-        <div className="px-2 py-2 text-[11px] text-gray-400 leading-relaxed">
+        <div className="px-2 py-2 text-xs text-gray-400 leading-relaxed">
           Nothing matches “{value.trim()}”. Every discovered model is listed — clear the field to
           see them, or press Enter to use this id as written.
         </div>
       ) : (
         <>
           <div className="flex items-center justify-between px-2 py-1">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+            <span className="text-2xs font-semibold uppercase tracking-wider text-gray-500">
               {matches.length === options.length
                 ? `${options.length} discovered`
                 : `${matches.length} of ${options.length}`}
@@ -187,7 +187,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 onClick={onRefresh}
                 disabled={refreshing}
                 title="Ask this provider what it serves right now"
-                className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-200 disabled:opacity-50 cursor-pointer"
+                className="flex items-center gap-1 text-2xs text-gray-400 hover:text-gray-200 disabled:opacity-50 cursor-pointer"
               >
                 <RefreshCw className={refreshing ? "w-2.5 h-2.5 animate-spin" : "w-2.5 h-2.5"} />
                 Refresh
@@ -211,27 +211,27 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                   "w-full text-left px-2 py-1 rounded-lg flex items-center gap-2 text-xs transition-colors cursor-pointer " +
                   (m.id === value
                     ? "bg-blue-600/20 text-blue-200 font-medium"
-                    : "text-gray-300 hover:bg-[#21262d]")
+                    : "text-gray-300 hover:bg-codify-raised")
                 }
               >
                 <span className="font-mono truncate flex-1 min-w-0">{m.id}</span>
                 {badges.roles && (
                   <span
-                    className="text-[10px] text-teal-300/90 flex-shrink-0 max-w-[9rem] truncate"
+                    className="text-2xs text-teal-300/90 flex-shrink-0 max-w-[9rem] truncate"
                     title={badges.rolesTitle}
                   >
                     {badges.roles}
                   </span>
                 )}
                 {badges.lastRun && (
-                  <span className="text-[10px] text-blue-300/90 flex-shrink-0">last run</span>
+                  <span className="text-2xs text-blue-300/90 flex-shrink-0">last run</span>
                 )}
                 {badges.notChat ? (
-                  <span className="text-[10px] text-amber-400/80 flex-shrink-0">not a chat model</span>
+                  <span className="text-2xs text-amber-400/80 flex-shrink-0">not a chat model</span>
                 ) : (
                   !badges.roles &&
                   m.description && (
-                    <span className="text-[10px] text-gray-500 truncate max-w-[110px] flex-shrink-0">
+                    <span className="text-2xs text-gray-500 truncate max-w-[110px] flex-shrink-0">
                       {m.description}
                     </span>
                   )
@@ -273,7 +273,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 close();
               }
             }}
-            className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
+            className="flex-1 bg-codify-bg border border-codify-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
           />
           <button
             type="button"
@@ -291,7 +291,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 ? "This provider reported no models"
                 : `Browse ${options.length} discovered models`
             }
-            className="flex items-center gap-1 px-2 py-2 bg-[#21262d] border border-[#30363d] rounded text-gray-300 hover:bg-[#30363d] transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
+            className="flex items-center gap-1 px-2 py-2 bg-codify-raised border border-codify-border rounded text-gray-300 hover:bg-codify-border transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
           >
             <ChevronDown className={open ? "w-3.5 h-3.5 rotate-180" : "w-3.5 h-3.5"} />
           </button>
@@ -299,7 +299,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
         {menu}
       </div>
       <span
-        className={`text-[10px] ${discovery && !discovery.ok ? "text-amber-400/90" : "text-gray-500"}`}
+        className={`text-2xs ${discovery && !discovery.ok ? "text-amber-400/90" : "text-gray-500"}`}
       >
         {note}
       </span>

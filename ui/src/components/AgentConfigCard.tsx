@@ -159,9 +159,9 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
 
   if (!draft && !config) {
     return (
-      <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-6 animate-pulse">
-        <div className="h-6 w-32 bg-[#30363d] rounded mb-4" />
-        <div className="h-24 bg-[#21262d] rounded" />
+      <div className="bg-codify-surface border border-codify-border rounded-lg p-6 animate-pulse">
+        <div className="h-6 w-32 bg-codify-border rounded mb-4" />
+        <div className="h-24 bg-codify-raised rounded" />
       </div>
     );
   }
@@ -222,20 +222,20 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
 
   return (
     <div
-      className={`bg-[#161b22] border rounded-lg p-5 flex flex-col gap-4 shadow-sm transition-colors ${
-        stale ? "border-amber-700/70" : "border-[#30363d] hover:border-[#484f58]"
+      className={`bg-codify-surface border rounded-lg p-5 flex flex-col gap-4 shadow-sm transition-colors ${
+        stale ? "border-amber-700/70" : "border-codify-border hover:border-codify-border-strong"
       }`}
     >
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-[#30363d] pb-3">
+      <div className="flex items-center justify-between border-b border-codify-border pb-3">
         <div className="flex items-center gap-3">
-          <div className="p-2 bg-[#21262d] rounded border border-[#30363d]">
+          <div className="p-2 bg-codify-raised rounded border border-codify-border">
             {ROLE_ICONS[role]}
           </div>
           <div>
             <h3 className="font-semibold text-base text-gray-100 flex items-center gap-2">
               {active.display_name}
-              <span className="text-xs px-2 py-0.5 bg-[#21262d] text-gray-400 rounded-full font-mono font-normal">
+              <span className="text-xs px-2 py-0.5 bg-codify-raised text-gray-400 rounded-full font-mono font-normal">
                 {role}
               </span>
             </h3>
@@ -251,7 +251,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               )}
             </p>
             {info && (
-              <p className="text-[11px] text-gray-500 mt-0.5 max-w-2xl leading-relaxed">
+              <p className="text-xs text-gray-500 mt-0.5 max-w-2xl leading-relaxed">
                 <span className="text-gray-400">{info.job}</span>{" "}
                 <span className="whitespace-nowrap text-gray-500">
                   · runs {info.timing}
@@ -260,7 +260,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               </p>
             )}
             {callStat && (callStat.last_call || callStat.last_error || (callStat.runs ?? 0) > 0) && (
-              <p className="text-[11px] text-gray-500 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+              <p className="text-xs text-gray-500 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
                 {(callStat.runs ?? 0) > 0 && (
                   <span
                     className="whitespace-nowrap text-gray-500"
@@ -334,7 +334,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
           comes back 404 for a model the provider retired or renamed. Verdict
           computed by SettingsPanel, so it matches the panel's summary. */}
       {stale && (
-        <div className="flex items-start gap-2 text-[11px] text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg px-3 py-2">
+        <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg px-3 py-2">
           <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             {stale.reportedCount > 0 ? (
@@ -361,7 +361,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
           repair refreshed the store). The draft keeps the user's edits — this
           names that fact and offers the server values in one click. */}
       {externallyUpdated && dirty && (
-        <div className="flex items-start gap-2 text-[11px] text-blue-300 bg-blue-950/30 border border-blue-800/60 rounded-lg px-3 py-2">
+        <div className="flex items-start gap-2 text-xs text-blue-300 bg-blue-950/30 border border-blue-800/60 rounded-lg px-3 py-2">
           <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed flex-1">
             The saved config changed underneath your unsaved edits (a repair or another save).
@@ -377,7 +377,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               setDirty(false);
               setExternallyUpdated(false);
             }}
-            className="flex-shrink-0 text-[11px] px-2 py-0.5 rounded border border-blue-700/60 hover:bg-blue-900/40 transition-colors"
+            className="flex-shrink-0 text-xs px-2 py-0.5 rounded border border-blue-700/60 hover:bg-blue-900/40 transition-colors"
           >
             Load server values
           </button>
@@ -445,7 +445,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
 
           It is collapsed until it is used, and the engine's own rule decides what
           counts as one — both a provider and a model, or it is not a fallback. */}
-      <div className="border border-[#30363d] rounded-lg p-3.5 flex flex-col gap-3 bg-[#0d1117]">
+      <div className="border border-codify-border rounded-lg p-3.5 flex flex-col gap-3 bg-codify-bg">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
             <Route className="w-3.5 h-3.5 text-teal-400" />
@@ -479,7 +479,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
                 setFallbackOpen(true);
               }
             }}
-            className="text-[11px] px-2 py-1 rounded border border-[#30363d] text-gray-300 hover:text-gray-100 hover:border-[#484f58] transition-colors"
+            className="text-xs px-2 py-1 rounded border border-codify-border text-gray-300 hover:text-gray-100 hover:border-codify-border-strong transition-colors"
           >
             {showFallback ? "Remove" : "Add a fallback"}
           </button>
@@ -487,7 +487,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
 
         {showFallback ? (
           <>
-            <p className="text-[11px] text-gray-500 leading-relaxed">
+            <p className="text-xs text-gray-500 leading-relaxed">
               Used when the primary target cannot be called at all: no credential stored, the
               endpoint unreachable, the model no longer served, or a reply the contract cannot
               parse. Tried once per call — never a retry loop. The role's temperature and max
@@ -529,7 +529,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               )}
             </div>
             {staleFallback && (
-              <div className="flex items-start gap-2 text-[11px] text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg px-3 py-2">
+              <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg px-3 py-2">
                 <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                 <span className="leading-relaxed">
                   {staleFallback.reportedCount > 0 ? (
@@ -553,14 +553,14 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               </div>
             )}
             {!hasFallback && (
-              <span className="text-[11px] text-amber-300/90">
+              <span className="text-xs text-amber-300/90">
                 Not in force yet: a fallback needs a model as well as a provider, and half of one
                 fails exactly when it is needed.
               </span>
             )}
           </>
         ) : (
-          <p className="text-[11px] text-gray-500 leading-relaxed">
+          <p className="text-xs text-gray-500 leading-relaxed">
             Without one, a failure on the primary target ends the goal. Adding a fallback lets a
             goal keep running when a key is missing or a provider is down.
           </p>
@@ -605,7 +605,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             step={256}
             value={active.max_tokens}
             onChange={(e) => updateDraft({ max_tokens: parseInt(e.target.value, 10) || 4096 })}
-            className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-gray-200 font-mono"
+            className="bg-codify-bg border border-codify-border rounded px-3 py-1.5 text-sm text-gray-200 font-mono"
           />
         </div>
       </div>
@@ -618,7 +618,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
       />
 
       {/* Footer Test Connection */}
-      <div className="pt-2 border-t border-[#21262d]">
+      <div className="pt-2 border-t border-codify-raised">
         <TestConnectionButton
           onTest={() => {
             // A connection test with no model chosen cannot succeed, and the raw

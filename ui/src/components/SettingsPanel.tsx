@@ -67,7 +67,7 @@ const LayaGateStatus: React.FC = () => {
 
   if (!status) {
     return (
-      <div className="flex items-start gap-2 text-xs text-gray-400 bg-[#161b22] border border-[#30363d] rounded-lg p-3">
+      <div className="flex items-start gap-2 text-xs text-gray-400 bg-codify-surface border border-codify-border rounded-lg p-3">
         <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
         <span>Gate status unavailable — the engine did not answer /settings/laya.</span>
       </div>
@@ -82,13 +82,13 @@ const LayaGateStatus: React.FC = () => {
     : "text-gray-300";
 
   return (
-    <div className="flex flex-col gap-1.5 bg-[#161b22] border border-[#30363d] rounded-lg p-3">
+    <div className="flex flex-col gap-1.5 bg-codify-surface border border-codify-border rounded-lg p-3">
       <div className={`flex items-center gap-2 text-xs font-semibold ${tone}`}>
         <Zap className="w-4 h-4" />
         Pre-flight gate:{" "}
         {sdk ? "Laya SDK (in-process, no tokens)" : "fallback model below, or skipped if it is unreachable"}
       </div>
-      <p className="text-[11px] text-gray-400 flex items-start gap-1.5">
+      <p className="text-xs text-gray-400 flex items-start gap-1.5">
         <Cpu className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
         <span>
           Runs before the planner: typed intent / risk / prompt-injection decisions. Injection at or
@@ -98,12 +98,12 @@ const LayaGateStatus: React.FC = () => {
         </span>
       </p>
       {status.sdk_disabled && (
-        <p className="text-[11px] text-amber-400">
+        <p className="text-xs text-amber-400">
           SDK disabled by CODIFY_LAYA_SDK=0 — the gate will use this role's provider below.
         </p>
       )}
       {!status.sdk_installed && !status.sdk_disabled && (
-        <p className="text-[11px] text-gray-500">
+        <p className="text-xs text-gray-500">
           Install the SDK (`pip install laya` + weights) to run the gate in-process;{" "}
           {status.sdk_error ? `last error: ${status.sdk_error}` : "no local weights installed yet."}
         </p>
@@ -435,7 +435,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       }
     >
       {!embedded && (
-        <div className="flex flex-col gap-1 border-b border-[#30363d] pb-4">
+        <div className="flex flex-col gap-1 border-b border-codify-border pb-4">
           <h2 className="text-xl font-bold text-gray-100 flex items-center gap-2">
             <Sliders className="w-5 h-5 text-blue-400" />
             Sub-Agent Configuration
@@ -459,7 +459,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       )}
 
       {callStatsError && (
-        <div className="flex items-start gap-2 text-[11px] text-gray-400 bg-[#161b22] border border-[#30363d] rounded-lg p-3">
+        <div className="flex items-start gap-2 text-xs text-gray-400 bg-codify-surface border border-codify-border rounded-lg p-3">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5 text-gray-500" />
           <span className="leading-relaxed">Per-role call stats unavailable — {callStatsError}</span>
         </div>
@@ -472,7 +472,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
       )}
 
-      <div className="flex flex-col gap-2.5 bg-[#0d1117] border border-[#30363d] rounded-xl p-3.5">
+      <div className="flex flex-col gap-2.5 bg-codify-bg border border-codify-border rounded-xl p-3.5">
         <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
           <Workflow className="w-3.5 h-3.5 text-purple-400" />
           Engine
@@ -480,7 +480,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <label
             htmlFor="parallel-width"
-            className="text-[11px] text-gray-300 font-medium"
+            className="text-xs text-gray-300 font-medium"
             title="How many steps of a parallel goal may run at once"
           >
             Parallel step width
@@ -496,7 +496,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               setWidthMsg(null);
             }}
             disabled={parallelWidth === null || widthSaving}
-            className="w-20 bg-[#161b22] border border-[#30363d] rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
+            className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
           />
           <button
             type="button"
@@ -511,22 +511,22 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             {widthSaving ? "Saving..." : "Save"}
           </button>
           {widthMsg && (
-            <span className={`text-[11px] ${widthMsg.ok ? "text-green-400" : "text-red-400"}`}>
+            <span className={`text-xs ${widthMsg.ok ? "text-green-400" : "text-red-400"}`}>
               {widthMsg.text}
             </span>
           )}
         </div>
-        <p className="text-[11px] text-gray-400 leading-relaxed">
+        <p className="text-xs text-gray-400 leading-relaxed">
           How many steps of a parallel goal may run at once; a wider plan runs in waves of this size
           instead of opening every model session simultaneously. Stored with the engine's settings
           (the <span className="font-mono">CODIFY_PARALLEL_WIDTH</span> env var, if set, overrides
           this field), and applies from the next batch without a restart.
         </p>
 
-        <div className="flex flex-wrap items-center gap-2 border-t border-[#30363d] pt-2.5">
+        <div className="flex flex-wrap items-center gap-2 border-t border-codify-border pt-2.5">
           <label
             htmlFor="stats-retention"
-            className="text-[11px] text-gray-300 font-medium"
+            className="text-xs text-gray-300 font-medium"
             title="How many daily statistics snapshots to keep"
           >
             Stats history to keep (days)
@@ -542,7 +542,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               setRetentionMsg(null);
             }}
             disabled={retention === null || retentionSaving}
-            className="w-20 bg-[#161b22] border border-[#30363d] rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
+            className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
           />
           <button
             type="button"
@@ -557,12 +557,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             {retentionSaving ? "Saving..." : "Save"}
           </button>
           {retentionMsg && (
-            <span className={`text-[11px] ${retentionMsg.ok ? "text-green-400" : "text-red-400"}`}>
+            <span className={`text-xs ${retentionMsg.ok ? "text-green-400" : "text-red-400"}`}>
               {retentionMsg.text}
             </span>
           )}
         </div>
-        <p className="text-[11px] text-gray-400 leading-relaxed">
+        <p className="text-xs text-gray-400 leading-relaxed">
           How many of the daily statistics snapshots (the “Day by day” chart in Stats) to keep.
           <span className="text-gray-300"> 0 keeps everything.</span> Lowering the number prunes the
           oldest days on the next stats view; the newest days always survive.
@@ -570,10 +570,10 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
         {traceRetention !== null && (
           <>
-            <div className="flex flex-wrap items-center gap-2 border-t border-[#30363d] pt-2.5">
+            <div className="flex flex-wrap items-center gap-2 border-t border-codify-border pt-2.5">
               <label
                 htmlFor="trace-retention"
-                className="text-[11px] text-gray-300 font-medium"
+                className="text-xs text-gray-300 font-medium"
                 title="How long a run's recording is kept"
               >
                 Recordings to keep (days)
@@ -589,7 +589,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   setTraceRetentionMsg(null);
                 }}
                 disabled={traceRetentionSaving}
-                className="w-20 bg-[#161b22] border border-[#30363d] rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
+                className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
               />
               <button
                 type="button"
@@ -603,12 +603,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 {traceRetentionSaving ? "Saving..." : "Save"}
               </button>
               {traceRetentionMsg && (
-                <span className={`text-[11px] ${traceRetentionMsg.ok ? "text-green-400" : "text-red-400"}`}>
+                <span className={`text-xs ${traceRetentionMsg.ok ? "text-green-400" : "text-red-400"}`}>
                   {traceRetentionMsg.text}
                 </span>
               )}
             </div>
-            <p className="text-[11px] text-gray-400 leading-relaxed">
+            <p className="text-xs text-gray-400 leading-relaxed">
               How long a run’s recording (the model calls of a goal armed with Record) is kept.
               <span className="text-gray-300"> 0 keeps every recording.</span> Older ones are
               forgotten on the next Stats view. Deleting a recording early is always allowed from
@@ -618,12 +618,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         )}
       </div>
 
-      <div className="flex flex-col gap-2.5 bg-[#0d1117] border border-[#30363d] rounded-xl p-3.5">
+      <div className="flex flex-col gap-2.5 bg-codify-bg border border-codify-border rounded-xl p-3.5">
         <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
           <Wrench className="w-3.5 h-3.5 text-emerald-400" />
           Fix the roles that can't run
         </div>
-        <p className="text-[11px] text-gray-400 leading-relaxed">
+        <p className="text-xs text-gray-400 leading-relaxed">
           Points a role at a model this engine has discovered when it has no model chosen, when its
           provider needs a credential none is stored for, or when its provider no longer serves the
           model it is set to. <span className="text-gray-300">Roles that already work are not
@@ -643,7 +643,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <button
               type="button"
               onClick={() => setRepairReport(null)}
-              className="text-[11px] text-gray-400 hover:text-gray-200"
+              className="text-xs text-gray-400 hover:text-gray-200"
             >
               Dismiss
             </button>
@@ -651,14 +651,14 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
 
         {repairError && (
-          <span className="text-[11px] text-red-400 font-medium">{repairError}</span>
+          <span className="text-xs text-red-400 font-medium">{repairError}</span>
         )}
 
         {repairReport && (
-          <div className="flex flex-col gap-1.5 border-t border-[#30363d] pt-2">
+          <div className="flex flex-col gap-1.5 border-t border-codify-border pt-2">
             {repairReport.changed ? (
               <>
-                <span className="text-[11px] text-gray-300">
+                <span className="text-xs text-gray-300">
                   Pointed {repairReport.repaired.length} role
                   {repairReport.repaired.length === 1 ? "" : "s"} at{" "}
                   <span className="font-mono text-emerald-300">
@@ -668,7 +668,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 </span>
                 <div className="flex flex-col gap-0.5">
                   {repairReport.repaired.map((row) => (
-                    <span key={row.role} className="text-[11px] text-gray-400">
+                    <span key={row.role} className="text-xs text-gray-400">
                       <span className="font-mono text-gray-200">{row.role}</span> — {row.reason}
                     </span>
                   ))}
@@ -678,21 +678,21 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               /* A broken install and a broken install nobody could fix are not the
                  same result, and this one must not read as a pass. */
               <>
-                <span className="text-[11px] text-amber-300">
+                <span className="text-xs text-amber-300">
                   Nothing was changed: {repairReport.unfixable.length} role
                   {repairReport.unfixable.length === 1 ? "" : "s"} need a model and none could be
                   pointed at{repairReport.target_reason ? ` — ${repairReport.target_reason}` : ""}.
                 </span>
                 <div className="flex flex-col gap-0.5">
                   {repairReport.unfixable.map((row) => (
-                    <span key={row.role} className="text-[11px] text-amber-300/80">
+                    <span key={row.role} className="text-xs text-amber-300/80">
                       <span className="font-mono">{row.role}</span> — {row.reason}
                     </span>
                   ))}
                 </div>
               </>
             ) : (
-              <span className="text-[11px] text-gray-300">
+              <span className="text-xs text-gray-300">
                 Nothing needed fixing
                 {repairReport.target_reason ? ` — ${repairReport.target_reason}` : ""}.
               </span>
@@ -700,11 +700,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
             {repairReport.left_alone.length > 0 && (
               <div className="flex flex-col gap-0.5">
-                <span className="text-[10px] uppercase tracking-wider text-gray-500">
+                <span className="text-2xs uppercase tracking-wider text-gray-500">
                   Left alone ({repairReport.left_alone.length})
                 </span>
                 {repairReport.left_alone.map((row) => (
-                  <span key={row.role} className="text-[11px] text-gray-500">
+                  <span key={row.role} className="text-xs text-gray-500">
                     <span className="font-mono text-gray-400">{row.role}</span> — {row.reason}
                   </span>
                 ))}
@@ -712,7 +712,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             )}
 
             {repairReport.notes.map((note, i) => (
-              <span key={i} className="text-[11px] text-amber-400/90 flex items-start gap-1.5">
+              <span key={i} className="text-xs text-amber-400/90 flex items-start gap-1.5">
                 <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
                 {note}
               </span>
@@ -721,12 +721,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         )}
       </div>
 
-      <div className="flex flex-col gap-2.5 bg-[#0d1117] border border-[#30363d] rounded-xl p-3.5">
+      <div className="flex flex-col gap-2.5 bg-codify-bg border border-codify-border rounded-xl p-3.5">
         <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
           <Wand2 className="w-3.5 h-3.5 text-blue-400" />
           Use one model for every role
         </div>
-        <p className="text-[11px] text-gray-400 leading-relaxed">
+        <p className="text-xs text-gray-400 leading-relaxed">
           No model list ships with Codify — every id below was discovered from a provider you
           configured. Roles start with none chosen, so a fresh install has to say which model it
           runs.
@@ -748,7 +748,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           <select
             value={bulkChoice}
             onChange={(e) => setBulkChoice(e.target.value)}
-            className="flex-1 min-w-[16rem] bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
+            className="flex-1 min-w-[16rem] bg-codify-surface border border-codify-border rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
           >
             <option value="">
               {models.length > 0 ? "Choose a discovered model..." : "No models discovered yet"}
@@ -767,7 +767,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           >
             {bulkBusy ? "Applying..." : `Apply to all ${orderedRoles.length} roles`}
           </button>
-          {bulkError && <span className="text-[11px] text-red-400">{bulkError}</span>}
+          {bulkError && <span className="text-xs text-red-400">{bulkError}</span>}
         </div>
       </div>
 
