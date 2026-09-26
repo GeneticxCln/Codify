@@ -272,6 +272,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const [retentionDraft, setRetentionDraft] = useState<string>("");
   const [retentionSaving, setRetentionSaving] = useState(false);
   const [retentionMsg, setRetentionMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // Recording retention — the same shape as the one above, for a different
+  // table. Kept separate rather than folded into a generic "retention" field
+  // because the two policies govern different data and a user lowering one
+  // should not silently lower the other.
+  const [traceRetention, setTraceRetention] = useState<number | null>(null);
+  const [traceRetentionBounds, setTraceRetentionBounds] = useState({ min: 0, max: 730 });
+  const [traceRetentionDraft, setTraceRetentionDraft] = useState<string>("");
+  const [traceRetentionSaving, setTraceRetentionSaving] = useState(false);
+  const [traceRetentionMsg, setTraceRetentionMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [engineSettingsError, setEngineSettingsError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -286,6 +295,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           setRetention(s.stats_retention_days.value);
           setRetentionBounds({ min: s.stats_retention_days.min, max: s.stats_retention_days.max });
           setRetentionDraft(String(s.stats_retention_days.value));
+        }
+        // Optional on purpose: an engine that predates the setting answers
+        // without it, and a hidden field is better than a broken save.
+        if (s.trace_retention_days) {
+          setTraceRetention(s.trace_retention_days.value);
+          setTraceRetentionBounds({
+            min: s.trace_retention_days.min,
+            max: s.trace_retention_days.max,
+          });
+          setTraceRetentionDraft(String(s.trace_retention_days.value));
         }
         setEngineSettingsError(null);
       })
@@ -351,6 +370,37 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       setRetentionMsg({ ok: false, text: err?.message || "Could not save the retention setting." });
     } finally {
       setRetentionSaving(false);
+    }
+  };
+
+  const saveTraceRetention = async () => {
+    const parsed = parseInt(traceRetentionDraft, 10);
+    if (!Number.isFinite(parsed)) {
+      setTraceRetentionMsg({ ok: false, text: "Enter a whole number (0 keeps every recording)." });
+      return;
+    }
+    setTraceRetentionSaving(true);
+    setTraceRetentionMsg(null);
+    try {
+      const res = await saveEngineSettings({ trace_retention_days: parsed });
+      const saved = res.saved.trace_retention_days;
+      setTraceRetention(saved);
+      setTraceRetentionDraft(String(saved));
+      setTraceRetentionMsg(
+        saved === parsed
+          ? {
+              ok: true,
+              text:
+                saved === 0
+                  ? "Saved — recordings are kept until you delete them."
+                  : `Saved — recordings older than ${saved} days go on the next Stats view.`,
+            }
+          : { ok: true, text: `Clamped to ${saved} (allowed ${traceRetentionBounds.min}–${traceRetentionBounds.max}).` }
+      );
+    } catch (err: any) {
+      setTraceRetentionMsg({ ok: false, text: err?.message || "Could not save the recording retention setting." });
+    } finally {
+      setTraceRetentionSaving(false);
     }
   };
 
@@ -517,6 +567,55 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           <span className="text-gray-300"> 0 keeps everything.</span> Lowering the number prunes the
           oldest days on the next stats view; the newest days always survive.
         </p>
+
+        {traceRetention !== null && (
+          <>
+            <div className="flex flex-wrap items-center gap-2 border-t border-[#30363d] pt-2.5">
+              <label
+                htmlFor="trace-retention"
+                className="text-[11px] text-gray-300 font-medium"
+                title="How long a run's recording is kept"
+              >
+                Recordings to keep (days)
+              </label>
+              <input
+                id="trace-retention"
+                type="number"
+                min={traceRetentionBounds.min}
+                max={traceRetentionBounds.max}
+                value={traceRetentionDraft}
+                onChange={(e) => {
+                  setTraceRetentionDraft(e.target.value);
+                  setTraceRetentionMsg(null);
+                }}
+                disabled={traceRetentionSaving}
+                className="w-20 bg-[#161b22] border border-[#30363d] rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
+              />
+              <button
+                type="button"
+                onClick={saveTraceRetention}
+                disabled={
+                  traceRetentionSaving ||
+                  traceRetentionDraft === String(traceRetention)
+                }
+                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+              >
+                {traceRetentionSaving ? "Saving..." : "Save"}
+              </button>
+              {traceRetentionMsg && (
+                <span className={`text-[11px] ${traceRetentionMsg.ok ? "text-green-400" : "text-red-400"}`}>
+                  {traceRetentionMsg.text}
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-gray-400 leading-relaxed">
+              How long a run’s recording (the model calls of a goal armed with Record) is kept.
+              <span className="text-gray-300"> 0 keeps every recording.</span> Older ones are
+              forgotten on the next Stats view. Deleting a recording early is always allowed from
+              the run’s own card.
+            </p>
+          </>
+        )}
       </div>
 
       <div className="flex flex-col gap-2.5 bg-[#0d1117] border border-[#30363d] rounded-xl p-3.5">

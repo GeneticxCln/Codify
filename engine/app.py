@@ -26,6 +26,7 @@ from engine.laya import LayaService
 from engine.role_repair import plan_role_repair
 from engine.spawn_guard import guarded_argv, guarded_env
 from engine.stats import build_overview, normalize_window
+from engine.trace import TraceService
 from engine.metrics import failure_breakdown, role_success_rate, stage_costs
 from engine.stats_history import StatsSnapshotService
 from engine.stats_import import StatsImportInvalid, StatsImportService
@@ -46,6 +47,7 @@ from engine.models import (
     ProviderKeyUpdate,
     ROLES,
     VersionedAction,
+    TraceToggle,
     Workspace,
     WorkspaceCreate,
     WorkspaceDesignContract,
@@ -114,12 +116,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The gate needs the registry for its LLM fallback when the real Laya SDK is
     # not installed; without it every goal's gate would silently skip.
     app.state.laya = LayaService(registry=app.state.registry)
+    # Trace recording (docs/04 §8). Attached whether or not a goal asked for
+    # it: the service is a reader of `goals.trace`, and a goal that has not
+    # asked records nothing. Wired here rather than per-goal so switching
+    # tracing on mid-run takes effect on the very next call.
+    app.state.traces = TraceService(conn)
     app.state.executor = ExecutorService(
         app.state.goals,
         app.state.workspaces,
         app.state.registry,
         app.state.sandbox,
         laya=app.state.laya,
+        tracer=app.state.traces,
     )
     app.state.executor.settings = app.state.settings
     app.state.token = BOOT_TOKEN
@@ -685,6 +693,11 @@ async def get_engine_settings(request: Request) -> dict[str, Any]:
             "min": 0,
             "max": 730,
         },
+        "trace_retention_days": {
+            "value": settings.get_int("trace_retention_days"),
+            "min": 0,
+            "max": 730,
+        },
     }
 
 
@@ -696,7 +709,7 @@ async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[st
     settings: SettingsService = request.app.state.settings
     out: dict[str, int] = {}
     for key, value in body.items():
-        if key in ("parallel_width", "stats_retention_days"):
+        if key in ("parallel_width", "stats_retention_days", "trace_retention_days"):
             if isinstance(value, bool):
                 raise ApiError(422, "invalid_value", f"{key} must be an integer, not a boolean")
             try:
@@ -1156,9 +1169,22 @@ async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, 
     except Exception:
         pass
 
+    # Recordings are the other thing that grows without a policy (docs/04
+    # §8). Pruned at the same moment and on the same terms as the snapshot
+    # above: on read, so lowering it takes effect now rather than at some next
+    # run of a job that may not happen, and swallowed, because forgetting a
+    # recording must never be able to fail the read that asked for one.
+    try:
+        traces_pruned: TraceService = request.app.state.traces
+        traces_pruned.delete_older_than(
+            request.app.state.settings.get_int("trace_retention_days")
+        )
+    except Exception:
+        pass
+
     window_days = normalize_window(window)
     overview = build_overview(goals, parsed, window_days=window_days, now=now)
-    # The per-stage and per-role view (docs/04 §4.4). Read from a second sweep
+    # The per-stage and per-role view (docs/04 §4.7). Read from a second sweep
     # over the measurement events, and failing that read is not allowed to take
     # the overview down with it: the goal-level numbers above are the ones
     # people have relied on longest, and a metrics problem should degrade this
@@ -1321,6 +1347,49 @@ async def retry_step(goal_id: str, step_id: str, body: VersionedAction, request:
     updated_step = await executor.retry_step(goal_id, step_id, body.expected_version)
     _spawn(request.app, _run_steps(request.app, goal_id), goal_id)
     return updated_step
+
+
+@app.get("/goals/{goal_id}/trace")
+async def get_goal_trace(goal_id: str, request: Request) -> dict[str, Any]:
+    """What this goal recorded: every model call, in order, without the bodies.
+
+    A summary rather than the recording itself. The digests are enough to
+    answer the question the summary exists for ("which call is the one that
+    went wrong, and was it the same prompt the recording holds?") and asking
+    for a body is a deliberate second step — a recording is a copy of model
+    output about the user's code, and the route that returns it all should not
+    be the one a panel opens on load.
+    """
+    request.app.state.goals.get(goal_id)  # 404 if unknown
+    traces: TraceService = request.app.state.traces
+    return traces.summary(goal_id)
+
+
+@app.delete("/goals/{goal_id}/trace")
+async def delete_goal_trace(goal_id: str, request: Request) -> dict[str, Any]:
+    """Forget a goal's recording. Idempotent, and always allowed.
+
+    Deleting is never gated on the goal's status: a recording of a finished run
+    is exactly what someone wants gone, and making them cancel or wait for a
+    retry to be able to remove a copy of their own code would be a strange
+    thing to enforce.
+    """
+    request.app.state.goals.get(goal_id)  # 404 if unknown
+    traces: TraceService = request.app.state.traces
+    return {"deleted": traces.delete(goal_id)}
+
+
+@app.put("/goals/{goal_id}/trace")
+async def put_goal_trace(goal_id: str, body: TraceToggle, request: Request) -> Goal:
+    """Record this goal's model calls, or stop (docs/04 §8).
+
+    Only while the goal is PLANNING: a recording that starts halfway is a trace
+    of half a run, and the replay it implies would be missing the calls that
+    shaped the first half. Turning it *off* works at any time, because deleting
+    what was recorded is the user's call rather than a state change.
+    """
+    goals: GoalService = request.app.state.goals
+    return goals.set_trace(goal_id, body.enabled)
 
 
 @app.post("/goals/{goal_id}/pause")

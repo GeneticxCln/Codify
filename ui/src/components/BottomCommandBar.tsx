@@ -20,6 +20,7 @@ import {
   RefreshCw,
   AlertCircle,
   Workflow,
+  Radio,
   Trash2,
   Palette,
 } from "lucide-react";
@@ -60,6 +61,9 @@ interface BottomCommandBarProps {
   /** Opt-in: independent (path-disjoint) steps of the goal run concurrently. */
   parallel?: boolean;
   onToggleParallel?: (on: boolean) => void;
+  /** Opt-in: record this goal's model calls so the run can be replayed. */
+  record?: boolean;
+  onToggleRecord?: (on: boolean) => void;
   /**
    * Returns false when the send was refused before anything was dispatched. A
    * promise is awaited before the prompt is cleared.
@@ -90,6 +94,8 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   onChangeGoalMode,
   parallel = false,
   onToggleParallel,
+  record = false,
+  onToggleRecord,
   onSubmit,
   isLoading,
   onOpenSettings,
@@ -845,6 +851,27 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
             >
               <Workflow className="w-3.5 h-3.5" />
               <span>Parallel</span>
+            </button>
+
+            {/* Recording: keep a copy of every model call this run makes, so the
+                run can be replayed later with no provider in the loop. Off by
+                default and never automatic — a recording is a copy of the
+                model's output about the user's code, so it is something they
+                ask for while chasing a bad run and can delete at any time. */}
+            <button
+              type="button"
+              onClick={() => onToggleRecord?.(!record)}
+              disabled={!onToggleRecord}
+              aria-pressed={record}
+              title="Record every model call this run makes, so it can be replayed later without a provider"
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors cursor-pointer disabled:opacity-40 ${
+                record
+                  ? "bg-amber-600/20 border-amber-500/50 text-amber-300 hover:bg-amber-600/30"
+                  : "bg-[#21262d] border-[#30363d] text-gray-400 hover:bg-[#30363d]"
+              }`}
+            >
+              <Radio className="w-3.5 h-3.5" />
+              <span>Record</span>
             </button>
 
             {/* Design deliverable: this goal produces the workspace's own brand

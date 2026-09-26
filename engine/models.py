@@ -243,6 +243,11 @@ class Goal(BaseModel):
     # agent proposes/revises DESIGN.md, a step writes it for real, and the
     # critic reviews it before anyone pins it. See docs/04 §4.0a.2.
     mode: GoalMode = "normal"
+    # trace: record this goal's model calls so the run can be replayed without
+    # a provider (docs/04 §8). Off by default and per goal, because a
+    # recording is a copy of model output about the user's code — something to
+    # switch on for one run, not a thing the engine quietly does to every goal.
+    trace: bool = False
     version: int = Field(0, ge=0)
     created_at: float
     updated_at: float
@@ -303,6 +308,10 @@ class GoalCreate(BaseModel):
     # sending anything else gets a 422 from the model itself, not a goal that
     # quietly runs the default.
     mode: GoalMode = "normal"
+    # Opt this goal into tracing (docs/04 §8). A client may also turn it on
+    # later with `PUT /goals/{id}/trace` before the run starts; both are the
+    # user asking for a recording they can delete.
+    trace: bool = False
     provider: str | None = None
     model: str | None = None
 
@@ -316,6 +325,18 @@ class ProviderKeyUpdate(BaseModel):
 class VersionedAction(BaseModel):
     model_config = {"extra": "forbid"}
     expected_version: int = Field(..., ge=0)
+
+
+class TraceToggle(BaseModel):
+    """Whether a goal records its model calls (docs/04 §8).
+
+    A separate body from `VersionedAction`: turning recording on is not a
+    status change and carries no version to guard, because the thing it
+    touches (this goal's own recording) is not shared with anybody else.
+    """
+
+    model_config = {"extra": "forbid"}
+    enabled: bool
 
 
 class GoalDetail(Goal):

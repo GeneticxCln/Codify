@@ -111,6 +111,42 @@ CREATE TABLE IF NOT EXISTS stats_snapshots (
   created_at REAL NOT NULL
 );
 
+-- One row per model call in a goal that was run with tracing on, so the run
+-- can be replayed without a provider (docs/04 §8). The request is stored as
+-- a digest rather than as text: a digest is what a replay has to match on, and
+-- the prompt is the most sensitive thing in the run — the goal, the evidence
+-- pack and the user's own source. `CODIFY_TRACE_PROMPTS=1` opts into storing
+-- the text as well, for the case where "what exactly was the model handed" is
+-- the question being asked. Responses are stored whole: a replay cannot serve
+-- anything else, and a response is model prose about the user's code rather
+-- than the code itself.
+CREATE TABLE IF NOT EXISTS trace_calls (
+  id TEXT PRIMARY KEY,
+  goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+  step_id TEXT,
+  seq INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  provider TEXT,
+  model TEXT,
+  temperature REAL,
+  max_tokens INTEGER,
+  prompt_hash TEXT NOT NULL,
+  system_hash TEXT,
+  system_prompt TEXT,
+  user_prompt TEXT,
+  response TEXT,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  duration_ms INTEGER,
+  created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_calls_goal ON trace_calls(goal_id, seq);
+-- The retention sweep deletes on created_at alone. Without this it walks the
+-- whole table every time the stats screen opens, and the table is one row per
+-- model call of every recorded run.
+CREATE INDEX IF NOT EXISTS idx_trace_calls_created ON trace_calls(created_at);
+
 -- The currently-imported stats-history document, one row per frozen day.
 -- Deliberately NOT a column on stats_snapshots: an imported day came from a
 -- file the user chose on another machine, while a snapshot is a day this
@@ -178,6 +214,15 @@ def connect(
     try:
         conn.execute(
             "ALTER TABLE goals ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'"
+        )
+    except Exception:
+        pass
+    # Tracing is opt-in per goal and off by default: a recording holds model
+    # output about the user's code, so an existing install gains the column
+    # defaulted to "record nothing" rather than starting to keep copies.
+    try:
+        conn.execute(
+            "ALTER TABLE goals ADD COLUMN trace INTEGER NOT NULL DEFAULT 0"
         )
     except Exception:
         pass

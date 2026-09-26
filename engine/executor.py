@@ -57,6 +57,7 @@ from engine.services import AgentRegistryService, ApiError, GoalService, Workspa
 
 if TYPE_CHECKING:
     from engine.services import SettingsService
+    from engine.trace import TraceService
 
 
 class AgentOutputInvalid(Exception):
@@ -230,7 +231,7 @@ def _text_words(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.casefold())
 
 
-# ── stage outcomes (docs/04 §4.4) ───────────────────────────────────────────
+# ── stage outcomes (docs/04 §4.7) ───────────────────────────────────────────
 # One closed vocabulary for "what did this stage achieve", so a per-role
 # success rate is a count of declared outcomes rather than a guess at what a
 # missing event meant. The eight stages, and nothing outside them:
@@ -285,7 +286,7 @@ class _Stage:
         self._declared = False
 
     def record(self, outcome: str, detail: str | None = None) -> None:
-        """Declare this stage's outcome (docs/04 §4.4)."""
+        """Declare this stage's outcome (docs/04 §4.7)."""
         if self._declared:
             return
         self.outcome = outcome
@@ -413,9 +414,16 @@ def extract_json(raw: str) -> Any:
 
 
 class AgentOrchestrator:
-    def __init__(self, registry: AgentRegistryService, goals: GoalService):
+    def __init__(
+        self, registry: AgentRegistryService, goals: GoalService,
+        tracer: TraceService | None = None,
+    ):
         self.registry = registry
         self.goals = goals
+        # Optional recorder (docs/04 §8). Attached by the app when tracing is
+        # available; a goal is only recorded when it asked to be, which
+        # `TraceService.enabled` answers per call rather than once at wiring.
+        self.tracer = tracer
 
     def _event(self, goal_id: str, step_id: str | None, type_: EventType, payload: dict[str, Any]) -> Event:
         return Event(
@@ -619,11 +627,16 @@ class AgentOrchestrator:
             # Settings screen reports as "last call", and the one number that
             # answers "is my fixer slow?" without touching a provider.
             call_started = time.monotonic()
+            # The same usage kept aside for the trace record, so a replay's
+            # token counts match the run it replays rather than being absent.
+            recorded_usage: dict[str, Any] = {}
 
             def _record(
                 usage: dict[str, Any], _role: AgentRole = role, _provider: str = target.provider,
                 _model: str = model_name, _started: float = call_started,
+                _usage_out: dict[str, Any] = recorded_usage,
             ) -> None:
+                _usage_out.update(usage)
                 self.goals.publish(self._event(
                     goal_id, step_id, "usage",
                     {
@@ -672,6 +685,22 @@ class AgentOrchestrator:
             finally:
                 provider.on_delta = None
             flush_deltas(raw)
+            if self.tracer is not None and self.tracer.enabled(goal_id):
+                # After the call, before the parse: a reply the engine could not
+                # use is still what the model said, and a recording that dropped
+                # the malformed ones would replay a run that never failed.
+                # Re-asked here rather than reusing `tracing` because the flag
+                # is a per-call read and the two are the same question; the
+                # narrowing this needs is the point.
+                self.tracer.record(
+                    goal_id, step_id,
+                    role=role, provider=target.provider, model=model_name,
+                    temperature=float(target.temperature),
+                    max_tokens=int(target.max_tokens),
+                    system_prompt=system, user_prompt=user_prompt, response=str(raw),
+                    usage=recorded_usage,
+                    duration_ms=int((time.monotonic() - call_started) * 1000),
+                )
             try:
                 return extract_json(raw)
             except (ValueError, TypeError) as exc:
@@ -695,10 +724,11 @@ class ExecutorService:
         sandbox: SandboxService,
         git: GitService | None = None,
         laya: LayaService | None = None,
+        tracer: TraceService | None = None,
     ):
         self.goals = goals
         self.workspaces = workspaces
-        self.orchestrator = AgentOrchestrator(registry, goals)
+        self.orchestrator = AgentOrchestrator(registry, goals, tracer=tracer)
         self.sandbox = sandbox
         self.git = git or GitService()
         # System-1 pre-flight gate (see engine/laya.py). Optional by design: a
@@ -729,7 +759,7 @@ class ExecutorService:
             sequence=self.goals.next_sequence(goal_id),
         )
 
-    # ── stage measurement (docs/04 §4.4) ───────────────────────────────
+    # ── stage measurement (docs/04 §4.7) ───────────────────────────────
     #
     # One `stage_result` event per role stage: what the stage was for, whether
     # it achieved it, what it cost, and how long it took. Everything downstream
@@ -877,12 +907,21 @@ class ExecutorService:
                 if decision.blocked:
                     laya_stage.record("block", decision.block_reason or None)
                 elif decision.engine == "skipped":
-                    laya_stage.record("skipped", decision.skipped_reason or None)
+                    # A gate that was never set up and a gate whose call just
+                    # failed both report `engine="skipped"`; only the second is
+                    # the role not doing its job, and `unavailable` is what
+                    # keeps a broken gate out of `STAGE_SUCCESS_OUTCOMES`.
+                    laya_stage.record(
+                        "unavailable" if decision.unavailable else "skipped",
+                        decision.skipped_reason or None,
+                    )
                 else:
                     laya_stage.record("allow")
             except Exception as exc:  # pragma: no cover - decide() already guards
                 decision = LayaDecision(engine="skipped", skipped_reason=f"gate error: {exc}")
-                laya_stage.record("skipped", decision.skipped_reason)
+                # The block reached the end without declaring an outcome, and a
+                # gate that raised is the one outcome that is not a clean skip.
+                laya_stage.record("unavailable", decision.skipped_reason)
         if decision.engine != "skipped":
             self.goals.publish(self._event(
                 goal_id, None, "agent_assigned",

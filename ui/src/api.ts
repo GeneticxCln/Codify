@@ -22,6 +22,7 @@ import type {
   RepairReport,
   RecentRunModel,
   RoleInfo,
+  TraceSummary,
   Workspace,
 } from "./types.ts";
 
@@ -245,7 +246,11 @@ export async function getEngineSettings(): Promise<EngineSettings> {
 
 /** Persist engine-wide settings; the response echoes the clamped values. */
 export async function saveEngineSettings(
-  patch: { parallel_width?: number; stats_retention_days?: number }
+  patch: {
+    parallel_width?: number;
+    stats_retention_days?: number;
+    trace_retention_days?: number;
+  }
 ): Promise<{ saved: Record<string, number> }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/settings/engine`, {
@@ -572,7 +577,10 @@ export async function createGoal(
   plan_only: boolean = false,
   parallel: boolean = false,
   /** `design` makes the workspace's own brand contract the deliverable. */
-  mode: GoalMode = "normal"
+  mode: GoalMode = "normal",
+  /** Record this run's model calls, so the run can be replayed without a
+   * provider. Opt-in, and a copy of the model's output about the user's code. */
+  trace: boolean = false,
 ): Promise<Goal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const payload: Record<string, any> = { workspace_id, title, description, dry_run, plan_only };
@@ -582,6 +590,7 @@ export async function createGoal(
   // Sent only when it is not the default: an older engine validating the body
   // strictly would reject an unknown key, and "normal" is what it assumes.
   if (mode !== "normal") payload.mode = mode;
+  if (trace) payload.trace = true;
 
   const res = await fetch(`${base}/goals`, {
     method: "POST",
@@ -606,6 +615,58 @@ export async function createGoal(
  * the UI could not tell a lost race from a real one. `goalActions.ts` keys the
  * retry policy on this code.
  */
+/**
+ * What this goal recorded: the calls, in order, with a digest of the prompt
+ * rather than the prompt. Never throws for "not recorded" — a goal that was
+ * never traced is an ordinary state, and the UI reads it as zero calls.
+ */
+export async function fetchGoalTrace(goal_id: string): Promise<TraceSummary> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/goals/${goal_id}/trace`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to read the recording");
+  return res.json();
+}
+
+/**
+ * Forget a goal's recording. The user's call, and the only way to remove one:
+ * a recording is a copy of the model's output about their code, so it is
+ * always deletable and never deleted on their behalf.
+ */
+export async function deleteGoalTrace(goal_id: string): Promise<{ deleted: number }> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/goals/${goal_id}/trace`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to delete the recording");
+  return res.json();
+}
+
+/**
+ * Start or stop recording a goal. Throws ApiRequestError with `trace_locked`
+ * if asked to start after the run has begun: a recording that starts halfway
+ * is a trace of half a run, and the replay it would support is missing the
+ * calls that shaped the first half. Stopping is always allowed.
+ */
+export async function setGoalTrace(goal_id: string, enabled: boolean): Promise<Goal> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/goals/${goal_id}/trace`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${currentEngine.token}`,
+    },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new ApiRequestError(res.status, err.code ?? null, err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 export class ApiRequestError extends Error {
   status: number;
   code: string | null;

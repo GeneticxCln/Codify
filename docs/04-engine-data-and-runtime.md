@@ -46,6 +46,11 @@ class Goal(BaseModel):
     status: GoalStatus
     dry_run: bool = False
     mode: GoalMode = "normal"
+    # Record this run's model calls so it can be replayed (§8). Set when the
+    # goal is created, or turned on with `PUT /goals/{id}/trace` while it is
+    # still PLANNING. It never turns itself on, and turning it off is allowed
+    # at any status.
+    trace: bool = False
     version: int = Field(0, ge=0)
     created_at: float
     updated_at: float
@@ -55,6 +60,11 @@ class Goal(BaseModel):
 executes. `GoalCreate.mode` defaults to `"normal"` and is validated by the model, so a client cannot
 send a third value and get a goal that quietly runs the default pipeline — the literal rejects it
 with a `422`.
+
+`trace` is orthogonal to all three: it says whether the run's model calls are *recorded* (§8).
+`GoalCreate.trace` defaults to `False`, and because it is a copy of the model's output about the
+user's code there is no way to set it anywhere except explicitly — it is never inferred from a mode,
+a setting, or a previous run.
 
 `update_goal(id, expected_version, **fields)`:
 
@@ -291,6 +301,36 @@ CREATE TABLE proposed_files (
   created_at REAL NOT NULL
 );
 
+-- One row per model call in a goal that was run with tracing on (§8). The
+-- request is stored as a digest rather than as text: a digest is what a replay
+-- matches on, and the prompt is the most sensitive thing in a run — the goal,
+-- the evidence pack and the user's own source. Responses are stored whole
+-- because a replay can serve nothing else.
+CREATE TABLE trace_calls (
+  id TEXT PRIMARY KEY,
+  goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+  step_id TEXT,
+  seq INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  provider TEXT,
+  model TEXT,
+  temperature REAL,
+  max_tokens INTEGER,
+  prompt_hash TEXT NOT NULL,
+  system_hash TEXT,
+  system_prompt TEXT,
+  user_prompt TEXT,
+  response TEXT,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  duration_ms INTEGER,
+  created_at REAL NOT NULL
+);
+
+-- `seq` orders a replay; `created_at` is what the retention sweep deletes on.
+CREATE INDEX idx_trace_calls_goal ON trace_calls(goal_id, seq);
+CREATE INDEX idx_trace_calls_created ON trace_calls(created_at);
+
 CREATE TABLE engine_settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
@@ -337,7 +377,7 @@ Error body: `{ "code": str, "message": str }`.
 | `GET` | `/workspaces/{id}` | — | `Workspace` |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
 | `DELETE` | `/workspaces/{id}?delete_goals={bool}` | — | forgets the folder; **never touches `root_path`**. 409 `workspace_not_empty` (with the goal count) unless the cascade is requested, 409 `workspace_has_active_goals` if anything is PLANNING/RUNNING |
-| `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, mode?, provider?, model?}` extra=forbid — `mode` is `"normal"` \| `"design"` (`04` §4.0a.2) | `Goal` |
+| `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, mode?, provider?, model?, trace?}` extra=forbid — `mode` is `"normal"` \| `"design"` (`04` §4.0a.2); `trace` records the run's model calls (`04` §8) | `Goal` |
 | `GET` | `/goals` | query: `workspace_id?`, `status?`, `limit` (1–200, default 50), `offset` | `Goal[]` — active goals first, then newest |
 | `GET` | `/goals/{id}` | — | `Goal` + `steps: PlanStep[]` |
 | `DELETE` | `/goals/{id}` | — | deletes the run record; events/steps/proposals cascade, counts returned. 409 `goal_in_progress` while PLANNING/RUNNING or a driver holds it. Never touches files |
@@ -351,6 +391,9 @@ Error body: `{ "code": str, "message": str }`.
 | `GET` | `/goals/{id}/audit` | — | the goal's audit document (plan edits, fallbacks, fix retries, errors, outcomes, usage, silent roles) |
 | `POST` | `/goals/{id}/apply` | `{expected_version}` | replays a completed dry-run's stored proposals for real |
 | `POST` | `/goals/{id}/enable-execution` | `{expected_version}` | lifts the `plan_only` guard (`Goal`) |
+| `GET` | `/goals/{id}/trace` | — | the recording's summary: `calls`, `by_role`, `prompts_kept`, `recording_error`, and `recorded[]` (`seq`, `role`, `model`, `prompt_hash`, tokens, `duration_ms`). Never the prompt text — that is a deliberate second step, not something a panel opens on load (`04` §8). 404 `unknown_goal` |
+| `PUT` | `/goals/{id}/trace` | `{enabled}` extra=forbid | `Goal`. 409 `trace_locked` when enabling a goal that is no longer PLANNING — a recording that starts halfway is a trace of half a run. Disabling is always allowed |
+| `DELETE` | `/goals/{id}/trace` | — | `{deleted}`. Idempotent and never refused on status: deleting a copy of your own run is the user's call |
 | `GET` | `/stats/overview?window={1\|7\|30\|0}` | — | cross-goal outcomes, success rate, spend, daily trend (`engine/stats.py`), plus `by_stage` and `by_role_outcome` from the `stage_result` events (`engine/metrics.py`, §4.7). Bounded windows are anchored to the request's wall clock, so an idle install sees an empty window rather than its last run relabelled as recent. Both stage blocks are optional and their absence degrades the view rather than failing the read |
 | `GET` | `/stats/failures?window={1\|7\|30\|0}` | — | what went wrong: `by_code`, `by_role`, `by_stage`, the ranked `causes` with their most recent message, and how many `fix_retry` steps the loop then got past (`recovery_rate` is `null` with no retries — no retries is not a perfect record). An install that has never failed reads `total: 0` with no rows, never a table of zeros |
 | `GET` | `/stats/history?limit={0..730}` | — | frozen daily stats documents, oldest first; `limit=0` returns every stored day for JSON export |
@@ -923,3 +966,99 @@ settings screen picks its wording from the reason, so it explains the store in f
 promising a keychain it did not use. A corrupted store reads as empty instead of crashing the
 engine; an unwritable one raises `secrets_unwritable`; a keyring that fails at write time falls through
 to the file instead of failing the save.
+
+## 8. Tracing and replay
+
+The event log records *what happened* — a verdict, a diff, a commit. It does not record *what was
+said*, so a run that misbehaved could not be reproduced: the prompt that produced the bad reply was
+gone, and a bug report was a story. A trace is the recording that makes it a reproduction.
+
+### 8.1 What is kept, and what is deliberately not
+
+Opt-in per goal and off by default (`Goal.trace`, `GoalCreate.trace`). A recording is a copy of the
+model's output about the user's code, so nothing at all is kept for a goal that did not ask.
+
+| Kept (`trace_calls`) | Not kept |
+|---|---|
+| role, provider, model, temperature, `max_tokens` | any file in the workspace |
+| the response, whole — a replay can serve nothing else | the prompt **text**, unless `CODIFY_TRACE_PROMPTS=1` |
+| `prompt_hash` / `system_hash`: 32 hex chars of SHA-256 over `system \x00 user` | the goal's source, evidence pack, or diff |
+| `input_tokens`, `output_tokens`, `duration_ms` | anything at all for a goal with `trace = 0` |
+
+The digest is the point rather than an omission. It is what a replay *matches on*, and the prompt is
+the most sensitive thing in a run: the goal, the evidence pack, and the user's own source. Keeping
+the digest means a replay can prove it is replaying the same request; not keeping the text means a
+stolen database is not a transcript of the user's code. `CODIFY_TRACE_PROMPTS=1` opts into the text,
+for the case where "exactly what was the model handed" is the question being asked.
+
+Both halves of that separator matter: `("ab", "c")` and `("a", "bc")` must not produce the same
+digest, so the system and user prompts are joined with a byte neither can contain.
+
+### 8.2 Enabling, stopping, deleting
+
+* **Armed at creation** (`POST /goals` with `trace: true`) — the usual path, and the only one the
+  composer offers.
+* **`PUT /goals/{id}/trace`** while the goal is still `PLANNING`. Enabling a goal that has already
+  started is `409 trace_locked`: a recording that begins halfway is a trace of half a run, and the
+  replay it implies would be missing the calls that shaped the first half.
+* **Turning it off is always allowed**, at any status. Stopping is not a state change; refusing it
+  would make a user cancel a run to stop recording it.
+* **`DELETE /goals/{id}/trace`** removes the recording and nothing else — not the goal, not its
+  events, not a single file. It is idempotent and never refused on status, because deleting a copy
+  of your own run is your call.
+
+Recording is checked **per call**, not once when the run starts, so a user who notices a problem
+mid-planning can switch it off and the very next call is not stored.
+
+### 8.3 Retention
+
+`trace_retention_days` (Settings → Engine, default **30**, band 0–730; `0` keeps everything) bounds
+how long a recording lives, so the table's growth is a decision rather than an accident. It is
+enforced on the `/stats/overview` read — the same moment and on the same terms as
+`stats_retention_days` — so a lowered policy takes effect on the next read instead of at the next
+run of a job that may never be scheduled. `trace_calls(created_at)` is indexed for it: the sweep
+walks a table with one row per model call of every recorded run.
+
+Deleting a goal deletes its recording through `ON DELETE CASCADE`, so a recording never outlives the
+run it describes.
+
+### 8.4 Replay
+
+```
+python3 scripts/replay_trace.py --goal <goal-id> [--db PATH] [--from TREE] [--into DIR]
+```
+
+Exit codes: `0` the recording replayed, `1` it diverged, `2` it could not be read.
+
+Three rules, and each is the difference between a replay and a story:
+
+* **Nothing is written to your workspace.** The tree is copied into a scratch directory and the
+  replay goal is pointed at the copy, so a fixer writing files inside a replay cannot touch the code
+  the recording came from. The scratch path is printed so a divergence can be inspected.
+* **`--from` names the tree as it was when the run started.** It defaults to the recorded goal's own
+  workspace, which is only still that tree if the run wrote nothing. A run that fixed a file left
+  the workspace one line ahead of its own prompts, so replaying *that* run wants a pristine copy
+  here — a checkout at the recorded commit, typically.
+* **A mismatch refuses rather than answers.** `ReplayProvider` matches on `(role, prompt_hash)` in
+  recording order and raises `TraceMismatch` on the first call its recording does not hold. Serving
+  the recorded reply to a different question would produce a green run that proves nothing, which is
+  worse than no run at all: it looks like evidence. The message names the role and both digests.
+
+The refusal arrives as a *failed goal* rather than as an exception, because `TraceMismatch` is a
+`ProviderError` and the orchestrator absorbs it into `agent_call_failed` before the retries give up.
+The CLI therefore reports the **first** `trace_mismatch` in the stream, not the fatal stage: a run
+that drifted usually refuses at the librarian and only fails later at the planner, and naming the
+planner would send the reader to the wrong call.
+
+The Laya gate is replayed, not re-run — its recorded `laya_decision` verdict is read back and
+returned, because a fresh gate decision would change what the run did before its first model call.
+
+### 8.5 A recording that cannot be written
+
+A failed write **never fails the run**: a trace is evidence, not a deliverable, and the goal it was
+recording is the thing that matters. It is also not silent. The reason is kept and returned as
+`recording_error` on `GET /goals/{id}/trace`, keyed to the goal it happened on.
+
+Without that, "I never armed it" and "I armed it and the write failed" are the same row of zeros,
+and the only one a user can act on is the second. The summary reports `null` normally, so the
+field's shape does not change depending on whether something broke.

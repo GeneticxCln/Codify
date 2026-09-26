@@ -6,6 +6,7 @@ import { DiffViewer } from "./DiffViewer";
 import { LayaDecision } from "../types";
 import { getGoalUsage, GoalUsage, getGoalAudit } from "../api";
 import { AuditReport } from "./AuditReport";
+import { TracePanel } from "./TracePanel";
 import {
   User,
   Bot,
@@ -34,6 +35,7 @@ import {
   FileDown,
   FileUp,
   Trash2,
+  Radio,
 } from "lucide-react";
 
 /**
@@ -682,6 +684,10 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   // settings change made from a transcript card, so the card has to say it
   // landed rather than send the user hunting in another screen for proof.
   const [pinState, setPinState] = useState<PinOutcome | null>(null);
+  // Which goal's recording panel is open. One at a time, keyed by goal — the
+  // same shape `pinState` and `editing` take, because these are properties of
+  // a card rather than of the transcript.
+  const [traceFor, setTraceFor] = useState<string | null>(null);
 
   const handlePinDeliverable = async (
     goalId: string,
@@ -1041,6 +1047,24 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         </button>
                       )}
 
+                      {/* Recording: this run's model calls, kept so it can be
+                          replayed without a provider. Offered only when the goal
+                          was armed for it — a control that opened an empty panel
+                          on every unrecorded run would teach people to ignore it,
+                          and the panel it opens is the only place the recording
+                          can be deleted from. */}
+                      {msg.goal?.trace && traceFor !== msg.goal!.id && (
+                        <button
+                          type="button"
+                          onClick={() => setTraceFor(msg.goal!.id)}
+                          className="p-1 text-gray-500 hover:text-amber-400 rounded-lg transition-colors"
+                          title="This run was recorded — inspect or delete its model calls"
+                          aria-label="Show recording"
+                        >
+                          <Radio className="w-4 h-4" />
+                        </button>
+                      )}
+
                       {/* Audit export: the run's structured trail (plan edits,
                           fallbacks, failures, outcomes) as a downloaded JSON
                           document. Available at any stage — an in-flight goal's
@@ -1079,6 +1103,13 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                     </div>
                   )}
                 </div>
+
+                {traceFor === msg.goal!.id && (
+                  <TracePanel
+                    goalId={msg.goal!.id}
+                    onClose={() => setTraceFor(null)}
+                  />
+                )}
 
                 {/* Plan Steps Accordion */}
                 {msg.goal?.steps && msg.goal.steps.length > 0 && (

@@ -70,6 +70,12 @@ class SettingsService:
         # the upper bound exists so a fat-fingered 999999 cannot be stored as
         # "effectively forever" when the user meant bounded.
         "stats_retention_days": (90, lambda v: max(0, min(v, 730))),
+        # How many days a goal's recording is kept (trace_calls). A recording
+        # is a copy of the model's output about the user's code, so the default
+        # is bounded rather than "forever"; 0 keeps everything for someone
+        # deliberately collecting replays. Same 730 ceiling as snapshots, for
+        # the same fat-finger reason.
+        "trace_retention_days": (30, lambda v: max(0, min(v, 730))),
     }
 
     def get_int(self, key: str) -> int:
@@ -510,6 +516,7 @@ class GoalService:
             plan_only=body.plan_only,
             parallel=body.parallel,
             mode=body.mode,
+            trace=body.trace,
             version=0,
             created_at=now,
             updated_at=now,
@@ -517,9 +524,9 @@ class GoalService:
             model=body.model,
         )
         self._db.execute(
-            """INSERT INTO goals (id, workspace_id, title, description, status, dry_run, plan_only, parallel, mode, version, event_seq, created_at, updated_at, provider, model)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)""",
-            (goal.id, goal.workspace_id, goal.title, goal.description, goal.status, int(goal.dry_run), int(goal.plan_only), int(goal.parallel), goal.mode, now, now, goal.provider, goal.model),
+            """INSERT INTO goals (id, workspace_id, title, description, status, dry_run, plan_only, parallel, mode, trace, version, event_seq, created_at, updated_at, provider, model)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)""",
+            (goal.id, goal.workspace_id, goal.title, goal.description, goal.status, int(goal.dry_run), int(goal.plan_only), int(goal.parallel), goal.mode, int(goal.trace), now, now, goal.provider, goal.model),
         )
         self._db.commit()
         return goal
@@ -532,6 +539,7 @@ class GoalService:
         data["dry_run"] = bool(row["dry_run"])
         data["plan_only"] = bool(row["plan_only"])
         data["parallel"] = bool(row["parallel"])
+        data["trace"] = bool(row["trace"])
         return Goal.model_validate(data)
 
     def list_goals(
@@ -780,6 +788,38 @@ class GoalService:
         if row.rowcount != 1:
             raise ApiError(404, "unknown_goal", "goal not found")
         self._db.commit()
+
+    def set_trace(self, goal_id: str, enabled: bool) -> Goal:
+        """Turn recording for this goal on or off (docs/04 §8).
+
+        Settable only while the goal has not started: a recording that begins
+        halfway through a run is a trace of half a run, and the replay it
+        claims to support would be missing the calls that shaped the first
+        half. Turning it *off* is always allowed, because deleting what has
+        already been recorded is the user's call and not a state change.
+        """
+        if not enabled:
+            row = self._db.execute(
+                "UPDATE goals SET trace = 0, updated_at = ? WHERE id = ?",
+                (time.time(), goal_id),
+            )
+        else:
+            row = self._db.execute(
+                "UPDATE goals SET trace = 1, updated_at = ? WHERE id = ? AND status = 'PLANNING'",
+                (time.time(), goal_id),
+            )
+        if row.rowcount != 1:
+            current = self._db.execute(
+                "SELECT status FROM goals WHERE id = ?", (goal_id,)
+            ).fetchone()
+            if current is None:
+                raise ApiError(404, "unknown_goal", "goal not found")
+            raise ApiError(
+                409, "trace_locked",
+                f"tracing can only be enabled while a goal is PLANNING, and this one is {current[0]}",
+            )
+        self._db.commit()
+        return self.get(goal_id)
 
     def set_parallel(self, goal_id: str, enabled: bool) -> None:
         row = self._db.execute(

@@ -169,12 +169,43 @@ export interface Goal {
   /** What the goal is for. Optional: an engine predating the mode omits it,
    * and the UI reads an absent value as the normal pipeline. */
   mode?: GoalMode;
+  /** Is this run's model calls being recorded? Optional for the same reason. */
+  trace?: boolean;
   version: number;
   /** Optional: older engines omit this; the UI derives startability from status. */
   canStart?: boolean;
   created_at: number;
   updated_at: number;
   steps?: PlanStep[];
+}
+
+/** One recorded model call, as the UI shows it. The prompt is a digest, never
+ * text: the UI can prove a replay will match, but it cannot read the prompt
+ * back out of the recording, which is the point (docs/04 §8). */
+export interface TraceCall {
+  seq: number;
+  role: string;
+  model: string;
+  prompt_hash: string;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  duration_ms: number | null;
+  at: number;
+}
+
+/** What a goal recorded — the engine's GET /goals/{id}/trace response. */
+export interface TraceSummary {
+  goal_id: string;
+  calls: number;
+  by_role: Record<string, number>;
+  /** True only when the prompt *text* was kept, which needs
+   * CODIFY_TRACE_PROMPTS=1. The UI says so rather than implying a transcript. */
+  prompts_kept: boolean;
+  /** Why a recording that should have calls has none — a write that failed.
+   * Null is the normal case; an engine that predates the field omits it, so
+   * the UI reads absence as "no known problem". */
+  recording_error?: string | null;
+  recorded: TraceCall[];
 }
 
 /** What actually happened to one role the last time it was called, read from
@@ -198,7 +229,7 @@ export interface AgentCallStat {
     model: string | null;
     at: number;
   } | null;
-  /** Measured stage runs for this role (docs/04 §4.4), over every run the log
+  /** Measured stage runs for this role (docs/04 §4.7), over every run the log
    * still holds. Absent on an engine too old to measure stages, which is why
    * every read of it is optional. */
   runs?: number;
@@ -223,7 +254,7 @@ export interface UsageLane {
 }
 
 /** One stage of a goal's pipeline, as measured by the engine's
- * `stage_result` events (docs/04 §4.4): what it achieved, what it spent, and
+ * `stage_result` events (docs/04 §4.7): what it achieved, what it spent, and
  * how long it took. `avg`/`p95` are over the *stage's* wall clock — the model
  * call plus the engine work around it — so they are not the mean of the
  * `usage` events' durations. */
@@ -380,6 +411,9 @@ export interface EngineSettings {
   parallel_width: EngineSettingValue;
   /** How many daily stats snapshots to keep; 0 = keep everything. */
   stats_retention_days: EngineSettingValue;
+  /** How long a goal's recording is kept (0 = forever). Optional: an engine
+   * that predates the setting omits it, and the panel hides the field. */
+  trace_retention_days?: EngineSettingValue;
 }
 
 /** Payload of a `laya_decision` event (one pre-flight gate verdict). */

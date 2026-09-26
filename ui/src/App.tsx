@@ -72,6 +72,11 @@ export const App: React.FC = () => {
   const [goalMode, setGoalMode] = useState<GoalMode>("normal");
   // Opt-in parallelism: independent (path-disjoint) steps of a goal run concurrently.
   const [parallel, setParallel] = useState(false);
+  // Opt-in recording: keep every model call this next goal makes so the run can
+  // be replayed without a provider. Off by default and disarmed once sent — a
+  // recording is a copy of the model's output about the user's code, and a
+  // toggle that stayed on would quietly record every prompt afterwards.
+  const [record, setRecord] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -629,12 +634,16 @@ export const App: React.FC = () => {
         selectedModel.id,
         isPlanOnly,
         parallelEnabled,
-        goalMode
+        goalMode,
+        record
       );
       // Cleared once dispatched: a design deliverable is what THIS goal is for,
       // not a standing preference — leaving it armed would quietly draft a
       // DESIGN.md for the next prompt the user only meant to be code.
       setGoalMode("normal");
+      // Same reasoning, with the user's own data at stake: recording arms one
+      // run the way it was asked for, and stays off until asked again.
+      setRecord(false);
 
       const fullGoal = await getGoal(goal.id);
       setMessages((prev) =>
@@ -1156,6 +1165,8 @@ export const App: React.FC = () => {
           onChangeGoalMode={setGoalMode}
           parallel={parallel}
           onToggleParallel={setParallel}
+          record={record}
+          onToggleRecord={setRecord}
           onSubmit={handleSendMessage}
           isLoading={isLoading}
           onOpenSettings={() => openSettings("keys")}
