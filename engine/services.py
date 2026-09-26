@@ -123,6 +123,22 @@ class AgentRegistryService:
         }
         return [rows[role] for role in ROLES if role in rows]
 
+    def provider_key_status(self) -> dict[str, dict[str, Any]]:
+        """Each known provider: does it need a credential, and is one stored.
+
+        Shaped for `engine/role_repair.py`, which is the only consumer. It
+        answers the "needs a credential" half from the provider's own
+        declaration rather than from a guess, because a custom slug with no
+        catalog entry would otherwise be assumed to need a key it does not.
+        """
+        return {
+            slug: {
+                "needs_key": bool(meta["needs_key"]),
+                "has_key": self._keychain.has_provider_key(slug),
+            }
+            for slug, meta in BUILTIN_PROVIDERS.items()
+        }
+
     def get_config(self, role: str) -> AgentConfig:
         if role not in ROLES:
             raise ApiError(404, "unknown_role", f"Unknown agent role {role}")

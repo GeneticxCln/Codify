@@ -57,8 +57,9 @@ from engine.library import (
     read_knowledge,
 )
 from engine.laya import LayaDecision, LayaService, build_state
-from engine.models import AgentConfig, AgentRole, Event, EventType, Goal, PlanStep
+from engine.models import ROLES, AgentConfig, AgentRole, Event, EventType, Goal, PlanStep
 from engine.providers import ProviderError
+from engine.role_repair import config_problems
 from engine.sandbox import CommandNotAllowed, SandboxService
 from engine.services import AgentRegistryService, ApiError, GoalService, WorkspaceService
 
@@ -937,9 +938,50 @@ class ExecutorService:
     def release_driver(self, goal_id: str) -> None:
         self._drivers.discard(goal_id)
 
+    def _preflight_roles(self, goal_id: str) -> None:
+        """Name, once, every role that cannot be called — before the first call.
+
+        The pipeline already diagnoses this properly, one role at a time:
+        `AgentNotConfigured` says "no model is configured for the librarian role"
+        and points at the right screen. The problem is that you learn it from a
+        goal that died, one role per run, and nothing ever mentions the *other*
+        six. A run that cannot possibly finish is the case where one line is
+        worth more than the run.
+
+        A warning, not a block, for the same reason laya, the librarian and the
+        designer are warnings: the roles that do work should still do their work,
+        and a run killed by a setting is a run nobody can inspect. The judgement
+        is `config_problems` — the same rule the Settings screen's repair uses,
+        minus discovery, because a provider that has not been asked proves
+        nothing and this line has to be cheap enough to always print.
+        """
+        registry = getattr(self.orchestrator, "registry", None)
+        if registry is None:  # pragma: no cover - the orchestrator always has one
+            return
+        try:
+            broken = config_problems(
+                [c.model_dump() for c in registry.list_configs()],
+                registry.provider_key_status(),
+                ROLES,
+            )
+        except Exception as exc:  # pragma: no cover - a preflight is never fatal
+            self._log(goal_id, None, "warn", f"role preflight could not run: {exc}")
+            return
+        if not broken:
+            return
+        detail = "; ".join(f"{role}: {reason}" for role, reason in broken)
+        self._log(
+            goal_id, None, "warn",
+            f"{len(broken)} of {len(ROLES)} agent roles cannot be called, so this goal "
+            f"will fail when it reaches them — {detail}. Open Settings → Agent Roles, "
+            "or press Repair to point them at a model that is reachable.",
+        )
+
     async def run_planning(self, goal_id: str) -> None:
         goal = self.goals.get(goal_id)
         ws = self.workspaces.get(goal.workspace_id)
+
+        self._preflight_roles(goal_id)
 
         # ── Laya: System-1 pre-flight gate ──────────────────────────────
         # Cheap typed decisions (intent / risk / injection probability) before

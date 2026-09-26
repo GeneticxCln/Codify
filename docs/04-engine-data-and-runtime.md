@@ -467,6 +467,8 @@ A role needs repair when **any** of these holds:
 | its provider requires a credential and none is stored | `<provider> needs a credential and none is stored` |
 | its provider answered **and** does not list the stored model | `<provider> no longer reports "<model>"` |
 
+**A fallback is only forgiven for what discovery could answer.** A role whose primary cannot run is left alone when its fallback may still serve it — but "may" is decided by whether the fallback's own problem is *provable without the network*. No model, or a credential that is not stored, is already true of the store we hold, so a fallback with either is not treated as a possible save; a model the provider may no longer list is, because only asking settles that. Without the distinction, a role whose primary and fallback both need a key reported as "may run on its fallback", and neither this screen nor the preflight below named the one thing the user could act on.
+
 A role is left alone when it is usable — a model the provider still lists, or any model on a provider that needs no credential. **A provider that failed discovery proves nothing**: an unanswered provider is an unknown, not a fault, so its roles are neither repaired nor reported as retired (`<provider> did not answer, so nothing here is proven`). Repair is idempotent: a second call changes nothing and reports all roles as `left alone`.
 
 The target is chosen from the catalog, never hardcoded:
@@ -497,6 +499,46 @@ The response reports what it did **and** what it skipped, because an action that
 `notes` entries are per provider, not per role: eight roles on an unreachable provider produce one caveat, not eight. An unverified role reads `left as configured: <provider>/<model> (not verified — <error>)`, never `usable` — the provider never said it works.
 
 A successful repair **invalidates the model catalog cache** (the catalog is keyed by role configs) and bumps `version` on every changed role, so the `409` version guard still protects concurrent updates. Only `provider`, `model_name`, and the protocol the catalog reports are written; `temperature`, `max_tokens`, `base_url`, and any system-prompt override are preserved. The endpoint is deliberately **not** sent, so an unchanged provider keeps the endpoint the user configured (a proxy, say) while a provider switch resets it to that provider's default.
+
+### 3.1.1 The same rule at the start of every goal
+
+`POST /settings/agents/repair` is an action, and an action nobody thinks to take
+is an action that never runs. So `ExecutorService._preflight_roles` asks the same
+question at the top of every run, through `config_problems` in
+`engine/role_repair.py` — the identical rule, minus discovery, because a provider
+that has not been asked proves nothing and this line has to be cheap enough to
+always print.
+
+The engine could already diagnose this correctly; `AgentNotConfigured` says "no
+model is configured for the librarian role" and names the screen. What it could
+not do was tell you about the roles it had not reached yet. You found out one dead
+run at a time, and never heard about the other six. One line naming all of them,
+before the first model call, is the difference between a diagnosis and a mystery:
+
+```
+4 of 8 agent roles cannot be called, so this goal will fail when it reaches them —
+librarian: anthropic needs a credential and none is stored; design: no model is
+chosen; verifier: openai needs a credential and none is stored; critic: deepseek
+needs a credential and none is stored. Open Settings → Agent Roles, or press
+Repair to point them at a model that is reachable.
+```
+
+A **warning, not a block**, for the reason laya, the librarian and the designer are
+warnings: the roles that do work should still do their work, and a run killed by a
+setting is a run nobody can inspect. A fully configured store prints nothing at
+all — a preflight that always speaks is a preflight that gets ignored.
+
+`config_problems` takes the full `ROLES` tuple, not just the stored rows. It is
+the one thing here the repair screen cannot see: the repair plan iterates stored
+configs, so a role with no row is invisible to it, and `get_config` answers such a
+role with a `404` about an "unknown" role that is one of the engine's own eight
+slots. The schema backfills a row for every role on every connection, so this is
+defence rather than a live path — but a preflight that cannot see the case is the
+bug it was written to fix.
+
+`tests/test_role_preflight.py` covers the rule, the line, the silence, and the
+agreement with the repair plan on the same database — one rule and two screens is
+exactly the arrangement that drifts.
 
 ## 4. Agent JSON contracts
 

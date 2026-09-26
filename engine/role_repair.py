@@ -17,6 +17,7 @@ the tests exercise the rule directly.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -67,6 +68,17 @@ def _describe(provider: str, model: str, discovery: dict[str, dict[str, Any]]) -
     return f"left as configured: {provider}/{model} (provider not checked)", ""
 
 
+# The two faults that need no network to establish. `target_problem` has only
+# three answers, and the third — the provider no longer lists this model — is
+# the one that genuinely requires having asked.
+_OFFLINE_PROBLEMS = ("no model is chosen", "needs a credential")
+
+
+def proven_offline(problem: str | None) -> bool:
+    """Is this problem true whether or not the provider was ever asked?"""
+    return bool(problem) and any(p in (problem or "") for p in _OFFLINE_PROBLEMS)
+
+
 def _fallback_verdict(
     config: dict[str, Any],
     problem: str,
@@ -92,7 +104,16 @@ def _fallback_verdict(
         provider, model, config.get("fallback_protocol"), keys, discovery, catalog_ids
     )
     found = discovery.get(provider)
-    if fb_problem is None or found is None or not found.get("ok"):
+    # "Not asked yet" forgives a fallback whose only problem is that its model
+    # may have been retired — that is a discovery question, and answering it
+    # needs the network. It does not forgive a fallback with no model or no
+    # credential, which is already true of the store we hold. Without this, a
+    # role whose primary and fallback both need a key reported as "may run on
+    # its fallback", and neither the preflight nor the repair screen named the
+    # one thing the user could act on.
+    if fb_problem is None or (
+        (found is None or not found.get("ok")) and not proven_offline(fb_problem)
+    ):
         assurance, note = _describe(provider, model, discovery)
         verified = found is not None and bool(found.get("ok"))
         lead = "runs on its fallback" if verified else "may run on its fallback"
@@ -153,6 +174,59 @@ def target_problem(
     if found and found.get("ok") and (provider, model) not in catalog_ids:
         return f'{provider} no longer reports "{model}"'
     return None
+
+
+def config_problems(
+    configs: list[dict[str, Any]],
+    keys: dict[str, dict[str, Any]],
+    roles: Sequence[str] | None = None,
+) -> list[tuple[str, str]]:
+    """Roles that cannot be called, judged from the store alone — no discovery.
+
+    This is the preflight half of the same question `plan_role_repair` answers
+    with discovery, and it asks `target_problem` for both, because two copies of
+    "does this role work" is how the Settings screen and the transcript end up
+    disagreeing about the same database.
+
+    Discovery is left out on purpose. This runs at the start of a goal, where
+    asking four providers to introduce themselves would cost seconds and could
+    itself fail — and a provider that was never asked proves nothing, so the only
+    reports here are the two facts the store already holds: no model chosen, and
+    a provider that needs a credential that is not stored. A role whose fallback
+    target is configured and sound is not named, for the same reason the repair
+    plan leaves it alone: warning about a role that will run is noise that
+    teaches the reader to ignore the line.
+
+    `roles` closes the one hole the repair screen has. It iterates stored rows,
+    so a role with no row is invisible to it — and `get_config` answers such a
+    role with a 404, which is the least useful thing the engine can say about
+    one of its own eight slots. The schema backfills a row for every role on
+    every connection, so this is defence rather than a live path, and it costs
+    one comparison.
+    """
+    stored = {str(c.get("role") or "") for c in configs}
+    broken: list[tuple[str, str]] = [
+        (role, "no configuration is stored for this role")
+        for role in (roles or [])
+        if role not in stored
+    ]
+    for config in configs:
+        role = str(config.get("role") or "?")
+        problem = target_problem(
+            config.get("provider"),
+            config.get("model_name"),
+            config.get("protocol"),
+            keys,
+            {},
+            set(),
+        )
+        if problem is None:
+            continue
+        verdict, detail = _fallback_verdict(config, problem, keys, {}, set())
+        if verdict is not None:
+            continue
+        broken.append((role, f"{problem}; {detail}" if detail else problem))
+    return broken
 
 
 def provider_is_keyless(provider: str, keys: dict[str, dict[str, Any]]) -> bool:
