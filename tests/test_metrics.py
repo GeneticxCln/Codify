@@ -103,32 +103,80 @@ class RoleSuccessRateCase(unittest.TestCase):
         events = [
             stage_event("verifier", "pass"),
             stage_event("verifier", "pass"),
-            stage_event("verifier", "fail"),
+            stage_event("verifier", "invalid"),
             stage_event("verifier", "cancelled"),
         ]
         rates = metrics.role_success_rate(events)["verifier"]
         self.assertEqual(rates["runs"], 4)
         # Cancelled is not in the denominator: it has not happened yet.
         self.assertEqual(rates["cancelled"], 1)
+        # `invalid` is the reply the engine could not use — a real failure, and
+        # the only kind this table has left. `fail` would not be: it is the
+        # verifier reporting red tests, which is the job.
         self.assertEqual((rates["succeeded"], rates["failed"]), (2, 1))
         self.assertEqual(rates["success_rate"], 67)
 
     def test_a_verifier_that_fails_is_a_role_working_not_a_role_broken(self) -> None:
         """The rate is about the role, not the goal: reporting a healthy
-        verifier as broken is the failure mode this split exists to avoid. The
-        two failures below are both failures, and the histogram is what tells a
-        reader which one it was looking at."""
+        verifier as broken is the failure mode this split exists to avoid. A
+        `fail` is the verifier reading the tests and saying they are red —
+        precisely what it is for. Only a reply the engine could not use counts
+        against it, and the histogram is what tells a reader which it was."""
         reported = metrics.role_success_rate([stage_event("verifier", "fail")])["verifier"]
-        self.assertEqual(reported["failed"], 1)
-        self.assertEqual(reported["success_rate"], 0)
+        self.assertEqual(reported["succeeded"], 1)
+        self.assertEqual(reported["failed"], 0)
+        self.assertEqual(reported["success_rate"], 100)
         broken = metrics.role_success_rate([stage_event("verifier", "invalid")])["verifier"]
         self.assertEqual(broken["failed"], 1)
+        self.assertEqual(broken["success_rate"], 0)
         self.assertNotEqual(
             broken["outcomes"], reported["outcomes"],
-            "two failures that name themselves differently must be distinguishable",
+            "a verifier that worked and one that did not must be distinguishable",
         )
         self.assertEqual(reported["outcomes"], {"fail": 1})
         self.assertEqual(broken["outcomes"], {"invalid": 1})
+
+    def test_everything_the_success_table_says_is_a_role_working_counts_as_one(self) -> None:
+        """Named by outcome rather than by reading the table back to itself: a
+        comment and a table can drift apart silently, and that drift is exactly
+        the bug — the docstring names three outcomes the table used to omit, and
+        each omission moved a working role into the failure column with nothing
+        on any surface to say so."""
+        for stage, outcome in (
+            ("verifier", "fail"),
+            ("critic", "request_changes"),
+            ("laya", "block"),
+        ):
+            with self.subTest(stage=stage, outcome=outcome):
+                rate = metrics.role_success_rate([stage_event(stage, outcome)])[stage]
+                self.assertEqual(rate["succeeded"], 1, f"{stage}/{outcome} must be the role working")
+                self.assertEqual(rate["failed"], 0)
+                self.assertEqual(rate["success_rate"], 100)
+
+    def test_an_outcome_the_table_does_not_claim_is_counted_against_the_role(self) -> None:
+        """The mirror of the test above, so the table cannot be widened into
+        meaninglessness by putting every outcome in the success set."""
+        for stage, outcome in (
+            ("verifier", "invalid"),
+            ("critic", "invalid"),
+            ("laya", "unavailable"),
+            ("planner", "unavailable"),
+        ):
+            with self.subTest(stage=stage, outcome=outcome):
+                rate = metrics.role_success_rate([stage_event(stage, outcome)])[stage]
+                self.assertEqual(rate["failed"], 1, f"{stage}/{outcome} must count against the role")
+                self.assertEqual(rate["success_rate"], 0)
+
+    def test_a_gate_that_could_not_run_is_not_reported_as_one_that_succeeded(self) -> None:
+        """The distinction `LayaDecision.unavailable` exists to carry: a fresh
+        install with no model for the gate is a skip and scores as fine, while a
+        configured gate whose call failed is `unavailable` and must not inherit
+        that score."""
+        skipped = metrics.role_success_rate([stage_event("laya", "skipped")])["laya"]
+        self.assertEqual(skipped["succeeded"], 1)
+        broken = metrics.role_success_rate([stage_event("laya", "unavailable")])["laya"]
+        self.assertEqual(broken["failed"], 1)
+        self.assertNotEqual(skipped["outcomes"], broken["outcomes"])
 
     def test_the_outcome_histogram_is_always_shipped(self) -> None:
         rates = metrics.role_success_rate([stage_event("critic", "approve")])
@@ -321,6 +369,34 @@ class FailureBreakdownCase(unittest.TestCase):
              "timestamp": 1.7e9, "payload": {}},
             {"type": "test_result", "goal_id": "g1", "step_id": "s1", "sequence": 3,
              "timestamp": 1.7e9, "payload": {"verdict": "pass"}},
+        ]
+        out = metrics.failure_breakdown(events)
+        self.assertEqual((out["retries"], out["recovered"]), (1, 1))
+
+    def test_a_pass_that_came_before_the_retry_is_not_a_recovery(self) -> None:
+        """The pass the retry was sent to undo must not be the one that earns
+        the credit: scored without order, this reads as a loop that recovered
+        when the loop had not started yet."""
+        events = [
+            {"type": "test_result", "goal_id": "g1", "step_id": "s1", "sequence": 1,
+             "timestamp": 1.0, "payload": {"verdict": "pass"}},
+            {"type": "fix_retry", "goal_id": "g1", "step_id": "s1", "sequence": 2,
+             "timestamp": 2.0, "payload": {"attempt": 1}},
+            {"type": "test_result", "goal_id": "g1", "step_id": "s1", "sequence": 3,
+             "timestamp": 3.0, "payload": {"verdict": "fail"}},
+        ]
+        out = metrics.failure_breakdown(events)
+        self.assertEqual((out["retries"], out["recovered"]), (1, 0))
+
+    def test_the_pass_after_the_retry_is_what_counts(self) -> None:
+        """The same three events with the outcome that actually recovered."""
+        events = [
+            {"type": "test_result", "goal_id": "g1", "step_id": "s1", "sequence": 1,
+             "timestamp": 1.0, "payload": {"verdict": "fail"}},
+            {"type": "fix_retry", "goal_id": "g1", "step_id": "s1", "sequence": 2,
+             "timestamp": 2.0, "payload": {"attempt": 1}},
+            {"type": "test_result", "goal_id": "g1", "step_id": "s1", "sequence": 3,
+             "timestamp": 3.0, "payload": {"verdict": "pass"}},
         ]
         out = metrics.failure_breakdown(events)
         self.assertEqual((out["retries"], out["recovered"]), (1, 1))

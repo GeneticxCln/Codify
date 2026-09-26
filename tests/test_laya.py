@@ -240,11 +240,31 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(decision.blocked)
         assert decision.skipped_reason is not None, "a skipped gate says why"
         self.assertIn("connection refused", decision.skipped_reason)
+        # A gate that was configured and whose call failed is not the same
+        # fact as one this install never set up, and the per-role rate is
+        # scored differently for each.
+        self.assertTrue(decision.unavailable, "a gate that could not answer says so")
+
+    async def test_a_gate_with_no_model_configured_is_a_skip_not_a_failure(self) -> None:
+        """The other half of `unavailable`. No model chosen for the laya role
+        is a fresh install, and reporting it as a broken gate would paint every
+        new install red the first time it runs."""
+        provider = _StubProvider({"status": "ok"})
+        conn, registry = _registry_with(provider, self.root, model="")
+        try:
+            decision = await LayaService(registry=registry).decide({"request": "x"})
+        finally:
+            conn.close()
+        self.assertEqual(decision.engine, "skipped")
+        self.assertFalse(decision.unavailable, "never configured is not a gate failure")
+        assert decision.skipped_reason is not None
+        self.assertIn("no model configured", decision.skipped_reason)
 
     async def test_no_registry_and_no_sdk_is_skipped(self) -> None:
         decision = await LayaService(registry=None).decide({"request": "x"})
         self.assertEqual(decision.engine, "skipped")
         self.assertFalse(decision.blocked)
+        self.assertFalse(decision.unavailable, "nothing to run is not a gate failure")
 
     async def test_sdk_is_preferred_over_the_llm_fallback(self) -> None:
         calls: list[dict[str, Any]] = []

@@ -18,7 +18,7 @@ do is to lie:
    A percentage with its evidence hidden is a claim.
 3. **Tokens are tokens.** There is no price table here and no currency on any
    surface that reads these numbers, because a price that silently stops
-   matching the provider is worse than no price at all (docs/04 §4.4).
+   matching the provider is worse than no price at all (docs/04 §4.7).
 
 Pure functions over parsed event dicts, the same shape `engine/stats.py` takes
 and for the same reason: the arithmetic is testable without an HTTP server and
@@ -34,17 +34,22 @@ from typing import Any
 # statement about the ROLE, not about the goal: a verifier that returns "fail"
 # and a critic that requests changes have both worked exactly as specified,
 # and counting those as role failures would report a healthy pipeline as
-# broken. The goal-level rate already exists (`engine/stats.py`) and answers
-# the other question. The outcome histogram ships alongside every rate so a
-# reader who means the other thing can compute it without asking the engine.
+# broken. The same rule covers a gate that blocks a real injection — refusing
+# is what a gate is for — and it is named here because leaving any of these out
+# of the table silently moves them to the failure column: an outcome that is
+# not in a stage's success set is counted as a failure by `role_success_rate`,
+# with nothing else to say so. The goal-level rate already exists
+# (`engine/stats.py`) and answers the other question. The outcome histogram
+# ships alongside every rate so a reader who means the other thing can compute
+# it without asking the engine.
 STAGE_SUCCESS_OUTCOMES: dict[str, frozenset[str]] = {
-    "laya": frozenset({"allow", "skipped"}),
+    "laya": frozenset({"allow", "block", "skipped"}),
     "librarian": frozenset({"pack", "incomplete"}),
     "design": frozenset({"contract", "declined"}),
     "planner": frozenset({"plan", "consult"}),
     "fixer": frozenset({"wrote", "no_change", "replayed"}),
-    "verifier": frozenset({"pass", "skip"}),
-    "critic": frozenset({"approve"}),
+    "verifier": frozenset({"pass", "skip", "fail"}),
+    "critic": frozenset({"approve", "request_changes"}),
     "scribe": frozenset({"committed", "nothing_to_commit", "not_a_repo", "skipped"}),
 }
 # The stages, in pipeline order, so a table reads as the pipeline and not as an
@@ -104,7 +109,7 @@ def role_success_rate(
 ) -> dict[str, dict[str, Any]]:
     """Per role: how often it did its job, and what that cost.
 
-    Reads the `stage_result` events the executor publishes (docs/04 §4.4) and
+    Reads the `stage_result` events the executor publishes (docs/04 §4.7) and
     the `usage` events for spend. A role that has never run is present with
     zero counts and a `null` rate — an install that has only ever run
     `/start` has not proved its librarian broken, and a row of 0% would say
@@ -358,14 +363,21 @@ def failure_breakdown(
 def _recovery(events: list[dict[str, Any]]) -> tuple[int, int]:
     """(retries, retries the step then got past) — per (goal, step).
 
-    A retry counts as recovered when a later `test_result` on the same step
+    A retry counts as recovered when a *later* `test_result` on the same step
     reports a verdict that is not a failure, or the step reaches COMPLETED.
-    Both are read from the same log, and the pairing is what makes the number
-    mean "the loop worked" rather than "some other step passed later".
+    Both are read from the same log, in order, and the pairing is what makes
+    the number mean "the loop worked" rather than "some other step passed
+    later".
+
+    The order is the point. Two sets of keys, one walked before the other,
+    would score a step that passed and *then* was retried as recovered — the
+    pass it was rewarded for is the one the retry was sent to fix. So a
+    finish only counts when its step has already been retried by the time it
+    arrives, and `events` is chronological (`_sweep_metrics` orders on
+    timestamp then sequence).
     """
     retried: set[tuple[str, str]] = set()
-    finished: set[tuple[str, str]] = set()
-    seen_order: list[tuple[str, str]] = []
+    recovered: set[tuple[str, str]] = set()
     for ev in events:
         goal_id = str(ev.get("goal_id") or "")
         step_id = str(ev.get("step_id") or "")
@@ -375,11 +387,10 @@ def _recovery(events: list[dict[str, Any]]) -> tuple[int, int]:
         kind = ev.get("type")
         payload = ev.get("payload") or {}
         if kind == "fix_retry":
-            if key not in retried:
-                retried.add(key)
-                seen_order.append(key)
-        elif kind == "test_result" and payload.get("verdict") in ("pass", "skip"):
-            finished.add(key)
-        elif kind == "step_status" and payload.get("status") == "COMPLETED":
-            finished.add(key)
-    return len(retried), sum(1 for key in seen_order if key in finished)
+            retried.add(key)
+        elif key in retried:
+            if kind == "test_result" and payload.get("verdict") in ("pass", "skip"):
+                recovered.add(key)
+            elif kind == "step_status" and payload.get("status") == "COMPLETED":
+                recovered.add(key)
+    return len(retried), len(recovered)

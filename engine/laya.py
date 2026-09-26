@@ -85,6 +85,16 @@ SDK_DISABLE_ENV = "CODIFY_LAYA_SDK"  # set to "0" to force the LLM fallback
 MAX_REQUEST_CHARS = 4000
 
 
+class LayaNotConfigured(RuntimeError):
+    """This install has not chosen a model for the `laya` role yet.
+
+    Its own type, not a plain RuntimeError, because it is not a failure: a
+    fresh install has no model set for a role nobody configured, and folding
+    it into "the fallback model failed" both mislabels the reason and reports
+    every new install's gate as broken.
+    """
+
+
 @dataclass
 class LayaDecision:
     """One gate decision, with the provenance the UI needs to be honest."""
@@ -96,6 +106,14 @@ class LayaDecision:
     block_reason: str | None = None
     warnings: list[str] = field(default_factory=list)
     skipped_reason: str | None = None
+    # True when the gate *could not* answer (it was configured and the call
+    # failed, or the reply held nothing usable), as opposed to this install
+    # simply not running one. Only meaningful when `engine == "skipped"`.
+    # The two are the same sentence in `skipped_reason` and a different fact
+    # about the pipeline: "no model chosen yet" is a fresh install, while
+    # "connection refused" is a gate that failed. Collapsing them reported the
+    # second as the first, and a per-role rate scored a broken gate 100%.
+    unavailable: bool = False
     provider: str | None = None
     model: str | None = None
 
@@ -108,6 +126,7 @@ class LayaDecision:
             "block_reason": self.block_reason,
             "warnings": self.warnings,
             "skipped_reason": self.skipped_reason,
+            "unavailable": self.unavailable,
             "provider": self.provider,
             "model": self.model,
             "policy": {
@@ -313,7 +332,7 @@ class LayaService:
         # No model chosen yet is a normal fresh-install state, not a gate
         # failure: say so, and let the pipeline continue without a gate.
         if not (cfg.model_name or "").strip():
-            raise RuntimeError("no model configured for the laya role")
+            raise LayaNotConfigured("no model configured for the laya role")
 
         system = cfg.system_prompt_override or DEFAULT_PROMPTS["laya"]
         raw = await provider.complete(
@@ -353,14 +372,20 @@ class LayaService:
         if self._registry is not None:
             try:
                 answers, provider, model = await self._decide_with_llm(state)
+            except LayaNotConfigured as exc:
+                # This install has not set the gate's model. Deliberate, and
+                # scored as a skip rather than as a gate that broke.
+                return LayaDecision(engine="skipped", skipped_reason=str(exc))
             except Exception as exc:
                 return LayaDecision(
                     engine="skipped",
+                    unavailable=True,
                     skipped_reason=f"laya SDK unavailable and the fallback model failed ({type(exc).__name__}: {exc})",
                 )
             if not answers:
                 return LayaDecision(
                     engine="skipped",
+                    unavailable=True,
                     skipped_reason="fallback model returned no typed answers",
                 )
             blocked, reason, warnings = evaluate_policy(answers)
