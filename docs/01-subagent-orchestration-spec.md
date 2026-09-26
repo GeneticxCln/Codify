@@ -15,7 +15,7 @@ split rather than asking the prompts to be well behaved:
 |---|---|---|---|
 | `laya` | typed decisions only | Typed pre-flight decisions (intent / risk / injection) — may fail the goal | `05` §5 |
 | `librarian` | **read** files, **search** the tree, read-only git, read-only inspect commands. Cannot write. | The evidence pack everything downstream plans from | `04` §4.0 |
-| `design` | reasons only, no tools; cannot write | The locked direction (artifact, design system, tokens, components, acceptance) that the planner plans against and the fixer obeys — or, in a design-deliverable goal, the workspace's own `DESIGN.md` in draft | `04` §4.0a, §4.0a.2 |
+| `design` | reasons only, no tools; cannot write | The locked direction (artifact, design system, tokens, components, acceptance) that the planner plans against and the fixer obeys — or, in a deliverable goal, the workspace's own `DESIGN.md` (`design`) or `CODIFY.md` (`knowledge`) in draft | `04` §4.0a, §4.0a.2, §4.9 |
 | `planner` | reasons only, no tools | Ordered `PlanStep[]` from the goal + the evidence pack | `04` §4.1 |
 | `fixer` | **the only writer** | File edits | `04` §4.2 |
 | `verifier` | **the only role that executes a command** | Argv + verdict + what actually ran | `04` §4.3 |
@@ -50,6 +50,13 @@ Two rules make its evidence usable:
    logged (`librarian cited N path(s) it never saw`). A confident list of files that do not exist is
    how "planning from the repository" becomes planning from a hallucination.
 
+**One thing is read *before* all of that, and is deliberately not evidence.** A workspace's
+`CODIFY.md` (`04` §4.9) is handed to the librarian as a **prior**: it is capped, its backticked
+paths are checked against the tree and the ones that no longer resolve are reported as stale, and it
+never enters the evidence pack's `files` — the pack's whole value is that a path in it was actually
+seen, and a note somebody wrote months ago cannot make that promise. It is there to aim reads, not
+to be cited.
+
 ### 1.1a Why the design agent exists
 
 The librarian fixed the *where*; the design agent fixes the *what it should look like*. Without it,
@@ -73,13 +80,16 @@ Two rules keep it from becoming a tax on goals with no visual surface:
 
 Its output contract, vocabulary and bounds live in `04` §4.0a.
 
-**One goal mode inverts this without changing the slot.** A goal created with `mode: "design"`
+**Two goal modes invert this without changing the slot.** A goal created with `mode: "design"`
 (`04` §4.0a.2) makes the workspace's brand contract the deliverable: the same agent, the same single
 bounded call, the same no-tools rule — but its `design_md` body is what a planned step writes to
-`DESIGN.md`, verbatim and whole. The invariants are untouched, which is the point: the fixer is still
-the only writer, the verifier still reviews instead of running something it does not have, the critic
-still decides whether the step stands, and the pin is still the user's own action. Nothing in the
-engine ever sets `workspaces.design_contract_path` from a model's output.
+`DESIGN.md`, verbatim and whole. `mode: "knowledge"` (`04` §4.9) is the same shape pointed at
+`CODIFY.md`, the file the *next* run's librarian reads as a prior. The invariants are untouched in
+both cases, which is the point: the fixer is still the only writer, the verifier still reviews
+instead of running something it does not have, the critic still decides whether the step stands, and
+the pin is still the user's own action. Nothing in the engine ever sets
+`workspaces.design_contract_path` from a model's output, and nothing outside a step ever writes
+`CODIFY.md`.
 
 ### 1.2 Legacy role ids
 

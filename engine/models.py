@@ -26,7 +26,7 @@ ProviderProtocol = Literal["anthropic", "openai_compat", "ollama", "google"]
 # the brand file: instead of deriving a contract from an existing one (or from
 # nothing), its output becomes the workspace's DESIGN.md — reviewed by the
 # critic before it is offered to be pinned.
-GoalMode = Literal["normal", "design"]
+GoalMode = Literal["normal", "design", "knowledge"]
 
 GoalStatus = Literal[
     "PLANNING", "PENDING", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"
@@ -241,7 +241,10 @@ class Goal(BaseModel):
     # mode: what this goal is *for*. "normal" is the default pipeline; "design"
     # makes the workspace's own brand contract the deliverable — the design
     # agent proposes/revises DESIGN.md, a step writes it for real, and the
-    # critic reviews it before anyone pins it. See docs/04 §4.0a.2.
+    # critic reviews it before anyone pins it. "knowledge" inverts the same
+    # shape around CODIFY.md: the design agent authors the file, a step writes
+    # it, the critic reviews it, and every later goal's librarian reads it as a
+    # prior. See docs/04 §4.0a.2.
     mode: GoalMode = "normal"
     # trace: record this goal's model calls so the run can be replayed without
     # a provider (docs/04 §8). Off by default and per goal, because a
@@ -304,9 +307,9 @@ class GoalCreate(BaseModel):
     dry_run: bool = False
     plan_only: bool = False
     parallel: bool = False
-    # Which pipeline this goal runs. Only "normal" and "design" exist; a client
-    # sending anything else gets a 422 from the model itself, not a goal that
-    # quietly runs the default.
+    # Which pipeline this goal runs. "normal", "design" and "knowledge" exist; a
+    # client sending anything else gets a 422 from the model itself, not a goal
+    # that quietly runs the default.
     mode: GoalMode = "normal"
     # Opt this goal into tracing (docs/04 §8). A client may also turn it on
     # later with `PUT /goals/{id}/trace` before the run starts; both are the

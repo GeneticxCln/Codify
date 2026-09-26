@@ -160,3 +160,21 @@ DESIGN_BRIEF_PROMPT = (
     "pins it as the workspace's contract."
 )
 
+KNOWLEDGE_BRIEF_PROMPT = (
+    "This is a KNOWLEDGE goal: what this goal produces is what Codify knows "
+    "about this repository, written to CODIFY.md. You are its author. "
+    "Read the request, the librarian's evidence, and the workspace's current "
+    "CODIFY.md if one exists — it is revision material and much of it may be "
+    "out of date, not a draft to polish. "
+    "Write the complete CODIFY.md body in design_md. It is read by the next "
+    "run's librarian as a PRIOR and never as evidence, so its only job is to "
+    "send that run to the right files: for each area, what lives there, the "
+    "entry points and the conventions, and the commands that matter. State "
+    "nothing you have not seen in the evidence pack, and prefer naming a file "
+    "you were shown over describing it — a path the reader cannot resolve is "
+    "worthless and will be reported as stale. "
+    "You still write nothing yourself: the body you produce is written to "
+    "CODIFY.md by a planned step, then reviewed by the critic, and it becomes "
+    "the next run's prior from then on."
+)
+

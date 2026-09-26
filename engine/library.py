@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 from pathlib import Path
 
 from engine.fs import FileSystemService, PathEscapeError
@@ -504,3 +505,121 @@ __all__ = [
     "MAX_READ_CHARS",
     "MAX_ROUND_CHARS",
 ]
+
+
+# ── workspace knowledge ──────────────────────────────────────────────────────
+
+# The file a workspace writes down what a previous run learned, and the only
+# name it is read under. Deliberately not a dotted config, not a cache, and not
+# in `~/.codify`: this is knowledge *about this repository*, it belongs in the
+# repository, it is reviewed in a diff, and it dies with the clone.
+ROOT_KNOWLEDGE_MD = "CODIFY.md"
+
+# A prior, not an input. Large enough for a real architecture note, small enough
+# that it cannot crowd out the workspace the librarian is about to read — and it
+# is capped here rather than by the model's cooperation, because the whole risk
+# of trusting a file is that it grows.
+MAX_KNOWLEDGE_CHARS = 8_000
+
+# A path-shaped token in a backtick pair is how prose names a file. Only
+# backticked ones count: a bare "src/app.py" in running text is too weak a
+# signal to call a knowledge file stale over.
+_PATH_TOKEN = re.compile(r"`([^`\n]{1,200})`")
+
+
+def _cited_paths(text: str) -> list[str]:
+    """Path-shaped tokens in `text`, deduplicated, in first-seen order."""
+    found: list[str] = []
+    for raw in _PATH_TOKEN.findall(text):
+        token = raw.strip()
+        # A path needs a separator to be a path here, and a trailing period or
+        # comma is prose punctuation rather than part of the name.
+        token = token.rstrip(".,;:")
+        if "/" not in token or token.startswith(("http://", "https://")):
+            continue
+        if token not in found:
+            found.append(token)
+    return found
+
+
+def read_knowledge(
+    root: str, tree_files: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """The workspace's own knowledge, or None when it has none.
+
+    Returns a dict rather than a bare string because every consumer needs the
+    same three facts alongside the text: how much of it was read, whether it was
+    cut short, and whether it names files this workspace no longer has.
+
+    That last one is the whole reason this is not just "read the file". A
+    knowledge file is written once and read for months; the repository moves
+    under it. Paths it names that are gone from the tree are reported as stale
+    so the librarian is told which parts of the prior to distrust, instead of
+    being handed a confident description of a module that was deleted in March.
+
+    `tree_files` is the librarian's own depth-limited listing, so "stale" here
+    means "not in what we were shown" — a path deeper than the listing is
+    reported, which is a mild false positive the prompt is careful about. Pass
+    `None` for a caller with no listing: that is *no opinion*, and it must not
+    degrade into an empty one, because "this file names nothing that exists" is
+    a finding about a repository, and a caller that never looked would be
+    reporting it anyway.
+    """
+    text = FileSystemService(root).read_text_or_none(ROOT_KNOWLEDGE_MD)
+    if text is None or not text.strip():
+        return None
+
+    truncated = len(text) > MAX_KNOWLEDGE_CHARS
+    if truncated:
+        text = text[:MAX_KNOWLEDGE_CHARS]
+
+    named = _cited_paths(text)
+    stale = [p for p in named if p not in tree_files] if tree_files is not None else []
+    return {
+        "path": ROOT_KNOWLEDGE_MD,
+        "text": text,
+        "chars": len(text),
+        "truncated": truncated,
+        "paths": named[:20],
+        "stale_paths": stale[:10],
+    }
+
+
+def format_knowledge(knowledge: dict[str, Any] | None) -> str:
+    """Render the prior for a prompt, labelled so it cannot be read as fact.
+
+    The wording is the load-bearing part. A prior that arrives without its
+    caveats is a hallucination with a citation, and the librarian's evidence
+    pack is built on the opposite premise — that a path in it was actually seen.
+    """
+    if not knowledge:
+        return "(none — this workspace has written down nothing yet)"
+    lines = [
+        f"--- {knowledge['path']} — what a PREVIOUS run of Codify concluded ---",
+        "This is a prior, NOT evidence. It was written by an earlier run and the "
+        "repository may have moved since. Nothing in it is verified: a path named "
+        "below is a claim about a file, and you have not opened it.",
+    ]
+    stale = knowledge.get("stale_paths") or []
+    if stale:
+        shown = ", ".join(stale[:5])
+        lines += [
+            "",
+            f"STALE — do not rely on these: {shown}",
+            f"The knowledge file names {len(stale)} path(s) that were NOT in the tree "
+            "listing you were given. Either they were deleted, renamed or moved, or "
+            "they are deeper than the listing reaches. Treat every claim about them "
+            "as wrong until you open the file yourself and see it.",
+        ]
+    lines += ["", knowledge["text"], f"--- end {knowledge['path']} ---"]
+    if knowledge.get("truncated"):
+        lines.append(
+            f"(truncated at {MAX_KNOWLEDGE_CHARS} of {len(knowledge['text'])}+ chars — "
+            "the rest of that file was not read)"
+        )
+    lines.append(
+        "Use it to aim your reads — a prior naming the right file saves a round. "
+        "Cite nothing from it as evidence: every path in your pack must be one you "
+        "opened, matched or saw listed."
+    )
+    return "\n".join(lines)

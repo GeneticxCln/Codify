@@ -35,8 +35,9 @@ GoalStatus = Literal["PLANNING", "PENDING", "RUNNING", "PAUSED", "COMPLETED", "F
 
 # What the goal is for. "design" makes the workspace's own brand contract the
 # deliverable — the design agent authors DESIGN.md instead of deriving a
-# direction from one (§4.0a.2).
-GoalMode = Literal["normal", "design"]
+# direction from one (§4.0a.2), and the workspace's own written-down knowledge
+# from the other (§4.9).
+GoalMode = Literal["normal", "design", "knowledge"]
 
 class Goal(BaseModel):
     id: str
@@ -58,8 +59,15 @@ class Goal(BaseModel):
 
 `mode` is orthogonal to `dry_run` and `plan_only`: it says what the goal is *for*, not how it
 executes. `GoalCreate.mode` defaults to `"normal"` and is validated by the model, so a client cannot
-send a third value and get a goal that quietly runs the default pipeline — the literal rejects it
+send a fourth value and get a goal that quietly runs the default pipeline — the literal rejects it
 with a `422`.
+
+`"design"` and `"knowledge"` are one shape pointed at two files, and the difference is only which
+one: a **deliverable** goal has the design agent author a document, a step write it verbatim, and
+the critic review it before anyone relies on it. `"design"` writes `DESIGN.md`, the contract every
+later goal obeys; `"knowledge"` writes `CODIFY.md`, the prior every later run's librarian reads
+(§4.9). `DELIVERABLE_FILES` and `DELIVERABLE_ROLE` in `engine/executor.py` hold both, so the fixer,
+the verifier and the critic cannot disagree about which file is being delivered.
 
 `trace` is orthogonal to all three: it says whether the run's model calls are *recorded* (§8).
 `GoalCreate.trace` defaults to `False`, and because it is a copy of the model's output about the
@@ -146,8 +154,8 @@ before, so a new event type means a new row here in the same change):
 | `file_change_summary` | step | `{paths: [str], dry_run: bool, unchanged: [str]}` — `unchanged` are paths whose proposal already matched the file ("already matched — left alone") |
 | `agent_assigned` | any (`null` for laya) | `{role, provider, model}` — the model about to be called, published before the call |
 | `provider_fallback` | any | `{role, from: {provider, model}, to: {provider, model}, code, detail}` |
-| `library_evidence` | — | the checked evidence pack: `{summary, files: [{path, why, evidence}], symbols, conventions, test_command, risks, rounds, counts: {opened, matched, considered}, dropped_paths, capped}` (`04` §4.0) — `capped` is true when the round cap stopped the search with material still outstanding, the difference between "this workspace had nothing more to say" and "the engine stopped asking" |
-| `design_contract` | — | the locked direction: `{applies, artifact, direction, design_system: {name, source, origin}, tokens: {colors: [{name, value}], typography: [{name, value}], spacing: [str], radii: [str]}, components: [{name, purpose}], conventions, constraints, acceptance, design_md, mode?}` — `origin` is `pinned`\|"discovered"\|`null` (`04` §4.0a). `mode: "design"` and a non-empty `design_md` mark a design-deliverable goal, where the body is the artifact rather than advice (`04` §4.0a.2) |
+| `library_evidence` | — | the checked evidence pack: `{summary, files: [{path, why, evidence}], symbols, conventions, test_command, risks, rounds, counts: {opened, matched, considered}, dropped_paths, capped}` (`04` §4.0) — `capped` is true when the round cap stopped the search with material still outstanding, the difference between "this workspace had nothing more to say" and "the engine stopped asking" | A workspace's `CODIFY.md`, when it has one, is carried separately as `knowledge: {path, chars, truncated, stale_paths}` — a prior, never a cited file (§4.9).
+| `design_contract` | — | the locked direction: `{applies, artifact, direction, design_system: {name, source, origin}, tokens: {colors: [{name, value}], typography: [{name, value}], spacing: [str], radii: [str]}, components: [{name, purpose}], conventions, constraints, acceptance, design_md, mode?}` — `origin` is `pinned`\|"discovered"\|`null` (`04` §4.0a). `mode: "design"` or `"knowledge"` with a non-empty `design_md` marks a deliverable goal, where the body is the artifact rather than advice — `DESIGN.md` for `design` (§4.0a.2), `CODIFY.md` for `knowledge` (§4.9) |
 | `stage_result` | any | `{stage, role, step_id, ordinal, outcome, detail, duration_ms, tokens, calls}` — what one role stage achieved, what it spent, and how long it took (§4.7). `ordinal` disambiguates repeated stages in one scope: librarian rounds, planner consults, fixer attempts and passes. `outcome` is from the closed per-stage vocabulary in §4.7; `detail` is a short engine-authored note (a skip reason, a block reason), never model prose |
 | `plan_updated` | step | `{step_id, step_title, fields: [str], changes: {field: {before, after}}}` — only fields the patch edited, only those whose value actually changed |
 | `laya_decision` | — | the gate's full verdict: `{engine, answers, routing, blocked, block_reason, warnings, skipped_reason, provider, model, policy: {injection_block_threshold, risk_warn_level, clarify_warn_threshold}}` (`05`) |
@@ -239,7 +247,8 @@ CREATE TABLE goals (
   plan_only INTEGER NOT NULL DEFAULT 0,
   parallel INTEGER NOT NULL DEFAULT 0,
   -- What the goal is for: 'normal' pipeline or 'design' (the brand contract
-  -- itself is the deliverable, §4.0a.2). Added by ALTER TABLE for an existing
+  -- itself is the deliverable, §4.0a.2; 'knowledge' makes CODIFY.md the
+  -- deliverable instead, §4.9). Added by ALTER TABLE for an existing
   -- database — every old goal stays a 'normal' run.
   mode TEXT NOT NULL DEFAULT 'normal',
   version INTEGER NOT NULL DEFAULT 0,
@@ -377,7 +386,7 @@ Error body: `{ "code": str, "message": str }`.
 | `GET` | `/workspaces/{id}` | — | `Workspace` |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
 | `DELETE` | `/workspaces/{id}?delete_goals={bool}` | — | forgets the folder; **never touches `root_path`**. 409 `workspace_not_empty` (with the goal count) unless the cascade is requested, 409 `workspace_has_active_goals` if anything is PLANNING/RUNNING |
-| `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, mode?, provider?, model?, trace?}` extra=forbid — `mode` is `"normal"` \| `"design"` (`04` §4.0a.2); `trace` records the run's model calls (`04` §8) | `Goal` |
+| `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, mode?, provider?, model?, trace?}` extra=forbid — `mode` is `"normal"` \| `"design"` (`04` §4.0a.2) \| `"knowledge"` (`04` §4.9); `trace` records the run's model calls (`04` §8) | `Goal` |
 | `GET` | `/goals` | query: `workspace_id?`, `status?`, `limit` (1–200, default 50), `offset` | `Goal[]` — active goals first, then newest |
 | `GET` | `/goals/{id}` | — | `Goal` + `steps: PlanStep[]` |
 | `DELETE` | `/goals/{id}` | — | deletes the run record; events/steps/proposals cascade, counts returned. 409 `goal_in_progress` while PLANNING/RUNNING or a driver holds it. Never touches files |
@@ -893,6 +902,68 @@ reason as `engine/stats.py`). Three rules govern every number it produces:
 3. **Tokens are tokens.** There is no price table and no currency on any
    surface that reads these numbers, because a price that silently stops
    matching the provider is worse than no price at all.
+
+### 4.9 Workspace knowledge (`CODIFY.md`, `Goal.mode = "knowledge"`)
+
+Every goal's librarian starts from nothing: a title, a description and a depth-2 tree listing. A
+repository that has already worked this out — which module owns what, where the entry points are,
+what the commands are — pays to have it re-derived, and the derivation is the part that is most
+often confidently wrong.
+
+`CODIFY.md` at the workspace root is where a workspace writes that down. It is in the repository
+rather than in `~/.codify` because it is knowledge *about this repository*: it belongs in a diff, it
+is reviewed like code, and it dies with the clone.
+
+#### 4.9.1 It is a prior, and never evidence
+
+The evidence pack is built on one promise — a path in `files` is there because the engine actually
+opened it, matched a line in it, or saw it listed. `CODIFY.md` cannot make that promise about
+itself, so it never enters `files`, `symbols` or `dropped_paths`. It arrives in its own `knowledge`
+block and in the prompt, wrapped in `format_knowledge` (`engine/library.py`), which says in the
+prompt itself that it is *"a prior, NOT evidence"* and that every path in it is a claim about a file
+nobody opened.
+
+The test that matters is `tests/test_workspace_knowledge.py::LibrarianPriorTests::test_a_prior_never_becomes_evidence`:
+a pack that cited the prior would look identical to a pack built on a real reconnaissance pass, and
+that is the failure this section exists to prevent.
+
+Three further bounds, all enforced in `engine/library.py`:
+
+| Bound | Rule |
+|---|---|
+| Capped | `MAX_KNOWLEDGE_CHARS` (8 000), and the truncation is stated in the prompt and in the pack — a silently half-read prior is worse than none |
+| Staleness-checked | every backticked path-shaped token in the file is compared against the tree listing; those absent are reported as `stale_paths`, named in a `warn` log, and listed in the prompt as *"treat every claim about them as wrong"* |
+| Repeated every round | a later librarian round is a fresh model call, and a librarian that forgets the architecture note halfway through is worse than one that never read it |
+
+Only *backticked* tokens are treated as paths, and URLs are excluded. "Stale" means "not in the
+listing we were shown", so a path deeper than the depth-2 listing is a mild false positive — which
+is why the wording says "deleted, renamed or moved, **or deeper than the listing reaches**" rather
+than asserting the file is gone. Passing `tree_files=None` is *no opinion* and yields no stale paths
+at all; it must not degrade into an empty listing, which would report every path as stale.
+
+#### 4.9.2 Knowledge-deliverable goals
+
+`POST /goals` with `mode: "knowledge"` makes `CODIFY.md` the goal's deliverable, through the same
+four stages as §4.0a.2 and with the same rules: `_knowledge_deliverable` runs instead of `_design`
+(with `KNOWLEDGE_BRIEF_PROMPT`), a non-empty `design_md` is mandatory, a step writes it verbatim,
+and the critic reviews it before the user has it.
+
+| Stage | What changes |
+|---|---|
+| design | `_knowledge_deliverable` (`engine/executor.py`) appends `KNOWLEDGE_BRIEF_PROMPT` to the goal and the evidence pack, and shows the current `CODIFY.md` as **revision material, not a prior to trust** — read fresh rather than taken from the pack, because a prior is exactly what the pack must not carry. The reply is parsed by `_design_contract` and the body is mandatory, so a drafter that returns nothing raises `AgentOutputInvalid` and the goal still plans with a `warn` |
+| planner | `_design_text` names `CODIFY.md body (the file a step must produce)` — the filename comes from `DELIVERABLE_FILES[mode]`, not a literal, so a knowledge goal cannot plan a step that writes the wrong document |
+| fixer | the step whose `suggested_paths` names `CODIFY.md` is handed the reviewed draft verbatim. `_deliverable_write_path` matches on the mode's file, so a design goal is never handed a knowledge body and vice versa |
+| verifier | reviews the document instead of running a command — identical to §4.0a.2, and already mode-agnostic |
+| critic | told the step delivers the workspace's `CODIFY.md` itself, and why that matters here: a wrong claim in it misdirects the next run rather than the next goal. Given the full content, read through the same helper the verifier uses |
+
+**The fixer remains the only writer.** No role writes `CODIFY.md` outside a step: the design agent
+authors a body in its reply, `_knowledge_deliverable` publishes it as a `design_contract` event, and
+the file appears on disk only when a step writes it. A dry run proposes it and writes nothing, and
+the critic reviews the stored proposal — the same bytes Apply would replay.
+
+**The mode is one-off, not a setting.** Rewriting what Codify believes about a repository is a
+decision with a review step attached, so it is a goal mode rather than a workspace preference. The
+composer exposes it as *Knowledge Deliverable* beside *Design Deliverable*.
 
 ## 5. Sandbox argv allowlist
 

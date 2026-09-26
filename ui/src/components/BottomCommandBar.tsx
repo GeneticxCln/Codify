@@ -22,6 +22,7 @@ import {
   Workflow,
   Radio,
   Trash2,
+  BookOpen,
   Palette,
 } from "lucide-react";
 
@@ -893,6 +894,27 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
             >
               <Palette className="w-3.5 h-3.5" />
               <span>Design Deliverable</span>
+            </button>
+
+            {/* Knowledge deliverable: the same shape pointed at a different
+                file. CODIFY.md is what every later run's librarian reads first
+                — as a prior, never as evidence — so the reviewer here is
+                approving a description of the repository that will aim every
+                future run at files. A goal-mode toggle rather than a workspace
+                setting because it is a one-off rewrite, not a standing one. */}
+            <button
+              type="button"
+              onClick={() => onChangeGoalMode(goalMode === "knowledge" ? "normal" : "knowledge")}
+              title="Knowledge deliverable — draft or revise this workspace's CODIFY.md, which later runs read as a prior"
+              aria-pressed={goalMode === "knowledge"}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
+                goalMode === "knowledge"
+                  ? "bg-amber-600/20 border-amber-500/50 text-amber-300 hover:bg-amber-600/30"
+                  : "bg-[#21262d] border-[#30363d] text-gray-400 hover:bg-[#30363d]"
+              }`}
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>Knowledge Deliverable</span>
             </button>
           </div>
 

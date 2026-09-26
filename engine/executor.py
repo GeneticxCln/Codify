@@ -38,16 +38,23 @@ import uuid
 from typing import TYPE_CHECKING, Any
 from collections.abc import AsyncIterator, Callable
 
-from engine.default_prompts import DEFAULT_PROMPTS, DESIGN_BRIEF_PROMPT
+from engine.default_prompts import (
+    DEFAULT_PROMPTS,
+    DESIGN_BRIEF_PROMPT,
+    KNOWLEDGE_BRIEF_PROMPT,
+)
 from engine.fs import FileSystemService, PathEscapeError
 from engine.git import GitService
 from engine.library import (
     MAX_ROUND_CHARS,
     READ_ONLY_TIMEOUT_S,
+    ROOT_KNOWLEDGE_MD,
     LibraryService,
     format_command,
+    format_knowledge,
     format_read,
     format_search,
+    read_knowledge,
 )
 from engine.laya import LayaDecision, LayaService, build_state
 from engine.models import AgentConfig, AgentRole, Event, EventType, Goal, PlanStep
@@ -205,6 +212,42 @@ MAX_CONTRACT_FILE_CHARS = 20000
 # reads.
 MAX_DRIFT_DIFF_CHARS = 20000
 MAX_BRAND_DRIFTS = 8
+
+# The one file each deliverable mode writes, and what that file *is* to the
+# roles judging it. Both modes share a shape — an agent drafts the body, a step
+# writes it verbatim, the verifier and critic read the bytes — and differ only
+# in which file, so the two facts live in one table rather than in three `if
+# mode == "design"` branches that could disagree about what is being written.
+# A mode absent from this table has no deliverable, which is what stops a
+# normal goal from being handed a document to write.
+DELIVERABLE_FILES = {
+    "design": ROOT_DESIGN_MD,
+    "knowledge": ROOT_KNOWLEDGE_MD,
+}
+# What the file *is*, for the role that writes it, and what the critic is being
+# asked to approve. Two tables rather than one because the two prompts genuinely
+# say different things: the fixer is told to reproduce a draft, the critic to
+# judge a document. Both design strings are byte-for-byte what they were before
+# the second mode existed, because `tests/test_design_role.py` pins that wording
+# and a contract test that breaks on a reword is a contract test that will be
+# silenced rather than honoured.
+DELIVERABLE_ROLE = {
+    "design": "the workspace's brand contract, the file every later goal is planned against",
+    "knowledge": (
+        "the workspace's knowledge file, which every later run's librarian reads as a "
+        "prior — wrong in it sends the next run to the wrong file"
+    ),
+}
+DELIVERABLE_SUBJECT = {
+    "design": (
+        f"the workspace's {ROOT_DESIGN_MD} itself — the contract every later goal is "
+        "planned against"
+    ),
+    "knowledge": (
+        f"the workspace's {ROOT_KNOWLEDGE_MD} itself — the knowledge every later run's "
+        "librarian reads as a prior, so a wrong claim in it misdirects the next run"
+    ),
+}
 
 # How a deliverable is labelled to the two roles that judge it. The difference
 # between these two strings is the difference between "this is the file" and
@@ -972,6 +1015,9 @@ class ExecutorService:
                 if goal.mode == "design":
                     design = await self._design_deliverable(goal_id, goal, ws, evidence)
                     design_stage.record("contract")
+                elif goal.mode == "knowledge":
+                    design = await self._knowledge_deliverable(goal_id, goal, ws, evidence)
+                    design_stage.record("contract")
                 else:
                     design = await self._design(goal_id, goal, ws, evidence)
                     design_stage.record("contract" if design else "declined")
@@ -1117,10 +1163,24 @@ class ExecutorService:
         matched: set[str] = set()
 
         listing = "\n".join(tree["files"]) or "(no files)"
+        # A workspace that wrote down what it learned gets that read first. It
+        # is a prior, never evidence: it enters the prompt and the pack's
+        # `knowledge` block, and it does NOT enter `files`, so it cannot borrow
+        # the pack's "this path was actually opened" guarantee (docs/04 §4.9).
+        knowledge = read_knowledge(ws.root_path, listed)
+        if knowledge and knowledge["stale_paths"]:
+            self._log(
+                goal_id, None, "warn",
+                f"{knowledge['path']} names {len(knowledge['stale_paths'])} path(s) this "
+                f"workspace does not have ({', '.join(knowledge['stale_paths'][:3])}) — "
+                "told the librarian to distrust them rather than to follow them",
+            )
+        prior = format_knowledge(knowledge)
         prompt = (
                 f"Goal: {goal.title}\nDescription:\n{goal.description}\n\n"
                 f"Workspace tree (depth 2, {len(tree['files'])} entries"
-                f"{', TRUNCATED' if tree['truncated'] else ''}):\n{listing}"
+                f"{', TRUNCATED' if tree['truncated'] else ''}):\n{listing}\n\n"
+                f"{prior}"
             )
 
         last: dict[str, Any] = {}
@@ -1153,15 +1213,21 @@ class ExecutorService:
                     goal_id, None, "warn",
                     f"librarian asked for {refused} thing(s) it may not have — refused, not run",
                 )
+            # The prior is repeated every round on purpose: a later round is a
+            # fresh model call with a fresh prompt, and a librarian that
+            # forgets the architecture note halfway through is worse than one
+            # that never read it.
             prompt = (
                 f"Goal: {goal.title}\nDescription:\n{goal.description}\n\n"
                 f"Material you asked for:\n{text}\n\n"
+                f"{prior}\n\n"
                 "Now answer with the evidence pack. Set enough=true if you have what "
                 "the goal needs, or keep asking by filling reads/searches/git/run."
             )
 
         evidence = self._evidence_pack(
-            goal_id, last, opened, matched, listed, rounds_used, capped=capped,
+            goal_id, last, opened, matched, listed, rounds_used,
+            capped=capped, knowledge=knowledge,
         )
         self.goals.publish(self._event(goal_id, None, "library_evidence", evidence))
         self._log(
@@ -1290,6 +1356,7 @@ class ExecutorService:
         listed: set[str],
         rounds_used: int,
         capped: bool = False,
+        knowledge: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Keep only the claims the engine can stand behind.
 
@@ -1373,6 +1440,20 @@ class ExecutorService:
             # workspace has no more to say" and "the engine stopped asking",
             # and it is worth knowing in the pack rather than only in a log line.
             "capped": capped,
+            # The workspace's own prior, summarised and kept OUT of `files`,
+            # `symbols` and `dropped_paths`. Those three are the engine standing
+            # behind a claim; this is a claim, with the staleness check attached
+            # so the roles reading it can see how old it is. docs/04 §4.9.
+            "knowledge": (
+                {
+                    "path": knowledge["path"],
+                    "chars": knowledge["chars"],
+                    "truncated": knowledge["truncated"],
+                    "stale_paths": knowledge["stale_paths"],
+                }
+                if knowledge
+                else None
+            ),
         }
 
     def _suggested_paths_context(
@@ -1438,6 +1519,23 @@ class ExecutorService:
             lines.append("Conventions: " + "; ".join(evidence["conventions"]))
         if evidence.get("test_command"):
             lines.append("Test command this repository runs: " + " ".join(evidence["test_command"]))
+        known = evidence.get("knowledge")
+        if known:
+            # Last, and labelled: a prior that arrives first reads as a fact.
+            lines += [
+                "",
+                f"PRIOR — not evidence: this workspace's {known['path']} was read this "
+                f"run ({known['chars']} chars"
+                + (", truncated" if known["truncated"] else "")
+                + "). It was written by an earlier run and none of it is verified; "
+                "use it to aim your steps' paths, and do not restate it as a finding.",
+            ]
+            if known.get("stale_paths"):
+                lines.append(
+                    "It names path(s) absent from this workspace: "
+                    + ", ".join(known["stale_paths"][:5])
+                    + ". Do not plan a step against those."
+                )
         if evidence.get("risks"):
             lines.append("Risks: " + "; ".join(evidence["risks"]))
         if evidence.get("dropped_paths"):
@@ -1491,10 +1589,12 @@ class ExecutorService:
                 "rather than handed an invented one",
             )
             return {}
-        self.goals.publish(self._event(
-            goal_id, None, "design_contract", {**contract, "mode": goal.mode},
-        ))
-        return contract
+        published = {**contract, "mode": goal.mode}
+        self.goals.publish(self._event(goal_id, None, "design_contract", published))
+        # The published dict, not a narrower one: the local `design` and
+        # `_design_for()` then agree on their shape, so a caller cannot read
+        # `mode` from one and miss it in the other.
+        return published
 
     async def _design_deliverable(
         self, goal_id: str, goal: Goal, ws: Any, evidence: dict[str, Any],
@@ -1522,10 +1622,74 @@ class ExecutorService:
                 "design_md — without one there is nothing to deliver",
                 role="design",
             )
-        self.goals.publish(self._event(
-            goal_id, None, "design_contract", {**contract, "mode": "design"},
-        ))
-        return contract
+        published = {**contract, "mode": "design"}
+        self.goals.publish(self._event(goal_id, None, "design_contract", published))
+        return published
+
+    async def _knowledge_deliverable(
+        self, goal_id: str, goal: Goal, ws: Any, evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        """A knowledge-deliverable goal: the design agent authors CODIFY.md.
+
+        The same shape as a design deliverable with the relationship flipped
+        again, and that is the whole point of the mode. A design goal revises a
+        contract it is *bound* by; a knowledge goal rewrites a prior it is
+        *superseding*, so the existing file is shown as revision material and
+        the draft must stand on its own — a knowledge file that merely restates
+        last month's file is worth less than none, because it looks current.
+
+        The same body field carries it. `design_md` is the deliverable slot in
+        the design reply, and the alternative — a second body field per file —
+        would be a shape the model has to be told about twice.
+        """
+        prompt = self._knowledge_prompt(goal, evidence, ws)
+        out = await self.orchestrator.run_agent("design", goal_id, None, prompt)
+        contract = self._design_contract(out)
+        if not (contract.get("design_md") or "").strip():
+            raise AgentOutputInvalid(
+                f"a knowledge-deliverable goal must author the complete {ROOT_KNOWLEDGE_MD} "
+                f"body in design_md — without one there is nothing to deliver",
+                role="design",
+            )
+        published = {**contract, "mode": "knowledge"}
+        self.goals.publish(self._event(goal_id, None, "design_contract", published))
+        return published
+
+    def _knowledge_prompt(
+        self, goal: Goal, evidence: dict[str, Any], ws: Any,
+    ) -> str:
+        """The knowledge call's prompt: the goal, what is known, what came before.
+
+        The existing file is read here rather than from the pack because the
+        pack deliberately does not carry it: a prior is not evidence, and the
+        evidence block is the one part of these prompts the roles are told they
+        may rely on. Mixing the two would spend the pack's credibility on a file
+        nobody has checked.
+        """
+        known = read_knowledge(ws.root_path)
+        parts = [
+            f"Goal: {goal.title}\nDescription:\n{goal.description}",
+            f"What the librarian found:\n{self._evidence_text(evidence)}",
+            KNOWLEDGE_BRIEF_PROMPT,
+        ]
+        if known:
+            parts.append(
+                f"--- current {ROOT_KNOWLEDGE_MD} — revision material, NOT a prior you "
+                "may trust ---\n"
+                f"{known['text']}\n"
+                f"--- end {ROOT_KNOWLEDGE_MD} ---\n"
+                "The workspace has written knowledge down before. Check it against the "
+                "evidence pack above and keep only what the evidence supports: a claim "
+                f"this file makes that the pack cannot back is {ROOT_KNOWLEDGE_MD}'s "
+                "whole failure mode, because the next run reads it as a prior. Write the "
+                "file it should have."
+            )
+        else:
+            parts.append(
+                f"The workspace has no {ROOT_KNOWLEDGE_MD} today. That is the file this "
+                "goal writes, so design_md must be a complete, standalone document."
+            )
+        return "\n\n".join(parts)
 
     def _design_prompt(
         self, goal: Goal, evidence: dict[str, Any], brand: dict[str, Any] | None,
@@ -1804,27 +1968,38 @@ class ExecutorService:
                 lines.append(f"{label}: " + "; ".join(str(r) for r in rows))
         body = str(contract.get("design_md") or "")
         if body:
+            # Named from the mode, not hardcoded: a planner told to write
+            # "DESIGN.md body" during a knowledge goal plans a step that writes
+            # the wrong file, and the fixer is then handed a document it has no
+            # instruction to write.
+            target = DELIVERABLE_FILES.get(str(contract.get("mode") or ""), ROOT_DESIGN_MD)
             lines += [
                 "",
-                "--- DESIGN.md body (the file a step must produce) ---",
+                f"--- {target} body (the file a step must produce) ---",
                 body,
-                "--- end DESIGN.md body ---",
+                f"--- end {target} body ---",
                 "One planned step writes that file: write it verbatim in its own step, "
                 "do not paste it into other files, and do not substitute a summary for it.",
             ]
         return "\n".join(lines)
 
-    def _design_write_path(self, step: PlanStep) -> str:
-        """The DESIGN.md a step means to write, recognized by its own plan.
+    @staticmethod
+    def _deliverable_write_path(step: PlanStep, contract: dict[str, Any]) -> str:
+        """The deliverable a step means to write, or "" when it means none.
 
         `suggested_paths` is the only honest signal a plan gives about intent,
         and it is the same signal for all three roles that care — so one helper
         recognizes it for the fixer, the verifier and the critic rather than
-        three that could disagree.
+        three that could disagree. Which filename counts is the mode's business,
+        from `DELIVERABLE_FILES`: a step that happens to name CODIFY.md in a
+        design goal is writing a document the pipeline did not ask for.
         """
+        wanted = DELIVERABLE_FILES.get(str(contract.get("mode") or ""))
+        if not wanted:
+            return ""
         for raw in step.suggested_paths or []:
             path = str(raw or "").strip()
-            if os.path.basename(path.replace("\\", "/")).casefold() == ROOT_DESIGN_MD.casefold():
+            if os.path.basename(path.replace("\\", "/")).casefold() == wanted.casefold():
                 return path
         return ""
 
@@ -2457,14 +2632,15 @@ class ExecutorService:
         design_section = ""
         if design:
             design_section = f"\n\n{self._design_text(design)}"
-            write_path = self._design_write_path(step) if design.get("mode") == "design" else ""
+            write_path = self._deliverable_write_path(step, design)
             body = str(design.get("design_md") or "")
             if write_path and body:
+                mode = str(design.get("mode") or "")
+                role = DELIVERABLE_ROLE.get(mode, "the deliverable")
                 design_section += (
-                    f"\n\nPlan note: this step writes the design deliverable itself — the "
-                    f"workspace's brand contract, the file every later goal is planned "
-                    f"against. Add, drop or reword nothing: write it to {write_path} "
-                    f"verbatim.\n"
+                    f"\n\nPlan note: this step writes the {mode or 'goal'} deliverable "
+                    f"itself — {role}. Add, drop or reword nothing: write it to "
+                    f"{write_path} verbatim.\n"
                     f"--- {write_path} (write exactly this) ---\n{body}\n"
                     f"--- end {write_path} ---"
                 )
@@ -2569,7 +2745,7 @@ class ExecutorService:
         brand_drifts = self._brand_drifts(diffs or [], design, ws.root_path)
         for drift in brand_drifts:
             self._log(goal_id, step.id, "warn", f"brand contract drift: {drift}")
-        write_path = self._design_write_path(step) if design.get("mode") == "design" else ""
+        write_path = self._deliverable_write_path(step, design)
         if write_path:
             return await self._verifier_deliverable(
                 goal_id, step, ws.root_path, write_path, brand_drifts,
@@ -2930,15 +3106,15 @@ class ExecutorService:
                 "what text comparison cannot prove:\n"
                 + "\n".join(f"- {d}" for d in drifts)
             )
-        write_path = self._design_write_path(step) if design.get("mode") == "design" else ""
+        write_path = self._deliverable_write_path(step, design)
         if not write_path:
             return section
         artifact, where = self._deliverable_artifact(goal_id, step, ws_root, write_path)
         if artifact is None:
             return section
+        subject = DELIVERABLE_SUBJECT.get(str(design.get("mode") or ""), "the deliverable")
         section += (
-            f"\n\nThis step delivers the workspace's DESIGN.md itself — the contract every "
-            f"later goal is planned against. Read it below, not only the diff above: a "
+            f"\n\nThis step delivers {subject}. Read it below, not only the diff above: a "
             f"`+`-prefixed unified diff is a poor thing to approve a document from, and "
             f"only your approval puts it in front of them. Request-changes sends it back to "
             f"be revised instead; the user pins the file from here either way.\n\n"

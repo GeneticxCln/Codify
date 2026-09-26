@@ -56,7 +56,14 @@ export type StepStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
  * to the brand file: instead of deriving a direction from an existing
  * contract, it authors DESIGN.md — a step writes it, the critic reviews it
  * before it is pinned, and the pin stays a user action. */
-export type GoalMode = "normal" | "design";
+/**
+ * Which pipeline a goal runs. "design" and "knowledge" are the two
+ * deliverable shapes: the design agent authors a file, a step writes it
+ * verbatim, the critic reviews it before anyone relies on it. They differ only
+ * in which file — DESIGN.md is the contract every later goal obeys, CODIFY.md is
+ * the prior every later run's librarian reads.
+ */
+export type GoalMode = "normal" | "design" | "knowledge";
 
 export type EventType =
   | "goal_status"
