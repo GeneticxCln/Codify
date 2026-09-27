@@ -39,9 +39,19 @@ const { Badge } = await import("../src/components/ui/Badge.tsx");
 const { Button } = await import("../src/components/ui/Button.tsx");
 const { Field } = await import("../src/components/ui/Field.tsx");
 const { IconButton } = await import("../src/components/ui/IconButton.tsx");
+const { Logo } = await import("../src/components/ui/Logo.tsx");
 const { Panel } = await import("../src/components/ui/Panel.tsx");
 const { Toggle } = await import("../src/components/ui/Toggle.tsx");
 const { ChatTimeline } = await import("../src/components/ChatTimeline.tsx");
+const { MatrixRain } = await import("../src/components/ui/MatrixRain.tsx");
+const { RainBackdrop } = await import("../src/components/ui/RainBackdrop.tsx");
+const { CyberGrid } = await import("../src/components/ui/CyberGrid.tsx");
+const { AbyssSpores } = await import("../src/components/ui/AbyssSpores.tsx");
+const { HudSweep } = await import("../src/components/ui/HudSweep.tsx");
+const { NeuralWeb } = await import("../src/components/ui/NeuralWeb.tsx");
+const { NebulaFlow } = await import("../src/components/ui/NebulaFlow.tsx");
+const { WeatherBackdrop } = await import("../src/components/ui/WeatherBackdrop.tsx");
+const { CMATRIX_OLED, CODIFY_DARK, THEMES } = await import("../src/appearance.ts");
 const { Pin } = await import("lucide-react");
 const { BookOpen } = await import("lucide-react");
 
@@ -144,6 +154,20 @@ const goal = (over: Partial<Goal> = {}): Goal => ({
 });
 
 /**
+ * One entry shape for the five effects, because five hand-written entries for
+ * the same contract is five places for one of them to be wrong.
+ */
+const effectEntry = (Component: React.FC<{ animated?: boolean }>) => ({
+  render: () =>
+    renderToStaticMarkup(React.createElement(Component, { animated: false })),
+  // Same contract as the rain: decoration beside real content, untouchable,
+  // and no width/height attributes at import — the effect never runs under
+  // `renderToStaticMarkup`, which is what keeps a canvas a render.
+  expect: /^\s*$/,
+  markup: new RegExp(`^<canvas[^>]*aria-hidden="true"[^>]*class="[^"]*pointer-events-none`),
+});
+
+/**
  * One entry per shared primitive: how to render it, and what must come out.
  *
  * Two expectations, because "what the user reads" and "what the element *is*"
@@ -227,6 +251,70 @@ const PRIMITIVES: Record<
       ),
     expect: /Knowledge/,
     markup: /aria-pressed="true"[^>]*class="[^"]*bg-cyan-600\/20/,
+  },
+  "Logo.tsx": {
+    render: () =>
+      renderToStaticMarkup(React.createElement(Logo, { size: 24 })),
+    // An `<img alt="">` has no text content, so the tag-strip gives nothing —
+    // the a11y contract *is* the empty alt, asserted on markup below.
+    expect: /^\s*$/,
+    markup: /alt=""[^>]*class="[^"]*rounded-lg/,
+  },
+  "MatrixRain.tsx": {
+    render: () =>
+      renderToStaticMarkup(React.createElement(MatrixRain, { animated: false })),
+    // aria-hidden: the rain is decoration beside real content, and a screen
+    // reader reading half-width katakana is not a service to anyone.
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[^>]*class="[^"]*pointer-events-none/,
+  },
+  "RainBackdrop.tsx": {
+    // The backdrop exists only under a theme that publishes `--cmatrix-rain`,
+    // so this entry drives the mechanism the real app uses: persist the OLED
+    // id, render, put the default back for everything below. On the default
+    // theme it renders *nothing* — that half is asserted in
+    // `appearance.test.ts`.
+    render: () => {
+      localStorage.setItem("codify.theme", CMATRIX_OLED.id);
+      const out = renderToStaticMarkup(React.createElement(RainBackdrop));
+      localStorage.setItem("codify.theme", CODIFY_DARK.id);
+      return out;
+    },
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[\s\S]*<canvas/,
+  },
+  "CyberGrid.tsx": {
+    render: () =>
+      renderToStaticMarkup(React.createElement(CyberGrid, { animated: false })),
+    // Same contract as the rain: decoration beside real content, untouchable,
+    // and no width/height attributes at import — the effect never runs under
+    // `renderToStaticMarkup`, which is what keeps a canvas a render.
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[^>]*class="[^"]*pointer-events-none/,
+  },
+  "AbyssSpores.tsx": effectEntry(AbyssSpores),
+  "HudSweep.tsx": effectEntry(HudSweep),
+  "NeuralWeb.tsx": effectEntry(NeuralWeb),
+  "NebulaFlow.tsx": effectEntry(NebulaFlow),
+  "WeatherBackdrop.tsx": {
+    // Gated on the theme's own variable rather than on a theme id, so the
+    // harness walks the themes that have weather the way the app would.
+    render: () => {
+      const themed = THEMES.filter((t) => t.id !== CODIFY_DARK.id);
+      const out = themed
+        .map((t) => {
+          localStorage.setItem("codify.theme", t.id);
+          return renderToStaticMarkup(React.createElement(WeatherBackdrop));
+        })
+        .join("");
+      localStorage.setItem("codify.theme", CODIFY_DARK.id);
+      return out;
+    },
+    // The veil is a class, not an inline style: it is the one piece of a theme
+    // that has to be able to answer `prefers-reduced-motion` from `index.css`,
+    // and an inline background could not.
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[\s\S]*<canvas[\s\S]*class="cyber-veil/,
   },
 };
 
@@ -443,3 +531,4 @@ test("rendering a transcript produces no React warning of any kind", () => {
     `React complained while rendering:\n  ${warnings.join("\n  ")}`
   );
 });
+

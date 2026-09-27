@@ -12,7 +12,7 @@ from httpx import ASGITransport
 
 from unittest.mock import patch
 
-from engine.app import app, BOOT_TOKEN
+from engine.app import app, BOOT_TOKEN, ENGINE_INT_SETTINGS, ENGINE_STRING_SETTINGS
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.model_catalog import ModelCatalogService
@@ -2041,6 +2041,197 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["code"], "unknown_setting")
+
+    async def test_the_conductors_model_is_a_setting_a_user_can_reach(self) -> None:
+        """The keys the executor reads were declared, read — and unwritable.
+
+        `conductor_provider` / `conductor_model` have been read by
+        `ExecutorService._conductor_config` since the conductor existed, and
+        nothing in the product could set them: the settings mutator accepted
+        three unrelated keys and 400'd on anything else. So the conductor ran on
+        the scribe's row on every install, and a user who wanted it on a
+        stronger model than their commit subjects had nowhere to say so. This
+        pins the whole path — read, write, and the config the executor builds.
+        """
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        # Borrowed by default, and said so rather than left to be discovered.
+        self.assertEqual(body["conductor_provider"], {"value": "", "max": 64})
+        self.assertEqual(body["conductor_model"], {"value": "", "max": 128})
+        self.assertEqual(body["conductor_max_turns"]["value"], 8)
+        self.assertEqual(body["conductor_max_moves"]["value"], 12)
+        self.assertEqual(body["conductor_drives_execution"]["value"], 1)
+
+        r = await self.client.put(
+            "/settings/engine",
+            headers=self.headers,
+            json={"conductor_provider": "openai", "conductor_model": "big-model"},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(
+            r.json()["saved"],
+            {"conductor_provider": "openai", "conductor_model": "big-model"},
+        )
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual(r.json()["conductor_model"]["value"], "big-model")
+
+        # The point of the surface: the executor now builds a different config.
+        scribe = app.state.registry.get_config("scribe")
+        cfg = app.state.executor._conductor_config(scribe)
+        self.assertEqual(cfg.provider, "openai")
+        self.assertEqual(cfg.model_name, "big-model")
+
+        # Half a pair is stored rather than refused, because clearing has to be
+        # one call — and the executor keeps reading it as "not chosen", which
+        # is the behaviour worth pinning at the boundary it is decided on. The
+        # provider is cleared here, so what is left really is half a pair
+        # rather than a second full one.
+        r = await self.client.put(
+            "/settings/engine",
+            headers=self.headers,
+            json={"conductor_provider": "", "conductor_model": "orphan"},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(app.state.executor._conductor_config(scribe), scribe)
+
+        # Clearing puts the borrowed row back rather than leaving a pair a later
+        # turn would try to call.
+        r = await self.client.put(
+            "/settings/engine",
+            headers=self.headers,
+            json={"conductor_provider": "", "conductor_model": ""},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(app.state.executor._conductor_config(scribe), scribe)
+
+    async def test_the_conductors_budgets_clamp_and_its_switch_takes_a_boolean(self) -> None:
+        """Bounded on the way in, and a checkbox is not a truthiness bug.
+
+        A model that has lost the thread will call tools forever, so the two
+        budgets are bands rather than free numbers. The 0/1 switch is the one
+        setting a toggle sends as a real boolean, which is the single place
+        `int(True)` is what the user meant rather than a JSON accident.
+        """
+        r = await self.client.put(
+            "/settings/engine",
+            headers=self.headers,
+            json={"conductor_max_turns": 999, "conductor_max_moves": -3},
+        )
+        self.assertEqual(
+            r.json()["saved"], {"conductor_max_turns": 40, "conductor_max_moves": 0}
+        )
+        for sent, stored in ((False, 0), (True, 1)):
+            r = await self.client.put(
+                "/settings/engine",
+                headers=self.headers,
+                json={"conductor_drives_execution": sent},
+            )
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["saved"]["conductor_drives_execution"], stored)
+        self.assertEqual(
+            app.state.executor._settings_int("conductor_drives_execution", 1), 1
+        )
+
+        # Still a refusal for a number the user is choosing, and for a word.
+        for bad in (True, "lots", None):
+            r = await self.client.put(
+                "/settings/engine", headers=self.headers, json={"conductor_max_turns": bad}
+            )
+            self.assertEqual(r.status_code, 422, bad)
+
+    async def test_a_conductors_provider_has_to_be_a_provider(self) -> None:
+        """The same slug shape `PUT /settings/agents/{role}` enforces.
+
+        A conductor pointed at `OpenAI` is handed to a provider factory that
+        cannot match it, and the failure surfaces as "no conductor" on every
+        turn rather than as the typo it is. Empty is allowed: that is how the
+        setting goes back to borrowing the scribe's row.
+        """
+        for bad in ("OpenAI", "9lives", "has space", "x" * 65):
+            r = await self.client.put(
+                "/settings/engine", headers=self.headers, json={"conductor_provider": bad}
+            )
+            self.assertEqual(r.status_code, 422, bad)
+            self.assertEqual(r.json()["code"], "invalid_value", bad)
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, json={"conductor_provider": 7}
+        )
+        self.assertEqual(r.status_code, 422)
+        r = await self.client.put(
+            "/settings/engine",
+            headers=self.headers,
+            json={"conductor_provider": "gpt4o-mini", "conductor_model": "gpt-4o"},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+
+    async def test_the_conductors_fallback_is_a_setting_too(self) -> None:
+        """A conductor with one model and no second is the case that motivated it.
+
+        Every role could fall back before the conductor existed; the conductor is
+        a loop with no single call to retry, so a dead provider ended a turn that
+        had already made three moves. The keys are a pair for the same reason
+        the primary's are — a fallback provider with no model is not a fallback.
+        """
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual(
+            r.json()["conductor_fallback_provider"], {"value": "", "max": 64}
+        )
+        self.assertEqual(
+            r.json()["conductor_fallback_model"], {"value": "", "max": 128}
+        )
+
+        r = await self.client.put(
+            "/settings/engine",
+            headers=self.headers,
+            json={
+                "conductor_provider": "openai",
+                "conductor_model": "gpt-4o",
+                "conductor_fallback_provider": "ollama",
+                "conductor_fallback_model": "qwen3:8b",
+            },
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(
+            r.json()["saved"],
+            {
+                "conductor_provider": "openai",
+                "conductor_model": "gpt-4o",
+                "conductor_fallback_provider": "ollama",
+                "conductor_fallback_model": "qwen3:8b",
+            },
+        )
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual(r.json()["conductor_fallback_model"]["value"], "qwen3:8b")
+
+        # The slug rule follows the key rather than its name, so the fallback
+        # provider is checked exactly as the primary one is.
+        r = await self.client.put(
+            "/settings/engine",
+            headers=self.headers,
+            json={"conductor_fallback_provider": "Ollama"},
+        )
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["code"], "invalid_value")
+
+        # And the executor sees it: two targets, in order.
+        targets = app.state.executor._conductor_targets()
+        self.assertEqual(
+            [(t[2].provider, t[1]) for t in targets],
+            [("openai", "gpt-4o"), ("ollama", "qwen3:8b")],
+        )
+
+    async def test_every_key_the_endpoint_takes_is_one_the_service_knows(self) -> None:
+        """The endpoint's tables and `SettingsService`'s are the same keys.
+
+        A key added to one and not the other is a 500 from `get_int` at worst
+        and a setting nobody can move at best, and neither is visible until a
+        user touches it. Equality, not containment: every setting the service
+        knows has to be on the screen that can change it, or it is a knob that
+        only a test can turn.
+        """
+        self.assertEqual(set(ENGINE_INT_SETTINGS), set(SettingsService.SPEC))
+        self.assertEqual(set(ENGINE_STRING_SETTINGS), set(SettingsService.STRING_SPEC))
 
     async def test_provider_switch_does_not_carry_the_key_ref_over(self) -> None:
         """A credential stored for provider A must never be sent to provider B.

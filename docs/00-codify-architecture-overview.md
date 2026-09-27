@@ -103,10 +103,14 @@ Critic rejection: Desktop click required to retry the step (`04` §4.3). Setting
 4. Responses NEVER include raw API keys.
 5. `LocalProvider.base_url` MUST pass `validate_local_base_url` before every request.
 6. Every `SandboxService.run_command` call goes through `validate_argv` first. Verifier-proposed
-   argv and conductor tool calls reach it in `test` mode; the librarian's requests use it in
-   `read_only` mode and cannot change the workspace. The conductor proposes argv, it does not
-   widen the allowlist — see `docs/01` §5.
+   argv and the conductor's `run_command` and `verify` moves reach it in `test` mode; the
+   librarian's requests use it in `read_only` mode and cannot change the workspace. The conductor
+   proposes argv through either move, it does not widen the allowlist — see `docs/01` §5.
 7. Single SQLite file: `~/.codify/codify.db`. There is no `agents.db`.
 8. A turn is created only by `POST /conversations/{id}/turns`. `POST /goals` refuses
    `mode: "chat"`, and `TurnCreate` carries no pipeline flags, so a client chooses neither
-   that a turn exists nor what it becomes — the gate does. See `docs/09` §10.
+   that a turn exists nor what it becomes — the gate classifies and the conductor disposes.
+   See `docs/09` §10.
+9. Only the fixer writes. The `write` move is the single path from a conductor run to the
+   filesystem, it refuses while the goal is unapproved, and no skill, workspace file or
+   conductor reply can widen that. A skill is instructions, never a capability. See `docs/09` §10.14.

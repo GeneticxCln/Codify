@@ -14,8 +14,11 @@ their semantics.
 
 What it guarantees:
 
-* the seven invariants quoted in `CLAUDE.md` match `docs/00` §6, one for one — none
-  added, none dropped, none renumbered, and none reworded into a weaker claim;
+* the invariants quoted in `CLAUDE.md` match `docs/00` §6, one for one — none added,
+  none dropped, none renumbered, and none reworded into a weaker claim. The count is
+  deliberately not named here: it was written as "seven" and stayed there through the
+  two invariants that came after, which is the same staleness this module exists to
+  catch. The sets are compared, not counted;
 * every repository path any of these files names actually exists, in backticks *and*
   in the fenced layout tree;
 * `CLAUDE.md` still says that `CONTRIBUTING.md` and `docs/` outrank it, because a

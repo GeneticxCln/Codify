@@ -18,12 +18,7 @@ and knowing which one you are in tells you what you may touch:
 |---|---|---|
 | Desktop shell | Rust / Tauri v2 | App lifecycle, owns the engine process, boot token |
 | UI | React 19 / TypeScript / Vite / Tailwind | Settings screen, goal chat, stats |
-| Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |
-
-The engine runs 8 fixed roles through one pipeline: `laya` (pre-flight gate) →
-`librarian` (read-only recon) → `design` (locks direction) → `planner` (steps) →
-`fixer` (the only writer) → `verifier` (the only role that runs a command) →
-`critic` (can request changes) → `scribe` (summary + commit subject).
+| Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |The engine runs 8 fixed roles. `laya` (pre-flight gate) guards every request; the **conductor** — a loop, not a ninth role — then decides which of the other seven run and in what order, through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`) and *skills* it can load. The recipe that used to be compiled in — `librarian` → `design` → `planner` → `fixer` → `verifier` → `critic` → `scribe` — is now the built-in skill `ship-a-change` (`engine/builtin_skills/`), and a workspace can replace it. The directory's other built-in, `context-transfer`, is a recipe for packaging a degraded thread into one pasteable block for a new thread — load it when the thread is long enough that the model is losing track. `fixer` is still the only writer and `verifier` still the only role that runs a command.
 
 ## The gate is `make check` / `make ci`
 
@@ -61,9 +56,10 @@ Quoted from `docs/00` §6, which is the owner. Do not weaken one to make a chang
 3. Engine binds `127.0.0.1`. Every HTTP/WS request requires `Authorization: Bearer <boot_token>`. *(docs/00 §6.3)*
 4. Responses NEVER include raw API keys. *(docs/00 §6.4)*
 5. `LocalProvider.base_url` MUST pass `validate_local_base_url` before every request. *(docs/00 §6.5)*
-6. Every `SandboxService.run_command` call goes through `validate_argv` first. Verifier-proposed argv and conductor tool calls reach it in `test` mode; the librarian's requests use it in `read_only` mode and cannot change the workspace. The conductor proposes argv, it does not widen the allowlist. *(docs/00 §6.6)*
+6. Every `SandboxService.run_command` call goes through `validate_argv` first. Verifier-proposed argv and the conductor's `run_command` and `verify` moves reach it in `test` mode; the librarian's requests use it in `read_only` mode and cannot change the workspace. The conductor proposes argv through either move, it does not widen the allowlist — see `docs/01` §5. *(docs/00 §6.6)*
 7. Single SQLite file: `~/.codify/codify.db`. There is no `agents.db`. *(docs/00 §6.7)*
-8. A turn is created only by `POST /conversations/{id}/turns`. `POST /goals` refuses `mode: "chat"`, and `TurnCreate` carries no pipeline flags, so a client chooses neither that a turn exists nor what it becomes — the gate does. *(docs/00 §6.8)*
+8. A turn is created only by `POST /conversations/{id}/turns`. `POST /goals` refuses `mode: "chat"`, and `TurnCreate` carries no pipeline flags, so a client chooses neither that a turn exists nor what it becomes — the gate classifies and the conductor disposes. See `docs/09` §10. *(docs/00 §6.8)*
+9. Only the fixer writes. The `write` move is the single path from a conductor run to the filesystem, it refuses while the goal is unapproved, and no skill, workspace file or conductor reply can widen that. A skill is instructions, never a capability. See `docs/09` §10.14. *(docs/00 §6.9)*
 
 ## Layout
 
@@ -72,7 +68,8 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
   models.py     ROLES + ROLE_JOB + ROLE_TIMING — the one place roles are defined
   default_prompts.py   one system prompt per role
   chat_prompts.py  the turn + conductor prompts — no AgentRole, so not in the file above
-  conductor.py    the model-driven dispatch loop; its tools are the pipeline's own doors
+  conductor.py    the loop that decides the sequence; its moves are the pipeline's own doors
+  skills.py       built-in + workspace recipes (`.codify/skills/`) discovered and loaded as data
   toolcall.py     the neutral tool-calling shape and its four protocol translations
   spawn_guard.py process guard; every spawn routes through it
 ui/             React 19 + TS + Vite; ui/tests/ run through node --test
@@ -87,6 +84,10 @@ docs/           00–09, below
 
 ## Working rules
 
+- **A skill is data, not a capability.** Skill bodies arrive from a cloned repository, so
+  they are untrusted: a skill may sequence moves that already exist and nothing more. It
+  cannot define a move, widen `validate_argv`, or reach the `write` gate, which reads the
+  goal's stored status rather than anything the model was told (invariant 9).
 - **Engine changes need a test that fails without them.** The suite exists to catch what
   this project has actually gotten wrong: hung test commands, swept git commits, crossed
   event streams, credentials escaping to a real `~/.codify`.

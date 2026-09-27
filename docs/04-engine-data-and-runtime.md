@@ -162,7 +162,7 @@ the UI's copy a member behind both.
 | `design_contract` | — | the locked direction: `{applies, artifact, direction, design_system: {name, source, origin}, tokens: {colors: [{name, value}], typography: [{name, value}], spacing: [str], radii: [str]}, components: [{name, purpose}], conventions, constraints, acceptance, design_md, mode?, revises?}` — `origin` is `pinned`\|"discovered"\|`null` (`04` §4.0a). `mode: "design"` or `"knowledge"` with a non-empty `design_md` marks a deliverable goal, where the body is the artifact rather than advice — `DESIGN.md` for `design` (§4.0a.2), `CODIFY.md` for `knowledge` (§4.9). `revises: {path, text, chars, truncated, stale_paths}` is present on a knowledge goal whose workspace already had a `CODIFY.md`, and carries the exact copy the drafter was shown so the transcript can render what the run is replacing; its `stale_paths` is the *pack's* verdict on that file, not the drafter's own (which is empty — that read has no tree listing) |
 | `stage_result` | any | `{stage, role, step_id, ordinal, outcome, detail, duration_ms, tokens, calls}` — what one role stage achieved, what it spent, and how long it took (§4.7). `ordinal` disambiguates repeated stages in one scope: librarian rounds, planner consults, fixer attempts and passes. `outcome` is from the closed per-stage vocabulary in §4.7; `detail` is a short engine-authored note (a skip reason, a block reason), never model prose |
 | `plan_updated` | step | `{step_id, step_title, fields: [str], changes: {field: {before, after}}}` — only fields the patch edited, only those whose value actually changed |
-| `laya_decision` | — | the gate's full verdict: `{engine, answers, routing, blocked, block_reason, warnings, skipped_reason, provider, model, policy: {injection_block_threshold, risk_warn_level, clarify_warn_threshold}}` (`05`) |
+| `laya_decision` | — | the gate's full verdict — on a turn (`mode: "chat"`) published only when the gate blocked or warned, because a turn's log is a conversation rather than a run's audit trail (docs/09 §10.15); a benign turn is measured as a `laya` stage and not narrated: `{engine, answers, routing, blocked, block_reason, warnings, skipped_reason, provider, model, policy: {injection_block_threshold, risk_warn_level, clarify_warn_threshold}}` (`05`) |
 | `fix_retry` | step | `{attempt, max_attempts, reason}` — a failing test run fed back to the fixer (bounded by `MAX_FIX_ATTEMPTS`) |
 | `fixer_pass` | step | `{attempt, max_passes, passes_left}` — the fixer asked for another pass of its own (bounded by `MAX_FIXER_PASSES`) |
 | `plan_consult` | — | `{refused, material_chars}` — the planner reopened the frozen evidence pack (`MAX_PLANNER_CONSULTS`) |
@@ -433,8 +433,8 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `PUT` | `/settings/agents/{role}` | `AgentConfigUpdate` | `AgentConfig` |
 | `POST` | `/settings/agents/{role}/test-connection` | — | `{ok, message}` — a 15s liveness probe (`01` §3) |
 | `GET` | `/settings/roles` | — | each role's `job` + `timing` (`01` §1) |
-| `GET` | `/settings/engine` | — | engine-wide settings with clamp bounds (currently `parallel_width`) |
-| `PUT` | `/settings/engine` | `{parallel_width}` | `{saved: {…}}` — echoes clamped values |
+| `GET` | `/settings/engine` | — | every key in `SettingsService.SPEC` / `STRING_SPEC`, each with its clamp band (or its max length, for a string) |
+| `PUT` | `/settings/engine` | `{parallel_width, …}` | `{saved: {…}}` — echoes what was actually stored, clamped for numbers |
 | `GET` | `/models?refresh=` | — | live-discovered catalog, per-provider status (`06`) |
 | `GET` | `/models/recent?limit={1..25}` | — | `[{provider, model, role, ran_at}]`, newest first (`06` §3.1) |
 
@@ -1112,7 +1112,75 @@ CODIFY_ENGINE token=<hex> port=<int>
 
 WS URL: `ws://127.0.0.1:<port>/ws/goals/{id}`. After auth, server sends events with `sequence > 0` live; client SHOULD `GET /goals/{id}/events?after=` for gap fill.
 
+### 6.0 Engine-level frames
+
+`ws://127.0.0.1:<port>/ws/engine` carries what belongs to *no* goal, on the same auth contract (boot
+token on the Upgrade, or the `{"type": "auth"}` first frame; `4401` on a bad one — invariant 3, docs/00
+§6.3, holding on a socket as on every route). It is a sibling of `/ws/goals/{id}`, not an extension of
+it: the goal stream is a durable sequenced log that replays from 0, and a frame with no `goal_id` and no
+`sequence` in it is a frame a deduping client drops.
+
+One frame exists today:
+
+| frame | payload | when |
+|---|---|---|
+| `model_catalog_changed` | `{added: {provider: [id]}, removed: {provider: [id]}, fetched_at}` | a provider's discovered model list differs from the previous sweep |
+| `model_catalog_checked` | `{fetched_at}` | every sweep that found no change — a time, not a diff |
+
+The payload is a **diff, never the catalogue** — eight providers at 500 models each is a payload no
+screen asked for, sent on every change. The client re-reads `GET /models` with `refresh` **false**,
+which is a cache hit because the engine's watcher is what discovered the change; asking for a refresh
+would ask all eight providers again for something the client was just told. A provider that stopped
+answering is reported as everything it had, `removed` — a provider gone quiet and a provider with
+nothing new are otherwise identical, and only one of them is a change.
+
+`model_catalog_checked` is the other half, and it is what lets a client stop polling. A screen
+showing the age of its list ("checked 40s ago") can only do that honestly if somebody is keeping the
+number true, and the engine is the only party that can. Both frames mean one thing to a client —
+"there is a current answer, re-read it" — and are told apart only so a test can say which arrived.
+
+The engine sweeps on the same period as the catalogue's own cache TTL (`model_catalog.DEFAULT_TTL_S`),
+so every sweep is a real answer rather than an echo, and **only while at least one client is
+connected** — an idle engine must not spend a provider's rate limit on a list nobody is reading. The
+first sweep after a client connects is a silent baseline; announcing it would tell someone opening the
+app after an hour away that every model everywhere is new.
+
 Token lifetime is the state directory, not the process. It is written once, with `O_EXCL`, so two engines booting against the same state dir converge on one value rather than each minting its own. This replaced a per-spawn rotation: a client that cached the token was rejected with 401 after every restart, and only the desktop shell could recover, by re-reading the live handshake over IPC — a browser tab pointed at a dev engine has no shell to ask and stayed broken until a human reloaded it. The cost is a longer-lived credential, affordable only because the socket is `127.0.0.1`: anything able to present this token could read the file, and the database beside it, without it. `CODIFY_BOOT_TOKEN` overrides the value for a caller that wants a token scoped to one process, and a state directory that cannot be written falls back to a per-boot token rather than refusing to boot.
+
+### 6.1 Death is bounded
+
+Closing the app ends the engine; so does a signal to the shell, which is why the engine watches the
+shell's pid instead of trusting the shell's own exit handler (`CODIFY_PARENT_PID`, `engine/watchdog.py`).
+`SIGTERM` and `SIGINT` are now handled by the shell itself, which asks the engine to stop on the way out
+and kills it only if it outlasts the bound below (`09` §5.4.1), so the watchdog is the backstop behind
+that rather than the mechanism — the cases it exists for are the ones no handler reaches: `SIGKILL`, a
+crash, and a shell that dies mid-request.
+
+Being *told* to stop is only the start of a shutdown, and the shutdown is uvicorn's: it waits for
+in-flight work, and its default is to wait **without any deadline**. That default is the orphan this
+subsection exists for. With one event stream open — or one turn still generating — `SIGTERM` closed the
+listening socket within a second and the process then held the SQLite file for as long as the work ran.
+Repeating the signal changed nothing: uvicorn's handler is still installed and only sets the same flag
+again. Both ways in therefore arm a deadline **before** the graceful path starts: a `SIGTERM` aimed at
+the engine itself (a stray `kill`, a supervisor, the shell asking it to stop), and the death of the
+parent it watches — which is the backstop behind that request rather than a substitute for it, since a
+shell killed mid-request never gets to send one.
+`timeout_graceful_shutdown` bounds the in-flight wait at `GRACEFUL_SHUTDOWN_S` (3 s — enough for a commit,
+short enough that nobody is waiting on it), and a daemon timer at `HARD_EXIT_GRACE_S` (6 s, deliberately
+outside that window) ends the process if the graceful path has not finished. That 6 s is announced to the
+shell on the boot handshake as `hard_exit_s`, because the shell now asks the engine to stop and waits
+exactly this long before escalating to `SIGKILL` (`09` §5.4.1) — the one number both sides hold, rather
+than two copies free to drift.
+
+`os._exit` and not `sys.exit` or a return from `main()`, because finalization joins every non-daemon
+thread and the threads left here are exactly the ones nobody can cancel: the `asyncio.to_thread` workers
+behind a sandboxed command or the native folder picker. A deadline that ran through that join would have
+no bound at all. The engine's own children are the other half of the same contract: `07` §1.
+
+The backstop says so on the way out, on stderr: `shutdown unfinished after 6s — exiting anyway`. That
+line is the entire explanation of an engine that vanished holding a hung websocket, which is why the
+shell tails the engine's stderr and shows the tail in the app rather than inheriting it into a console
+(`09` §5.5) — a bounded shutdown nobody can read is indistinguishable from a crash.
 
 ## 7. Key storage
 

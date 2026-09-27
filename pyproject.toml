@@ -30,6 +30,9 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
     "mypy>=1.11",
+    # Regenerates the checked-in logo/desktop icons on demand
+    # (scripts/make_logo.py); nothing in the gate invokes it.
+    "pillow>=10.0",
 ]
 
 [tool.mypy]
@@ -72,6 +75,26 @@ warn_unreachable = true
 # falls back to the LLM gate when it is absent (docs/05). It is not a dependency
 # and ships no stubs, so a missing import here is the documented normal case.
 module = ["laya", "laya.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Pillow, for the logo generator, is the same shape as Laya above: a `dev` extra,
+# imported inside a guard that explains how to install it, on a script whose whole
+# job is drawing images. The declared-minimum leg installs only the engine
+# requirements plus ruff and mypy, so it reads this file with neither the library
+# nor its stubs.
+#
+# Named by the *imported* module, like `laya` above and not like the file that
+# imports it: a per-module option is matched against the name mypy could not
+# resolve. Naming the script here changes nothing, which is a quiet way to
+# believe a config entry is doing something.
+#
+# An override rather than a `# type: ignore[import-not-found]` on the import,
+# because the two legs disagree in the other direction: a developer who installed
+# the `dev` extra *has* the stubs, so the same ignore is then reported as unused —
+# and an unused ignore is an error here (CLAUDE.md, working rules). One config
+# entry is correct in both environments; an ignore cannot be.
+module = ["PIL"]
 ignore_missing_imports = true
 
 [tool.ruff]

@@ -19,6 +19,7 @@ import {
   RecentRunModel,
 } from "./types";
 import { buildModelSignals } from "./modelSignals";
+import { openEngineStream } from "./engineStream";
 import {
   listWorkspaces,
   fetchAgentConfigs,
@@ -45,10 +46,12 @@ import {
   checkEngineHealth,
   refreshEngineInfoFromIpc,
   engineFailureReason,
+  fetchEngineStderr,
   enableExecution,
   applyGoal,
   fetchConversations,
   createConversation,
+  fetchConversationTurns,
   renameConversation,
   archiveConversation,
   attachGoalToConversation,
@@ -59,9 +62,22 @@ import {
   openTerminal,
   resizeTerminal,
 } from "./api";
-import { runGoalAction, canStopGoal, isGoalActive } from "./goalActions";
+import {
+  runGoalAction,
+  canStopGoal,
+  isGoalActive,
+  isMessageBusy,
+} from "./goalActions";
+import {
+  mergeThreadMessages,
+  shouldHydrateThread,
+  turnMessageIds,
+  turnMessages,
+  turnsNeedingHydration,
+} from "./threadHydration";
 import { Badge } from "./components/ui/Badge";
 import { IconButton } from "./components/ui/IconButton";
+import { Logo } from "./components/ui/Logo";
 import { Toggle } from "./components/ui/Toggle";
 import { statusTone } from "./statusTone";
 import { BottomCommandBar, ExecutionMode } from "./components/BottomCommandBar";
@@ -110,19 +126,53 @@ import { openGoalStream, GoalStreamHandle } from "./goalStream";
 import { readRejection } from "./rejection.ts";
 import { threadTitleFromPrompt } from "./threadTitle";
 import {
-  Code,
   AlertCircle,
   History,
   BarChart3,
   X,
   RefreshCw,
+  ScrollText,
 } from "lucide-react";
+import { notableStderrLines } from "./engineLog";
+import { RainBackdrop } from "./components/ui/RainBackdrop";
+import { WeatherBackdrop } from "./components/ui/WeatherBackdrop";
+import {
+  ENGINE_STATE_CLASSES,
+  ENGINE_STATE_COPY,
+  engineState,
+} from "./statusTone";
+
+/**
+ * How much of the engine's stderr to ask the shell for when it stops answering.
+ *
+ * More than the panel shows on purpose: the filter in `engineLog.ts` has to see
+ * the noise to find the line worth keeping, and the shell's buffer is 200 lines
+ * deep, so this costs nothing but a slightly larger IPC payload.
+ */
+const ENGINE_STDERR_TAIL = 60;
 
 export const App: React.FC = () => {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWs, setSelectedWs] = useState<Workspace | undefined>();
   // Model catalog: discovered from every configured provider by the engine.
   // Nothing here is hardcoded — an empty list means nothing is configured yet.
+  /**
+   * Bumped whenever the engine reports it has a current catalogue. The settings
+   * panel owns its own fetch, so this is how it learns there is something to
+   * re-read — a counter rather than the catalogue itself, because handing the
+   * panel a second copy of the list is how two screens end up disagreeing about
+   * what a provider serves.
+   */
+  const [catalogTick, setCatalogTick] = useState(0);
+  /**
+   * Is the engine pushing? While it is, nothing in this app owns a timer: the
+   * watcher sweeps on the catalogue's own cache period and one sweep serves every
+   * client. While it is *not*, each screen that shows a model has to ask for
+   * itself — so the settings panel falls back to its own refresh, and the cost of
+   * a dead socket becomes one extra discovery per open panel rather than a stale
+   * list.
+   */
+  const [catalogLive, setCatalogLive] = useState(false);
   const [modelCatalog, setModelCatalog] = useState<ModelCatalog>({
     models: [],
     providers: [],
@@ -166,15 +216,24 @@ export const App: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   // Which settings tab to land on. A failure diagnosis sends the user straight
   // to the screen that holds the fix instead of making them find it.
-  const [settingsTab, setSettingsTab] = useState<"keys" | "agents">("keys");
-  const openSettings = (tab: "keys" | "agents" = "keys") => {
+  const [settingsTab, setSettingsTab] = useState<"keys" | "agents" | "appearance">("keys");
+  const openSettings = (tab: "keys" | "agents" | "appearance" = "keys") => {
     setSettingsTab(tab);
     setIsSettingsOpen(true);
   };
-  const [engine, setEngine] = useState<EngineInfo>(getEngineInfo());
   const [error, setError] = useState<string | null>(null);
   const [engineUp, setEngineUp] = useState<boolean | null>(null); // null = checking
+  /**
+   * What the engine said on its way out, read from the shell that tailed its
+   * stderr. Shown only while the engine is down, and fetched once per outage:
+   * the interesting moment is the engine stopping, and by the time the 3s health
+   * probe notices, the tail already holds everything it said. Empty again as
+   * soon as the engine answers, so a resolved outage leaves nothing behind.
+   */
+  const [engineStderr, setEngineStderr] = useState<string[]>([]);
   const [authOk, setAuthOk] = useState<boolean | null>(null);
+  /** The connection, as one word: the pill's label, hint and colours all key off it. */
+  const engineConnection = engineState(engineUp, authOk);
 
   // Live goal streams (one per goal, with reconnect backoff).
   const goalStreams = useRef<Record<string, GoalStreamHandle>>({});
@@ -203,7 +262,8 @@ export const App: React.FC = () => {
         const fresh = await refreshEngineInfoFromIpc();
         if (cancelled) return;
         if (fresh) {
-          setEngine(fresh);
+          // `refreshEngineInfoFromIpc` has already applied the new port and token
+          // to the API client; nothing else kept a copy of them to update.
           loadWorkspacesRef.current?.();
           // A fresh token may point at a different engine (and therefore a
           // different set of configured providers) — re-discover its models.
@@ -243,7 +303,6 @@ export const App: React.FC = () => {
       tauriInvoke<EngineInfo>("codify_get_engine_info")
         .then((info) => {
           setEngineInfo(info);
-          setEngine(info);
           // Engine just became reachable — re-read workspaces now that the
           // real token/port are set (clears the startup failure banner).
           loadWorkspacesRef.current?.();
@@ -265,6 +324,38 @@ export const App: React.FC = () => {
     };
     fetchInfo();
   }, []);
+
+  // The engine's own words, the moment it stops answering. `engineFailureReason`
+  // can only report what the *launcher* knows (no checkout, no handshake, a
+  // port it never reported), which says nothing about an engine that ran fine
+  // for an hour and then went: a provider that refused, a traceback, or the
+  // bounded-shutdown backstop giving up on a hung websocket. The shell has been
+  // reading the engine's stderr the whole time; this is the one moment the
+  // window has use for it.
+  useEffect(() => {
+    if (engineUp !== false) {
+      // Not an outage, or an outage already explained and resolved. Either way
+      // the previous run's last words are not this one's.
+      setEngineStderr([]);
+      return;
+    }
+    let cancelled = false;
+    fetchEngineStderr(ENGINE_STDERR_TAIL)
+      .then((lines) => {
+        if (cancelled) return;
+        // The filter is where "worth reading" is decided, and it is the reason
+        // the backstop's line is visible rather than the four hundredth line of
+        // a session's chatter. See `engineLog.ts`.
+        setEngineStderr(notableStderrLines(lines));
+      })
+      .catch(() => {
+        // No tail to show is not a second failure to report: the red pill and
+        // the launcher's own reason are already on screen.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engineUp]);
 
   // Load workspaces; never fabricate a hardcoded one — if the engine has no
   // workspaces yet, the user picks a folder via the command bar first.
@@ -362,6 +453,47 @@ export const App: React.FC = () => {
     loadModels(true);
     loadModelSignals();
   }, [loadModels, loadModelSignals]);
+
+  /**
+   * The engine tells us when a provider's model list moves, so every screen with
+   * a model in it updates the moment a release lands — the settings provider
+   * rows, the role cards, the command bar — instead of each one owning a timer
+   * that happens to fire.
+   *
+   * The frame carries the *diff*, not the catalogue, so this re-reads `GET /models`
+   * with `refresh: false`. That is a cache hit by construction: the engine's
+   * watcher is what discovered the change, and it only announces after the answer
+   * is in the cache. Asking for a refresh here would ask all eight providers
+   * again for something we were just told.
+   */
+  useEffect(() => {
+    const everConnected = { current: false };
+    const handle = openEngineStream({
+      onFrame: () => {
+        setCatalogTick((n) => n + 1);
+        void loadModels(false);
+      },
+      onConnected: () => {
+        setCatalogLive(true);
+        if (everConnected.current) {
+          // A change that landed while the socket was down was never announced to
+          // anybody: the engine only reports to current subscribers, and there is
+          // no replay. So a reconnect re-reads, or the one release nobody hears
+          // about is the one that arrived while you were not looking.
+          setCatalogTick((n) => n + 1);
+          void loadModels(false);
+        }
+        everConnected.current = true;
+      },
+      // Backoff starts the moment the socket drops, which is exactly when a screen
+      // showing a model list needs to start asking for itself again.
+      onReconnecting: () => setCatalogLive(false),
+    });
+    return () => {
+      handle.close();
+      setCatalogLive(false);
+    };
+  }, [loadModels]);
 
   // Native OS File Manager browser handler (opens Nautilus / portal)
   const handleBrowseWorkspace = async () => {
@@ -463,15 +595,15 @@ export const App: React.FC = () => {
    * The tab strip's busy dot reads this, which is the only way a user can see a
    * run is live while looking at another tab. Read from the messages rather than
    * tracked separately, so a goal that ends is never reported as busy by a
-   * counter nobody decremented.
+   * counter nobody decremented — and derived from the goal's own status rather
+   * than from the dispatch flag, which nothing clears when the engine finishes
+   * (`isMessageBusy`). A transcript that pulses forever says the assistant never
+   * stopped, which is the report this fixes.
    */
   const activeGoalIds = useMemo(() => {
     const ids = new Set<string>();
     for (const m of messages) {
-      const busy =
-        m.isStreaming === true ||
-        (m.goal ? isGoalActive(m.goal.status) : false);
-      if (busy && m.conversationId) ids.add(m.conversationId);
+      if (isMessageBusy(m) && m.conversationId) ids.add(m.conversationId);
     }
     return ids;
   }, [messages]);
@@ -992,9 +1124,15 @@ export const App: React.FC = () => {
           delete goalStreams.current[goalId];
           getGoal(goalId)
             .then((refreshed) => {
+              // The run is over, so the dispatch flag goes with it. What the
+              // busy dot reads is the goal's own status (`isMessageBusy`), but a
+              // `true` left on a finished message is a trap for the next reader
+              // either way.
               setMessages((prev) =>
                 prev.map((msg) =>
-                  msg.id === messageId ? { ...msg, goal: refreshed } : msg,
+                  msg.id === messageId
+                    ? { ...msg, goal: refreshed, isStreaming: false }
+                    : msg,
                 ),
               );
             })
@@ -1147,6 +1285,104 @@ export const App: React.FC = () => {
     () => new Set(["COMPLETED", "FAILED", "CANCELLED"]),
     [],
   );
+
+  // ── Reopening a thread ─────────────────────────────────────────────────
+  //
+  // A thread the user has not sent anything into this session used to open as an
+  // empty pane: the store holds what streamed to it, a reload starts it empty, and
+  // nothing in the UI ever asked the engine what the thread had already said. The
+  // engine has known all along — `GET /conversations/{id}/turns` derives the turns
+  // from the goals that answered them, and each turn's events are the same ones a
+  // live stream delivers — so opening a thread reads its history back.
+  //
+  // This is History's restore applied to a whole thread, and the two agree because
+  // they build the same message pair (`threadHydration.turnMessages`). The decisions
+  // that could go wrong — which turns are still worth fetching, and not writing over
+  // a turn that is streaming in front of the user — are pure and tested there.
+  //
+  // The store is the whole truth about what has been shown, and it is not
+  // persisted, so a thread is read once per session; a *failed* read is not
+  // recorded, so the next time the thread is opened it is tried again rather than
+  // remembered as empty.
+  const hydratedThreads = useRef<Set<string>>(new Set());
+  const hydratingThreads = useRef<Set<string>>(new Set());
+  // The store as of the last render, for the "is this turn already here?" check
+  // that has to run before the fetches rather than after them.
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  const hydrateThread = useCallback(
+    async (conversationId: string | undefined) => {
+      if (
+        !shouldHydrateThread(
+          conversationId,
+          hydratedThreads.current,
+          hydratingThreads.current,
+        )
+      ) {
+        return;
+      }
+      const threadId = conversationId as string;
+      hydratingThreads.current.add(threadId);
+      try {
+        const turns = await fetchConversationTurns(threadId);
+        // A thread opened a second time in one session already holds most of its
+        // turns, and its last one may be live: fetching those again would be a
+        // request per turn to learn nothing, and — worse, if one raced the stream —
+        // a second copy of the turn the user is watching under a different id.
+        const wanted = turnsNeedingHydration(turns, messagesRef.current);
+        const fetched = await Promise.all(
+          wanted.map(async (turn) => {
+            const [goal, events] = await Promise.all([
+              getGoal(turn.goal_id),
+              getGoalEvents(turn.goal_id),
+            ]);
+            return { turn, goal, events };
+          }),
+        );
+        setMessages((prev) => {
+          // Decided again here, against the store as it is *now*: the check above
+          // was made before the requests went out, and a turn dispatched since then
+          // is live, not history.
+          const still = new Set(
+            turnsNeedingHydration(turns, prev).map((t) => t.goal_id),
+          );
+          return mergeThreadMessages(
+            prev,
+            fetched
+              .filter(({ turn }) => still.has(turn.goal_id))
+              .flatMap(({ turn, goal, events }) =>
+                turnMessages(turn, goal, events, threadId),
+              ),
+          );
+        });
+        hydratedThreads.current.add(threadId);
+        // A turn that is not over keeps streaming into the very message it was
+        // hydrated from, so a thread whose last turn was in flight when the window
+        // closed goes on updating from here rather than freezing mid-answer.
+        for (const { turn } of fetched) {
+          if (!TERMINAL_STATUSES.has(turn.status)) {
+            subscribeToGoal(turn.goal_id, turnMessageIds(turn.goal_id).assistant);
+          }
+        }
+      } catch (err: any) {
+        setError(readRejection(err, "Failed to load this thread's history"));
+      } finally {
+        hydratingThreads.current.delete(threadId);
+      }
+    },
+    [TERMINAL_STATUSES, subscribeToGoal],
+  );
+
+  // Whenever the visible thread changes — clicked in the sidebar, restored with the
+  // tab, or arrived at by closing another one — read it back if the store cannot
+  // already show it. Gated on the engine actually answering, because a restored tab
+  // can name a thread before the handshake has set the port this client will use.
+  useEffect(() => {
+    if (engineUp === true) hydrateThread(activeConversationId);
+  }, [activeConversationId, engineUp, hydrateThread]);
 
   // Poll active goals periodically
   useEffect(() => {
@@ -1732,14 +1968,41 @@ export const App: React.FC = () => {
 
   return (
     // select-none REMOVED so text cursor and selection work normally in WebKitGTK
-    <div className="flex flex-col h-screen bg-codify-bg text-gray-200 font-sans">
+    // `relative` for the rain: the OLED theme's backdrop is a child of this box
+    // and needs a positioned ancestor to be the window rather than the viewport's
+    // idea of it. See `ui/src/components/ui/RainBackdrop.tsx`.
+    <div className="relative flex flex-col h-screen bg-codify-bg text-gray-200 font-sans">
+      {/* The window's weather, under everything and mounted once. It used to be
+          inside the idle hero, which is why it showed down the middle and left
+          when the first message arrived; both were the mount point, and a
+          backdrop that lives inside the transcript cannot be behind the sidebar
+          or survive a conversation. Gated on the theme publishing a rain
+          variable, so the default theme has no canvas at all. `active` is the
+          same flag the other themes get, and the rain is what the user reads it
+          on — it is the theme most people pick the whole system for. */}
+      <RainBackdrop active={canStop} />
+      {/* Every other theme's weather, in one mount. Same point and the same
+          reasoning as the rain above: a sibling, once, under the chrome, so
+          nothing a conversation does can switch it off. The table inside it
+          decides whether the active theme has any — a theme that is not the
+          one gets no canvas and not even an empty div.
+          `active` is the one piece of state any atmosphere is allowed to
+          report: while a run is in flight the effect runs faster, and the
+          constellation also brightens and sends a ring outward. It comes from
+          the goal's own status rather than a second flag, so it cannot disagree
+          with the Stop button. DESIGN.md §7 is what admits this — the motion
+          carries the run's state, which is the difference between feedback and
+          decoration, and the two are not the same thing. */}
+      <WeatherBackdrop active={canStop} />
       {/* Top Header Bar */}
-      <header className="bg-codify-surface border-b border-codify-border px-4 py-2.5 flex items-center justify-between z-10 flex-shrink-0">
+      <header className="relative bg-codify-chrome border-b border-codify-border px-4 py-2.5 flex items-center justify-between z-10 flex-shrink-0">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 font-bold text-sm tracking-tight text-white">
-            <div className="w-6 h-6 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow">
-              <Code className="w-3.5 h-3.5" />
-            </div>
+            {/* The mark, not a stand-in: `logo.gif` is generated into the brand
+                palette by `scripts/make_logo.py`, and the primitive swaps the
+                static companion in under `prefers-reduced-motion` — DESIGN.md
+                §7's rule, applied for the one asset that cannot read it. */}
+            <Logo size={24} />
             <span>CODIFY</span>
           </div>
 
@@ -1754,49 +2017,30 @@ export const App: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Live engine connection indicator (probes /health every 3s) */}
+          {/* The engine connection, as four words: Live, Checking, Auth stale,
+              Offline. It used to answer with the port number when healthy, which
+              made the number the headline and the state the decoration; the port
+              lives in the engine's boot line and the stderr panel instead. The
+              wording and the colours both come from `statusTone.ts`, so the pill
+              cannot disagree with itself about what a state looks like. */}
           <button
             type="button"
             onClick={() => setIsSettingsOpen(true)}
-            title={
-              engineUp === false
-                ? "Engine is not responding — click to check settings"
-                : engineUp && authOk === false
-                  ? "Engine is up but the auth token is not accepted — click to check settings"
-                  : "Engine connected"
-            }
+            title={ENGINE_STATE_COPY[engineConnection].hint}
             className={`flex items-center gap-1.5 text-xs font-mono px-2.5 py-1 rounded-full border transition-colors cursor-pointer ${
-              engineUp === false
-                ? "bg-red-950/40 text-red-400 border-red-800"
-                : engineUp && authOk === false
-                  ? "bg-amber-950/40 text-amber-400 border-amber-800"
-                  : "bg-codify-bg text-gray-400 border-codify-border"
+              ENGINE_STATE_CLASSES[engineConnection].pill
             }`}
           >
             {/* Not a `<Button>`: this is a *status* pill that happens to be
-                clickable, and the three fills above are connection states
-                (`offline` / `auth stale` / `ok`) rather than button tones. A tone
-                here would be claiming a button state the control does not have.
+                clickable, and the four fills above are connection states rather
+                than button tones. A tone here would be claiming a button state the
+                control does not have.
 
                 The dot is steady, not pulsing. DESIGN.md §7: nothing pulses to look
                 alive — and the colour already says healthy, so the loop was carrying
                 no information a reduced-motion user could get. */}
-            <span
-              className={`w-2 h-2 rounded-full ${
-                engineUp === false
-                  ? "bg-red-500"
-                  : engineUp && authOk === false
-                    ? "bg-amber-500"
-                    : "bg-green-500"
-              }`}
-            />
-            <span>
-              {engineUp === false
-                ? "Engine Offline"
-                : engineUp && authOk === false
-                  ? "Auth Stale"
-                  : `Port ${engine.port}`}
-            </span>
+            <span className={`w-2 h-2 rounded-full ${ENGINE_STATE_CLASSES[engineConnection].dot}`} />
+            <span>{ENGINE_STATE_COPY[engineConnection].label}</span>
           </button>
 
           {/* Goal history: everything this workspace ever ran, restorable into
@@ -1853,7 +2097,7 @@ export const App: React.FC = () => {
           A flex sibling shrinks the column instead of covering it. The transcript
           reflows, the command bar stays whole, and the boundary is a visible border
           rather than an occlusion. */}
-      <main className="flex-1 flex overflow-hidden">
+      <main className="relative z-10 flex-1 flex overflow-hidden">
         {/* The threads. A flex sibling, not an overlay: the transcript reflows
             rather than being covered, which is the same reasoning as the drawers
             below. */}
@@ -1898,6 +2142,31 @@ export const App: React.FC = () => {
                 >
                   <X className="w-3.5 h-3.5" />
                 </IconButton>
+              </div>
+            </div>
+          )}
+          {/* What the engine said before it stopped answering.
+              Its own stderr, not the launcher's diagnosis: the difference between
+              "the engine is offline" and "the engine waited 6s for a websocket
+              that never closed, then left". Amber rather than red because this is
+              a quote of an explanation, not a second error — and it sits under
+              the launcher's own message when there is one, so the two read as
+              cause and effect. `pre` with wrapping, not a scroll box: a stack
+              traceback line cut off at the right edge is the line that mattered. */}
+          {engineStderr.length > 0 && (
+            <div className="mx-auto mt-2 mb-1 w-full max-w-4xl px-4">
+              <div className="rounded-xl border border-amber-900/60 bg-amber-950/20 p-2.5 text-xs">
+                <div className="mb-1.5 flex items-center gap-1.5 text-amber-300">
+                  <ScrollText className="h-3.5 w-3.5 flex-shrink-0" />
+                  <span>What the engine said before it stopped</span>
+                </div>
+                <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-amber-200/90">
+                  {engineStderr.join("\n")}
+                </pre>
+                <p className="mt-1.5 text-[11px] text-amber-300/70">
+                  The shell stops the engine rather than restarting it, so a new
+                  engine means relaunching the app.
+                </p>
               </div>
             </div>
           )}
@@ -2096,6 +2365,8 @@ export const App: React.FC = () => {
         isOpen={isSettingsOpen}
         initialTab={settingsTab}
         recentRuns={recentRuns}
+        catalogTick={catalogTick}
+        catalogLive={catalogLive}
         onClose={() => {
           setIsSettingsOpen(false);
           // Keys or endpoints may have changed — re-discover, don't re-read cache.

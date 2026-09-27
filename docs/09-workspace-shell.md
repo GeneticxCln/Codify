@@ -346,6 +346,170 @@ so any change to them re-runs the script and forces `lib.rs` to be re-expanded.
 `npm run build` then `cargo build`** — and if a UI change does not appear in the
 app, check that sequence before suspecting the code.
 
+### 5.3 The window itself: undecorated, and Wayland when there is one
+
+The main window sets `"decorations": false` in `src-tauri/tauri.conf.json`. Under
+a tiling compositor the title bar is dead weight the compositor will not draw
+anyway, and a window drawn by GTK with client-side decorations puts the app's own
+close button and maximise square on top of a layout the user is arranging by
+keyboard. The close affordance does not go missing: it moves to the compositor,
+which is where a niri/sway user already closes windows.
+
+A frameless window is not the whole story, because GTK chooses its backend from
+the environment and the choice is a coin flip when a session has **both** a
+Wayland compositor and an X server — every Wayland session with Xwayland, which
+is most of them. Land on X11 and the app is an X client inside a Wayland session:
+Xwayland draws a title bar for it regardless of `decorations`, and a compositor
+tiles a window whose chrome it does not own. So `lib.rs` names the backend:
+`apply_display_backend()` runs **before** `Builder::build()` (GTK reads
+`GDK_BACKEND` while it initialises, on that same call, so a variable set later is
+a variable nothing reads) and sets it to `wayland` when a Wayland session is up
+and nothing has overridden the choice.
+
+The conditions are the point, and `display_backend` is a pure function precisely
+so they can be tested without touching the process environment: an X11 session is
+left exactly as it was (forcing Wayland onto a machine that has none is a window
+that never appears, which is worse than a title bar), and an explicit
+`GDK_BACKEND` wins — which is also how a user undoes this without a rebuild. The
+launch says which one it did, once, because "the title bar is back" is otherwise
+a bug whose cause cannot be read off the launch.
+
+### 5.4 How the app ends, whichever way it is asked
+
+Closing the window and being `SIGTERM`ed used to be the same event with two
+outcomes. The window reaches Tauri's exit path, so `RunEvent::Exit` closed the
+terminals and stopped the engine. A signal does not: `SIGTERM`'s default
+disposition is to end the process where it stands, so the window went, the
+terminals were left to whatever their PTY happened to do on EOF, and the engine
+was left to notice that its parent had died. That last step is a backstop working
+as designed — the engine watches the shell's pid and its own shutdown is bounded
+(`04` §6.1) — but it is not this shell keeping its own promise, and it takes a
+second and a half longer than doing it deliberately.
+
+So `watch_shutdown_signals` puts the two paths on top of each other. A
+`tokio::signal` stream per signal, spawned from `setup`, resolves when the signal
+arrives and then does exactly what a closed window does: `release_children` closes
+the terminals, stops the engine, and `AppHandle::exit(0)` produces the same
+`RunEvent::Exit` the window-close path emits, so the window, the webview and the
+compositor's idea of this surface all come down the ordinary route. tokio's
+streams rather than `libc::signal` because what tokio installs writes to a pipe and
+the work happens on a runtime thread — a signal handler may not touch the app's
+state or call into Tauri at all.
+
+Both paths can arrive for one exit, so `release_children` is claimed once
+(`claim_shutdown`, over an `AtomicBool`): the second caller leaves rather than
+paying a second bounded wait for a lock nobody holds and logging a second
+"stopped" line for an engine that is already gone.
+
+### 5.4.1 The engine is asked to stop, and only then killed
+
+`SIGKILL` on the way out used to be the whole of it, on the grounds that a closing
+window should not wait. That was right about the wait and wrong about the kill. A
+killed engine writes nothing on its way out: a goal that was RUNNING stays RUNNING
+in the database, with no event saying why, and the only repair is the *next* boot's
+rescue (`04` §6.1) — a post-mortem, not a record, with a stretch of lying state in
+between. The wait is bounded by the engine itself, so asking costs a few hundred
+milliseconds in the ordinary case and a deadline in the worst one, and buys the
+record at the moment it happens.
+
+So `stop_engine` sends `SIGTERM`, then watches for the *exit* rather than for
+silence, and escalates to `SIGKILL` only once the engine has outlasted the bound
+it announced. Three things keep that honest, and the third is the one a person
+found by quitting the app:
+
+- **The bound is the engine's own.** `CODIFY_ENGINE token=… port=… hard_exit_s=6`
+  carries `HARD_EXIT_GRACE_S` from the engine's boot handshake, so the shell is
+  waiting out the deadline the engine promised rather than a number written down
+  twice in two languages. A `hard_exit_s` that is not finite and positive is
+  ignored — a bad bound must not stop the app booting — and the shell falls back
+  to the engine's own default. Slack is added on top: the announcement is what the
+  engine *intends*, not a guarantee it reaches, and a shell that waited exactly
+  as long would kill an engine one scheduling hiccup before its own deadline,
+  which is the very failure this arrangement exists to remove.
+- **The wait is for the process, not the clock.** It ends the moment the engine is
+  gone, and it stops early on the other signal too: the stdout reader sees the pipe
+  close and clears the connection info, so an engine that crashed a moment ago is
+  not waited for as a zombie answering signal 0. Closing the app after a crash is
+  therefore still immediate.
+- **The escalation is unconditional.** An engine that ignores `SIGTERM` is killed on
+  a deadline, which is what `04` §6.1 promises. Nothing here is a reason to leave a
+  process holding the port and the database.
+- **The wait yields; it never blocks a thread.** The first version slept with
+  `std::thread::sleep`, and the signal path runs this as a tokio task — so the
+  sleeping worker starved the two tasks the wait depends on: the reaper that
+  collects the child and the reader that sees its pipe close. A real engine asked
+  this way left in 0.19s, sat unreaped as a zombie for the entire bound, and
+  answered `kill(pid, 0)` the whole time; the shell waited 7.5s and then
+  `SIGKILL`ed a process that had been gone since the first nap. `stop_engine` and
+  its wait are therefore `async`, and `RunEvent::Exit` — which is not a future —
+  drives them with `block_on` from the main thread, which is not a runtime worker.
+  A test on a deliberately single-threaded runtime pins it, because a multi-threaded
+  one hides a blocking wait behind a spare worker.
+
+What this costs is a delay at exit, in the pathological case only, and the log says
+so before it starts: `Asked the engine to stop (SIGTERM) — up to 7.5s before
+SIGKILL`, then either `stopped inside its own bound` or `outlived its shutdown
+bound — killed, so whatever it had not recorded is lost`.
+
+Measured against a real engine with a goal forced to `RUNNING` and stopped by the
+sequence above: gone in **0.19s**, the goal recorded `FAILED`, and its event log
+carrying the reason — `the engine is shutting down while this goal was RUNNING`,
+then an `engine_interrupted` error. The same run stopped the way the shell used to
+stop it is still `RUNNING` afterwards, with no terminal event at all. That record
+is the engine's, written in the lifespan's shutdown (`engine/app.py`); the backstop
+and the shell's escalation both skip that block, which is exactly why they are the
+second and third lines of defence and this is the first.
+
+`SIGTERM` and `SIGINT` are the whole list. `SIGHUP` is deliberately absent: a
+terminal that launched the app may have been started with it ignored, and a handler
+installed over an inherited `SIG_IGN` would make closing that terminal kill an app
+that was deliberately detached. What no handler can cover is a signal that cannot
+be caught at all — `SIGKILL`, and a crash — which is the case the engine's own
+watchdog and bound exist for. A keybind that quits the app pays §5.4.1's wait
+before the window goes, which is why that section logs the bound it is waiting out.
+
+### 5.5 The engine's stderr, where the window can read it
+
+`Stdio::inherit` for the engine's stderr was right for a person with a terminal in
+front of them and useless for a person using the app. The one diagnostic that
+explains an engine is the engine's last word, and the bounded-shutdown backstop's
+last word is exactly that: `[engine] shutdown unfinished after 6s — exiting
+anyway`, printed and then `os._exit`ed. A hung websocket — a cancelled turn, a
+closed laptop — took the engine away, and the app could say only that it was
+offline, because the line explaining it had gone to a console nobody was looking
+at.
+
+So stderr is piped and read. A task drains it for the life of the process and
+does two things with every line: keeps it in `engine_log::EngineLog` (200 lines,
+500 characters each, 8 KiB of unterminated bytes tolerated — another process is
+feeding this buffer, so it is bounded against both a long session and a process
+that never sends a newline) and echoes it, byte for byte, so the terminal shows
+exactly what `inherit` showed. Bytes are decoded only once a line is complete: a
+multi-byte character split across two reads would otherwise become two
+replacement characters. A panicking reader poisons the mutex; it does not
+destroy the buffer.
+
+`codify_engine_log` returns the tail, and the window asks for it **once, when it
+notices the engine has stopped** — not while the engine is healthy, and not on a
+timer. That is the only moment the tail has anything to say, and by then the
+reader already holds everything the engine printed.
+
+The window does not print the whole tail. `engineLog.ts` keeps the last few
+*notable* lines — anything reading as a warning, error, traceback, or shutdown —
+and then the last few lines of all, because a process that dies usually says why
+last, and a panel that rendered nothing because nothing matched a keyword would be
+the same blank panel this removed. The panel sits under the launcher's own
+diagnosis when there is one, so the two read as cause and effect, and it is amber
+because it is a quote rather than a second error.
+
+Two things follow that are worth stating. The `engine_exited_problem` message
+still names `python3 -m engine` and the directory: the tail is bounded, the whole
+of it is not, and the tail is not there in the browser build at all — outside
+Tauri there is no shell holding a pipe, so `fetchEngineStderr` answers `[]`. And
+the grant is a named permission like every other command
+(`allow-codify-engine-log`), so the command is unreachable until it is listed;
+`browser.rs`'s ACL test fails the build's test leg when the two lists drift.
+
 ## 6. The restore gap, closed
 
 Attaching an **existing** goal to a thread used to be client-side only. When
@@ -371,6 +535,52 @@ Asserted in `tests/test_conversations.py`: the headline test attaches a goal,
 does — and reads the link back through `GET /goals/{id}` and
 `GET /conversations/{id}/turns`; two more pin the refusals (404/422/422 +
 extra-field) and the move-and-touch behaviour.
+
+### 6.1 Reopening a thread, which used to open blank
+
+The route the test above reads is also the one a client never called. The store
+held what had streamed into it *this session*, and nothing asked the engine what a
+thread had already said, so every thread was an empty pane after a reload — a user
+whose history was in the database, in a tab, and invisible. History's restore
+rehydrated a single goal, which is why the gap read as "restoring works, opening a
+thread does not".
+
+`hydrateThread` in `App.tsx` closes it, and the pieces are deliberately small:
+
+* **The read.** `GET /conversations/{id}/turns` for the thread's turns — derived by
+  the engine from the goals that answered them, so there is no second record to
+  reconcile — and then `getGoal` + `getGoalEvents` per turn, which are the same
+  events a live stream delivers. A restored turn and a live one are therefore one
+  format: `threadHydration.turnMessages` mints the pair with the *goal id*
+  (`user-<goal>`, `assistant-<goal>`), the same scheme `restoreGoal` uses, and
+  `ChatTimeline` decides prose-vs-run-card from the goal either way.
+* **When.** On the *visible* thread changing — clicked in the sidebar, restored with
+  the tab, or arrived at by closing another — and gated on the engine answering,
+  because a restored tab can name a thread before the handshake has set the port
+  this client will use. Once per thread per session: the store is not persisted, so
+  it is the whole truth about what has been shown, and a second pass can only
+  repeat it. A *failed* read is deliberately not recorded, so the next opening
+  retries instead of remembering the thread as empty.
+* **Not duplicating what is already there.** This is the part that needed a rule
+  rather than care: a live turn's message ids come from the clock
+  (`user-${Date.now()}`) and a hydrated one's from the goal id, so nothing that
+  compares ids can tell "the same turn, read twice" from "the same turn, twice".
+  `turnsNeedingHydration` decides by **goal** instead, and it runs twice — once
+  before the fetches (a thread reopened in one session should not spend a request
+  per turn to learn nothing) and again inside the write, against the store as it is
+  at that moment, because a turn dispatched since the first check is live and not
+  history. `mergeThreadMessages` then owns only what ids *can* answer: a second
+  read replaces its own pair instead of appending beside it. A turn that is still
+  running re-subscribes to the very message it was hydrated from, so a thread whose
+  last turn was in flight when the window closed goes on updating rather than
+  freezing mid-answer.
+
+Asserted in `ui/tests/threadHydration.test.ts` — the decisions are pure and the
+React half only fetches and applies them: the pair's shape and its goal-id scheme,
+the user's bubble reading as the words typed rather than the engine's normalised
+title, a turn already in the store not being fetched again, a re-read replacing
+rather than appending, and the composition that keeps a live turn single while the
+rest of its thread arrives.
 
 ## 7. The terminal and the browser
 
@@ -823,18 +1033,27 @@ turn, because a client that could choose is the client that produced a plan for
 `TurnCreate` is also `extra: "forbid"`, so `agent_config` is a 422 — invariant 2
 holds on the new route for the same reason it holds on `POST /goals`.
 
-### 10.4 No gate means the pipeline
+### 10.4 No gate means the conductor
 
 A fresh install has no gate configured, and `engine == "skipped"` is the ordinary
 first-run state. A question branch that fires on *no classification* would mean
 an unconfigured install silently answers code changes from a chat call — the
 exact failure this section removes, in a new place.
 
-So the routing is: `intent == "question"` **and** the gate answered → answer.
-Anything else — `code_change`, `ops_command`, `other`, or no gate at all — runs
-the pipeline, and the log line says which and why. Planning is a superset of
-answering, so guessing wrong costs a slower answer; the reverse guess costs a
-code change the user believed was acted on.
+So the routing is: the conductor decides, and it decides everything. When one is
+configured it runs whatever the gate said — a question, a change, or no
+classification at all — and §10.14 is what it may then do. When there is no
+conductor the older rule stands, unchanged: `intent == "question"` **and** the
+gate answered → answer, and anything else — `code_change`, `ops_command`,
+`other`, or no gate at all — runs the pipeline, with a log line saying which and
+why.
+
+The two are not in tension. The pipeline is a superset of answering, so with no
+conductor, guessing wrong costs a slower answer while the reverse guess costs a
+code change the user believed was acted on. And when a conductor is configured
+but *fails* — its model errors, or it spends its whole call budget without
+producing an answer or a plan — that same pipeline runs as the floor, and the
+transcript says so.
 
 A blocked turn is a blocked goal: same gate, same `laya_blocked` code, same
 event. The gate guards the engine, not a pipeline.
@@ -864,34 +1083,29 @@ so a ninth row in `agent_configs` would be a ninth role the moment anything
 iterated it. It is configured through `engine_settings` instead, and measured
 through the ordinary `agent_assigned` / `usage` events.
 
-**Judgement is the model's; authority is the engine's.** Every tool is a call
+**Judgement is the model's; authority is the engine's.** Every move is a call
 the pipeline already makes, through the same service:
 
-| Tool | Routed through | Inherits |
+| Move | Routed through | Inherits |
 |---|---|---|
 | `read_file` | `LibraryService.read` | path escape refused by `FileSystemService` |
 | `search_code` | `LibraryService.search` | same |
 | `git_history` | `GitService.read_only` | an explicit subcommand list, not a prefix rule |
 | `run_command` | `SandboxService.run_command` | `validate_argv`, `test` mode (docs/00 §6.6) |
-| `delegate` | `ExecutorService.run_planning` | the whole 8-role pipeline, unchanged |
+| `recon` | `ExecutorService._librarian` | read-only, bounded rounds |
+| `design` | `ExecutorService._design` | no tools at all; decides from the evidence |
+| `plan` | the planner | refuses without evidence; writes steps, never files |
+| `write` | `ExecutorService._fixer` | docs/00 §6.9 — the only move that touches the filesystem, and it refuses while the goal is unapproved |
+| `verify` | `ExecutorService._verifier` | `validate_argv`, `test` mode — the second door, same allowlist |
+| `review` | `ExecutorService._critic` | approve or request changes; cannot write |
+| `summarize` | `ExecutorService._scribe` | commits, and only after `review` approved |
+| `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
 
-So the conductor gains *choice* over existing powers, never *new* ones. Note
-what is **absent**: anything that writes. Editing a file is the fixer's job and
-is reachable only through `delegate`, so a code change still goes through the
-librarian, planner, fixer, verifier and critic. A `write_file` tool would make
-all five optional for any change the conductor felt like making itself.
-
-**`delegate` is narrower than the table above suggests, and this was observed
-rather than designed.** The gate runs *before* the conductor, so a direct change
-request arrives as `intent=code_change` and `run_chat` routes straight to the
-pipeline — the conductor never gets a chance to offer a tool at all. Which
-leaves `delegate` reachable only when the gate answered `question` and the model
-then judged that a change was needed: a question escalating into work. That is
-the real job of the tool, and it is a useful one, but it is not the main road to
-a code change and the table above should not be read as if it were. Forcing a live
-`delegate` call needs a request the gate classifies as a question that the model
-still wants to act on; contriving one would have proven less than this reading
-does. §10.12 records the related cost: every routed code change gates twice.
+So the conductor gains *choice* over existing powers, never *new* ones. There is
+still no `write_file` and no `commit`: the move that writes is the fixer's own
+method under the fixer's own validation, and the move that commits is the
+scribe's after the critic approved. §10.14 is the section on how that holds when
+the model — not the code — is choosing the order.
 
 `git_history` is worth calling out: it is an allowlist of subcommand *names*, not
 a prefix rule, because `log` is safe and `log --output=x` is not. The caller is a
@@ -997,8 +1211,10 @@ The four expected outcomes, all observed:
 2. **question needing a file → `conductor called read_file({"path": …})`,
    then a correct prose answer.** The loop, the tool result round trip and
    `coerce_tool_reply` all live here.
-3. **code change → gate says `code_change`, the full pipeline runs, status
-   `PENDING` awaiting approval.**
+3. **code change → the conductor decides.** With a conductor configured it
+   plans, and the goal ends `PENDING` awaiting approval with nothing written;
+   with none, the gate's `code_change` routes straight to the pipeline and the
+   outcome is the same. §10.14 is the path in between.
 4. **memory → turn 2 answers from turn 1**, which it cannot do from its own
    prompt: `turn_history` is the only source.
 
@@ -1008,3 +1224,184 @@ never the developer's state.
 
 It is deliberately *not* part of `make check`: it needs a model, and a gate
 that depends on somebody's machine is the thing docs/00 §6 is against.
+
+### 10.14 The conductor chooses the sequence
+
+§10.6 describes the conductor as a dispatcher with five read-only tools and one
+`delegate` that ran the whole recipe. That was the first shape of the idea, and
+it left the sequence compiled in: `delegate` fired the librarian, the designer
+and the planner whether or not the request needed them, and there was no way for
+the model to say "change this one step" or "verify only that".
+
+The sequence is now a decision. Four things changed and one deliberately did not.
+
+**The order became a skill.** `engine/builtin_skills/ship-a-change.md` is the
+recipe that used to live in `run_planning` and `run_step`, written as
+instructions. It is discovered by name and one-line description, its body is
+fetched with `use_skill` only when it is wanted, and a
+`<workspace>/.codify/skills/*.md` file of the same name replaces it — with the
+replacement announced in the transcript, because a silently shadowed recipe is
+worse than an obvious one. `context-transfer.md` is the directory's other
+built-in and the proof that the set is not a pipeline with one entry.
+
+**A skill is data, not a capability.** `.codify/skills/` arrives with a cloned
+repository, which makes it untrusted input. A skill can sequence moves that
+already exist; it cannot define a move, cannot widen `validate_argv`, and cannot
+reach the write gate — that gate reads the goal's *stored status*, not anything
+the model was told. The worst a hostile skill can do is argue, and an argument
+cannot open a door. `tests/test_skills.py::TestASkillCannotEmpower` holds it.
+
+**A second built-in, for handing the thread over.**
+`engine/builtin_skills/context-transfer.md` is the other one: when a
+conversation is long enough that the model has started losing track, load it and
+package the thread into a single pasteable block for a new thread. It is a
+recipe for prose, not for the workspace — it changes nothing and reaches no
+move, which is the point of putting it beside `ship-a-change` in the same
+directory: a skill is a *kind* of thing, and the set is not a pipeline with one
+entry. It is the one built-in whose value is a list of things it refuses to
+carry across, so `tests/test_skills.py` pins those phrases rather than its
+prose — a handoff that dropped the gate's real result, or a key, would be worse
+than no handoff.
+
+**The stages became moves.** `recon`, `design`, `plan`, `write`, `verify`,
+`review` and `summarize` are each one of the pipeline's own methods, wrapped in
+the same `self._stage(goal_id, …)` block the recipe uses. So the accounting, the
+`stage_result` vocabulary and the stats screen needed no new case, and
+`tests/test_metrics.py` still re-derives the call sites from the source and fails
+if a move is added without one. They are also more forgiving than the recipe was:
+`TestsFailed` and `CriticRejection` come back as values the conductor can act on
+rather than unwinding a step, so a conductor that cannot make a test pass can
+re-plan or report where a step could only fail.
+
+**What did not change is who is allowed to do what.** docs/00 §6.9: only the
+fixer writes, and the move refuses while the goal is unapproved. The seam is
+`RUNNING`, reachable only through `POST /goals/{id}/start` — a person saying yes.
+So a turn that produces a plan ends with the plan in front of the user and
+**nothing written**; the approval starts it, and `run_conductor_resume` hands the
+approved plan back to the same conductor to execute. That run is re-derived from
+rows — the goal, its steps, the conversation — rather than a persisted
+transcript, which is the same choice §10.5 already makes for turn history.
+
+**The recipe is the floor.** If the conductor's model errors, or it spends its
+whole call budget without producing an answer or a plan, `run_chat` runs the
+sequence it would have run before the conductor existed and says that it did. If
+the conductor drives an approved plan but leaves steps open, the engine finishes
+them. A model that is bad at this therefore costs a plan some time and nothing
+else, and `conductor_drives_execution = 0` turns the arrangement off without a
+rebuild.
+
+One distinction the design rests on, and the reason declining and failing are
+modelled separately: **a conductor that declines is obeyed; a conductor that
+fails is caught.** Judging that no change is needed is a decision, and running
+the recipe over the top of it would make the brain a suggestion. Producing
+neither an answer nor a plan is not a decision, and falling back beats failing
+the turn. `TestDecliningIsObeyedAndFailingIsCaught` holds both.
+
+### 10.14a What the live runs actually showed
+
+The five runs below were against `qwen2.5-coder:7b` on a local Ollama, through
+`scripts/drive_a_turn.py`, and each one changed the code:
+
+1. **The gate's verdict was not reaching the conductor.** A `code_change`
+   request arrived looking like any other prompt, so the model answered it with
+   a clarifying question instead of planning. Fixed by `_intent_brief`: the gate
+   classifies on every request and its answer was being computed and dropped,
+   which is the same discarded signal this whole section started from.
+2. **The skill menu alone did not make the model load a skill.** It answered
+   from the transcript instead. Naming the skill in the brief for a change
+   request fixed it: `conductor called use_skill({"name": "ship-a-change"})`.
+3. **A 7B narrates the sequence instead of calling it.** After loading the skill
+   and calling `recon`, it replied "2. `plan` — Turn the request plus the
+   evidence into steps" and stopped, having called nothing. One bounded
+   `nudge` — a single reminder, never a loop — turns this into a real call in
+   some runs and not others.
+4. **A call written inside a prose fence was shown to the user as the answer.**
+   `coerce_tool_reply` recovered a whole-body envelope and a whole-body fence,
+   but not prose that narrates a move and then writes the call underneath it in
+   a ```json block. It does now, guarded the same way — the recovered name must
+   be a tool that was actually offered — and the verbatim reply is pinned in
+   `tests/test_conductor.py::TestACallWrittenInsideProse`.
+5. **A decline that is right looks exactly like a decline that is wrong.**
+   Asked to document `greeter.py`, the conductor read the file, found the
+   function already documented, and said so — correct, evidence-based, and
+   correctly obeyed. The same shape then appeared where the model *intended* to
+   act and never did. Nothing in the text separates those two, so the engine
+   does not guess: it obeys both, and logs a warning when the gate read the
+   request as a change and no plan came out, so an untouched workspace cannot
+   read as an updated one.
+
+The honest conclusion from 3 and 5: **the architecture is sound and a 7B local
+model is not good enough to drive it reliably.** That is the risk this section
+named before it was built, it is why the recipe is the floor, and it is why
+`conductor_drives_execution` exists. A model that can call three tools in a row
+without narrating them is a different machine, not a different design.
+
+### 10.15 A benign turn is a conversation
+
+The gate runs on every turn — it is what decides the turn's shape — and it never
+stopped running. What it did do was *report*: `run_chat` published the verdict,
+and the transcript drew it as a card over the answer, so typing "hi" produced
+
+```
+Laya gate passed (Laya via fallback model)
+intent question   risk 0.00   injection 0.01   / block at 0.85
+Hello! What would you like to work on?
+```
+
+which reads as a pipeline that vetted the person before answering them. That is
+the behaviour this section removes, in the one place it was still on screen.
+
+The announcement is now conditional, and the parts are separated:
+
+* **The gate still gates.** Same call, same stage: the `laya` row in
+  `STAGE_OUTCOMES` records `allow`/`block`/`skipped`/`unavailable` for a turn
+  exactly as it does for a goal, so the stats screen and the silent-role audit
+  count it the same way. `tests/test_turns.py::test_the_gate_ran_before_the_answer`
+  reads that record to prove the gate ran, because the verdict is no longer in the
+  turn's log.
+* **A blocked turn is still a blocked goal** — same code, same `laya_blocked`
+  error, and the card *is* published, so a refusal has its reason on screen
+  (§10.4).
+* **A warned turn shows the warning.** Silence is for a verdict that decided
+  nothing a person can act on; a warning is the opposite of that.
+* **Only that.** A benign turn publishes its reply and its `goal_status` and
+  nothing else about the gate: no `agent_assigned`, no `laya_decision`.
+
+The transcript's half of the same rule is `ui/src/turnTranscript.ts`, because a
+rule that only exists inside a component's render is a rule nothing can assert.
+It says what a turn's message *is*: the reply as prose; the conductor's streamed
+snapshot standing in while it arrives; the gate's card along with any warnings
+and errors beside it; and no narration of the engine's own tool calls
+("conductor called `read_file`…"), which stay in the event log and in the audit
+export. A turn that *planned* keeps the run's card, approve button and all —
+`isConversationalTurn` is the chat mode **and** no steps, because the turn and the
+run it turned into share one goal row.
+
+`tests/test_turns.py::test_a_benign_turn_does_not_report_the_gate` and
+`ui/tests/turnTranscript.test.ts` hold both ends: the engine's silence, and a
+rendered turn with no gate line in it.
+
+### 10.16 A turn ends where the engine says it did
+
+"After every message the AI has to stop" is not a matter of taste: the engine
+writes `goal_status: COMPLETED`, and the UI has to believe it. It did not. The
+tab strip's busy dot read
+
+```
+m.isStreaming === true || isGoalActive(m.goal?.status)
+```
+
+and `isStreaming` is a flag this client sets at dispatch that nothing clears when
+the engine finishes — not the terminal `goal_status`, not the stream closing. So
+a turn answered in three seconds left its tab pulsing for the rest of the
+session, and the transcript said the assistant was still working after it had
+stopped.
+
+The fix is to stop asking two questions and take the engine's answer: once a
+message has a goal, the goal's status decides (`isMessageBusy`,
+`ui/src/goalActions.ts`). `isStreaming` keeps the one job it can do honestly —
+the gap between dispatching a goal and having a row to read — and it is cleared
+when the terminal status arrives as well, so a finished message carries no stale
+flag for the next reader. `ui/tests/goalActions.test.ts` pins all three cases: a
+finished goal is not busy whatever the flag says, a live goal is, and a message
+with no goal yet is busy only while its dispatch is pending.
