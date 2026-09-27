@@ -1,16 +1,20 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import ast
 import json
 import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+from engine.app import _silent_roles, _usage_from_events
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.laya import (
     LAYA_QUESTIONS,
+    GateCall,
     LayaDecision,
     LayaService,
     build_state,
@@ -32,6 +36,7 @@ from engine.providers import (
 )
 from engine.sandbox import SandboxService
 from engine.services import AgentRegistryService, GoalService, WorkspaceService
+from engine.trace import TraceService
 
 
 class TestPolicy(unittest.TestCase):
@@ -337,7 +342,9 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
 class _BlockingLaya(LayaService):
     """Stands in for a high-confidence injection verdict from the real SDK."""
 
-    async def decide(self, state: dict[str, Any]) -> LayaDecision:
+    async def decide(
+        self, state: dict[str, Any], on_call: GateCall | None = None,
+    ) -> LayaDecision:
         return LayaDecision(
             engine="sdk",
             answers={"prompt_injection": {"noul": 0.99}},
@@ -348,7 +355,9 @@ class _BlockingLaya(LayaService):
 
 
 class _SilentLaya(LayaService):
-    async def decide(self, state: dict[str, Any]) -> LayaDecision:
+    async def decide(
+        self, state: dict[str, Any], on_call: GateCall | None = None,
+    ) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 
 
@@ -411,7 +420,9 @@ class TestExecutorGate(unittest.IsolatedAsyncioTestCase):
 
     async def test_warnings_surface_as_events_without_blocking(self) -> None:
         class _WarnLaya(LayaService):
-            async def decide(self, state: dict[str, Any]) -> LayaDecision:
+            async def decide(
+        self, state: dict[str, Any], on_call: GateCall | None = None,
+    ) -> LayaDecision:
                 return LayaDecision(
                     engine="llm-fallback",
                     answers={"risk": {"score": 2.0}},
@@ -435,13 +446,319 @@ class TestExecutorGate(unittest.IsolatedAsyncioTestCase):
 
     async def test_gate_exception_is_skipped_not_fatal(self) -> None:
         class _Exploding(LayaService):
-            async def decide(self, state: dict[str, Any]) -> LayaDecision:
+            async def decide(
+        self, state: dict[str, Any], on_call: GateCall | None = None,
+    ) -> LayaDecision:
                 raise RuntimeError("boom")
 
         executor = self._executor(_Exploding())
         goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="t", description="d"))
         await executor.run_planning(goal.id)
         self.assertEqual(self.goals.get(goal.id).status, "PENDING")
+
+
+class _AccountingStubProvider(_StubProvider):
+    """A stub that reports usage, so a call can be *booked* and not just made.
+
+    A provider that says nothing about tokens is the reason this whole class
+    exists: without a `usage_sink` call there is nothing for the engine to
+    account, so a test could never have caught the gate going unbooked.
+    """
+
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
+        if self.usage_sink is not None:
+            self.usage_sink({"input_tokens": 31, "output_tokens": 12, "total_tokens": 43})
+        return await super().complete(system_prompt, user_prompt, model, temperature, max_tokens)
+
+
+class GateOverrideContract(unittest.TestCase):
+    """Every `decide` override in the tree has to accept the call hook.
+
+    The executor hands the gate `on_call` so the gate's model call can be booked.
+    An override written against the older two-argument signature then raises
+    `TypeError` on every run — and the executor's deliberate contract that "an
+    unusable gate is a skipped gate" turns that into a *silently* ungated run
+    rather than a failure. It cost a replay to find: the CLI reported its gate as
+    `unavailable` and carried on.
+
+    So the signature is frozen here, the way `test_no_unguarded_spawns` freezes
+    spawn sites. A static scan cannot prove a gate decides correctly; it can
+    prove the next double cannot be added in a shape that quietly does nothing.
+    """
+
+    ROOT = Path(__file__).resolve().parent.parent
+    SCANNED = ("engine", "tests", "scripts", "benchmarks")
+
+    def _overrides(self) -> list[tuple[str, ast.AsyncFunctionDef]]:
+        found: list[tuple[str, ast.AsyncFunctionDef]] = []
+        for directory in self.SCANNED:
+            for path in sorted((self.ROOT / directory).rglob("*.py")):
+                if "__pycache__" in path.parts:
+                    continue
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                for node in ast.walk(tree):
+                    if (
+                        isinstance(node, ast.AsyncFunctionDef)
+                        and node.name == "decide"
+                    ):
+                        found.append((str(path.relative_to(self.ROOT)), node))
+        return found
+
+    def test_every_decide_override_accepts_the_call_hook(self) -> None:
+        offenders = [
+            f"{where}:{node.lineno}"
+            for where, node in self._overrides()
+            if "on_call" not in {a.arg for a in node.args.args + node.args.kwonlyargs}
+        ]
+        self.assertEqual(
+            offenders, [],
+            "these `decide` overrides cannot accept the `on_call` the executor "
+            "passes, so each one raises and its gate is silently skipped",
+        )
+
+    def test_the_scan_finds_the_overrides_it_is_meant_to_find(self) -> None:
+        """Guard the guard: a scan that matches nothing proves nothing."""
+        found = self._overrides()
+        self.assertGreaterEqual(
+            len(found), 5,
+            f"only found {len(found)} decide override(s): the walk is broken",
+        )
+        # The real one and the replay's, which between them are the two shapes
+        # that actually run.
+        names = {where for where, _ in found}
+        self.assertIn("engine/laya.py", names)
+        self.assertIn("scripts/replay_trace.py", names)
+
+
+def _event(type_: str, payload: dict[str, Any]) -> Any:
+    """A bare `Event`, for a rule that reads a log without a run behind it."""
+    return SimpleNamespace(
+        type=type_, payload=payload, step_id=None, timestamp=0.0, sequence=0
+    )
+
+
+class _RoleAwareFactory(ProviderFactory):
+    """Tells a replay provider which role it is being asked for.
+
+    `ReplayProvider` matches a recorded call on (role, prompt digest), so a
+    factory that does not pass the role along leaves it guessing — and it guesses
+    `unknown`, which matches nothing. This is the wiring `scripts/replay_trace.py`
+    does for a real replay.
+    """
+
+    def __init__(self, provider: BaseProvider) -> None:
+        super().__init__(Keychain())
+        self.provider = provider
+
+    def build(self, config: AgentConfig) -> BaseProvider:
+        # A plain attribute on the replay provider — the same line the real
+        # replay factory in `scripts/replay_trace.py` uses.
+        self.provider.current_role = config.role  # type: ignore[attr-defined]
+        return self.provider
+
+
+class TestGateCallIsBooked(unittest.IsolatedAsyncioTestCase):
+    """The gate's LLM fallback is a model call, and is booked as one.
+
+    The gate used to call `provider.complete` itself, outside the orchestrator
+    that publishes `usage` and drives the recorder. Three things followed, all
+    of them invisible: the spend never reached the goal's usage document or the
+    Stats rollup, the call was missing from a recording that claimed to hold
+    every call, and — because the gate still published `agent_assigned` — the
+    audit reported the role as "assigned but never ran" on every goal of every
+    install without the Laya SDK, which is the default install.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.conn = connect(self.root / "gate-books.db")
+        self.traces = TraceService(self.conn)
+        self.provider = _AccountingStubProvider(
+            planner={"steps": [{"title": "S1", "description": "d", "suggested_paths": []}]}
+        )
+        self.registry = AgentRegistryService(
+            self.conn, _StubFactory(self.provider), Keychain()
+        )
+        for role in ROLES:
+            self.registry.set_config(role, AgentConfigUpdate(model_name="stub-model"))
+        self.workspaces = WorkspaceService(self.conn)
+        self.goals = GoalService(self.conn)
+        self.ws = self.workspaces.create(
+            WorkspaceCreate(name="WS", root_path=str(self.root))
+        )
+        # `disabled=True` rather than relying on the SDK being absent: what is
+        # under test is the *fallback* path, and it has to be the path taken on a
+        # machine that happens to have the SDK installed too.
+        self.gate = LayaService(registry=self.registry, disabled=True)
+        self.executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(),
+            laya=self.gate, tracer=self.traces,
+        )
+
+    async def asyncTearDown(self) -> None:
+        self.conn.close()
+        self.tmp.cleanup()
+
+    async def _plan_a_traced_goal(self) -> Any:
+        goal = self.goals.create(
+            GoalCreate(workspace_id=self.ws.id, title="t", description="d", trace=True)
+        )
+        await self.executor.run_planning(goal.id)
+        return goal
+
+    async def test_the_gate_reports_the_usage_of_its_call(self) -> None:
+        goal = await self._plan_a_traced_goal()
+        events = self.goals.events_after(goal.id, 0)
+
+        gate_usage = [
+            e for e in events
+            if e.type == "usage" and (e.payload or {}).get("role") == "laya"
+        ]
+        self.assertEqual(
+            len(gate_usage), 1,
+            "the gate's fallback call must publish a usage event like every other role",
+        )
+        payload = gate_usage[0].payload or {}
+        self.assertEqual(payload["input_tokens"], 31)
+        self.assertEqual(payload["output_tokens"], 12)
+        self.assertEqual(payload["model"], "stub-model")
+        self.assertIn("duration_ms", payload)
+
+    async def test_the_gate_call_counts_in_the_goals_usage(self) -> None:
+        """The number the chat's usage card and the Stats rollup both read."""
+        goal = await self._plan_a_traced_goal()
+        events = self.goals.events_after(goal.id, 0)
+
+        by_role = _usage_from_events(events)["by_role"]
+        self.assertIn("laya", by_role, "the gate's spend is missing from the goal's usage")
+        self.assertEqual(by_role["laya"]["total_tokens"], 43)
+        self.assertEqual(by_role["laya"]["calls"], 1)
+
+    async def test_a_gate_that_ran_is_not_called_a_silent_role(self) -> None:
+        goal = await self._plan_a_traced_goal()
+        self.goals.update_status(goal.id, self.goals.get(goal.id).version, "FAILED")
+        events = self.goals.events_after(goal.id, 0)
+        usage = _usage_from_events(events)
+
+        silent = _silent_roles(self.goals.get(goal.id).status, events, usage)
+        self.assertEqual(
+            silent, [],
+            "a gate that answered a typed contract did not run silently",
+        )
+
+    async def test_the_gate_call_is_in_the_recording(self) -> None:
+        """A recording that claims every call but omits the gate is a story."""
+        goal = await self._plan_a_traced_goal()
+        calls = self.traces.calls(goal.id)
+
+        gate_calls = [c for c in calls if c["role"] == "laya"]
+        self.assertEqual(len(gate_calls), 1, "the gate's call must be recorded")
+        self.assertEqual(gate_calls[0]["model"], "stub-model")
+        # And the tokens it reported are kept with it, so a replay's counts
+        # match the run it replays.
+        self.assertEqual(gate_calls[0]["input_tokens"], 31)
+        self.assertEqual(gate_calls[0]["output_tokens"], 12)
+
+    async def test_the_recording_can_serve_the_gate_call_back(self) -> None:
+        """The round trip: a replay has to be able to *answer* the gate.
+
+        A recording that cannot be replayed is a story, so the gate's call is
+        matched on (role, prompt digest) like every other one. The clone below
+        therefore keeps the recorded workspace's *basename* — the gate's prompt
+        carries the workspace name and nothing else about the path, so a rename
+        is the one difference that would make this a different call.
+        """
+        goal = await self._plan_a_traced_goal()
+        clone_root = Path(self.tmp.name).resolve() / "clone" / self.root.name
+        clone_root.mkdir(parents=True)
+        clone = self.workspaces.create(
+            WorkspaceCreate(name="WS", root_path=str(clone_root))
+        )
+        replay = self.goals.create(
+            GoalCreate(workspace_id=clone.id, title="t", description="d")
+        )
+        provider = self.traces.replay_provider(goal.id)
+        registry = AgentRegistryService(
+            self.conn, _RoleAwareFactory(provider), Keychain()
+        )
+        for role in ROLES:
+            registry.set_config(role, AgentConfigUpdate(model_name="stub-model"))
+        replay_executor = ExecutorService(
+            self.goals, self.workspaces, registry, SandboxService(),
+            laya=LayaService(registry=registry, disabled=True),
+        )
+        await replay_executor.run_planning(replay.id)
+
+        self.assertIn(
+            "laya", provider.served,
+            "the replayed gate must be answered from the recording, not re-decided",
+        )
+
+    async def test_a_gate_that_never_called_books_nothing(self) -> None:
+        """The other half: no call, no usage. A skipped gate must not invent spend."""
+        goal = self.goals.create(
+            GoalCreate(workspace_id=self.ws.id, title="t", description="d", trace=True)
+        )
+        silent_gate = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(),
+            laya=_SilentLaya(), tracer=self.traces,
+        )
+        await silent_gate.run_planning(goal.id)
+
+        by_role = _usage_from_events(self.goals.events_after(goal.id, 0))["by_role"]
+        self.assertNotIn("laya", by_role)
+
+    async def test_an_in_process_gate_is_not_called_silent_either(self) -> None:
+        """The SDK path books nothing at all, and is still not silence.
+
+        With the real Laya package the gate answers in-process: no provider, no
+        tokens, no `usage` event. Judged on spend alone it looked exactly like a
+        role that never ran, so a second signal is needed — the engine's own
+        record that the stage did its job.
+        """
+        class _SdkGate(LayaService):
+            async def decide(
+                self, state: dict[str, Any], on_call: GateCall | None = None,
+            ) -> LayaDecision:
+                return LayaDecision(
+                    engine="sdk", answers={"intent": {"choice": "code_change"}},
+                    model="laya-noul-en",
+                )
+
+        goal = self.goals.create(
+            GoalCreate(workspace_id=self.ws.id, title="t", description="d", trace=True)
+        )
+        executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, SandboxService(),
+            laya=_SdkGate(), tracer=self.traces,
+        )
+        await executor.run_planning(goal.id)
+        self.goals.update_status(goal.id, self.goals.get(goal.id).version, "COMPLETED")
+        events = self.goals.events_after(goal.id, 0)
+
+        by_role = _usage_from_events(events)["by_role"]
+        self.assertNotIn("laya", by_role, "an in-process gate books no tokens")
+        self.assertEqual(_silent_roles("COMPLETED", events, {"by_role": by_role}), [])
+
+    async def test_a_gate_that_was_assigned_and_failed_is_still_silent(self) -> None:
+        """The other half of the second signal.
+
+        `unavailable` is not in the gate's success set, so a gate that was
+        announced and then could not answer is still reported — which is the
+        whole point of the report.
+        """
+        events = [
+            _event("agent_assigned", {"role": "laya", "provider": "ollama", "model": "m"}),
+            _event("stage_result", {"role": "laya", "outcome": "unavailable"}),
+        ]
+        self.assertEqual(
+            [s["role"] for s in _silent_roles("COMPLETED", events, {"by_role": {}})],
+            ["laya"],
+        )
 
 
 if __name__ == "__main__":

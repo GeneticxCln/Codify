@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { AssertionError } from "node:assert";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,9 +85,9 @@ function configBlock(key: string): string {
       if (depth === 0) return config.slice(start + 1, i);
     }
   }
-  throw new AssertionError(
-    `unbalanced braces after \`${key}: {\` in tailwind.config.js`,
-  );
+  throw new AssertionError({
+    message: `unbalanced braces after \`${key}: {\` in tailwind.config.js`,
+  });
 }
 
 /** `name -> value` for every `"name": "value"` pair inside one config block. */

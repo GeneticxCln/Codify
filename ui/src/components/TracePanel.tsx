@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { deleteGoalTrace, fetchGoalTrace } from "../api";
-import type { TraceSummary } from "../types";
-import { promptStorageNote, traceHeadline, traceRoles } from "../traceSummary";
-import { Loader2, Radio, Trash2, X } from "lucide-react";
+import type { Goal, TraceSummary } from "../types";
+import { canArmTrace, promptStorageNote, traceHeadline, traceRoles } from "../traceSummary";
+import { CircleDot, Loader2, Radio, Trash2, X } from "lucide-react";
+import { readRejection } from "../rejection.ts";
 
 /**
  * One goal's recording: what it holds, and the only control that removes it.
@@ -12,21 +13,39 @@ import { Loader2, Radio, Trash2, X } from "lucide-react";
  * lists it should be something they asked to see. Deleting is offered here
  * and nowhere else — it is the user's call, always allowed, and it names what
  * it will remove before it does.
+ *
+ * Arming and disarming live here too, because this is the one surface that
+ * talks about recordings: the engine can turn recording on for a goal that has
+ * not started, and a control that exists only on the command bar at creation
+ * time cannot reach a goal the user decided to record a moment later.
  */
 export const TracePanel: React.FC<{
   goalId: string;
+  /** The goal itself: the panel says what recording is possible, and that is a
+   * function of the goal's status and its armed flag, not of the recording. */
+  goal: Goal;
+  onSetTrace: (enabled: boolean) => void | Promise<void>;
   onClose: () => void;
-}> = ({ goalId, onClose }) => {
+}> = ({ goalId, goal, onSetTrace, onClose }) => {
   const [summary, setSummary] = useState<TraceSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [armed, setArmed] = useState<boolean>(Boolean(goal.trace));
+
+  // The parent owns the goal, so an arming done here has to show up even if the
+  // panel is reopened from a stale copy of it.
+  useEffect(() => {
+    setArmed(Boolean(goal.trace));
+  }, [goal.trace]);
+
+  const armable = canArmTrace(goal.status);
 
   const load = useCallback(async () => {
     try {
       setError(null);
       setSummary(await fetchGoalTrace(goalId));
     } catch (err: any) {
-      setError(err?.message || "Could not read this run's recording.");
+      setError(readRejection(err, "Could not read this run's recording."));
     }
   }, [goalId]);
 
@@ -37,7 +56,7 @@ export const TracePanel: React.FC<{
         if (live) setSummary(s);
       })
       .catch((err: any) => {
-        if (live) setError(err?.message || "Could not read this run's recording.");
+        if (live) setError(readRejection(err, "Could not read this run's recording."));
       });
     return () => {
       live = false;
@@ -57,7 +76,20 @@ export const TracePanel: React.FC<{
       await deleteGoalTrace(goalId);
       await load();
     } catch (err: any) {
-      setError(err?.message || "Could not delete the recording.");
+      setError(readRejection(err, "Could not delete the recording."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleToggleRecording = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await onSetTrace(enabled);
+      setArmed(enabled);
+    } catch (err: any) {
+      setError(readRejection(err, "Could not change this run's recording."));
     } finally {
       setBusy(false);
     }
@@ -71,6 +103,29 @@ export const TracePanel: React.FC<{
           {summary ? traceHeadline(summary) : "Recording"}
         </div>
         <div className="flex items-center gap-1">
+          {armed ? (
+            <button
+              type="button"
+              onClick={() => handleToggleRecording(false)}
+              disabled={busy}
+              className="p-1 text-gray-500 hover:text-amber-400 rounded-lg transition-colors disabled:opacity-40"
+              title="Stop recording this run's model calls"
+              aria-label="Stop recording"
+            >
+              <CircleDot className="w-4 h-4" />
+            </button>
+          ) : armable ? (
+            <button
+              type="button"
+              onClick={() => handleToggleRecording(true)}
+              disabled={busy}
+              className="p-1 text-gray-500 hover:text-amber-400 rounded-lg transition-colors disabled:opacity-40"
+              title="Record this run's model calls — it has not started, so every call it makes will be kept"
+              aria-label="Start recording"
+            >
+              <Radio className="w-4 h-4" />
+            </button>
+          ) : null}
           {summary && summary.calls > 0 && (
             <button
               type="button"
@@ -109,10 +164,12 @@ export const TracePanel: React.FC<{
             <span className="text-amber-300">
               Recording failed: {summary.recording_error}
             </span>
+          ) : armed ? (
+            <>This run is recording, but no model call has been kept yet.</>
           ) : (
             <>
-              This run recorded no model calls — either it was not armed, or the
-              provider never answered.
+              This run recorded no model calls — it was not armed
+              {!armable && ", and it has already started, so it cannot be armed now"}.
             </>
           )}
         </p>

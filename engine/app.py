@@ -17,6 +17,7 @@ from typing import Any
 
 from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from engine import home, watchdog
@@ -27,25 +28,37 @@ from engine.role_repair import plan_role_repair
 from engine.spawn_guard import guarded_argv, guarded_env
 from engine.stats import build_overview, normalize_window
 from engine.trace import TraceService
-from engine.metrics import failure_breakdown, role_success_rate, stage_costs
+from engine.metrics import (
+    STAGE_SUCCESS_OUTCOMES,
+    failure_breakdown,
+    role_success_rate,
+    stage_costs,
+)
 from engine.stats_history import StatsSnapshotService
 from engine.stats_import import StatsImportInvalid, StatsImportService
 from engine.model_catalog import ModelCatalogService
 from engine.models import (
     BUILTIN_PROVIDERS,
+    ErrorBody,
     ROLE_JOB,
     ROLE_ORDER,
     ROLE_TIMING,
     AgentConfig,
     AgentConfigUpdate,
+    Conversation,
+    ConversationCreate,
+    ConversationTurn,
+    ConversationUpdate,
     Event,
     Goal,
+    GoalConversationUpdate,
     GoalCreate,
     GoalDetail,
     PlanStep,
     PlanStepUpdate,
     ProviderKeyUpdate,
     ROLES,
+    TurnCreate,
     VersionedAction,
     TraceToggle,
     Workspace,
@@ -57,6 +70,7 @@ from engine.sandbox import SandboxService
 from engine.services import (
     AgentRegistryService,
     ApiError,
+    ConversationService,
     GoalService,
     SettingsService,
     WorkspaceService,
@@ -102,6 +116,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.factory = factory
     app.state.registry = AgentRegistryService(conn, factory, keychain)
     app.state.workspaces = WorkspaceService(conn)
+    # Threads of turns — what a tab points at. Separate from `goals` because a
+    # goal is one run and a conversation is the question several runs answer.
+    app.state.conversations = ConversationService(conn)
     app.state.goals = GoalService(conn)
     app.state.sandbox = SandboxService()
     app.state.settings = SettingsService(conn)
@@ -176,7 +193,57 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     conn.close()
 
 
-app = FastAPI(title="Codify Engine", lifespan=lifespan)
+# The engine's refusals, declared once and applied to every route by
+# `FastAPI(responses=…)`. Declared at the app rather than repeated on every
+# decorator because the alternative does not survive: forty-odd routes each
+# carrying their own `responses={...}` is forty-odd chances to forget one, and a
+# forgotten one is a refusal the schema does not describe — which is exactly how
+# `ErrorBody` ended up declared in `models.py` and referenced by nothing.
+#
+# Every status the engine raises is here. `test_error_contract.py` scans
+# `engine/` for `ApiError(<status>` and fails if a status is raised that is not
+# declared below, so the list cannot quietly fall behind the code.
+#
+# 422 is not an exception to the rule, because the engine now answers a rejected
+# body in the same shape as every other refusal (see `request_validation_error`
+# below) — with the field-level errors kept as an extra. That was worth doing
+# rather than documenting a second shape: the UI's error reader handles `detail`
+# only as a string, so FastAPI's default array was a bare "HTTP 422" on screen.
+ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {
+        "model": ErrorBody,
+        "description": "Understood and refused — an invalid root, a path that escapes, a refused pin.",
+    },
+    401: {
+        "model": ErrorBody,
+        "description": "Missing or invalid boot token (docs/00 §6.3). Every request requires it.",
+    },
+    404: {
+        "model": ErrorBody,
+        "description": "No such workspace, goal or step.",
+    },
+    409: {
+        "model": ErrorBody,
+        "description": (
+            "The resource moved under the caller, or refuses in its current state: "
+            "`version_conflict`, `illegal_status`, `trace_locked`, `goal_in_progress`."
+        ),
+    },
+    422: {
+        "model": ErrorBody,
+        "description": (
+            "A refused body: a field that failed validation (`code: invalid_request`, "
+            "with the field errors under `detail`) or a body the engine understood "
+            "and declined."
+        ),
+    },
+    503: {
+        "model": ErrorBody,
+        "description": "A dependency is unavailable — a credential that cannot be stored, for instance.",
+    },
+}
+
+app = FastAPI(title="Codify Engine", lifespan=lifespan, responses=ERROR_RESPONSES)
 
 
 @app.middleware("http")
@@ -224,6 +291,48 @@ async def api_error(_req: Request, exc: ApiError) -> JSONResponse:
     if exc.extra:
         body.update(exc.extra)
     return JSONResponse(body, status_code=exc.status)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(
+    _req: Request, exc: RequestValidationError,
+) -> JSONResponse:
+    """Answer a malformed body in the engine's shape, not FastAPI's.
+
+    FastAPI's default for a rejected body is `{"detail": [...]}`, which broke the
+    promise the rest of the API makes: a caller that reads `code` and `message`
+    got neither, and the UI — whose reader handles `detail` only as a *string* —
+    fell through to showing a bare "HTTP 422". The field-level errors were there
+    all along in an array nobody was reading.
+
+    So they are kept, as an extra on the declared shape. `ErrorBody` allows
+    extras precisely for this: `code` and `message` are what every caller may
+    rely on, and the refusal may attach the facts behind it. The result is that
+    every error this API can return is one documented shape, and a validation
+    failure names the fields that were rejected.
+    """
+    errors = exc.errors()
+    fields: list[str] = []
+    for err in errors:
+        loc = [str(part) for part in err.get("loc", []) if part != "body"]
+        fields.append(".".join(loc) or "body")
+    shown = ", ".join(fields[:5])
+    if len(fields) > 5:
+        shown += f" (+{len(fields) - 5} more)"
+    return JSONResponse(
+        {
+            "code": "invalid_request",
+            "message": (
+                f"{len(errors)} field(s) rejected by validation: {shown}"
+                if fields
+                else "the request body was rejected by validation"
+            ),
+            # Kept verbatim, so nothing a caller could have learned from
+            # FastAPI's own report is lost by answering in our shape.
+            "detail": errors,
+        },
+        status_code=422,
+    )
 
 
 @app.get("/health")
@@ -772,6 +881,150 @@ async def delete_ws(
     return workspaces.delete(workspace_id, delete_goals=delete_goals)
 
 
+@app.post("/conversations", response_model=Conversation)
+async def create_conversation(body: ConversationCreate, request: Request) -> Conversation:
+    """Start a thread of turns in a workspace.
+
+    The unit a tab points at. It is not a goal: a goal is one run with a plan and
+    a verifier, and a conversation is the question several runs answer. Held here
+    rather than in the client so a thread outlives the window that opened it —
+    the defect this replaces was a transcript in React state that vanished on
+    reload.
+    """
+    conversations: ConversationService = request.app.state.conversations
+    return conversations.create(body)
+
+
+@app.get("/conversations", response_model=list[Conversation])
+async def list_conversations(
+    request: Request,
+    workspace_id: str | None = None,
+    include_archived: bool = False,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> list[Conversation]:
+    """Threads, most recently touched first, for the side panel.
+
+    Archived threads are hidden unless asked for: a tab list is what the user is
+    working on, and burying it under every finished thread is the same mistake
+    `list_goals` avoids by leading with active goals.
+    """
+    conversations: ConversationService = request.app.state.conversations
+    return conversations.list_conversations(
+        workspace_id=workspace_id,
+        include_archived=include_archived,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/conversations/{conversation_id}", response_model=Conversation)
+async def get_conversation(conversation_id: str, request: Request) -> Conversation:
+    conversations: ConversationService = request.app.state.conversations
+    return conversations.get(conversation_id)
+
+
+@app.get("/conversations/{conversation_id}/turns", response_model=list[ConversationTurn])
+async def list_conversation_turns(
+    conversation_id: str, request: Request
+) -> list[ConversationTurn]:
+    """The thread's turns, oldest first.
+
+    Derived from the goals that answer them rather than stored separately, so
+    there is no second record to get out of step. This is what a tab loads to
+    rebuild its transcript after a restart.
+    """
+    conversations: ConversationService = request.app.state.conversations
+    return conversations.turns(conversation_id)
+
+
+@app.post("/conversations/{conversation_id}/turns", response_model=Goal)
+async def create_conversation_turn(
+    conversation_id: str, body: TurnCreate, request: Request
+) -> Goal:
+    """Say something in a thread. The route a chat actually posts to.
+
+    Until this existed, every message in this app was a `POST /goals`, so
+    typing "hi" started a librarian, a designer, a planner and a fixer and
+    produced a plan for a greeting. The gate had already classified the request
+    as a question — `LayaDecision.intent` has been computed on every goal since
+    the gate existed and was only ever used to append a warning — so the fix is
+    not a new model path but honouring a signal the engine was already
+    producing. See docs/09 §10.
+
+    The response is a `Goal` because a turn *is* one, with `mode="chat"` and no
+    steps ever: `events.goal_id` is NOT NULL, so the event log is the WebSocket,
+    the audit trail and the stats feed, and a turn stored anywhere else would
+    have nowhere to write a single streamed token. Reusing the row is what buys
+    the client all of that for free. Clients read `mode` to tell a turn from a
+    run; nothing else about the shape differs.
+    """
+    goals: GoalService = request.app.state.goals
+    # 404 on an unknown thread, before anything is written.
+    request.app.state.conversations.get(conversation_id)
+    goal = goals.create_turn(conversation_id, body)
+    _spawn(request.app, request.app.state.executor.run_chat(goal.id), goal.id)
+    return goal
+
+
+@app.patch("/conversations/{conversation_id}", response_model=Conversation)
+async def rename_conversation(
+    conversation_id: str, body: ConversationUpdate, request: Request
+) -> Conversation:
+    """Rename a thread. The only mutable thing about one.
+
+    `ConversationUpdate` forbids extra fields, so a body that tried to set
+    `archived` or `workspace_id` here is a 422 rather than a silent rewrite — the
+    same reasoning as invariant 2 on `POST /goals`.
+    """
+    conversations: ConversationService = request.app.state.conversations
+    return conversations.rename(conversation_id, body)
+
+
+@app.post("/conversations/{conversation_id}/archive", response_model=Conversation)
+async def archive_conversation(
+    conversation_id: str,
+    request: Request,
+    archived: bool = True,
+) -> Conversation:
+    """Archive or restore a thread. Archived rather than deleted, because the
+    runs it holds still belong to it and the history is not the user's to lose.
+    """
+    conversations: ConversationService = request.app.state.conversations
+    return conversations.set_archived(conversation_id, archived)
+
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str, request: Request
+) -> dict[str, Any]:
+    """Drop the thread and keep its runs.
+
+    Goals reference a conversation `ON DELETE SET NULL`, so every run it held
+    survives as a single-turn thread in the history. Deleting a tab is not a way
+    to delete an audit trail.
+    """
+    conversations: ConversationService = request.app.state.conversations
+    return conversations.delete(conversation_id)
+
+
+@app.put("/goals/{goal_id}/conversation", response_model=Goal)
+async def attach_goal_conversation(
+    goal_id: str, body: GoalConversationUpdate, request: Request
+) -> Goal:
+    """Put an existing goal into a thread.
+
+    The other half of `POST /goals`: a goal created before conversations (or
+    restored from history) has no thread, and until this route the link was the
+    panel's rather than the store's — one restart later the run read as its own
+    thread again (docs/09 §6). The link is checked through the same code that
+    checks it at creation: unknown goal 404, unknown thread 404, cross-workspace
+    422.
+    """
+    goals: GoalService = request.app.state.goals
+    return goals.attach_conversation(goal_id, body)
+
+
 @app.post("/goals")
 async def create_goal(body: GoalCreate, request: Request) -> Goal:
     goals: GoalService = request.app.state.goals
@@ -906,6 +1159,66 @@ async def get_goal_usage(goal_id: str, request: Request) -> dict[str, Any]:
     }
 
 
+def _silent_roles(
+    status: str, events: list[Any], usage: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Roles the engine announced but that never spent anything.
+
+    A role is announced by `agent_assigned` — the engine decided it should run
+    — and a role that runs calls a model, which is a `usage` event. A gap
+    between the two is worth surfacing: it usually means the role was skipped
+    by a guard, its calls failed silently, or a fallback absorbed its work.
+
+    Two things are deliberately *not* silence:
+
+    * A role the engine never assigned (the Laya gate deciding to skip itself)
+      is a deliberate no.
+    * A goal still in flight gets no verdict at all. Its roles may simply not
+      have had their turn, and calling that "silent" would cry wolf on every
+      healthy in-progress run. Only terminal goals are judged.
+
+    This is why the gate's model call has to be booked like every other role's.
+    The gate publishes `agent_assigned` and then, for the SDK, spends nothing —
+    it runs in-process, with no provider and no tokens. Judged on spend alone,
+    a gate that correctly answered `allow` was reported as a role that never
+    ran, on every goal, on every install.
+
+    So "did it run" is asked twice, and a role has to fail both to be called
+    silent: it spent nothing *and* the engine never recorded a stage outcome
+    saying it did its job. That second question is the same one the Stats screen
+    asks when it scores a role, read from the same table, so the audit and the
+    stats cannot disagree about whether a stage ran.
+    """
+    if status not in ("COMPLETED", "FAILED", "CANCELLED"):
+        return []
+    assigned: dict[str, str] = {}
+    for e in events:
+        if e.type == "agent_assigned" and (e.payload or {}).get("role"):
+            role = e.payload["role"]
+            model = f"{e.payload.get('provider') or '?'}/{e.payload.get('model') or '?'}"
+            # Last assignment wins: a role re-assigned after a retry carries its
+            # latest configuration.
+            assigned[role] = model
+    spent = set(usage.get("by_role", {}))
+    # A stage that recorded an outcome the engine counts as the role doing its
+    # job ran, whatever it cost. The gate under the SDK is the case that needs
+    # this: it answers in-process, so it books no tokens and would otherwise be
+    # reported as a role that never ran.
+    achieved = {
+        str((e.payload or {}).get("role"))
+        for e in events
+        if e.type == "stage_result"
+        and str((e.payload or {}).get("outcome")) in STAGE_SUCCESS_OUTCOMES.get(
+            str((e.payload or {}).get("role")), frozenset()
+        )
+    }
+    return [
+        {"role": role, "assigned_model": assigned[role]}
+        for role in sorted(assigned)
+        if role not in spent and role not in achieved
+    ]
+
+
 @app.get("/goals/{goal_id}/audit")
 async def get_goal_audit(goal_id: str, request: Request) -> dict[str, Any]:
     """The goal's audit trail as one structured document, for export or review.
@@ -1003,32 +1316,7 @@ async def get_goal_audit(goal_id: str, request: Request) -> dict[str, Any]:
 
     parallel = _parallel_peak_from_events(events)
     usage = _usage_from_events(events)
-
-    # Silent roles: the engine announced them (agent_assigned — it decided this
-    # role should run) but no model call ever completed (zero usage events).
-    # That difference is worth surfacing: it usually means the role was skipped
-    # by a guard, its calls failed silently, or a fallback absorbed its work.
-    # A role the engine never assigned (e.g. the Laya gate deciding to skip
-    # itself) is a deliberate no, not silence — so it never appears here.
-    # A goal that is still RUNNING gets no verdict yet: its roles may simply
-    # not have taken their turn, and calling that "silent" would cry wolf on
-    # every healthy in-flight run. Only terminal goals are judged.
-    silent_roles: list[dict[str, Any]] = []
-    if goal.status in ("COMPLETED", "FAILED", "CANCELLED"):
-        assigned: dict[str, str] = {}
-        for e in events:
-            if e.type == "agent_assigned" and (e.payload or {}).get("role"):
-                role = e.payload["role"]
-                model = f"{e.payload.get('provider') or '?'}/{e.payload.get('model') or '?'}"
-                # Last assignment wins: a role re-assigned after a retry
-                # carries its latest configuration.
-                assigned[role] = model
-        spent = set(usage.get("by_role", {}))
-        silent_roles = [
-            {"role": role, "assigned_model": assigned[role]}
-            for role in sorted(assigned)
-            if role not in spent
-        ]
+    silent_roles = _silent_roles(goal.status, events, usage)
 
     return {
         "goal_id": goal_id,

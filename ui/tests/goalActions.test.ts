@@ -17,7 +17,6 @@ import {
   type GoalActionArgs,
 } from "../src/goalActions.ts";
 
-let now = 0;
 const clock: number[] = [];
 
 // Deterministic "setTimeout": record the requested delay, resolve on the spot.

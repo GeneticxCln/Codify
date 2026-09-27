@@ -1,0 +1,91 @@
+{
+  "$schema": "../gen/schemas/permissions.json",
+  "permission": [
+    {
+      "identifier": "allow-codify-get-engine-info",
+      "description": "Reports the engine's base URL and boot token to the main window. With the token, every engine route is reachable (docs/00 §6.3), so this permission is the reason the local-origin bypass below had to be closed.",
+      "commands": { "allow": ["codify_get_engine_info"] }
+    },
+    {
+      "identifier": "allow-codify-engine-status",
+      "description": "Reports whether the engine process is up, without starting it.",
+      "commands": { "allow": ["codify_engine_status"] }
+    },
+    {
+      "identifier": "allow-codify-list-agent-configs",
+      "description": "Lists the eight role slots and their per-role configuration, with API keys redacted (docs/00 §6.4).",
+      "commands": { "allow": ["codify_list_agent_configs"] }
+    },
+    {
+      "identifier": "allow-codify-update-agent-config",
+      "description": "Writes one role's configuration. Read-modify-write over the same key, so a lost race is a lost update rather than a credential leak.",
+      "commands": { "allow": ["codify_update_agent_config"] }
+    },
+    {
+      "identifier": "allow-codify-repair-agent-configs",
+      "description": "Restores missing or malformed role slots to their defaults. Destructive to local state by design, so it is granted explicitly rather than swept in by a wildcard.",
+      "commands": { "allow": ["codify_repair_agent_configs"] }
+    },
+    {
+      "identifier": "allow-codify-test-agent-connection",
+      "description": "Probes a provider connection and reports the failure, without persisting anything.",
+      "commands": { "allow": ["codify_test_agent_connection"] }
+    },
+    {
+      "identifier": "allow-codify-terminal-open",
+      "description": "Starts a PTY the user asked for. A terminal is arbitrary code execution by another name, so the grant names it rather than inheriting it.",
+      "commands": { "allow": ["codify_terminal_open"] }
+    },
+    {
+      "identifier": "allow-codify-terminal-write",
+      "description": "Writes keystrokes to an existing PTY.",
+      "commands": { "allow": ["codify_terminal_write"] }
+    },
+    {
+      "identifier": "allow-codify-terminal-resize",
+      "description": "Resizes an existing PTY so the shell redraws to fit.",
+      "commands": { "allow": ["codify_terminal_resize"] }
+    },
+    {
+      "identifier": "allow-codify-terminal-close",
+      "description": "Closes an existing PTY.",
+      "commands": { "allow": ["codify_terminal_close"] }
+    },
+    {
+      "identifier": "allow-codify-browser-open",
+      "description": "Opens a browser webview. The webview itself holds no permission (capabilities/browser.json is empty), so this grants the *main window* the ability to open one — it does not grant that page anything.",
+      "commands": { "allow": ["codify_browser_open"] }
+    },
+    {
+      "identifier": "allow-codify-browser-navigate",
+      "description": "Navigates an existing browser webview, through the same loopback guard as `open`.",
+      "commands": { "allow": ["codify_browser_navigate"] }
+    },
+    {
+      "identifier": "allow-codify-browser-close",
+      "description": "Closes a browser webview by tab id.",
+      "commands": { "allow": ["codify_browser_close"] }
+    }
+  ],
+  "set": [
+    {
+      "identifier": "shell",
+      "description": "Every command this app defines, as thirteen named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser.rs fails the build's test leg if the two lists ever differ. Permissions are not where a window/webview is decided: this set is referenced only by capabilities/default.json, whose `windows` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.",
+      "permissions": [
+        "allow-codify-get-engine-info",
+        "allow-codify-engine-status",
+        "allow-codify-list-agent-configs",
+        "allow-codify-update-agent-config",
+        "allow-codify-repair-agent-configs",
+        "allow-codify-test-agent-connection",
+        "allow-codify-terminal-open",
+        "allow-codify-terminal-write",
+        "allow-codify-terminal-resize",
+        "allow-codify-terminal-close",
+        "allow-codify-browser-open",
+        "allow-codify-browser-navigate",
+        "allow-codify-browser-close"
+      ]
+    }
+  ]
+}

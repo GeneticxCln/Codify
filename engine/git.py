@@ -106,6 +106,39 @@ class GitService:
         res = self._run_text(["status", "--porcelain"], cwd=str(Path(root_path).resolve()))
         return res.stdout
 
+    # Read-only subcommands. A *list*, not a prefix rule: `log` is safe and
+    # `log --output=x` is not, so anything that could write is named rather
+    # than inferred from its first argument.
+    READ_ONLY_ARGV: tuple[str, ...] = (
+        "log", "show", "status", "diff", "blame", "branch", "rev-parse", "ls-files",
+    )
+
+    def read_only(self, root_path: str, args: list[str]) -> str:
+        """Run one read-only git subcommand and return its output.
+
+        The public door for the conductor's `git_history` tool, and the reason
+        the conductor is not reaching into `_run_text`. A subcommand outside
+        `READ_ONLY_ARGV` is refused rather than attempted: the caller here is a
+        model, and "the model asked for it" is not a reason to run `git commit`.
+
+        Returns a sentence on refusal instead of raising — the conductor shows
+        tool results to the model, and a sentence it can read and route around
+        is a recoverable miscall where an exception is a dead turn.
+        """
+        if not args or not all(isinstance(a, str) for a in args):
+            return "git_history takes a list of strings, e.g. [\"log\", \"-5\"]"
+        if args[0] not in self.READ_ONLY_ARGV:
+            allowed = " ".join(self.READ_ONLY_ARGV)
+            return (
+                f"git {args[0]!r} is not a read-only git command ({allowed}). "
+                "This tool only reads history; to change the repository, use delegate."
+            )
+        if not self.is_git_repo(root_path):
+            return "This workspace is not a git repository, so there is no history to read."
+        res = self._run_text(list(args), cwd=str(Path(root_path).resolve()))
+        out = (res.stdout or "").strip() or (res.stderr or "").strip()
+        return f"$ git {' '.join(args)} (exit {res.returncode})\n{out}"
+
     def commit(
         self,
         root_path: str,

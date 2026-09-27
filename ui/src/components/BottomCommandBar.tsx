@@ -35,6 +35,7 @@ import {
 import { Toggle } from "./ui/Toggle";
 import { Button } from "./ui/Button";
 import { IconButton } from "./ui/IconButton";
+import { readRejection } from "../rejection.ts";
 
 export type ExecutionMode = "direct" | "dry_run" | "plan_only";
 
@@ -266,10 +267,24 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
         // window top and the card top.
         const chrome = Math.max(0, menu.offsetHeight - list.offsetHeight);
         const cap = Math.floor(cardRect.top - 12 - chrome);
-        // Cap at a comfortable window as well as at the available space: a menu
-        // that grows to fill the screen buries the chat behind it. Small list,
-        // scroll inside it.
-        const next = Math.max(120, Math.min(cap, 320));
+        // Cap the **panel**, not just the list, so the box comes out square.
+        //
+        // This used to be `Math.min(cap, 320)`, which capped only the list — and
+        // `chrome` (header + filter input + the "Use Any Custom Model" footer +
+        // padding) measured ~140px, so the panel rendered 320 wide by 460 tall:
+        // a portrait slab, stretched because a height cap on *part* of a box is
+        // not a cap on the box. Taking the list's allowance from the menu's own
+        // width instead makes `chrome + list === width` by construction, which
+        // is the only arithmetic here that guarantees squareness rather than
+        // hoping the parts happen to add up.
+        //
+        // `chrome` is independent of the list's height — it is everything in the
+        // panel that is not the list — so reading it here is stable across
+        // frames rather than self-referential.
+        const side = Math.round(menu.getBoundingClientRect().width);
+        // Floor, not a guarantee: if the fixed chrome ever grows past the width,
+        // a short-but-readable list beats an honest square of zero rows.
+        const next = Math.max(120, Math.min(cap, side - chrome));
         setMenuMax((prev) =>
           prev[key] === next ? prev : { ...prev, [key]: next },
         );
@@ -415,7 +430,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
     } catch (err: any) {
       // The engine's refusal names the file and the reason; keep the dialog open
       // with the typed path so it can be corrected rather than re-typed.
-      setContractError(err?.message || "Failed to pin the brand contract");
+      setContractError(readRejection(err, "Failed to pin the brand contract"));
     } finally {
       setContractSaving(false);
     }
@@ -432,7 +447,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
       await onSetDesignContract(contractWs.id, "");
       setContractWs(null);
     } catch (err: any) {
-      setContractError(err?.message || "Failed to unpin the brand contract");
+      setContractError(readRejection(err, "Failed to unpin the brand contract"));
     } finally {
       setContractSaving(false);
     }

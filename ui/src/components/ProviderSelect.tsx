@@ -1,19 +1,35 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 
 interface ProviderSelectProps {
   value: string;
   onChange: (val: string) => void;
-  builtins?: string[];
+  /**
+   * The provider slugs the engine ships, from `GET /settings/providers`.
+   *
+   * Required, and there is deliberately no default: this list used to be a
+   * second copy in the UI and it went stale the moment the engine gained a
+   * provider, so `openrouter` and `groq` became invisible here *and* were
+   * mistaken downstream for custom endpoints. `engine/models.py`
+   * `BUILTIN_PROVIDERS` is the only place this is defined; making the prop
+   * required means the compiler, not a review, is what stops the copy returning.
+   */
+  builtins: string[];
 }
-
-const DEFAULT_BUILTINS = ["anthropic", "openai", "deepseek", "ollama", "google"];
 
 export const ProviderSelect: React.FC<ProviderSelectProps> = ({
   value,
   onChange,
-  builtins = DEFAULT_BUILTINS,
+  builtins,
 }) => {
   const [isCustom, setIsCustom] = useState(!builtins.includes(value));
+
+  // The stored provider can change under this control — a repair, a bulk
+  // assign, or "Load server values" — and a control still showing the custom
+  // text box for a provider the engine ships is asking the user to fix
+  // something that is not broken.
+  useEffect(() => {
+    setIsCustom(!builtins.includes(value));
+  }, [builtins, value]);
 
   return (
     <div className="flex flex-col gap-1.5">

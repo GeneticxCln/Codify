@@ -17,7 +17,9 @@ story:
 * **The gate is replayed, not re-run.** The Laya verdict the run got is read
   back from its `laya_decision` event. Re-running it would make a live
   decision the recording never saw, and would change what the run did before
-  the first model call even happens.
+  the first model call even happens. A gate that answered through its LLM
+  fallback still has its call in the recording; it is counted and reported
+  separately, because it is recovered from the event log rather than served.
 * **A mismatch stops and is reported.** `ReplayProvider` refuses a prompt its
   recording does not hold rather than answer a different question. The exit
   code says which happened: 0 the recording replayed, 1 it diverged, 2 the
@@ -43,7 +45,7 @@ from typing import Any
 
 from engine.db import connect, default_db_path
 from engine.executor import ExecutorService
-from engine.laya import LayaDecision, LayaService
+from engine.laya import GateCall, LayaDecision, LayaService
 from engine.models import (
     ROLES,
     AgentConfig,
@@ -67,13 +69,22 @@ class _ReplayedGate(LayaService):
     The gate runs before any model call, so a live decision here would change
     the run's shape before the replay had served anything — a blocked recording
     would sail past the block, and an unblocked one could stop short of it.
+
+    `on_call` is accepted and ignored on purpose. The executor hands the gate a
+    way to make its model call; this one makes none, because the recording's
+    verdict *is* the gate's answer. The parameter has to be in the signature
+    anyway: leaving it out makes this override raise `TypeError` on every
+    replayed run, and the executor's "an unusable gate is a skipped gate"
+    contract turns that into a silently ungated replay rather than a failure.
     """
 
     def __init__(self, verdict: LayaDecision) -> None:
         super().__init__(registry=None)
         self._verdict = verdict
 
-    async def decide(self, state: dict[str, Any]) -> LayaDecision:  # noqa: D102
+    async def decide(  # noqa: D102
+        self, state: dict[str, Any], on_call: GateCall | None = None,
+    ) -> LayaDecision:
         return self._verdict
 
 
@@ -249,6 +260,15 @@ async def replay(
             else:
                 diverged = "the replay failed before every recorded call was served"
     stages = _stage_sequence(replay_events)
+    # The gate's call is recorded, but it is not served by the replay provider:
+    # the gate runs before any model call and decides whether the run happens at
+    # all, so `_ReplayedGate` answers with the recorded verdict rather than
+    # asking a provider — and it could not serve that call anyway, because the
+    # gate's prompt carries the workspace basename and a replay always runs in a
+    # scratch tree of its own. So its calls are accounted separately, visibly,
+    # rather than quietly dropped from the total and making every replay of a
+    # gated run report a divergence that never happened.
+    gate_calls = [c for c in calls if c.get("role") == "laya"]
     return {
         "goal_id": goal_id,
         "replay_goal_id": replay_goal.id,
@@ -256,18 +276,25 @@ async def replay(
         "source": str(source),
         "recorded_calls": len(calls),
         "served_calls": len(provider.served),
+        "gate_calls_replayed": len(gate_calls),
         "stages": stages,
         "status": final.status,
         "diverged": diverged,
         # Every recorded call consumed, and no call the recording lacks was
-        # ever asked. Either half failing means the run was not this run.
-        "matched": diverged is None and len(provider.served) == len(calls),
+        # ever asked. Either half failing means the run was not this run. The
+        # gate's own calls are consumed by `_ReplayedGate` from the event log.
+        "matched": diverged is None and len(provider.served) + len(gate_calls) == len(calls),
     }
 
 
 def _print(report: dict[str, Any]) -> None:
     print(f"recorded : {report['recorded_calls']} calls")
     print(f"served   : {report['served_calls']} calls")
+    if report.get("gate_calls_replayed"):
+        print(
+            f"gate     : {report['gate_calls_replayed']} call(s) replayed from the "
+            f"recorded verdict"
+        )
     print(f"status   : {report['status']}")
     print(f"scratch  : {report['scratch']}")
     if report["stages"]:

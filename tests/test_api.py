@@ -594,6 +594,124 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json()["code"], "unknown_workspace")
 
+    async def test_creating_a_goal_refuses_agent_config(self) -> None:
+        """docs/00 §6.2: `PUT /settings/agents/{role}` is the ONLY mutator.
+
+        `POST /goals` must reject `agent_config` — not ignore it. A silently
+        ignored field is the worse failure: the client is told 200 and walks
+        away believing it configured the run, and the goal executes on whatever
+        the roles were already set to.
+        """
+        ws_dir = self.root / "ws-agent-config"
+        ws_dir.mkdir()
+        ws_id = (
+            await self.client.post(
+                "/workspaces", headers=self.headers,
+                json={"name": "AGENT-CONFIG", "root_path": str(ws_dir)},
+            )
+        ).json()["id"]
+
+        before = (await self.client.get(
+            "/settings/agents/fixer", headers=self.headers,
+        )).json()
+
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={
+                "workspace_id": ws_id, "title": "smuggled config",
+                "agent_config": {"fixer": {"model_name": "attacker-model"}},
+            },
+        )
+        self.assertEqual(r.status_code, 422, "agent_config must be refused, not ignored")
+
+        after = (await self.client.get(
+            "/settings/agents/fixer", headers=self.headers,
+        )).json()
+        self.assertEqual(after["model_name"], before["model_name"])
+
+    async def test_starting_a_goal_refuses_agent_config(self) -> None:
+        """The same rule on `POST /goals/{id}/start` (docs/00 §6.2).
+
+        Planning is mocked out in this suite, so the goal sits in PLANNING and
+        the only thing under test is what the endpoint does with the field.
+        """
+        ws_dir = self.root / "ws-start-agent-config"
+        ws_dir.mkdir()
+        ws_id = (
+            await self.client.post(
+                "/workspaces", headers=self.headers,
+                json={"name": "START-CONFIG", "root_path": str(ws_dir)},
+            )
+        ).json()["id"]
+        goal = (await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "start me"},
+        )).json()
+
+        before = (await self.client.get(
+            "/settings/agents/fixer", headers=self.headers,
+        )).json()
+
+        r = await self.client.post(
+            f"/goals/{goal['id']}/start", headers=self.headers,
+            json={
+                "expected_version": goal["version"],
+                "agent_config": {"fixer": {"model_name": "attacker-model"}},
+            },
+        )
+        self.assertEqual(r.status_code, 422, "agent_config must be refused, not ignored")
+
+        after = (await self.client.get(
+            "/settings/agents/fixer", headers=self.headers,
+        )).json()
+        self.assertEqual(after["model_name"], before["model_name"])
+
+    async def test_the_two_agent_config_mutators_and_no_others(self) -> None:
+        """The invariant is about the whole surface, not two endpoints.
+
+        A third writer added later — a new route, a query parameter, a header —
+        would leave the two refusals above passing while the guarantee is gone.
+        So the routes that take a body are enumerated, and every one that is not
+        the documented mutator is asserted to refuse a smuggled `agent_config`.
+        """
+        ws_dir = self.root / "ws-mutator-surface"
+        ws_dir.mkdir()
+        ws_id = (await self.client.post(
+            "/workspaces", headers=self.headers,
+            json={"name": "MUTATORS", "root_path": str(ws_dir)},
+        )).json()["id"]
+        goal = (await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "surface"},
+        )).json()
+        step = (await self.client.get(
+            f"/goals/{goal['id']}", headers=self.headers,
+        )).json()
+
+        smuggled = {"agent_config": {"fixer": {"model_name": "attacker-model"}}}
+        version = goal["version"]
+
+        # Every POST/PUT/PATCH below is a candidate writer. The engine's own
+        # PUT /settings/agents/{role} is the one that is *supposed* to take a
+        # config; everything else has to refuse the field.
+        writers = [
+            ("POST", "/goals", {**smuggled, "workspace_id": ws_id, "title": "x"}),
+            ("POST", f"/goals/{goal['id']}/start", {**smuggled, "expected_version": version}),
+            ("POST", f"/goals/{goal['id']}/pause", {**smuggled, "expected_version": version}),
+            ("POST", f"/goals/{goal['id']}/cancel", {**smuggled, "expected_version": version}),
+            ("POST", f"/goals/{goal['id']}/apply", {**smuggled, "expected_version": version}),
+            ("POST", f"/goals/{goal['id']}/enable-execution", {**smuggled, "expected_version": version}),
+            ("PUT", f"/goals/{goal['id']}/trace", {**smuggled, "enabled": True}),
+        ]
+        for method, path, body in writers:
+            with self.subTest(method=method, path=path):
+                r = await self.client.request(method, path, headers=self.headers, json=body)
+                self.assertEqual(
+                    r.status_code, 422,
+                    f"{method} {path} accepted an agent_config body",
+                )
+        _ = step  # the goal is only needed to keep the paths above addressable
+
     async def test_pinning_rejects_unknown_fields(self) -> None:
         ws_dir = self.root / "ws-brand-extra"
         ws_dir.mkdir()

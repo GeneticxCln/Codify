@@ -37,6 +37,7 @@ export const MEANINGFUL_FROM: Record<GoalActionKind, string[]> = {
   pause: ["RUNNING"],
   cancel: ["PLANNING", "PENDING", "RUNNING", "PAUSED"],
 };
+import { readRejection } from "./rejection.ts";
 
 /**
  * Whether a goal in `status` can still be stopped.
@@ -99,7 +100,7 @@ function failureOf(err: unknown): {
   return {
     status: typeof e?.status === "number" ? e.status : 0,
     code: typeof e?.code === "string" ? e.code : null,
-    message: typeof e?.message === "string" ? e.message : "the request failed",
+    message: readRejection(e, "the request failed"),
   };
 }
 
@@ -151,7 +152,10 @@ export async function runGoalAction<GoalT>(
     kind: "refused",
     status: last?.status ?? 0,
     code: last?.code ?? null,
-    message: last?.message ?? "the engine kept moving the goal",
+    // The fallback goes in as an argument rather than behind `??`: this used to
+    // be `last?.message ?? …`, and `readRejection` always returns a string, so a
+    // `??` after it is dead code that reads as if it might not.
+    message: readRejection(last, "the engine kept moving the goal"),
   };
 }
 

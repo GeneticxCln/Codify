@@ -1,7 +1,9 @@
 // Prevents additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod browser;
 mod engine_protocol;
+mod terminal;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -29,6 +31,11 @@ pub struct EngineState {
 }
 
 type SharedEngineState = Arc<Mutex<EngineState>>;
+
+/// The open terminals. A `std` mutex rather than a `tokio` one: every use here is
+/// a short synchronous section and none of it is held across an await, so a
+/// `tokio` lock would only add a scheduler dependency.
+type SharedTerminals = Arc<std::sync::Mutex<terminal::Terminals>>;
 
 // ── Serde types for Tauri commands ─────────────────────────────────────────
 
@@ -127,6 +134,115 @@ async fn check_engine(resp: reqwest::Response) -> Result<reqwest::Response, Stri
     }
     let body = resp.text().await.unwrap_or_default();
     Err(format!("engine returned {status}: {body}"))
+}
+
+/// A registered workspace's root directory, asked for rather than supplied.
+///
+/// This is the whole security shape of the terminal. The client names a
+/// workspace *id*; the shell asks the engine what directory that workspace is,
+/// and `terminal::pin_cwd` refuses anything that is not an existing absolute
+/// directory. A caller that could send a path could point a user's shell at
+/// anywhere on the machine, and the engine's own record is the only authority on
+/// what the workspace is. An unknown id is an error here rather than a shell in
+/// the app's own launch directory.
+async fn workspace_root_for(
+    engine: &SharedEngineState,
+    workspace_id: &str,
+) -> Result<String, String> {
+    let (base, token) = engine_url(engine).await?;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/workspaces/{workspace_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .map_err(|e| format!("engine unreachable: {e}"))?;
+    let checked = check_engine(resp).await?;
+    let body: serde_json::Value = checked
+        .json()
+        .await
+        .map_err(|e| format!("bad workspace response: {e}"))?;
+    body.get("root_path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "workspace has no root_path recorded".to_string())
+}
+
+/// Open a terminal in a registered workspace.
+///
+/// The workspace is resolved through the engine (see [`workspace_root_for`]) and
+/// the directory is pinned by [`terminal::pin_cwd`]. This is the user's own
+/// shell: it does not go through the engine's `SandboxService`, which is the
+/// agent's privileged path and must stay that way (docs/00 §6.6).
+#[tauri::command]
+async fn codify_terminal_open(
+    engine: State<'_, SharedEngineState>,
+    terminals: State<'_, SharedTerminals>,
+    app: tauri::AppHandle,
+    workspace_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<String, String> {
+    let root = workspace_root_for(&engine, &workspace_id).await?;
+    terminal::open(app, &terminals, Some(&root), cols, rows)
+}
+
+#[tauri::command]
+async fn codify_terminal_write(
+    terminals: State<'_, SharedTerminals>,
+    terminal_id: String,
+    data: String,
+) -> Result<(), String> {
+    terminal::write(&terminals, &terminal_id, &data)
+}
+
+#[tauri::command]
+async fn codify_terminal_resize(
+    terminals: State<'_, SharedTerminals>,
+    terminal_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    terminal::resize(&terminals, &terminal_id, cols, rows)
+}
+
+#[tauri::command]
+async fn codify_terminal_close(
+    terminals: State<'_, SharedTerminals>,
+    terminal_id: String,
+) -> Result<(), String> {
+    terminal::close(&terminals, &terminal_id)
+}
+
+/// Open a browser webview for a tab (or bring the existing one forward).
+///
+/// The webview runs the page with an empty capability set and a loopback URL
+/// guard — both enforced and asserted in [`browser`], which owns the whole
+/// boundary. This command exists only so the main window can ask for a tab;
+/// the browser webview itself cannot invoke it, or anything else.
+#[tauri::command]
+async fn codify_browser_open(
+    app: tauri::AppHandle,
+    tab_id: String,
+    url: String,
+) -> Result<String, String> {
+    browser::open(&app, &tab_id, &url)
+}
+
+/// Navigate an open browser tab. Guarded twice: here for a refusal the UI can
+/// show, and in `on_navigation` for enforcement no caller routes around.
+#[tauri::command]
+async fn codify_browser_navigate(
+    app: tauri::AppHandle,
+    tab_id: String,
+    url: String,
+) -> Result<String, String> {
+    browser::navigate(&app, &tab_id, &url)
+}
+
+/// Close a browser tab's webview.
+#[tauri::command]
+async fn codify_browser_close(app: tauri::AppHandle, tab_id: String) -> Result<String, String> {
+    browser::close(&app, &tab_id)
 }
 
 /// Return the current engine connection info so the UI can build its HTTP client.
@@ -330,9 +446,63 @@ async fn login_shell_path() -> Option<(String, String)> {
     None
 }
 
-/// Spawn the Python engine and parse its boot handshake:
-/// `CODIFY_ENGINE token=<hex> port=<int>`
+/// How many times to try before giving up, and how long to wait between tries.
+///
+/// Three, a second apart. The failure worth retrying is a *transient* one — the
+/// port band exhausted by another engine, an interpreter that had not finished
+/// importing, a machine still coming out of suspend — and all of those clear in
+/// seconds. A fourth attempt is not optimism, it is a hang.
+const ENGINE_LAUNCH_ATTEMPTS: u32 = 3;
+const ENGINE_LAUNCH_RETRY_MS: u64 = 1_000;
+
+/// What one launch attempt managed. Only one of these is worth trying again.
+#[derive(PartialEq)]
+enum LaunchOutcome {
+    /// The engine handed over a port, and this call returned when it later exited.
+    Started,
+    /// It ran and died without a handshake: transient, so try again.
+    NoHandshake,
+    /// It was never going to start — no checkout, no `python3`. The reason is
+    /// already recorded, and retrying it would only bury that reason in noise.
+    Unlaunchable,
+}
+
+/// Keep trying until the engine is up, or the attempts run out.
+///
+/// This used to be a single attempt in `setup`, which made one transient failure
+/// permanent: `codify_get_engine_info` answers `Err("Engine not yet started")`
+/// forever after, the window retries its IPC ten times, gives up, and shows a
+/// red pill for the rest of the session — with the port free again thirty
+/// seconds later. A launcher that cannot retry is a launcher that turns a blip
+/// into a restart of the app.
+///
+/// Not retried: an engine that ran and then exited. That is a crash, and
+/// restarting the app is a decision the user should make, not one this makes for
+/// them in a loop.
 async fn launch_engine(shared: SharedEngineState) {
+    for attempt in 1..=ENGINE_LAUNCH_ATTEMPTS {
+        match launch_engine_once(shared.clone()).await {
+            LaunchOutcome::Started | LaunchOutcome::Unlaunchable => return,
+            LaunchOutcome::NoHandshake => {
+                if attempt < ENGINE_LAUNCH_ATTEMPTS {
+                    eprintln!(
+                        "[Codify] Engine launch attempt {attempt}/{} never completed its \
+                         handshake — retrying in {ENGINE_LAUNCH_RETRY_MS}ms",
+                        ENGINE_LAUNCH_ATTEMPTS
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(ENGINE_LAUNCH_RETRY_MS))
+                        .await;
+                }
+            }
+        }
+    }
+    eprintln!("[Codify] Engine did not come up after {ENGINE_LAUNCH_ATTEMPTS} attempts");
+}
+
+/// Spawn the Python engine and parse its boot handshake:
+/// `CODIFY_ENGINE token=<hex> port=<int>`. One attempt; `launch_engine` decides
+/// whether to make another.
+async fn launch_engine_once(shared: SharedEngineState) -> LaunchOutcome {
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -347,7 +517,7 @@ async fn launch_engine(shared: SharedEngineState) {
     if let Some(problem) = engine_protocol::launch_problem(&project_root) {
         eprintln!("[Codify] {problem}");
         shared.lock().await.problem = Some(problem);
-        return;
+        return LaunchOutcome::Unlaunchable;
     }
 
     // Resolve the interpreter through the login shell's PATH, not this process's —
@@ -398,7 +568,7 @@ async fn launch_engine(shared: SharedEngineState) {
             let problem = format!("Could not start the engine: {e}");
             eprintln!("[Codify] {problem}");
             shared.lock().await.problem = Some(problem);
-            return;
+            return LaunchOutcome::NoHandshake;
         }
     };
 
@@ -410,7 +580,7 @@ async fn launch_engine(shared: SharedEngineState) {
             .to_string();
         eprintln!("[Codify] {problem}");
         shared.lock().await.problem = Some(problem);
-        return;
+        return LaunchOutcome::NoHandshake;
     };
     // Suspenders: park the handle where the exit handler can reach it.
     {
@@ -464,6 +634,11 @@ async fn launch_engine(shared: SharedEngineState) {
     // No `child.wait()` here: the handle lives in shared state and tokio's
     // reaper collects the process in the background. Waiting on a child we no
     // longer own would just pin this task forever.
+    if handshake_done {
+        LaunchOutcome::Started
+    } else {
+        LaunchOutcome::NoHandshake
+    }
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -504,6 +679,9 @@ pub fn run() {
         // cheaply cloneable over an internal connection pool, while
         // `Client::new()` per call re-resolves and re-handshakes every time.
         .manage(reqwest::Client::new())
+        .manage(SharedTerminals::new(std::sync::Mutex::new(
+            terminal::Terminals::default(),
+        )))
         .setup(move |_app| {
             // Launch engine asynchronously so the window appears immediately.
             let shared = state_clone.clone();
@@ -519,6 +697,13 @@ pub fn run() {
             codify_update_agent_config,
             codify_repair_agent_configs,
             codify_test_agent_connection,
+            codify_terminal_open,
+            codify_terminal_write,
+            codify_terminal_resize,
+            codify_terminal_close,
+            codify_browser_open,
+            codify_browser_navigate,
+            codify_browser_close,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codify application")
@@ -527,6 +712,16 @@ pub fn run() {
             // Without this, closing Codify left a stray `python3 -m engine`
             // holding the port, the DB, and any writes it was mid-way through.
             if let tauri::RunEvent::Exit = event {
+                // The terminals go first, and unconditionally. They are the
+                // user's own shells, and one left running after the window goes
+                // is a stray process holding the workspace directory — the same
+                // defect the engine kill below exists to prevent. It runs before
+                // the lock dance on purpose: the engine lock may never be
+                // acquired, and a shell leak must not depend on that.
+                {
+                    let terms = app.state::<SharedTerminals>();
+                    terminal::close_all(&terms);
+                }
                 let shared = app.state::<SharedEngineState>();
                 // This kill is not optional — a silently-skipped kill leaks a
                 // stray engine holding the port and DB. Every lock holder holds

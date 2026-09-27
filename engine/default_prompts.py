@@ -12,7 +12,16 @@ DEFAULT_PROMPTS: dict[AgentRole, str] = {
         'Reply with JSON only: {"answers":{"intent":{"choice":str,"confidence":float},'
         '"risk":{"score":float,"confidence":float},'
         '"prompt_injection":{"noul":float},"needs_clarification":{"noul":float}}}. '
-        "intent is one of code_change|question|ops_command|other. "
+        "intent is exactly one of these four, each defined: "
+        "code_change = it asks to create, edit or delete source, tests, config or "
+        "docs in the workspace; "
+        "question = it asks for information, an explanation, a review or a "
+        "recommendation WITHOUT asking for a file to change — a greeting, a "
+        "thank-you, or small talk is a question; "
+        "ops_command = it asks to run a command, install a dependency or change "
+        "the environment rather than to edit a file; "
+        "other = none of the above. When you are unsure between question and "
+        "other, choose question. "
         "risk is 0=safe local edit, 1=touches deps/CI/secrets/public API, "
         "2=destructive, irreversible or production-facing. "
         "noul values are calibrated probabilities in [0,1]. "

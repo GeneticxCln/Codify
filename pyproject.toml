@@ -117,8 +117,15 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 #       as bound parameters.
 # S108  /tmp literals — the sandbox tests assert refusal of /tmp paths, and
 #       the laya/library tests need a path *shape*, not a usable directory.
+# S110 (conductor.py)  the `on_tool` progress callback. It is a notification
+#       that a tool was called, published so the transcript can show the
+#       dispatch; a renderer that throws while rendering must not end the turn,
+#       and there is nowhere to log it — the failure is in the viewer's event
+#       handler, not in the run. Same shape as providers.py's usage sink, which
+#       is exempted for the same reason.
 "tests/*" = ["S101", "S603", "S607", "S608", "S108"]
 "engine/app.py" = ["S110", "S603", "S607", "S608"]
+"engine/conductor.py" = ["S110"]
 "engine/db.py" = ["S110"]
 "engine/executor.py" = ["S101", "S110", "S608"]
 "engine/git.py" = ["S603"]

@@ -45,6 +45,17 @@ interface AgentConfigCardProps {
   /** Raw per-provider discovery outcomes, so the model field can state the reason. */
   providerStatus?: ProviderModelStatus[];
   /**
+   * The provider slugs the engine ships (`GET /settings/providers`).
+   *
+   * This decides what counts as a *custom* provider, and that is not cosmetic:
+   * a custom provider gets a protocol picker and a base-URL box, because the
+   * engine cannot know how to reach it. Offering those to a provider the engine
+   * ships a fixed protocol for invites the user to break a working setup. The
+   * list used to be a hardcoded copy of five slugs that quietly fell behind the
+   * engine's seven.
+   */
+  builtinProviders: string[];
+  /**
    * Set by SettingsPanel when this role's SAVED model is missing from its
    * provider's live catalog. Computed there so the per-card warning and the
    * panel summary are the same verdict, from the same rule.
@@ -94,8 +105,6 @@ const ROLE_ICONS: Record<AgentRole, React.ReactNode> = {
 /** Roles whose work happens before planning, so the card can label them. */
 const GOAL_LEVEL: AgentRole[] = ["laya", "librarian", "design", "planner"];
 
-const BUILTINS = new Set(["anthropic", "openai", "deepseek", "ollama", "google"]);
-
 export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
   onRefreshModels,
   refreshingModels = false,
@@ -103,6 +112,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
   store,
   models = [],
   providerStatus = [],
+  builtinProviders,
   stale = null,
   staleFallback = null,
   info,
@@ -208,7 +218,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
   // is how a role ends up configured with a model its endpoint cannot serve.
   const providerModels = models.filter((m) => m.provider === active.provider);
   const discovery = providerStatus.find((s) => s.provider === active.provider);
-  const isCustomProvider = !BUILTINS.has(active.provider);
+  const isCustomProvider = !builtinProviders.includes(active.provider);
   const isOllama = active.provider === "ollama";
   const needsKey = active.protocol !== "ollama";
 
@@ -216,7 +226,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
   const fallbackProvider = (active.fallback_provider || "").trim();
   const hasFallback = Boolean(fallbackProvider && (active.fallback_model_name || "").trim());
   const showFallback = Boolean(fallbackProvider) || fallbackOpen;
-  const fallbackCustom = Boolean(fallbackProvider) && !BUILTINS.has(fallbackProvider);
+  const fallbackCustom = Boolean(fallbackProvider) && !builtinProviders.includes(fallbackProvider);
   const fallbackModels = models.filter((m) => m.provider === fallbackProvider);
   const fallbackDiscovery = providerStatus.find((s) => s.provider === fallbackProvider);
 
@@ -389,6 +399,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
         <ProviderSelect
           value={active.provider}
           onChange={(p) => updateDraft({ provider: p })}
+          builtins={builtinProviders}
         />
 
         {isCustomProvider ? (
@@ -497,6 +508,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               <ProviderSelect
                 value={fallbackProvider}
                 onChange={(p) => updateDraft({ fallback_provider: p })}
+                builtins={builtinProviders}
               />
               <ModelSelect
                 provider={fallbackProvider}

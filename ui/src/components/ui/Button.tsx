@@ -47,11 +47,40 @@ export interface ButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   tone?: ButtonTone;
   size?: ButtonSize;
+  /**
+   * Where the label sits in the button.
+   *
+   * `center` is a button that sizes to its own label. `start` is a control that
+   * fills a column — a menu item, a toolbar row — where centring the label would
+   * put every item's text at a different x and leave the right half of the row
+   * empty.
+   *
+   * A prop rather than a `justify-*` class the caller passes: two of those in one
+   * class string both survive into the stylesheet and the later *stylesheet*
+   * rule wins, not the later class — so a caller's `justify-start` silently lost
+   * to `justify-center` here and every menu item's label sat in the middle of the
+   * row. Emitting exactly one of the two is the fix.
+   */
+  align?: "center" | "start";
+  /**
+   * How heavy the label is.
+   *
+   * `semibold` is the app's button: a control whose label is the whole point of
+   * the row. `normal` is a control in a list of equals — a menu item, where every
+   * row is bold and so nothing is.
+   *
+   * For the same reason as `align`: `font-normal` passed as a class fought the
+   * `font-semibold` in the base and lost to the stylesheet order, so a menu of
+   * bold items was the result. One of the two is emitted, never both.
+   */
+  weight?: "normal" | "semibold";
 }
 
 export const Button: React.FC<ButtonProps> = ({
   tone = "subtle",
   size = "sm",
+  align = "center",
+  weight = "semibold",
   className = "",
   type = "button",
   children,
@@ -60,7 +89,11 @@ export const Button: React.FC<ButtonProps> = ({
   <button
     type={type}
     className={
-      "inline-flex items-center justify-center rounded-lg font-semibold " +
+      "inline-flex items-center " +
+      (align === "start" ? "justify-start" : "justify-center") +
+      " rounded-lg " +
+      (weight === "normal" ? "font-normal" : "font-semibold") +
+      " " +
       // A label wraps to a second line when its container is squeezed, which puts
       // the text under the icon and turns a header into two stacked words. Found by
       // looking at the running app, not by the tests — the header did it the moment

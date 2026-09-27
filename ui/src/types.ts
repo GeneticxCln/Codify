@@ -63,7 +63,15 @@ export type StepStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
  * in which file — DESIGN.md is the contract every later goal obeys, CODIFY.md is
  * the prior every later run's librarian reads.
  */
-export type GoalMode = "normal" | "design" | "knowledge";
+export type GoalMode = "normal" | "design" | "knowledge" | "chat";
+
+/** True for a goal that is a turn rather than a run. A turn is answered from
+ * one model call and never has steps, so the plan/apply/step chrome has nothing
+ * to show for it. Narrowing on this is why the composer's send is not the same
+ * code path as a run's start. */
+export function isChatMode(mode: GoalMode | undefined): boolean {
+  return mode === "chat";
+}
 
 export type EventType =
   | "goal_status"
@@ -84,7 +92,17 @@ export type EventType =
   | "plan_consult"
   | "usage"
   | "model_delta"
-  | "error";
+  | "error"
+  /**
+   * The engine's own per-stage measurement (docs/04 §4.7). Listed here because
+   * the engine publishes it into this goal's log, so `GET /goals/{id}/events`
+   * can return one and the `Event` type has to be able to say so.
+   *
+   * It is not read from an event on purpose: the stage table and the per-role
+   * rates come from `StatsOverview.by_stage`, which the engine derives from these
+   * events. A per-goal stage card would want this one; nothing currently does.
+   */
+  | "stage_result";
 
 export interface AgentConfig {
   role: AgentRole;
@@ -162,9 +180,64 @@ export interface PlanStep {
   last_agent_role?: AgentRole | null;
 }
 
+/**
+ * A thread of turns in a workspace — what a chat tab points at.
+ *
+ * The engine owns it, so it survives the window that opened it. Deliberately not
+ * a goal: a goal is one run with a plan and a verifier, a conversation is the
+ * question several runs answer.
+ */
+export interface Conversation {
+  id: string;
+  workspace_id: string;
+  /** Empty until a turn names it; the UI shows "New chat" rather than inventing. */
+  title: string;
+  /** Hidden from the panel but still fetchable — archived, never deleted. */
+  archived: boolean;
+  /**
+   * The thread this one was started on, or `null` for a top-level thread.
+   *
+   * The field that makes "a new thread" and "a new chat" different objects: a
+   * thread with a parent is a continuation of that conversation, and the panel
+   * says so. `null` is the ordinary case, not a missing one.
+   */
+  parent_id: string | null;
+  /**
+   * The parent's name, joined in by the engine.
+   *
+   * Sent rather than resolved by the panel because the panel *cannot* resolve
+   * it: it lists one workspace's live threads and hides archived ones, so
+   * archiving a parent left every child unable to find the name and degrading
+   * its label to a generic word permanently. `null` now means the parent row is
+   * genuinely gone, which is the only case where the name is really unknown.
+   */
+  parent_title: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/**
+ * One turn: the user's question and the goal that answered it.
+ *
+ * Derived by the engine from the goal rather than stored separately, so there is
+ * no second record to get out of step with the first.
+ */
+export interface ConversationTurn {
+  goal_id: string;
+  conversation_id: string | null;
+  prompt: string;
+  status: GoalStatus;
+  created_at: number;
+}
+
 export interface Goal {
   id: string;
   workspace_id: string;
+  /**
+   * The thread this run belongs to. Absent for a goal that predates
+   * conversations, which reads as its own single-turn thread.
+   */
+  conversation_id?: string | null;
   title: string;
   description: string;
   status: GoalStatus;
@@ -574,6 +647,16 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   timestamp: number;
+  /**
+   * The thread this message belongs to.
+   *
+   * Held on the message rather than by the store holding the messages, so the
+   * live-run path stays a flat map by message id. A goal streams into the thread
+   * it was asked in even while the user is looking at another tab — which is the
+   * one thing a store keyed by "the conversation currently on screen" would get
+   * wrong.
+   */
+  conversationId?: string | null;
   goal?: Goal;
   events?: Event[];
   isStreaming?: boolean;

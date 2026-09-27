@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams test-ui lint typecheck build-ui dev-ui check-tauri build-tauri run-engine run-engine-scratch check ci ci-python-floor hooks clean bench bench-smoke
+.PHONY: help test test-engine test-streams test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri run-engine run-engine-scratch check ci ci-python-floor hooks clean bench bench-smoke
 
 # mypy is a dev tool, installed like ruff (`pip install mypy` or `pip install -e ".[dev]"`);
 # when it is only in the project venv, fall back to that so `make check` works unactivated.
@@ -20,6 +20,7 @@ help:
 	@echo "  make test         - Run full Python test suite (includes the concurrency/stream tests)"
 	@echo "  make test-streams - Run the concurrency/stream-isolation tests explicitly, by name"
 	@echo "  make test-ui      - Run the React/TypeScript unit tests (node --test, needs Node 22.6+)"
+	@echo "  make typecheck-ui-tests - Type-check the React/TypeScript test suite (tsc over src+tests)"
 	@echo "  make lint         - Lint engine, tests and scripts with ruff (rules pinned in pyproject.toml)"
 	@echo "  make typecheck    - Static-type-check engine, tests and scripts with mypy (config in pyproject.toml)"
 	@echo "  make build-ui     - Typecheck and build React frontend (Vite)"
@@ -62,6 +63,21 @@ test-streams:
 # and no bundler — but that flag landed in Node 22.6.
 test-ui:
 	cd ui && npm test
+
+# The companion to test-ui, and the one that was missing. `tsconfig.json` has
+# "include": ["src"], so every `tsc` in this repository — `npm run build`, and
+# therefore `make build-ui` — never read a line of `ui/tests/`. And `node --test`
+# cannot close the gap: `--experimental-strip-types` *erases* types, so a suite
+# that builds a value the interface no longer accepts, or calls a component with
+# the wrong props, still passes. That is not hypothetical drift; it is what had
+# happened, and `make ci` said nothing.
+#
+# This is the mypy leg for the TypeScript half, same argument as the one above
+# it: the runtime check and the static check are not substitutes. The config is
+# `ui/tsconfig.test.json`, which extends the app's own so `strict` and
+# `noUnusedLocals` apply to tests exactly as they do to `src/`.
+typecheck-ui-tests:
+	cd ui && npm run typecheck:tests
 
 # Ruff's rule selection is pinned in pyproject.toml (target-version = the declared
 # minimum Python), so this is the same check on every machine and in CI. It covers
@@ -120,7 +136,7 @@ bench:
 bench-smoke:
 	python3 -m benchmarks.runner --tier smoke
 
-check: lint typecheck test-ui test test-streams build-ui check-tauri
+check: lint typecheck test-ui typecheck-ui-tests test test-streams build-ui check-tauri
 	@echo "All verifications passed successfully!"
 
 # The declared-minimum leg. No machine is guaranteed a python $(PY_MIN), so this brings

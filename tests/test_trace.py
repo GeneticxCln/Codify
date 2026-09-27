@@ -24,9 +24,17 @@ from engine.sandbox import SandboxService
 from engine.services import AgentRegistryService, ApiError, GoalService, WorkspaceService
 from engine.trace import ReplayProvider, TraceMismatch, TraceService, keep_prompts, prompt_digest
 
+from engine.laya import LayaService
 from tests.test_design_role import SkippedGate  # noqa: F401 — the gate is its own concern
 
 RESPONSES: dict[str, Any] = {
+    # The gate's typed contract, for a run whose gate answers through its LLM
+    # fallback rather than the SDK. Present so a recording can hold the gate's
+    # call like any other; a run with a skipped gate never asks for it.
+    "laya": {"answers": {"intent": {"choice": "code_change", "confidence": 0.9},
+                         "risk": {"score": 0.0},
+                         "prompt_injection": {"noul": 0.01},
+                         "needs_clarification": {"noul": 0.05}}},
     "librarian": {"summary": "s", "files": [], "conventions": [], "enough": True},
     "design": {"applies": False},
     "planner": {"steps": [{"title": "S1", "description": "d", "suggested_paths": ["a.txt"]}]},
@@ -117,7 +125,10 @@ class TraceHarness(unittest.IsolatedAsyncioTestCase):
             WorkspaceCreate(name=workspace.name, root_path=str(target))
         )
 
-    def _engine(self, provider: ScriptedProvider, *, tracer: bool = True) -> ExecutorService:
+    def _engine(
+        self, provider: ScriptedProvider, *, tracer: bool = True,
+        laya: LayaService | None = None,
+    ) -> ExecutorService:
         registry = AgentRegistryService(
             self.conn, ScriptedFactory(provider, Keychain()), Keychain()
         )
@@ -125,7 +136,24 @@ class TraceHarness(unittest.IsolatedAsyncioTestCase):
             registry.set_config(role, AgentConfigUpdate(provider="ollama", model_name="m"))
         return ExecutorService(
             self.goals, self.workspaces, registry, SandboxService(),
-            laya=SkippedGate(), tracer=self.traces if tracer else None,
+            laya=laya or SkippedGate(), tracer=self.traces if tracer else None,
+        )
+
+    def _gated_engine(self, provider: ScriptedProvider) -> ExecutorService:
+        """An engine whose gate answers through its LLM fallback.
+
+        `disabled=True` forces the fallback path so the test is about a gate that
+        *calls a model*, whether or not this machine has the SDK.
+        """
+        registry = AgentRegistryService(
+            self.conn, ScriptedFactory(provider, Keychain()), Keychain()
+        )
+        for role in ROLES:
+            registry.set_config(role, AgentConfigUpdate(provider="ollama", model_name="m"))
+        return ExecutorService(
+            self.goals, self.workspaces, registry, SandboxService(),
+            laya=LayaService(registry=registry, disabled=True),
+            tracer=self.traces,
         )
 
     def _replay_engine(self, goal_id: str) -> tuple[ExecutorService, ReplayProvider]:

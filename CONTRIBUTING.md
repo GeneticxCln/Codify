@@ -13,9 +13,10 @@ runs everything in one pass:
 | `make lint` | `ruff check engine tests scripts benchmarks` — rules and target Python pinned in `pyproject.toml` |
 | `make typecheck` | `mypy` over the same files — config (3.10 floor, pydantic plugin) pinned in `pyproject.toml` |
 | `make test-ui` | the React/TypeScript unit tests in `ui/tests/` (needs Node 22.6+) |
+| `make typecheck-ui-tests` | `tsc` over `ui/src` **and** `ui/tests` — the check `npm test` cannot do |
 | `make test` | full Python suite (411 tests today — the number moves, so trust the run) |
 | `make test-streams` | the concurrency/stream-isolation tests, **by name** (not just via discovery) |
-| `make build-ui` | TypeScript check + Vite production build |
+| `make build-ui` | TypeScript check (`src` only) + Vite production build |
 | `make check-tauri` | `cargo check` + `cargo fmt --check` on the desktop shell |
 
 The Python suite must run on **3.10 and 3.14** — 3.10 because `pyproject.toml`
@@ -74,6 +75,24 @@ test layers (service-level in `test_concurrent_streams.py`, over-the-wire in
 `test_concurrent_streams_ws.py`) assert through that one shared helper. If you
 change a stream guarantee, change it *there* — both layers pick it up and
 cannot drift apart.
+
+**A card is tested by its markup, and the loader is what makes that possible.**
+`ui/tests/tsxLoader.ts` teaches `node --test` to import `.tsx` (node rejects the
+extension during format detection, before any `load` hook can answer) and gives
+`src/` the one browser global a module reads while it loads — `localStorage`, for
+`api.ts`'s boot token. That read is why every card `ChatTimeline` draws used to
+be unrenderable: the harness could only reach components that had been extracted
+out of it. Render through `react-dom/server` and assert on the output, because
+whether the sentence about a file lands on screen is a fact about the JSX and not
+about the function that returns it — a body rendered inside a branch that never
+evaluates, a path that prints as `undefined`, a disabled control that computes its
+reason and never says it. Logic tests still earn their place; they are cheaper,
+and `pinReadiness` deciding correctly says nothing about whether the reason is on
+screen. Two rules fall out of it. A new `ui/src/components/ui/*.tsx` has to be
+added to the table in `componentLoader.test.ts`, so a shared primitive nobody
+rendered is a primitive whose markup nothing checks. And a render must produce no
+React warning at all: a list child without a unique key reconciles by index, which
+is a state-mixing bug rather than a cosmetic one.
 
 **Never touch the developer's real state.** Tests run hermetically via
 `tests/hermetic.py`; an isolated engine moves *both* the database and the

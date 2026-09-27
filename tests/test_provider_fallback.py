@@ -16,7 +16,7 @@ from pathlib import Path
 
 from engine.db import connect
 from engine.executor import ExecutorService
-from engine.laya import LayaDecision, LayaService
+from engine.laya import GateCall, LayaDecision, LayaService
 from engine.models import (
     ROLES,
     AgentConfig,
@@ -83,7 +83,9 @@ class FallbackFactory(ProviderFactory):
 
 
 class SkippedGate(LayaService):
-    async def decide(self, state: dict[str, Any]) -> LayaDecision:
+    async def decide(
+        self, state: dict[str, Any], on_call: GateCall | None = None,
+    ) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 
 

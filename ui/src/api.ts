@@ -1,6 +1,8 @@
+import { readErrorBody } from "./errorBody.ts";
 import type {
   AgentCallStat,
   AgentConfig,
+  Conversation,
   DeletedGoal,
   DeletedWorkspace,
   EngineInfo,
@@ -88,6 +90,25 @@ export async function engineFailureReason(): Promise<string | null> {
   }
 }
 
+/**
+ * Call a shell command.
+ *
+ * ## Argument names are camelCase, and that is not a style choice
+ *
+ * Tauri v2 converts the JS argument names to the Rust parameter names, and the
+ * default conversion is camelCase → snake_case. So a Rust `workspace_id:
+ * String` is reached with `{ workspaceId }`, and sending `{ workspace_id }`
+ * fails with:
+ *
+ * > invalid args `workspaceId` for command `codify_terminal_open`: command
+ * > codify_terminal_open missing required key workspaceId
+ *
+ * which names the *expected* key and says nothing about the one that was sent.
+ * Every pane command in this file took an argument, so all seven of them failed
+ * that way, while the no-argument commands (engine info, the agent configs)
+ * kept working — which is why the app looked healthy and only the two panes
+ * were broken. `invokeArgs.test.ts` holds the line for all of them at once.
+ */
 export async function tauriInvoke<T>(cmd: string, args?: Record<string, any>): Promise<T> {
   if (typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__) {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -96,6 +117,26 @@ export async function tauriInvoke<T>(cmd: string, args?: Record<string, any>): P
   // Fallback to direct HTTP API if running outside Tauri
   return fallbackHttpInvoke<T>(cmd, args);
 }
+
+/**
+ * Why the panes answer this in a browser tab.
+ *
+ * A browser pane's page is a `WebviewWindow` and a terminal's shell is a PTY;
+ * both live in the Rust process, and the engine has never exposed either over
+ * HTTP. Reimplementing a shell on top of `POST /exec` would be a different
+ * product, not a fallback.
+ *
+ * So outside the shell these refuse, and they refuse *by name* — every caller in
+ * `App.tsx` already renders `err.message` into the pane that asked, so a
+ * rejection here is a message on screen. Reaching `default:` instead threw
+ * `Unknown command: codify_browser_open`, which claims the command does not
+ * exist when it does; and because the first browser address is refused before
+ * the pane has a page to show, the error landed in state keyed to an id no tab
+ * had and the user saw nothing happen at all.
+ */
+const NEEDS_DESKTOP_SHELL =
+  "The browser and terminal panes need the Codify desktop shell — the engine " +
+  "serves no HTTP equivalent, so these commands exist only in the app.";
 
 async function fallbackHttpInvoke<T>(cmd: string, args?: Record<string, any>): Promise<T> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
@@ -146,37 +187,39 @@ async function fallbackHttpInvoke<T>(cmd: string, args?: Record<string, any>): P
     case "codify_get_engine_info": {
       return currentEngine as any;
     }
+    // Grouped, not one line each: these have no HTTP shape to write, and six
+    // near-identical branches would be six places for a future command to be
+    // forgotten in. A missing name still has to be loud, which is what the
+    // default below is for.
+    case "codify_browser_open":
+    case "codify_browser_navigate":
+    case "codify_browser_close":
+    case "codify_terminal_open":
+    case "codify_terminal_write":
+    case "codify_terminal_resize":
+    case "codify_terminal_close": {
+      throw new Error(NEEDS_DESKTOP_SHELL);
+    }
     default:
       throw new Error(`Unknown command: ${cmd}`);
   }
 }
 
 /**
- * Parse an engine error body into a useful message. The engine reports
- * failures as `{code, message}` or `{detail}`; fall back to the HTTP status
- * so a failure is never silent or empty.
+ * Parse an engine error body into a useful message. Falls back to the HTTP
+ * status so a failure is never silent or empty.
+ *
+ * The reading itself is `readErrorBody` in `./errorBody`, which is where the
+ * engine's declared refusal shape is described and where it is tested — it was
+ * untestable in here, which is how it came to understand `detail` as a string
+ * when a rejected body sends an array.
  */
 async function engineError(res: Response, fallback: string): Promise<Error> {
   let code = "";
   let message = "";
   let extra: Record<string, unknown> = {};
   try {
-    const body = await res.json();
-    code = typeof body?.code === "string" ? body.code : "";
-    message =
-      typeof body?.message === "string"
-        ? body.message
-        : typeof body?.detail === "string"
-        ? body.detail
-        : "";
-    // Keep whatever else the engine attached. The delete routes refuse with
-    // structured facts (`workspace_not_empty` carries the goal count) that a
-    // confirm dialog has to read — a stringified "409: ..." would lose the one
-    // number the user needs before agreeing to a cascade.
-    if (body && typeof body === "object") {
-      const { code: _c, message: _m, detail: _d, ...rest } = body as Record<string, unknown>;
-      extra = rest;
-    }
+    ({ code, message, extra } = readErrorBody(await res.json()));
   } catch {
     /* non-JSON body — fall through to status text below */
   }
@@ -567,6 +610,261 @@ export async function setWorkspaceDesignContract(
   return res.json();
 }
 
+/**
+ * The threads in a workspace, most recently touched first.
+ *
+ * Archived threads are hidden unless asked for: the side panel is what the user
+ * is working on, and burying it under every finished thread is the mistake the
+ * goal history avoids by leading with active runs.
+ */
+export async function fetchConversations(
+  workspaceId: string,
+  includeArchived: boolean = false,
+): Promise<Conversation[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const params = new URLSearchParams({ workspace_id: workspaceId });
+  if (includeArchived) params.set("include_archived", "true");
+  const res = await fetch(`${base}/conversations?${params}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to load conversations");
+  return res.json();
+}
+
+/** Start a thread. An empty title is the ordinary case — it is named later. */
+export async function createConversation(
+  workspaceId: string,
+  title: string = "",
+  parentId?: string,
+): Promise<Conversation> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/conversations`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${currentEngine.token}`,
+    },
+    // `parent_id` only when there is one: the engine's `ConversationCreate` is
+    // `extra: "forbid"`, and sending an explicit `null` for every top-level
+    // thread would be a field the client had to keep meaning straight.
+    body: JSON.stringify({
+      workspace_id: workspaceId,
+      title,
+      ...(parentId ? { parent_id: parentId } : {}),
+    }),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to start a conversation");
+  return res.json();
+}
+
+/** Name a thread. The only mutable thing about one. */
+export async function renameConversation(
+  conversationId: string,
+  title: string,
+): Promise<Conversation> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/conversations/${conversationId}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${currentEngine.token}`,
+    },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to rename the conversation");
+  return res.json();
+}
+
+/** Hide a thread from the panel, or bring it back. Archived, never deleted. */
+export async function archiveConversation(
+  conversationId: string,
+  archived: boolean = true,
+): Promise<Conversation> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const params = new URLSearchParams({ archived: String(archived) });
+  const res = await fetch(
+    `${base}/conversations/${conversationId}/archive?${params}`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${currentEngine.token}` },
+    },
+  );
+  if (!res.ok) throw await engineError(res, "Failed to archive the conversation");
+  return res.json();
+}
+
+/**
+ * Drop the thread and keep its runs.
+ *
+ * The engine keeps every goal it held as a single-turn thread, so this is a way
+ * to tidy a tab list and never a way to erase a history.
+ */
+export async function deleteConversation(
+  conversationId: string,
+): Promise<{ deleted: boolean }> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/conversations/${conversationId}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to delete the conversation");
+  return res.json();
+}
+
+/**
+ * Put an existing goal into a thread, server-side.
+ *
+ * The link that used to live only in the panel: restoring a goal that predates
+ * conversations created the thread here, in the client, and the engine still
+ * had NULL on the row — one restart later the run read as its own thread again.
+ * This makes the store's copy match what the tab shows.
+ */
+export async function attachGoalToConversation(
+  goal_id: string,
+  conversationId: string,
+): Promise<Goal> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/goals/${goal_id}/conversation`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${currentEngine.token}`,
+    },
+    body: JSON.stringify({ conversation_id: conversationId }),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to attach the goal to its conversation");
+  return res.json();
+}
+
+/**
+ * Ask the shell to open a browser tab's webview window.
+ *
+ * Returns the webview label, which is `browser-<tabId>` and is the shell's own
+ * business — nothing in `ui/` needs it, because the tab id is what every later
+ * call takes and the close signal reports. It is typed as the shell types it
+ * rather than as `void` so that a future caller which does need the label is
+ * not casting a string to nothing.
+ *
+ * A refusal arrives as a thrown `Error` carrying the shell's own message, and
+ * that message is shown to the user unchanged — the loopback guard's wording
+ * ("browser webviews load http(s) on non-loopback hosts only") says more than
+ * any message written here would, because it is the same sentence as the rule.
+ */
+export async function openBrowserWebview(
+  tabId: string,
+  url: string
+): Promise<string> {
+  return tauriInvoke<string>("codify_browser_open", { tabId, url });
+}
+
+/**
+ * Send an open browser tab to a new address.
+ *
+ * Distinct from `openBrowserWebview` because the shell is: `open` on a tab that
+ * already exists navigates it and focuses it, while `navigate` refuses a tab
+ * that has no webview. The pane uses that refusal as its answer to "has this
+ * tab got a page yet" — see `Tab.url` — so the two are called from different
+ * places and neither has to catch an error to find out.
+ */
+export async function navigateBrowserWebview(
+  tabId: string,
+  url: string
+): Promise<string> {
+  return tauriInvoke<string>("codify_browser_navigate", { tabId, url });
+}
+
+/**
+ * Start the user's shell in a workspace, at a character grid.
+ *
+ * The id comes back from the shell and is not ours to choose — `terminal.rs`
+ * numbers its own sessions `term-1`, `term-2` — so it becomes the tab's id
+ * rather than a second string to keep in step. `workspace_id` rather than a path
+ * is the whole of the boundary: `pin_cwd` resolves it against the engine's
+ * record and refuses anything that is not an existing absolute directory
+ * (`docs/00` §6.6 is about the *agent's* shell, and `docs/07` §2.1 is about
+ * this one).
+ *
+ * `cols`/`rows` are clamped by the caller through `gridFrom` rather than here,
+ * because the pane is what knows the measurement; this function only has the
+ * numbers it is handed, and a `u16` parameter is the last line of defence.
+ */
+export async function openTerminal(
+  workspaceId: string,
+  cols: number,
+  rows: number
+): Promise<string> {
+  return tauriInvoke<string>("codify_terminal_open", {
+    workspaceId,
+    cols,
+    rows,
+  });
+}
+
+/**
+ * Send keystrokes to an open terminal.
+ *
+ * Called once per `onData` batch, which is what xterm hands us: one string that
+ * may be a character, a control sequence, a paste, or several of those at once.
+ * Splitting it into characters would turn one paste into several hundred IPC
+ * round trips and reorder the shell's own line editing with them.
+ */
+export async function writeTerminal(
+  terminalId: string,
+  data: string
+): Promise<void> {
+  return tauriInvoke<void>("codify_terminal_write", {
+    terminalId,
+    data,
+  });
+}
+
+/**
+ * Tell the PTY its window changed size, so the shell re-wraps what it has.
+ *
+ * A no-op on a terminal that has already exited, which is why the pane does not
+ * have to check whether it is still running before every drag frame.
+ */
+export async function resizeTerminal(
+  terminalId: string,
+  cols: number,
+  rows: number
+): Promise<void> {
+  return tauriInvoke<void>("codify_terminal_resize", {
+    terminalId,
+    cols,
+    rows,
+  });
+}
+
+/**
+ * Kill a terminal's shell and reap it.
+ *
+ * Unlike `closeBrowserWebview` this one is safe to call for an id that is not
+ * there: `terminal::close` returns `Ok(())` when the session is already gone,
+ * because a terminal outlives its tab in the other direction too — a shell that
+ * has exited is a normal state, and closing its tab must not be an error.
+ */
+export async function closeTerminal(terminalId: string): Promise<void> {
+  return tauriInvoke<void>("codify_terminal_close", { terminalId });
+}
+
+/**
+ * Ask the shell to destroy a browser tab's webview window.
+ *
+ * The other half of the close signal: closing the tab in the strip has to close
+ * the window too, or the page keeps running with nothing pointing at it. The
+ * shell answers with `browser-window-closed` (see `shellEvents.ts`), which the
+ * main window treats as a no-op because this side already closed the tab.
+ *
+ * Errors when there is no window, which is a caller error rather than a fault
+ * to report: `App.handleCloseTab` skips the call for a browser tab that never
+ * got a URL, so the user is never shown the shell's "no browser tab is open"
+ * for a tab they never gave a page to.
+ */
+export async function closeBrowserWebview(tabId: string): Promise<string> {
+  return tauriInvoke<string>("codify_browser_close", { tabId });
+}
+
 export async function createGoal(
   workspace_id: string,
   title: string,
@@ -581,12 +879,17 @@ export async function createGoal(
   /** Record this run's model calls, so the run can be replayed without a
    * provider. Opt-in, and a copy of the model's output about the user's code. */
   trace: boolean = false,
+  /** The thread this run belongs to. Absent means "a thread of its own". */
+  conversation_id?: string | null,
 ): Promise<Goal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const payload: Record<string, any> = { workspace_id, title, description, dry_run, plan_only };
   if (provider) payload.provider = provider;
   if (model) payload.model = model;
   if (parallel) payload.parallel = true;
+  // Sent only when set, like `mode` below: an older engine validating the body
+  // strictly would reject an unknown key, and absent is what it assumes.
+  if (conversation_id) payload.conversation_id = conversation_id;
   // Sent only when it is not the default: an older engine validating the body
   // strictly would reject an unknown key, and "normal" is what it assumes.
   if (mode !== "normal") payload.mode = mode;
@@ -603,6 +906,48 @@ export async function createGoal(
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Say something in a thread.
+ *
+ * This is what the composer posts to, and it is deliberately *not* `createGoal`:
+ * a goal starts a pipeline, so every message used to start eight agents, and
+ * "hi" produced a plan. The gate classifies the request and the engine picks
+ * the shape — a question is answered from one model call, anything else runs
+ * the full pipeline. So the client sends the words and nothing else: there is
+ * no `mode` and no `dry_run` here to get wrong, and the engine's one door into
+ * a turn is the only one (docs/09 §10).
+ *
+ * The response is a `Goal` with `mode: "chat"` — a turn is stored as a goal
+ * because `events.goal_id` is NOT NULL, so the event log is the WebSocket, the
+ * audit trail and the stats feed. Reusing the row is what makes the stream
+ * below work with no turn-specific machinery at all.
+ */
+export async function createTurn(
+  conversationId: string,
+  prompt: string,
+  provider?: string,
+  model?: string,
+  trace: boolean = false,
+): Promise<Goal> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const payload: Record<string, any> = { prompt };
+  if (provider) payload.provider = provider;
+  if (model) payload.model = model;
+  if (trace) payload.trace = true;
+  const res = await fetch(`${base}/conversations/${conversationId}/turns`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${currentEngine.token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    throw await engineError(res, "Failed to send");
   }
   return res.json();
 }

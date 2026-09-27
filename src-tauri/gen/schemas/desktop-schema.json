@@ -177,6 +177,90 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Every command this app defines, as thirteen named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser.rs fails the build's test leg if the two lists ever differ. Permissions are not where a window/webview is decided: this set is referenced only by capabilities/default.json, whose `windows` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.\n#### This permission set includes:\n\n- `allow-codify-get-engine-info`\n- `allow-codify-engine-status`\n- `allow-codify-list-agent-configs`\n- `allow-codify-update-agent-config`\n- `allow-codify-repair-agent-configs`\n- `allow-codify-test-agent-connection`\n- `allow-codify-terminal-open`\n- `allow-codify-terminal-write`\n- `allow-codify-terminal-resize`\n- `allow-codify-terminal-close`\n- `allow-codify-browser-open`\n- `allow-codify-browser-navigate`\n- `allow-codify-browser-close`",
+          "type": "string",
+          "const": "shell",
+          "markdownDescription": "Every command this app defines, as thirteen named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser.rs fails the build's test leg if the two lists ever differ. Permissions are not where a window/webview is decided: this set is referenced only by capabilities/default.json, whose `windows` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.\n#### This permission set includes:\n\n- `allow-codify-get-engine-info`\n- `allow-codify-engine-status`\n- `allow-codify-list-agent-configs`\n- `allow-codify-update-agent-config`\n- `allow-codify-repair-agent-configs`\n- `allow-codify-test-agent-connection`\n- `allow-codify-terminal-open`\n- `allow-codify-terminal-write`\n- `allow-codify-terminal-resize`\n- `allow-codify-terminal-close`\n- `allow-codify-browser-open`\n- `allow-codify-browser-navigate`\n- `allow-codify-browser-close`"
+        },
+        {
+          "description": "Closes a browser webview by tab id.",
+          "type": "string",
+          "const": "allow-codify-browser-close",
+          "markdownDescription": "Closes a browser webview by tab id."
+        },
+        {
+          "description": "Navigates an existing browser webview, through the same loopback guard as `open`.",
+          "type": "string",
+          "const": "allow-codify-browser-navigate",
+          "markdownDescription": "Navigates an existing browser webview, through the same loopback guard as `open`."
+        },
+        {
+          "description": "Opens a browser webview. The webview itself holds no permission (capabilities/browser.json is empty), so this grants the *main window* the ability to open one — it does not grant that page anything.",
+          "type": "string",
+          "const": "allow-codify-browser-open",
+          "markdownDescription": "Opens a browser webview. The webview itself holds no permission (capabilities/browser.json is empty), so this grants the *main window* the ability to open one — it does not grant that page anything."
+        },
+        {
+          "description": "Reports whether the engine process is up, without starting it.",
+          "type": "string",
+          "const": "allow-codify-engine-status",
+          "markdownDescription": "Reports whether the engine process is up, without starting it."
+        },
+        {
+          "description": "Reports the engine's base URL and boot token to the main window. With the token, every engine route is reachable (docs/00 §6.3), so this permission is the reason the local-origin bypass below had to be closed.",
+          "type": "string",
+          "const": "allow-codify-get-engine-info",
+          "markdownDescription": "Reports the engine's base URL and boot token to the main window. With the token, every engine route is reachable (docs/00 §6.3), so this permission is the reason the local-origin bypass below had to be closed."
+        },
+        {
+          "description": "Lists the eight role slots and their per-role configuration, with API keys redacted (docs/00 §6.4).",
+          "type": "string",
+          "const": "allow-codify-list-agent-configs",
+          "markdownDescription": "Lists the eight role slots and their per-role configuration, with API keys redacted (docs/00 §6.4)."
+        },
+        {
+          "description": "Restores missing or malformed role slots to their defaults. Destructive to local state by design, so it is granted explicitly rather than swept in by a wildcard.",
+          "type": "string",
+          "const": "allow-codify-repair-agent-configs",
+          "markdownDescription": "Restores missing or malformed role slots to their defaults. Destructive to local state by design, so it is granted explicitly rather than swept in by a wildcard."
+        },
+        {
+          "description": "Closes an existing PTY.",
+          "type": "string",
+          "const": "allow-codify-terminal-close",
+          "markdownDescription": "Closes an existing PTY."
+        },
+        {
+          "description": "Starts a PTY the user asked for. A terminal is arbitrary code execution by another name, so the grant names it rather than inheriting it.",
+          "type": "string",
+          "const": "allow-codify-terminal-open",
+          "markdownDescription": "Starts a PTY the user asked for. A terminal is arbitrary code execution by another name, so the grant names it rather than inheriting it."
+        },
+        {
+          "description": "Resizes an existing PTY so the shell redraws to fit.",
+          "type": "string",
+          "const": "allow-codify-terminal-resize",
+          "markdownDescription": "Resizes an existing PTY so the shell redraws to fit."
+        },
+        {
+          "description": "Writes keystrokes to an existing PTY.",
+          "type": "string",
+          "const": "allow-codify-terminal-write",
+          "markdownDescription": "Writes keystrokes to an existing PTY."
+        },
+        {
+          "description": "Probes a provider connection and reports the failure, without persisting anything.",
+          "type": "string",
+          "const": "allow-codify-test-agent-connection",
+          "markdownDescription": "Probes a provider connection and reports the failure, without persisting anything."
+        },
+        {
+          "description": "Writes one role's configuration. Read-modify-write over the same key, so a lost race is a lost update rather than a credential leak.",
+          "type": "string",
+          "const": "allow-codify-update-agent-config",
+          "markdownDescription": "Writes one role's configuration. Read-modify-write over the same key, so a lost race is a lost update rather than a credential leak."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

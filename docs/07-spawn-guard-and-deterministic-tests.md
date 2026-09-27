@@ -53,10 +53,11 @@ short the grace a test runner deliberately gets to shut its workers down, so a
 TERM whose sender is still alive forwards nothing — the command answers it. A TERM
 that arrives because the engine died is the one case that gets the group kill.
 
-### The five guarded spawn sites
+### The guarded spawn sites
 
 One table in the code (`tests/test_no_unguarded_spawns.py::GUARDED_SPAWN_SITES`)
-freezes them, each with its justification and its dynamic test:
+freezes them, each with its justification and its dynamic test. `src-tauri/` has
+its own table beside it (`RUST_GUARDED_SPAWN_SITES`) — see §2.1:
 
 | Site | Spawns | Guarded by | Proven by |
 |---|---|---|---|
@@ -65,6 +66,8 @@ freezes them, each with its justification and its dynamic test:
 | `engine/app.py` `_picker_command` | the GTK folder picker behind `POST /workspaces/browse` | same; env inherited because DISPLAY/WAYLAND put the dialog on screen | `tests/test_sandbox.py`, the picker e2e |
 | `engine/spawn_guard.py` `main` | the guard's own `Popen` of the command | is the guard | every one of the above |
 | `benchmarks/runner.py` | a benchmark task's `test_command`, taken from the manifest | same, plus a whole-group kill on timeout | `tests/test_benchmark_runner.py` |
+| `src-tauri/src/lib.rs` | `python3 -m engine`, and a login-shell PATH probe | the shell owns the engine's lifecycle; `RunEvent::Exit` kills it unconditionally | `cargo test` in `src-tauri/`, and the launch itself |
+| `src-tauri/src/terminal.rs` | the user's shell behind a terminal pane | `pin_cwd` pins cwd to a registered workspace root; `$SHELL` supplies argv, never a request; the pane's close and the app's exit both kill and reap | `terminal::tests`, 8 of them |
 
 The benchmark site is deliberately **not** routed through `SandboxService`. That
 allowlist is a security boundary for model-proposed argv; widening it to let a
@@ -98,6 +101,40 @@ object and starts nothing; a scanner with false positives stops being read.
 The second test keeps the table honest in the other direction: an entry whose
 spawn no longer exists is reported stale, so the freeze cannot outlive the code
 it names.
+
+### 2.1 The Rust half: `src-tauri/`
+
+The desktop shell starts processes and always did — it spawns `python3 -m engine`
+and kills it on exit. A freeze scoped to the engine's own languages is a freeze
+the shell walks around, so `src-tauri/src/**/*.rs` is scanned too.
+
+That half is **lexical, not parsed**: Rust has no AST available here, so the scan
+strips `//` comments and matches the calls a reader would recognise —
+`Command::new`, `.spawn()`, `.spawn_unchecked()`, `spawn_command()`, `.output()`,
+and the two PTY choke points `native_pty_system()` and `openpty()`. Freezing the
+PTY openers is deliberate: a terminal is a terminal rather than a pipe because of
+them, and "a pane was opened" should stay a decision someone made. A spawn hidden
+inside a macro is beyond what a lexical scan sees, and the same admission applies
+as on the Python side — this freezes decision sites rather than proving semantics.
+
+`.status()` is deliberately **not** flagged. It is the method an HTTP response
+also has (`resp.status()` in `lib.rs`), and a scanner that flags it reports one
+false positive per request until nobody reads the output.
+
+A browser webview is deliberately **not** a pattern either.
+`WebviewWindowBuilder::build()` in `src-tauri/src/browser.rs` renders a window
+in the shell's own process — no child, no pty, nothing to reap at exit — so
+freezing it would claim a process boundary it does not have. What a webview
+needs is isolation from `invoke`, and that is asserted where the decision
+lives instead: `browser.rs` parses `src-tauri/capabilities/*.json` and fails if
+any permission reaches a `browser-*` label, with the same "committed and
+asserted, not assumed" shape this freeze has (`09` §7.2, `03` §1.5).
+
+Why the terminal is here and not in the engine is in `terminal.rs`'s module docs
+and `09` §7, and it is a boundary rather than a preference: `SandboxService` is
+the agent's privileged path (docs/00 §6.6, only verifier-proposed argv reaches it)
+and a user typing at a prompt is a different authority. Nothing in that module
+reads an argv from a request.
 
 The review conversation for a new spawn is written where the change happens:
 route it through an existing choke point, or add a justified entry and give it a

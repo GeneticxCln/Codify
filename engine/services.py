@@ -18,11 +18,17 @@ from engine.models import (
     AgentConfig,
     AgentConfigUpdate,
     AgentRole,
+    Conversation,
+    ConversationCreate,
+    ConversationTurn,
+    ConversationUpdate,
     Event,
     Goal,
+    GoalConversationUpdate,
     GoalCreate,
     GoalStatus,
     PlanStep,
+    TurnCreate,
     Workspace,
     WorkspaceCreate,
 )
@@ -76,7 +82,49 @@ class SettingsService:
         # deliberately collecting replays. Same 730 ceiling as snapshots, for
         # the same fat-finger reason.
         "trace_retention_days": (30, lambda v: max(0, min(v, 730))),
+        # How many tool-calling turns one conductor run may take before the
+        # engine stops it and answers with what it has. Bounded because a model
+        # that has lost the thread will call tools forever, and an unbounded
+        # loop is a way to spend a key and a machine's time on nothing.
+        "conductor_max_turns": (8, lambda v: max(1, min(v, 40))),
     }
+
+    # The conductor's model, and why it is here rather than in `agent_configs`:
+    # `agent_configs` is keyed by role and iterated by `config_problems`, the
+    # preflight and the Settings screen, so a row in it *is* a ninth AgentRole
+    # and docs/00 §6.1 forbids that. The conductor is a loop, not a stage. These
+    # two keys are where it is configured instead. Empty means "not chosen",
+    # which the caller resolves to the scribe's configuration — the one role
+    # whose job is already writing prose for a person.
+    STRING_SPEC: dict[str, str] = {
+        "conductor_provider": "",
+        "conductor_model": "",
+    }
+
+    def get_str(self, key: str) -> str:
+        """A known string key's value, stripped. The key must exist here."""
+        if key not in self.STRING_SPEC:
+            raise KeyError(key)
+        row = self._db.execute(
+            "SELECT value FROM engine_settings WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None:
+            return self.STRING_SPEC[key]
+        return str(row["value"]).strip()
+
+    def set_str(self, key: str, value: str) -> str:
+        if key not in self.STRING_SPEC:
+            raise ApiError(400, "unknown_setting", f"unknown engine setting: {key}")
+        clean = str(value).strip()[:200]
+        self._db.execute(
+            """INSERT INTO engine_settings (key, value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                             updated_at = excluded.updated_at""",
+            (key, clean, time.time()),
+        )
+        self._db.commit()
+        return clean
 
     def get_int(self, key: str) -> int:
         """A known key's value, clamped — the key must exist in SPEC."""
@@ -512,6 +560,235 @@ def split_title_description(title: str, description: str) -> tuple[str, str]:
     return head.strip(), full[:20000]
 
 
+class ConversationService:
+    """Threads of turns — the unit a tab points at.
+
+    Lives beside `GoalService` because the two are deliberately separate: a goal
+    is a run with a plan and a verifier, a conversation is the question several
+    runs answer. Collapsing them would mean every tab is one goal and the app
+    cannot hold two lines of inquiry in the same workspace, which is exactly the
+    shape the single `messages` array had.
+
+    Nothing here writes a goal. A turn is derived from the goal that answers it,
+    so there is no second record to drift out of step with the first.
+    """
+
+    # Every read of a conversation carries its parent's *name*, joined rather
+    # than left for the client to resolve.
+    #
+    # The panel lists one workspace's live threads and hides archived ones, so a
+    # child whose parent has been archived cannot look that parent up in the list
+    # it was given — the id is still on the row and the name is still in the
+    # database, but nothing the panel can see connects them. The label then
+    # degrades to a generic word and never recovers. Joining here makes the
+    # lineage a fact the response carries, so archiving a parent costs the child
+    # nothing and `parent_title` is `None` only when the parent row is truly
+    # gone.
+    #
+    # Both sides of the join share `workspace_id` and `archived`, so every
+    # column a caller filters or orders by has to be qualified with `c.`. An
+    # unqualified one is not a second bug but a hard `ambiguous column name`
+    # error from SQLite, which is how this shape usually announces itself.
+    _SELECT_WITH_PARENT = (
+        "SELECT c.id, c.workspace_id, c.title, c.archived, c.parent_id, "
+        "c.created_at, c.updated_at, p.title AS parent_title "
+        "FROM conversations c LEFT JOIN conversations p ON p.id = c.parent_id"
+    )
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._db = conn
+
+    @staticmethod
+    def _row_to_conversation(row: sqlite3.Row) -> Conversation:
+        return Conversation(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            title=row["title"],
+            archived=bool(row["archived"]),
+            parent_id=row["parent_id"],
+            # Present on every read that goes through `_SELECT_WITH_PARENT`, and
+            # absent from a bare `SELECT *`. The `in` check rather than `row["…"]`
+            # is what lets both shapes share this one mapper: a missing column
+            # would otherwise raise `IndexError` on a query that never promised
+            # the join, which is a 500 from an unrelated change.
+            parent_title=(
+                row["parent_title"] if "parent_title" in row.keys() else None
+            ),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def create(self, body: ConversationCreate) -> Conversation:
+        row = self._db.execute(
+            "SELECT id FROM workspaces WHERE id = ?", (body.workspace_id,)
+        ).fetchone()
+        if row is None:
+            raise ApiError(404, "unknown_workspace", "workspace not found")
+        now = time.time()
+        # A title the client sends is normalised the same way a goal's is, so
+        # "New chat" is a placeholder the UI shows and not a row the engine
+        # invented. An empty title is the ordinary case.
+        title = body.title.strip()[:200] if body.title else ""
+        # A parent has to be a real thread in the same workspace, or the child
+        # is claiming a lineage that does not exist. Checked here rather than
+        # trusted, because `parent_id` is client input and a parent from another
+        # workspace would be a thread hanging off a tree the caller cannot see.
+        parent_id = body.parent_id
+        if parent_id is not None:
+            parent = self._db.execute(
+                "SELECT workspace_id FROM conversations WHERE id = ?",
+                (parent_id,),
+            ).fetchone()
+            if parent is None:
+                raise ApiError(404, "unknown_conversation", "parent conversation not found")
+            if parent["workspace_id"] != body.workspace_id:
+                raise ApiError(
+                    422,
+                    "parent_workspace_mismatch",
+                    "a thread can only be started on a thread in the same workspace",
+                )
+        convo = Conversation(
+            id=str(uuid.uuid4()),
+            workspace_id=body.workspace_id,
+            title=title,
+            archived=False,
+            parent_id=parent_id,
+            created_at=now,
+            updated_at=now,
+        )
+        self._db.execute(
+            """INSERT INTO conversations
+                   (id, workspace_id, title, archived, parent_id, created_at, updated_at)
+               VALUES (?, ?, ?, 0, ?, ?, ?)""",
+            (
+                convo.id,
+                convo.workspace_id,
+                convo.title,
+                convo.parent_id,
+                convo.created_at,
+                convo.updated_at,
+            ),
+        )
+        self._db.commit()
+        # Re-read rather than returning the object built above, so a thread born
+        # on another one comes back carrying that parent's name. Returning the
+        # hand-built value would make the response shape depend on *how* the row
+        # was created, and a client that reads `parent_title` would see it
+        # missing on exactly the response where it is most wanted.
+        return self.get(convo.id)
+
+    def _get_row(self, conversation_id: str) -> sqlite3.Row:
+        row: sqlite3.Row | None = self._db.execute(
+            self._SELECT_WITH_PARENT + " WHERE c.id = ?", (conversation_id,)
+        ).fetchone()
+        if row is None:
+            raise ApiError(404, "unknown_conversation", "conversation not found")
+        return row
+
+    def get(self, conversation_id: str) -> Conversation:
+        return self._row_to_conversation(self._get_row(conversation_id))
+
+    def list_conversations(
+        self,
+        workspace_id: str | None = None,
+        include_archived: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Conversation]:
+        """Threads, most recently touched first.
+
+        Archived threads are hidden by default: a tab list is a list of things the
+        user is working on, and burying the live ones under months of finished
+        threads is the same mistake `list_goals` avoids by putting active goals
+        first. They are still there — `include_archived` reads them.
+        """
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        where: list[str] = []
+        params: list[Any] = []
+        # Qualified with `c.`: the join brings a second table that has its own
+        # `workspace_id` and `archived`, and an unqualified name is ambiguous.
+        if workspace_id is not None:
+            where.append("c.workspace_id = ?")
+            params.append(workspace_id)
+        if not include_archived:
+            where.append("c.archived = 0")
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        params.extend([limit, offset])
+        rows = self._db.execute(
+            self._SELECT_WITH_PARENT
+            + clause
+            + " ORDER BY c.updated_at DESC, c.id DESC LIMIT ? OFFSET ?",
+            params,
+        ).fetchall()
+        return [self._row_to_conversation(r) for r in rows]
+
+    def rename(self, conversation_id: str, body: ConversationUpdate) -> Conversation:
+        # A rename is the only mutable thing about a thread, and it cannot move
+        # it: `ConversationUpdate` forbids extra fields, so a body that tried to
+        # set `workspace_id` or `archived` is a 422 rather than a silent rewrite.
+        self._get_row(conversation_id)
+        now = time.time()
+        title = body.title.strip()[:200]
+        self._db.execute(
+            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+            (title, now, conversation_id),
+        )
+        self._db.commit()
+        return self.get(conversation_id)
+
+    def set_archived(self, conversation_id: str, archived: bool) -> Conversation:
+        self._get_row(conversation_id)
+        self._db.execute(
+            "UPDATE conversations SET archived = ? WHERE id = ?",
+            (int(archived), conversation_id),
+        )
+        self._db.commit()
+        return self.get(conversation_id)
+
+    def delete(self, conversation_id: str) -> dict[str, Any]:
+        """Drop the thread, keep the runs.
+
+        A goal's history is the audit trail of what the engine did, and it is not
+        undone by someone closing a tab. `ON DELETE SET NULL` on
+        `goals.conversation_id` means the goals survive as single-turn threads
+        rather than being swept out of the history with the thread that named
+        them — the same reasoning as docs/03 §1.7's commit scope.
+        """
+        self._get_row(conversation_id)
+        self._db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        self._db.commit()
+        return {"deleted": True}
+
+    def turns(self, conversation_id: str) -> list[ConversationTurn]:
+        """The thread's turns, oldest first, as the transcript reads them.
+
+        Derived rather than stored. The prompt is the goal's description, falling
+        back to its title for a goal created before descriptions carried the full
+        text — never a second copy of the user's words.
+        """
+        self._get_row(conversation_id)
+        rows = self._db.execute(
+            """SELECT id, conversation_id, title, description, status, created_at
+               FROM goals WHERE conversation_id = ?
+               ORDER BY created_at ASC, id ASC""",
+            (conversation_id,),
+        ).fetchall()
+        out: list[ConversationTurn] = []
+        for row in rows:
+            prompt = (row["description"] or "").strip() or row["title"]
+            out.append(
+                ConversationTurn(
+                    goal_id=row["id"],
+                    conversation_id=row["conversation_id"],
+                    prompt=prompt,
+                    status=row["status"],
+                    created_at=row["created_at"],
+                )
+            )
+        return out
+
+
 class GoalService:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._db = conn
@@ -522,9 +799,14 @@ class GoalService:
             raise ApiError(404, "unknown_workspace", "workspace not found")
         now = time.time()
         title, description = split_title_description(body.title, body.description)
+        # A conversation is not a free-floating label: it has to exist, and it has
+        # to be in the same workspace. One check, shared with
+        # `attach_conversation`, so creation and later attachment cannot drift.
+        self._check_link(body.conversation_id, body.workspace_id)
         goal = Goal(
             id=str(uuid.uuid4()),
             workspace_id=body.workspace_id,
+            conversation_id=body.conversation_id,
             title=title,
             description=description,
             status="PLANNING",
@@ -540,12 +822,74 @@ class GoalService:
             model=body.model,
         )
         self._db.execute(
-            """INSERT INTO goals (id, workspace_id, title, description, status, dry_run, plan_only, parallel, mode, trace, version, event_seq, created_at, updated_at, provider, model)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)""",
-            (goal.id, goal.workspace_id, goal.title, goal.description, goal.status, int(goal.dry_run), int(goal.plan_only), int(goal.parallel), goal.mode, int(goal.trace), now, now, goal.provider, goal.model),
+            """INSERT INTO goals (id, workspace_id, conversation_id, title, description, status, dry_run, plan_only, parallel, mode, trace, version, event_seq, created_at, updated_at, provider, model)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)""",
+            (goal.id, goal.workspace_id, goal.conversation_id, goal.title, goal.description, goal.status, int(goal.dry_run), int(goal.plan_only), int(goal.parallel), goal.mode, int(goal.trace), now, now, goal.provider, goal.model),
         )
+        if goal.conversation_id is not None:
+            # The thread is what a tab orders by, so a new turn has to move it.
+            # Without this a conversation that opened last week would stay pinned
+            # below one nobody has touched since.
+            self._db.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, goal.conversation_id),
+            )
         self._db.commit()
         return goal
+
+    def _check_link(self, conversation_id: str | None, workspace_id: str) -> None:
+        """Validate a goal↔thread link, and the one place that validation lives.
+
+        Shared by `create` and `attach_conversation` because the two must not
+        drift: a mismatch check that guarded creation but not later attachment
+        would let a client move a run under another workspace's name — the
+        reach-around docs/09 §3.1 exists to forbid. Without it a tab could
+        show one workspace's work under another's.
+        """
+        if conversation_id is None:
+            return
+        row = self._db.execute(
+            "SELECT workspace_id FROM conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            raise ApiError(404, "unknown_conversation", "conversation not found")
+        if row["workspace_id"] != workspace_id:
+            raise ApiError(
+                422,
+                "conversation_workspace_mismatch",
+                "conversation belongs to a different workspace",
+            )
+
+    def attach_conversation(self, goal_id: str, body: GoalConversationUpdate) -> Goal:
+        """Move an existing goal into a thread — what `POST /goals` cannot do.
+
+        The restore path needs this: a goal that predates conversations has
+        `conversation_id` NULL, and the UI creating a thread client-side left
+        the link in the panel rather than the store — one restart later the run
+        was its own thread again (docs/09 §6).
+
+        Re-attaching overwrites: moving a run from thread A to thread B is the
+        same act as the first attach, and refusing it would file history
+        permanently wherever it first landed. The goal's `version` is not
+        bumped — that counter guards status/step concurrency
+        (`update_goal`'s check-and-increment), and a thread link is not that.
+        """
+        goal = self.get(goal_id)  # 404 unknown_goal
+        self._check_link(body.conversation_id, goal.workspace_id)
+        now = time.time()
+        self._db.execute(
+            "UPDATE goals SET conversation_id = ? WHERE id = ?",
+            (body.conversation_id, goal_id),
+        )
+        # The panel orders threads by last touch, and putting a run into a
+        # thread is a touch — same as creating one into it.
+        self._db.execute(
+            "UPDATE conversations SET updated_at = ? WHERE id = ?",
+            (now, body.conversation_id),
+        )
+        self._db.commit()
+        return self.get(goal_id)
 
     def get(self, goal_id: str) -> Goal:
         row = self._db.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
@@ -557,6 +901,113 @@ class GoalService:
         data["parallel"] = bool(row["parallel"])
         data["trace"] = bool(row["trace"])
         return Goal.model_validate(data)
+
+    def create_turn(self, conversation_id: str, body: TurnCreate) -> Goal:
+        """One turn: a goal row that will never have a plan.
+
+        A goal rather than a new table, and the reason is `events.goal_id` being
+        `NOT NULL`. The event log is the WebSocket, the audit trail, the usage
+        books and the stats feed, so a turn stored anywhere else would have
+        nowhere to write a single streamed token. `mode="chat"` is what keeps it
+        out of the pipeline: `POST /goals` spawns `run_planning` and this route
+        spawns `run_chat`, and `GoalCreate` refuses `mode="chat"` so there is
+        exactly one door.
+
+        The thread must exist and must belong to a real workspace, checked
+        through `_check_link` for the same reason `create` uses it: attachment
+        and creation cannot be allowed to disagree about what a valid link is.
+        """
+        row = self._db.execute(
+            "SELECT workspace_id FROM conversations WHERE id = ?", (conversation_id,)
+        ).fetchone()
+        if row is None:
+            raise ApiError(404, "unknown_conversation", "conversation not found")
+        workspace_id = str(row["workspace_id"])
+        ws_row = self._db.execute(
+            "SELECT id FROM workspaces WHERE id = ?", (workspace_id,)
+        ).fetchone()
+        if ws_row is None:
+            raise ApiError(404, "unknown_workspace", "workspace not found")
+        prompt = body.prompt.strip()
+        if not prompt:
+            raise ApiError(422, "empty_prompt", "a turn needs something to say")
+        now = time.time()
+        # The title is the prompt truncated the way every other goal's is —
+        # a turn with a 20,000-character title would not fit the column's
+        # contract, and the thread's own name is the UI's business, not this.
+        title = prompt[:200]
+        goal = Goal(
+            id=str(uuid.uuid4()),
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            title=title,
+            description=prompt,
+            status="PLANNING",
+            mode="chat",
+            trace=body.trace,
+            version=0,
+            created_at=now,
+            updated_at=now,
+            provider=body.provider,
+            model=body.model,
+        )
+        self._db.execute(
+            """INSERT INTO goals (id, workspace_id, conversation_id, title, description,
+                                  status, dry_run, plan_only, parallel, mode, trace,
+                                  version, event_seq, created_at, updated_at, provider, model)
+               VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, 0, 0, ?, ?, ?, ?)""",
+            (goal.id, goal.workspace_id, goal.conversation_id, goal.title, goal.description,
+             goal.status, goal.mode, int(goal.trace), goal.created_at, goal.updated_at,
+             goal.provider, goal.model),
+        )
+        self._db.execute(
+            "UPDATE conversations SET updated_at = ? WHERE id = ?",
+            (now, conversation_id),
+        )
+        self._db.commit()
+        return goal
+
+    def turn_history(self, conversation_id: str, limit: int = 12) -> list[dict[str, str]]:
+        """This thread's earlier turns as (prompt, reply) pairs, oldest first.
+
+        Derived from rows that already exist rather than stored, so there is no
+        second copy of a conversation that could disagree with the transcript.
+        Only `mode="chat"` goals are read: a pipeline goal's "reply" is a commit
+        subject and a step summary, and feeding those to a turn as though they
+        were things a person said is how a thread fills up with noise.
+
+        A turn whose reply was never written — cancelled, or failed mid-call —
+        is still returned, with an empty reply. Dropping it would lose the fact
+        that the user asked something, and the next turn's model would then be
+        told about a conversation with a hole in it.
+        """
+        rows = self._db.execute(
+            """SELECT id, title, description FROM goals
+               WHERE conversation_id = ? AND mode = 'chat'
+               ORDER BY created_at DESC, id DESC LIMIT ?""",
+            (conversation_id, max(0, int(limit))),
+        ).fetchall()
+        out: list[dict[str, str]] = []
+        for r in reversed(rows):
+            reply = self._db.execute(
+                """SELECT payload FROM events
+                   WHERE goal_id = ? AND type = 'log'
+                   ORDER BY sequence DESC LIMIT 40""",
+                (r["id"],),
+            ).fetchall()
+            text = ""
+            for ev in reversed(reply):
+                payload = json.loads(ev["payload"] or "{}")
+                if payload.get("turn"):
+                    text = str(payload.get("message") or "")
+                    break
+            out.append(
+                {
+                    "prompt": (r["description"] or r["title"] or "").strip(),
+                    "reply": text.strip(),
+                }
+            )
+        return out
 
     def list_goals(
         self,

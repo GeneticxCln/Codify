@@ -31,11 +31,20 @@ directory is a freeze the next directory walks around.
 A static scan cannot prove semantics; it freezes decision sites. That is the
 point: a spawn that cannot appear unannounced cannot silently regress to
 unguarded.
+
+`src-tauri/` is scanned too, by a second lexical half. The desktop shell starts
+processes — it spawns and kills `python3 -m engine` — and a freeze scoped to the
+engine's own languages is a freeze the shell walks around. That half cannot use
+an AST (Rust has none here), so it strips comments and matches the calls a reader
+would recognise; the same honesty applies, and the weakness is stated rather than
+hidden. It is the test that keeps a terminal from appearing without a decision
+behind it.
 """
 
 from __future__ import annotations
 
 import ast
+import re
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
@@ -62,6 +71,63 @@ GUARDED_SPAWN_SITES: dict[str, dict[str, str]] = {
         "Popen": "a task's test command: manifest-owned argv, guarded_argv/guarded_env + start_new_session + a whole-group kill on timeout, pinned by tests/test_benchmark_runner.py. Deliberately NOT routed through SandboxService: that allowlist is a security boundary for model-proposed argv, and widening it for a reviewed manifest would weaken it for every agent in the pipeline",
     },
 }
+
+# The Rust half of the freeze, for `src-tauri/`.
+#
+# Why a second table and a second scan rather than folding Rust into the Python
+# one: there is no Python AST for Rust, so this half is lexical — comments are
+# stripped and each pattern names a call that can start a process or open a pty.
+# That is weaker than the AST walk above and says so. A static scan cannot prove
+# semantics on either side; it freezes decision sites. What matters is that a
+# process cannot appear unannounced in a file the engine's dynamic tests never
+# touch.
+#
+# This directory is scanned at all because it starts processes and always did:
+# the desktop shell spawns `python3 -m engine` and kills it on exit. A freeze
+# scoped to `engine/` is a freeze `src-tauri/` walks around.
+RUST_SPAWN_SCAN_ROOTS = ("src-tauri/src",)
+
+RUST_PROCESS_START_PATTERNS: dict[str, re.Pattern[str]] = {
+    "Command::new": re.compile(r"\bCommand::new\s*\("),
+    "CommandBuilder::new": re.compile(r"\bCommandBuilder::new\s*\("),
+    ".spawn()": re.compile(r"\.spawn\s*\("),
+    ".spawn_unchecked()": re.compile(r"\.spawn_unchecked\s*\("),
+    "spawn_command()": re.compile(r"\.spawn_command\s*\("),
+    ".output()": re.compile(r"\.output\s*\("),
+    # Opening a pty is not a process, but it is the choke point every PTY spawn
+    # has to pass through. Freezing it is how "a terminal was opened" stays a
+    # decision someone made.
+    "native_pty_system()": re.compile(r"\bnative_pty_system\s*\("),
+    "openpty()": re.compile(r"\bopenpty\s*\("),
+}
+
+# Deliberately absent: browser webview creation (`WebviewWindowBuilder::build`
+# in src-tauri/src/browser.rs) is not a process start. A webview is a window
+# the shell renders in its own process — no child, no pty, nothing to reap on
+# exit — so freezing it here would claim a process boundary it does not have.
+# What a webview does need is isolation from *invoke*, and that is asserted
+# where the decision lives: browser.rs's capability-set test parses
+# src-tauri/capabilities/*.json and fails if any permission reaches a
+# `browser-*` label.
+
+RUST_GUARDED_SPAWN_SITES: dict[str, dict[str, str]] = {
+    "src-tauri/src/lib.rs": {
+        "Command::new": "the engine launcher and the login-shell PATH probe: the shell owns the engine's process lifecycle, and both of these are the shell's own children, killed on exit by the RunEvent::Exit handler",
+        ".spawn()": "the engine child process: spawned into its own process group so the exit handler can kill it, and killed unconditionally when the app goes — a silently-skipped kill leaks a stray engine holding the port and the DB",
+        ".output()": "the login shell's own output, to inherit the user's PATH rather than guessing one: short-lived, bounded by a timeout, and it changes nothing on disk",
+    },
+    "src-tauri/src/terminal.rs": {
+        "CommandBuilder::new": "the user's own shell for a terminal pane. Deliberately NOT routed through the engine's SandboxService: that is the agent's privileged path (docs/00 §6.6, only verifier-proposed argv reaches it) and a user typing at a prompt is a different authority. argv comes from $SHELL, never from a request; cwd is pinned by pin_cwd to a registered workspace root",
+        "native_pty_system()": "the pty a terminal pane runs in: the choke point every PTY spawn passes through, and the reason a terminal is a terminal rather than a pipe",
+        "openpty()": "the pty pair for a pane, including the one the close/reap test opens without spawning anything",
+        "spawn_command()": "the shell behind a pane: spawned through the pty above with cwd already pinned, and killed by codify_terminal_close or by the app's exit handler so a closed window does not leave a shell holding the workspace",
+    },
+}
+
+# A line whose stripped form starts with one of these is not code. Doc comments
+# and examples inside them are the most likely source of a false positive in a
+# lexical scan, and a scanner that cries wolf stops being read.
+RUST_COMMENT_PREFIXES = ("//",)
 
 # The subprocess members that actually start a process. The module also carries
 # pure helpers (`CompletedProcess`, `list2cmdline`) that must NOT be frozen — a
@@ -146,6 +212,38 @@ def _spawn_findings(tree: ast.AST, rel: str) -> list[tuple[int, str]]:
     return findings
 
 
+def _iter_rust_files() -> Iterator[Path]:
+    for root in RUST_SPAWN_SCAN_ROOTS:
+        for path in sorted((PROJECT_ROOT / root).rglob("*.rs")):
+            # `target/` is build output, not source; it can live under the root
+            # after a workspace build and is nobody's decision site.
+            if "target" not in path.parts:
+                yield path
+
+
+def _rust_spawn_findings(text: str) -> list[tuple[int, str]]:
+    """(line, call) for every process- or pty-starting call in one Rust file.
+
+    Lexical rather than parsed. The patterns are named by the call a reader would
+    recognise — `Command::new`, `.spawn()`, `spawn_command()` — so the freeze is
+    readable from the table rather than from a regex.
+
+    Comments are stripped first: a doc comment showing a spawn is prose, and
+    flagging prose is how a scanner gets ignored. A spawn hidden inside a macro is
+    beyond what a lexical scan sees; the same honesty as the Python half, which
+    also freezes decision sites rather than proving semantics.
+    """
+    findings: list[tuple[int, str]] = []
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if line.startswith(RUST_COMMENT_PREFIXES):
+            continue
+        for call, pattern in RUST_PROCESS_START_PATTERNS.items():
+            if pattern.search(raw):
+                findings.append((lineno, call))
+    return findings
+
+
 class NoUnguardedSpawns(unittest.TestCase):
     """The freeze: every spawn site in the reviewed packages is justified."""
 
@@ -178,6 +276,46 @@ class NoUnguardedSpawns(unittest.TestCase):
             present = {dotted for _, dotted in _spawn_findings(tree, rel)}
             for call in calls:
                 if f"subprocess.{call}" not in present:
+                    stale.append(
+                        f"{rel}: allowlisted `{call}` starts no process any more — "
+                        "drop the entry or restore the guarded spawn"
+                    )
+        self.assertEqual([], stale, "\nThe allowlist must name only live spawn sites.")
+
+    def test_every_rust_spawn_is_an_allowlisted_site(self) -> None:
+        """The same freeze over `src-tauri/`.
+
+        A terminal is a shell, so this is the test that keeps one from appearing
+        without a decision behind it. The desktop shell starts processes already
+        — it spawns and kills the engine — and a pane that shelled out on its own
+        would be invisible to every Python test in this repository.
+        """
+        unexpected: list[str] = []
+        for path in _iter_rust_files():
+            rel = str(path.relative_to(PROJECT_ROOT))
+            for line, call in _rust_spawn_findings(path.read_text(encoding="utf-8")):
+                if call not in RUST_GUARDED_SPAWN_SITES.get(rel, {}):
+                    unexpected.append(
+                        f"{rel}:{line} `{call}` — not an allowlisted guarded spawn"
+                    )
+        self.assertEqual(
+            [],
+            unexpected,
+            "\nA process can start in src-tauri/ outside the guarded spawn sites. Route it"
+            "\nthrough an existing choke point, or justify a new entry in"
+            "\nRUST_GUARDED_SPAWN_SITES with the reason it is safe and a test that pins it."
+            "\nNote that the engine's SandboxService is not an option here: it is the agent's"
+            "\nprivileged path (docs/00 §6.6) and a user-driven process is a different"
+            "\nauthority — see terminal.rs's module docs.",
+        )
+
+    def test_the_rust_allowlist_never_outlives_the_spawns_it_names(self) -> None:
+        stale: list[str] = []
+        for rel, calls in RUST_GUARDED_SPAWN_SITES.items():
+            path = PROJECT_ROOT / rel
+            present = {call for _, call in _rust_spawn_findings(path.read_text(encoding="utf-8"))}
+            for call in calls:
+                if call not in present:
                     stale.append(
                         f"{rel}: allowlisted `{call}` starts no process any more — "
                         "drop the entry or restore the guarded spawn"

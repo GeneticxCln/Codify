@@ -38,6 +38,8 @@ import uuid
 from typing import TYPE_CHECKING, Any
 from collections.abc import AsyncIterator, Callable
 
+from engine.chat_prompts import CHAT_SYSTEM_PROMPT, CONDUCTOR_SYSTEM_PROMPT
+from engine.conductor import DEFAULT_MAX_TURNS, TOOLS, Conductor
 from engine.default_prompts import (
     DEFAULT_PROMPTS,
     DESIGN_BRIEF_PROMPT,
@@ -56,9 +58,18 @@ from engine.library import (
     format_search,
     read_knowledge,
 )
-from engine.laya import LayaDecision, LayaService, build_state
-from engine.models import ROLES, AgentConfig, AgentRole, Event, EventType, Goal, PlanStep
-from engine.providers import ProviderError
+from engine.laya import GateCall, LayaDecision, LayaService, build_state
+from engine.models import (
+    ROLES,
+    AgentConfig,
+    AgentRole,
+    BUILTIN_PROVIDERS,
+    Event,
+    EventType,
+    Goal,
+    PlanStep,
+)
+from engine.providers import BaseProvider, ProviderError
 from engine.role_repair import config_problems
 from engine.sandbox import CommandNotAllowed, SandboxService
 from engine.services import AgentRegistryService, ApiError, GoalService, WorkspaceService
@@ -137,6 +148,86 @@ MAX_CRITIC_COMMANDS = 2
 # lets the planner reopen it when the pack provably misses what a step needs,
 # instead of planning a guess. Same serving machinery, own bound.
 MAX_PLANNER_CONSULTS = 1
+
+# How many earlier turns of a thread are put in front of the model answering the
+# next one (see `_turn_prompt`). A conversation the model cannot remember is the
+# defect docs/09 §10 exists to close, and this is what makes "now do the other
+# one" mean anything. Bounded because a thread is unbounded and a prompt is
+# not, and because the most recent exchange is what a follow-up refers to — so
+# the oldest turns are the ones worth losing.
+TURN_HISTORY_TURNS = 12
+
+
+def _clip_text(text: str, limit: int) -> str:
+    """Trim to a limit, marking that something was dropped.
+
+    Both ends are kept, the same rule `laya._clip` uses on a request: a turn
+    that opens "here are the 40 files I need you to look at" and closes with the
+    actual question loses the question to a middle-ellipsis.
+    """
+    clean = (text or "").strip()
+    if len(clean) <= limit:
+        return clean
+    half = max(1, limit // 2)
+    return f"{clean[:half]}…[{len(clean) - 2 * half} chars elided]…{clean[-half:]}"
+
+
+# The keys a turn's answer is most likely to have been wrapped in, most useful
+# first. Mirrors the UI's `ui/src/replyPreview.ts` deliberately: two readers of
+# the same turn must strip the same envelope, or the transcript's collapsed
+# preview and its expanded text disagree about what was said.
+_TURN_REPLY_KEYS = (
+    "answer", "message", "reply", "response", "text", "summary", "detail",
+    "explanation", "result", "error",
+)
+
+
+def _as_prose(raw: str) -> str:
+    """Unwrap a structured reply, because the model did it anyway.
+
+    `CHAT_SYSTEM_PROMPT` opens by telling the model not to reply with JSON. A
+    code model asked a direct question does it regardless — measured on a live
+    qwen2.5-coder:7b, which answered a turn with
+    `{"error": "I cannot read or access files…"}` — and the user reads a brace
+    and a colon where a sentence was meant to be. That is the same complaint
+    that started this work, one layer down.
+
+    So a reply that parses as a JSON object and carries a readable string field
+    loses the envelope. A reply that is JSON but has nothing readable in it is
+    returned **unchanged**: dropping the envelope to reveal nothing useful would
+    turn an odd-looking answer into an empty one, which is worse.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    candidate = text
+    if candidate.startswith("```"):
+        candidate = candidate.strip("`").strip()
+        if candidate.lower().startswith("json"):
+            candidate = candidate[4:].strip()
+    if not candidate.startswith("{"):
+        return text
+    try:
+        parsed = json.loads(candidate)
+    except ValueError:
+        # Still prose as far as the reader is concerned: an object that does not
+        # parse is a truncated stream or an odd sentence, and stripping it to
+        # nothing would replace something readable with nothing.
+        return text
+    if isinstance(parsed, dict):
+        for key in _TURN_REPLY_KEYS:
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        # Named `error` with no prose key still beats a raw object: the model
+        # already put the sentence somewhere, it just chose the wrong container.
+        strings = [v for v in parsed.values() if isinstance(v, str) and v.strip()]
+        if len(strings) == 1:
+            return strings[0].strip()
+    # Nothing readable. The envelope is dropped only when it was hiding
+    # something; dropping it to reveal nothing turns an odd answer into an empty
+    # one, which is worse.
+    return text
 
 # Failures that mean the target could not be used at all, and so may be retried on
 # the role's fallback. The list is deliberately made of *provider* problems — no
@@ -457,6 +548,56 @@ def extract_json(raw: str) -> Any:
     return json.loads(raw)
 
 
+class _CallAccounting:
+    """One model call's books: the `usage` event it publishes, and the numbers
+    the recorder reads back for the same call.
+
+    Shared by `run_agent` and the gate rather than written twice. The gate is the
+    one role that does not go through `run_agent` — it answers a typed contract
+    and never falls back to a second target — and while it called the provider
+    itself it also called nothing that *booked* it. So its spend never reached
+    the usage document or the Stats rollup, its call was missing from a
+    recording that claimed to hold every call, and the audit judged it a "silent
+    role": assigned, and never seen spending anything.
+    """
+
+    def __init__(
+        self,
+        publish: Callable[[dict[str, Any]], None],
+        role: str,
+        provider: str,
+        model: str,
+        started: float | None = None,
+    ) -> None:
+        self._publish = publish
+        self._role = role
+        self._provider = provider
+        self._model = model
+        # One clock for the call, so the `usage` event and the `agent_call_failed`
+        # event for the same call cannot report durations that differ by the time
+        # it took to notice one had happened.
+        self._started = time.monotonic() if started is None else started
+        # The same usage kept aside for the trace record, so a replay's token
+        # counts match the run it replays rather than being absent.
+        self.usage: dict[str, Any] = {}
+
+    def sink(self, usage: dict[str, Any]) -> None:
+        """The provider's `usage_sink`: report what one call cost."""
+        self.usage.update(usage)
+        self._publish(
+            {
+                "role": self._role,
+                "provider": self._provider,
+                "model": self._model,
+                "duration_ms": self.duration_ms(),
+                **usage,
+            }
+        )
+
+    def duration_ms(self) -> int:
+        return int((time.monotonic() - self._started) * 1000)
+
+
 class AgentOrchestrator:
     def __init__(
         self, registry: AgentRegistryService, goals: GoalService,
@@ -479,6 +620,56 @@ class AgentOrchestrator:
             timestamp=time.time(),
             sequence=self.goals.next_sequence(goal_id),
         )
+
+    def _accounting(
+        self, goal_id: str, step_id: str | None, role: str,
+        provider: str, model: str, started: float | None = None,
+    ) -> _CallAccounting:
+        """One call's books. Every model call in a run gets one of these."""
+        def publish(payload: dict[str, Any]) -> None:
+            self.goals.publish(self._event(goal_id, step_id, "usage", payload))
+
+        return _CallAccounting(publish, role, provider, model, started)
+
+    def gate_call(self, goal_id: str) -> GateCall:
+        """The `GateCall` for the pre-flight gate, bound to one goal.
+
+        The gate runs before any step exists, so its call is attributed to the
+        goal rather than to a step. It is recorded exactly like a step's calls:
+        the same `usage` event, the same trace entry, the same tokens — which is
+        also what makes a replay able to *answer* the gate instead of re-deciding
+        it in front of a model the recording never held.
+        """
+
+        async def call(
+            provider: BaseProvider, provider_slug: str, system: str, user: str,
+            model: str, temperature: float, max_tokens: int,
+        ) -> str:
+            books = self._accounting(goal_id, None, "laya", provider_slug, model)
+            provider.usage_sink = books.sink
+            try:
+                raw = await provider.complete(
+                    system_prompt=system,
+                    user_prompt=user,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            finally:
+                # The provider is shared across roles and reused for a replay, so
+                # the sink must not outlive the call it belongs to.
+                provider.usage_sink = None
+            if self.tracer is not None and self.tracer.enabled(goal_id):
+                self.tracer.record(
+                    goal_id, None,
+                    role="laya", provider=provider_slug, model=model,
+                    temperature=float(temperature), max_tokens=int(max_tokens),
+                    system_prompt=system, user_prompt=user, response=str(raw),
+                    usage=books.usage, duration_ms=books.duration_ms(),
+                )
+            return raw
+
+        return call
 
     def _not_configured(self, role: AgentRole, target: AgentConfig, label: str) -> AgentNotConfigured:
         """The failure for a target that has no model to call.
@@ -626,7 +817,10 @@ class AgentOrchestrator:
         aggregate.role = role
         return aggregate
 
-    async def run_agent(self, role: AgentRole, goal_id: str, step_id: str | None, user_prompt: str) -> Any:
+    async def run_agent(
+        self, role: AgentRole, goal_id: str, step_id: str | None, user_prompt: str,
+        system: str | None = None, raw_output: bool = False,
+    ) -> Any:
         """Run one sub-agent call, on its primary target or its fallback.
 
         Per-role registry config (Settings → Agents) is the single source of
@@ -637,14 +831,30 @@ class AgentOrchestrator:
 
         The fallback exists so a goal keeps running when the primary cannot be
         used — no key stored, the endpoint down, the model retired, or a reply the
-        contract cannot parse. It is tried at most once, and only for those
-        failures; anything else is a bug that must not be papered over by running
+        contract cannot parse. It is tried at most once, and only for        those failures; anything else is a bug that must not be papered over by running
         the same call somewhere else.
+
+        `system` overrides the role's prompt for one call. It exists for the two
+        model-holding components that are not stages and so have no entry in
+        `DEFAULT_PROMPTS` — a turn and the conductor (docs/09 §10). Everything
+        else about the call is unchanged, which is the point: a turn gets the
+        fallback chain, the usage books, the trace record and the streamed
+        deltas for free rather than by a second implementation of them.
+        `role` still names whose *configuration* is used, so telemetry reads
+        honestly even though the prompt is not theirs.
+
+        `raw_output` skips `extract_json`, and exists because a turn's answer is
+        prose. Every one of the eight roles is told to reply with JSON only
+        because its output is structure a later stage consumes; a reply meant
+        for a person is not that, and parsing it raised `agent_output_invalid` —
+        which then tripped the *fallback* chain, so a perfectly good answer was
+        discarded and retried against a second provider before the turn failed.
+        The parse is the roles' contract, not `run_agent`'s.
         """
         goal = self.goals.get(goal_id)
         _ = goal  # kept for interface symmetry; config comes from the registry
         cfg, targets = self._targets(role)
-        system = cfg.system_prompt_override or DEFAULT_PROMPTS[role]
+        system = system or cfg.system_prompt_override or DEFAULT_PROMPTS[role]
         failures: list[tuple[str, str, ProviderError | AgentOutputInvalid]] = []
 
         for label, target in targets:
@@ -671,27 +881,11 @@ class AgentOrchestrator:
             # Settings screen reports as "last call", and the one number that
             # answers "is my fixer slow?" without touching a provider.
             call_started = time.monotonic()
-            # The same usage kept aside for the trace record, so a replay's
-            # token counts match the run it replays rather than being absent.
-            recorded_usage: dict[str, Any] = {}
-
-            def _record(
-                usage: dict[str, Any], _role: AgentRole = role, _provider: str = target.provider,
-                _model: str = model_name, _started: float = call_started,
-                _usage_out: dict[str, Any] = recorded_usage,
-            ) -> None:
-                _usage_out.update(usage)
-                self.goals.publish(self._event(
-                    goal_id, step_id, "usage",
-                    {
-                        "role": _role,
-                        "provider": _provider,
-                        "model": _model,
-                        "duration_ms": round((time.monotonic() - _started) * 1000),
-                        **usage,
-                    },
-                ))
-            provider.usage_sink = _record
+            books = self._accounting(
+                goal_id, step_id, role, target.provider, model_name, call_started,
+            )
+            recorded_usage = books.usage
+            provider.usage_sink = books.sink
             on_delta, flush_deltas = self._delta_publisher(goal_id, step_id, role, target.provider, model_name)
             provider.on_delta = on_delta
             try:
@@ -719,7 +913,7 @@ class AgentOrchestrator:
                         "target": label,
                         "code": exc.code,
                         "message": exc.message,
-                        "duration_ms": round((time.monotonic() - call_started) * 1000),
+                        "duration_ms": books.duration_ms(),
                     },
                 ))
                 failures.append((label, target.provider, self._provider_failure(role, target, label, exc)))
@@ -743,10 +937,10 @@ class AgentOrchestrator:
                     max_tokens=int(target.max_tokens),
                     system_prompt=system, user_prompt=user_prompt, response=str(raw),
                     usage=recorded_usage,
-                    duration_ms=int((time.monotonic() - call_started) * 1000),
+                    duration_ms=books.duration_ms(),
                 )
             try:
-                return extract_json(raw)
+                return raw if raw_output else extract_json(raw)
             except (ValueError, TypeError) as exc:
                 failures.append((
                     label, target.provider,
@@ -988,7 +1182,10 @@ class ExecutorService:
         # any LLM call. High-confidence injection stops the goal here.
         async with self._stage(goal_id, "laya", "laya") as laya_stage:
             try:
-                decision = await self.laya.decide(build_state(goal, ws.root_path))
+                decision = await self.laya.decide(
+                    build_state(goal, ws.root_path),
+                    on_call=self.orchestrator.gate_call(goal_id),
+                )
                 if decision.blocked:
                     laya_stage.record("block", decision.block_reason or None)
                 elif decision.engine == "skipped":
@@ -1172,6 +1369,380 @@ class ExecutorService:
             )
             return
         self._set_status(goal_id, "PENDING", None)
+
+    # ── a turn: the gate's other answer ─────────────────────────────────
+
+    async def run_chat(self, goal_id: str) -> None:
+        """Answer a turn, or hand it to the pipeline.
+
+        The sibling of `run_planning`, spawned by the turns route instead of
+        `POST /goals`, and the whole reason a greeting does not start eight
+        agents. The gate has already been asked what kind of request this is —
+        `laya` scores intent, risk, injection and ambiguity on every goal, and
+        until now every answer it produced was used the same way: run the
+        pipeline. So the branch is here, on the one signal that was computed and
+        then thrown away.
+
+        Three outcomes, and the third is the point:
+
+        * **blocked** — the injection gate fires, exactly as in planning. A
+          blocked turn is a blocked goal, same code, same event, because it is
+          the same gate guarding the same engine.
+        * **question** — the conductor, if this install can run one, and
+          otherwise a single model call. Either way: no plan, no steps, no
+          verifier. The conductor is an upgrade and never a prerequisite
+          (`_conduct` returns None and the turn degrades), because a user must
+          be able to ask a question on any install.
+        * **anything else** — the full pipeline, by delegating to
+          `run_planning` on this same goal. Not a copy of it: the delegation, so
+          there is one implementation of planning and a turn that needs a plan
+          gets the identical one.
+
+        The history is what makes a second turn mean anything. A thread's earlier
+        prompts and replies are read back from the rows that already hold them
+        (`GoalService.turn_history`) and put in front of the model, because the
+        common follow-up — "now do the other one" — is unintelligible without
+        them, and an assistant that forgets what it just said is the thing this
+        whole feature exists to stop.
+        """
+        goal = self.goals.get(goal_id)
+        ws = self.workspaces.get(goal.workspace_id)
+
+        # Measured as the `laya` stage, which is what it is: the same gate, on
+        # the same goal, doing the same job as it does in `run_planning`. A
+        # "turn" stage would have to be a ninth entry in STAGE_OUTCOMES, and
+        # that vocabulary is keyed by role (tests/test_metrics.py) — so naming it
+        # after the role would be the truth anyway, and the gate's outcome lands
+        # in the same per-stage table as every other goal's.
+        async with self._stage(goal_id, "laya", "laya") as gate_stage:
+            try:
+                decision = await self.laya.decide(
+                    build_state(goal, ws.root_path),
+                    on_call=self.orchestrator.gate_call(goal_id),
+                )
+                if decision.blocked:
+                    gate_stage.record("block", decision.block_reason or None)
+                else:
+                    gate_stage.record("skipped" if decision.engine == "skipped" else "allow")
+            except Exception as exc:  # pragma: no cover - decide() already guards
+                decision = LayaDecision(
+                    engine="skipped", skipped_reason=f"gate error: {exc}", unavailable=True
+                )
+                gate_stage.record("unavailable", decision.skipped_reason)
+        if decision.engine != "skipped":
+            self.goals.publish(self._event(
+                goal_id, None, "agent_assigned",
+                {"role": "laya", "provider": decision.provider or decision.engine,
+                 "model": decision.model},
+            ))
+            self.goals.publish(self._event(
+                goal_id, None, "laya_decision", decision.to_payload(),
+            ))
+        for warning in decision.warnings:
+            self._log(goal_id, None, "warn", warning)
+        if decision.blocked:
+            self._fail(
+                goal_id, None, "laya_blocked",
+                decision.block_reason or "blocked by Laya", role="laya",
+            )
+            return
+
+        # Three ways out, and only one of them is new. The gate's own vocabulary
+        # is `code_change | question | ops_command | other` (engine/laya.py), and
+        # everything that is not a plain question runs the pipeline — including
+        # the two cases where nothing useful came back at all. Planning is the
+        # safe default because it is a superset of answering: guessing wrong
+        # costs a slower answer, whereas answering a code change from a chat
+        # call would cost a request the user believed was acted on and was not.
+        intent = decision.intent
+        if intent != "question" or decision.engine == "skipped":
+            if decision.engine == "skipped":
+                why = (
+                    f"the System-1 gate is not answering ({decision.skipped_reason}), "
+                    "so nothing classified this request"
+                )
+            else:
+                why = f"the gate classified this as {intent!r}"
+            self._log(
+                goal_id, None, "info",
+                f"{why} — running the full pipeline. Open Settings → Agent Roles to "
+                "point the gate at a model so questions can be answered directly.",
+            )
+            # Delegated, not reimplemented. `run_planning` sets PENDING when it
+            # finishes; returning here without touching the status is what lets
+            # one goal be either shape depending on what was asked.
+            await self.run_planning(goal_id)
+            return
+
+        try:
+            root = ws.root_path or ""
+            # `if answer` rather than `is not None`: a conductor that came back
+            # with nothing has not answered, and an empty turn is worse than
+            # the extra call the single-shot path costs.
+            answer = await self._conduct(goal_id, goal, root) if root else None
+            reply = _as_prose(answer) if answer else await self._turn_reply(goal_id, goal)
+            reply = reply or "(no answer)"
+        except (ProviderError, AgentNotConfigured) as exc:
+            self._fail(goal_id, None, getattr(exc, "code", "provider_error"), str(exc))
+            return
+        self.goals.publish(self._event(
+            goal_id, None, "log", {"level": "info", "message": reply, "turn": True},
+        ))
+        self._set_status(goal_id, "COMPLETED", None)
+
+    def _conductor_dispatch(self, goal_id: str, goal: Goal, root: str) -> dict[str, Any]:
+        """The conductor's tools, each bound to the service the pipeline uses.
+
+        This table *is* the conductor's authority, and it is deliberately made
+        of the same calls the pipeline already makes — `LibraryService.read` is
+        what serves the librarian's reads, `SandboxService.run_command` is what
+        the verifier's argv goes through. So docs/00 §6.6 holds for a tool call
+        exactly as it holds for a verifier: the model asks, `validate_argv`
+        decides, and an unlisted command is refused however it was phrased.
+
+        Note what is *absent*: anything that writes. Editing a file is the
+        fixer's job and is only reachable through `delegate`, so a code change
+        still goes through the librarian, the planner, the fixer, the verifier
+        and the critic. A `write_file` tool here would make all five optional,
+        which is the opposite of what a conductor is for.
+        """
+        library = LibraryService(root)
+        git = self.git
+
+        async def read_file(args: dict[str, Any]) -> str:
+            return format_read(
+                library.read(
+                    str(args.get("path") or ""),
+                    args.get("offset"),
+                    args.get("limit"),
+                )
+            )
+
+        async def search_code(args: dict[str, Any]) -> str:
+            return format_search(
+                library.search(
+                    str(args.get("query") or ""),
+                    glob=str(args["glob"]) if args.get("glob") else None,
+                    regex=bool(args.get("regex")),
+                )
+            )
+
+        async def git_history(args: dict[str, Any]) -> str:
+            # `GitService.read_only` owns the subcommand allowlist. The
+            # conductor's authority is that list, and it lives with the service
+            # that runs git rather than in a table here that could drift from it.
+            return git.read_only(root, args.get("args") or [])
+
+        async def run_command(args: dict[str, Any]) -> str:
+            argv = args.get("argv") or []
+            if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+                return "run_command takes a list of strings, e.g. [\"pytest\", \"-q\"]"
+            reason = str(args.get("reason") or "").strip()
+            # `mode="test"`, the same mode the verifier's argv runs in. The
+            # conductor is not the librarian, so it gets the test allowlist
+            # rather than the read-only one — but it does not get a *wider* one.
+            return format_command(
+                self.sandbox.run_command(root, [str(a) for a in argv], mode="test")
+            ) + (f"\n(reason given: {reason})" if reason else "")
+
+        async def delegate(args: dict[str, Any]) -> str:
+            task = str(args.get("task") or "").strip()
+            if not task:
+                return "delegate needs a task describing the change to make."
+            # The whole point, and the reason this is worth building: a code
+            # change reaches the *existing* pipeline rather than a second
+            # implementation of one. Same librarian, same planner, same fixer,
+            # same verifier, same critic.
+            self._log(
+                goal_id, None, "info",
+                f"conductor delegated to the full pipeline: {task}",
+            )
+            await self.run_planning(goal_id)
+            refreshed = self.goals.get(goal_id)
+            steps = self.goals.steps(goal_id)
+            return json.dumps({
+                "status": refreshed.status,
+                "steps": [{"title": s.title, "status": s.status} for s in steps],
+                "note": (
+                    "The plan is ready and is waiting for the user to approve it "
+                    "before anything is written."
+                    if refreshed.status == "PENDING" else
+                    "The run finished; read the transcript for the detail."
+                ),
+            }, default=str)
+
+        return {
+            "read_file": read_file,
+            "search_code": search_code,
+            "git_history": git_history,
+            "run_command": run_command,
+            "delegate": delegate,
+        }
+
+    async def _conduct(self, goal_id: str, goal: Goal, root: str) -> str | None:
+        """Run the conductor loop, or return None to fall back to a plain answer.
+
+        None means "this install cannot conduct", and the caller degrades to the
+        single-call turn. That is not a consolation prize: it is what happens on
+        a provider without tool support, on a model that has not been pointed at
+        by the conductor settings, and on any turn whose role has no configured
+        model. A user must be able to ask "what does this do?" on any install,
+        and the conductor is an upgrade rather than a prerequisite.
+        """
+        role = self._conductor_role()
+        try:
+            cfg = self.orchestrator.registry.get_config(role)
+        except Exception:
+            return None
+        cfg = self._conductor_config(cfg)
+        model = (cfg.model_name or "").strip()
+        if not model:
+            return None
+        try:
+            provider = self.orchestrator.registry.build_provider(cfg)
+        except ProviderError:
+            return None
+        if not getattr(provider, "supports_tools", False):
+            return None
+        max_turns = DEFAULT_MAX_TURNS
+        if self.settings is not None:
+            try:
+                max_turns = self.settings.get_int("conductor_max_turns")
+            except Exception:
+                max_turns = DEFAULT_MAX_TURNS
+        history = (
+            self.goals.turn_history(goal.conversation_id, TURN_HISTORY_TURNS)
+            if goal.conversation_id else []
+        )
+        prompt = self._turn_prompt(goal)
+        conductor = Conductor(
+            provider, model, root, list(TOOLS),
+            self._conductor_dispatch(goal_id, goal, root),
+            system_prompt=CONDUCTOR_SYSTEM_PROMPT,
+            max_turns=max_turns,
+            on_text=lambda text: self._publish_turn_delta(goal_id, text),
+            on_tool=lambda name, args: self._log(
+                goal_id, None, "info", f"conductor called {name}({_clip_text(args, 200)})"
+            ),
+        )
+        # Announced before the first call, so a turn that spends its whole budget
+        # is still legible as "the conductor looked at things" rather than a
+        # pause with nothing in it.
+        self.goals.publish(self._event(
+            goal_id, None, "agent_assigned",
+            {"role": role, "provider": cfg.provider, "model": model, "conductor": True},
+        ))
+        try:
+            return await conductor.run(prompt, history)
+        except ProviderError as exc:
+            # The provider failed mid-loop. Falling back to a plain answer is
+            # better than failing the turn: the user asked a question, and a
+            # question has an answer that does not need tools.
+            self._log(
+                goal_id, None, "warn",
+                f"the conductor could not run ({exc.code}: {exc.message}) — "
+                "answering without tools",
+            )
+            return None
+
+    def _publish_turn_delta(self, goal_id: str, text: str) -> None:
+        """Stream a chunk of the conductor's prose onto the turn's event log.
+
+        A named method rather than a lambda in the call, so the callback's
+        return type is `None` and mypy does not read `publish`'s `Event` as a
+        disagreement about what a callback returns.
+        """
+        self.goals.publish(
+            self._event(goal_id, None, "model_delta", {"text": text, "role": "conductor"})
+        )
+
+    async def _turn_reply(self, goal_id: str, goal: Goal) -> str:
+        """One model call, streamed, for a turn. The prose a person reads.
+
+        Routed through `run_agent` with a borrowed role purely for *which
+        configuration* to use. `scribe` is the honest choice: it is the one role
+        whose entire job is writing prose for a person rather than structure for
+        a later stage, so a fresh install that has configured nothing sensible
+        still gets a sensible answer, and the usage books attribute the call to
+        a role that really was writing a summary. The conductor's own settings
+        override it when they are set (see `_conductor_role`).
+        """
+        role = self._conductor_role()
+        raw = await self.orchestrator.run_agent(
+            role, goal_id, None, self._turn_prompt(goal),
+            system=CHAT_SYSTEM_PROMPT, raw_output=True,
+        )
+        return _as_prose(str(raw)) or "(no answer)"
+
+    def _turn_prompt(self, goal: Goal) -> str:
+        """The user's words, plus this thread's earlier turns.
+
+        The history is capped by `GoalService.turn_history` and trimmed here, so
+        a long thread cannot grow a prompt without bound — the oldest turns go
+        first, because the most recent exchange is what a follow-up refers to.
+        """
+        parts: list[str] = []
+        if goal.conversation_id:
+            history = self.goals.turn_history(goal.conversation_id, TURN_HISTORY_TURNS)
+            if history:
+                lines = ["Earlier in this conversation:"]
+                for turn in history:
+                    said = _clip_text(turn["prompt"], 600)
+                    got = _clip_text(turn["reply"], 900) or "(no answer)"
+                    # Two different speakers. Labelling both lines "You:"
+                    # leaves the model unable to tell what the user asked from
+                    # what it said itself, which is the one distinction the
+                    # history exists to carry — "now do the other one" resolves
+                    # against *its own* last answer.
+                    lines.append(f"User: {said}")
+                    lines.append(f"Assistant: {got}")
+                parts.append("\n".join(lines))
+        parts.append(f"The user says: {goal.description}")
+        return "\n\n".join(parts)
+
+    def _conductor_config(self, base: AgentConfig) -> AgentConfig:
+        """The conductor's own provider/model, if the settings name one.
+
+        A turn and the conductor's loop both borrow the `scribe` row for their
+        *configuration* (see `_conductor_role`), which is a reasonable default
+        and a poor place to keep a permanent preference: a user who wants the
+        conductor on a stronger model than they want their commit subjects on
+        has nowhere to say so. `conductor_provider` / `conductor_model` are that
+        somewhere, in `engine_settings` rather than `agent_configs` because
+        docs/00 §6.1 fixes `AgentRole` at eight and this is not a role.
+
+        Only the provider, the model and the credential are taken. Temperature
+        and the system prompt stay with the base row: a loop that calls tools
+        wants the low temperature the roles already carry, and the prompt is
+        passed in by `_conduct` regardless.
+        """
+        if self.settings is None:
+            return base
+        try:
+            provider = self.settings.get_str("conductor_provider")
+            model = self.settings.get_str("conductor_model")
+        except Exception:
+            return base
+        if not (provider and model):
+            return base
+        return base.model_copy(update={
+            "provider": provider,
+            "protocol": BUILTIN_PROVIDERS.get(
+                provider, BUILTIN_PROVIDERS.get(base.provider, {})
+            ).get("protocol", base.protocol),
+            "model_name": model,
+        })
+
+    def _conductor_role(self) -> AgentRole:
+        """Whose configuration a turn or the conductor's own calls use.
+
+        `scribe` unless the conductor has been pointed at a provider and model
+        through engine settings, in which case the *librarian* row is not the
+        right answer either — so the nearest honest thing is to borrow the
+        scribe's row and say so. A ninth `AgentConfig` would be a ninth
+        `AgentRole`, and docs/00 §6.1 fixes that at eight.
+        """
+        return "scribe"
 
     # ── librarian ──────────────────────────────────────────────────────────────
 
@@ -1684,7 +2255,12 @@ class ExecutorService:
         the design reply, and the alternative — a second body field per file —
         would be a shape the model has to be told about twice.
         """
-        prompt = self._knowledge_prompt(goal, evidence, ws)
+        # Read once and used twice: the prompt quotes these bytes, and the
+        # published contract carries them, so a user comparing the two is
+        # comparing a document against itself rather than against a second,
+        # possibly newer, copy of the same file.
+        known = read_knowledge(ws.root_path)
+        prompt = self._knowledge_prompt(goal, evidence, ws, known)
         out = await self.orchestrator.run_agent("design", goal_id, None, prompt)
         contract = self._design_contract(out)
         if not (contract.get("design_md") or "").strip():
@@ -1694,11 +2270,35 @@ class ExecutorService:
                 role="design",
             )
         published = {**contract, "mode": "knowledge"}
+        if known:
+            # What the drafter was rewriting, published so the user can see it.
+            # The body alone answers "what will this file say" and leaves "what
+            # did it say" to a diff the user has to reconstruct — and for this
+            # file that is the whole review, because a prior that only looks
+            # plausible is exactly what this run exists to replace (docs/04
+            # §4.9.2).
+            #
+            # The text is the fresh read the prompt quotes. The stale paths are
+            # the pack's verdict on that same file, not the fresh read's: the
+            # drafter's copy was taken with no tree listing, so its own
+            # `stale_paths` is empty by construction, while the pack's is the
+            # check the drafter was *also* given and has to live with. Publishing
+            # the fresh read's empty list would read as "nothing here is stale",
+            # which is the opposite of the truth.
+            pack = evidence.get("knowledge") or {}
+            published["revises"] = {
+                "path": known["path"],
+                "text": known["text"],
+                "chars": known["chars"],
+                "truncated": known["truncated"],
+                "stale_paths": pack.get("stale_paths") or [],
+            }
         self.goals.publish(self._event(goal_id, None, "design_contract", published))
         return published
 
     def _knowledge_prompt(
         self, goal: Goal, evidence: dict[str, Any], ws: Any,
+        known: dict[str, Any] | None = None,
     ) -> str:
         """The knowledge call's prompt: the goal, what is known, what came before.
 
@@ -1707,8 +2307,15 @@ class ExecutorService:
         evidence block is the one part of these prompts the roles are told they
         may rely on. Mixing the two would spend the pack's credibility on a file
         nobody has checked.
+
+        `known` is passed in rather than read here so the caller can publish the
+        very bytes this prompt quotes. A second read would be a second file: one
+        read for the prompt and another for the transcript, disagreeing whenever
+        anything wrote in between, and a reviewer comparing them would be
+        comparing a document against a slightly older copy of itself.
         """
-        known = read_knowledge(ws.root_path)
+        if known is None:
+            known = read_knowledge(ws.root_path)
         parts = [
             f"Goal: {goal.title}\nDescription:\n{goal.description}",
             f"What the librarian found:\n{self._evidence_text(evidence)}",

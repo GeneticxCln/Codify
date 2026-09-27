@@ -1,6 +1,10 @@
 import React, { useRef, useEffect, useState } from "react";
-import { AgentRole, ChatMessage, Event, Goal, PlanStep } from "../types";
-import { deliverablePath, pinReadiness } from "../designDeliverable";
+import { AgentRole, ChatMessage, Event, PlanStep } from "../types";
+import {
+  DesignDeliverableCard,
+  PinOutcome,
+} from "./DesignDeliverableCard";
+import { KnowledgeDeliverableCard } from "./KnowledgeDeliverableCard";
 import { canStopGoal, isGoalActive } from "../goalActions";
 import { foldStages, stageStates, callLabel } from "../pipeline";
 import { traceGoalId } from "../tracePanel";
@@ -13,6 +17,7 @@ import { LayaDecision } from "../types";
 import { getGoalUsage, GoalUsage, getGoalAudit } from "../api";
 import { AuditReport } from "./AuditReport";
 import { TracePanel } from "./TracePanel";
+import { canArmTrace } from "../traceSummary";
 import {
   User,
   Bot,
@@ -30,7 +35,6 @@ import {
   FileCode,
   BookOpen,
   Palette,
-  Pin,
   ShieldCheck,
   ShieldAlert,
   Check,
@@ -44,6 +48,7 @@ import {
   Trash2,
   Radio,
 } from "lucide-react";
+import { readRejection } from "../rejection.ts";
 
 /**
  * Laya's pre-flight verdict, rendered as one honest line of chat: which engine
@@ -612,80 +617,6 @@ function auditSummary(events: Event[] | undefined): {
   return { edits, fallbacks, errors };
 }
 
-/** The outcome of the last pin attempt, per goal card. */
-interface PinOutcome {
-  goalId: string;
-  ok: boolean;
-  message: string;
-}
-
-/**
- * The pin action for a design deliverable.
- *
- * The two reasons it can be unavailable are rendered as text rather than only a
- * `title`: a disabled button does not reliably surface a tooltip, and "why can't
- * I pin this" is the question the card exists to answer. The body stays
- * collapsible so a full contract does not swallow the transcript.
- *
- * A workspace that already obeys this file gets a state instead of an action.
- * The pin is workspace state — it can be set from the workspace picker, or by an
- * earlier goal, or before this tab was reloaded — so the card reads it from the
- * workspace rather than from whether this transcript happened to watch it
- * happen. Offering the pin again there would be asking the user to do something
- * they have already done.
- */
-const DesignDeliverablePin: React.FC<{
-  goal: Goal;
-  path: string;
-  body: string;
-  outcome: PinOutcome | null;
-  /** The file this workspace already obeys, if any. */
-  pinnedPath?: string;
-  onPin: (goalId: string, workspaceId: string, path: string) => Promise<void>;
-}> = ({ goal, path, body, outcome, pinnedPath, onPin }) => {
-  const readiness = pinReadiness(goal, path, pinnedPath);
-  return (
-    <div className="flex flex-col gap-1.5 mt-0.5 pt-1.5 border-t border-codify-raised">
-      <div className="flex items-center gap-2 flex-wrap">
-        {readiness.pinned ? (
-          <span className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-pink-500/10 border border-pink-500/30 text-pink-200/90 text-xs">
-            <Check className="w-3 h-3" />
-            {path} is this workspace&rsquo;s brand contract
-          </span>
-        ) : (
-          <button
-            type="button"
-            disabled={!readiness.ready}
-            onClick={() => void onPin(goal.id, goal.workspace_id, path)}
-            className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-pink-600/20 border border-pink-500/50 text-pink-300 hover:bg-pink-600/30 text-xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-pink-600/20"
-          >
-            <Pin className="w-3 h-3" />
-            Pin as brand contract
-          </button>
-        )}
-        {!readiness.ready && readiness.reason && (
-          <span className="text-2xs text-gray-500">{readiness.reason}</span>
-        )}
-        {readiness.ready && outcome !== null && outcome.goalId === goal.id && (
-          <span
-            className={`text-2xs ${outcome.ok ? "text-green-400" : "text-red-400"}`}
-          >
-            {outcome.message}
-          </span>
-        )}
-      </div>
-      <details className="text-xs text-gray-400">
-        <summary className="cursor-pointer text-gray-500">
-          {path} ({body.length} chars) — {readiness.bodyLabel}
-        </summary>
-        <pre className="mt-1.5 p-2 rounded bg-codify-surface border border-codify-raised text-2xs text-gray-300 whitespace-pre-wrap max-h-64 overflow-auto">
-          {body}
-        </pre>
-      </details>
-    </div>
-  );
-};
-
 interface ChatTimelineProps {
   messages: ChatMessage[];
   onStartGoal: (goalId: string, version: number) => void;
@@ -699,6 +630,11 @@ interface ChatTimelineProps {
   ) => boolean | void | Promise<boolean | void>;
   onPauseGoal: (goalId: string, version: number) => void;
   onCancelGoal: (goalId: string, version: number) => void;
+  /**
+   * Arm or disarm a goal's recording. The engine allows this only before the
+   * run starts, so the control is offered exactly when it can succeed.
+   */
+  onSetGoalTrace: (goalId: string, enabled: boolean) => void;
   /** Confirms, then deletes the goal and its recorded history. */
   onDeleteGoal: (goalId: string, title: string) => void;
   onRetryStep: (goalId: string, stepId: string, version: number) => void;
@@ -733,6 +669,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   onEditStep,
   onPauseGoal,
   onCancelGoal,
+  onSetGoalTrace,
   onDeleteGoal,
   onRetryStep,
   onQuickPrompt,
@@ -772,7 +709,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
       setPinState({
         goalId,
         ok: false,
-        message: err?.message || `could not pin ${path}`,
+        message: readRejection(err, `could not pin ${path}`),
       });
     }
   };
@@ -1191,12 +1128,16 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             )}
 
                             {/* Recording: this run's model calls, kept so it can be
-                          replayed without a provider. Offered only when the goal
-                          was armed for it — a control that opened an empty panel
-                          on every unrecorded run would teach people to ignore it,
-                          and the panel it opens is the only place the recording
-                          can be deleted from. */}
-                            {msg.goal?.trace && traceFor !== msg.goal!.id && (
+                          replayed without a provider. Shown for a run that was
+                          armed, and for one that has not started yet — that second
+                          case is the only moment the engine will let a recording
+                          begin, and a control that is never offered there is a
+                          capability nobody has. A finished unrecorded run still
+                          shows nothing, because an empty panel on every one of them
+                          would teach people to ignore it. */}
+                            {(msg.goal?.trace ||
+                              canArmTrace(msg.goal?.status ?? "")) &&
+                              traceFor !== msg.goal!.id && (
                               <button
                                 type="button"
                                 onClick={() => setTraceFor(msg.goal!.id)}
@@ -1244,8 +1185,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                   URL.revokeObjectURL(url);
                                 } catch (err: any) {
                                   setExportError(
-                                    err?.message ||
-                                      "Could not export the audit trail.",
+                                    readRejection(err, "Could not export the audit trail."),
                                   );
                                 }
                               }}
@@ -1259,9 +1199,13 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         )}
                       </div>
 
-                      {openTraceId && (
+                      {openTraceId && msg.goal && (
                         <TracePanel
                           goalId={openTraceId}
+                          goal={msg.goal}
+                          onSetTrace={(enabled) =>
+                            onSetGoalTrace(msg.goal!.id, enabled)
+                          }
                           onClose={() => setTraceFor(null)}
                         />
                       )}
@@ -1763,195 +1707,43 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                       </div>
                                     )}
 
+                                    {/* The body a knowledge goal authored, as the
+                              document it is. It reaches the transcript as an
+                              event during planning and as a diff once a step has
+                              run, and a `+`-prefixed diff is a poor thing to read
+                              a file the next run will treat as fact from. */}
+                                    {ev.type === "design_contract" &&
+                                      ev.payload.mode === "knowledge" && (
+                                        <KnowledgeDeliverableCard
+                                          goal={msg.goal}
+                                          payload={ev.payload}
+                                        />
+                                      )}
+
                                     {/* The direction the planner planned against and the fixer
                               was told to obey: locked once, before any step exists,
                               and published so a step can be judged against the
-                              contract that shaped it rather than from memory. */}
-                                    {ev.type === "design_contract" && (
-                                      <div className="p-2.5 rounded-lg bg-codify-bg border border-codify-border flex flex-col gap-1.5">
-                                        <div className="flex items-center gap-1.5">
-                                          <Palette className="w-3.5 h-3.5 text-pink-400" />
-                                          <span className="font-semibold text-xs uppercase tracking-wider text-gray-400">
-                                            {/* A design-mode goal's contract is the artifact
-                                      itself, not the direction a step is written
-                                      against: the difference between input and
-                                      deliverable, so it is named. */}
-                                            {ev.payload.mode === "design"
-                                              ? "Design deliverable"
-                                              : "Design direction"}
-                                          </span>
-                                          <span className="text-2xs font-mono text-gray-500">
-                                            {ev.payload.artifact}
-                                          </span>
-                                        </div>
-                                        {ev.payload.direction && (
-                                          <p className="text-xs text-gray-300 leading-relaxed">
-                                            {ev.payload.direction}
-                                          </p>
-                                        )}
-                                        {ev.payload.design_system?.name && (
-                                          <div className="text-xs text-gray-400">
-                                            design system:{" "}
-                                            <span className="font-mono text-gray-300">
-                                              {ev.payload.design_system.name}
-                                            </span>
-                                            {/* Three states, said differently on purpose: a pin
-                                      is the user's instruction, a discovery is a
-                                      convention the engine noticed, and a proposal
-                                      exists because there was nothing to obey. */}
-                                            {ev.payload.design_system.origin ===
-                                            "pinned" ? (
-                                              <span className="text-pink-300/90">
-                                                {" "}
-                                                — pinned at{" "}
-                                                {
-                                                  ev.payload.design_system
-                                                    .source
-                                                }
-                                              </span>
-                                            ) : ev.payload.design_system
-                                                .origin === "discovered" ? (
-                                              <span className="text-gray-500">
-                                                {" "}
-                                                — found at{" "}
-                                                {
-                                                  ev.payload.design_system
-                                                    .source
-                                                }
-                                              </span>
-                                            ) : ev.payload.design_system
-                                                .source ? (
-                                              <span className="text-gray-500">
-                                                {" "}
-                                                — from{" "}
-                                                {
-                                                  ev.payload.design_system
-                                                    .source
-                                                }
-                                              </span>
-                                            ) : (
-                                              <span className="text-gray-500">
-                                                {" "}
-                                                — proposed, no existing contract
-                                              </span>
-                                            )}
-                                          </div>
-                                        )}
-                                        {(ev.payload.tokens?.colors?.length ??
-                                          0) > 0 && (
-                                          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                                            {ev.payload.tokens.colors.map(
-                                              (
-                                                c: {
-                                                  name: string;
-                                                  value: string;
-                                                },
-                                                i: number,
-                                              ) => (
-                                                <span
-                                                  key={i}
-                                                  className="text-xs flex items-center gap-1"
-                                                >
-                                                  <span
-                                                    className="w-2.5 h-2.5 rounded-sm border border-codify-border"
-                                                    style={{
-                                                      background: c.value,
-                                                    }}
-                                                  />
-                                                  <span className="font-mono text-gray-400">
-                                                    {c.name}
-                                                  </span>
-                                                  <span className="font-mono text-gray-500">
-                                                    {c.value}
-                                                  </span>
-                                                </span>
-                                              ),
-                                            )}
-                                          </div>
-                                        )}
-                                        {(ev.payload.tokens?.typography
-                                          ?.length ?? 0) > 0 && (
-                                          <div className="text-xs text-gray-400">
-                                            type:{" "}
-                                            {ev.payload.tokens.typography
-                                              .map(
-                                                (t: {
-                                                  name: string;
-                                                  value: string;
-                                                }) => `${t.name} ${t.value}`,
-                                              )
-                                              .join(" · ")}
-                                          </div>
-                                        )}
-                                        {(ev.payload.components?.length ?? 0) >
-                                          0 && (
-                                          <div className="flex flex-col gap-0.5">
-                                            {ev.payload.components.map(
-                                              (
-                                                c: {
-                                                  name: string;
-                                                  purpose?: string;
-                                                },
-                                                i: number,
-                                              ) => (
-                                                <div
-                                                  key={i}
-                                                  className="text-xs flex items-start gap-1.5"
-                                                >
-                                                  <span className="font-mono text-pink-300/90">
-                                                    {c.name}
-                                                  </span>
-                                                  {c.purpose && (
-                                                    <span className="text-gray-400">
-                                                      — {c.purpose}
-                                                    </span>
-                                                  )}
-                                                </div>
-                                              ),
-                                            )}
-                                          </div>
-                                        )}
-                                        {(ev.payload.acceptance?.length ?? 0) >
-                                          0 && (
-                                          <div className="text-xs text-gray-400">
-                                            acceptance:{" "}
-                                            {ev.payload.acceptance.join("; ")}
-                                          </div>
-                                        )}
-                                        {(ev.payload.constraints?.length ?? 0) >
-                                          0 && (
-                                          <div className="text-xs text-amber-400/90">
-                                            constraints:{" "}
-                                            {ev.payload.constraints.join("; ")}
-                                          </div>
-                                        )}
-                                        {/* The deliverable's own body, and the one action
-                                  that gives it authority. The engine drafts it
-                                  and a step writes it; only the user can make
-                                  it binding, and this is where the file they
-                                  were just shown becomes the contract. */}
-                                        {ev.payload.mode === "design" &&
-                                          ev.payload.design_md &&
-                                          msg.goal && (
-                                            <DesignDeliverablePin
-                                              goal={msg.goal}
-                                              path={deliverablePath(msg.goal)}
-                                              body={ev.payload.design_md}
-                                              outcome={
-                                                pinState?.goalId === msg.goal.id
-                                                  ? pinState
-                                                  : null
-                                              }
-                                              pinnedPath={
-                                                pinnedContracts[
-                                                  msg.goal.workspace_id
-                                                ]
-                                              }
-                                              onPin={handlePinDeliverable}
-                                            />
-                                          )}
-                                      </div>
-                                    )}
+                              contract that shaped it rather than from memory.
+                              A knowledge deliverable has its own card above: its
+                              body is the artifact, and the design furniture here
+                              (tokens, components, acceptance) would describe a
+                              contract nothing is bound by. */}
+                                    {ev.type === "design_contract" &&
+                                      ev.payload.mode !== "knowledge" && (
+                                        <DesignDeliverableCard
+                                          payload={ev.payload}
+                                          goal={msg.goal}
+                                          pinOutcome={
+                                            pinState?.goalId === msg.goal?.id ? pinState : null
+                                          }
+                                          pinnedPath={
+                                            msg.goal
+                                            ? pinnedContracts[msg.goal.workspace_id]
+                                            : undefined
+                                          }
+                                          onPin={handlePinDeliverable}
+                                        />
+                                      )}
 
                                     {ev.type === "test_result" && (
                                       <div className="p-2.5 rounded-lg bg-codify-bg border border-codify-border flex flex-col gap-1">

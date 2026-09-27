@@ -1,0 +1,665 @@
+"""The conductor dispatches; the engine decides what is allowed.
+
+`engine/conductor.py` is a model that calls tools. The thing worth testing is
+not that it loops — it is that **every tool it can reach is a call the pipeline
+already makes, through the same service, with the same validation**. A conductor
+is a new way for a model to reach the filesystem and the process table, and the
+only thing standing between "it can choose" and "it can do anything" is that
+each entry in its dispatch table is somebody else's already-checked door.
+
+So these tests are mostly negative: a command the sandbox refuses is refused
+through the conductor too, a git subcommand that writes is refused, and there
+is no tool that writes at all.
+
+The rest is the loop itself: it terminates, it terminates *usefully* when the
+cap is hit, a tool name the model invented is a recoverable sentence rather
+than a dead turn, and a provider that cannot do tools degrades to a plain
+answer rather than failing the question.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from typing import Any
+
+from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+
+from engine.conductor import TOOLS, Conductor, tool_names
+from engine.db import connect
+from engine.fs import PathEscapeError
+from engine.git import GitService
+from engine.models import (
+    ROLES,
+    AgentConfigUpdate,
+    ConversationCreate,
+    TurnCreate,
+    WorkspaceCreate,
+)
+from engine.providers import BaseProvider, Keychain, ProviderFactory
+from engine.sandbox import CommandNotAllowed, SandboxService
+from engine.services import (
+    AgentRegistryService,
+    ConversationService,
+    GoalService,
+    SettingsService,
+    WorkspaceService,
+)
+from engine.toolcall import (
+    ToolCall,
+    ToolReply,
+    ToolSpec,
+    coerce_arguments,
+    coerce_tool_reply,
+    parse_anthropic_tool_calls,
+    parse_openai_tool_calls,
+    to_anthropic_messages,
+    to_google_contents,
+    to_ollama_messages,
+    to_openai_messages,
+)
+from engine.executor import ExecutorService
+from engine.laya import LayaDecision, LayaService
+
+
+class _ToolProvider(BaseProvider):
+    """A scripted model. `replies` is consumed one per `complete_with_tools`.
+
+    `pipeline` is what the single-shot `complete` returns, so the same double
+    can serve the conductor's loop *and* the eight roles' JSON calls — which is
+    what lets the `delegate` test assert the delegated run is the pipeline's
+    own plan rather than a second implementation of one.
+    """
+
+    def __init__(self, replies: list[ToolReply] | None = None, pipeline: Any = None) -> None:
+        self.replies = list(replies or [])
+        self.pipeline = pipeline if pipeline is not None else {
+            "summary": "an empty repo", "enough": True,
+        }
+        self.seen_tools: list[list[str]] = []
+        self.seen_messages: list[list[dict[str, Any]]] = []
+
+    @property
+    def supports_tools(self) -> bool:
+        return True
+
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
+        # Keyed on the role's own self-description rather than a loose
+        # substring: the planner's prompt *mentions* a design contract, so a
+        # `"design" in prompt` test returns the design role's reply to the
+        # planner and the run dies with "planner must return 1..20 steps".
+        lowered = system_prompt.lower()
+        if "you are codify librarian" in lowered:
+            return json.dumps({"summary": "an empty repo", "enough": True})
+        if "you are codify design" in lowered:
+            return json.dumps({"applies": False})
+        if "you are codify planner" in lowered:
+            return json.dumps({"steps": [{"title": "S1", "description": "d", "suggested_paths": []}]})
+        return json.dumps(self.pipeline)
+
+    async def complete_with_tools(
+        self, system_prompt: str, messages: list[dict[str, Any]],
+        tools: list[ToolSpec], model: str, temperature: float, max_tokens: int,
+    ) -> ToolReply:
+        self.seen_tools.append([t.name for t in tools])
+        self.seen_messages.append([dict(m) for m in messages])
+        if not self.replies:
+            return ToolReply(text="I have run out of things to say.")
+        return self.replies.pop(0)
+
+
+class _PlainProvider(BaseProvider):
+    """A provider with no tool support at all — the base class's answer."""
+
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+    ) -> str:
+        return "a plain answer"
+
+
+def _call(name: str, **arguments: Any) -> ToolCall:
+    return ToolCall(id=f"c_{name}", name=name, arguments=arguments)
+
+
+class ConductorTestCase(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        (self.repo / "app.py").write_text("def parse(text):\n    return text\n")
+        (self.repo / "README.md").write_text("# demo\n")
+        self.conn: sqlite3.Connection = connect(self.root / "conductor.db")
+        self.workspaces = WorkspaceService(self.conn)
+        self.goals = GoalService(self.conn)
+        self.conversations = ConversationService(self.conn)
+        self.settings = SettingsService(self.conn)
+        self.sandbox = SandboxService()
+        self.git = GitService()
+        self.ws = self.workspaces.create(
+            WorkspaceCreate(name="WS", root_path=str(self.repo))
+        )
+        self.thread = self.conversations.create(ConversationCreate(workspace_id=self.ws.id))
+        self.goal = self.goals.create_turn(self.thread.id, TurnCreate(prompt="hi"))
+
+    async def asyncTearDown(self) -> None:
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _executor(self, provider: BaseProvider, laya: LayaService | None = None) -> ExecutorService:
+        registry = AgentRegistryService(self.conn, _Factory(provider), Keychain())
+        for role in ROLES:
+            registry.set_config(role, AgentConfigUpdate(model_name="stub-model"))
+        return ExecutorService(
+            self.goals, self.workspaces, registry, self.sandbox,
+            laya=laya or _QuestionGate(),
+        )
+
+    def _dispatch(self, goal_id: str, **overrides: Any) -> dict[str, Any]:
+        # `_ToolProvider` so the `delegate` test can drive the *real* pipeline
+        # through the same double the loop uses.
+        executor = self._executor(_ToolProvider())
+        table = executor._conductor_dispatch(goal_id, self.goals.get(goal_id), str(self.repo))
+        table.update(overrides)
+        return table
+
+
+class _Factory(ProviderFactory):
+    def __init__(self, provider: BaseProvider) -> None:
+        self.provider = provider
+
+    def build(self, config: Any) -> BaseProvider:
+        return self.provider
+
+
+class _QuestionGate(LayaService):
+    async def decide(self, state: dict[str, Any], on_call: Any = None) -> LayaDecision:
+        return LayaDecision(
+            engine="sdk",
+            answers={"intent": {"choice": "question", "confidence": 0.99}},
+        )
+
+
+class TestTheLoop(ConductorTestCase):
+    async def test_a_model_that_calls_a_tool_gets_the_result_and_can_finish(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        async def read_file(args: dict[str, Any]) -> str:
+            calls.append(args)
+            return "--- app.py\ndef parse(text): return text"
+
+        provider = _ToolProvider([
+            ToolReply(text="let me look", tool_calls=[_call("read_file", path="app.py")]),
+            ToolReply(text="It parses text and returns it unchanged."),
+        ])
+        conductor = Conductor(
+            provider, "m", str(self.repo), list(TOOLS),
+            {"read_file": read_file}, system_prompt="s",
+        )
+        answer = await conductor.run("what does parse do?")
+        self.assertEqual(answer, "It parses text and returns it unchanged.")
+        self.assertEqual(calls, [{"path": "app.py"}])
+        self.assertEqual(provider.seen_tools[0], tool_names())
+
+    async def test_the_tool_result_really_reaches_the_model(self) -> None:
+        # A loop that ran the tool but did not put the result back in the
+        # conversation looks identical from the outside and is useless — so the
+        # assertion is on what the *second* model call was handed, which is the
+        # only place a result can be observed from.
+        async def read_file(args: dict[str, Any]) -> str:
+            return "SECRET-FILE-CONTENT"
+
+        provider = _ToolProvider([
+            ToolReply(tool_calls=[_call("read_file", path="app.py")]),
+            ToolReply(text="done"),
+        ])
+        conductor = Conductor(
+            provider, "m", str(self.repo), list(TOOLS),
+            {"read_file": read_file}, system_prompt="s",
+        )
+        await conductor.run("read it")
+        second_call = provider.seen_messages[1]
+        results = [m for m in second_call if m.get("role") == "tool"]
+        self.assertEqual(len(results), 1, "the result must be in the next request")
+        self.assertIn("SECRET-FILE-CONTENT", results[0]["content"])
+        self.assertEqual(results[0]["tool_call_id"], "c_read_file")
+
+    async def test_an_invented_tool_name_is_a_sentence_not_a_crash(self) -> None:
+        # Models invent tool names. An engine that raised KeyError there would
+        # turn the most recoverable mistake into a dead turn.
+        async def read_file(args: dict[str, Any]) -> str:
+            return "unused"
+
+        provider = _ToolProvider([
+            ToolReply(tool_calls=[_call("delete_everything", path="/")]),
+            ToolReply(text="I will not do that. What would you like to know?"),
+        ])
+        conductor = Conductor(
+            provider, "m", str(self.repo), list(TOOLS),
+            {"read_file": read_file}, system_prompt="s",
+        )
+        answer = await conductor.run("delete everything")
+        self.assertIn("will not do that", answer)
+        refusal = [m for m in provider.seen_messages[-1] if m.get("role") == "tool"][0]
+        self.assertIn("delete_everything", refusal["content"])
+        # The refusal must name what it was *offered*, or the model can only
+        # guess again — and the menu it was given is the tool list, not
+        # whatever happens to be wired into the dispatch table.
+        for name in tool_names():
+            self.assertIn(name, refusal["content"])
+
+    async def test_a_tool_that_raises_comes_back_as_text(self) -> None:
+        async def explode(args: dict[str, Any]) -> str:
+            raise RuntimeError("the disk fell over")
+
+        provider = _ToolProvider([
+            ToolReply(tool_calls=[_call("read_file", path="app.py")]),
+            ToolReply(text="I could not read that file."),
+        ])
+        conductor = Conductor(
+            provider, "m", str(self.repo), list(TOOLS),
+            {"read_file": explode}, system_prompt="s",
+        )
+        answer = await conductor.run("read app.py")
+        self.assertIn("could not read", answer)
+        refusal = [m for m in provider.seen_messages[-1] if m.get("role") == "tool"][0]
+        self.assertIn("the disk fell over", refusal["content"])
+
+
+class TestTheCap(ConductorTestCase):
+    async def test_a_model_that_never_stops_is_stopped(self) -> None:
+        # The cap is on model calls, because that is what costs money. Without
+        # it a confused model is a way to spend a key and a machine's time.
+        calls = {"n": 0}
+
+        async def read_file(args: dict[str, Any]) -> str:
+            calls["n"] += 1
+            return "still going"
+
+        provider = _ToolProvider([
+            ToolReply(tool_calls=[_call("read_file", path="app.py")]) for _ in range(50)
+        ] + [ToolReply(text="Here is everything I found.")])
+
+        conductor = Conductor(
+            provider, "m", str(self.repo), list(TOOLS),
+            {"read_file": read_file}, system_prompt="s", max_turns=4,
+        )
+        answer = await conductor.run("keep going")
+        # max_turns=4 buys four tool rounds and then one more call — the one
+        # that is told to answer, whose tool calls are then dropped. A turn
+        # that stopped at four would end on a tool call with nothing said.
+        self.assertEqual(len(provider.seen_messages), 5)
+        self.assertTrue(conductor.exhausted)
+        # The tool it asked for on that last round was not run.
+        self.assertEqual(calls["n"], 4)
+        # And the answer says it was cut off, rather than trailing off.
+        self.assertIn("ran out of calls", answer)
+
+    async def test_hitting_the_cap_still_answers_rather_than_stopping_dead(self) -> None:
+        # A turn cut off mid-thought reads as broken; one that says what it has
+        # reads as a limit. The nudge is a *prompt* to the model, so the
+        # assertion is that it reached the model at all.
+        async def read_file(args: dict[str, Any]) -> str:
+            return "partial"
+
+        provider = _ToolProvider([ToolReply(tool_calls=[_call("read_file", path="a.py")])])
+        conductor = Conductor(
+            provider, "m", str(self.repo), list(TOOLS),
+            {"read_file": read_file}, system_prompt="s", max_turns=1,
+        )
+        answer = await conductor.run("go")
+        self.assertTrue(answer, "an exhausted turn must still say something")
+        last = provider.seen_messages[-1][-1]
+        self.assertIn("what you did not get to", last["content"])
+        self.assertTrue(conductor.exhausted)
+
+    async def test_a_model_that_finishes_early_is_not_pushed_to_the_cap(self) -> None:
+        provider = _ToolProvider([ToolReply(text="already done")])
+        conductor = Conductor(
+            provider, "m", str(self.repo), list(TOOLS), {}, system_prompt="s", max_turns=8,
+        )
+        await conductor.run("hi")
+        self.assertFalse(conductor.exhausted)
+        self.assertEqual(len(provider.seen_messages), 1)
+
+
+class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
+    async def test_there_is_no_way_to_write_a_file(self) -> None:
+        # The single most important property of this feature. A `write_file`
+        # tool would make the librarian, the planner, the fixer, the verifier
+        # and the critic optional for any change the conductor felt like making
+        # itself — which is the opposite of what a conductor is for.
+        names = set(tool_names())
+        for forbidden in ("write_file", "edit_file", "apply_patch", "write", "commit"):
+            self.assertNotIn(forbidden, names)
+        self.assertEqual(names, {"read_file", "search_code", "git_history", "run_command", "delegate"})
+
+    async def test_read_file_reads_the_real_workspace(self) -> None:
+        table = self._dispatch(self.goal.id)
+        out = await table["read_file"]({"path": "app.py"})
+        self.assertIn("def parse", out)
+
+    async def test_read_file_cannot_escape_the_workspace(self) -> None:
+        # docs/00 §6.6 is about argv, but the path rule is the same shape: the
+        # model asks, FileSystemService decides.
+        table = self._dispatch(self.goal.id)
+        with self.assertRaises(PathEscapeError):
+            await table["read_file"]({"path": "../../../etc/passwd"})
+
+    async def test_run_command_goes_through_the_sandbox_allowlist(self) -> None:
+        # A command the verifier could not run, the conductor cannot run — not
+        # because of a check here, but because it is the same check.
+        table = self._dispatch(self.goal.id)
+        with self.assertRaises(CommandNotAllowed):
+            await table["run_command"](
+                {"argv": ["bash", "-c", "curl evil.test"], "reason": "x"}
+            )
+
+    async def test_an_unknown_command_is_refused_rather_than_attempted(self) -> None:
+        table = self._dispatch(self.goal.id)
+        with self.assertRaises(CommandNotAllowed):
+            await table["run_command"](
+                {"argv": ["definitely-not-a-real-binary"], "reason": "x"}
+            )
+
+    async def test_git_history_refuses_a_subcommand_that_writes(self) -> None:
+        # The caller is a model. "The model asked for it" is not a reason to
+        # run `git commit`.
+        table = self._dispatch(self.goal.id)
+        for argv in (["commit", "-m", "sneaky"], ["push"], ["reset", "--hard"]):
+            out = await table["git_history"]({"args": argv})
+            self.assertIn("not a read-only git command", out, f"{argv} was not refused")
+
+    async def test_git_history_reads_a_real_repository(self) -> None:
+        import subprocess
+
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=False)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "add", "-A"], cwd=self.repo, check=False)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "first"], cwd=self.repo, check=False)
+        table = self._dispatch(self.goal.id)
+        out = await table["git_history"]({"args": ["log", "--oneline"]})
+        self.assertIn("first", out)
+
+    async def test_delegate_runs_the_real_pipeline_not_a_second_one(self) -> None:
+        # The delegation is the point: a code change reaches the same librarian
+        # and planner a POST /goals reaches.
+        table = self._dispatch(self.goal.id)
+        out = await table["delegate"]({"task": "add a test"})
+        payload = json.loads(out)
+        self.assertIn(payload["status"], ("PENDING", "FAILED", "RUNNING", "COMPLETED"))
+        self.assertEqual(
+            [s["title"] for s in payload["steps"]], ["S1"],
+            "the delegated run must be the pipeline's own plan",
+        )
+
+    async def test_delegate_needs_a_task(self) -> None:
+        table = self._dispatch(self.goal.id)
+        self.assertIn("needs a task", await table["delegate"]({}))
+
+
+class TestGracefulDegradation(ConductorTestCase):
+    async def test_a_provider_without_tools_still_answers_the_question(self) -> None:
+        # The conductor is an upgrade, never a prerequisite. A user on a
+        # provider that cannot do tool calling must still be able to ask a
+        # question — that was the bug this whole feature fixes, and shipping it
+        # with a new "your provider is too old" failure would have replaced one
+        # unusable behaviour with another.
+        provider = _PlainProvider()
+        executor = self._executor(provider)
+        await executor.run_chat(self.goal.id)
+        self.assertEqual(self.goals.get(self.goal.id).status, "COMPLETED")
+        replies = [
+            p for p in [
+                e.payload for e in self.goals.events_after(self.goal.id, 0) if e.type == "log"
+            ] if p.get("turn")
+        ]
+        self.assertEqual(len(replies), 1)
+        self.assertEqual(replies[0]["message"], "a plain answer")
+
+    async def test_a_role_with_no_model_fails_the_turn_cleanly(self) -> None:
+        # Not an unhandled exception in a background task — `run_chat` is
+        # spawned by the route with `_spawn`, and a raise here would be a
+        # coroutine that dies with nothing written. The goal is FAILED and the
+        # reason is on the log, which is what the transcript renders.
+        registry = AgentRegistryService(self.conn, _Factory(_PlainProvider()), Keychain())
+        for role in ROLES:
+            if role != "scribe":
+                registry.set_config(role, AgentConfigUpdate(model_name="stub-model"))
+        # scribe deliberately left unconfigured: it is the row a turn borrows.
+        executor = ExecutorService(
+            self.goals, self.workspaces, registry, self.sandbox, laya=_QuestionGate(),
+        )
+        goal = self.goals.create_turn(self.thread.id, TurnCreate(prompt="hi"))
+        await executor.run_chat(goal.id)
+        self.assertEqual(self.goals.get(goal.id).status, "FAILED")
+        errors = [e for e in self.goals.events_after(goal.id, 0) if e.type == "error"]
+        self.assertTrue(errors, "a failed turn must say why on the event log")
+        self.assertIn("scribe", str(errors[0].payload))
+
+
+class TestToolDialects(unittest.TestCase):
+    """The translations, which are the part with no type checker.
+
+    A `content` block that should be a `tool_result` is a 400 from someone
+    else's API, not an error in our code — so these are the assertions that
+    would otherwise only be made against a live endpoint.
+    """
+
+    def test_openai_tool_results_are_their_own_role(self) -> None:
+        out = to_openai_messages([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "", "tool_calls": [_call("read_file", path="a.py")]},
+            {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "body"},
+        ])
+        self.assertEqual(out[2], {
+            "role": "tool", "tool_call_id": "c1", "content": "body",
+        })
+        self.assertEqual(out[1]["tool_calls"][0]["function"]["name"], "read_file")
+        self.assertEqual(json.loads(out[1]["tool_calls"][0]["function"]["arguments"]),
+                         {"path": "a.py"})
+
+    def test_anthropic_shares_one_turn_between_consecutive_results(self) -> None:
+        # A `tool_result` per message is rejected by the API; they share a turn.
+        out = to_anthropic_messages([
+            {"role": "assistant", "content": "", "tool_calls": [
+                _call("read_file", path="a"), _call("read_file", path="b"),
+            ]},
+            {"role": "tool", "tool_call_id": "1", "content": "x"},
+            {"role": "tool", "tool_call_id": "2", "content": "y"},
+        ])
+        self.assertEqual(len(out), 2)
+        self.assertEqual(len(out[1]["content"]), 2)
+        self.assertTrue(all(b["type"] == "tool_result" for b in out[1]["content"]))
+
+    def test_anthropic_turns_a_tool_use_into_a_block(self) -> None:
+        out = to_anthropic_messages([
+            {"role": "assistant", "content": "looking", "tool_calls": [_call("read_file", path="a")]},
+        ])
+        self.assertEqual(out[0]["content"][0], {"type": "text", "text": "looking"})
+        self.assertEqual(out[0]["content"][1]["type"], "tool_use")
+        self.assertEqual(out[0]["content"][1]["input"], {"path": "a"})
+
+    def test_google_uses_model_and_function_response(self) -> None:
+        out = to_google_contents([
+            {"role": "assistant", "content": "", "tool_calls": [_call("read_file", path="a")]},
+            {"role": "tool", "tool_call_id": "1", "name": "read_file", "content": "x"},
+        ])
+        self.assertEqual(out[0]["role"], "model")
+        self.assertEqual(out[0]["parts"][0]["functionCall"]["name"], "read_file")
+        self.assertEqual(out[1]["role"], "user")
+        self.assertEqual(
+            out[1]["parts"][0]["functionResponse"]["name"], "read_file",
+        )
+
+    def test_google_required_comes_from_the_schema_not_the_type(self) -> None:
+        # All five tools declare their required parameter as a *string*, so the
+        # old `type != "string"` rule sent Gemini: read_file with no required
+        # path, and `offset`/`limit` required though they are optional. Gemini
+        # accepts that document, so nothing failed — the model just called the
+        # tool wrong. Pin the real specs, because a synthetic one would have
+        # agreed with whichever rule wrote it.
+        by_name = {t.name: t for t in TOOLS}
+        sent = by_name["read_file"].to_google()["parameters"]
+        self.assertEqual(sent["required"], ["path"])
+        self.assertNotIn("offset", sent["required"])
+        self.assertNotIn("limit", sent["required"])
+        # A required non-string survives the other way: it was already right by
+        # accident, and now it is right on purpose.
+        self.assertEqual(
+            by_name["run_command"].to_google()["parameters"]["required"],
+            ["argv"],
+        )
+        self.assertEqual(
+            by_name["search_code"].to_google()["parameters"]["required"],
+            ["query"],
+        )
+
+    def test_a_json_string_of_arguments_is_parsed(self) -> None:
+        # OpenAI hands back a string, Anthropic and Google hand back an object.
+        # A caller that had to care would be three parsers in the conductor.
+        calls = parse_openai_tool_calls({
+            "tool_calls": [{
+                "id": "x", "function": {"name": "r", "arguments": '{"path":"a.py"}'},
+            }]
+        })
+        self.assertEqual(calls[0].arguments, {"path": "a.py"})
+        self.assertEqual(parse_anthropic_tool_calls(
+            [{"type": "tool_use", "id": "y", "name": "r", "input": {"path": "b.py"}}]
+        )[0].arguments, {"path": "b.py"})
+
+    def test_half_written_arguments_do_not_kill_the_loop(self) -> None:
+        calls = parse_openai_tool_calls({
+            "tool_calls": [{"id": "x", "function": {"name": "r", "arguments": '{"path":'}}]
+        })
+        self.assertEqual(calls[0].arguments, {})
+
+    def test_google_stringly_types_are_coerced_back(self) -> None:
+        # Google returns every argument as a string. Without this, an `offset`
+        # the model sent as 10 arrives as "10" and a range read is nonsense.
+        spec = ToolSpec(
+            name="read_file", description="",
+            parameters={"type": "object", "properties": {"offset": {"type": "integer"}}},
+        )
+        self.assertEqual(coerce_arguments(spec, {"offset": "10"}), {"offset": 10})
+
+    def test_ollama_needs_arguments_as_an_object_not_a_string(self) -> None:
+        # Measured: OpenAI's format says `arguments` is a JSON *string*;
+        # Ollama's Go template parses it as an object and 400s with
+        # `Value looks like object, but can't find closing '}' symbol` when it
+        # gets the string. Sending the OpenAI shape to Ollama is a hard failure
+        # of the second half of every conductor loop.
+        out = to_ollama_messages([
+            {"role": "assistant", "content": "", "tool_calls": [_call("read_file", path="a.py")]},
+            {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "body"},
+        ])
+        self.assertEqual(out[0]["tool_calls"][0]["function"]["arguments"], {"path": "a.py"})
+
+    def test_openai_still_gets_the_string(self) -> None:
+        # The two disagree, and neither is "the" format — so this pins the
+        # other half: sending an object to an OpenAI-compat server is the same
+        # bug with the labels swapped.
+        out = to_openai_messages([
+            {"role": "assistant", "content": "", "tool_calls": [_call("read_file", path="a.py")]},
+        ])
+        self.assertEqual(out[0]["tool_calls"][0]["function"]["arguments"], '{"path": "a.py"}')
+
+    def test_ollama_dialect_survives_unparseable_arguments(self) -> None:
+        # A half-written argument object must degrade to {} rather than raise
+        # inside a transport function, where the model cannot see it.
+        out = to_ollama_messages([{
+            "role": "assistant", "content": "",
+            "tool_calls": [ToolCall("c", "read_file", {})],
+        }])
+        self.assertEqual(out[0]["tool_calls"][0]["function"]["arguments"], {})
+
+    def test_a_tool_with_no_id_still_gets_one(self) -> None:
+        # The id is the correlation handle; a missing one means the model
+        # cannot match a result to its question.
+        self.assertTrue(parse_openai_tool_calls(
+            {"tool_calls": [{"function": {"name": "r", "arguments": "{}"}}]}
+        )[0].id)
+
+
+class TestProvidersThatWriteToolCallsAsText(unittest.TestCase):
+    """Measured against a live model, not assumed.
+
+    `qwen2.5-coder:7b` on Ollama was asked to call `read_file` and replied with
+    `message.tool_calls` **empty** and the call written into `message.content`
+    as a JSON document. A provider that read only `tool_calls` treated that JSON
+    as the turn's final answer and showed it to the user. No test double finds
+    this, because a double returns what the implementation expects.
+
+    The reply below is the real body, verbatim.
+    """
+
+    LIVE_REPLY: dict[str, Any] = {
+        "model": "qwen2.5-coder:7b",
+        "message": {
+            "role": "assistant",
+            "content": '{"name": "read_file", "arguments": {"path": "app.py"}}',
+        },
+        "done": True,
+    }
+
+    def _tools(self) -> list[ToolSpec]:
+        return list(TOOLS)
+
+    def test_a_call_written_into_content_is_recovered(self) -> None:
+        reply = coerce_tool_reply(
+            self.LIVE_REPLY["message"]["content"], [], self._tools()
+        )
+        self.assertEqual(len(reply.tool_calls), 1)
+        self.assertEqual(reply.tool_calls[0].name, "read_file")
+        self.assertEqual(reply.tool_calls[0].arguments, {"path": "app.py"})
+        # And it is NOT prose — the JSON must not also be shown to the user.
+        self.assertEqual(reply.text, "")
+
+    def test_a_fenced_call_is_recovered_too(self) -> None:
+        reply = coerce_tool_reply(
+            '```json\n{"name": "search_code", "arguments": {"query": "def parse"}}\n```',
+            [], self._tools(),
+        )
+        self.assertEqual(reply.tool_calls[0].name, "search_code")
+
+    def test_an_openai_shaped_call_written_into_content_is_recovered(self) -> None:
+        reply = coerce_tool_reply(
+            '{"function": {"name": "read_file", "arguments": {"path": "b.py"}}}',
+            [], self._tools(),
+        )
+        self.assertEqual(reply.tool_calls[0].name, "read_file")
+        self.assertEqual(reply.tool_calls[0].arguments, {"path": "b.py"})
+
+    def test_a_json_reply_that_is_not_a_call_stays_prose(self) -> None:
+        # The guard. A real answer can be JSON too, and inventing a call from
+        # it would be worse than showing it: the model would be shown words
+        # nobody said and asked to explain them.
+        for body in (
+            '{"summary": "the parser splits on commas"}',
+            '{"name": "rm_rf_slash", "arguments": {"/": true}}',
+            'just a normal sentence',
+            '{"broken": ',
+        ):
+            reply = coerce_tool_reply(body, [], self._tools())
+            self.assertEqual(reply.tool_calls, [], f"{body!r} was read as a call")
+            self.assertEqual(reply.text, body)
+
+    def test_a_structured_call_is_never_second_guessed(self) -> None:
+        # When the provider did send tool_calls, `content` is whatever prose
+        # came with them and must not be re-read as a call.
+        calls = [ToolCall("x", "read_file", {"path": "real.py"})]
+        reply = coerce_tool_reply("looking now", calls, self._tools())
+        self.assertEqual(reply.tool_calls, calls)
+        self.assertEqual(reply.text, "looking now")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

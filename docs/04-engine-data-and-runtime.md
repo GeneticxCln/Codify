@@ -125,8 +125,8 @@ Unique `(goal_id, ordinal)`. Max 20 steps per goal (planner contract).
 EventType = Literal[
     "goal_status", "step_status", "log", "diff", "test_result",
     "file_change_summary", "agent_assigned", "provider_fallback",
-    "library_evidence", "design_contract", "plan_updated", "laya_decision",
-    "fix_retry", "fixer_pass", "plan_consult",
+    "library_evidence", "design_contract", "stage_result", "plan_updated",
+    "laya_decision", "fix_retry", "fixer_pass", "plan_consult",
     "agent_call_failed", "usage", "model_delta", "error",
 ]
 
@@ -142,7 +142,11 @@ class Event(BaseModel):
 
 Payloads — one row per type the engine publishes (verified against the
 `publish` sites in `executor.py` / `services.py`; this table has drifted
-before, so a new event type means a new row here in the same change):
+before, so a new event type means a new row here in the same change). The
+literal above, `ui/src/types.ts`'s `EventType` and the table below are three
+copies of one list, and `tests/test_event_type_contract.py` fails when they
+diverge — the `Literal` quoted here had fallen a member behind the union, and
+the UI's copy a member behind both.
 
 | type | `step_id` | payload |
 |---|---|---|
@@ -155,7 +159,7 @@ before, so a new event type means a new row here in the same change):
 | `agent_assigned` | any (`null` for laya) | `{role, provider, model}` — the model about to be called, published before the call |
 | `provider_fallback` | any | `{role, from: {provider, model}, to: {provider, model}, code, detail}` |
 | `library_evidence` | — | the checked evidence pack: `{summary, files: [{path, why, evidence}], symbols, conventions, test_command, risks, rounds, counts: {opened, matched, considered}, dropped_paths, capped}` (`04` §4.0) — `capped` is true when the round cap stopped the search with material still outstanding, the difference between "this workspace had nothing more to say" and "the engine stopped asking" | A workspace's `CODIFY.md`, when it has one, is carried separately as `knowledge: {path, chars, truncated, stale_paths}` — a prior, never a cited file (§4.9).
-| `design_contract` | — | the locked direction: `{applies, artifact, direction, design_system: {name, source, origin}, tokens: {colors: [{name, value}], typography: [{name, value}], spacing: [str], radii: [str]}, components: [{name, purpose}], conventions, constraints, acceptance, design_md, mode?}` — `origin` is `pinned`\|"discovered"\|`null` (`04` §4.0a). `mode: "design"` or `"knowledge"` with a non-empty `design_md` marks a deliverable goal, where the body is the artifact rather than advice — `DESIGN.md` for `design` (§4.0a.2), `CODIFY.md` for `knowledge` (§4.9) |
+| `design_contract` | — | the locked direction: `{applies, artifact, direction, design_system: {name, source, origin}, tokens: {colors: [{name, value}], typography: [{name, value}], spacing: [str], radii: [str]}, components: [{name, purpose}], conventions, constraints, acceptance, design_md, mode?, revises?}` — `origin` is `pinned`\|"discovered"\|`null` (`04` §4.0a). `mode: "design"` or `"knowledge"` with a non-empty `design_md` marks a deliverable goal, where the body is the artifact rather than advice — `DESIGN.md` for `design` (§4.0a.2), `CODIFY.md` for `knowledge` (§4.9). `revises: {path, text, chars, truncated, stale_paths}` is present on a knowledge goal whose workspace already had a `CODIFY.md`, and carries the exact copy the drafter was shown so the transcript can render what the run is replacing; its `stale_paths` is the *pack's* verdict on that file, not the drafter's own (which is empty — that read has no tree listing) |
 | `stage_result` | any | `{stage, role, step_id, ordinal, outcome, detail, duration_ms, tokens, calls}` — what one role stage achieved, what it spent, and how long it took (§4.7). `ordinal` disambiguates repeated stages in one scope: librarian rounds, planner consults, fixer attempts and passes. `outcome` is from the closed per-stage vocabulary in §4.7; `detail` is a short engine-authored note (a skip reason, a block reason), never model prose |
 | `plan_updated` | step | `{step_id, step_title, fields: [str], changes: {field: {before, after}}}` — only fields the patch edited, only those whose value actually changed |
 | `laya_decision` | — | the gate's full verdict: `{engine, answers, routing, blocked, block_reason, warnings, skipped_reason, provider, model, policy: {injection_block_threshold, risk_warn_level, clarify_warn_threshold}}` (`05`) |
@@ -375,7 +379,16 @@ Bind `127.0.0.1`. Port: first free in `7430-7440`, printed on stdout (`04` §6).
 
 All routes: `Authorization: Bearer <boot_token>` or `401` `unauthorized`.
 
-Error body: `{ "code": str, "message": str }`.
+Error body: `{ "code": str, "message": str }` — `ErrorBody` in `engine/models.py`, the
+one place that shape is defined. Extra keys are part of the contract, not a
+loophole: a refusal may attach the facts a caller needs to act
+(`workspace_not_empty` carries the goal count), and `code`/`message` are what
+every caller may rely on. It is declared to OpenAPI via `ERROR_RESPONSES` in
+`engine/app.py`, so `/openapi.json` and `/docs` describe every refusal rather than
+only the successes; `tests/test_error_contract.py` fails if a status the engine
+raises is not declared there. A body rejected by validation answers in the same
+shape (`code: invalid_request`, field errors under `detail`) rather than
+FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 
 | Method | Path | Body | Success |
 |---|---|---|---|
@@ -1003,9 +1016,60 @@ authors a body in its reply, `_knowledge_deliverable` publishes it as a `design_
 the file appears on disk only when a step writes it. A dry run proposes it and writes nothing, and
 the critic reviews the stored proposal — the same bytes Apply would replay.
 
+**The file is the mechanism, so the chain is held end to end.** `tests/test_workspace_knowledge.py::KnowledgeDeliverableEndToEndCase`
+drives it over real HTTP — a drafted body becomes `CODIFY.md` on disk, the verifier and the critic
+are shown *that file* rather than the draft the engine published, the scribe commits it, and the
+next run's librarian is handed it as a prior (and, because the staleness check compares it against
+the tree, is told which of its paths no longer exist). Unlike `DESIGN.md`, `CODIFY.md` needs no pin
+to bind, so a run that published a perfect draft and wrote nothing would satisfy every unit test in
+this file and leave the mode inert.
+
+**Revision is the mode's other half, and it is not the design one.** A design goal revises a
+contract it is *bound* by; a knowledge goal rewrites a prior it is *superseding*, so a body that
+merely restates the existing file is worth less than none — it looks current, and the next run will
+aim its reads at whatever it says. The existing `CODIFY.md` therefore reaches the drafter under a
+label of its own, `--- current CODIFY.md — revision material, NOT a prior you may trust ---`, and
+the drafter is told to check it against the evidence pack rather than polish it.
+
+That block is read fresh (`read_knowledge` with no tree listing), not quoted out of the pack, so
+that the drafter is not spending the pack's credibility on a file the pack never opened. The cost
+is that **the fresh copy carries no staleness annotation of its own** — the annotation rides the
+*other* copy, the `knowledge` block in the evidence summary, which names the absent paths and says
+*"Do not plan a step against those"*. Both copies matter and only one is annotated;
+`tests/test_workspace_knowledge.py::KnowledgeRevisionCase` holds each half separately, and its
+end-to-end sibling holds the part only the full chain shows: the next run is holding this run's
+conclusion and none of the one it replaced.
+
+**The file is read once and published twice.** The same `read_knowledge` result feeds the prompt and
+the `revises` block on the published `design_contract`, because a second read is a second file: the
+day something writes to `CODIFY.md` between the two, the transcript would show the user a document
+the drafter never read. `revises.stale_paths` is taken from the pack rather than from that read, so
+publishing it says which of the old claims the engine had *already* distrusted — the same warning
+the drafter was given, rather than the fresh read's `[]`, which would read as "nothing here is
+stale" and be the opposite of the truth.
+
+**A dry run is the half where the reviewed draft is not yet the file.** The same case holds
+`nothing on disk, a review that still had an artifact, and Apply writing exactly the bytes that
+were reviewed`: a dry-run `CODIFY.md` exists only as the step's stored proposal, which is what both
+judges are shown and what Apply replays — the two are asserted to be the same record, not two
+readings of the same draft. And because the file binds by existing, the prior follows the disk
+rather than the goal: a second goal planned before Apply is told the workspace has written nothing
+down, and a third planned after is handed the file. There is no pin to be refused in the meantime,
+so the disk is the only thing that can say the file is not there.
+
 **The mode is one-off, not a setting.** Rewriting what Codify believes about a repository is a
 decision with a review step attached, so it is a goal mode rather than a workspace preference. The
 composer exposes it as *Knowledge Deliverable* beside *Design Deliverable*.
+
+**In the transcript it is a card of its own, not a diff.** The `design_contract` event carries the
+body in `design_md` for both modes, but the two files are drawn differently. A design deliverable
+is shown with the design vocabulary it came from and one action: pin it. A knowledge deliverable
+has no pin — it binds by being written — so the card renders the body itself, open and height-
+capped, and carries one sentence saying what makes it real: not yet written, proposed and awaiting
+Apply (in which case the next run still holds whatever an earlier run left), or written, in which
+case every later run's librarian reads it as a prior. `ui/src/designDeliverable.ts` mirrors the
+engine's `DELIVERABLE_FILES` so a knowledge goal resolves `CODIFY.md` and never `DESIGN.md`, and
+both cards share one vocabulary of body labels.
 
 ## 5. Sandbox argv allowlist
 

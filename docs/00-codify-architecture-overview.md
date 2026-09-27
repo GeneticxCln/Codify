@@ -92,6 +92,7 @@ Critic rejection: Desktop click required to retry the step (`04` §4.3). Setting
 | `06-model-discovery.md` | Live model discovery — why there is no catalog |
 | `07-spawn-guard-and-deterministic-tests.md` | The spawn guard, the guarded choke points, the freeze that keeps them honest |
 | `08-benchmarks.md` | The benchmark harness, what a number may claim, and the no-third-party-source policy |
+| `09-workspace-shell.md` | Conversations, tabs, terminal, browser — and §10, what a turn is |
 
 ## 6. Invariants (non-negotiable)
 
@@ -101,6 +102,11 @@ Critic rejection: Desktop click required to retry the step (`04` §4.3). Setting
 3. Engine binds `127.0.0.1`. Every HTTP/WS request requires `Authorization: Bearer <boot_token>`.
 4. Responses NEVER include raw API keys.
 5. `LocalProvider.base_url` MUST pass `validate_local_base_url` before every request.
-6. Only verifier-proposed argv reaches `SandboxService.run_command` in `test` mode; the librarian's
-   requests use the same validator in `read_only` mode and cannot change the workspace.
+6. Every `SandboxService.run_command` call goes through `validate_argv` first. Verifier-proposed
+   argv and conductor tool calls reach it in `test` mode; the librarian's requests use it in
+   `read_only` mode and cannot change the workspace. The conductor proposes argv, it does not
+   widen the allowlist — see `docs/01` §5.
 7. Single SQLite file: `~/.codify/codify.db`. There is no `agents.db`.
+8. A turn is created only by `POST /conversations/{id}/turns`. `POST /goals` refuses
+   `mode: "chat"`, and `TurnCreate` carries no pipeline flags, so a client chooses neither
+   that a turn exists nor what it becomes — the gate does. See `docs/09` §10.

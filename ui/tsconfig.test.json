@@ -1,0 +1,26 @@
+{
+  // The type-check that covers the test suite.
+  //
+  // `tsconfig.json` has `"include": ["src"]`, so `tsc` — and therefore
+  // `npm run build`, and therefore `make build-ui` — never looked at a single
+  // line of `ui/tests/`. `node --test` does not cover the gap either: it runs
+  // the suite with `--experimental-strip-types`, which *erases* types rather
+  // than checking them. The result was a suite that could hold a helper
+  // building a value the interface no longer accepted, or a component call with
+  // the wrong number of arguments, and no target in `make ci` would say so.
+  //
+  // This is that check. It extends the app's own config rather than repeating
+  // it, so `strict`, `noUnusedLocals` and the rest apply to tests exactly as
+  // they do to `src/` — a test that reads a possibly-null value without saying
+  // so is the same defect there as it is in the app.
+  //
+  // `types: ["node"]` is what makes `node:test`, `node:assert/strict` and
+  // `node:fs` resolve at all. `@types/node` is a devDependency for this: the
+  // suite imports Node built-ins, and without the declarations every one of
+  // those imports is an error rather than a check.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["src", "tests"]
+}

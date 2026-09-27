@@ -30,7 +30,9 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
+
+from engine.providers import BaseProvider
 
 # ── Typed questions ─────────────────────────────────────────────────────────
 # Mirrors Laya's own schema shape: each question declares its primitive
@@ -117,6 +119,21 @@ class LayaDecision:
     provider: str | None = None
     model: str | None = None
 
+    @property
+    def intent(self) -> str:
+        """The classified intent, or "" when nothing classified one.
+
+        A public reader rather than the executor reaching for `_answer_value`,
+        because the tolerance for Laya's nested `{"choice": ...}` shape against
+        a flat `{"intent": "code_change"}` has to live in one place: the policy
+        below already reads it this way, and a second reader that forgot the
+        nested form would see every real gate answer as "unclassified" and send
+        every question down the pipeline — the exact bug docs/09 §10 fixes,
+        reappearing as a subtler one.
+        """
+        value = _answer_value(self.answers, "intent")
+        return str(value).strip() if value is not None else ""
+
     def to_payload(self) -> dict[str, Any]:
         return {
             "engine": self.engine,
@@ -135,6 +152,36 @@ class LayaDecision:
                 "clarify_warn_threshold": CLARIFY_WARN_THRESHOLD,
             },
         }
+
+
+class GateCall(Protocol):
+    """How the fallback gate's one model call is actually made.
+
+    The gate is the only role that does not go through
+    `AgentOrchestrator.run_agent`, and for a long time that meant it did not go
+    through the accounting either: it called `provider.complete` itself, so its
+    spend never became a `usage` event, its call was missing from a recording
+    that claimed to hold every call, and the audit — which judges a role "silent"
+    when it was assigned but spent nothing — reported the gate as a role that
+    never ran, on every goal of every install without the SDK.
+
+    The executor passes this in so the gate's call is booked the same way as the
+    other seven, rather than the gate growing a second copy of the bookkeeping.
+    Left unset, the gate calls the provider itself, which is what a standalone
+    `LayaService` — the settings screen's capability probe, and every test of
+    the typed contract in isolation — wants.
+    """
+
+    async def __call__(
+        self,
+        provider: BaseProvider,
+        provider_slug: str,
+        system: str,
+        user: str,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> str: ...
 
 
 # ── Typed answer accessors ──────────────────────────────────────────────────
@@ -323,7 +370,9 @@ class LayaService:
         routing = result.get("routing", {}) if isinstance(result, dict) else {}
         return answers or {}, routing or {}
 
-    async def _decide_with_llm(self, state: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+    async def _decide_with_llm(
+        self, state: dict[str, Any], on_call: GateCall | None = None,
+    ) -> tuple[dict[str, Any], str, str]:
         if self._registry is None:
             raise RuntimeError("no registry configured")
         provider, cfg = self._registry.get_provider_for("laya")
@@ -335,13 +384,20 @@ class LayaService:
             raise LayaNotConfigured("no model configured for the laya role")
 
         system = cfg.system_prompt_override or DEFAULT_PROMPTS["laya"]
-        raw = await provider.complete(
-            system_prompt=system,
-            user_prompt=_fallback_prompt(state),
-            model=cfg.model_name,
-            temperature=cfg.temperature,
-            max_tokens=cfg.max_tokens,
-        )
+        user = _fallback_prompt(state)
+        if on_call is not None:
+            raw = await on_call(
+                provider, cfg.provider, system, user, cfg.model_name,
+                cfg.temperature, cfg.max_tokens,
+            )
+        else:
+            raw = await provider.complete(
+                system_prompt=system,
+                user_prompt=user,
+                model=cfg.model_name,
+                temperature=cfg.temperature,
+                max_tokens=cfg.max_tokens,
+            )
         parsed = _extract_json(raw)
         answers = parsed.get("answers", parsed) if isinstance(parsed, dict) else {}
         if not isinstance(answers, dict):
@@ -350,7 +406,9 @@ class LayaService:
 
     # --- public ------------------------------------------------------------
 
-    async def decide(self, state: dict[str, Any]) -> LayaDecision:
+    async def decide(
+        self, state: dict[str, Any], on_call: GateCall | None = None,
+    ) -> LayaDecision:
         """Gate one request. Never raises: an unusable gate is a skipped gate."""
         if self.sdk_available():
             try:
@@ -371,7 +429,7 @@ class LayaService:
 
         if self._registry is not None:
             try:
-                answers, provider, model = await self._decide_with_llm(state)
+                answers, provider, model = await self._decide_with_llm(state, on_call)
             except LayaNotConfigured as exc:
                 # This install has not set the gate's model. Deliberate, and
                 # scored as a skip rather than as a gate that broke.

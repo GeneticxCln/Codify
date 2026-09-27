@@ -286,3 +286,80 @@ order as in `ROLES`.
 `POST /goals*` : `extra=forbid`, no agent fields.
 
 Critic rejection: no auto-fix. Retry `POST /goals/{id}/steps/{step_id}/retry`.
+
+## 5. The conductor — a loop, not a slot
+
+`engine/conductor.py` is a model that calls tools. It is deliberately **not** a
+ninth `AgentRole`, and that is a structural decision rather than a naming one:
+
+- `ROLES` is iterated by `config_problems`, by `_preflight_roles` and by the
+  Settings screen. A ninth entry in `DEFAULT_PROMPTS` would be a ninth role the
+  moment any of them read it, and docs/00 §6.1 fixes the count at eight.
+- So its prompt lives in `engine/chat_prompts.py` (with the turn's), and its
+  configuration lives in `engine_settings` — `conductor_provider`,
+  `conductor_model`, `conductor_max_turns` — not in `agent_configs`. When those
+  are unset a turn borrows the `scribe` row, which is the one role whose job is
+  already writing prose for a person.
+- It is measured through the ordinary `agent_assigned` / `usage` events, so
+  stats and the Settings screen need no new case.
+
+### 5.1 Tools are the pipeline's own doors
+
+| Tool | Routed through | Guarantee it inherits |
+|---|---|---|
+| `read_file` | `LibraryService.read` | `FileSystemService` refuses a path escape |
+| `search_code` | `LibraryService.search` | same |
+| `git_history` | `GitService.read_only` | `READ_ONLY_ARGV`, a name list not a prefix rule |
+| `run_command` | `SandboxService.run_command` | `validate_argv` in `test` mode (docs/00 §6.6) |
+| `delegate` | `ExecutorService.run_planning` | the whole pipeline, unchanged |
+
+Judgement is the model's; authority is the engine's. The conductor chooses among
+doors that already exist — it cannot open one. **There is no write tool**, by
+design: editing is the fixer's job, reachable only through `delegate`, so a code
+change still passes the librarian, planner, fixer, verifier and critic. A
+`write_file` tool would make all five optional for any change the conductor
+decided to make itself, which is the opposite of what a conductor is for.
+
+`tests/test_conductor.py::TestTheToolsAreThePipelinesDoors` is mostly negative
+for that reason, and the first test asserts the *absence* of a write tool by
+name.
+
+**Reachability, observed rather than specified.** The gate runs before the
+conductor, so a request the gate reads as `code_change` never reaches this
+menu — `run_chat` routes it straight to the pipeline. `delegate` is therefore
+reached when a request classified `question` escalates into a change, not on
+every code change. Both routes land in the same `run_planning`, so this is a
+question of how many round trips and not of what gets done; it is recorded in
+docs/09 §10.6 because the table reads as if `delegate` were the main road.
+
+### 5.2 Why `complete_with_tools` is a separate method
+
+`BaseProvider.complete` is single-shot — system prompt, user prompt, one JSON
+reply — and every one of the eight roles depends on that contract. Widening its
+signature would put a `tools` parameter on a path whose entire design is "no
+tools", and would break every test double in the suite for nothing.
+
+So each provider grows a second method. The neutral shape and the four
+translations live in `engine/toolcall.py`, together, because they are the part
+with no type checker: a `content` block that should be a `tool_result` is a 400
+from someone else's API, not an error in our code. Written once and read once.
+
+`supports_tools` is a property, not a caught exception, because
+`Conductor`/`_conduct` asks it *first* — a provider that cannot do tools must
+degrade to a plain answer, not fail the question.
+
+### 5.3 What the loop guarantees
+
+- **It terminates.** `conductor_max_turns` bounds model calls. On the last one
+  the loop's tool calls are *dropped* and the reply's text is returned with a
+  sentence saying it was cut off. An earlier version nudged the model to stop
+  and then honoured the next request anyway; `TestTheCap` found it.
+- **A bad call is recoverable.** An invented tool name, a malformed argument, a
+  tool that raised: each returns text naming what *is* available. `ApiError` and
+  `CommandNotAllowed` are the exceptions — the engine refused, and the sentence
+  says so, because a recoverable-looking refusal teaches the model to retry.
+- **Partial arguments do not kill it.** Providers disagree about shape (a JSON
+  string, a parsed object, Google's stringly dict); `coerce_arguments` is the
+  one place that knows, and it repairs the types Google's round trip costs. A
+  half-written object becomes `{}` so the *tool* can refuse with something the
+  model can read.

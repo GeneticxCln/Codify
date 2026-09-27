@@ -8,6 +8,7 @@ import React, {
 import {
   Workspace,
   ChatMessage,
+  Conversation,
   EngineInfo,
   Event,
   Goal,
@@ -24,13 +25,14 @@ import {
   fetchRecentRunModels,
   createWorkspace,
   setWorkspaceDesignContract,
-  createGoal,
+  createTurn,
   getGoal,
   listGoals,
   getGoalEvents,
   startGoal,
   pauseGoal,
   cancelGoal,
+  setGoalTrace,
   deleteGoal,
   deleteWorkspace,
   retryStep,
@@ -45,23 +47,70 @@ import {
   engineFailureReason,
   enableExecution,
   applyGoal,
+  fetchConversations,
+  createConversation,
+  renameConversation,
+  archiveConversation,
+  attachGoalToConversation,
+  closeBrowserWebview,
+  closeTerminal,
+  navigateBrowserWebview,
+  openBrowserWebview,
+  openTerminal,
+  resizeTerminal,
 } from "./api";
 import { runGoalAction, canStopGoal, isGoalActive } from "./goalActions";
 import { Badge } from "./components/ui/Badge";
-import { Button } from "./components/ui/Button";
 import { IconButton } from "./components/ui/IconButton";
 import { Toggle } from "./components/ui/Toggle";
 import { statusTone } from "./statusTone";
 import { BottomCommandBar, ExecutionMode } from "./components/BottomCommandBar";
+import { Sidebar } from "./components/Sidebar";
+import { TabBar } from "./components/TabBar";
+import {
+  activeTab,
+  closeBrowserTab,
+  closeTab,
+  emptyTabs,
+  focusTab,
+  markTerminalExited,
+  openBrowserTab,
+  openConversation,
+  openTab,
+  openTerminalTab,
+  renameTab,
+  setBrowserUrl,
+  tabForConversation,
+  closeConversation,
+  tabId,
+  type TabState,
+} from "./tabs";
+import {
+  goBack,
+  goForward,
+  visit,
+  type BrowserHistory,
+} from "./browserHistory";
+import { BrowserPane } from "./components/BrowserPane";
+import { TerminalPane } from "./components/TerminalPane";
+import { DEFAULT_GRID, type Grid } from "./terminalModel";
 import { StatsPanel } from "./components/StatsPanel";
 import { ChatTimeline } from "./components/ChatTimeline";
 import { looksLikeAudit } from "./components/AuditReport";
 import { SettingsModal } from "./components/SettingsModal";
+import { CommandPalette } from "./components/CommandPalette";
+import { buildPaletteItems, type PaletteItem } from "./commandPalette";
+import { resolveShortcut } from "./shortcuts";
+import {
+  BROWSER_WINDOW_CLOSED,
+  listenShellEvent,
+  readBrowserWindowClosed,
+} from "./shellEvents";
 import { openGoalStream, GoalStreamHandle } from "./goalStream";
+import { readRejection } from "./rejection.ts";
+import { threadTitleFromPrompt } from "./threadTitle";
 import {
   Code,
-  Settings,
-  FolderGit2,
   AlertCircle,
   History,
   BarChart3,
@@ -98,6 +147,15 @@ export const App: React.FC = () => {
   // toggle that stayed on would quietly record every prompt afterwards.
   const [record, setRecord] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // The shell: what is open, and which one is showing. A pure module holds the
+  // arithmetic (`ui/src/tabs.ts`) because "where do I land when a tab closes"
+  // is the kind of thing that is easy to get subtly wrong and impossible to see
+  // in markup.
+  const [tabState, setTabState] = useState<TabState>(emptyTabs);
+  // Threads in the selected workspace, for the side panel. Owned by the engine
+  // and listed here, so a conversation outlives the window that opened it.
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [conversationsLoading, setConversationsLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   // The goal currently in flight, so the command bar can offer to stop it. This is
   // deliberately not `isLoading`: that flag is set while a goal is being *dispatched*
@@ -260,7 +318,7 @@ export const App: React.FC = () => {
     } catch (err: any) {
       // Discovery failure must not wedge the picker: keep the last catalog
       // and say why the list may be stale.
-      setError(err?.message || "Failed to discover models from the engine.");
+      setError(readRejection(err, "Failed to discover models from the engine."));
     } finally {
       setModelsLoading(false);
     }
@@ -317,7 +375,7 @@ export const App: React.FC = () => {
         setSelectedWs(ws);
       }
     } catch (err: any) {
-      setError(err?.message || "Failed to open the folder browser.");
+      setError(readRejection(err, "Failed to open the folder browser."));
     }
   };
 
@@ -328,7 +386,7 @@ export const App: React.FC = () => {
       setWorkspaces((prev) => [...prev, ws]);
       setSelectedWs(ws);
     } catch (err: any) {
-      setError(err?.message || "Failed to create workspace");
+      setError(readRejection(err, "Failed to create workspace"));
       throw err;
     }
   };
@@ -367,6 +425,513 @@ export const App: React.FC = () => {
     return byWorkspace;
   }, [workspaces]);
 
+  // The thread the visible tab is showing, when it is a chat tab.
+  // The active tab, resolved once. Two derived questions are asked of it below —
+  // which thread is showing, and whether what is showing is a page — and the
+  // second is asked on the *kind*, not on the presence of a `url`, so a terminal
+  // tab can never be mistaken for a browser tab by sharing a field.
+  const activeTabNow = activeTab(tabState);
+  const activeConversationId = activeTabNow?.conversationId;
+  const activeBrowserTab =
+    activeTabNow?.kind === "browser" ? activeTabNow : undefined;
+  const activeTerminalTab =
+    activeTabNow?.kind === "terminal" ? activeTabNow : undefined;
+
+  /**
+   * The transcript for the visible thread.
+   *
+   * `messages` stays one flat list on purpose, and this is the whole of the
+   * multi-conversation change on the UI side. Threading it by message id is what
+   * keeps the live-run path correct: a goal streams into the thread it was asked
+   * in even while the user is looking at another tab, and the store keyed by
+   * "the conversation currently on screen" would have written a running goal's
+   * events into whichever thread happened to be visible. A derived filter cannot
+   * make that mistake.
+   */
+  const visibleMessages = useMemo(() => {
+    if (activeConversationId) {
+      return messages.filter((m) => m.conversationId === activeConversationId);
+    }
+    // Nothing open: only what has not been assigned a thread. A message from
+    // another conversation must never leak into this column.
+    return messages.filter((m) => m.conversationId == null);
+  }, [messages, activeConversationId]);
+
+  /**
+   * The threads with a run still in flight.
+   *
+   * The tab strip's busy dot reads this, which is the only way a user can see a
+   * run is live while looking at another tab. Read from the messages rather than
+   * tracked separately, so a goal that ends is never reported as busy by a
+   * counter nobody decremented.
+   */
+  const activeGoalIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const m of messages) {
+      const busy =
+        m.isStreaming === true ||
+        (m.goal ? isGoalActive(m.goal.status) : false);
+      if (busy && m.conversationId) ids.add(m.conversationId);
+    }
+    return ids;
+  }, [messages]);
+
+  // ── the side panel ────────────────────────────────────────────────
+
+  const loadConversations = useCallback(async () => {
+    if (!selectedWs) {
+      setConversations([]);
+      return;
+    }
+    setConversationsLoading(true);
+    try {
+      setConversations(await fetchConversations(selectedWs.id));
+    } catch (err: any) {
+      setError(readRejection(err, "Failed to load conversations"));
+    } finally {
+      setConversationsLoading(false);
+    }
+  }, [selectedWs]);
+
+  useEffect(() => {
+    void loadConversations();
+  }, [loadConversations]);
+
+  /** Start a thread and open its tab. The panel's only creation action. */
+  const handleNewChat = useCallback(async () => {
+    if (!selectedWs) return;
+    try {
+      const convo = await createConversation(selectedWs.id);
+      setConversations((prev) => [convo, ...prev]);
+      setTabState((prev) =>
+        openConversation(prev, convo.id, convo.title, convo.workspace_id),
+      );
+    } catch (err: any) {
+      setError(readRejection(err, "Failed to start a conversation"));
+    }
+  }, [selectedWs]);
+
+  /**
+   * Start a thread *on* the thread the gesture was made in, and open its tab.
+   *
+   * The menu's "New thread", and the reason it is a separate handler from
+   * `handleNewChat` rather than a second call to it. A new thread with no
+   * `parent_id` is a brand-new chat: a different object that happened to be
+   * triggered by a button with the same name, and the reader has no way to tell
+   * them apart until an unrelated empty tab is already open. `parentConversationId`
+   * undefined — nothing is showing — is a top-level thread, which is the honest
+   * answer rather than a failure: there was no chat to branch off.
+   */
+  const handleNewThread = useCallback(
+    async (parentConversationId?: string) => {
+      if (!selectedWs) return;
+      try {
+        const convo = await createConversation(
+          selectedWs.id,
+          "",
+          parentConversationId,
+        );
+        setConversations((prev) => [convo, ...prev]);
+        setTabState((prev) =>
+          openConversation(prev, convo.id, convo.title, convo.workspace_id),
+        );
+      } catch (err: any) {
+        setError(readRejection(err, "Failed to start a thread"));
+      }
+    },
+    [selectedWs],
+  );
+
+  /**
+   * Show a thread, in its own tab.
+   *
+   * `openConversation` is where "already open means focus it, not open it twice"
+   * lives, so this handler does not have to know: one tab per thread, and the
+   * strip is the set of threads you currently have open.
+   */
+  const handleSelectConversation = useCallback(
+    (conversationId: string) => {
+      const convo = conversations.find((c) => c.id === conversationId);
+      setTabState((prev) =>
+        openConversation(
+          prev,
+          conversationId,
+          convo?.title ?? "",
+          convo?.workspace_id,
+        ),
+      );
+    },
+    [conversations],
+  );
+
+  // ── The keyboard layer ───────────────────────────────────────────────────
+  // ⌘/Ctrl+T new tab, +W close, +1..9 jump, +K palette. The mapping is pure
+  // and tested in `shortcuts.ts`; this is only dispatch. Registered in the
+  // *capture* phase on `window`, so a keystroke that belongs to the shell
+  // wins over whatever the focused control would otherwise do with it — these
+  // are global shortcuts, and capture is the first stop. Escape is
+  // deliberately NOT handled here: the palette owns it while open and stops
+  // its propagation, so one keystroke can never close two surfaces.
+
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  const paletteItems = useMemo(
+    () =>
+      buildPaletteItems({
+        tabs: tabState.tabs,
+        activeId: tabState.activeId,
+        conversations,
+      }),
+    [tabState, conversations],
+  );
+
+  // Every close in the shell goes through here — the strip's close button, the
+  // ⌘W shortcut, and the browser pane — because a browser tab's webview is a
+  // separate OS window that has to be told to go. Two seams would be two ways
+  // to orphan a running page: close the tab one way and the window stays.
+  //
+  // The kind is read from this render's tab list rather than from inside the
+  // state updater: an updater must stay pure, and React runs it twice under
+  // StrictMode — a shell call inside it would fire twice per click.
+  //
+  // `tab.url` is the test for "does this tab own a window". A browser tab that
+  // was opened but never given an address has no webview, and `close` refuses
+  // a tab that has none — so calling it would put the shell's "no browser tab
+  // is open" on screen as an error the user caused by closing an empty tab.
+  const handleCloseTab = useCallback(
+    (id: string) => {
+      setTabState((prev) => closeTab(prev, id));
+      const tab = tabState.tabs.find((t) => t.id === id);
+      if (tab?.kind === "terminal") {
+        // No `ptyId` guard, unlike a browser tab's `url`. `terminal::close`
+        // returns `Ok(())` for an id it does not hold, so calling it for a tab
+        // whose shell has already exited is the documented quiet path rather
+        // than an error to swallow.
+        void closeTerminal(id).catch((err: any) =>
+          setError(readRejection(err, "Could not close that terminal")),
+        );
+      }
+      if (tab?.kind === "browser" && tab.url) {
+        void closeBrowserWebview(id).catch((err: any) =>
+          setError(
+            readRejection(err, "Could not close that tab's browser window"),
+          ),
+        );
+      }
+    },
+    [tabState.tabs],
+  );
+
+  // ── the browser pane's four moves ──────────────────────────────────────
+  //
+  // All four are "send this address to this tab's webview", and they differ only
+  // in where the address comes from and whether the window exists yet. Keeping
+  // them together is the point: a navigation the pane has to know the shape of
+  // is a place for the tab's state and the page to disagree.
+  //
+  // `pending` is the tab being navigated, and it is what the pane's error line
+  // belongs to. One browser tab at a time is deliberate: a refusal is a sentence
+  // about one address, and attaching it to whichever tab happened to be focused
+  // when it arrived would be a lie. Navigating a second tab while one is in
+  // flight is not lost either — the first error is cleared by the second
+  // `setPending`, and the second tab keeps its own history.
+  const [pendingBrowser, setPendingBrowser] = useState<{
+    tabId: string;
+    error: string | null;
+  } | null>(null);
+
+  const sendToBrowser = useCallback(
+    async (tabId: string, url: string, history: BrowserHistory) => {
+      setPendingBrowser({ tabId, error: null });
+      try {
+        await navigateBrowserWebview(tabId, url);
+        setTabState((prev) => setBrowserUrl(prev, tabId, url, history));
+      } catch (err: any) {
+        // The tab is left exactly where it was. Recording the address before
+        // the shell accepted it would have the address bar claim a page that
+        // never loaded, and Back would walk into a place the user never was.
+        setPendingBrowser({
+          tabId,
+          error: readRejection(err, "Could not open that address"),
+        });
+      }
+    },
+    [],
+  );
+
+  // The address bar's first move, which is the only one that creates a window.
+  //
+  // `tabId` is the tab already on screen — the one whose address bar the user
+  // just typed in — and it is passed to the shell as well as to the tab state,
+  // because `browser::open` names the window after it and `browser::navigate`
+  // looks the same name up. It used to mint a second id here, which left the
+  // window and the tab disagreeing about what page they were showing.
+  //
+  // A refusal is therefore reported *in that tab*, which is the tab the user is
+  // looking at and can type a different address into. Keying the message to an
+  // id no tab had is how typing an address came to do nothing at all.
+  const handleOpenBrowser = useCallback(async (id: string, url: string) => {
+    setPendingBrowser({ tabId: id, error: null });
+    try {
+      await openBrowserWebview(id, url);
+      // The folder is recorded for the same reason a chat tab records one: the
+      // strip says which folder a tab is in, and a browser tab that never did
+      // was the odd one out.
+      setTabState((prev) => openBrowserTab(prev, id, url, selectedWs?.id));
+    } catch (err: any) {
+      // The tab keeps its empty address bar, so the next attempt is a retype
+      // rather than a hunt for the button that made this happen. The shell's
+      // wording is the whole of the explanation.
+      setPendingBrowser({
+        tabId: id,
+        error: readRejection(err, "Could not open that address"),
+      });
+    }
+  }, [selectedWs?.id]);
+
+  const handleBackBrowser = useCallback(
+    (id: string) => {
+      const tab = tabState.tabs.find((t) => t.id === id);
+      const step = tab?.history ? goBack(tab.history) : null;
+      if (tab && step) void sendToBrowser(id, step.url, step.history);
+    },
+    [tabState.tabs, sendToBrowser],
+  );
+
+  const handleForwardBrowser = useCallback(
+    (id: string) => {
+      const tab = tabState.tabs.find((t) => t.id === id);
+      const step = tab?.history ? goForward(tab.history) : null;
+      if (tab && step) void sendToBrowser(id, step.url, step.history);
+    },
+    [tabState.tabs, sendToBrowser],
+  );
+
+  // ── the terminal's three moves ─────────────────────────────────────────
+  //
+  // A terminal tab is named by the shell, so the order is: open the PTY, take
+  // the id it answers with, then open the tab under that name. Nothing can go
+  // wrong between the second and third step, which is what makes leaking a PTY
+  // here not a thing to guard against — `openTab` cannot fail.
+  //
+  // There is no "pending terminal" state here, and there used to be. It held the
+  // last PTY opened, and its `error` was rendered only when that id matched the
+  // active tab — which a *failed* open never does, because it leaves the id
+  // null. So a shell that would not start reported itself to state nothing read,
+  // the same silence the browser pane had. The id was then read a second time by
+  // `handleTerminalResize`, which is how resizing came to address the last shell
+  // opened rather than the one being drawn. Both readers were wrong, so the
+  // state is gone rather than trimmed: the tab *is* the record of which PTY is
+  // open, and a failure before there is a tab goes to the app-wide banner.
+
+  const handleOpenTerminal = useCallback(async () => {
+    // The shell starts a PTY in a *workspace*, and refuses anything it cannot
+    // pin to an existing directory (`pin_cwd`). With no workspace chosen there
+    // is nothing to ask for, and the refusal is worth saying before the click
+    // rather than after it.
+    if (!selectedWs) {
+      setError("Pick a workspace before opening a terminal");
+      return;
+    }
+    try {
+      const ptyId = await openTerminal(
+        selectedWs.id,
+        DEFAULT_GRID.cols,
+        DEFAULT_GRID.rows
+      );
+      // The workspace goes on the tab, not just into the open call: the shell's
+      // cwd was pinned from it, and it is the key the scrollback is filed under
+      // if this tab is closed and reopened.
+      setTabState((prev) => openTerminalTab(prev, ptyId, selectedWs.id));
+    } catch (err: any) {
+      setError(readRejection(err, "Could not start a shell"));
+    }
+  }, [selectedWs]);
+
+  // The shell finished on its own — `exit`, or the user closing a window in a
+  // shell that was running something. The tab stays, because a finished
+  // command's scrollback is the record of what it printed and throwing it away
+  // is not what a user who just pressed Ctrl-D meant.
+  const handleTerminalExit = useCallback((ptyId: string) => {
+    setTabState((prev) => markTerminalExited(prev, ptyId));
+  }, []);
+
+  // Called by the pane once it has a real size. The PTY was opened at
+  // DEFAULT_GRID because a pane measures itself after it exists; this is where
+  // it finds out the truth. A resize for a terminal that has already exited is a
+  // no-op in the shell, so the pane does not have to check.
+  //
+  // The id arrives with the grid rather than being read out of `pendingTerminal`.
+  // That state held the *last* terminal opened, so with two shells up, dragging
+  // the window resized the wrong one — the pane is the only party that knows
+  // which terminal it is drawing, and it already knows.
+  const handleTerminalResize = useCallback(
+    (terminalId: string, grid: Grid) => {
+      void resizeTerminal(terminalId, grid.cols, grid.rows).catch((err: any) =>
+        setError(readRejection(err, "Could not resize that terminal")),
+      );
+    },
+    [],
+  );
+
+  // The header's entry point. It opens a tab with no address rather than a
+  // default start page: every hardcoded one would be a site this project chose
+  // for the user, and a `about:blank` would be refused by the guard. An address
+  // bar waiting for an address is the honest version of "new tab".
+  const handleNewBrowserTab = useCallback(() => {
+    const id = tabId("browser");
+    setTabState((prev) => openTab(prev, { id, kind: "browser", title: "New tab" }));
+  }, []);
+
+  // A browser webview can also be closed the other way round — the user
+  // clicking the OS window's own close button — and nothing about that reaches
+  // the strip. The shell announces it (`browser-window-closed`); the tab goes
+  // with the window, through the same neighbour arithmetic every close gets.
+  //
+  // Closing the tab ourselves emits the same event, and this handler is a
+  // no-op for it: the tab is already gone, and `closeBrowserTab` refuses an
+  // unknown id on purpose.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listenShellEvent<unknown>(BROWSER_WINDOW_CLOSED, (payload) => {
+      const tabId = readBrowserWindowClosed(payload);
+      if (tabId) setTabState((prev) => closeBrowserTab(prev, tabId));
+    })
+      .then((off) => {
+        // The unlisten can land after unmount — StrictMode mounts, unmounts
+        // and remounts in development, and the promise has no idea. Dropping it
+        // on the floor would leave a listener calling setState for a window
+        // that is gone.
+        if (cancelled) off();
+        else unlisten = off;
+      })
+      .catch((err: any) => {
+        // A shell that cannot deliver events cannot have opened a browser
+        // window either. Report it rather than leaving a listener that
+        // silently never fires.
+        if (!cancelled) {
+          setError(
+            readRejection(err, "Could not listen for browser window events"),
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const action = resolveShortcut(e);
+      if (!action) return;
+      switch (action.type) {
+        case "new-tab":
+          void handleNewChat();
+          break;
+        case "close-active-tab":
+          // Through the same seam as the strip's close button, so ⌘W on a
+          // browser tab closes its webview too. The listener re-binds when the
+          // tab set changes: cheap, and it buys the one seam above.
+          if (tabState.activeId) handleCloseTab(tabState.activeId);
+          break;
+        case "focus-tab":
+          setTabState((prev) => {
+            const tab = prev.tabs[action.index];
+            return tab ? focusTab(prev, tab.id) : prev;
+          });
+          break;
+        case "focus-last-tab":
+          setTabState((prev) => {
+            const tab = prev.tabs[prev.tabs.length - 1];
+            return tab ? focusTab(prev, tab.id) : prev;
+          });
+          break;
+        case "toggle-palette":
+          setPaletteOpen((v) => !v);
+          break;
+      }
+      // Claimed keystrokes are consumed: no browser default, no second
+      // meaning for whatever held focus.
+      e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [handleNewChat, handleCloseTab, tabState.activeId]);
+
+  /** Palette pick. The item carries data; this switch is the whole act. */
+  const handlePaletteSelect = (item: PaletteItem) => {
+    setPaletteOpen(false);
+    switch (item.kind) {
+      case "tab":
+        setTabState((prev) => focusTab(prev, item.tabId));
+        break;
+      case "conversation":
+        handleSelectConversation(item.conversationId);
+        break;
+      case "settings":
+        openSettings(item.settingsTab);
+        break;
+    }
+  };
+
+  /**
+   * Name a thread, and move its tab with it.
+   *
+   * No dialog: the caller has already decided the name, which is the whole
+   * difference between this and the handler below it. The strip shows the
+   * thread's name, so the tab has to move with the rename — a tab left saying
+   * "New chat" over a thread called "Add an index" is the one thing a label
+   * must never do. A tab's id is not the thread's id, so the tab is looked up
+   * by the thread it points at.
+   */
+  const nameThread = useCallback(
+    async (conversationId: string, title: string) => {
+      const updated = await renameConversation(conversationId, title);
+      setConversations((prev) =>
+        prev.map((c) => (c.id === updated.id ? updated : c)),
+      );
+      setTabState((prev) => {
+        const tab = tabForConversation(prev, conversationId);
+        return tab ? renameTab(prev, tab.id, updated.title) : prev;
+      });
+    },
+    [],
+  );
+
+  const handleRenameConversation = useCallback(
+    async (conversationId: string, title: string) => {
+      const next = window.prompt("Name this conversation", title) ?? "";
+      if (!next.trim()) return;
+      try {
+        await nameThread(conversationId, next.trim());
+      } catch (err: any) {
+        setError(readRejection(err, "Failed to rename the conversation"));
+      }
+    },
+    [nameThread],
+  );
+
+  /**
+   * Hide a thread from the panel.
+   *
+   * Archived, never deleted: the engine keeps every run it held either way, so
+   * this tidies the tab list and cannot erase a history.
+   */
+  const handleArchiveConversation = useCallback(
+    async (conversationId: string) => {
+      try {
+        await archiveConversation(conversationId);
+        setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+        setTabState((prev) => closeConversation(prev, conversationId));
+      } catch (err: any) {
+        setError(readRejection(err, "Failed to archive the conversation"));
+      }
+    },
+    [],
+  );
+
   // Subscribe to live goal events via WebSocket (reconnects with backoff,
   // closes itself when the goal reaches a terminal status).
   const subscribeToGoal = useCallback(
@@ -402,7 +967,7 @@ export const App: React.FC = () => {
               );
             })
             .catch((err: any) => {
-              setError(err?.message || "Failed to refresh goal");
+              setError(readRejection(err, "Failed to refresh goal"));
             });
         }
       };
@@ -434,7 +999,7 @@ export const App: React.FC = () => {
               );
             })
             .catch((err: any) => {
-              setError(err?.message || "Failed to refresh goal");
+              setError(readRejection(err, "Failed to refresh goal"));
             });
         },
       });
@@ -464,7 +1029,7 @@ export const App: React.FC = () => {
       });
       setHistory(goals ?? []);
     } catch (err: any) {
-      setError(err?.message || "Failed to load goal history");
+      setError(readRejection(err, "Failed to load goal history"));
     } finally {
       setHistoryLoading(false);
     }
@@ -490,11 +1055,45 @@ export const App: React.FC = () => {
           getGoal(goalId),
           getGoalEvents(goalId),
         ]);
+        // Which thread this goal belongs to, resolved before anything is put in
+        // the transcript — because a message stamped with a thread the panel is
+        // not showing is a message the user clicks "restore" for and then does
+        // not see. A goal that predates conversations gets one here, so history
+        // lands in a tab rather than in a bucket nothing renders.
+        //
+        // The thread is also written back (`PUT /goals/{id}/conversation`), so
+        // the link is the store's and not just the panel's — without it the
+        // next restart would read this run as its own thread again (docs/09
+        // §6). Best effort with the error surfaced: the restore must not be
+        // lost because the filing failed, but a filing that failed must not be
+        // silent either.
+        let threadId = goal.conversation_id ?? null;
+        if (!threadId && selectedWs) {
+          const convo = await createConversation(
+            selectedWs.id,
+            (goal.description || goal.title).slice(0, 200),
+          );
+          threadId = convo.id;
+          setConversations((prev) => [convo, ...prev]);
+          try {
+            await attachGoalToConversation(goalId, convo.id);
+          } catch (err: any) {
+            setError(
+              readRejection(err, "Goal restored, but its thread link could not be saved to the engine"),
+            );
+          }
+        }
+        const thread = threadId ?? null;
+
         const userMsg: ChatMessage = {
           id: `user-${goalId}`,
           role: "user",
           content: goal.title,
           timestamp: goal.created_at * 1000,
+          // A restored goal returns to the thread it was asked in, which is the
+          // difference between history that lands in the right tab and history
+          // that appears wherever the user happened to be looking.
+          conversationId: thread,
         };
         const assistantMsg: ChatMessage = {
           id: `assistant-${goalId}`,
@@ -505,6 +1104,7 @@ export const App: React.FC = () => {
           events: [...events].sort((a, b) => a.sequence - b.sequence),
           // Terminal goals are done; a live one re-subscribes below instead.
           isStreaming: false,
+          conversationId: thread,
         };
         setMessages((prev) => [
           ...prev.filter(
@@ -513,18 +1113,26 @@ export const App: React.FC = () => {
           userMsg,
           assistantMsg,
         ]);
+        // And the tab comes forward, so the thing just restored is the thing on
+        // screen. A goal with no thread and no workspace has nowhere to go, and
+        // the transcript keeps it in the unthreaded bucket instead.
+        if (thread) {
+          setTabState((prev) =>
+            openConversation(prev, thread, goal.title, goal.workspace_id),
+          );
+        }
         setHistoryOpen(false);
         const terminal = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
         if (!terminal.has(goal.status)) {
           subscribeToGoal(goalId, assistantMsg.id);
         }
       } catch (err: any) {
-        setError(err?.message || "Failed to restore goal");
+        setError(readRejection(err, "Failed to restore goal"));
       } finally {
         setRestoring(false);
       }
     },
-    [restoring, subscribeToGoal],
+    [restoring, subscribeToGoal, selectedWs],
   );
 
   // Goals whose execution we have already kicked off in direct mode. Without
@@ -664,6 +1272,50 @@ export const App: React.FC = () => {
     const wsToUse = selectedWs;
     setError(null);
 
+    // Which thread this turn belongs to. A message typed with no tab open starts
+    // one, because a turn that had no thread would be invisible to the panel —
+    // and a thread that only exists in the transcript is the defect this whole
+    // feature replaces.
+    let conversationId = activeConversationId;
+    if (!conversationId) {
+      try {
+        const convo = await createConversation(wsToUse.id, threadTitleFromPrompt(promptText));
+        conversationId = convo.id;
+        setConversations((prev) => [convo, ...prev]);
+        setTabState((prev) =>
+          openConversation(prev, convo.id, convo.title, convo.workspace_id),
+        );
+      } catch (err: any) {
+        setError(readRejection(err, "Failed to start a conversation"));
+        return false;
+      }
+    }
+    const threadId = conversationId;
+
+    // A thread made by "New chat" has no name, and nothing else was ever going
+    // to give it one: the engine stores exactly what it is told. With a tab per
+    // thread that stops being cosmetic — three untitled threads are three tabs
+    // all labelled "New chat", so opening one looks precisely like nothing
+    // happening. The first prompt is the name.
+    //
+    // Only when the panel knows the thread *and* knows it has no name. A thread
+    // missing from this list was created moments ago with this very prompt as
+    // its title, or belongs to another workspace; either way, do not guess and
+    // overwrite a name this function cannot see.
+    const named = conversations.find((c) => c.id === threadId);
+    if (named && !named.title.trim()) {
+      try {
+        await nameThread(threadId, threadTitleFromPrompt(promptText));
+      } catch (err: any) {
+        // The turn runs either way. Surfaced rather than swallowed because an
+        // unnamed thread is a real defect the user meets again in the strip,
+        // and this is the only line that can say why.
+        setError(
+          readRejection(err, "The turn ran, but naming the thread failed"),
+        );
+      }
+    }
+
     const userMsgId = `user-${Date.now()}`;
     const assistantMsgId = `assistant-${Date.now() + 1}`;
 
@@ -672,6 +1324,7 @@ export const App: React.FC = () => {
       role: "user",
       content: promptText,
       timestamp: Date.now(),
+      conversationId: threadId,
     };
 
     const assistantMsg: ChatMessage = {
@@ -681,27 +1334,24 @@ export const App: React.FC = () => {
       timestamp: Date.now() + 1,
       isStreaming: true,
       events: [],
+      conversationId: threadId,
     };
 
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
     setIsLoading(true);
 
     try {
-      const isDryRun = mode === "dry_run";
-      const isPlanOnly = mode === "plan_only"; // now backed by a real engine field
-      const parallelEnabled = parallel; // independent steps may run concurrently
-      // The engine caps titles at 200 chars; send the full prompt as the
-      // description so the planner sees every word regardless of length.
-      const goal = await createGoal(
-        wsToUse.id,
+      // A turn, not a goal. The gate classifies what was said and the engine
+      // decides the shape — a question is answered from one model call, and
+      // anything else runs the full pipeline. The composer's run flags (dry
+      // run, plan-only, parallel, the design/knowledge modes) deliberately do
+      // NOT come along: sending them would be asking the client to make the
+      // decision, which is the thing that produced a plan for "hi".
+      const goal = await createTurn(
+        threadId,
         promptText,
-        promptText,
-        isDryRun,
         selectedModel.provider,
         selectedModel.id,
-        isPlanOnly,
-        parallelEnabled,
-        goalMode,
         record,
       );
       // Cleared once dispatched: a design deliverable is what THIS goal is for,
@@ -725,7 +1375,7 @@ export const App: React.FC = () => {
       // rather than before: before it, there is no id to cancel.
       setActiveGoalId(goal.id);
     } catch (err: any) {
-      const detail = err?.message || "Failed to dispatch agent";
+      const detail = readRejection(err, "Failed to dispatch agent");
       setError(detail);
       setMessages((prev) =>
         prev.map((m) =>
@@ -759,7 +1409,7 @@ export const App: React.FC = () => {
         ),
       );
     } catch (err: any) {
-      setError(err?.message || "Failed to enable execution");
+      setError(readRejection(err, "Failed to enable execution"));
     }
   };
 
@@ -794,7 +1444,7 @@ export const App: React.FC = () => {
         ),
       );
     } catch (err: any) {
-      setError(err?.message || "Failed to apply changes");
+      setError(readRejection(err, "Failed to apply changes"));
     }
   };
 
@@ -820,7 +1470,7 @@ export const App: React.FC = () => {
         );
         return true;
       } catch (err: any) {
-        setError(err?.message || "Failed to update plan step");
+        setError(readRejection(err, "Failed to update plan step"));
         // False leaves the editor open with the user's edits intact: a refused
         // save (conflict, engine down) must not destroy what they typed.
         return false;
@@ -880,6 +1530,18 @@ export const App: React.FC = () => {
     if (outcome.kind === "refused") {
       setError(outcome.message || "Failed to pause goal");
     }
+  };
+
+  const handleSetGoalTrace = async (goalId: string, enabled: boolean) => {
+    setError(null);
+    // The engine owns the rule about when a recording may start, and refuses
+    // with `trace_locked` once the run has begun. That refusal is surfaced here
+    // rather than swallowed: a control that silently did nothing is worse than
+    // one that says why.
+    const updated = await setGoalTrace(goalId, enabled);
+    setMessages((prev) =>
+      prev.map((m) => (m.goal?.id === goalId ? { ...m, goal: updated } : m)),
+    );
   };
 
   const handleCancelGoal = async (goalId: string, _version: number) => {
@@ -968,7 +1630,7 @@ export const App: React.FC = () => {
       delete goalStreams.current[goalId];
       autoStartedGoals.current.delete(goalId);
     } catch (err: any) {
-      setError(err?.message || "Failed to delete goal");
+      setError(readRejection(err, "Failed to delete goal"));
     }
   };
 
@@ -1017,11 +1679,11 @@ export const App: React.FC = () => {
           );
           await loadWorkspacesRef.current?.();
         } catch (retryErr: any) {
-          setError(retryErr?.message || "Failed to delete workspace");
+          setError(readRejection(retryErr, "Failed to delete workspace"));
         }
         return;
       }
-      setError(err?.message || "Failed to delete workspace");
+      setError(readRejection(err, "Failed to delete workspace"));
     }
   };
 
@@ -1054,7 +1716,7 @@ export const App: React.FC = () => {
         ),
       );
     } catch (err: any) {
-      setError(err?.message || "Failed to retry step");
+      setError(readRejection(err, "Failed to retry step"));
     }
   };
 
@@ -1081,15 +1743,14 @@ export const App: React.FC = () => {
             <span>CODIFY</span>
           </div>
 
-          {selectedWs && (
-            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-codify-raised border border-codify-border text-xs text-codify-secondary">
-              <FolderGit2 className="w-3.5 h-3.5 text-blue-400" />
-              <span className="font-semibold">{selectedWs.name}</span>
-              <span className="text-2xs text-codify-muted font-mono hidden md:inline truncate max-w-xs">
-                ({selectedWs.root_path})
-              </span>
-            </div>
-          )}
+          {/*
+            No folder pill here. It used to sit beside the logo naming
+            `selectedWs` — one global claim about which folder the app was in —
+            and it was wrong for every tab but the one the composer happened to
+            point at. The folder is per tab now (`Tab.workspaceId`), because two
+            tabs in two folders cannot both be described by one label in the
+            header. See `TabBar.tsx`.
+          */}
         </div>
 
         <div className="flex items-center gap-3">
@@ -1171,10 +1832,12 @@ export const App: React.FC = () => {
             <span>History</span>
           </Toggle>
 
-          <Button tone="subtle" onClick={() => setIsSettingsOpen(true)}>
-            <Settings className="w-3.5 h-3.5" />
-            <span>Keys &amp; Endpoints</span>
-          </Button>
+          {/* Browser, Terminal and Keys & Endpoints used to be here, as three
+              labelled buttons. They are badges on the side panel now: the header
+              is for state (which workspace, is the engine up), and a second row
+              of actions for unrelated things was pushing the connection pill out
+              of the room it needed. The panel is already "the things you can
+              open". */}
         </div>
       </header>
 
@@ -1191,62 +1854,153 @@ export const App: React.FC = () => {
           reflows, the command bar stays whole, and the boundary is a visible border
           rather than an occlusion. */}
       <main className="flex-1 flex overflow-hidden">
+        {/* The threads. A flex sibling, not an overlay: the transcript reflows
+            rather than being covered, which is the same reasoning as the drawers
+            below. */}
+        <Sidebar
+          conversations={conversations}
+          workspaces={workspaces}
+          activeConversationId={activeConversationId}
+          onNewChat={() => void handleNewChat()}
+      onNewThread={(parentId) => void handleNewThread(parentId)}
+          onSelect={handleSelectConversation}
+          onRename={(id, title) => void handleRenameConversation(id, title)}
+          onArchive={(id) => void handleArchiveConversation(id)}
+          onOpenBrowser={handleNewBrowserTab}
+          onOpenTerminal={() => void handleOpenTerminal()}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          loading={conversationsLoading}
+        />
         <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
+          {/* The one place a refusal is shown when there is no pane to show it
+              in. It carries a dismiss control because it has no natural
+              lifetime: `setError(null)` is called by whichever handler owns the
+              next action, so a message from an action that is not repeated
+              stayed on screen until the user happened to do something else. A
+              refusal the reader has understood and cannot clear is an obstacle,
+              not a report.
+
+              `IconButton` rather than a bare `<button>` so the label is a
+              required prop — a dismiss icon with no accessible name is a
+              control nobody using a screen reader can find. */}
           {error && (
             <div className="mx-auto mt-3 mb-1 w-full max-w-4xl px-4">
-              <div className="flex items-start gap-2 p-2.5 rounded-xl bg-red-950/40 border border-red-800 text-xs text-red-300">
+              <div
+                role="alert"
+                className="flex items-start gap-2 p-2.5 rounded-xl bg-red-950/40 border border-red-800 text-xs text-red-300"
+              >
                 <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-red-400" />
-                <span className="leading-relaxed">{error}</span>
+                <span className="leading-relaxed flex-1">{error}</span>
+                <IconButton
+                  label="Dismiss error"
+                  onClick={() => setError(null)}
+                  className="text-red-300 hover:text-red-100"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </IconButton>
               </div>
             </div>
           )}
-          <ChatTimeline
-            messages={messages}
-            onStartGoal={handleStartGoal}
-            onEnableExecution={handleEnableExecution}
-            onApplyGoal={handleApplyGoal}
-            onEditStep={handleEditStep}
-            onPauseGoal={handlePauseGoal}
-            onCancelGoal={handleCancelGoal}
-            onRetryStep={handleRetryStep}
-            onDeleteGoal={handleDeleteGoal}
-            onQuickPrompt={(text) => handleSendMessage(text)}
-            onOpenSettings={openSettings}
-            onImportAudit={handleImportAudit}
-            onPinDesignContract={handleSetDesignContract}
-            pinnedContracts={pinnedContracts}
-          />
-
-          <BottomCommandBar
+          {/* What is open. The strip is the only place that knows a tab is busy
+              when it is not the one on screen, so it takes the ids of the goals
+              still streaming. */}
+          <TabBar
+            tabs={tabState.tabs}
+            activeId={tabState.activeId}
+            onFocus={(id) => setTabState((prev) => focusTab(prev, id))}
+            onClose={handleCloseTab}
+            busyTabIds={tabState.tabs
+              .filter((t) => t.conversationId && activeGoalIds.has(t.conversationId))
+              .map((t) => t.id)}
             workspaces={workspaces}
-            selectedWorkspace={selectedWs}
-            onSelectWorkspace={setSelectedWs}
-            onBrowseWorkspace={handleBrowseWorkspace}
-            onCreateWorkspace={handleCreateWorkspace}
-            onDeleteWorkspace={handleDeleteWorkspace}
-            onSetDesignContract={handleSetDesignContract}
-            availableModels={modelCatalog.models}
-            selectedModel={selectedModel}
-            onSelectModel={setSelectedModel}
-            modelStatus={modelCatalog.providers}
-            modelSignals={modelSignals}
-            modelsLoading={modelsLoading}
-            onRefreshModels={() => loadModels(true)}
-            mode={mode}
-            onChangeMode={setMode}
-            goalMode={goalMode}
-            onChangeGoalMode={setGoalMode}
-            parallel={parallel}
-            onToggleParallel={setParallel}
-            record={record}
-            onToggleRecord={setRecord}
-            onSubmit={handleSendMessage}
-            isLoading={isLoading}
-            onStop={handleStopGoal}
-            canStop={canStop}
-            isRunning={isGoalActive(activeGoal?.status)}
-            onOpenSettings={() => openSettings("keys")}
           />
+          {/* What the active tab is. A browser tab replaces the transcript
+              rather than sitting under it: the chat column and the composer are
+              a conversation, and a page that arrived in the strip has its own
+              controls. Rendering both would leave a user with a goal transcript
+              they are not reading sitting under an address bar they are.
+
+              The page itself is a separate OS window (`docs/09` §7.2) —
+              `BrowserPane` is its address bar, not a viewport, and says so. */}
+          {activeBrowserTab ? (
+            <BrowserPane
+              tabId={activeBrowserTab.id}
+              url={activeBrowserTab.url}
+              history={activeBrowserTab.history}
+              onOpen={(url) => void handleOpenBrowser(activeBrowserTab.id, url)}
+              onNavigate={(url) => {
+                const tab = activeBrowserTab;
+                if (!tab?.history) return;
+                void sendToBrowser(tab.id, url, visit(tab.history, url));
+              }}
+              onBack={() => handleBackBrowser(activeBrowserTab.id)}
+              onForward={() => handleForwardBrowser(activeBrowserTab.id)}
+              error={
+                pendingBrowser?.tabId === activeBrowserTab.id
+                  ? pendingBrowser.error
+                  : null
+              }
+            />
+          ) : activeTerminalTab ? (
+            <TerminalPane
+              terminalId={activeTerminalTab.id}
+              workspaceId={activeTerminalTab.workspaceId}
+              exited={activeTerminalTab.exited}
+              onResize={handleTerminalResize}
+              onExit={handleTerminalExit}
+            />
+          ) : (
+            <>
+            <ChatTimeline
+              messages={visibleMessages}
+              onStartGoal={handleStartGoal}
+              onEnableExecution={handleEnableExecution}
+              onApplyGoal={handleApplyGoal}
+              onEditStep={handleEditStep}
+              onPauseGoal={handlePauseGoal}
+              onCancelGoal={handleCancelGoal}
+              onSetGoalTrace={handleSetGoalTrace}
+              onRetryStep={handleRetryStep}
+              onDeleteGoal={handleDeleteGoal}
+              onQuickPrompt={(text) => handleSendMessage(text)}
+              onOpenSettings={openSettings}
+              onImportAudit={handleImportAudit}
+              onPinDesignContract={handleSetDesignContract}
+              pinnedContracts={pinnedContracts}
+            />
+
+            <BottomCommandBar
+              workspaces={workspaces}
+              selectedWorkspace={selectedWs}
+              onSelectWorkspace={setSelectedWs}
+              onBrowseWorkspace={handleBrowseWorkspace}
+              onCreateWorkspace={handleCreateWorkspace}
+              onDeleteWorkspace={handleDeleteWorkspace}
+              onSetDesignContract={handleSetDesignContract}
+              availableModels={modelCatalog.models}
+              selectedModel={selectedModel}
+              onSelectModel={setSelectedModel}
+              modelStatus={modelCatalog.providers}
+              modelSignals={modelSignals}
+              modelsLoading={modelsLoading}
+              onRefreshModels={() => loadModels(true)}
+              mode={mode}
+              onChangeMode={setMode}
+              goalMode={goalMode}
+              onChangeGoalMode={setGoalMode}
+              parallel={parallel}
+              onToggleParallel={setParallel}
+              record={record}
+              onToggleRecord={setRecord}
+              onSubmit={handleSendMessage}
+              isLoading={isLoading}
+              onStop={handleStopGoal}
+              canStop={canStop}
+              isRunning={isGoalActive(activeGoal?.status)}
+              onOpenSettings={() => openSettings("keys")}
+            />
+            </>
+          )}
         </div>
 
         {/* Cross-goal statistics drawer: the wide-angle lens over the same
@@ -1350,6 +2104,16 @@ export const App: React.FC = () => {
           // which ids the menus lead with.
           loadModelSignals();
         }}
+      />
+
+      {/* ⌘K. After SettingsModal in the DOM on purpose: both sit at z-50, and
+          a later sibling paints above — the palette must be reachable while
+          the dialog is open. */}
+      <CommandPalette
+        open={paletteOpen}
+        items={paletteItems}
+        onClose={() => setPaletteOpen(false)}
+        onSelect={handlePaletteSelect}
       />
     </div>
   );

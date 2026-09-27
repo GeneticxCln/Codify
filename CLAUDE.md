@@ -39,7 +39,8 @@ mean the change is shippable.
 | `make test` | Full Python suite via `unittest` |
 | `make test-streams` | Stream-isolation tests **by name**, not just by discovery |
 | `make test-ui` | `ui/tests/` through `node --test` (needs Node 22.6+) |
-| `make build-ui` | TypeScript check + Vite production build |
+| `make typecheck-ui-tests` | `tsc --noEmit` over `ui/src` **and** `ui/tests` — config `ui/tsconfig.test.json` |
+| `make build-ui` | TypeScript check (`src` only) + Vite production build |
 | `make check-tauri` | `cargo check` + `cargo fmt --check` |
 | `make ci-python-floor` | Only the 3.10 leg; never skips — it fails with install instructions |
 
@@ -60,8 +61,9 @@ Quoted from `docs/00` §6, which is the owner. Do not weaken one to make a chang
 3. Engine binds `127.0.0.1`. Every HTTP/WS request requires `Authorization: Bearer <boot_token>`. *(docs/00 §6.3)*
 4. Responses NEVER include raw API keys. *(docs/00 §6.4)*
 5. `LocalProvider.base_url` MUST pass `validate_local_base_url` before every request. *(docs/00 §6.5)*
-6. Only verifier-proposed argv reaches `SandboxService.run_command` in `test` mode; the librarian's requests use the same validator in `read_only` mode and cannot change the workspace. *(docs/00 §6.6)*
+6. Every `SandboxService.run_command` call goes through `validate_argv` first. Verifier-proposed argv and conductor tool calls reach it in `test` mode; the librarian's requests use it in `read_only` mode and cannot change the workspace. The conductor proposes argv, it does not widen the allowlist. *(docs/00 §6.6)*
 7. Single SQLite file: `~/.codify/codify.db`. There is no `agents.db`. *(docs/00 §6.7)*
+8. A turn is created only by `POST /conversations/{id}/turns`. `POST /goals` refuses `mode: "chat"`, and `TurnCreate` carries no pipeline flags, so a client chooses neither that a turn exists nor what it becomes — the gate does. *(docs/00 §6.8)*
 
 ## Layout
 
@@ -69,13 +71,17 @@ Quoted from `docs/00` §6, which is the owner. Do not weaken one to make a chang
 engine/         Python: orchestration, providers, sandbox, git, db, trace
   models.py     ROLES + ROLE_JOB + ROLE_TIMING — the one place roles are defined
   default_prompts.py   one system prompt per role
+  chat_prompts.py  the turn + conductor prompts — no AgentRole, so not in the file above
+  conductor.py    the model-driven dispatch loop; its tools are the pipeline's own doors
+  toolcall.py     the neutral tool-calling shape and its four protocol translations
   spawn_guard.py process guard; every spawn routes through it
 ui/             React 19 + TS + Vite; ui/tests/ run through node --test
 src-tauri/      Tauri v2 Rust shell
 tests/          Python suite; stream_isolation.py is the shared isolation helper
 scripts/        fake_ollama.py (drive a goal with no API keys), replay_trace.py
+                 drive_a_turn.py (drive a turn against a real local model)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–07, below
+docs/           00–09, below
 .githooks/      versioned pre-commit / pre-push
 ```
 
@@ -96,7 +102,10 @@ docs/           00–07, below
   config live in `pyproject.toml`, not in a command line.
 - **Type annotations are checked, not decorative.** mypy must pass on every type you
   write. A `type: ignore` carries its exact error code, and an ignore that stops being
-  needed is itself an error.
+  needed is itself an error. The same is true of TypeScript, in `ui/tests/` as much as
+  in `ui/src/`: `node --test` runs the suite with `--experimental-strip-types`, which
+  *erases* types rather than checking them, so a test that builds a value an interface
+  no longer accepts passes. `make typecheck-ui-tests` is the leg that says so.
 - **A new ruff `S` finding is a decision, not noise.** Each `per-file-ignores` entry
   names its exemption with the reason it is safe; widen deliberately, with the fixes.
 - **No new process start outside the spawn guard.** `tests/test_no_unguarded_spawns.py`
@@ -123,6 +132,7 @@ docs/           00–07, below
 | `docs/06` | Live model discovery — why there is no catalog |
 | `docs/07` | Spawn guard and deterministic tests |
 | `docs/08` | Benchmarks: what a number may claim, and the no-third-party-source policy |
+| `docs/09` | The workspace shell: conversation model, tab rules, both panes, the browser pane's separate-window decision, and §10 on what a turn is |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.

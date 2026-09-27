@@ -57,6 +57,47 @@ class ReplaySurfaceCase(TraceHarness):
             "the replay took the same stages as a real run",
         )
 
+    async def test_a_gated_run_replays_as_a_match_too(self) -> None:
+        """A recording that holds the gate's call must still be replayable.
+
+        The gate is recovered from the recorded verdict rather than served by the
+        replay provider — it decides whether the run happens at all, and a replay
+        that re-asked a provider could sail past a block the recording hit. So its
+        call is counted and reported on its own line. Left out of the arithmetic
+        it would make every replay of a gated run report a divergence that never
+        happened, which is the one thing a replay must not do.
+        """
+        pristine = self._clone_of(self.ws, folder="ws-gated")
+        goal = self.goals.create(
+            GoalCreate(workspace_id=self.ws.id, title="t", description="", trace=True)
+        )
+        await self._run(self._gated_engine(ScriptedProvider(dict(RESPONSES))), goal.id)
+
+        calls = self.traces.calls(goal.id)
+        gate_calls = [c for c in calls if c["role"] == "laya"]
+        self.assertEqual(
+            len(gate_calls), 1, "the recorded run's gate must have called a model"
+        )
+
+        into = Path(tempfile.mkdtemp()) / "scratch"
+        report = await replay(self.conn, goal.id, source=Path(pristine.root_path), into=into)
+
+        self.assertTrue(
+            report["matched"],
+            f"replay diverged: {report['diverged']!r} "
+            f"({report['served_calls']}/{report['recorded_calls']} served)",
+        )
+        self.assertEqual(report["gate_calls_replayed"], 1)
+        self.assertEqual(
+            report["served_calls"] + report["gate_calls_replayed"],
+            report["recorded_calls"],
+            "every recorded call is either served or replayed from the event log",
+        )
+        self.assertIn(
+            ("laya", "allow"), report["stages"],
+            "the replay took the same gate verdict as the run",
+        )
+
     async def test_a_replay_never_writes_to_the_tree_it_read_from(self) -> None:
         """The whole reason the copy exists. A replay that fixed files in the
         user's checkout would be worse than no replay at all."""

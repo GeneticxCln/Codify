@@ -24,7 +24,7 @@ from engine.executor import (
     AgentOutputInvalid,
     ExecutorService,
 )
-from engine.laya import LayaDecision, LayaService
+from engine.laya import GateCall, LayaDecision, LayaService
 from engine.models import (
     ROLES,
     AgentConfig,
@@ -84,7 +84,9 @@ class SkippedGate(LayaService):
     """The gate is its own concern (docs/05); these tests are about the design
     contract."""
 
-    async def decide(self, state: dict[str, Any]) -> LayaDecision:
+    async def decide(
+        self, state: dict[str, Any], on_call: GateCall | None = None,
+    ) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 
 

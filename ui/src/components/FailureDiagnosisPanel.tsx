@@ -1,3 +1,4 @@
+import { readRejection } from "../rejection.ts";
 import React, { useEffect, useState } from "react";
 import {
   AgentConfig,
@@ -81,7 +82,7 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
       setCatalog((cat as ModelCatalog).models ?? []);
       setStatus((cat as ModelCatalog).providers ?? []);
     } catch (err: any) {
-      setLoadError(err?.message || "Could not read the engine's current state.");
+      setLoadError(readRejection(err, "Could not read the engine's current state."));
     } finally {
       setLoading(false);
     }

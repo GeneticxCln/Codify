@@ -1,0 +1,106 @@
+/**
+ * Events the desktop shell emits to the app window.
+ *
+ * The engine's own event stream is a WebSocket (`goalStream.ts`). This is the
+ * other channel — the Tauri IPC one — carrying facts the shell alone knows
+ * because they happened to the shell: a terminal's output, a browser webview's
+ * window being destroyed.
+ *
+ * Small, and guarded on purpose. Outside Tauri there is no shell to emit from,
+ * so [`listenShellEvent`] resolves to a no-op unlisten instead of throwing: the
+ * same posture `engineFailureReason` takes in `api.ts`, and the reason a caller
+ * never has to ask "am I in the desktop app" itself.
+ *
+ * The event name and the payload shape here are the other end of
+ * `src-tauri/src/browser.rs` and `src-tauri/src/terminal.rs`. Nothing in either
+ * type system spans the two, so a test on the Rust side reads *this file* and
+ * fails if they ever drift — the same "parse the committed file, do not assume"
+ * move as the browser capability test.
+ */
+
+/** A browser tab's webview window was destroyed. */
+export const BROWSER_WINDOW_CLOSED = "browser-window-closed";
+
+/** The payload `browser-window-closed` carries. */
+export interface BrowserWindowClosed {
+  tab_id: string;
+}
+
+/**
+ * The tab id in a `browser-window-closed` payload, or null when the payload is
+ * not one.
+ *
+ * Validated rather than cast. The event crosses a process boundary, and the
+ * handler it feeds closes a *tab*: a payload that is null, a string, or missing
+ * the field must close nothing at all. `null` is the answer that makes the
+ * caller's decision obvious — "no tab named this" — rather than an id that
+ * matches nothing by accident.
+ */
+export function readBrowserWindowClosed(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const tabId = (payload as { tab_id?: unknown }).tab_id;
+  return typeof tabId === "string" && tabId.length > 0 ? tabId : null;
+}
+
+/** A terminal's output, as it arrives. */
+export const TERMINAL_OUTPUT = "terminal-output";
+
+/** A terminal's shell finished. The scrollback stays; the input does not. */
+export const TERMINAL_EXIT = "terminal-exit";
+
+/**
+ * The one chunk of `terminal-output`, or null when the payload is not one.
+ *
+ * Validated for the same reason [`readBrowserWindowClosed`] is, and one step
+ * further: `data` is written straight into a live terminal rather than closing a
+ * tab, so a payload that is the right object with the wrong field types would
+ * reach xterm as `"undefined"` on screen. Both halves must be strings, and the
+ * id must be non-empty — a terminal named `""` is a terminal nothing will match.
+ *
+ * The chunk is *not* required to be non-empty. An empty `data` is a real thing
+ * the reader thread can emit (a `read` that returned bytes the lossy decode
+ * turned into nothing), and refusing it would silently drop a write that xterm
+ * would have handled.
+ */
+export function readTerminalOutput(
+  payload: unknown
+): { id: string; data: string } | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const { id, data } = payload as { id?: unknown; data?: unknown };
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (typeof data !== "string") return null;
+  return { id, data };
+}
+
+/**
+ * The terminal id in a `terminal-exit` payload, or null when the payload is not
+ * one.
+ *
+ * An exit is what makes a terminal tab's input stop accepting keys, so a
+ * malformed payload here means a shell that has finished but still takes
+ * keystrokes — and every one of them goes to `codify_terminal_write` for an id
+ * that is no longer in the map.
+ */
+export function readTerminalExit(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const id = (payload as { id?: unknown }).id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+/**
+ * Subscribe to a shell event; resolves to the unsubscribe function.
+ *
+ * Resolving to a function even when there is nothing to subscribe to is the
+ * point: the caller can hold the result and call it unconditionally in its
+ * cleanup, with no branch of its own on whether the shell is there.
+ */
+export async function listenShellEvent<T>(
+  event: string,
+  handler: (payload: T) => void,
+): Promise<() => void> {
+  if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) {
+    return () => {};
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<T>(event, (received) => handler(received.payload));
+}

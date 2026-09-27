@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # The pipeline slots. Each one has a different *ability*, not a different
 # persona: the librarian is the only role that reads the workspace, the design
@@ -26,7 +26,15 @@ ProviderProtocol = Literal["anthropic", "openai_compat", "ollama", "google"]
 # the brand file: instead of deriving a contract from an existing one (or from
 # nothing), its output becomes the workspace's DESIGN.md — reviewed by the
 # critic before it is offered to be pinned.
-GoalMode = Literal["normal", "design", "knowledge"]
+#
+# "chat" is not a pipeline like the other three. It is a *turn*: the Laya gate
+# classifies the request, and a question is answered from one model call instead
+# of being planned, fixed, verified and critiqued. It is still a goal row, and
+# that is deliberate rather than a shortcut — `events.goal_id` is NOT NULL, so
+# the event log *is* the WebSocket, the audit trail and the stats feed, and a
+# turn that was not a goal would have nowhere to put a single event. Reusing the
+# row buys the whole streaming and audit surface for free. See docs/09 §10.
+GoalMode = Literal["normal", "design", "knowledge", "chat"]
 
 GoalStatus = Literal[
     "PLANNING", "PENDING", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"
@@ -226,9 +234,97 @@ class WorkspaceDesignContract(BaseModel):
     path: str = Field("", max_length=400)
 
 
+class Conversation(BaseModel):
+    """A thread of turns in a workspace — the thing a tab points at.
+
+    Deliberately not a goal. A goal is one run: a plan, steps, a verifier, a
+    commit. A conversation is the question several runs answer, and a chat that
+    could only hold one run at a time is what the transcript's single message
+    array was. Held in the engine rather than the client so a thread survives the
+    window that opened it.
+    """
+
+    id: str
+    workspace_id: str
+    # Empty until a turn names it; `GoalService.split_title_description` is the
+    # normaliser. No default title is invented here — a placeholder in the UI is
+    # more honest than a string the user never chose.
+    title: str = Field("", max_length=200)
+    # Archived rather than deleted: a goal belongs to the thread it was asked in,
+    # and dropping the thread would orphan the history.
+    archived: bool = False
+    # The thread this one was branched from, when it was started from inside
+    # another thread rather than from an empty panel. `None` is the ordinary
+    # case and is not a lesser one: most threads are top-level, and this says
+    # where the *others* came from rather than ranking them.
+    parent_id: str | None = None
+    # The parent's name at the time this was read, joined in by the query rather
+    # than left for the client to resolve.
+    #
+    # `parent_id` alone is not enough to label a row. The panel lists one
+    # workspace's live threads and hides archived ones, so a child whose parent
+    # has been archived cannot find its parent's name in that list — and the
+    # label degrades to a generic word *permanently*, with the name still in the
+    # database and nothing able to reach it. Carrying the name means the lineage
+    # is data: it survives the parent being archived, and it is only `None` when
+    # the parent row is genuinely gone.
+    parent_title: str | None = None
+    created_at: float
+    updated_at: float
+
+
+class ConversationCreate(BaseModel):
+    """Starting a thread, optionally from inside another one.
+
+    `parent_id` is the whole difference between "a new thread on the chat I am
+    looking at" and "a brand-new chat": both are a fresh conversation, and
+    without a link from the child to its parent they are the same row. It is
+    set here and only here — `ConversationUpdate` is `extra: "forbid"`, so
+    there is no route by which a thread can be re-parented after the fact, and
+    the shape of a thread's history cannot be rewritten from the client.
+    """
+
+    model_config = {"extra": "forbid"}
+    workspace_id: str
+    title: str = Field("", max_length=20000)
+    parent_id: str | None = None
+
+
+class ConversationUpdate(BaseModel):
+    """The one mutable thing about a conversation is what it is called.
+
+    `extra: "forbid"` here is load-bearing in the same way it is on
+    `GoalCreate`: a client cannot reach around the declared shape to set
+    `archived` on a rename, or smuggle an `agent_config` through a rename route
+    that was never meant to carry one.
+    """
+
+    model_config = {"extra": "forbid"}
+    title: str = Field(..., min_length=1, max_length=20000)
+
+
+class ConversationTurn(BaseModel):
+    """One turn: the user's question and the goal that answered it.
+
+    Read-only and derived — the stored facts are the goal and its events, so a
+    turn is a shape the API draws rather than a row anyone could get out of step
+    with. A goal with no `conversation_id` is its own single-turn thread, which
+    is how pre-migration history reads.
+    """
+
+    goal_id: str
+    conversation_id: str | None = None
+    prompt: str
+    status: GoalStatus
+    created_at: float
+
+
 class Goal(BaseModel):
     id: str
     workspace_id: str
+    # The thread this run belongs to. `None` for a goal that predates
+    # conversations, which reads as its own thread.
+    conversation_id: str | None = None
     title: str = Field(..., min_length=1, max_length=200)
     description: str = Field("", max_length=20000)
     status: GoalStatus
@@ -244,7 +340,7 @@ class Goal(BaseModel):
     # critic reviews it before anyone pins it. "knowledge" inverts the same
     # shape around CODIFY.md: the design agent authors the file, a step writes
     # it, the critic reviews it, and every later goal's librarian reads it as a
-    # prior. See docs/04 §4.0a.2.
+    # prior. "chat" is a turn rather than a run — see `GoalMode`. docs/04 §4.0a.2.
     mode: GoalMode = "normal"
     # trace: record this goal's model calls so the run can be replayed without
     # a provider (docs/04 §8). Off by default and per goal, because a
@@ -296,9 +392,29 @@ class WorkspaceCreate(BaseModel):
     root_path: str
 
 
+class GoalConversationUpdate(BaseModel):
+    """Which thread an existing goal belongs to.
+
+    The write `POST /goals` cannot make: a goal that predates conversations —
+    or one restored from history — starts with no thread, and the link has to
+    be settable after the row exists (docs/09 §6). `extra: "forbid"` for
+    exactly the reason `GoalCreate` and `ConversationUpdate` carry it: this
+    route moves one link and refuses to be a general goal editor, the same
+    reach-around invariant 2 closes on `POST /goals`.
+    """
+
+    model_config = {"extra": "forbid"}
+    conversation_id: str = Field(..., min_length=1)
+
+
 class GoalCreate(BaseModel):
     model_config = {"extra": "forbid"}
     workspace_id: str
+    # Which thread to append this run to. Optional, and a *known* field: the
+    # `extra: "forbid"` above is invariant 2 (docs/00 §6.2) and adding a field
+    # the API actually accepts does not weaken it — `agent_config` and anything
+    # else unlisted are still refused.
+    conversation_id: str | None = None
     # Chat UIs send the whole prompt as `title`; accept up to the description
     # cap and let GoalService.split_title_description normalize it down to a
     # 200-char title. The Goal model (storage/response) still enforces 200.
@@ -310,7 +426,23 @@ class GoalCreate(BaseModel):
     # Which pipeline this goal runs. "normal", "design" and "knowledge" exist; a
     # client sending anything else gets a 422 from the model itself, not a goal
     # that quietly runs the default.
+    #
+    # "chat" is refused here even though it is a legal `GoalMode`, because this
+    # route is the door to *running a pipeline* and a chat goal has no pipeline.
+    # The turn route creates it. One door, so "what can a client start" stays a
+    # question with one answer.
     mode: GoalMode = "normal"
+
+    @field_validator("mode")
+    @classmethod
+    def _refuse_chat(cls, value: str) -> str:
+        if value == "chat":
+            raise ValueError(
+                "mode 'chat' is created by POST /conversations/{id}/turns, which "
+                "classifies the request itself; POST /goals starts a pipeline and "
+                "cannot make a turn"
+            )
+        return value
     # Opt this goal into tracing (docs/04 §8). A client may also turn it on
     # later with `PUT /goals/{id}/trace` before the run starts; both are the
     # user asking for a recording they can delete.
@@ -323,6 +455,34 @@ class ProviderKeyUpdate(BaseModel):
     model_config = {"extra": "forbid"}
     provider: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
     api_key: str = Field(..., min_length=1, max_length=4096)
+
+
+class TurnCreate(BaseModel):
+    """One turn in a thread: what the user said, and nothing else.
+
+    Deliberately *not* a `GoalCreate`. The flags that shape a run — `dry_run`,
+    `plan_only`, `parallel`, `mode` — are absent rather than defaulted, because
+    the whole point of this route is that the caller does not choose the
+    pipeline: the gate classifies the request and the engine picks. A turn body
+    that could say `mode: "design"` would be a second door onto goal creation,
+    and `docs/09` §10 exists so there is exactly one.
+
+    `extra: "forbid"` is invariant 2 (docs/00 §6.2) for the same reason it is on
+    every other write here: `agent_config` and anything else unlisted is a 422,
+    not a silently accepted field.
+    """
+
+    model_config = {"extra": "forbid"}
+    # The user's words. A turn with nothing to say is not a turn — `min_length=1`
+    # after the strip below is what makes "  " a 422 rather than a goal whose
+    # planner is handed an empty request.
+    prompt: str = Field(..., min_length=1, max_length=20000)
+    # The command bar's model choice, seeded onto the roles the user has never
+    # configured, exactly as `POST /goals` does. It does not override a role.
+    provider: str | None = None
+    model: str | None = None
+    # Record this turn's model calls (docs/04 §8), same opt-in as a goal.
+    trace: bool = False
 
 
 class VersionedAction(BaseModel):
@@ -347,6 +507,26 @@ class GoalDetail(Goal):
 
 
 class ErrorBody(BaseModel):
+    """The engine's own refusal: a stable `code` and a sentence a person can act on.
+
+    Every coded refusal — every `ApiError`, from a route or from deep inside a
+    service — is returned as this, by one exception handler, so the shape does not
+    depend on which layer noticed the problem.
+
+    This is declared rather than implied because the alternative is what this file
+    carried for a while: a model named `ErrorBody` that nothing referenced, an
+    OpenAPI schema that described successes and nothing else, and a client that
+    had to guess whether a given failure carried `code`, `message` or `detail`.
+
+    Extras are allowed on purpose, and that is part of the contract rather than a
+    loophole. A refusal may attach the facts a caller needs in order to act:
+    `workspace_not_empty` carries the goal count, so a confirm dialog can name
+    the cascade before the user agrees to it. `code` and `message` are what every
+    caller may rely on; the rest is the refusal explaining itself, and a client
+    that ignores it loses detail, never correctness.
+    """
+
+    model_config = {"extra": "allow"}
     code: str
     message: str
 

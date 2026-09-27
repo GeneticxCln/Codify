@@ -2,8 +2,9 @@ name: check
 
 # CONTRIBUTING.md states the bar in one line: "`make check` must pass." This runs
 # that same gate in CI — the union of the three jobs below is exactly the targets
-# `make check` depends on (lint, typecheck, test-ui, test, test-streams, build-ui,
-# check-tauri), split by toolchain so a Python failure cannot hide a Rust one and
+# `make check` depends on (lint, typecheck, test-ui, typecheck-ui-tests, test,
+# test-streams, build-ui, check-tauri), split by toolchain so a Python failure
+# cannot hide a Rust one and
 # each job installs only the toolchain it needs.
 #
 # Until this existed there was no CI at all, and the failures that reached the
@@ -98,9 +99,15 @@ jobs:
         working-directory: ui
 
       # `npm run build` typechecks and bundles but never executes ui/tests/, which
-      # is why these are two separate steps.
+      # is why these are separate steps. Nor does `node --test` typecheck them:
+      # `--experimental-strip-types` erases types instead of checking them, so a
+      # test that drifted from the interface it renders is a third way the UI
+      # job could go green over something real. Hence its own leg.
       - name: UI unit tests
         run: make test-ui
+
+      - name: Typecheck UI tests
+        run: make typecheck-ui-tests
 
       - name: Typecheck and build
         run: make build-ui

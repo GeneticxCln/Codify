@@ -19,7 +19,7 @@ from httpx import ASGITransport
 from engine.app import BOOT_TOKEN, app
 from engine.db import connect
 from engine.executor import ExecutorService
-from engine.laya import LayaDecision, LayaService
+from engine.laya import GateCall, LayaDecision, LayaService
 from engine.models import ROLES, AgentConfig, AgentConfigUpdate, Goal
 from engine.providers import BaseProvider, Keychain, ProviderFactory
 from engine.sandbox import SandboxService
@@ -71,7 +71,9 @@ class _StubFactory(ProviderFactory):
 class _NoGate(LayaService):
     """Skip the pre-flight gate so the pipeline under test is the only variable."""
 
-    async def decide(self, state: dict[str, Any]) -> LayaDecision:
+    async def decide(
+        self, state: dict[str, Any], on_call: GateCall | None = None,
+    ) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 
 

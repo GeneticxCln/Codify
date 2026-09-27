@@ -21,9 +21,42 @@ CREATE TABLE IF NOT EXISTS workspaces (
   created_at REAL NOT NULL
 );
 
+-- A conversation is a thread of turns, and it is the thing a tab points at.
+-- It exists because the transcript used to be one array of React state: every
+-- send was one goal, flat and unlabelled, and reloading the window lost the
+-- thread. A goal is a *run* — a plan, steps, a verifier — while a conversation
+-- is the question those runs answer, and they are not the same row.
+--
+-- Owned by the engine rather than the client, for the same reason the goal
+-- history is: a conversation that lived in localStorage would vanish with the
+-- browser profile, which is the exact defect this table replaces.
+CREATE TABLE IF NOT EXISTS conversations (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  -- Empty until a turn gives it a name; the UI shows a placeholder rather than
+  -- inventing a title.
+  title TEXT NOT NULL DEFAULT '',
+  -- 0 for an active conversation, 1 once it is archived. Archived rather than
+  -- deleted so a goal's history stays attributable to the thread it came from.
+  archived INTEGER NOT NULL DEFAULT 0,
+  -- The conversation this one was branched from, or NULL when it is a
+  -- top-level thread. A "new thread" made while another thread is showing is
+  -- *that* thread's child: it is where "a thread on the current chat" is
+  -- recorded, and without this column a new thread is indistinguishable from
+  -- a brand-new chat. `ON DELETE SET NULL` so archiving a parent orphans its
+  -- children rather than taking them with it — an archived thread's history
+  -- stays readable, and so does the record of where each child came from.
+  parent_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS goals (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  -- Nullable: a goal that predates conversations reads as its own thread, so
+  -- existing history is not orphaned by the migration.
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
   title TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,
@@ -226,6 +259,49 @@ def connect(
         )
     except Exception:
         pass
+    # A conversation is a thread of turns, and an install that predates it keeps
+    # every goal with no thread: the column is nullable on purpose, so old
+    # history renders as single-turn threads rather than disappearing.
+    try:
+        conn.execute("ALTER TABLE goals ADD COLUMN conversation_id TEXT")
+    except Exception:
+        pass
+    # The index is created unconditionally — `CREATE INDEX IF NOT EXISTS` is the
+    # idiom the schema already uses — because listing a conversation's turns is
+    # the hot read of a tab switch and must not scan every goal.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_goals_conversation "
+        "ON goals(conversation_id, created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversations_workspace "
+        "ON conversations(workspace_id, updated_at)"
+    )
+    # A thread on another thread needs somewhere to live. Nullable, and added
+    # the same way as `goals.conversation_id` above: an existing install gains
+    # the column unset, so every thread that already exists reads as a
+    # top-level thread rather than disappearing or needing a wipe.
+    #
+    # Unlike the migrations around it, this one does not swallow every failure.
+    # `_row_to_conversation` reads `parent_id` on *every* conversation read, so a
+    # migration that quietly failed turns into an `IndexError` — a 500 on the
+    # first request that lists a thread — with the real cause (a locked file, a
+    # corrupt database, a full disk) nowhere in sight. Only "the column is
+    # already there" is the expected outcome; anything else is a real error and
+    # belongs at startup where the message can still name the file.
+    try:
+        conn.execute(
+            "ALTER TABLE conversations ADD COLUMN parent_id TEXT "
+            "REFERENCES conversations(id) ON DELETE SET NULL"
+        )
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+    # The read a panel does on every render: a conversation's children.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversations_parent "
+        "ON conversations(parent_id)"
+    )
     # Adding a fallback target must not require wiping an install: an existing
     # database keeps every configured role and gains the columns unset. Same
     # shape as the `goals` migrations above — the column may already exist, and

@@ -9,12 +9,13 @@ import {
   RepairReport,
   RoleInfo,
 } from "../types";
-import { fetchAgentCallStats, fetchRoles, getEngineSettings, getLayaStatus, repairAgentConfigs, saveEngineSettings } from "../api";
+import { fetchAgentCallStats, fetchProviders, fetchRoles, getEngineSettings, getLayaStatus, repairAgentConfigs, saveEngineSettings } from "../api";
 import { useAgentConfigs } from "../hooks/useAgentConfigs";
 import { buildModelSignals } from "../modelSignals";
 import { findStaleFallback, findStaleModel, StaleModel } from "../staleModel";
 import { AgentConfigCard } from "./AgentConfigCard";
 import { Sliders, ShieldCheck, Zap, AlertTriangle, Cpu, Wand2, Wrench, Workflow } from "lucide-react";
+import { readRejection } from "../rejection.ts";
 
 interface SettingsPanelProps {
   /** Render compactly inside the settings modal instead of as a full page. */
@@ -124,6 +125,34 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   // read the same state and a save updates all of them.
   const store = useAgentConfigs();
 
+  // Which providers the engine ships, asked rather than assumed. This is not a
+  // cosmetic list: the role cards use it to decide whether a provider is custom,
+  // and a custom provider gets a protocol picker and an endpoint box the user
+  // should never be asked to fill in for a provider the engine already knows how
+  // to reach. Until it arrives the cards are held back, because rendering them
+  // against a guess is how a builtin ends up wearing a custom-provider form.
+  const [builtinProviders, setBuiltinProviders] = useState<string[] | null>(null);
+  const [providerListError, setProviderListError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchProviders()
+      .then((catalog) => {
+        if (cancelled) return;
+        setBuiltinProviders(catalog.builtins.map((b) => b.slug));
+        setProviderListError(null);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        // An empty list would call every provider custom, so the cards stay
+        // hidden and the reason is stated instead of a wrong form.
+        setProviderListError(readRejection(err, "Could not read the provider list."));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // The same ordering signals the chat's menu uses, built from *this* screen's
   // store rather than a prop: assigning a model to a role here must move it in
   // both lists immediately, and a prop that arrives one save late would not.
@@ -147,7 +176,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       })
       .catch((err: any) => {
         if (cancelled) return;
-        setRolesError(err?.message || "Could not load role descriptions.");
+        setRolesError(readRejection(err, "Could not load role descriptions."));
       });
     return () => {
       cancelled = true;
@@ -173,7 +202,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         // "last call" line rather than failing the screen, but it is recorded
         // instead of swallowed so a broken endpoint is visible.
         if (cancelled) return;
-        setCallStatsError(err?.message || "Could not load per-role call stats.");
+        setCallStatsError(readRejection(err, "Could not load per-role call stats."));
       });
     return () => {
       cancelled = true;
@@ -249,7 +278,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       await store.refresh();
       onRefreshModels?.();
     } catch (err: any) {
-      setRepairError(err?.message || "Could not repair the role configs");
+      setRepairError(readRejection(err, "Could not repair the role configs"));
     } finally {
       setRepairBusy(false);
     }
@@ -310,7 +339,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       })
       .catch((err: any) => {
         if (cancelled) return;
-        setEngineSettingsError(err?.message || "Could not load engine settings.");
+        setEngineSettingsError(readRejection(err, "Could not load engine settings."));
       });
     return () => {
       cancelled = true;
@@ -336,7 +365,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           : { ok: true, text: `Clamped to ${saved} (allowed ${parallelWidthBounds.min}–${parallelWidthBounds.max}).` }
       );
     } catch (err: any) {
-      setWidthMsg({ ok: false, text: err?.message || "Could not save the parallel width." });
+      setWidthMsg({ ok: false, text: readRejection(err, "Could not save the parallel width.") });
     } finally {
       setWidthSaving(false);
     }
@@ -367,7 +396,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           : { ok: true, text: `Clamped to ${saved} (allowed ${retentionBounds.min}–${retentionBounds.max}).` }
       );
     } catch (err: any) {
-      setRetentionMsg({ ok: false, text: err?.message || "Could not save the retention setting." });
+      setRetentionMsg({ ok: false, text: readRejection(err, "Could not save the retention setting.") });
     } finally {
       setRetentionSaving(false);
     }
@@ -398,7 +427,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           : { ok: true, text: `Clamped to ${saved} (allowed ${traceRetentionBounds.min}–${traceRetentionBounds.max}).` }
       );
     } catch (err: any) {
-      setTraceRetentionMsg({ ok: false, text: err?.message || "Could not save the recording retention setting." });
+      setTraceRetentionMsg({ ok: false, text: readRejection(err, "Could not save the recording retention setting.") });
     } finally {
       setTraceRetentionSaving(false);
     }
@@ -420,7 +449,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         });
       }
     } catch (err: any) {
-      setBulkError(err?.message || "Failed to apply the model to every role");
+      setBulkError(readRejection(err, "Failed to apply the model to every role"));
     } finally {
       setBulkBusy(false);
     }
@@ -785,24 +814,43 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
-        {orderedRoles.map((role) => (
-          <AgentConfigCard
-            key={role}
-            role={role}
-            store={store}
-            models={models}
-            providerStatus={providerStatus}
-            stale={staleByRole.get(role) ?? null}
-            staleFallback={staleFallbackByRole.get(role) ?? null}
-            info={roleInfo[role]}
-            callStat={callStats[role] ?? null}
-            signals={signals}
-            onRefreshModels={onRefreshModels}
-            refreshingModels={refreshingModels}
-          />
-        ))}
-      </div>
+      {builtinProviders === null && !providerListError && (
+        <p className="text-xs text-gray-500">Asking the engine which providers it ships…</p>
+      )}
+
+      {providerListError && (
+        <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg p-3">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <span className="leading-relaxed">
+            Could not read the engine&apos;s provider list ({providerListError}), so the role
+            cards are hidden rather than shown against a guess — a wrong list would offer a
+            custom-endpoint form for a provider the engine already knows. Retry by reopening
+            settings.
+          </span>
+        </div>
+      )}
+
+      {builtinProviders !== null && (
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+          {orderedRoles.map((role) => (
+            <AgentConfigCard
+              key={role}
+              role={role}
+              store={store}
+              models={models}
+              providerStatus={providerStatus}
+              builtinProviders={builtinProviders}
+              stale={staleByRole.get(role) ?? null}
+              staleFallback={staleFallbackByRole.get(role) ?? null}
+              info={roleInfo[role]}
+              callStat={callStats[role] ?? null}
+              signals={signals}
+              onRefreshModels={onRefreshModels}
+              refreshingModels={refreshingModels}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 };

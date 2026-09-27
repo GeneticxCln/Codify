@@ -1,3 +1,4 @@
+import { readRejection } from "../rejection.ts";
 import React, { useState, useEffect, useCallback } from "react";
 import {
   ModelCatalog,
@@ -58,7 +59,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setModels(catalog.models ?? []);
       setModelStatus(catalog.providers ?? []);
     } catch (err: any) {
-      setCatalogError(err?.message || "Could not discover models from the engine.");
+      setCatalogError(readRejection(err, "Could not discover models from the engine."));
     } finally {
       setCatalogLoading(false);
     }

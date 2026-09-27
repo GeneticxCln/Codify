@@ -40,7 +40,7 @@ from typing import Any
 from benchmarks.provider import CannedFactory, CannedProvider
 from engine.db import connect, default_db_path
 from engine.executor import ExecutorService
-from engine.laya import LayaDecision, LayaService
+from engine.laya import GateCall, LayaDecision, LayaService
 from engine.models import ROLES, AgentConfigUpdate, GoalCreate, WorkspaceCreate
 from engine.providers import Keychain, ProviderFactory
 from engine.sandbox import SandboxService
@@ -77,7 +77,9 @@ class SkippedGate(LayaService):
     def __init__(self) -> None:
         super().__init__(registry=None)
 
-    async def decide(self, state: dict[str, Any]) -> LayaDecision:
+    async def decide(
+        self, state: dict[str, Any], on_call: GateCall | None = None,
+    ) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="benchmarks gate nothing")
 
 

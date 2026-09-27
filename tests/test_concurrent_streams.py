@@ -34,7 +34,7 @@ from collections.abc import Callable
 
 from engine.db import connect
 from engine.executor import ExecutorService
-from engine.laya import LayaDecision, LayaService
+from engine.laya import GateCall, LayaDecision, LayaService
 
 from engine.models import (
     ROLES,
@@ -138,7 +138,9 @@ class _GoalAwareFactory(ProviderFactory):
 class _SkippedGate(LayaService):
     """The gate is a separate concern; this test is about stream isolation."""
 
-    async def decide(self, state: dict[str, Any]) -> LayaDecision:
+    async def decide(
+        self, state: dict[str, Any], on_call: GateCall | None = None,
+    ) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 
 

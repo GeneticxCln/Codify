@@ -13,6 +13,19 @@ import httpx
 
 from engine import home
 from engine.models import AgentConfig, BUILTIN_PROVIDERS
+from engine.toolcall import (
+    ToolCall,
+    ToolReply,
+    ToolSpec,
+    coerce_arguments,
+    coerce_tool_reply,
+    parse_anthropic_tool_calls,
+    parse_openai_tool_calls,
+    to_anthropic_messages,
+    to_google_contents,
+    to_ollama_messages,
+    to_openai_messages,
+)
 
 
 class ProviderError(Exception):
@@ -141,6 +154,40 @@ class BaseProvider(ABC):
         temperature: float, max_tokens: int,
     ) -> str: ...
 
+    @property
+    def supports_tools(self) -> bool:
+        """Whether this provider can be given a tool list.
+
+        False on the base class, and the base `complete_with_tools` refuses.
+        A caller asks this *first* rather than catching the refusal, because a
+        turn that cannot use tools must degrade to a plain answer rather than
+        fail — see `engine/conductor.py`.
+        """
+        return False
+
+    async def complete_with_tools(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> ToolReply:
+        """One turn of a tool-calling conversation. Overridden per protocol.
+
+        Deliberately a *separate* method from `complete` rather than an extra
+        keyword on it. `complete`'s signature is the contract every role and
+        every test double in this codebase is written against, and widening it
+        would put a `tools` parameter on a path whose whole design is "no
+        tools" — the eight roles are told to reply with JSON because they have
+        no other way to act.
+        """
+        raise ProviderError(
+            "tools_unsupported",
+            f"{type(self).__name__} cannot call tools",
+        )
+
     @staticmethod
     async def _stream_lines(response: httpx.Response) -> AsyncIterator[str]:
         """Yield decoded SSE data payloads from a streaming response body.
@@ -236,6 +283,53 @@ class AnthropicProvider(BaseProvider):
             b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
         )
 
+    @property
+    def supports_tools(self) -> bool:
+        return True
+
+    async def complete_with_tools(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> ToolReply:
+        url = f"{self._base_url}/v1/messages"
+        async with httpx.AsyncClient(timeout=120) as client:
+            data = await post_json(
+                client, url, label="anthropic",
+                headers={
+                    "x-api-key": self._api_key,
+                    "anthropic-version": "2023-11-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "system": system_prompt,
+                    "tools": [t.to_anthropic() for t in tools],
+                    "messages": to_anthropic_messages(messages),
+                },
+            )
+        self._report_usage("anthropic", data)
+        blocks = [b for b in (data.get("content") or []) if isinstance(b, dict)]
+        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        by_name = {t.name: t for t in tools}
+        calls = [
+            ToolCall(c.id, c.name, coerce_arguments(by_name.get(c.name), c.arguments))
+            for c in parse_anthropic_tool_calls(blocks)
+        ]
+        reply = coerce_tool_reply(text, calls, tools)
+        if reply.text and self.on_delta is not None:
+            try:
+                self.on_delta(reply.text)
+            except Exception:
+                pass
+        return reply
+
 
 class OpenAICompatProvider(BaseProvider):
     def __init__(self, api_key: str | None, base_url: str):
@@ -244,6 +338,67 @@ class OpenAICompatProvider(BaseProvider):
         # Three states: None = not probed yet, True/False = probed. Cached per
         # provider instance so the capability probe runs once, not per call.
         self._json_mode: bool | None = None
+
+    @property
+    def supports_tools(self) -> bool:
+        return True
+
+    async def complete_with_tools(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> ToolReply:
+        # One call per provider class rather than four: every `openai_compat`
+        # entry in BUILTIN_PROVIDERS (openai, deepseek, openrouter, groq, and
+        # any self-hosted vLLM the user typed in) takes this exact payload, so
+        # a per-vendor override would be four ways to be wrong and no way to be
+        # right twice.
+        #
+        # Not streamed. A tool call's arguments arrive as one JSON string that
+        # has to be parsed whole, and a partial one is not a partial call — it
+        # is not a call. The conductor's prose is delivered as a `model_delta`
+        # event on the turn that carries text, which is enough to show progress
+        # without pretending a half-written argument object is usable.
+        url = f"{self._base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "content-type": "application/json",
+        }
+        by_name = {t.name: t for t in tools}
+        async with httpx.AsyncClient(timeout=120) as client:
+            data = await post_json(
+                client, url, label="openai_compat", headers=headers,
+                json={
+                    "model": model,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        *to_openai_messages(messages),
+                    ],
+                    "tools": [t.to_openai() for t in tools],
+                    "tool_choice": "auto",
+                },
+            )
+        self._report_usage("openai_compat", data)
+        choices = data.get("choices") or [{}]
+        message = choices[0].get("message") or {}
+        text = str(message.get("content") or "")
+        calls = [
+            ToolCall(c.id, c.name, coerce_arguments(by_name.get(c.name), c.arguments))
+            for c in parse_openai_tool_calls(message)
+        ]
+        reply = coerce_tool_reply(text, calls, tools)
+        if reply.text and self.on_delta is not None:
+            try:
+                self.on_delta(reply.text)
+            except Exception:
+                pass
+        return reply
 
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
@@ -398,6 +553,67 @@ class OllamaProvider(BaseProvider):
         validate_local_base_url(base_url)
         self._base_url = base_url.rstrip("/")
 
+    @property
+    def supports_tools(self) -> bool:
+        return True
+
+    async def complete_with_tools(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> ToolReply:
+        # `/api/chat` rather than `/api/generate`: only the chat endpoint takes
+        # a `tools` array and returns `message.tool_calls`. The generate
+        # endpoint this provider's `complete` uses is prompt-in, text-out, and
+        # has nowhere to put a call.
+        #
+        # `format: "json"` is deliberately NOT sent here, unlike `complete`.
+        # That field is how the eight roles get a wire guarantee of JSON, and
+        # forcing it here would tell Ollama to answer the *tool call* with a
+        # JSON document instead of calling the tool.
+        by_name = {t.name: t for t in tools}
+        async with httpx.AsyncClient(timeout=180) as client:
+            data = await post_json(
+                client,
+                f"{self._base_url}/api/chat",
+                label="ollama",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        *to_ollama_messages(messages),
+                    ],
+                    "tools": [t.to_openai() for t in tools],
+                    "stream": False,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens,
+                    },
+                },
+            )
+        message = data.get("message") or {}
+        text = str(message.get("content") or "")
+        calls = [
+            ToolCall(c.id, c.name, coerce_arguments(by_name.get(c.name), c.arguments))
+            for c in parse_openai_tool_calls(message)
+        ]
+        # `coerce_tool_reply` earns its keep here more than anywhere else: a
+        # measured qwen2.5-coder:7b on Ollama sends no `message.tool_calls` at
+        # all and writes the call into `message.content` as JSON. Without this
+        # the loop reads that JSON as the final answer and shows it to the user.
+        reply = coerce_tool_reply(text, calls, tools)
+        self._report_usage("ollama", data)
+        if reply.text and self.on_delta is not None:
+            try:
+                self.on_delta(reply.text)
+            except Exception:
+                pass
+        return reply
+
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
@@ -479,6 +695,72 @@ class GoogleProvider(BaseProvider):
             raise ProviderError("missing_api_key", "Google API key is not set")
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
+
+    @property
+    def supports_tools(self) -> bool:
+        return True
+
+    async def complete_with_tools(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> ToolReply:
+        # Google's function calling is the one dialect here that is not
+        # OpenAI-shaped: `functionDeclarations` on the tool list, and the
+        # exchange lives in `contents` as `functionCall` / `functionResponse`
+        # parts. The translation is in engine/toolcall.py because getting it
+        # wrong is a 400 from someone else's API, not an error in our code.
+        url = f"{self._base_url}/models/{model}:generateContent"
+        by_name = {t.name: t for t in tools}
+        async with httpx.AsyncClient(timeout=120) as client:
+            data = await post_json(
+                client, url, label="google",
+                json={
+                    "system_instruction": {"parts": [{"text": system_prompt}]},
+                    "contents": to_google_contents(messages),
+                    "tools": [{"functionDeclarations": [t.to_google() for t in tools]}],
+                    "tool_config": {
+                        "function_calling_config": {"mode": "AUTO"},
+                    },
+                    "generationConfig": {
+                        "temperature": temperature,
+                        "maxOutputTokens": max_tokens,
+                    },
+                },
+                headers={"x-goog-api-key": self._api_key},
+            )
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return ToolReply()
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+        calls: list[ToolCall] = []
+        for index, part in enumerate(parts):
+            if not isinstance(part, dict):
+                continue
+            call = part.get("functionCall")
+            if not isinstance(call, dict):
+                continue
+            name = str(call.get("name") or "")
+            if not name:
+                continue
+            calls.append(ToolCall(
+                id=f"call_{index}",
+                name=name,
+                arguments=coerce_arguments(by_name.get(name), call.get("args")),
+            ))
+        self._report_usage("google", data)
+        reply = coerce_tool_reply(text, calls, tools)
+        if reply.text and self.on_delta is not None:
+            try:
+                self.on_delta(reply.text)
+            except Exception:
+                pass
+        return reply
 
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
