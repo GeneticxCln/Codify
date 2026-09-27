@@ -487,6 +487,12 @@ export interface EngineSettingValue {
   max: number;
 }
 
+/** A string engine setting: no band to clamp into, so the length it accepts. */
+export interface EngineStringSettingValue {
+  value: string;
+  max: number;
+}
+
 export interface EngineSettings {
   parallel_width: EngineSettingValue;
   /** How many daily stats snapshots to keep; 0 = keep everything. */
@@ -494,6 +500,23 @@ export interface EngineSettings {
   /** How long a goal's recording is kept (0 = forever). Optional: an engine
    * that predates the setting omits it, and the panel hides the field. */
   trace_retention_days?: EngineSettingValue;
+  /** The conductor's own provider and model. Optional for the same reason: an
+   * engine that predates the setting answers without them, and a hidden card
+   * beats a broken one. The conductor is a loop, not a ninth role, so these are
+   * engine settings rather than a ninth `AgentConfig` row (docs/01 §5). */
+  conductor_provider?: EngineStringSettingValue;
+  conductor_model?: EngineStringSettingValue;
+  /** The conductor's second target, used only when the first cannot serve a
+   * call. Two keys rather than one because a fallback provider with no model is
+   * the same inert half-pair the primary would be. */
+  conductor_fallback_provider?: EngineStringSettingValue;
+  conductor_fallback_model?: EngineStringSettingValue;
+  /** How many tool-calling turns one conductor run may take. */
+  conductor_max_turns?: EngineSettingValue;
+  /** How many stage moves one conductor run may make. */
+  conductor_max_moves?: EngineSettingValue;
+  /** 1 = the conductor drives an approved plan, 0 = the engine's own sequence. */
+  conductor_drives_execution?: EngineSettingValue;
 }
 
 /** Payload of a `laya_decision` event (one pre-flight gate verdict). */

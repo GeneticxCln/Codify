@@ -313,14 +313,28 @@ export async function getEngineSettings(): Promise<EngineSettings> {
   return res.json();
 }
 
-/** Persist engine-wide settings; the response echoes the clamped values. */
+/**
+ * Persist engine-wide settings; the response echoes the clamped values.
+ *
+ * Numbers clamp at the engine and strings are stored as sent, so the echo is
+ * the truth in both cases — read `saved` rather than assuming the value that
+ * was sent is what was kept. `conductor_drives_execution` is a real boolean
+ * because a checkbox sends one; the engine is the one place that accepts it.
+ */
 export async function saveEngineSettings(
   patch: {
     parallel_width?: number;
     stats_retention_days?: number;
     trace_retention_days?: number;
+    conductor_provider?: string;
+    conductor_model?: string;
+    conductor_fallback_provider?: string;
+    conductor_fallback_model?: string;
+    conductor_max_turns?: number;
+    conductor_max_moves?: number;
+    conductor_drives_execution?: boolean;
   }
-): Promise<{ saved: Record<string, number> }> {
+): Promise<{ saved: Record<string, number | string> }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/settings/engine`, {
     method: "PUT",

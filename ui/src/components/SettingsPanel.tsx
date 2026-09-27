@@ -14,6 +14,7 @@ import { useAgentConfigs } from "../hooks/useAgentConfigs";
 import { buildModelSignals } from "../modelSignals";
 import { findStaleFallback, findStaleModel, StaleModel } from "../staleModel";
 import { AgentConfigCard } from "./AgentConfigCard";
+import { ConductorSettingsCard } from "./ConductorSettingsCard";
 import { Sliders, ShieldCheck, Zap, AlertTriangle, Cpu, Wand2, Wrench, Workflow } from "lucide-react";
 import { readRejection } from "../rejection.ts";
 
@@ -231,6 +232,21 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
   const staleRoles = [...staleByRole.entries()];
 
+  // The model the conductor borrows when it has none of its own. Read from the
+  // store rather than passed down, so a save on the scribe's card moves what the
+  // conductor card says it is borrowing in the same render.
+  const scribeModel = useMemo(
+    () => store.configs.find((c) => c.role === "scribe")?.model_name ?? "",
+    [store.configs]
+  );
+
+  // The scribe's fallback, because a conductor still borrowing the scribe's row
+  // borrows its fallback too — the two are one chain, not two.
+  const scribeFallbackModel = useMemo(
+    () => store.configs.find((c) => c.role === "scribe")?.fallback_model_name ?? "",
+    [store.configs]
+  );
+
   // The fallback target rots the same way and is even easier to miss: it is only
   // used once something else has already failed.
   const staleFallbackByRole = useMemo(() => {
@@ -356,7 +372,10 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     setWidthMsg(null);
     try {
       const res = await saveEngineSettings({ parallel_width: parsed });
-      const saved = res.saved.parallel_width;
+      // The echo is `number | string` because the settings table now carries the
+      // conductor's provider and model too; a numeric key still comes back a
+      // number, and reading it as one is what keeps the state typed.
+      const saved = Number(res.saved.parallel_width);
       setParallelWidth(saved);
       setWidthDraft(String(saved));
       setWidthMsg(
@@ -381,7 +400,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     setRetentionMsg(null);
     try {
       const res = await saveEngineSettings({ stats_retention_days: parsed });
-      const saved = res.saved.stats_retention_days;
+      const saved = Number(res.saved.stats_retention_days);
       setRetention(saved);
       setRetentionDraft(String(saved));
       setRetentionMsg(
@@ -412,7 +431,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     setTraceRetentionMsg(null);
     try {
       const res = await saveEngineSettings({ trace_retention_days: parsed });
-      const saved = res.saved.trace_retention_days;
+      const saved = Number(res.saved.trace_retention_days);
       setTraceRetention(saved);
       setTraceRetentionDraft(String(saved));
       setTraceRetentionMsg(
@@ -646,6 +665,21 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           </>
         )}
       </div>
+
+      {/* The conductor is not one of the eight role cards, so it gets its own —
+          but it sits among them because it is the model the user will look for
+          when a turn picks the wrong sub-agent. */}
+      {builtinProviders !== null && (
+        <ConductorSettingsCard
+          models={models}
+          providerStatus={providerStatus}
+          builtins={builtinProviders}
+          scribeModel={scribeModel}
+          scribeFallbackModel={scribeFallbackModel}
+          onRefreshModels={onRefreshModels}
+          refreshingModels={refreshingModels}
+        />
+      )}
 
       <div className="flex flex-col gap-2.5 bg-codify-bg border border-codify-border rounded-xl p-3.5">
         <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">

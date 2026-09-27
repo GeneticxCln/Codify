@@ -1,6 +1,7 @@
 import { readRejection } from "../rejection.ts";
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
+  AgentRole,
   ModelCatalog,
   ModelOption,
   ProviderKeyStatus,
@@ -9,24 +10,69 @@ import {
 } from "../types";
 import { fetchModelCatalog, fetchProviderKeys, saveProviderKey } from "../api";
 import { SettingsPanel } from "./SettingsPanel";
-import { X, Key, Check, ShieldCheck, Cpu, Sliders, HardDrive, Lock, AlertCircle, RefreshCw } from "lucide-react";
+import { AppearancePane } from "./AppearancePane";
+import { ProviderRow } from "./ProviderRow";
+import { useAgentConfigs } from "../hooks/useAgentConfigs";
+import { checkedLabel, discoveredFooter, needsOwnRefresh } from "../providerSetup";
+import {
+  loadSeen,
+  mergeAll,
+  newModelIds,
+  saveSeen,
+  type SeenIndex,
+} from "../modelFreshness";
+import { X, Key, Sliders, HardDrive, Lock, AlertCircle, RefreshCw, Palette } from "lucide-react";
+
+/**
+ * How often the panel re-asks while it is open, and how long after a check a
+ * window focus is ignored.
+ *
+ * A minute matches the engine's own cache TTL (`DEFAULT_TTL_S`), so every tick is
+ * a real answer rather than an echo of the last one. The cooldown is the other
+ * half: alt-tabbing fires a burst of focus events, and each burst is eight
+ * providers asked in parallel — a reader switching windows twice would queue
+ * more provider traffic than the minute is worth.
+ */
+const AUTO_REFRESH_MS = 60_000;
+const FOCUS_COOLDOWN_MS = 10_000;
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   /** Which tab to open on (defaults to keys). */
-  initialTab?: "keys" | "agents";
+  initialTab?: "keys" | "agents" | "appearance";
   /**
    * Models that recently answered, handed down so a role's model field badges the
    * ids the app has actually run — the same hint the chat's menu shows.
    */
   recentRuns?: RecentRunModel[];
+  /**
+   * Bumped by the engine-level stream whenever a provider's model list moves.
+   *
+   * The panel owns its own fetch rather than being handed the catalogue, so this
+   * is how it learns there is something to re-read — and the re-read is
+   * `refresh: false`, because the engine only announces a change *after* the
+   * fresh answer is in its cache. Asking the eight providers again here would
+   * spend a rate limit to be told what we were just told.
+   */
+  catalogTick?: number;
+  /**
+   * Is the engine pushing the catalogue to us?
+   *
+   * While it is, this panel owns no timer at all: the engine's watcher sweeps on
+   * the catalogue's own cache period and one sweep serves every screen, so a
+   * timer here would ask eight providers a second time for an answer the app
+   * already has. While it is not — the socket dropped, or a build without the
+   * channel — the panel falls back to refreshing itself, which is a stale list
+   * versus one extra discovery, and the list is the worse of the two.
+   */
+  catalogLive?: boolean;
 }
 
 /**
  * The settings screen.
  *
- * It is a full-height panel, not a dialog: eight role cards and seven providers do
+ * It is a full-height panel, not a dialog: eight role cards and eight providers do
  * not fit in a 2xl box with a 26rem scroll region, and shrinking them into one
  * made every card half cut off. Left column = where credentials live, right
  * column = which agent gets which model, both scrolling independently.
@@ -36,10 +82,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   initialTab = "keys",
   recentRuns = [],
+  catalogTick = 0,
+  catalogLive = false,
 }) => {
-  const [tab, setTab] = useState<"keys" | "agents">(initialTab);
+  const [tab, setTab] = useState<"keys" | "agents" | "appearance">(initialTab);
   const [keys, setKeys] = useState<ProviderKeyStatus[]>([]);
-  const [inputValues, setInputValues] = useState<Record<string, string>>({});
+  // No draft keys here any more. Each `ProviderRow` owns the text in its own
+  // field, so this component no longer holds a second copy of a secret it does
+  // not use — and a modal-level draft map was the wrong place for one: it
+  // outlived the row that filled it, and survived a tab switch with the value
+  // still in it.
   const [saving, setSaving] = useState<Record<string, boolean>>({});
   const [savedSuccess, setSavedSuccess] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
@@ -50,20 +102,222 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
+  /** Which request is in flight, so the footer can say what it is waiting on. */
+  const [checking, setChecking] = useState<"manual" | "auto" | null>(null);
+  /**
+   * When the engine last *asked* the providers, in epoch seconds. This is the
+   * engine's own `fetched_at`, not the moment the answer reached the UI, so a
+   * cached reply reports when it was really fetched rather than claiming to have
+   * just been.
+   */
+  const [lastChecked, setLastChecked] = useState<number | null>(null);
+  /** In-flight and last-start, as refs: a ref is the only thing a burst sees. */
+  const inFlight = useRef(false);
+  const lastFetchAt = useRef(0);
+  /** An explicit refresh that arrived during a request, to run the moment it ends. */
+  const askAgain = useRef(false);
+  /**
+   * The current `loadCatalog`, for the re-run below. A ref, because the function
+   * refers to itself and a `useCallback` cannot hold the value it is producing.
+   * Assigned in the body rather than in an effect: an effect would run *after*
+   * the effect that opens the panel, so the first request on the first open
+   * would re-run through a seed instead of the real function. Writing a ref is
+   * idempotent, so a second render in strict mode changes nothing.
+   */
+  const loadCatalogRef = useRef<(refresh?: boolean, cause?: "manual" | "auto") => Promise<void>>(
+    async () => {},
+  );
+  /**
+   * Ticks on its own so "checked 12s ago" becomes "checked 48s ago" without a
+   * re-render of the whole panel every second.
+   */
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    if (!isOpen) return;
+    const id = window.setInterval(() => setNow(Date.now() / 1000), 10_000);
+    return () => window.clearInterval(id);
+  }, [isOpen]);
 
-  const loadCatalog = useCallback(async (refresh = false) => {
-    setCatalogLoading(true);
-    setCatalogError(null);
-    try {
-      const catalog: ModelCatalog = await fetchModelCatalog(refresh);
-      setModels(catalog.models ?? []);
-      setModelStatus(catalog.providers ?? []);
-    } catch (err: any) {
-      setCatalogError(readRejection(err, "Could not discover models from the engine."));
-    } finally {
-      setCatalogLoading(false);
+  /**
+   * What the last visit to this panel showed, per provider — the baseline the
+   * "new" marker is measured against.
+   *
+   * Read once, on purpose. A baseline that moved with every fetch would make the
+   * marker blink out the moment it appeared, which is the same as not having one.
+   * The stored copy is what the *next* launch compares against, so a model stays
+   * badged for as long as this session lasts and then stops being news.
+   */
+  const [seen] = useState<SeenIndex>(loadSeen);
+
+  // The agent store, owned here rather than in SettingsPanel, so the provider
+  // tab can say how many roles a model would touch and then write to them. One
+  // store for the whole screen: eight role cards each holding their own copy
+  // meant a save in one left the others stale, and this tab would have had a
+  // third, disagreeing one.
+  const store = useAgentConfigs();
+
+  /** The footer's freshness line, or nothing before the first answer arrives. */
+  const checked = checkedLabel(lastChecked, now, checking !== null);
+
+  /** Each provider's slice of the discovered catalogue, computed once. */
+  const modelsByProvider = useMemo(() => {
+    const by = new Map<string, ModelOption[]>();
+    for (const m of models) {
+      const list = by.get(m.provider) ?? [];
+      list.push(m);
+      by.set(m.provider, list);
     }
-  }, []);
+    return by;
+  }, [models]);
+
+  /** What each provider has newly released, against the last visit. */
+  const newIdsByProvider = useMemo(() => {
+    const by = new Map<string, string[]>();
+    for (const m of models) {
+      const list = by.get(m.provider) ?? [];
+      list.push(m.id);
+      by.set(m.provider, list);
+    }
+    const out = new Map<string, string[]>();
+    for (const [provider, ids] of by) {
+      out.set(provider, newModelIds(seen, provider, ids));
+    }
+    return out;
+  }, [models, seen]);
+
+  const roleProviders = useMemo(
+    () =>
+      store.configs.map((c) => ({
+        role: c.role as AgentRole,
+        provider: c.provider,
+        model_name: c.model_name,
+      })),
+    [store.configs],
+  );
+
+  /**
+   * Write one model to the named roles, one request each.
+   *
+   * `PUT /settings/agents/{role}` is the only route that may change agent
+   * config (docs/00 §6.2), so a provider row has no "set the default" of its
+   * own to call — it calls the one legal route, per role. The protocol travels
+   * with it because a model is only callable on the dialect its provider speaks,
+   * and `openai_compat` is not a synonym for "any endpoint".
+   */
+  const applyModel = async (
+    provider: string,
+    model: string,
+    roles: AgentRole[],
+  ): Promise<void> => {
+    const target = models.find((m) => m.provider === provider && m.id === model);
+    for (const role of roles) {
+      await store.update(role, {
+        provider,
+        ...(target?.protocol ? { protocol: target.protocol } : {}),
+        model_name: model,
+      });
+    }
+  };
+
+  const loadCatalog = useCallback(
+    async (refresh = false, cause: "manual" | "auto" = "manual") => {
+      // One discovery at a time. A second burst stacked on the first asks eight
+      // providers twice for the same answer, and the slower of the two is what
+      // the reader ends up looking at.
+      //
+      // The two callers are not treated the same, because what they want is not.
+      // An automatic one can be dropped: the request already on its way is
+      // seconds old at worst, and the next tick is a minute away. An explicit one
+      // cannot — a key saved a moment ago invalidated the engine's cache, and the
+      // in-flight answer may predate the key, which is how "paste a key and the
+      // list fills in" (docs/06 §1) turns into an empty list for a minute.
+      if (inFlight.current) {
+        if (cause === "auto") return;
+        askAgain.current = true;
+        return;
+      }
+      inFlight.current = true;
+      lastFetchAt.current = Date.now();
+      setCatalogLoading(true);
+      setChecking(cause);
+      setCatalogError(null);
+      try {
+        const catalog: ModelCatalog = await fetchModelCatalog(refresh);
+        setModels(catalog.models ?? []);
+        setModelStatus(catalog.providers ?? []);
+        setLastChecked(catalog.fetched_at ?? null);
+        // Fold what just came back into the stored baseline, so the models on
+        // screen right now are not "new" the next time this panel is opened.
+        // A provider that refused to answer contributes nothing: recording its
+        // empty list as what it serves is how a rejected key turns into every
+        // model on the provider being announced as new.
+        const idsByProvider = new Map<string, string[]>();
+        for (const m of catalog.models ?? []) {
+          const list = idsByProvider.get(m.provider) ?? [];
+          list.push(m.id);
+          idsByProvider.set(m.provider, list);
+        }
+        saveSeen(
+          mergeAll(
+            seen,
+            (catalog.providers ?? []).map((p) => ({
+              provider: p.provider,
+              ok: p.ok,
+              ids: idsByProvider.get(p.provider) ?? [],
+            })),
+          ),
+        );
+      } catch (err: any) {
+        setCatalogError(readRejection(err, "Could not discover models from the engine."));
+      } finally {
+        inFlight.current = false;
+        setCatalogLoading(false);
+        setChecking(null);
+        if (askAgain.current) {
+          askAgain.current = false;
+          void loadCatalogRef.current(true, "manual");
+        }
+      }
+    },
+    [seen],
+  );
+  loadCatalogRef.current = loadCatalog;
+
+  /**
+   * The engine reported it has a current catalogue — a change, or just a check.
+   * Re-read it from the cache the engine just filled: a provider that gains a
+   * model mid-session should appear in this row now, badged as new, without
+   * waiting for anything.
+   *
+   * The record of "what was new" is deliberately not touched here
+   * (`modelFreshness`): it is still the last *visit*, so a release that lands
+   * mid-session is badged, and it stops being news on the next launch rather than
+   * the next check.
+   */
+  useEffect(() => {
+    // The fallback, and only the fallback. While the engine pushes, the watcher
+    // sweeps on the catalogue's own cache period and one sweep serves every open
+    // screen — a timer here would ask eight providers a second time for an answer
+    // this app already has. When the socket is down the calculation reverses: a
+    // stale list is worse than an extra discovery, so the panel asks.
+    if (!needsOwnRefresh({ live: catalogLive, isOpen })) return;
+    const onFocus = () => {
+      if (Date.now() - lastFetchAt.current < FOCUS_COOLDOWN_MS) return;
+      void loadCatalog(true, "auto");
+    };
+    const tick = window.setInterval(() => {
+      // A hidden window is a window nobody is reading, and polling it spends
+      // provider quota to update a list that is not on screen. The focus handler
+      // covers the moment it comes back.
+      if (document.hidden) return;
+      void loadCatalog(true, "auto");
+    }, AUTO_REFRESH_MS);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(tick);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [isOpen, catalogLive, loadCatalog]);
 
   useEffect(() => {
     setTab(initialTab);
@@ -77,6 +331,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       loadCatalog(true);
     }
   }, [isOpen, tab, loadCatalog]);
+
+  /**
+   * The engine announced that a provider's list moved. Re-read it from the cache
+   * the engine just filled: a provider that gains a model mid-session should
+   * appear in this row now, badged as new, without waiting for the next tick.
+   */
+  useEffect(() => {
+    if (!isOpen || catalogTick === 0) return;
+    void loadCatalog(false);
+  }, [isOpen, catalogTick, loadCatalog]);
 
   // Escape closes, like every other overlay in the app.
   useEffect(() => {
@@ -94,30 +358,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setKeys(data);
     } catch (err: any) {
       setError(err.message || "Failed to load provider credentials");
-    }
-  };
-
-  const handleSaveKey = async (provider: string) => {
-    const key = inputValues[provider]?.trim();
-    if (!key) return;
-
-    setSaving((prev) => ({ ...prev, [provider]: true }));
-    setError(null);
-    try {
-      await saveProviderKey(provider, key);
-      setSavedSuccess((prev) => ({ ...prev, [provider]: true }));
-      setInputValues((prev) => ({ ...prev, [provider]: "" }));
-      await loadKeys();
-      // The engine invalidates its catalog on key save; refresh so this
-      // provider's models are listed without closing the dialog.
-      await loadCatalog(true);
-      setTimeout(() => {
-        setSavedSuccess((prev) => ({ ...prev, [provider]: false }));
-      }, 2500);
-    } catch (err: any) {
-      setError(err.message || `Failed to save ${provider} key`);
-    } finally {
-      setSaving((prev) => ({ ...prev, [provider]: false }));
     }
   };
 
@@ -146,7 +386,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   ? needsKeyCount > 0
                     ? `${needsKeyCount} of ${keys.length} providers still need a key — their models cannot be listed or called until then.`
                     : "Every keyed provider has a credential. Models are discovered live from each provider."
-                  : "Each role's model, endpoint, temperature, and prompt. Roles run in the order of the pipeline."}
+                  : tab === "appearance"
+                    ? "Themes swap the app's surface and text colours at runtime — no restart, no rebuild."
+                    : "Each role's model, endpoint, temperature, and prompt. Roles run in the order of the pipeline."}
               </p>
             </div>
           </div>
@@ -188,6 +430,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }`}
           >
             <Sliders className="w-3.5 h-3.5" /> Agent Roles
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("appearance")}
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+              tab === "appearance"
+                ? "bg-codify-raised text-gray-100 border border-codify-border"
+                : "text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            <Palette className="w-3.5 h-3.5" /> Appearance
           </button>
         </div>
 
@@ -241,102 +494,44 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               )}
 
-              {/* Provider list — two columns, so seven providers do not need a scroll */}
-              <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+              {/* One row per provider: the credential, and the model, in the order
+                  a person decides them. Each row owns its own staged model, so
+                  two providers can be half-configured at once without either
+                  losing what was typed. */}
+              <div className="space-y-3">
                 {keys.map((k) => (
-                  <div
+                  <ProviderRow
                     key={k.provider}
-                    className="bg-codify-bg border border-codify-border rounded-xl p-3.5 space-y-2"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Cpu className="w-4 h-4 text-purple-400 flex-shrink-0" />
-                        <span className="font-semibold text-xs text-gray-200 capitalize truncate">
-                          {k.provider}
-                        </span>
-                        <span className="text-2xs text-gray-500 font-mono truncate">
-                          ({k.protocol})
-                        </span>
-
-                        {/* Live discovery result for this provider. */}
-                        {models.length > 0 || modelStatus.length > 0
-                          ? (() => {
-                              const status = modelStatus.find((p) => p.provider === k.provider);
-                              if (status?.ok) {
-                                return (
-                                  <span className="text-2xs text-gray-500 flex-shrink-0">
-                                    {status.count} models
-                                  </span>
-                                );
-                              }
-                              if (status?.error) {
-                                return (
-                                  <span className="text-2xs text-amber-400/90 truncate">
-                                    — {status.error}
-                                  </span>
-                                );
-                              }
-                              return null;
-                            })()
-                          : null}
-                      </div>
-
-                      {k.has_key ? (
-                        <span className="flex items-center gap-1 text-xs font-medium text-green-400 bg-green-950/40 border border-green-800/60 px-2 py-0.5 rounded-full flex-shrink-0">
-                          <ShieldCheck className="w-3 h-3" /> Configured
-                        </span>
-                      ) : k.needs_key ? (
-                        <span className="text-xs text-gray-500 bg-codify-surface px-2 py-0.5 rounded-full border border-codify-border flex-shrink-0">
-                          Missing Key
-                        </span>
-                      ) : (
-                        <span className="text-xs text-blue-400 bg-blue-950/40 border border-blue-800/60 px-2 py-0.5 rounded-full flex-shrink-0">
-                          Local / No Key
-                        </span>
-                      )}
-                    </div>
-
-                    {k.needs_key && (
-                      <div className="flex items-center gap-2 pt-1">
-                        <input
-                          type="password"
-                          placeholder={`Enter ${k.provider} API key...`}
-                          value={inputValues[k.provider] || ""}
-                          onChange={(e) =>
-                            setInputValues((prev) => ({ ...prev, [k.provider]: e.target.value }))
-                          }
-                          className="flex-1 min-w-0 bg-codify-surface border border-codify-border rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => handleSaveKey(k.provider)}
-                          disabled={saving[k.provider] || !inputValues[k.provider]?.trim()}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors flex-shrink-0 ${
-                            savedSuccess[k.provider]
-                              ? "bg-green-600 text-white"
-                              : "bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40"
-                          }`}
-                        >
-                          {savedSuccess[k.provider] ? (
-                            <>
-                              <Check className="w-3.5 h-3.5" /> Saved
-                            </>
-                          ) : saving[k.provider] ? (
-                            "Saving..."
-                          ) : (
-                            "Save Key"
-                          )}
-                        </button>
-                      </div>
-                    )}
-
-                    {!k.needs_key && (
-                      <p className="text-2xs text-gray-500 pl-6">
-                        Local server at <span className="font-mono">{k.base_url}</span> — its downloaded
-                        models are discovered automatically, no key.
-                      </p>
-                    )}
-                  </div>
+                    keyStatus={k}
+                    status={modelStatus.find((p) => p.provider === k.provider)}
+                    models={modelsByProvider.get(k.provider) ?? []}
+                    newIds={newIdsByProvider.get(k.provider) ?? []}
+                    roleProviders={roleProviders}
+                    onSaveKey={async (provider, key) => {
+                      setSaving((prev) => ({ ...prev, [provider]: true }));
+                      setError(null);
+                      try {
+                        await saveProviderKey(provider, key);
+                        setSavedSuccess((prev) => ({ ...prev, [provider]: true }));
+                        await loadKeys();
+                        // The engine invalidates its catalog on key save, so ask
+                        // again — that is what fills the picker beside this field
+                        // without a second visit.
+                        await loadCatalog(true);
+                        setTimeout(
+                          () => setSavedSuccess((prev) => ({ ...prev, [provider]: false })),
+                          2500,
+                        );
+                      } finally {
+                        setSaving((prev) => ({ ...prev, [provider]: false }));
+                      }
+                    }}
+                    onApplyModel={applyModel}
+                    onRefresh={() => loadCatalog(true)}
+                    refreshing={catalogLoading}
+                    savingKey={saving[k.provider]}
+                    keySaved={savedSuccess[k.provider]}
+                  />
                 ))}
               </div>
             </div>
@@ -352,12 +547,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               refreshingModels={catalogLoading}
             />
           )}
+
+          {tab === "appearance" && <AppearancePane />}
         </div>
 
         {/* Footer */}
         <div className="border-t border-codify-border px-6 py-3 flex items-center justify-between flex-shrink-0">
           <span className="flex items-center gap-2 text-xs text-gray-500">
-            {models.length} models discovered across {modelStatus.filter((s) => s.ok).length} providers
+            {discoveredFooter(models.length, modelStatus.filter((s) => s.ok).length)}
+            {/* The list re-discovers on its own now, so it can change while
+                somebody is reading it. Saying when the last answer arrived is
+                what keeps that from reading as a model quietly disappearing. */}
+            {checked && (
+              <span
+                className={
+                  checking === "auto" ? "text-sky-400/90 flex items-center gap-1" : undefined
+                }
+                title={
+                  checking === "auto"
+                    ? "Re-checking the providers on their own — this panel re-asks every minute and whenever the window comes back"
+                    : "When the providers were last asked what they serve"
+                }
+              >
+                {checkedLabel(lastChecked, now, checking !== null)}
+              </span>
+            )}
+            {catalogError && (
+              <span className="text-amber-400/90" title={catalogError}>
+                — last check failed
+              </span>
+            )}
             <button
               type="button"
               onClick={() => loadCatalog(true)}
