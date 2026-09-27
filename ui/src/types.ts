@@ -577,6 +577,43 @@ export interface ModelOption {
 }
 
 /**
+ * The engine-level channel's one frame: a provider's model list moved.
+ *
+ * A diff, never the catalogue. Eight providers at five hundred models each is a
+ * payload no screen asked for, sent on every change — so the engine names what
+ * gained and lost, and the reader re-reads `GET /models`, which is a cache hit
+ * because the engine's watcher is what warmed it.
+ *
+ * `removed` matters as much as `added`: a provider that stopped answering is
+ * reported as everything it had, removed, which is a fact a reader of a model
+ * list needs. A provider that has gone quiet and a provider with nothing new
+ * look identical otherwise.
+ */
+export interface ModelCatalogChanged {
+  added: Record<string, string[]>;
+  removed: Record<string, string[]>;
+  /** Epoch seconds: when the providers were actually asked. */
+  fetched_at: number;
+}
+
+/**
+ * Engine-level events (`/ws/engine`), kept apart from the goal `Event` union.
+ *
+ * A catalogue belongs to no goal, and the goal stream is a durable sequenced log
+ * that replays from 0 — a frame with no `sequence` in it is a frame a deduping
+ * client drops. So this is its own closed set, and a new member is a decision in
+ * two files rather than a typo in one.
+ *
+ * `model_catalog_checked` is not a change and says so: it carries only the time
+ * the providers were asked. It exists so a screen that no longer polls can still
+ * report the age of its own list truthfully — otherwise "checked 40s ago" is a
+ * number nobody is keeping true.
+ */
+export type EngineEvent =
+  | { type: "model_catalog_changed"; payload: ModelCatalogChanged }
+  | { type: "model_catalog_checked"; payload: { fetched_at: number } };
+
+/**
  * A model that recently answered, read from the engine's `agent_assigned` events.
  *
  * Deliberately not the goal's requested model: roles run on their own configured

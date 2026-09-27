@@ -149,6 +149,24 @@ BUILTIN_PROVIDERS: dict[str, dict[str, Any]] = {
         "needs_key": True,
         "local_only": False,
     },
+    # NVIDIA NIM, which is an OpenAI-compatible endpoint rather than a bespoke
+    # dialect: it serves /v1/models and /v1/chat/completions, so the existing
+    # openai_compat provider reads it unchanged and the catalogue is discovered
+    # live like every other. Added because it is a provider people ask for and
+    # were previously reaching for as a "custom" endpoint — which asks them for a
+    # protocol and a base URL the engine already knows.
+    "nvidia": {
+        "protocol": "openai_compat",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "needs_key": True,
+        "local_only": False,
+    },
+    # NVIDIA NIM, which is an OpenAI-compatible endpoint rather than a bespoke
+    # dialect: it serves /v1/models and /v1/chat/completions, so the existing
+    # openai_compat provider reads it unchanged and the catalogue is discovered
+    # live like every other. Added because it is a provider people ask for and
+    # were previously reaching for as a "custom" endpoint — which asks them for a
+    # protocol and a base URL the engine already knows.
 }
 
 

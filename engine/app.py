@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -13,6 +14,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
@@ -37,6 +39,7 @@ from engine.metrics import (
 from engine.stats_history import StatsSnapshotService
 from engine.stats_import import StatsImportInvalid, StatsImportService
 from engine.model_catalog import ModelCatalogService
+from engine.catalog_watch import CatalogWatch
 from engine.models import (
     BUILTIN_PROVIDERS,
     ErrorBody,
@@ -104,6 +107,29 @@ def pick_port() -> int:
     raise RuntimeError("no free port in 7430-7440")
 
 
+# Shutdown's WAL checkpoint is a tidy-up — it truncates the log file — and SQLite
+# recovers a WAL on the next open regardless, so it must never be able to hold the
+# process. `TRUNCATE` waits for every reader to release the log, and a reader is
+# exactly what a cancelled turn leaves behind; `db.connect`'s five-second timeout was
+# inherited here, which is longer than the whole shutdown grace it was hiding in.
+SHUTDOWN_CHECKPOINT_BUSY_MS = 250
+
+
+def _truncate_wal(conn: sqlite3.Connection) -> None:
+    """Truncate the WAL on the way out, best-effort and bounded.
+
+    A checkpoint that cannot get the log within a quarter of a second gives up: the
+    cost of giving up is a larger `-wal` file that the next open recovers from, and
+    the cost of waiting is an engine that outlives the app that stopped it.
+    """
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {SHUTDOWN_CHECKPOINT_BUSY_MS}")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.commit()
+    except Exception:
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The keychain is built first so a role-id migration (coder→fixer, ...) can
@@ -149,6 +175,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.executor.settings = app.state.settings
     app.state.token = BOOT_TOKEN
 
+    # Engine-level WebSocket connections, each with a queue the watcher can hand a
+    # frame to. One queue per connection rather than a send from the watcher: two
+    # tasks writing one socket is how frames interleave halfway through.
+    # (Annotated on the local, not the attribute: mypy refuses a type declaration
+    # in an assignment to a non-`self` attribute, and the readers of it annotate
+    # their own local the same way `/models` does.)
+    engine_conns: set[asyncio.Queue[str]] = set()
+    app.state.engine_conns = engine_conns
+
+    def _publish_engine_event(frame: dict[str, Any]) -> None:
+        text = json.dumps(frame)
+        for queue in list(engine_conns):
+            # A full queue means a client that is connected and not reading. It is
+            # dropped rather than awaited: the next frame supersedes this one, and
+            # blocking here would hold up the sweep for every other client.
+            try:
+                queue.put_nowait(text)
+            except asyncio.QueueFull:
+                pass
+
+    app.state.catalog_watch = CatalogWatch(app.state.models, publish=_publish_engine_event)
+    # On state, not just in the closure: the fan-out is the thing a test needs to
+    # reach, and a publisher that can only be called from inside the lifespan is a
+    # publisher whose only test is the whole engine booting.
+    app.state.publish_engine_event = _publish_engine_event
+
     # ── Rescue goals orphaned by the last process ──────────────────────────
     # A goal in PLANNING or RUNNING when the engine died has no coroutine
     # driving it anymore. PLANNING was the worst wedge: start refuses (planning
@@ -184,12 +236,47 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # silently chose a target the user never picked. A workspace is now an
     # explicit choice — the folder picker in the command bar — and a fresh install
     # simply has none until one is chosen, which is what the UI already documented.
-    yield
+
+    # Started here, before the yield, so the watcher is running for the whole life
+    # of the app. It asks nothing until a client subscribes
+    # (`engine/catalog_watch.py`), so a quiet engine spends nothing on it.
+    watch_task = asyncio.create_task(app.state.catalog_watch.run())
+    app.state.catalog_watch_task = watch_task
     try:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        conn.commit()
-    except Exception:
-        pass
+        yield
+    finally:
+        # Stopped before the database closes, and before the socket does: a task
+        # that outlived the state directory it was watching for is an orphan with a
+        # publish callback into a store that is being closed underneath it.
+        watch_task.cancel()
+        try:
+            await watch_task
+        except asyncio.CancelledError:
+            pass
+        # A goal that was RUNNING a moment ago is not running now. The coroutine
+        # driving it stops existing the moment this process does, and nothing else
+        # will ever say so: the goal sits in the database claiming to be mid-run
+        # until the next boot's rescue rewrites it, which is a post-mortem rather
+        # than a record. Recording it here is why the desktop shell asks this
+        # process to stop before it kills it (`docs/09` §5.4.1) — a hard exit skips
+        # this block entirely, and then the boot-time rescue is all there is.
+        for goal_id, previous, message in app.state.goals.fail_orphaned_active_goals(
+            "the engine is shutting down"
+        ):
+            try:
+                app.state.executor._log(goal_id, None, "warn", message)
+            except Exception:
+                pass
+            try:
+                app.state.executor._fail(
+                    goal_id, None, "engine_interrupted",
+                    f"the engine shut down while this goal was {previous} — "
+                    "it was not running anymore",
+                    role=None,
+                )
+            except Exception:
+                pass
+    _truncate_wal(conn)
     conn.close()
 
 
@@ -784,47 +871,112 @@ async def recent_models(request: Request, limit: int = Query(5, ge=1, le=25)) ->
     return goals.recent_run_models(limit)
 
 
+# The engine-wide settings, and the only place a key's shape is declared.
+#
+# Both tables exist so `GET` and `PUT` cannot disagree about what exists: the
+# read is built by iterating them and the write accepts the same keys, so adding
+# a setting to one and forgetting the other is a diff rather than a setting
+# nobody can change. The bands mirror `SettingsService.SPEC`, which owns the
+# clamp; these are what the UI is told so it can validate before saving instead
+# of discovering a clamp afterwards.
+ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
+    "parallel_width": (1, 16),
+    "stats_retention_days": (0, 730),
+    "trace_retention_days": (0, 730),
+    "conductor_max_turns": (1, 40),
+    "conductor_max_moves": (0, 60),
+    # A switch rather than a number a user has to know the meaning of, stored as
+    # the 0/1 the engine already reads.
+    "conductor_drives_execution": (0, 1),
+}
+
+# The conductor's own provider and model, keyed to the longest value each
+# accepts. They are settings rather than an `AgentConfig` row because
+# docs/00 §6.1 fixes `AgentRole` at eight and a row in `agent_configs` *is* a
+# role (see `SettingsService.STRING_SPEC` for the same argument on that side).
+ENGINE_STRING_SETTINGS: dict[str, int] = {
+    "conductor_provider": 64,
+    "conductor_model": 128,
+    "conductor_fallback_provider": 64,
+    "conductor_fallback_model": 128,
+}
+
+# The slug shape `AgentConfigUpdate` enforces, so a conductor pointed at a
+# provider that cannot exist is refused here for the same reason it would be
+# there — and an empty string is not a slug, because empty is how the setting is
+# cleared back to "borrow the scribe's row".
+PROVIDER_SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+# Which of the string settings name a provider rather than free text. Named
+# rather than inferred from the key, so a setting added later does not inherit a
+# validation rule it never agreed to.
+SLUG_SETTINGS = frozenset({"conductor_provider", "conductor_fallback_provider"})
+
+
 @app.get("/settings/engine")
 async def get_engine_settings(request: Request) -> dict[str, Any]:
     """The engine-wide settings screen values, each with its clamp bounds so the
     UI can validate before saving instead of discovering a clamp after."""
     settings: SettingsService = request.app.state.settings
-    return {
-        "parallel_width": {
-            "value": settings.get_int("parallel_width"),
-            "min": 1,
-            "max": 16,
-        },
-        "stats_retention_days": {
-            "value": settings.get_int("stats_retention_days"),
-            # The band mirrors SettingsService.SPEC's clamp. 0 keeps everything;
-            # the max is the bound a fat-fingered "999999" clamps down to.
-            "min": 0,
-            "max": 730,
-        },
-        "trace_retention_days": {
-            "value": settings.get_int("trace_retention_days"),
-            "min": 0,
-            "max": 730,
-        },
+    out: dict[str, Any] = {
+        key: {"value": settings.get_int(key), "min": low, "max": high}
+        for key, (low, high) in ENGINE_INT_SETTINGS.items()
     }
+    out.update({
+        # A string setting has no band to clamp into, so it carries the length it
+        # accepts instead — the one bound a free-text field can be wrong about.
+        key: {"value": settings.get_str(key), "max": limit}
+        for key, limit in ENGINE_STRING_SETTINGS.items()
+    })
+    return out
+
+
+def _clean_engine_string(key: str, value: Any) -> str:
+    """One string setting, stripped, bounded, and slug-checked where it is a slug.
+
+    Split out of the handler because the rules are per-key and the loop below
+    should stay a list of the keys it accepts.
+    """
+    if not isinstance(value, str):
+        raise ApiError(422, "invalid_value", f"{key} must be a string")
+    text = value.strip()
+    limit = ENGINE_STRING_SETTINGS[key]
+    if len(text) > limit:
+        raise ApiError(
+            422, "invalid_value", f"{key} must be at most {limit} characters"
+        )
+    if key in SLUG_SETTINGS and text and not PROVIDER_SLUG_RE.match(text):
+        raise ApiError(422, "invalid_value", f"{key} is not a provider slug")
+    return text
 
 
 @app.put("/settings/engine")
 async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[str, Any]:
     """Persist engine-wide settings. Only known keys are accepted; each clamps
     to its band, and the response echoes what was actually stored so the UI
-    shows the truth rather than what the user typed."""
+    shows the truth rather than what the user typed.
+
+    A conductor provider saved without a model is stored rather than refused,
+    because "clear it" has to be one call and a provider on its own has a
+    meaning already: the executor reads half a pair as "not configured" and
+    borrows the scribe's row (`ExecutorService._conductor_config`).
+    """
     settings: SettingsService = request.app.state.settings
-    out: dict[str, int] = {}
+    out: dict[str, Any] = {}
     for key, value in body.items():
-        if key in ("parallel_width", "stats_retention_days", "trace_retention_days"):
-            if isinstance(value, bool):
+        if key in ENGINE_INT_SETTINGS:
+            # A boolean is refused for a number the user is *choosing*: JSON's
+            # `true` reaching `int()` is a truthiness trap, not a 1. The 0/1
+            # switch is the one exception — a checkbox genuinely sends one, and
+            # its clamp turns anything truthy into 1.
+            if isinstance(value, bool) and key != "conductor_drives_execution":
                 raise ApiError(422, "invalid_value", f"{key} must be an integer, not a boolean")
             try:
                 out[key] = settings.set_int(key, int(value))
             except (TypeError, ValueError) as err:
                 raise ApiError(422, "invalid_value", f"{key} must be an integer") from err
+        elif key in ENGINE_STRING_SETTINGS:
+            out[key] = settings.set_str(key, _clean_engine_string(key, value))
         else:
             raise ApiError(400, "unknown_setting", f"unknown engine setting: {key}")
     return {"saved": out}
@@ -1864,6 +2016,22 @@ async def _run_steps(app: FastAPI, goal_id: str) -> None:
 
 async def _run_steps_locked(app: FastAPI, goal_id: str) -> None:
     executor = app.state.executor
+    # An approved plan is driven by the conductor when this install has one, and
+    # by the engine's own sequence when it does not. The choice lives here rather
+    # than in the route because the executor is the only side that can see
+    # whether a tool-capable model is actually configured — and the fallback is
+    # what lets the conductor be the default without a machine losing its ability
+    # to execute a plan at all.
+    if executor.conductor_can_drive(goal_id):
+        await executor.run_conductor_resume(goal_id)
+        if app.state.goals.get(goal_id).status != "RUNNING":
+            # Cancelled or paused while the conductor was driving. That wins.
+            return
+        # Fall through. Anything the conductor did not complete is still driven
+        # by the engine's own sequence below, so the recipe is the floor: a
+        # model that is not yet good at this costs the plan some time and
+        # nothing else. Without this, "the conductor drives execution" would be
+        # a switch that can strand a plan half-executed.
     remaining = [s for s in app.state.goals.steps(goal_id) if s.status != "COMPLETED"]
     while remaining:
         refreshed = app.state.goals.get(goal_id)
@@ -1902,6 +2070,104 @@ async def _run_steps_locked(app: FastAPI, goal_id: str) -> None:
         except ApiError:
             # Version conflict: another coroutine already updated the goal status.
             pass
+
+
+@app.websocket("/ws/engine")
+async def ws_engine(websocket: WebSocket) -> None:
+    """Engine-level frames: today, one — the model catalogue moved.
+
+    A sibling of `/ws/goals/{id}`, not an extension of it. A catalogue belongs to
+    no goal, and a frame with no `goal_id` and no `sequence` in a durable,
+    sequenced, per-goal log is the cross-stream contamination
+    `tests/stream_isolation.py` exists to prevent — so this channel carries its
+    own small union (`engine/catalog_watch.EngineEventType`) and the goal event
+    union is untouched.
+
+    Auth is byte for byte `/ws/goals/{id}`'s: a boot token on the Upgrade, or the
+    same `{"type": "auth"}` first frame for a browser, which cannot set headers
+    on a WebSocket. 4401 for a bad token, invariant 3 (docs/00 §6.3) holding on
+    a socket exactly as it does on every route.
+
+    The read loop exists only to notice the peer leaving. An idle engine-level
+    connection sends nothing, and a client that sends nothing is how a dead
+    socket gets noticed at all.
+    """
+    expected_token = getattr(websocket.app.state, "token", None) or BOOT_TOKEN
+    auth_header = websocket.headers.get("authorization", "")
+    authenticated = secrets.compare_digest(auth_header, f"Bearer {expected_token}")
+
+    await websocket.accept()
+
+    if not authenticated:
+        try:
+            msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            auth_msg = json.loads(msg)
+            token = str(auth_msg.get("token") or "")
+            if auth_msg.get("type") == "auth" and secrets.compare_digest(token, expected_token):
+                authenticated = True
+        except Exception:
+            pass
+
+    if not authenticated:
+        try:
+            await websocket.close(code=4401)
+        except (WebSocketDisconnect, RuntimeError):
+            # The peer hung up inside the auth window, so there is nobody left to
+            # refuse. Closing a socket that has already gone raises, and an
+            # exception escaping this handler is a traceback in the engine's log
+            # for a client that merely left — which trains people to ignore the
+            # log. The refusal stands either way; there is just no recipient.
+            pass
+        return
+
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
+    conns: set[asyncio.Queue[str]] = websocket.app.state.engine_conns
+    conns.add(queue)
+    watch: CatalogWatch = websocket.app.state.catalog_watch
+    # Subscribing is what makes the engine ask the providers at all, so it is
+    # paired with the unsubscribe in the `finally` rather than left to the socket
+    # closing: a client that vanished without a close frame is exactly the case
+    # that would otherwise leave the engine polling on.
+    watch.subscribe()
+    try:
+        while True:
+            getter = asyncio.create_task(queue.get())
+            receiver = asyncio.create_task(websocket.receive_text())
+            done, pending = await asyncio.wait(
+                {getter, receiver}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            # Then wait for the cancelled ones, so whatever they raised is
+            # retrieved. A `receive` cancelled while a frame is being sent ends in
+            # "cannot receive once a disconnect message has been received", and an
+            # unretrieved task exception is printed to stderr by the event loop —
+            # on every frame, forever. `return_exceptions` also cannot swallow
+            # *this* coroutine's cancellation: a cancel delivered here propagates
+            # out of the gather rather than being collected as a result.
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if getter in done:
+                await websocket.send_text(getter.result())
+                continue
+            # The receive side finished first. That is either a client frame this
+            # channel has no use for, or the peer going away — and the two must
+            # not be confused: calling `receive` again on a socket that has already
+            # delivered its disconnect raises, so a loop that treated both as
+            # "ignore it and carry on" would spin on the exception forever instead
+            # of noticing the client left.
+            if receiver.cancelled() or receiver.exception() is not None:
+                break
+            # A client frame. Ignored — the channel is one-directional — and the
+            # loop continues, because a client that can send one can still receive.
+            continue
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        watch.unsubscribe()
+        conns.discard(queue)
 
 
 @app.websocket("/ws/goals/{goal_id}")
@@ -1991,10 +2257,45 @@ def main() -> None:
     except OSError:
         sock.close()
         raise
-    print(f"CODIFY_ENGINE token={BOOT_TOKEN} port={port}", flush=True)
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-    server = uvicorn.Server(config)
+    # `hard_exit_s` is announced rather than left for the shell to know: this is
+    # the engine's own bound on how long a stop request can take, and the shell
+    # waits exactly that long before escalating to SIGKILL (src-tauri/src/lib.rs).
+    # A copy of the number in the shell would be a second source of truth for a
+    # deadline whose whole job is to be longer than the work it cuts off — and
+    # the failure mode of a stale copy is the one this handshake exists to stop.
+    print(
+        f"CODIFY_ENGINE token={BOOT_TOKEN} port={port} "
+        f"hard_exit_s={watchdog.HARD_EXIT_GRACE_S:g}",
+        flush=True,
+    )
+    config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_level="warning",
+        # A stop request has to finish in bounded time. uvicorn's default here is
+        # "wait for in-flight work, forever", and this engine's in-flight work is a
+        # turn against a model — minutes of it, on a local one — or an event stream
+        # the window holds open. That default is how a closed app left an engine
+        # behind with its port already released and the database still held.
+        timeout_graceful_shutdown=watchdog.GRACEFUL_SHUTDOWN_S,
+    )
+    # `capture_signals` installs `self.handle_exit` for SIGTERM/SIGINT when `run`
+    # starts, so the method is the whole hook — overriding it is what puts the
+    # deadline on the signal path as well as on the parent-death path. The override
+    # *wraps*: the graceful shutdown is still uvicorn's, with a bound behind it.
+    class BoundedShutdown(uvicorn.Server):
+        def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+            watchdog.arm_hard_deadline()
+            super().handle_exit(sig, frame)
+
+    server = BoundedShutdown(config)
     server.run(sockets=[sock])
+    # Reached only when no signal arrived — a captured one is re-raised on the way out
+    # of `capture_signals`, which ends the process inside `run`. Everything the engine
+    # has to say or write has been said, and what is left is interpreter finalization,
+    # which waits on threads that cannot be cancelled; leave the way the deadline does.
+    watchdog.hard_exit()
 
 
 if __name__ == "__main__":
