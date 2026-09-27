@@ -20,6 +20,13 @@ decisions that make the feature safe rather than a second pipeline:
 - **The gate chooses, the client does not.** `TurnCreate` carries no `mode`, no
   `dry_run`, no `plan_only`. A client cannot ask for a plan the engine did not
   decide to run.
+- **The gate does not narrate itself on a turn.** It is still asked, still
+  measured (the `laya` stage records the outcome) and still refuses a blocked
+  turn — but a benign turn's log is a conversation, and the verdict card is
+  published only when it has something a person has to act on: a block or a
+  warning. "Laya gate passed (intent: question)" over the top of "hi" is the
+  pipeline classifying the user before answering them, which is what this whole
+  file exists to stop happening.
 - **No gate means the pipeline.** A fresh install with no gate configured gets
   what it got before any of this: the full run. Guessing wrong in the other
   direction would cost a code change answered from a chat call.
@@ -54,7 +61,7 @@ from engine.models import (
     TurnCreate,
     WorkspaceCreate,
 )
-from engine.providers import BaseProvider, Keychain, ProviderFactory
+from engine.providers import BaseProvider, Keychain, ProviderError, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.services import (
     AgentRegistryService,
@@ -141,6 +148,43 @@ class _BlockingGate(LayaService):
             answers={"prompt_injection": {"noul": 0.99}},
             blocked=True,
             block_reason="prompt-injection probability 0.99 >= 0.85",
+        )
+
+
+RISK_WARNING = "risk score 2.00/2 — destructive"
+
+
+class _WarnGate(LayaService):
+    """A gate that allowed the turn and had something to say about it.
+
+    The card is published exactly when the verdict is worth acting on, so the
+    warning half of that condition needs a gate of its own — otherwise
+    "published when blocked" would pass while "published when warned" silently
+    fell off, which is how a warning stops reaching the person it was raised
+    for.
+    """
+
+    async def decide(self, state: dict[str, Any], on_call: Any = None) -> LayaDecision:
+        return LayaDecision(
+            engine="llm-fallback",
+            # A question, so the turn is answered and the card being counted is
+            # this turn's own. A gate that warns on something it also routes to
+            # the pipeline would be gated twice (§10.12) and say it twice.
+            answers={"intent": {"choice": "question"}, "risk": {"score": 2.0}},
+            warnings=[RISK_WARNING],
+            provider="ollama",
+            model="m",
+        )
+
+
+class _UnavailableGate(LayaService):
+    """A gate whose own call failed: skipped in kind, broken in fact."""
+
+    async def decide(self, state: dict[str, Any], on_call: Any = None) -> LayaDecision:
+        return LayaDecision(
+            engine="skipped",
+            unavailable=True,
+            skipped_reason="fallback model returned no typed answers",
         )
 
 
@@ -233,6 +277,19 @@ class TurnTestCase(unittest.IsolatedAsyncioTestCase):
                 return str(payload.get("message") or "")
         return ""
 
+    def _stages(self, goal_id: str, stage: str) -> list[dict[str, Any]]:
+        """Every measured run of one stage, oldest first.
+
+        The gate's own record, and on a turn with nothing to report it is the
+        *only* place the gate ran is still visible — which is the observable
+        these tests have to use once the verdict stopped being published.
+        """
+        return [
+            e.payload
+            for e in self.goals.events_after(goal_id, 0)
+            if e.type == "stage_result" and e.payload.get("stage") == stage
+        ]
+
 
 class TestAQuestionIsAnswered(TurnTestCase):
     async def test_a_greeting_is_answered_by_one_call_and_never_planned(self) -> None:
@@ -256,7 +313,7 @@ class TestAQuestionIsAnswered(TurnTestCase):
         self.assertEqual(refreshed.mode, "chat")
         self.assertEqual(refreshed.conversation_id, self.thread.id)
         types = [e.type for e in self.goals.events_after(goal.id, 0)]
-        for expected in ("laya_decision", "agent_assigned", "log", "goal_status"):
+        for expected in ("log", "goal_status"):
             self.assertIn(expected, types, f"a turn must publish {expected} on the shared log")
 
     async def test_a_turn_never_invents_steps(self) -> None:
@@ -268,13 +325,71 @@ class TestAQuestionIsAnswered(TurnTestCase):
 
     async def test_the_gate_ran_before_the_answer(self) -> None:
         # The branch is on the gate's verdict, so a turn with no gate call is a
-        # turn that cannot have been classified.
+        # turn that cannot have been classified. Read from the stage record
+        # rather than from an event, because a benign turn no longer announces
+        # its verdict — see `test_a_benign_turn_does_not_report_the_gate`.
         goal = self._turn("hi")
         await self.executor.run_chat(goal.id)
-        decision_events = [
-            e for e in self.goals.events_after(goal.id, 0) if e.type == "laya_decision"
+
+        stages = self._stages(goal.id, "laya")
+        self.assertEqual(len(stages), 1, "a turn must measure the gate it ran")
+        self.assertEqual(stages[0]["outcome"], "allow")
+
+    async def test_a_benign_turn_does_not_report_the_gate(self) -> None:
+        # "hi" is a conversation. The gate still ran — the test above is the
+        # proof — but it does not put a verdict card, or a dispatch line, in the
+        # transcript: a report saying the request was classified before it was
+        # answered is the behaviour docs/09 §10.15 removes.
+        goal = self._turn("hi")
+        await self.executor.run_chat(goal.id)
+
+        events = self.goals.events_after(goal.id, 0)
+        self.assertNotIn("laya_decision", [e.type for e in events])
+        # The conductor still announces itself — that is *which model answered*,
+        # a fact the stats book and the model menu read. The gate's own dispatch
+        # line is what is gone: on a turn there is no pipeline for it to be the
+        # first row of.
+        assigned = [
+            e.payload.get("role") for e in events if e.type == "agent_assigned"
         ]
-        self.assertEqual(len(decision_events), 1)
+        self.assertNotIn("laya", assigned)
+
+    async def test_a_gate_with_something_to_say_still_says_it(self) -> None:
+        # Silence is for a verdict that decided nothing a person can act on. A
+        # warning is the opposite, and so is a block — the two halves of the
+        # condition, and the reason this is a rule rather than a deletion.
+        self.executor = self._executor(_WarnGate())
+        app.state.executor = self.executor
+        goal = self._turn("hi")
+        await self.executor.run_chat(goal.id)
+
+        decisions = [
+            e for e in self.goals.events_after(goal.id, 0)
+            if e.type == "laya_decision"
+        ]
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].payload["warnings"], [RISK_WARNING])
+        self.assertTrue(
+            any("risk score" in str(p.get("message")) for p in self._logs(goal.id)),
+            "the warning must reach the transcript too, not just the card",
+        )
+
+    async def test_a_gate_that_broke_is_not_scored_as_one_never_set_up(self) -> None:
+        # `skipped` is a deliberate no — `STAGE_SUCCESS_OUTCOMES` counts it as
+        # the role having done its job — while `unavailable` is a gate that
+        # failed at it. Both arrive as `engine == "skipped"`, so only
+        # `unavailable` tells them apart, and a turn that scored a broken gate
+        # as a healthy skip would report a gate that answered when none did.
+        self.executor = self._executor(_UnavailableGate())
+        app.state.executor = self.executor
+        goal = self._turn("hi")
+        await self.executor.run_chat(goal.id)
+
+        stages = self._stages(goal.id, "laya")
+        self.assertEqual(stages[0]["outcome"], "unavailable")
+        self.assertEqual(
+            stages[0]["detail"], "fallback model returned no typed answers"
+        )
 
 
 class TestOnlyQuestionsSkipThePipeline(TurnTestCase):
@@ -330,10 +445,15 @@ class TestOnlyQuestionsSkipThePipeline(TurnTestCase):
         refreshed = self.goals.get(goal.id)
         self.assertEqual(refreshed.status, "FAILED")
         self.assertEqual(self._reply(goal.id), "", "a blocked turn must not answer")
-        errors = [
-            e for e in self.goals.events_after(goal.id, 0) if e.type == "error"
-        ]
+        events = self.goals.events_after(goal.id, 0)
+        errors = [e for e in events if e.type == "error"]
         self.assertEqual(errors[0].payload["code"], "laya_blocked")
+        decisions = [e for e in events if e.type == "laya_decision"]
+        self.assertEqual(
+            len(decisions), 1,
+            "a block must be shown, not swallowed by the silence a benign turn keeps",
+        )
+        self.assertTrue(decisions[0].payload["blocked"])
 
 
 class TestOneDoor(TurnTestCase):
@@ -393,8 +513,11 @@ class TestOneDoor(TurnTestCase):
 
         events = (await self.call("GET", f"/goals/{goal_id}/events")).json()
         kinds = [e["type"] for e in events]
-        self.assertIn("laya_decision", kinds)
         self.assertIn("log", kinds)
+        self.assertNotIn(
+            "laya_decision", kinds,
+            "a benign turn is a conversation: the verdict is measured, not narrated",
+        )
         replies = [
             e["payload"]["message"] for e in events
             if e["type"] == "log" and e["payload"].get("turn")
@@ -592,6 +715,153 @@ class TestTheConductorIsConfigured(TurnTestCase):
         self.settings.set_str("conductor_model", "big-model")
         cfg = self.executor._conductor_config(self._scribe_config())
         self.assertEqual(cfg.temperature, self._scribe_config().temperature)
+
+
+class _ToolCapableStub(_StubProvider):
+    """The turn stub, able to take a tool list.
+
+    The shared stub inherits `BaseProvider.supports_tools`, which is False, so a
+    conductor built on it is correctly refused — which is right for the tests
+    that want no conductor, and useless for the ones that want to see which
+    targets it would have chosen.
+    """
+
+    @property
+    def supports_tools(self) -> bool:
+        return True
+
+
+class TestTheConductorsTargets(TurnTestCase):
+    """Which provider the conductor may be called on, and in what order.
+
+    A role's chain is one row with a fallback column. The conductor has no row,
+    so its chain is assembled from two places, and the assembly is where the
+    interesting decisions are: which of the two sources of a fallback wins, and
+    what must *not* be carried over from the row it borrows.
+    """
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        # Same swap the executor tests make: the shared stub cannot take a tool
+        # list, so a conductor built on it is refused before its targets are read.
+        self.registry._factory = _StubFactory(_ToolCapableStub())
+
+    def _targets(self) -> list[tuple[Any, str, Any]]:
+        return self.executor._conductor_targets()
+
+    async def test_a_borrowing_conductor_inherits_the_scribes_own_fallback(self) -> None:
+        # Nothing configured for the conductor: the chain is the scribe's own,
+        # already carrying credentials the registry resolved. A conductor with no
+        # fallback here is a turn that dies whenever the scribe's model does.
+        self.registry.set_config("scribe", AgentConfigUpdate(
+            provider="openai", model_name="scribe-model",
+            fallback_provider="ollama", fallback_model_name="scribe-backup",
+        ))
+        targets = self._targets()
+        self.assertEqual(len(targets), 2)
+        self.assertEqual((targets[0][2].provider, targets[0][1]), ("openai", "scribe-model"))
+        self.assertEqual(
+            (targets[1][2].provider, targets[1][1]), ("ollama", "scribe-backup")
+        )
+
+    async def test_its_own_pair_brings_its_own_fallback(self) -> None:
+        self.registry.set_config("scribe", AgentConfigUpdate(
+            provider="openai", model_name="scribe-model",
+        ))
+        self.settings.set_str("conductor_provider", "groq")
+        self.settings.set_str("conductor_model", "conductor-model")
+        self.settings.set_str("conductor_fallback_provider", "ollama")
+        self.settings.set_str("conductor_fallback_model", "conductor-backup")
+        targets = self._targets()
+        self.assertEqual(
+            [(t[2].provider, t[1]) for t in targets],
+            [("groq", "conductor-model"), ("ollama", "conductor-backup")],
+        )
+
+    async def test_the_conductor_fallback_keys_are_ignored_while_it_borrows(self) -> None:
+        # Precedence, not a merge: a conductor still on the scribe's row takes the
+        # scribe's fallback. Reading the two sources as one list would give an
+        # install with both a scribe fallback and conductor fallback keys two
+        # fallbacks, which is a chain nothing else in the product has.
+        self.registry.set_config("scribe", AgentConfigUpdate(
+            provider="openai", model_name="scribe-model",
+        ))
+        self.settings.set_str("conductor_fallback_provider", "ollama")
+        self.settings.set_str("conductor_fallback_model", "conductor-backup")
+        targets = self._targets()
+        self.assertEqual(len(targets), 1, "the scribe has no fallback of its own")
+
+    async def test_half_a_fallback_pair_is_not_a_fallback(self) -> None:
+        self.settings.set_str("conductor_provider", "groq")
+        self.settings.set_str("conductor_model", "conductor-model")
+        self.settings.set_str("conductor_fallback_provider", "ollama")
+        targets = self._targets()
+        self.assertEqual(len(targets), 1, "a provider with no model is not a target")
+
+    async def test_a_named_provider_keeps_none_of_the_borrowed_row_s_address(self) -> None:
+        # Both fields name the provider being left behind, and both are
+        # load-bearing: `ProviderFactory` prefers `config.base_url` over the
+        # built-in catalog, and `keychain.get(api_key_ref)` returns a key by
+        # reference without asking which provider it belongs to. Carrying either
+        # one over points the conductor at the scribe's endpoint holding the
+        # scribe's credential.
+        self.registry.set_config("scribe", AgentConfigUpdate(
+            provider="ollama", model_name="scribe-model",
+            base_url="http://127.0.0.1:11434",
+        ))
+        self.settings.set_str("conductor_provider", "openai")
+        self.settings.set_str("conductor_model", "gpt-4o")
+        self.settings.set_str("conductor_fallback_provider", "groq")
+        self.settings.set_str("conductor_fallback_model", "llama-3.3-70b")
+        for _, _, cfg in self._targets():
+            self.assertIsNone(cfg.base_url, cfg.provider)
+            self.assertIsNone(cfg.api_key_ref, cfg.provider)
+
+    async def test_naming_the_borrowed_providers_own_keeps_its_endpoint(self) -> None:
+        # The other half of that rule: a custom provider's base URL is how the
+        # engine reaches it at all, and dropping it because the *slug* matched
+        # would make the setting unusable.
+        self.registry.set_config("scribe", AgentConfigUpdate(
+            provider="vllm", model_name="scribe-model",
+            base_url="http://127.0.0.1:8000",
+        ))
+        self.settings.set_str("conductor_provider", "vllm")
+        self.settings.set_str("conductor_model", "conductor-model")
+        cfg = self._targets()[0][2]
+        self.assertEqual(cfg.base_url, "http://127.0.0.1:8000")
+
+    async def test_a_single_target_has_no_fallback_notice_to_build(self) -> None:
+        # Most installs have one target, and the notice reads the *second* one
+        # out of the list. Built unconditionally, that raised IndexError while
+        # `_conduct` was still assembling the loop — so every goal the conductor
+        # drove failed before its first model call, and the stream suite is what
+        # said so.
+        self.settings.set_str("conductor_provider", "openai")
+        self.settings.set_str("conductor_model", "gpt-4o")
+        targets = self._targets()
+        self.assertEqual(len(targets), 1)
+        self.assertIsNone(
+            self.executor._conductor_fallback_notice("g1", "scribe", targets)
+        )
+
+    async def test_a_primary_that_cannot_be_built_does_not_hide_the_fallback(self) -> None:
+        # A provider that cannot be constructed at all — a protocol nothing
+        # speaks, a keyring the user cannot write — used to be "no conductor".
+        # With a chain it is "not the primary", which is the whole point of one.
+        self.settings.set_str("conductor_provider", "openai")
+        self.settings.set_str("conductor_model", "gpt-4o")
+        self.settings.set_str("conductor_fallback_provider", "ollama")
+        self.settings.set_str("conductor_fallback_model", "llama3")
+        real = self.registry.build_provider
+
+        def build(cfg: Any) -> Any:
+            if cfg.provider == "openai":
+                raise ProviderError("unknown_protocol", "nothing speaks this")
+            return real(cfg)
+
+        self.registry.build_provider = build  # type: ignore[method-assign]
+        targets = self._targets()
+        self.assertEqual([(t[2].provider, t[1]) for t in targets], [("ollama", "llama3")])
 
 
 if __name__ == "__main__":  # pragma: no cover

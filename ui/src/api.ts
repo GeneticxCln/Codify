@@ -3,6 +3,7 @@ import type {
   AgentCallStat,
   AgentConfig,
   Conversation,
+  ConversationTurn,
   DeletedGoal,
   DeletedWorkspace,
   EngineInfo,
@@ -694,6 +695,24 @@ export async function createConversation(
     }),
   });
   if (!res.ok) throw await engineError(res, "Failed to start a conversation");
+  return res.json();
+}
+
+/**
+ * A thread's turns, oldest first — what the transcript reads as.
+ *
+ * Derived by the engine from the goals that answer them (each turn is one run), so
+ * this is the list a tab needs to rebuild a pane after a reload, and it is the
+ * reason a thread is not empty just because nothing is streaming to it.
+ */
+export async function fetchConversationTurns(
+  conversationId: string,
+): Promise<ConversationTurn[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/conversations/${conversationId}/turns`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to load the thread's turns");
   return res.json();
 }
 

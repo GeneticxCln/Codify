@@ -19,6 +19,12 @@ import { AuditReport } from "./AuditReport";
 import { TracePanel } from "./TracePanel";
 import { canArmTrace } from "../traceSummary";
 import {
+  isConversationalTurn,
+  turnAlerts,
+  turnLiveText,
+  turnReply,
+} from "../turnTranscript";
+import {
   User,
   Bot,
   Route,
@@ -303,6 +309,87 @@ const LayaGateCard: React.FC<{ payload: Record<string, any> }> = ({
           {w}
         </div>
       ))}
+    </div>
+  );
+};
+
+/**
+ * A turn, rendered as the conversation it is.
+ *
+ * The alternative was the execution card, and for "hi" that card is a lie of
+ * shape: a status badge over a question, a spine naming the roles dispatched to
+ * answer it, and a Laya verdict card — three pieces of run furniture a person
+ * asking a question never asked for, and the reason the answer read as a side
+ * effect of a pipeline rather than as a reply. What a turn *does* keep is
+ * everything a person has to act on: the gate's card when the engine published
+ * one (which now means it blocked or warned — see `turnTranscript`), and any
+ * warning or error. The engine's narration of its own tool calls is dropped
+ * here on purpose; it is in the event log and in the audit export.
+ *
+ * The rules live in `turnTranscript.ts` and are asserted there; this draws them.
+ */
+const TurnExchange: React.FC<{
+  msg: ChatMessage;
+  /** This message's recording panel is open. */
+  traceOpen: boolean;
+  onToggleTrace: () => void;
+}> = ({ msg, traceOpen, onToggleTrace }) => {
+  const reply = turnReply(msg.events);
+  // Only while there is nothing to show yet: the streamed snapshot *is* the
+  // answer being produced, and once the engine publishes the reply it is the
+  // same words said twice.
+  const live = reply === null ? turnLiveText(msg.events) : null;
+  const alerts = turnAlerts(msg.events);
+  const active = isGoalActive(msg.goal?.status);
+
+  return (
+    <div className="space-y-2">
+      <div className="rounded-2xl rounded-tl-sm border border-codify-border bg-codify-surface px-4 py-2.5 text-sm leading-relaxed text-gray-100 whitespace-pre-wrap break-words">
+        {reply ??
+          live ??
+          (active ? (
+            <span className="text-gray-400 italic animate-pulse">
+              Thinking…
+            </span>
+          ) : (
+            <span className="text-gray-500">(no answer)</span>
+          ))}
+      </div>
+      {alerts.length > 0 && (
+        <div className="space-y-1.5">
+          {alerts.map((alert, i) =>
+            alert.kind === "gate" ? (
+              <LayaGateCard key={`gate-${i}`} payload={alert.payload ?? {}} />
+            ) : (
+              <div
+                key={`${alert.kind}-${i}`}
+                className={`flex items-start gap-1.5 pl-2 text-xs ${
+                  alert.kind === "error" ? "text-red-300" : "text-amber-300"
+                }`}
+              >
+                <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                <span className="leading-relaxed font-mono">{alert.text}</span>
+              </div>
+            ),
+          )}
+        </div>
+      )}
+      {/* A turn can be recorded like any other goal, so the recording stays
+          reachable from the turn's own card. Nothing to arm: a turn spends its
+          life between PLANNING and COMPLETED, and the composer is where its
+          recording is asked for. */}
+      {msg.goal?.trace && (
+        <button
+          type="button"
+          onClick={onToggleTrace}
+          aria-expanded={traceOpen}
+          className="flex items-center gap-1.5 pl-2 text-2xs text-gray-400 hover:text-blue-400 transition-colors"
+          title={traceOpen ? "Hide the recording" : "Show this turn's recording"}
+        >
+          <Radio className="w-3 h-3 text-red-400" />
+          Recording
+        </button>
+      )}
     </div>
   );
 };
@@ -754,14 +841,19 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
 
   if (messages.length === 0) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center p-6 text-center max-w-2xl mx-auto">
-        <div className="w-12 h-12 rounded-2xl bg-blue-600/10 border border-blue-500/20 flex items-center justify-center text-blue-400 mb-4 shadow-inner">
+      <div className="relative flex-1 flex flex-col items-center justify-center p-6 text-center max-w-2xl mx-auto">
+        {/* No rain here, and that is the fix rather than a loss: the OLED theme's
+            backdrop is mounted once in the shell (`App.tsx`), behind the sidebar
+            and the transcript alike. It used to sit in this branch, which made it
+            a `max-w-2xl` column of glyphs that vanished the moment a message
+            existed — the mount point was the bug, not the animation. */}
+        <div className="relative w-12 h-12 rounded-2xl bg-blue-600/10 border border-blue-500/20 flex items-center justify-center text-blue-400 mb-4 shadow-inner">
           <Sparkles className="w-6 h-6" />
         </div>
-        <h2 className="text-xl font-bold text-gray-100 mb-2">
+        <h2 className="relative text-xl font-bold text-gray-100 mb-2">
           What would you like to build or fix?
         </h2>
-        <p className="text-xs text-gray-400 max-w-md mb-8 leading-relaxed">
+        <p className="relative text-xs text-gray-400 max-w-md mb-8 leading-relaxed">
           Select a project folder and your preferred model below. Codify will
           inspect your codebase, plan atomic steps, propose file diffs, and
           verify tests automatically.
@@ -779,7 +871,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
               key={suggestion}
               type="button"
               onClick={() => onQuickPrompt(suggestion)}
-              className="text-left p-3 rounded-xl bg-codify-surface border border-codify-border hover:border-blue-500/40 hover:bg-codify-raised transition-all text-xs text-gray-300 group"
+              className="relative text-left p-3 rounded-xl bg-codify-surface border border-codify-border hover:border-blue-500/40 hover:bg-codify-raised transition-all text-xs text-gray-300 group"
             >
               <div className="flex items-center gap-2 font-medium text-gray-200 group-hover:text-blue-400">
                 <FileCode className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
@@ -794,7 +886,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
         <button
           type="button"
           onClick={onImportAudit}
-          className="mt-4 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-codify-surface border border-codify-border hover:border-blue-500/40 text-xs text-gray-400 hover:text-blue-400 transition-colors"
+          className="relative mt-4 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-codify-surface border border-codify-border hover:border-blue-500/40 text-xs text-gray-400 hover:text-blue-400 transition-colors"
           title="Open an exported audit-trail JSON and view it as a report"
         >
           <FileUp className="w-3.5 h-3.5" />
@@ -857,33 +949,82 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
         const activeRole = isGoalActive(msg.goal?.status)
           ? ((lastDispatch?.payload?.role as string | undefined) ?? null)
           : null;
+        // A turn that was answered is a conversation; a turn that planned is a
+        // run and keeps the card. See `turnTranscript.isConversationalTurn`.
+        const conversational = !msg.auditDoc && isConversationalTurn(msg.goal);
+        // The recording panel, drawn by whichever card the message gets.
+        const tracePanel =
+          openTraceId && msg.goal ? (
+            <TracePanel
+              goalId={openTraceId}
+              goal={msg.goal}
+              onSetTrace={(enabled) => onSetGoalTrace(msg.goal!.id, enabled)}
+              onClose={() => setTraceFor(null)}
+            />
+          ) : null;
         return (
           <div key={msg.id} className="space-y-4">
             {/* User Message */}
             {msg.role === "user" ? (
+              /* The user's own words, on a surface the theme owns.
+                 This used to be `bg-blue-600 text-white` with a blue-tinted
+                 avatar beside it, and both were hardcoded — which is why the
+                 prompt was a saturated blue slab in a theme that has no blue in
+                 it. Nothing in the transcript's *chrome* may pick a hue: a
+                 theme supplies surfaces and text, so anything that is going to
+                 carry words composes from `raised`/`primary` and is opaque by
+                 construction.                 Who is speaking is said by side and by the bubble's tail
+                 corner, not by colour.
+
+                 The border is load-bearing, not decoration: on OLED, `raised`
+                 (#061009) and `bg` (#000000) are two steps apart, so a fill-only
+                 bubble has no edge and `shadow-sm` does nothing on pure black.
+                 The border is what draws the panel on every theme. */
               <div className="flex items-start gap-3 justify-end">
-                <div className="bg-blue-600 text-white px-4 py-2.5 rounded-2xl rounded-tr-sm max-w-xl text-sm leading-relaxed shadow-sm">
+                <div className="bg-codify-raised border border-codify-border text-codify-primary px-4 py-2.5 rounded-2xl rounded-tr-sm max-w-xl text-sm leading-relaxed shadow-sm">
                   {msg.content}
                 </div>
-                <div className="w-7 h-7 rounded-full bg-blue-500/20 border border-blue-400/30 flex items-center justify-center text-blue-300 flex-shrink-0">
+                <div
+                  className="w-7 h-7 rounded-full bg-codify-raised border border-codify-border-strong flex items-center justify-center text-codify-secondary flex-shrink-0"
+                  aria-hidden="true"
+                >
                   <User className="w-4 h-4" />
                 </div>
               </div>
             ) : (
-              /* Assistant Execution Card */
+              /* The assistant's side: a conversation for a turn that answered,
+                 an execution card for everything else. */
               <div className="flex items-start gap-3">
-                <div className="w-7 h-7 rounded-full bg-purple-500/20 border border-purple-400/30 flex items-center justify-center text-purple-300 flex-shrink-0 mt-1">
+                <div
+                  className="w-7 h-7 rounded-full bg-codify-raised border border-codify-border-strong flex items-center justify-center text-codify-secondary flex-shrink-0 mt-1"
+                  aria-hidden="true"
+                >
                   <Bot className="w-4 h-4" />
                 </div>
 
                 <div
                   ref={scopeRef}
-                  className="flex-1 bg-codify-surface border border-codify-border rounded-2xl p-4 sm:p-5 shadow-lg space-y-4"
+                  className={
+                    conversational
+                      ? "flex-1 min-w-0 space-y-4"
+                      : "flex-1 bg-codify-surface border border-codify-border rounded-2xl p-4 sm:p-5 shadow-lg space-y-4"
+                  }
                 >
                   {/* An imported audit document renders as a standalone report —
                     it has no live goal, so it short-circuits the whole
-                    execution-card chrome. */}
-                  {msg.auditDoc ? (
+                    execution-card chrome; a turn that answered renders as the
+                    conversation it is, and everything else as the run it was. */}
+                  {conversational ? (
+                    <TurnExchange
+                      msg={msg}
+                      traceOpen={traceFor === msg.goal?.id}
+                      onToggleTrace={() =>
+                        setTraceFor(
+                          traceFor === msg.goal?.id ? null : (msg.goal?.id ?? null),
+                        )
+                      }
+                    />
+                  ) : msg.auditDoc ? (
                     <>
                       <div className="flex items-center gap-2 text-xs font-semibold text-gray-300 border-b border-codify-border/60 pb-3">
                         <FileUp className="w-3.5 h-3.5 text-blue-400" />
@@ -1199,16 +1340,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         )}
                       </div>
 
-                      {openTraceId && msg.goal && (
-                        <TracePanel
-                          goalId={openTraceId}
-                          goal={msg.goal}
-                          onSetTrace={(enabled) =>
-                            onSetGoalTrace(msg.goal!.id, enabled)
-                          }
-                          onClose={() => setTraceFor(null)}
-                        />
-                      )}
+                      {tracePanel}
 
                       {/* Plan Steps Accordion */}
                       {msg.goal?.steps && msg.goal.steps.length > 0 && (
@@ -2211,6 +2343,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       )}
                     </>
                   )}
+                  {conversational && tracePanel}
                 </div>
               </div>
             )}

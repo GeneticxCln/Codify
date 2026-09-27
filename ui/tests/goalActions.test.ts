@@ -12,6 +12,7 @@ import {
   MEANINGFUL_FROM,
   canStopGoal,
   isGoalActive,
+  isMessageBusy,
   ACTIVE_STATUSES,
   runGoalAction,
   type GoalActionArgs,
@@ -251,4 +252,36 @@ test("being stoppable and being worked on are different questions", () => {
 
 test("only PLANNING and RUNNING count as in flight", () => {
   assert.deepEqual([...ACTIVE_STATUSES], ["PLANNING", "RUNNING"]);
+});
+
+//
+// The tab strip's busy dot — "the assistant is still working" — reads
+// `isMessageBusy`, and it used to read the dispatch flag with an OR. Nothing
+// clears that flag when the engine finishes, so a turn answered in three seconds
+// left its tab pulsing for the rest of the session: the transcript said the AI
+// never stopped. These pin the fix, and the one job the flag still has.
+
+test("a finished goal stops reading as busy, whatever the dispatch flag says", () => {
+  for (const status of ["COMPLETED", "FAILED", "CANCELLED", "PENDING", "PAUSED"]) {
+    assert.equal(
+      isMessageBusy({ goal: { status }, isStreaming: true }),
+      false,
+      `${status} is not in flight, so the tab must not pulse for it`,
+    );
+  }
+});
+
+test("a live goal reads as busy even before any event has arrived", () => {
+  for (const status of ACTIVE_STATUSES) {
+    assert.equal(isMessageBusy({ goal: { status } }), true, status);
+  }
+});
+
+test("the dispatch flag covers only the gap before the goal row is read", () => {
+  // Two states, and the difference matters: a message dispatched moments ago has
+  // no goal yet and *is* running, while one that never got a goal (a refusal at
+  // dispatch) was reported to the user and is not.
+  assert.equal(isMessageBusy({ isStreaming: true }), true);
+  assert.equal(isMessageBusy({ isStreaming: false }), false);
+  assert.equal(isMessageBusy({}), false);
 });

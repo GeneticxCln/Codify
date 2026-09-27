@@ -65,10 +65,14 @@ export type StepStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
  */
 export type GoalMode = "normal" | "design" | "knowledge" | "chat";
 
-/** True for a goal that is a turn rather than a run. A turn is answered from
- * one model call and never has steps, so the plan/apply/step chrome has nothing
- * to show for it. Narrowing on this is why the composer's send is not the same
- * code path as a run's start. */
+/** True for a goal that is a turn rather than a run: it was typed into a thread
+ * (`conversation_id`), and it is the route the composer sends to.
+ *
+ * It says where the goal came from, not what it became. A turn that asked for a
+ * change delegates to `run_planning` on the same row, so it comes back with
+ * steps and a PENDING status like any run. A caller that wants "this was
+ * answered as a conversation" wants `turnTranscript.isConversationalTurn` —
+ * this mode *and* no steps — rather than this alone. */
 export function isChatMode(mode: GoalMode | undefined): boolean {
   return mode === "chat";
 }

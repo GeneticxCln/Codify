@@ -68,6 +68,24 @@ export function isGoalActive(status: string | null | undefined): boolean {
   return !!status && ACTIVE_STATUSES.includes(status);
 }
 
+/**
+ * Whether a transcript message still has work in flight.
+ *
+ * The goal's own status is the engine's answer and is the one to trust once
+ * there is one: it can be at most one event stale, while `isStreaming` is a flag
+ * this client sets at dispatch that nothing in the engine updates. Read as an OR
+ * — which is what the tab strip did — the flag kept a finished turn's tab
+ * pulsing forever, so the transcript said the assistant was still working long
+ * after it had stopped. `isStreaming` keeps its one real job here: covering the
+ * gap between dispatching a goal and having a row to read.
+ */
+export function isMessageBusy(m: {
+  goal?: { status: string } | null;
+  isStreaming?: boolean;
+}): boolean {
+  return m.goal ? isGoalActive(m.goal.status) : m.isStreaming === true;
+}
+
 /** What one action run saw. `refused` carries the engine's own words. */
 export type GoalActionOutcome<GoalT> =
   | { kind: "applied"; goal: GoalT }
