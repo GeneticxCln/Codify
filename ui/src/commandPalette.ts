@@ -42,7 +42,7 @@ export type PaletteItem =
     })
   | (BaseItem & {
       kind: "settings";
-      settingsTab: "keys" | "agents";
+      settingsTab: "keys" | "agents" | "appearance";
     });
 
 /** What the palette is choosing from. */
@@ -62,10 +62,11 @@ export interface PaletteSources {
 export const SETTINGS_ENTRIES: ReadonlyArray<{
   id: string;
   title: string;
-  settingsTab: "keys" | "agents";
+  settingsTab: "keys" | "agents" | "appearance";
 }> = [
   { id: "settings:keys", title: "Provider keys & endpoints", settingsTab: "keys" },
   { id: "settings:agents", title: "Agent roles & prompts", settingsTab: "agents" },
+  { id: "settings:appearance", title: "Appearance & themes", settingsTab: "appearance" },
 ];
 
 const KIND_LABEL: Record<PaletteItemKind, string> = {

@@ -276,7 +276,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <nav
-      className="flex flex-col gap-1.5 w-60 flex-shrink-0 border-r border-codify-border bg-codify-surface p-1.5"
+      className="flex flex-col gap-1.5 w-60 flex-shrink-0 border-r border-codify-border bg-codify-chrome p-1.5"
       onContextMenu={onPanelContextMenu}
     >
       {/*

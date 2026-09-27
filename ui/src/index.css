@@ -74,3 +74,78 @@ body {
     animation: none;
   }
 }
+
+/* The Cyberpunk theme's CRT veil: a one-pixel scanline period plus a slow roll,
+   the way a display that is not quite calibrated behaves. Declared here, beside
+   the audit-flash keyframes and for the same reason — the guarantee that matters
+   is the `prefers-reduced-motion` block below it. The theme's canvas already
+   draws exactly one frame when motion is off; a class that animated with no
+   escape hatch would hand the opt-out back, which is the thing DESIGN.md §7
+   bans.
+
+   The roll is a `transform`, not a `background-position`, and that is the whole
+   engineering: `background-position` is a paint property, so animating it on a
+   full-window element repaints every pixel of the window every frame — at the
+   display's rate, not the theme's 30 FPS budget. A `translateY` is composited,
+   so the veil moves without the canvas beside it repainting. It moves by
+   exactly one gradient period and the box is one period taller than the window
+   (`bottom: -3px` below), so the loop has no seam to travel across. The
+   scanline colour is the theme's own `--cyber-scan`, composed from the `-rgb`
+   triplet `applyTheme` derives, which is why this rule needs no per-theme copy. */
+@keyframes cyber-roll {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(3px); }
+}
+.cyber-veil {
+  bottom: -3px;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgb(var(--cyber-scan-rgb) / 0.55) 0 1px,
+    transparent 1px 3px
+  );
+  animation: cyber-roll 9s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cyber-veil {
+    animation: none;
+  }
+}
+
+/* ── runtime theme layer ────────────────────────────────────────────────────
+   Tailwind compiles `bg-codify-bg` to a literal `rgb(13 17 23 …)`, so a theme
+   applied at runtime (`ui/src/appearance.ts` writes CSS custom properties on
+   the document root) would repaint the body and scrollbars but not any panel.
+   These rules re-point exactly the `codify-*` utility class names the source
+   uses at the live variables — same specificity, later in source order, so
+   they win without `!important` and the class names stay untouched everywhere.
+
+   Status and accent hues are deliberately absent: five tones with one meaning
+   is a contract (DESIGN.md §2), not a palette to re-skin. A theme paints
+   surfaces and text; it does not renegotiate what "failed" looks like.
+   The `/60`, `/50`, `/20` alphas recombine from the `-rgb` triplets
+   `applyTheme` derives from each theme's own hexes. */
+.bg-codify-bg { background-color: rgb(var(--codify-bg-rgb) / 1); }
+.bg-codify-surface { background-color: rgb(var(--codify-surface-rgb) / 1); }
+.bg-codify-raised { background-color: rgb(var(--codify-raised-rgb) / 1); }
+/* The chrome — the top bar and the sidebar — is glass rather than paint.
+   Those are the two full-bleed surfaces the window's rain sits behind, and at
+   full opacity they hid it completely: the rain was visible in the middle of
+   the window and nowhere else, which read as a centred animation rather than a
+   background. The alpha composes from the same `-rgb` triplet every other
+   utility here does, so a rainy theme gets weather behind its chrome for free
+   and a non-rainy one is unchanged — a translucent panel over its own opaque
+   background is the colour it always was. Content surfaces stay opaque: text on
+   glass is legible, text *under* glass is not, and the transcript is where the
+   reading happens. */
+.bg-codify-chrome { background-color: rgb(var(--codify-surface-rgb) / 0.6); }
+.bg-codify-border { background-color: rgb(var(--codify-border-rgb) / 1); }
+.bg-codify-border-strong { background-color: rgb(var(--codify-border-strong-rgb) / 1); }
+.border-codify-border { border-color: rgb(var(--codify-border-rgb) / 1); }
+.border-codify-border\/60 { border-color: rgb(var(--codify-border-rgb) / 0.6); }
+.border-codify-raised { border-color: rgb(var(--codify-raised-rgb) / 1); }
+.border-codify-border-strong { border-color: rgb(var(--codify-border-strong-rgb) / 1); }
+.border-codify-surface { border-color: rgb(var(--codify-surface-rgb) / 1); }
+.text-codify-primary { color: rgb(var(--codify-primary-rgb) / 1); }
+.text-codify-secondary { color: rgb(var(--codify-secondary-rgb) / 1); }
+.text-codify-muted { color: rgb(var(--codify-muted-rgb) / 1); }
+.bg-codify-raised\/60 { background-color: rgb(var(--codify-raised-rgb) / 0.6); }

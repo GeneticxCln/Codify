@@ -174,6 +174,12 @@ Eight themes ship in the box, and choosing one is a **runtime swap, not a rebuil
 | **Solar Flare** | A starfield and slow indigo-to-ultraviolet streams along the window's edges. |
 | **Monochrome ASCII Rain** | The same rain in hex bytes and grey — no component of its own, just different tokens. |
 
+<p align="center">
+  <img src="docs/themes.gif" alt="All eight themes side by side, each running its own animated backdrop at the same time" width="1000">
+</p>
+
+<sub>All eight at once, each drawing its own backdrop. Every cell is a screenshot of the running app in that theme — the backdrops read their colours from the document root, so they cannot share one document, and this is eight captures stitched rather than one page with eight iframes.</sub>
+
 Four constraints hold every one of them, and they are the reason this is a feature rather than a pile of canvas demos:
 
 - **A theme is data.** The last one added — Monochrome ASCII Rain — is five lines of tokens and no new

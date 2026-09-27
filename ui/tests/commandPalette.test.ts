@@ -87,7 +87,7 @@ test("items come in strip order: tabs, then conversations, then settings", () =>
   );
   assert.deepEqual(
     items.map((i) => i.id),
-    ["tab:tab-1", "tab:tab-2", "conversation:c9", "settings:keys", "settings:agents"]
+    ["tab:tab-1", "tab:tab-2", "conversation:c9", "settings:keys", "settings:agents", "settings:appearance"]
   );
 });
 
@@ -107,7 +107,7 @@ test("the active tab is marked, and settings land on the right dialog page", () 
   const settings = items.filter((i) => i.kind === "settings");
   assert.deepEqual(
     settings.map((i) => (i.kind === "settings" ? i.settingsTab : "?")),
-    ["keys", "agents"]
+    ["keys", "agents", "appearance"]
   );
 });
 
