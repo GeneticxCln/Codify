@@ -23,6 +23,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,7 @@ from engine.models import (
     TurnCreate,
     WorkspaceCreate,
 )
-from engine.providers import BaseProvider, Keychain, ProviderFactory
+from engine.providers import BaseProvider, Keychain, ProviderError, ProviderFactory
 from engine.sandbox import CommandNotAllowed, SandboxService
 from engine.services import (
     AgentRegistryService,
@@ -62,6 +63,7 @@ from engine.toolcall import (
     to_openai_messages,
 )
 from engine.executor import ExecutorService
+from engine.skills import load_skills
 from engine.laya import LayaDecision, LayaService
 
 
@@ -124,6 +126,34 @@ class _PlainProvider(BaseProvider):
         return "a plain answer"
 
 
+class _DyingProvider(_ToolProvider):
+    """A provider that fails the calls `fail_on` names, and behaves otherwise.
+
+    Keyed by call number rather than a queue of codes, because the test that
+    matters is the one where the provider served a call *first* and died on the
+    second — the case where a fallback that restarted the run rather than the
+    call would double every move already made.
+    """
+
+    def __init__(self, fail_on: dict[int, str] | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.fail_on = dict(fail_on or {})
+        self.attempts: list[str] = []
+        self.served = 0
+
+    async def complete_with_tools(
+        self, system_prompt: str, messages: list[dict[str, Any]],
+        tools: list[ToolSpec], model: str, temperature: float, max_tokens: int,
+    ) -> ToolReply:
+        self.attempts.append(model)
+        self.served += 1
+        if self.served in self.fail_on:
+            raise ProviderError(self.fail_on[self.served], "the endpoint refused the call")
+        return await super().complete_with_tools(
+            system_prompt, messages, tools, model, temperature, max_tokens,
+        )
+
+
 def _call(name: str, **arguments: Any) -> ToolCall:
     return ToolCall(id=f"c_{name}", name=name, arguments=arguments)
 
@@ -163,10 +193,13 @@ class ConductorTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     def _dispatch(self, goal_id: str, **overrides: Any) -> dict[str, Any]:
-        # `_ToolProvider` so the `delegate` test can drive the *real* pipeline
+        # `_ToolProvider` so the `plan` test can drive the *real* pipeline
         # through the same double the loop uses.
         executor = self._executor(_ToolProvider())
-        table = executor._conductor_dispatch(goal_id, self.goals.get(goal_id), str(self.repo))
+        table = executor._conductor_dispatch(
+            goal_id, self.goals.get(goal_id), str(self.repo),
+            load_skills(str(self.repo)),
+        )
         table.update(overrides)
         return table
 
@@ -331,15 +364,52 @@ class TestTheCap(ConductorTestCase):
 
 
 class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
-    async def test_there_is_no_way_to_write_a_file(self) -> None:
-        # The single most important property of this feature. A `write_file`
-        # tool would make the librarian, the planner, the fixer, the verifier
+    async def test_the_only_door_to_a_file_is_the_gated_write_move(self) -> None:
+        # The single most important property of this feature, restated for a
+        # conductor that can now drive stages itself. There is still no direct
+        # file writer: a `write_file` tool would make the planner, the verifier
         # and the critic optional for any change the conductor felt like making
-        # itself — which is the opposite of what a conductor is for.
+        # on its own. `write` exists because the conductor has to be able to say
+        # "do this step next" — but it is the fixer's own method, and the next
+        # test is the one that matters: it refuses until a person approves.
         names = set(tool_names())
-        for forbidden in ("write_file", "edit_file", "apply_patch", "write", "commit"):
+        for forbidden in ("write_file", "edit_file", "apply_patch", "commit"):
             self.assertNotIn(forbidden, names)
-        self.assertEqual(names, {"read_file", "search_code", "git_history", "run_command", "delegate"})
+        # The whole-pipeline button is gone: it ran all seven stages whether or
+        # not the request needed them, which is exactly the hardcoding this
+        # replaced.
+        self.assertNotIn("delegate", names)
+        self.assertEqual(
+            names,
+            {
+                "read_file", "search_code", "git_history", "run_command",
+                "use_skill", "recon", "design", "plan",
+                "write", "verify", "review", "summarize",
+            },
+        )
+
+    async def test_write_is_gated_on_the_plan_being_approved(self) -> None:
+        # docs/00 §6.9, and the reason the moves are safe to hand a model. The
+        # check reads the goal's stored status, so nothing the model says or
+        # was told can move it.
+        executor = self._executor(_ToolProvider())
+        allowed, why = executor._write_allowed(self.goal.id)
+        self.assertFalse(allowed, "an unapproved plan must not be writable")
+        self.assertIn("has not been approved", why)
+        current = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, current.version, "RUNNING")
+        allowed, _why = executor._write_allowed(self.goal.id)
+        self.assertTrue(allowed, "starting the goal is what authorises a write")
+
+    async def test_write_refuses_and_writes_nothing_while_unapproved(self) -> None:
+        table = self._dispatch(self.goal.id)
+        await table["recon"]({"task": "find the parser"})
+        await table["plan"]({"task": "change the parser"})
+        step_id = self.goals.steps(self.goal.id)[0].id
+        before = (self.repo / "app.py").read_text()
+        out = await table["write"]({"step_id": step_id, "instructions": "rename it"})
+        self.assertIn("has not been approved", out)
+        self.assertEqual((self.repo / "app.py").read_text(), before)
 
     async def test_read_file_reads_the_real_workspace(self) -> None:
         table = self._dispatch(self.goal.id)
@@ -389,21 +459,54 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
         out = await table["git_history"]({"args": ["log", "--oneline"]})
         self.assertIn("first", out)
 
-    async def test_delegate_runs_the_real_pipeline_not_a_second_one(self) -> None:
-        # The delegation is the point: a code change reaches the same librarian
-        # and planner a POST /goals reaches.
+    async def test_recon_then_plan_reaches_the_real_pipeline(self) -> None:
+        # The moves are the pipeline's own stages: `plan` produces the same
+        # steps a POST /goals produces, through the same planner.
         table = self._dispatch(self.goal.id)
-        out = await table["delegate"]({"task": "add a test"})
+        recon = await table["recon"]({"task": "find the parser"})
+        self.assertIn("empty repo", recon, "recon must return the librarian's findings")
+        out = await table["plan"]({"task": "add a test"})
         payload = json.loads(out)
-        self.assertIn(payload["status"], ("PENDING", "FAILED", "RUNNING", "COMPLETED"))
         self.assertEqual(
             [s["title"] for s in payload["steps"]], ["S1"],
-            "the delegated run must be the pipeline's own plan",
+            "the plan must be the pipeline's own plan",
         )
+        self.assertEqual(payload["status"], "PENDING")
+        self.assertIn("step_id", payload["steps"][0])
 
-    async def test_delegate_needs_a_task(self) -> None:
+    async def test_plan_refuses_without_evidence(self) -> None:
+        # The one guard that has to be in code rather than in a prompt: a plan
+        # written against a guessed file layout edits the wrong files.
         table = self._dispatch(self.goal.id)
-        self.assertIn("needs a task", await table["delegate"]({}))
+        out = await table["plan"]({"task": "change something"})
+        self.assertIn("no evidence", out)
+        self.assertEqual(self.goals.steps(self.goal.id), [])
+
+    async def test_a_move_addressed_to_an_unknown_step_says_which_exist(self) -> None:
+        table = self._dispatch(self.goal.id)
+        out = await table["write"]({"step_id": "nope", "instructions": "x"})
+        self.assertIn("no steps yet", out)
+        self.assertIn("`plan`", out)
+
+    async def test_verify_refuses_before_a_write(self) -> None:
+        # Verification judges a change. With no change there is nothing to
+        # judge, and pretending otherwise would produce a passing verdict for
+        # work that was never done.
+        table = self._dispatch(self.goal.id)
+        await table["recon"]({"task": "find the parser"})
+        await table["plan"]({"task": "change the parser"})
+        step_id = self.goals.steps(self.goal.id)[0].id
+        out = await table["verify"]({"step_id": step_id})
+        self.assertIn("Call `write` first", out)
+
+    async def test_use_skill_returns_the_body_and_lists_the_menu(self) -> None:
+        table = self._dispatch(self.goal.id)
+        body = await table["use_skill"]({"name": "ship-a-change"})
+        self.assertIn("recon", body)
+        self.assertIn("approval", body.lower())
+        out = await table["use_skill"]({"name": "not-a-skill"})
+        self.assertIn("no skill called", out)
+        self.assertIn("ship-a-change", out)
 
 
 class TestGracefulDegradation(ConductorTestCase):
@@ -659,6 +762,177 @@ class TestProvidersThatWriteToolCallsAsText(unittest.TestCase):
         reply = coerce_tool_reply("looking now", calls, self._tools())
         self.assertEqual(reply.tool_calls, calls)
         self.assertEqual(reply.text, "looking now")
+
+
+class TestACallWrittenInsideProse(ConductorTestCase):
+    """The third shape a model reaches for, found by a live run.
+
+    The two already covered are a JSON document as the whole body, and a fence as
+    the whole body. This is the one neither caught: prose that narrates the move
+    and then writes the call underneath it in a fenced block. Against a 7B the
+    conductor answered with the narration, the fence, and no tool call at all —
+    so the move it had described was never made, and the description was shown to
+    the user as the turn's answer.
+    """
+
+    LIVE = (
+        "Based on the evidence, the workspace is empty, and there is no existing "
+        "code to reference or modify. Let's proceed with the plan.\n\n"
+        "2. **`design`** — Lock the direction for the new file and function.\n\n"
+        "```json\n"
+        '{"name": "design", "arguments": {"task": "Create utils.py with an '
+        'add(a, b) function."}}\n'
+        "```\n"
+    )
+
+    def test_it_is_recovered_rather_than_shown_to_the_user(self) -> None:
+        reply = coerce_tool_reply(self.LIVE, [], list(TOOLS))
+        self.assertEqual([c.name for c in reply.tool_calls], ["design"])
+        self.assertEqual(
+            reply.tool_calls[0].arguments["task"],
+            "Create utils.py with an add(a, b) function.",
+        )
+
+    def test_the_narration_is_not_returned_as_the_answer(self) -> None:
+        # A reply that both calls a tool and is shown as the final answer would
+        # put the model's intentions in the transcript as if they were results.
+        reply = coerce_tool_reply(self.LIVE, [], list(TOOLS))
+        self.assertEqual(reply.text, "")
+        self.assertTrue(reply.wants_tools)
+
+    def test_a_last_fence_wins_over_an_earlier_one(self) -> None:
+        # A model laying out two options settled on the second one, which is the
+        # move it means to make.
+        text = (
+            "```json\n{\"name\": \"recon\", \"arguments\": {}}\n```\n"
+            "Actually, on reflection:\n"
+            "```json\n{\"name\": \"plan\", \"arguments\": {}}\n```\n"
+        )
+        reply = coerce_tool_reply(text, [], list(TOOLS))
+        self.assertEqual([c.name for c in reply.tool_calls], ["plan"])
+
+    def test_a_fence_naming_a_tool_that_was_not_offered_stays_prose(self) -> None:
+        # The guard that makes the wider net safe. A model describing a call it
+        # cannot make is still just talking.
+        text = 'You could write\n\n```json\n{"name": "exfiltrate"}\n```\n'
+        reply = coerce_tool_reply(text, [], list(TOOLS))
+        self.assertEqual(reply.tool_calls, [])
+        self.assertEqual(reply.text, text)
+
+    def test_a_fence_that_is_not_json_is_left_alone(self) -> None:
+        text = "Here is the function:\n\n```python\ndef add(a, b):\n    return a + b\n```\n"
+        reply = coerce_tool_reply(text, [], list(TOOLS))
+        self.assertEqual(reply.tool_calls, [])
+        self.assertEqual(reply.text, text)
+
+
+class TestTheConductorFallsBack(unittest.IsolatedAsyncioTestCase):
+    """A conductor whose model is down should still answer.
+
+    Every role has had a fallback target since before the conductor existed, and
+    the conductor is the one component that had none: it is a loop with no
+    single call to retry, so a dead provider ended a turn that had already made
+    three moves. The fix is to retry the *call* on the fallback, which is only
+    safe if the moves already made are carried into it rather than repeated.
+    """
+
+    def _loop(
+        self, primary: _DyingProvider, fallback: _DyingProvider | None = None,
+        on_fallback: Callable[[ProviderError, Any, str], None] | None = None,
+    ) -> Conductor:
+        reads: list[dict[str, Any]] = []
+
+        async def read_file(args: dict[str, Any]) -> str:
+            reads.append(args)
+            return "def parse(text):\n    return text"
+
+        return Conductor(
+            primary, "primary-model", ".",
+            [t for t in TOOLS if t.name == "read_file"],
+            {"read_file": read_file},
+            system_prompt="s",
+            fallback=(fallback, "fallback-model") if fallback else None,
+            on_fallback=on_fallback,
+        )
+
+    async def test_a_dead_primary_resumes_on_the_fallback(self) -> None:
+        # Dies on the *second* call, so the first move really happened and its
+        # result really has to survive the switch.
+        primary = _DyingProvider(
+            fail_on={2: "provider_unreachable"},
+            replies=[
+                ToolReply(tool_calls=[_call("read_file", path="app.py")]),
+                ToolReply(text="never reached"),
+            ],
+        )
+        fallback = _DyingProvider(replies=[ToolReply(text="answered by the fallback")])
+
+        answer = await self._loop(primary, fallback).run("read it")
+
+        self.assertEqual(answer, "answered by the fallback")
+        self.assertEqual(primary.attempts, ["primary-model", "primary-model"])
+
+    async def test_the_fallback_call_carries_the_moves_already_made(self) -> None:
+        # The distinction the whole design rests on: a retry that restarted the
+        # run would make `write` and `summarize` happen twice, and those have
+        # effects outside the transcript.
+        primary = _DyingProvider(
+            fail_on={2: "provider_unreachable"},
+            replies=[ToolReply(tool_calls=[_call("read_file", path="app.py")])],
+        )
+        fallback = _DyingProvider(replies=[ToolReply(text="done")])
+
+        conductor = self._loop(primary, fallback)
+        await conductor.run("read it")
+
+        self.assertEqual(len(fallback.seen_messages), 1)
+        results = [m for m in fallback.seen_messages[0] if m.get("role") == "tool"]
+        self.assertEqual(len(results), 1, "the move the primary made must reach the fallback")
+        self.assertIn("return text", results[0]["content"])
+        self.assertEqual(fallback.attempts, ["fallback-model"])
+        self.assertEqual(conductor.moves_made, 0, "read_file is not a stage move")
+
+    async def test_only_a_provider_fault_moves_the_loop(self) -> None:
+        # `internal_error` means our own code is wrong. Retrying it on a second
+        # model is how a real defect gets buried under a lucky retry.
+        primary = _DyingProvider(fail_on={1: "internal_error"})
+        fallback = _DyingProvider(replies=[ToolReply(text="should not be reached")])
+
+        with self.assertRaises(ProviderError):
+            await self._loop(primary, fallback).run("go")
+        self.assertEqual(fallback.attempts, [], "the fallback must not run our bug")
+
+    async def test_the_fallback_is_tried_once_and_then_the_error_surfaces(self) -> None:
+        # A loop that could hop between two providers forever is a coin toss
+        # dressed as a recovery, and an unanswered turn is a real failure.
+        primary = _DyingProvider(fail_on={1: "provider_http"})
+        fallback = _DyingProvider(fail_on={1: "provider_http"})
+
+        with self.assertRaises(ProviderError):
+            await self._loop(primary, fallback).run("go")
+        self.assertEqual(fallback.attempts, ["fallback-model"])
+        self.assertEqual(len(fallback.attempts), 1)
+
+    async def test_the_switch_is_announced_rather_than_silent(self) -> None:
+        # A silent switch credits the turn's answer to a model that never
+        # produced it, which is the one thing the usage books must not do.
+        seen: list[tuple[str, str, str]] = []
+        primary = _DyingProvider(fail_on={1: "provider_unreachable"})
+        fallback = _DyingProvider(replies=[ToolReply(text="from the fallback")])
+
+        await self._loop(
+            primary, fallback,
+            on_fallback=lambda exc, provider, model: seen.append((exc.code, str(provider), model)),
+        ).run("go")
+
+        self.assertEqual(seen, [("provider_unreachable", str(fallback), "fallback-model")])
+
+    async def test_a_loop_with_no_fallback_still_raises(self) -> None:
+        # The default install has no conductor fallback, and must fail the way
+        # it always did rather than silently swallowing the error.
+        primary = _DyingProvider(fail_on={1: "provider_unreachable"})
+        with self.assertRaises(ProviderError):
+            await self._loop(primary).run("go")
 
 
 if __name__ == "__main__":  # pragma: no cover

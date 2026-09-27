@@ -87,18 +87,38 @@ class SettingsService:
         # that has lost the thread will call tools forever, and an unbounded
         # loop is a way to spend a key and a machine's time on nothing.
         "conductor_max_turns": (8, lambda v: max(1, min(v, 40))),
+        # How many *stage moves* one conductor run may make (recon, design, plan,
+        # write, verify, review, summarize). A separate budget because the two
+        # are not the same currency: a model call costs seconds, while a stage
+        # move is a whole sub-agent run that can take minutes and, for `write`,
+        # touch files. Counting them together would let eight cheap file reads
+        # starve the change the user actually asked for.
+        "conductor_max_moves": (12, lambda v: max(0, min(v, 60))),
+        # Whether an approved plan is executed by the conductor or by the
+        # engine's own sequence. 1 leaves the conductor driving, which is the
+        # point of having one; 0 is the escape hatch for a model that is not yet
+        # good enough to be trusted with the order, and it needs no rebuild.
+        "conductor_drives_execution": (1, lambda v: 1 if v else 0),
     }
 
     # The conductor's model, and why it is here rather than in `agent_configs`:
     # `agent_configs` is keyed by role and iterated by `config_problems`, the
     # preflight and the Settings screen, so a row in it *is* a ninth AgentRole
     # and docs/00 §6.1 forbids that. The conductor is a loop, not a stage. These
-    # two keys are where it is configured instead. Empty means "not chosen",
-    # which the caller resolves to the scribe's configuration — the one role
-    # whose job is already writing prose for a person.
+    # keys are where it is configured instead. Empty means "not chosen", which
+    # the caller resolves to the scribe's configuration — the one role whose job
+    # is already writing prose for a person.
+    #
+    # The fallback pair is the same argument one level down: a conductor whose
+    # only model is down has no answer to give at all, and the roles have had a
+    # fallback target since before the conductor existed. Two keys rather than
+    # one, because a fallback with a provider and no model is the same inert
+    # half-pair the primary would be.
     STRING_SPEC: dict[str, str] = {
         "conductor_provider": "",
         "conductor_model": "",
+        "conductor_fallback_provider": "",
+        "conductor_fallback_model": "",
     }
 
     def get_str(self, key: str) -> str:
@@ -1215,16 +1235,22 @@ class GoalService:
         self.publish(event)
         return next(s for s in self.steps(goal_id) if s.id == step_id)
 
-    def fail_orphaned_active_goals(self) -> list[tuple[str, str, str]]:
-        """Mark goals left PLANNING/RUNNING by a dead process as FAILED.
+    def fail_orphaned_active_goals(self, why: str = "the engine restarted") -> list[tuple[str, str, str]]:
+        """Mark goals left PLANNING/RUNNING by a process that is gone as FAILED.
 
-        Called once at boot, before any request can see the stale state. Returns
-        (goal_id, previous_status, message) so the caller can explain each rescue
-        in the goal's own event log. Version is bumped unconditionally here —
-        no client holds a view of a goal from a dead process, so there is
-        nothing to conflict with. Publishes nothing: the terminal status event
-        comes from the executor's `_fail`, so the stream shows one coherent
-        story (log line, then failure) rather than two competing writers.
+        Called twice, with two different reasons, and the reason is the whole point of
+        the parameter. At boot the cause is an engine that died without anyone seeing
+        it go; on a graceful shutdown it is this engine, deliberately, with a run cut
+        short. Both leave a goal whose coroutine is not there any more, both are
+        repaired before any client can read the stale status, and a user reading the
+        event log later deserves to be told which of the two happened to them.
+
+        Returns (goal_id, previous_status, message) so the caller can explain each
+        rescue in the goal's own event log. Version is bumped unconditionally here —
+        no client holds a view of a goal from a process that is going away, so there
+        is nothing to conflict with. Publishes nothing: the terminal status event
+        comes from the executor's `_fail`, so the stream shows one coherent story
+        (log line, then failure) rather than two competing writers.
         """
         rows = self._db.execute(
             "SELECT id, status, version FROM goals WHERE status IN ('PLANNING', 'RUNNING')"
@@ -1238,11 +1264,11 @@ class GoalService:
                 (now, goal_id, version),
             )
             if cur.rowcount != 1:
-                continue  # concurrent change mid-boot; not ours to fight
+                continue  # concurrent change while we are deciding; not ours to fight
             rescued.append((
                 goal_id,
                 previous,
-                f"the engine restarted while this goal was {previous} — marking it failed; retry to run it again",
+                f"{why} while this goal was {previous} — marking it failed; retry to run it again",
             ))
         self._db.commit()
         return rescued

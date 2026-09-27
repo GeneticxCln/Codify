@@ -17,25 +17,49 @@ screen need no new case.
 
 ## The rule this file is built around
 
-**Judgement is the model's; authority is the engine's.** Every tool below is a
+**Judgement is the model's; authority is the engine's.** Every move below is a
 call the pipeline already makes, through the same service object, with the same
 validation:
 
-| Tool | Routed through | The invariant it inherits |
+| Move | Routed through | The invariant it inherits |
 |---|---|---|
 | `read_file` | `LibraryService.read` | paths are workspace-relative; an escape raises |
 | `search_code` | `LibraryService.search` | same |
-| `git_history` | `GitService` | read-only argv, under the spawn guard |
+| `git_history` | `GitService.read_only` | read-only argv, under the spawn guard |
 | `run_command` | `SandboxService.run_command` | docs/00 §6.6 — the allowlist, verbatim |
-| `delegate` | `ExecutorService.run_planning` | the whole 8-role pipeline, unchanged |
+| `recon` | `ExecutorService._librarian` | read-only, bounded rounds |
+| `design` | `ExecutorService._design` | no tools at all; decides from evidence |
+| `plan` | the planner | refuses without evidence; writes steps, never files |
+| `write` | `ExecutorService._fixer` | **docs/00 §6.9 — the only move that touches the filesystem, and it refuses while the goal is unapproved** |
+| `verify` | `ExecutorService._verifier` | docs/00 §6.6 — the second door to a command, same allowlist |
+| `review` | `ExecutorService._critic` | approve or request changes; cannot write |
+| `summarize` | `ExecutorService._scribe` | commits, and only after `review` approved |
+| `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
 
 So the conductor gains *choice* over which powers to use, never *new* powers.
-There is deliberately no write tool: editing a file is the fixer's job and is
-reached only through `delegate`, which means a code change still goes through
-the librarian, the planner, the fixer, the verifier and the critic exactly as
-it did before this file existed. A tool that wrote files directly would make
-every one of those stages optional, which is the opposite of what a conductor
-is for.
+The move that writes is the fixer's, reached through the fixer's own method and
+the fixer's own validation, and it reads the goal's stored status before it does
+anything. A conductor running inside a turn is not approved to write, and what
+comes back is a sentence rather than an exception. That is the difference
+between "the model decides" and "the model may edit your repository whenever it
+feels like it".
+
+## The order is a skill now
+
+Until this file grew the moves, the sequence lived in `ExecutorService` as
+control flow: `run_planning` then `run_step`, unchangeable at runtime. That
+made the pipeline's *shape* a property of the code rather than a decision the
+decider could make. It is now a skill — `engine/builtin_skills/ship-a-change.md`
+— which is a name, a description and a body of instructions the conductor is
+shown by name and pulls when it wants. A workspace can replace it.
+
+## The menu narrows
+
+A model choosing from twelve tools chooses worse than one choosing from six, and
+the four step moves are meaningless before a step exists. So the menu is built
+per iteration: `write`, `verify`, `review` and `summarize` are only offered once
+`plan` has produced something for them to act on. That is the cheapest
+reliability win available and it needs no prompt work to get.
 
 ## Failure is a sentence, not a crash
 
@@ -55,6 +79,7 @@ from collections.abc import Awaitable, Callable
 
 from engine.sandbox import CommandNotAllowed
 from engine.services import ApiError
+from engine.providers import FALLBACK_TRIGGER_CODES, ProviderError
 from engine.toolcall import ToolReply, ToolSpec, coerce_arguments
 
 # How much of a tool result the model is shown. A whole file read into a
@@ -68,6 +93,21 @@ MAX_TOOL_RESULT_CHARS = 12000
 # answer" and low enough that a model which has lost the thread cannot spin a
 # key for an hour. Configurable via `conductor_max_turns`.
 DEFAULT_MAX_TURNS = 8
+
+# A second, separate cap, because these two budgets are not the same currency.
+# A model call costs seconds; a *stage move* (recon, plan, write, verify) costs
+# minutes and real money — each one is a whole sub-agent run with its own model
+# call, and `write` can touch files. Counting them in the same budget as a file
+# read would let eight cheap reads starve the change the user actually asked
+# for. Configurable via `conductor_max_moves`.
+DEFAULT_MAX_MOVES = 12
+
+# The moves that drive a sub-agent rather than reading something. Their cost is
+# the reason they have their own budget, and their names are what the menu drops
+# when that budget is spent.
+STAGE_MOVES = frozenset({
+    "recon", "design", "plan", "write", "verify", "review", "summarize",
+})
 
 # Refusals the model is shown but cannot argue with. Everything else is
 # recoverable and comes back as text.
@@ -99,21 +139,56 @@ class Conductor:
         provider: Any,
         model: str,
         workspace_root: str,
-        tools: list[ToolSpec],
-        dispatch: dict[str, Callable[[dict[str, Any]], Awaitable[str]]],
+        tools: list[ToolSpec] | None = None,
+        dispatch: dict[str, Callable[[dict[str, Any]], Awaitable[str]]] | None = None,
         *,
         system_prompt: str,
+        menu: Callable[[], list[ToolSpec]] | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
+        max_moves: int = DEFAULT_MAX_MOVES,
         on_text: Callable[[str], None] | None = None,
         on_tool: Callable[[str, str], None] | None = None,
+        nudge: str | None = None,
+        needs_action: Callable[[], bool] | None = None,
+        fallback: tuple[Any, str] | None = None,
+        on_fallback: Callable[[ProviderError, Any, str], None] | None = None,
     ) -> None:
+        # `nudge` is a directive added *once*, when the model stops without
+        # having done anything and `needs_action()` still says something is
+        # needed. It exists because a small model will narrate the sequence it
+        # intends — "let's start with the recon step" — and then stop, having
+        # called nothing. Observed against a live 7B, not theorised.
+        #
+        # Bounded by construction: it is applied at most once, and only while
+        # the call budget has not run out, so it cannot become a loop that keeps
+        # asking a model to try again.
+        self.nudge = nudge
+        self.needs_action = needs_action
         self.provider = provider
         self.model = model
+        # The target to move onto when the primary cannot serve a call, and the
+        # notification that it did. The fallback is consumed on use rather than
+        # kept: a loop that could hop back and forth between two providers would
+        # be a coin toss dressed as a recovery.
+        self._fallback = fallback
+        self.on_fallback = on_fallback
         self.workspace_root = workspace_root
-        self.tools = tools
-        self.dispatch = dispatch
+        self.dispatch = dispatch or {}
         self.system_prompt = system_prompt
         self.max_turns = max(1, int(max_turns))
+        self.max_moves = max(0, int(max_moves))
+        # `menu` is asked for the offered set at the top of every iteration, so
+        # a caller can narrow it as state changes (see the module docstring).
+        # `tools` is the fixed alternative, kept for callers with nothing to
+        # narrow and because a menu with no source is just a list.
+        self._static_menu = list(tools or [])
+        self._menu = menu
+        # Every spec ever offered, not just the ones offered this iteration: a
+        # move disappears from the menu when the budget is spent, and
+        # `_run_tool` still has to resolve the spec for a call the model made
+        # while it was visible.
+        self._specs: dict[str, ToolSpec] = {t.name: t for t in self._static_menu}
+        self.tools: list[ToolSpec] = list(self._static_menu)
         # Progress callbacks, both optional. `on_text` streams the prose as it
         # arrives so the transcript fills in rather than appearing at the end;
         # `on_tool` is how the UI shows *which* sub-agent the conductor reached
@@ -121,7 +196,65 @@ class Conductor:
         self.on_text = on_text
         self.on_tool = on_tool
         self.calls_made = 0
+        self.moves_made = 0
+        self.nudged = False
         self.tools_used: list[str] = []
+
+    def _swap_to_fallback(self, exc: ProviderError) -> bool:
+        """Move the loop onto its fallback target, once. True when it moved.
+
+        The primary's identity is not carried here: the caller closed over it when
+        it built the loop, so one definition of "what the conductor was on" stays
+        with the thing that decided it.
+        """
+        if self._fallback is None:
+            return False
+        provider, model = self._fallback
+        self._fallback = None
+        self.provider, self.model = provider, model
+        if self.on_fallback is not None:
+            self.on_fallback(exc, provider, model)
+        return True
+
+    async def _call(self, messages: list[dict[str, Any]]) -> ToolReply:
+        """One model call, on the fallback target if the primary cannot serve it.
+
+        The retry replaces the *call*, not the run. The messages carry every tool
+        result the moves already produced, so a provider that dies on the fourth
+        call resumes on the fifth rather than the loop starting over — which
+        would be worse than dying, because `write` and `summarize` are moves
+        with effects outside the transcript and a second pass would make them
+        twice.
+
+        Only a code in `FALLBACK_TRIGGER_CODES` moves targets, the same rule the
+        roles run under: a provider problem may be retried elsewhere, and a code
+        outside that set is a bug in our own code, which has to surface rather
+        than be run a second time somewhere it might succeed by luck.
+        """
+        while True:
+            try:
+                reply: ToolReply = await self.provider.complete_with_tools(
+                    self.system_prompt, messages, self.tools, self.model,
+                    temperature=0.2, max_tokens=2048,
+                )
+                return reply
+            except ProviderError as exc:
+                if exc.code not in FALLBACK_TRIGGER_CODES or not self._swap_to_fallback(exc):
+                    raise
+
+    def _refresh_menu(self) -> None:
+        """Rebuild the offered set, and drop the stage moves once they are spent.
+
+        Dropping them rather than counting refusals is deliberate: a model that
+        is still being offered `write` will keep asking for it, and a refusal it
+        can retry is a refusal that costs a turn every time.
+        """
+        offered = list(self._menu()) if self._menu is not None else list(self._static_menu)
+        for spec in offered:
+            self._specs.setdefault(spec.name, spec)
+        if self.moves_made >= self.max_moves:
+            offered = [t for t in offered if t.name not in STAGE_MOVES]
+        self.tools = offered
 
     @property
     def exhausted(self) -> bool:
@@ -137,8 +270,9 @@ class Conductor:
         of the wrong shape and a reply with neither text nor calls all come back
         as something the model is shown, because a conductor that dies on a bad
         call is a conductor that fails exactly when the model is least sure of
-        itself. A provider-level failure *does* propagate, because there is no
-        answer to give without one.
+        itself. A provider-level failure *does* propagate — but only after the
+        fallback target has had its turn, which is what keeps one dead model from
+        ending a turn that had already made three moves.
         """
         messages: list[dict[str, Any]] = []
         for turn in history or []:
@@ -165,10 +299,8 @@ class Conductor:
                     ),
                 })
             self.calls_made += 1
-            reply: ToolReply = await self.provider.complete_with_tools(
-                self.system_prompt, messages, self.tools, self.model,
-                temperature=0.2, max_tokens=2048,
-            )
+            self._refresh_menu()
+            reply: ToolReply = await self._call(messages)
 
             if reply.text and self.on_text is not None:
                 self.on_text(reply.text)
@@ -177,6 +309,20 @@ class Conductor:
             })
 
             if not reply.wants_tools:
+                if (
+                    self.nudge is not None
+                    and self.needs_action is not None
+                    and not exhausted
+                    and self.needs_action()
+                ):
+                    # One reminder, once. A turn that ends here leaves the user
+                    # holding a description of moves nobody made, and the model
+                    # was not refusing — it was waiting for permission it
+                    # already had.
+                    self.nudged = True
+                    messages.append({"role": "user", "content": self.nudge})
+                    self.nudge = None
+                    continue
                 return reply.text.strip()
 
             if exhausted:
@@ -196,6 +342,11 @@ class Conductor:
 
             for call in reply.tool_calls:
                 content = await self._run_tool(call, messages)
+                if call.name in STAGE_MOVES and not content.startswith(
+                    "There is no tool called"
+                ):
+                    self.moves_made += 1
+                self.tools_used.append(call.name)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.id,
@@ -234,7 +385,9 @@ class Conductor:
                 self.on_tool(call.name, json.dumps(call.arguments, default=str))
             except Exception:
                 pass
-        spec = next((t for t in self.tools if t.name == call.name), None)
+        spec = self._specs.get(call.name) or next(
+            (t for t in self.tools if t.name == call.name), None
+        )
         try:
             return _result(await handler(coerce_arguments(spec, call.arguments)))
         except (ApiError, CommandNotAllowed) as exc:
@@ -331,28 +484,186 @@ RUN_COMMAND = ToolSpec(
     },
 )
 
-DELEGATE = ToolSpec(
-    name="delegate",
+# ── the stage moves ─────────────────────────────────────────────────────────
+#
+# Each of these drives one of the pipeline's own stages. They are the reason
+# the conductor is a brain rather than a switch: before they existed, the only
+# way to change a file was `delegate`, which ran all seven stages whether or not
+# the request needed them.
+#
+# `step_id` appears in four of them, and it is the thread that keeps the audit
+# trail intact: a change belongs to a reviewed step, and every move below the
+# planner is addressed to one.
+
+RECON = ToolSpec(
+    name="recon",
     description=(
-        "Hand a change to Codify's full pipeline: it researches the workspace, "
-        "plans the steps, writes the code, runs the tests and reviews its own "
-        "work. Use it when the user wants the workspace *changed*. Do not use it "
-        "to answer a question, and do not try to edit files yourself — you have "
-        "no way to. It can take several minutes."
+        "Send the librarian to read the workspace and come back with what is "
+        "actually in it. Call this BEFORE planning anything that depends on the "
+        "code: `plan` refuses to run without evidence, and a plan built on a "
+        "guessed file layout edits the wrong files. Ask for what you need "
+        "rather than for the whole repository."
     ),
     parameters={
         "type": "object",
         "properties": {
             "task": {
                 "type": "string",
-                "description": "the change to make, in full sentences",
+                "description": "what to find out, in full sentences",
             },
         },
         "required": ["task"],
     },
 )
 
-TOOLS: tuple[ToolSpec, ...] = (READ_FILE, SEARCH_CODE, GIT_HISTORY, RUN_COMMAND, DELEGATE)
+DESIGN = ToolSpec(
+    name="design",
+    description=(
+        "Ask the design agent to lock a direction before any code is planned: "
+        "the shape of an API, a schema, a set of names, a UI surface. It has no "
+        "tools and decides from the evidence that already exists, so call "
+        "`recon` first. Skip it for a change small enough that there is no "
+        "direction to lock."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "the direction to decide, in full sentences",
+            },
+        },
+        "required": ["task"],
+    },
+)
+
+PLAN = ToolSpec(
+    name="plan",
+    description=(
+        "Turn the request into discrete, reviewable steps. Returns the steps "
+        "with their ids, which is what `write`, `verify`, `review` and "
+        "`summarize` all address. It needs evidence first — if it reports that "
+        "there is none, call `recon` and then call it again. Planning ends with "
+        "the plan waiting for the user's approval; it does not change any file."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "what the plan has to achieve, in full sentences",
+            },
+        },
+        "required": ["task"],
+    },
+)
+
+WRITE = ToolSpec(
+    name="write",
+    description=(
+        "Have the fixer make the change for one planned step. This is the only "
+        "tool here that can modify a file. It requires a `step_id` returned by "
+        "`plan`, and it will refuse — writing nothing — while the user has not "
+        "yet approved the plan, because that approval is what authorises a "
+        "change to someone's repository."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "step_id": {"type": "string", "description": "a step id from `plan`"},
+            "instructions": {
+                "type": "string",
+                "description": (
+                    "what this write must achieve. Be specific about the files "
+                    "and the behaviour — the fixer does not see this conversation."
+                ),
+            },
+        },
+        "required": ["step_id", "instructions"],
+    },
+)
+
+VERIFY = ToolSpec(
+    name="verify",
+    description=(
+        "Run the project's own command for a step — its tests, its type checker, "
+        "its build — and get the verdict back. Use it after every `write`: a "
+        "change that has not been run is a change nobody has seen work. The "
+        "commands allowed are the project's, decided by the engine; a refusal "
+        "there is final, not a hint to try something else."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "step_id": {"type": "string", "description": "the step to verify"},
+        },
+        "required": ["step_id"],
+    },
+)
+
+REVIEW = ToolSpec(
+    name="review",
+    description=(
+        "Ask the critic whether a step's change is acceptable. It answers with "
+        "an approval or with reasons to change something. Call it after a "
+        "successful `verify` and before `summarize`; it cannot write, so an "
+        "objection means going back to `write` or telling the user why not."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "step_id": {"type": "string", "description": "the step to review"},
+        },
+        "required": ["step_id"],
+    },
+)
+
+SUMMARIZE = ToolSpec(
+    name="summarize",
+    description=(
+        "Record a finished step and commit it. Call it last, and only after "
+        "`review` approved: the commit is the point of no return for a step, "
+        "and the engine refuses to reach it early."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "step_id": {"type": "string", "description": "the step to record and commit"},
+        },
+        "required": ["step_id"],
+    },
+)
+
+USE_SKILL = ToolSpec(
+    name="use_skill",
+    description=(
+        "Fetch the full instructions for one of this workspace's skills. The "
+        "names and one-line descriptions were given to you already; this is how "
+        "you read the one you have decided you need. Call it before starting a "
+        "piece of work whose sequence you are unsure of."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "the skill's name"},
+        },
+        "required": ["name"],
+    },
+)
+
+# The menu before a plan exists: the read tools, the skills, and the three moves
+# that produce a plan. Nothing here can change a file.
+BASE_TOOLS: tuple[ToolSpec, ...] = (
+    READ_FILE, SEARCH_CODE, GIT_HISTORY, RUN_COMMAND, USE_SKILL, RECON, DESIGN, PLAN,
+)
+
+# Offered once `plan` has produced steps for them to act on. `write` is the only
+# one that touches the filesystem and it still needs the goal's approval.
+STEP_TOOLS: tuple[ToolSpec, ...] = (WRITE, VERIFY, REVIEW, SUMMARIZE)
+
+# Everything, for callers that want the whole vocabulary rather than one menu:
+# the refusal list, the tests, and the honest answer to "what can it do".
+TOOLS: tuple[ToolSpec, ...] = (*BASE_TOOLS, *STEP_TOOLS)
 
 
 def tool_names() -> list[str]:

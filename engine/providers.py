@@ -41,6 +41,32 @@ class ProviderError(Exception):
         self.message = message
 
 
+# Failures that mean the target could not be used at all, and so may be retried on
+# a fallback. The list is deliberately made of *provider* problems — no credential,
+# an endpoint that refuses, an error status, a reply the contract cannot parse. A
+# failure that is not here (a bug in our own code) stops the caller instead of
+# silently running it somewhere else, because pointing an unknown failure at a
+# second model is how a real defect gets buried under a retry.
+#
+# It lives here rather than in the executor because the conductor asks the same
+# question from a layer that cannot import the executor, and two copies of "which
+# codes may be retried" is one more list to drift. `engine/executor.py` re-exports
+# it, so `from engine.executor import FALLBACK_TRIGGER_CODES` still resolves.
+# The test `test_failed_call_still_closes_the_stream` covers the opposite branch —
+# a code outside this set surfaces as a raised ProviderError — so re-adding a code
+# that belongs here flips that test's condition and fails it loudly.
+FALLBACK_TRIGGER_CODES = frozenset({
+    "missing_api_key",
+    "unknown_protocol",
+    "invalid_base_url",
+    "secrets_unwritable",
+    "provider_http",
+    "provider_unreachable",
+    "provider_bad_response",
+    "agent_output_invalid",
+})
+
+
 async def post_json(
     client: httpx.AsyncClient, url: str, *, label: str, **kwargs: Any
 ) -> Any:

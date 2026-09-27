@@ -297,40 +297,92 @@ ninth `AgentRole`, and that is a structural decision rather than a naming one:
   moment any of them read it, and docs/00 §6.1 fixes the count at eight.
 - So its prompt lives in `engine/chat_prompts.py` (with the turn's), and its
   configuration lives in `engine_settings` — `conductor_provider`,
-  `conductor_model`, `conductor_max_turns` — not in `agent_configs`. When those
-  are unset a turn borrows the `scribe` row, which is the one role whose job is
-  already writing prose for a person.
+  `conductor_model`, `conductor_fallback_provider`, `conductor_fallback_model`,
+  `conductor_max_turns`, `conductor_max_moves`, `conductor_drives_execution` —
+  not in `agent_configs`. When those are unset a turn borrows the `scribe` row,
+  which is the one role whose job is already writing prose for a person.
+- Those keys are the conductor's **only** mutator, and it is `GET`/`PUT
+  /settings/engine` — not `PUT /settings/agents/{role}`, which has no conductor
+  row to patch. They were declared and read for a long time before anything
+  could write them, which meant the conductor silently ran on the scribe's row
+  on every install; the surface now exists and the Conductor card in Settings →
+  Agent Roles is where it is set. A provider saved without a model is stored and
+  then ignored, because clearing has to be one call — so the card refuses to
+  save a half pair rather than storing a setting that will not take effect.
+- Naming a provider **drops** the borrowed row's `base_url` and `api_key_ref`.
+  Both name the provider being left behind: `ProviderFactory` prefers
+  `config.base_url` over the built-in catalog, and `keychain.get(api_key_ref)`
+  returns a key by reference without asking which provider it is for.
+  `AgentRegistryService.fallback_config_for` drops the same field for the same
+  reason.
 - It is measured through the ordinary `agent_assigned` / `usage` events, so
   stats and the Settings screen need no new case.
 
-### 5.1 Tools are the pipeline's own doors
+### 5.0 The chain: one fallback, tried per call
 
-| Tool | Routed through | Guarantee it inherits |
+A role's fallback is a column on its own row. The conductor has no row, so
+`ExecutorService._conductor_targets` assembles a chain of up to two targets and
+returns *every* target it can build — filtered, not checked in order, so a
+primary that cannot serve a tool-calling loop at all does not hide a fallback
+that can. The two sources are a rule rather than a merge:
+
+| Conductor | Fallback comes from |
+|---|---|
+| its own `conductor_provider` + `conductor_model` | `conductor_fallback_provider` + `conductor_fallback_model` |
+| still borrowing the `scribe` row | the scribe's own `fallback_provider` / `fallback_model_name` |
+
+A borrowing conductor never reads the `conductor_fallback_*` keys, and an
+own-pair conductor never reads the scribe's — one chain, not a merge of two.
+An install with both configured has one fallback, exactly as a role has one.
+
+`Conductor._call` retries the **call**, not the run. A conductor is a loop with
+no single call to re-issue, and a provider that dies on the fourth call has
+already made three moves whose effects are outside the transcript: restarting
+would make `write` and `summarize` happen twice. The messages carry every tool
+result, so the fallback resumes where the primary stopped. It moves targets only
+for a code in `FALLBACK_TRIGGER_CODES` — the same set the roles use, defined in
+`engine/providers.py` so both layers share one answer — and exactly once. A
+switch publishes `provider_fallback` then `agent_assigned`, because a silent
+switch credits the turn's answer to a model that never produced it.
+
+### 5.1 Moves are the pipeline's own doors
+
+| Move | Routed through | Guarantee it inherits |
 |---|---|---|
 | `read_file` | `LibraryService.read` | `FileSystemService` refuses a path escape |
 | `search_code` | `LibraryService.search` | same |
 | `git_history` | `GitService.read_only` | `READ_ONLY_ARGV`, a name list not a prefix rule |
 | `run_command` | `SandboxService.run_command` | `validate_argv` in `test` mode (docs/00 §6.6) |
-| `delegate` | `ExecutorService.run_planning` | the whole pipeline, unchanged |
+| `recon` | `ExecutorService._librarian` | read-only, `MAX_LIBRARY_ROUNDS` |
+| `design` | `ExecutorService._design` | no tools at all |
+| `plan` | `_plan_steps` | refuses without evidence; writes steps, never files |
+| `write` | `ExecutorService._fixer` | docs/00 §6.9 — the only move that writes, gated on approval |
+| `verify` | `ExecutorService._verifier` | `validate_argv` in `test` mode — second door, same list |
+| `review` | `ExecutorService._critic` | approve or request changes; cannot write |
+| `summarize` | `ExecutorService._scribe` | commits only after `review` approved |
+| `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
 
 Judgement is the model's; authority is the engine's. The conductor chooses among
-doors that already exist — it cannot open one. **There is no write tool**, by
-design: editing is the fixer's job, reachable only through `delegate`, so a code
-change still passes the librarian, planner, fixer, verifier and critic. A
-`write_file` tool would make all five optional for any change the conductor
-decided to make itself, which is the opposite of what a conductor is for.
+doors that already exist — it cannot open one. **There is still no `write_file`
+and no `commit`**: the move that writes is the fixer's own method under the
+fixer's own validation, and the move that commits is the scribe's, after the
+critic approved. What makes `write` safe is not that it is narrow but that it
+reads the goal's stored status before it does anything, so a conductor running
+inside a turn — where no plan has been approved — writes nothing and says so.
 
 `tests/test_conductor.py::TestTheToolsAreThePipelinesDoors` is mostly negative
-for that reason, and the first test asserts the *absence* of a write tool by
-name.
+for that reason: it asserts the absence of a file writer by name, that `write`
+is refused while the goal is unapproved, and that a refused write changed
+nothing.
 
-**Reachability, observed rather than specified.** The gate runs before the
-conductor, so a request the gate reads as `code_change` never reaches this
-menu — `run_chat` routes it straight to the pipeline. `delegate` is therefore
-reached when a request classified `question` escalates into a change, not on
-every code change. Both routes land in the same `run_planning`, so this is a
-question of how many round trips and not of what gets done; it is recorded in
-docs/09 §10.6 because the table reads as if `delegate` were the main road.
+**`delegate` is gone, and its absence is the point.** It ran the whole recipe —
+librarian, design, planner — whether or not the request needed them, which made
+the sequence a property of the code rather than a decision of the decider. The
+seven stage moves replaced it, and the sequence they are used in is a *skill*
+(`engine/builtin_skills/ship-a-change.md`) rather than control flow. It is one
+of two built-ins in that directory, beside `context-transfer.md`, which is a
+recipe for handing a degraded thread to a new one. See docs/09
+§10.14.
 
 ### 5.2 Why `complete_with_tools` is a separate method
 
@@ -354,6 +406,15 @@ degrade to a plain answer, not fail the question.
   the loop's tool calls are *dropped* and the reply's text is returned with a
   sentence saying it was cut off. An earlier version nudged the model to stop
   and then honoured the next request anyway; `TestTheCap` found it.
+- **Spend is bounded twice.** `conductor_max_moves` bounds *stage* moves
+  separately from model calls, because they are not the same currency: a model
+  call costs seconds, a `write` or a `plan` is a whole sub-agent run that can
+  take minutes and touch files. When the move budget is spent the stage moves
+  are taken off the menu rather than refused at call time — a refusal a model
+  can retry costs a turn every time.
+- **The menu narrows with the state.** `write`, `verify`, `review` and
+  `summarize` are only offered once `plan` has produced a step for them to act
+  on. Eight tools choose better than twelve, and this costs no prompt work.
 - **A bad call is recoverable.** An invented tool name, a malformed argument, a
   tool that raised: each returns text naming what *is* available. `ApiError` and
   `CommandNotAllowed` are the exceptions — the engine refused, and the sentence

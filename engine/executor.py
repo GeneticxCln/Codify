@@ -38,8 +38,16 @@ import uuid
 from typing import TYPE_CHECKING, Any
 from collections.abc import AsyncIterator, Callable
 
+from dataclasses import dataclass
+
 from engine.chat_prompts import CHAT_SYSTEM_PROMPT, CONDUCTOR_SYSTEM_PROMPT
-from engine.conductor import DEFAULT_MAX_TURNS, TOOLS, Conductor
+from engine.conductor import (
+    BASE_TOOLS,
+    DEFAULT_MAX_MOVES,
+    DEFAULT_MAX_TURNS,
+    STEP_TOOLS,
+    Conductor,
+)
 from engine.default_prompts import (
     DEFAULT_PROMPTS,
     DESIGN_BRIEF_PROMPT,
@@ -69,10 +77,16 @@ from engine.models import (
     Goal,
     PlanStep,
 )
-from engine.providers import BaseProvider, ProviderError
+from engine.providers import (
+    BaseProvider,
+    FALLBACK_TRIGGER_CODES as FALLBACK_TRIGGER_CODES,
+    ProviderError,
+)
 from engine.role_repair import config_problems
 from engine.sandbox import CommandNotAllowed, SandboxService
 from engine.services import AgentRegistryService, ApiError, GoalService, WorkspaceService
+from engine.skills import SkillSet, load_skills
+from engine.toolcall import ToolSpec
 
 if TYPE_CHECKING:
     from engine.services import SettingsService
@@ -229,27 +243,12 @@ def _as_prose(raw: str) -> str:
     # one, which is worse.
     return text
 
-# Failures that mean the target could not be used at all, and so may be retried on
-# the role's fallback. The list is deliberately made of *provider* problems — no
-# credential, an endpoint that refuses, an error status, a reply the contract
-# cannot parse. A failure that is not here (a bug in our own code) stops the role
-# instead of silently running it somewhere else, because pointing an unknown
-# failure at a second model is how a real defect gets buried under a retry.
-# The codes the executor treats as provider/protocol faults: a call that fails
-# with one of these may be retried on the role's fallback target. The test
-# `test_failed_call_still_closes_the_stream` covers the opposite branch — a code
-# outside this set surfaces as a raised ProviderError — so re-adding a code that
-# belongs here flips that test's condition and fails it loudly.
-FALLBACK_TRIGGER_CODES = frozenset({
-    "missing_api_key",
-    "unknown_protocol",
-    "invalid_base_url",
-    "secrets_unwritable",
-    "provider_http",
-    "provider_unreachable",
-    "provider_bad_response",
-    "agent_output_invalid",
-})
+# `FALLBACK_TRIGGER_CODES` — which failures may be retried on a fallback — is
+# defined in `engine/providers.py` and re-exported above, because the conductor
+# asks the same question from a layer that cannot import this module. The
+# `as` form is what keeps `from engine.executor import FALLBACK_TRIGGER_CODES`
+# working for callers that already reach in this way, under a mypy that does not
+# re-export implicitly.
 
 # The codes that mean "this role was never configured", which the executor reports
 # as its own error class rather than as a provider failure.
@@ -953,6 +952,39 @@ class AgentOrchestrator:
         raise self._all_targets_failed(role, failures)
 
 
+@dataclass
+class _Conducted:
+    """What one conductor run produced, and whether it got somewhere worth keeping.
+
+    The distinction this exists for: a conductor that *declined* to plan — it
+    answered instead, having judged that no change was needed — has made a
+    decision the engine should honour. A conductor that *failed* to plan — its
+    model errored, or it spent its whole call budget and produced neither an
+    answer worth having nor a plan — has not decided anything, and falling back
+    to the engine's own sequence is strictly better than failing the turn.
+
+    Those two look identical from the reply text alone, which is why they are
+    modelled instead of inferred.
+    """
+
+    answer: str | None
+    exhausted: bool
+    planned: bool
+
+    @property
+    def finished(self) -> bool:
+        if self.answer is None:
+            return False
+        if self.exhausted and not self.planned:
+            return False
+        return True
+
+    def explanation(self) -> str:
+        if self.answer is None:
+            return "its model failed, so there is no answer and no plan"
+        return "it used every call it was given without producing a plan"
+
+
 class ExecutorService:
     def __init__(
         self,
@@ -1268,8 +1300,34 @@ class ExecutorService:
             )
             design = {}
 
+        await self._plan_steps(goal_id, goal, ws, evidence, design)
+
+    async def _plan_steps(
+        self,
+        goal_id: str,
+        goal: Goal,
+        ws: Any,
+        evidence: dict[str, Any],
+        design: dict[str, Any],
+        task: str | None = None,
+    ) -> None:
+        """Ask the planner for steps, with its bounded consult loop, and store them.
+
+        Split out of `run_planning` so the conductor's `plan` move can reach the
+        planner *without* reaching the rest of the recipe: the gate has already
+        run for a turn, and the librarian and the designer are moves the
+        conductor may or may not have chosen. What is left here is the part that
+        is not a decision — one planning call, at most `MAX_PLANNER_CONSULTS`
+        follow-ups to the librarian when the evidence has a hole in it, and the
+        steps stored with the goal moved to PENDING.
+
+        `task` is the conductor's own framing of what to plan. The step
+        descriptions still come from the planner, because the plan is what the
+        user reviews and approves and a model should not be able to relabel it
+        on the way past.
+        """
         prompt = (
-            f"Title: {goal.title}\nDescription:\n{goal.description}\n\n"
+            f"Title: {goal.title}\nDescription:\n{task or goal.description}\n\n"
             f"Librarian evidence:\n{self._evidence_text(evidence)}\n"
             f"Design direction:\n{self._design_text(design)}"
         )
@@ -1404,6 +1462,12 @@ class ExecutorService:
         common follow-up — "now do the other one" — is unintelligible without
         them, and an assistant that forgets what it just said is the thing this
         whole feature exists to stop.
+
+        The gate runs on every turn, and on a turn it does not *report* — see
+        the announcement below. A goal's log is a run's audit trail, where the
+        gate's verdict belongs; a turn's log is a conversation, and a verdict
+        card over the top of "hi" says the person was classified before they
+        were answered (docs/09 §10.15).
         """
         goal = self.goals.get(goal_id)
         ws = self.workspaces.get(goal.workspace_id)
@@ -1422,14 +1486,43 @@ class ExecutorService:
                 )
                 if decision.blocked:
                     gate_stage.record("block", decision.block_reason or None)
+                elif decision.engine == "skipped":
+                    # The same distinction `run_planning` draws, for the same
+                    # reason: a gate nobody configured and a gate whose call
+                    # failed both report `engine == "skipped"`, and only the
+                    # second is the role not doing its job. Scoring a broken
+                    # gate as a deliberate skip is a measurement lie —
+                    # `skipped` is in STAGE_SUCCESS_OUTCOMES and `unavailable`
+                    # is not.
+                    gate_stage.record(
+                        "unavailable" if decision.unavailable else "skipped",
+                        decision.skipped_reason or None,
+                    )
                 else:
-                    gate_stage.record("skipped" if decision.engine == "skipped" else "allow")
+                    gate_stage.record("allow")
             except Exception as exc:  # pragma: no cover - decide() already guards
                 decision = LayaDecision(
                     engine="skipped", skipped_reason=f"gate error: {exc}", unavailable=True
                 )
                 gate_stage.record("unavailable", decision.skipped_reason)
-        if decision.engine != "skipped":
+        # Announced only when the gate has something a person has to act on.
+        #
+        # The gate still ran, and it still gated: the stage above recorded the
+        # outcome, `tests/test_turns.py` reads that record to prove it, and the
+        # block below still refuses the turn. What changed is the audience. A
+        # goal's log is an audit trail — a run is eight roles and the reader
+        # wants to see who was dispatched — while a turn's log is a
+        # conversation, and "Laya gate passed (intent: question, risk 0.00)" over
+        # the top of "hi" reads as a pipeline that vetted the user before
+        # answering them. That is the behaviour docs/09 §10 exists to remove, and
+        # publishing the verdict was the part of it still on screen.
+        #
+        # Blocked and warned turns keep both events: a refusal with no reason on
+        # screen is a bug report, and a warning the gate raised is the gate doing
+        # its job loudly rather than a report about nothing. A skipped gate never
+        # carries warnings (`laya.decide`), so this condition also subsumes the
+        # `engine != "skipped"` it replaces.
+        if decision.blocked or decision.warnings:
             self.goals.publish(self._event(
                 goal_id, None, "agent_assigned",
                 {"role": "laya", "provider": decision.provider or decision.engine,
@@ -1447,14 +1540,80 @@ class ExecutorService:
             )
             return
 
-        # Three ways out, and only one of them is new. The gate's own vocabulary
-        # is `code_change | question | ops_command | other` (engine/laya.py), and
-        # everything that is not a plain question runs the pipeline — including
-        # the two cases where nothing useful came back at all. Planning is the
-        # safe default because it is a superset of answering: guessing wrong
-        # costs a slower answer, whereas answering a code change from a chat
-        # call would cost a request the user believed was acted on and was not.
+        # The conductor decides everything, when there is one.
+        #
+        # It may answer, it may recon and plan, it may send the librarian to look
+        # at three files and then decide nothing needs changing. All of those are
+        # decisions, and honouring them is the point of having a brain. What it
+        # is *not* allowed to do is fail silently: `_Conducted.finished` is False
+        # only when its model errored or it spent its whole call budget without
+        # producing either an answer or a plan, and on that path the engine runs
+        # the sequence it would have run before the conductor existed.
+        #
+        # So the old behaviour is still the floor. It is just no longer the
+        # ceiling.
         intent = decision.intent
+        root = ws.root_path or ""
+
+        if root:
+            conducted = await self._conduct(goal_id, goal, root, intent=intent)
+            if conducted.finished:
+                reply = _as_prose(conducted.answer or "") or "(no answer)"
+                self.goals.publish(self._event(
+                    goal_id, None, "log",
+                    {"level": "info", "message": reply, "turn": True},
+                ))
+                if not self.goals.steps(goal_id):
+                    # Nothing was planned, so this turn is a finished answer.
+                    #
+                    # When the gate read the request as a change, that is worth
+                    # saying out loud. A weak model narrates the sequence it
+                    # means to run — observed live, where a 7B called `use_skill`
+                    # and `recon` and then replied "2. `plan` — Turn the request
+                    # into steps" without planning anything. The turn is not a
+                    # failure (the model may have decided, with evidence, that no
+                    # change was needed) so it is not overridden; but it must not
+                    # read as success either, or a workspace that nobody touched
+                    # looks like one that was updated.
+                    if intent != "question":
+                        self._log(
+                            goal_id, None, "warn",
+                            f"the gate read this as {intent!r} and the conductor "
+                            "finished without planning anything: no file was "
+                            "changed. If you wanted this done, ask again and say "
+                            "so plainly.",
+                        )
+                    self._set_status(goal_id, "COMPLETED", None)
+                # With steps, planning already left the goal PENDING and that
+                # stands. "Here is the plan, approve it" is not a finished
+                # goal, and marking it COMPLETED would clear the very state the
+                # approval gate reads.
+                return
+            self._log(
+                goal_id, None, "warn",
+                f"the conductor did not finish this turn ({conducted.explanation()}) "
+                "— running Codify's own sequence instead",
+            )
+            self.goals.publish(self._event(
+                goal_id, None, "log",
+                {
+                    "level": "warn",
+                    "message": (
+                        "the conductor could not finish this request, so Codify "
+                        "ran its standard sequence"
+                    ),
+                },
+            ))
+        else:
+            self._log(
+                goal_id, None, "info",
+                "this workspace has no root path, so there is nothing a conductor "
+                "could read — answering without tools",
+            )
+
+        # Everything below is what this route did before the conductor could
+        # decide: the recipe for anything that is not a plain question, and one
+        # streamed call for anything that is.
         if intent != "question" or decision.engine == "skipped":
             if decision.engine == "skipped":
                 why = (
@@ -1475,13 +1634,7 @@ class ExecutorService:
             return
 
         try:
-            root = ws.root_path or ""
-            # `if answer` rather than `is not None`: a conductor that came back
-            # with nothing has not answered, and an empty turn is worse than
-            # the extra call the single-shot path costs.
-            answer = await self._conduct(goal_id, goal, root) if root else None
-            reply = _as_prose(answer) if answer else await self._turn_reply(goal_id, goal)
-            reply = reply or "(no answer)"
+            reply = _as_prose(await self._turn_reply(goal_id, goal)) or "(no answer)"
         except (ProviderError, AgentNotConfigured) as exc:
             self._fail(goal_id, None, getattr(exc, "code", "provider_error"), str(exc))
             return
@@ -1490,7 +1643,9 @@ class ExecutorService:
         ))
         self._set_status(goal_id, "COMPLETED", None)
 
-    def _conductor_dispatch(self, goal_id: str, goal: Goal, root: str) -> dict[str, Any]:
+    def _conductor_dispatch(
+        self, goal_id: str, goal: Goal, root: str, skills: SkillSet
+    ) -> dict[str, Any]:
         """The conductor's tools, each bound to the service the pipeline uses.
 
         This table *is* the conductor's authority, and it is deliberately made
@@ -1500,14 +1655,38 @@ class ExecutorService:
         exactly as it holds for a verifier: the model asks, `validate_argv`
         decides, and an unlisted command is refused however it was phrased.
 
-        Note what is *absent*: anything that writes. Editing a file is the
-        fixer's job and is only reachable through `delegate`, so a code change
-        still goes through the librarian, the planner, the fixer, the verifier
-        and the critic. A `write_file` tool here would make all five optional,
-        which is the opposite of what a conductor is for.
+        What replaced `delegate`: the seven stage moves below. `delegate` ran
+        the whole recipe — librarian, design, planner — whether or not the
+        request needed it, which made the sequence a property of the code rather
+        than a decision of the decider. Each stage is now reachable on its own.
+
+        What did *not* change is who is allowed to do what. `write` is the
+        fixer's method under the fixer's validation and it refuses while the
+        goal is unapproved (docs/00 §6.9); `verify` is the verifier's, so the
+        command it proposes goes through `validate_argv` in `test` mode exactly
+        as a step's own verification does (docs/00 §6.6). The conductor chooses
+        *when* each runs. It cannot make any of them run without their checks.
         """
         library = LibraryService(root)
         git = self.git
+        ws = self.workspaces.get(goal.workspace_id)
+
+        async def use_skill(args: dict[str, Any]) -> str:
+            """One skill's instructions, or the menu if the name is wrong.
+
+            The body is returned as a tool result and nowhere else. It is never
+            executed or imported: a skill is text a model reads, so the worst a
+            hostile one in a cloned repository can do is argue, and an argument
+            cannot widen a tool.
+            """
+            name = str(args.get("name") or "").strip().lower()
+            found = skills.get(name)
+            if found is None:
+                return (
+                    f"There is no skill called {name!r}. Available:\n{skills.menu()}"
+                )
+            self._log(goal_id, None, "info", f"conductor loaded the {found.name} skill")
+            return found.body
 
         async def read_file(args: dict[str, Any]) -> str:
             return format_read(
@@ -1545,87 +1724,567 @@ class ExecutorService:
                 self.sandbox.run_command(root, [str(a) for a in argv], mode="test")
             ) + (f"\n(reason given: {reason})" if reason else "")
 
-        async def delegate(args: dict[str, Any]) -> str:
+        # ── the stage moves ────────────────────────────────────────────────
+        #
+        # `state` is what one move hands to the next inside a single conductor
+        # run: the files a write produced, the verdict a verify returned. It is
+        # keyed by step so a conductor working through three steps cannot mix
+        # one step's diff into another's review.
+        state: dict[str, dict[str, Any]] = {}
+
+        def step_for(step_id: str) -> PlanStep | str:
+            """The step, or the sentence explaining which ids exist.
+
+            Returning the refusal rather than raising it is the same rule the
+            loop holds everywhere else: a model that passed a stale or invented
+            id gets something it can act on, not a dead turn.
+            """
+            steps = self.goals.steps(goal_id)
+            for candidate in steps:
+                if candidate.id == step_id:
+                    return candidate
+            if not steps:
+                return (
+                    "There is no step with that id, because this goal has no "
+                    "steps yet. Call `plan` first (and `recon` before it if there "
+                    "is no evidence)."
+                )
+            listed = ", ".join(f"{s.id} ({s.title!r})" for s in steps)
+            return f"There is no step called {step_id!r}. The steps are: {listed}"
+
+        async def recon(args: dict[str, Any]) -> str:
             task = str(args.get("task") or "").strip()
             if not task:
-                return "delegate needs a task describing the change to make."
-            # The whole point, and the reason this is worth building: a code
-            # change reaches the *existing* pipeline rather than a second
-            # implementation of one. Same librarian, same planner, same fixer,
-            # same verifier, same critic.
-            self._log(
-                goal_id, None, "info",
-                f"conductor delegated to the full pipeline: {task}",
-            )
-            await self.run_planning(goal_id)
+                return "recon needs a task saying what to find out."
+            self._log(goal_id, None, "info", f"conductor sent the librarian: {task}")
+            try:
+                async with self._stage(goal_id, "librarian", "librarian") as lib_stage:
+                    evidence = await self._librarian(goal_id, goal, ws)
+                    lib_stage.record("incomplete" if evidence.get("capped") else "pack")
+            except (AgentOutputInvalid, ProviderError, ValueError) as exc:
+                return (
+                    f"The librarian could not run ({getattr(exc, 'code', 'error')}: "
+                    f"{exc}). You may plan without evidence, but say in your answer "
+                    "that the workspace was not looked at."
+                )
+            return self._evidence_text(evidence)
+
+        async def design(args: dict[str, Any]) -> str:
+            task = str(args.get("task") or "").strip()
+            if not task:
+                return "design needs a task saying what direction to lock."
+            evidence = self._evidence_for(goal_id)
+            if not evidence:
+                return (
+                    "There is no evidence for the designer to decide from. Call "
+                    "`recon` first, then `design`."
+                )
+            try:
+                async with self._stage(goal_id, "design", "design") as design_stage:
+                    locked = await self._design(goal_id, goal, ws, evidence)
+                    design_stage.record("contract" if locked else "declined")
+            except (AgentOutputInvalid, ProviderError, ValueError) as exc:
+                return (
+                    f"The designer could not run ({getattr(exc, 'code', 'error')}: "
+                    f"{exc}). Plan without a locked direction, and say so."
+                )
+            if not locked:
+                return "The designer declined to lock a direction for this request."
+            return self._design_text(locked)
+
+        async def plan(args: dict[str, Any]) -> str:
+            task = str(args.get("task") or "").strip()
+            evidence = self._evidence_for(goal_id)
+            if not evidence:
+                # The one guard that has to stay in code rather than in the
+                # prompt: a plan written against a guessed file layout edits the
+                # wrong files, and telling a model to recon first does not stop a
+                # model that has decided it already knows.
+                return (
+                    "There is no evidence yet, and a plan built on a guess edits "
+                    "the wrong files. Call `recon` first, then call `plan` again."
+                )
+            try:
+                await self._plan_steps(
+                    goal_id, goal, ws, evidence, self._design_for(goal_id),
+                    task=task or None,
+                )
+            except (AgentOutputInvalid, ProviderError, ValueError) as exc:
+                return (
+                    f"Planning failed ({getattr(exc, 'code', 'error')}: {exc}). "
+                    "Nothing was written and the goal is not planned."
+                )
             refreshed = self.goals.get(goal_id)
             steps = self.goals.steps(goal_id)
             return json.dumps({
                 "status": refreshed.status,
-                "steps": [{"title": s.title, "status": s.status} for s in steps],
+                "steps": [
+                    {"step_id": s.id, "title": s.title, "order": s.ordinal}
+                    for s in steps
+                ],
                 "note": (
-                    "The plan is ready and is waiting for the user to approve it "
-                    "before anything is written."
-                    if refreshed.status == "PENDING" else
-                    "The run finished; read the transcript for the detail."
+                    "The plan is waiting for the user to approve it. Nothing has "
+                    "been written and nothing can be until they start it. Tell "
+                    "them what the steps are and stop."
                 ),
             }, default=str)
+
+        async def write(args: dict[str, Any]) -> str:
+            step_id = str(args.get("step_id") or "").strip()
+            instructions = str(args.get("instructions") or "").strip()
+            step = step_for(step_id)
+            if isinstance(step, str):
+                return step
+            allowed, why = self._write_allowed(goal_id)
+            if not allowed:
+                return why
+            if not instructions:
+                return "write needs instructions: what should change."
+            fs = FileSystemService(ws.root_path)
+            try:
+                async with self._stage(goal_id, "fixer", "fixer", step.id) as fix_stage:
+                    summaries, _wants_pass = await self._fixer(
+                        goal_id, step, fs, goal.dry_run, self._evidence_for(goal_id),
+                        guidance=instructions,
+                    )
+                    changed = [s for s in summaries if s.get("changed", True)]
+                    fix_stage.record("wrote" if changed else "no_change")
+            except (AgentOutputInvalid, ProviderError, PathEscapeError) as exc:
+                return (
+                    f"The fixer failed on that step ({getattr(exc, 'code', 'error')}: "
+                    f"{exc}). Nothing further was written for it."
+                )
+            state.setdefault(step.id, {})["files"] = summaries
+            return json.dumps({
+                "step_id": step.id,
+                "changed": [
+                    {"path": s.get("path"), "op": s.get("op", "write")}
+                    for s in summaries if s.get("changed", True)
+                ],
+                "dry_run": bool(goal.dry_run),
+                "note": (
+                    "This was a dry run: the files were proposed, not written. "
+                    if goal.dry_run else
+                    "Call `verify` next: a change that has not been run is one "
+                    "nobody has seen work."
+                ),
+            }, default=str)
+
+        async def verify(args: dict[str, Any]) -> str:
+            step_id = str(args.get("step_id") or "").strip()
+            step = step_for(step_id)
+            if isinstance(step, str):
+                return step
+            summaries = state.get(step.id, {}).get("files")
+            if summaries is None:
+                return (
+                    "Nothing has been written for that step in this run. Call "
+                    "`write` first — verification is meant to judge a change, "
+                    "and there is none."
+                )
+            try:
+                async with self._stage(goal_id, "verifier", "verifier", step.id) as v:
+                    outcome = await self._verifier(
+                        goal_id, step, ws, self._evidence_for(goal_id), diffs=summaries,
+                    )
+                    v.record(_verifier_outcome(outcome))
+            except TestsFailed as exc:
+                # The verifier's own contract: a failed run is the verdict, and
+                # it raises it as control flow inside `run_step`. Here it is a
+                # value, because the conductor is the thing that decides what to
+                # do about a failure — retry, re-plan, or report it.
+                outcome = self._last_test_result(goal_id, step.id)
+                state.setdefault(step.id, {})["test"] = outcome
+                return "Verification FAILED. " + json.dumps({
+                    "reason": str(exc), "outcome": outcome,
+                }, default=str)
+            except (AgentOutputInvalid, ProviderError) as exc:
+                return (
+                    f"The verifier could not run ({getattr(exc, 'code', 'error')}: "
+                    f"{exc}). This step is unverified."
+                )
+            state.setdefault(step.id, {})["test"] = outcome
+            return json.dumps({"passed": True, "outcome": outcome}, default=str)
+
+        async def review(args: dict[str, Any]) -> str:
+            step_id = str(args.get("step_id") or "").strip()
+            step = step_for(step_id)
+            if isinstance(step, str):
+                return step
+            summaries = state.get(step.id, {}).get("files")
+            if summaries is None:
+                return (
+                    "There is nothing to review for that step: it has not been "
+                    "written in this run. Call `write` first."
+                )
+            outcome = state.get(step.id, {}).get("test") or self._last_test_result(
+                goal_id, step.id
+            )
+            if not outcome:
+                return (
+                    "That step has no test verdict yet, and a review without one "
+                    "cannot tell working code from broken code. Call `verify` first."
+                )
+            fs = FileSystemService(ws.root_path)
+            try:
+                async with self._stage(goal_id, "critic", "critic", step.id) as c:
+                    await self._critic(
+                        goal_id, step, fs, summaries, self._evidence_for(goal_id),
+                        outcome, ws_root=ws.root_path,
+                    )
+                    c.record("approve")
+            except CriticRejection as exc:
+                # Recorded here because the stage block above never reaches its
+                # `record` on this path, and a critic that asked for changes is
+                # the one outcome a reader most needs to see.
+                self.goals.publish(self._event(
+                    goal_id, step.id, "stage_result",
+                    {
+                        "stage": "critic", "role": "critic", "ordinal": 0,
+                        "outcome": "request_changes", "detail": str(exc),
+                        "duration_ms": 0, "tokens": 0, "calls": 0,
+                    },
+                ))
+                return (
+                    "The critic asked for changes and did not approve: " + str(exc)
+                    + "\nEither act on those reasons with `write`, or tell the user "
+                    "plainly that you are not going to and why."
+                )
+            state.setdefault(step.id, {})["reviewed"] = True
+            return "The critic approved this step. Call `summarize` to record and commit it."
+
+        async def summarize(args: dict[str, Any]) -> str:
+            step_id = str(args.get("step_id") or "").strip()
+            step = step_for(step_id)
+            if isinstance(step, str):
+                return step
+            summaries = state.get(step.id, {}).get("files")
+            if summaries is None:
+                return "That step was not written in this run, so there is nothing to record."
+            if not state.get(step.id, {}).get("reviewed"):
+                # Not a formality. The commit is the point of no return for a
+                # step, and the review is the only thing standing between a
+                # model's opinion of its own work and the user's git history.
+                return (
+                    "That step has not been reviewed. Call `review` first, and "
+                    "commit it only if the critic approved."
+                )
+            outcome = state.get(step.id, {}).get("test") or self._last_test_result(
+                goal_id, step.id
+            )
+            try:
+                async with self._stage(goal_id, "scribe", "scribe", step.id) as s:
+                    s.record(
+                        await self._scribe(
+                            goal_id, step, summaries, ws.root_path, goal.dry_run, outcome,
+                        )
+                    )
+            except (AgentOutputInvalid, ProviderError) as exc:
+                return f"The scribe could not record that step ({exc})."
+            self._set_step(goal_id, step, "COMPLETED")
+            return "That step is recorded and committed."
 
         return {
             "read_file": read_file,
             "search_code": search_code,
             "git_history": git_history,
             "run_command": run_command,
-            "delegate": delegate,
+            "recon": recon,
+            "design": design,
+            "plan": plan,
+            "write": write,
+            "verify": verify,
+            "review": review,
+            "summarize": summarize,
+            "use_skill": use_skill,
         }
 
-    async def _conduct(self, goal_id: str, goal: Goal, root: str) -> str | None:
-        """Run the conductor loop, or return None to fall back to a plain answer.
+    def _settings_int(self, key: str, default: int) -> int:
+        """One engine setting, or the default.
 
-        None means "this install cannot conduct", and the caller degrades to the
-        single-call turn. That is not a consolation prize: it is what happens on
-        a provider without tool support, on a model that has not been pointed at
-        by the conductor settings, and on any turn whose role has no configured
-        model. A user must be able to ask "what does this do?" on any install,
-        and the conductor is an upgrade rather than a prerequisite.
+        Every read of a setting here is best-effort on purpose: a goal must not
+        fail because a row is missing, and a machine that has never been
+        configured is the normal case rather than an error.
+        """
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            return default
+        try:
+            return int(settings.get_int(key))
+        except Exception:
+            return default
+
+    def _conductor_target(self) -> tuple[Any, str, Any] | None:
+        """What a conductor would run on, or None when this install has none.
+
+        None is the documented degradation (docs/09 §10.9): a provider with no
+        tool support, no conductor model chosen, or a role whose configuration
+        cannot be read. The conductor is an upgrade and never a prerequisite, so
+        every caller has to be able to proceed without it.
+        """
+        targets = self._conductor_targets()
+        return targets[0] if targets else None
+
+    def _conductor_targets(self) -> list[tuple[Any, str, Any]]:
+        """Every target this conductor may be called on, in order, best first.
+
+        A role's chain is one row with a fallback column; the conductor's is two
+        candidates, because it has no row. They come from different places on
+        purpose: a conductor that borrowed the scribe's row inherits the scribe's
+        own fallback, which is already configured and already has credentials
+        resolved, while one configured on its own pair gets the explicit
+        `conductor_fallback_*` pair.
+
+        Every candidate is filtered rather than checked in order, so a primary
+        that cannot serve a tool-calling loop at all — no key, a dead endpoint, a
+        protocol that cannot call tools — does not hide a fallback that can. A
+        target with no model, or with a provider that cannot call tools, is not
+        a conductor at all; keeping it would only move the failure later and make
+        it harder to read.
         """
         role = self._conductor_role()
         try:
-            cfg = self.orchestrator.registry.get_config(role)
+            base = self.orchestrator.registry.get_config(role)
         except Exception:
-            return None
-        cfg = self._conductor_config(cfg)
-        model = (cfg.model_name or "").strip()
-        if not model:
-            return None
-        try:
-            provider = self.orchestrator.registry.build_provider(cfg)
-        except ProviderError:
-            return None
-        if not getattr(provider, "supports_tools", False):
-            return None
-        max_turns = DEFAULT_MAX_TURNS
-        if self.settings is not None:
+            return []
+        primary_cfg = self._conductor_config(base)
+        candidates = [primary_cfg]
+        borrowed = primary_cfg is base
+        fallback_cfg = (
+            self.orchestrator.registry.fallback_config_for(base)
+            if borrowed
+            else self._conductor_fallback_config(primary_cfg)
+        )
+        if fallback_cfg is not None:
+            candidates.append(fallback_cfg)
+
+        targets: list[tuple[Any, str, Any]] = []
+        for cfg in candidates:
+            model = (cfg.model_name or "").strip()
+            if not model:
+                continue
             try:
-                max_turns = self.settings.get_int("conductor_max_turns")
-            except Exception:
-                max_turns = DEFAULT_MAX_TURNS
+                provider = self.orchestrator.registry.build_provider(cfg)
+            except ProviderError:
+                continue
+            if not getattr(provider, "supports_tools", False):
+                continue
+            targets.append((provider, model, cfg))
+        return targets
+
+    def conductor_menu(self, goal_id: str) -> Callable[[], list[ToolSpec]]:
+        """The moves offered for a goal, as a callable the loop asks each turn.
+
+        Narrowed by state, and the one rule that matters: the four step moves do
+        nothing before a step exists, so they are not offered until one does. A
+        model choosing from eight tools chooses better than the same model
+        choosing from twelve, and this is the cheapest reliability win available
+        — no prompt work, no extra call.
+
+        A method rather than a closure inside `_conduct` so the narrowing is
+        testable without running a conductor, and so there is one definition of
+        the menu rather than one per call site.
+        """
+
+        def menu() -> list[ToolSpec]:
+            return [*BASE_TOOLS, *(STEP_TOOLS if self.goals.steps(goal_id) else ())]
+
+        return menu
+
+    def _write_allowed(self, goal_id: str) -> tuple[bool, str]:
+        """Whether a write may touch the filesystem for this goal (docs/00 §6.9).
+
+        The check reads the goal's **stored status** — not anything the model
+        was told, and not anything in the transcript. That is the whole point of
+        putting the gate in the engine: a model cannot talk its way past a check
+        it cannot write to. `RUNNING` is only reachable through
+        `POST /goals/{id}/start`, which is a person saying yes to a plan.
+        """
+        try:
+            goal = self.goals.get(goal_id)
+        except ApiError:
+            return False, "This goal no longer exists, so nothing was written."
+        if goal.plan_only:
+            return False, (
+                "Nothing was written: this goal is plan-only, so execution is "
+                "switched off for it. Say what you would change and stop."
+            )
+        if goal.status != "RUNNING":
+            return False, (
+                "Nothing was written. This plan has not been approved yet — it is "
+                "in front of the user waiting for them to start it. Say what the "
+                "steps are, say plainly that no file has been changed, and stop. "
+                "They approve it by starting it, and you will be asked again then."
+            )
+        return True, ""
+
+    def conductor_can_drive(self, goal_id: str) -> bool:
+        """Whether an approved plan should be driven by the conductor.
+
+        Off when `conductor_drives_execution` is 0, and off when there is no
+        conductor at all — in which case the engine's own sequence walks the
+        steps exactly as it did before the conductor existed. That fallback is
+        what makes this safe to default on.
+        """
+        if self._settings_int("conductor_drives_execution", 1) == 0:
+            return False
+        return self._conductor_target() is not None
+
+    async def run_conductor_resume(self, goal_id: str) -> None:
+        """Drive an already-approved plan. The other half of the approval seam.
+
+        `write` refuses while a goal is not RUNNING, so a plan the conductor
+        produced during a turn cannot be written by that turn. The user approves
+        it, `POST /goals/{id}/start` moves the goal to RUNNING and lands here,
+        and *now* the same conductor can execute what it planned.
+
+        The run is re-derived from rows — the goal, its steps, the conversation
+        — rather than a persisted conductor transcript. That is the choice
+        `turn_history` already makes, and it means there is no second copy of the
+        plan to fall out of step with the first.
+        """
+        goal = self.goals.get(goal_id)
+        ws = self.workspaces.get(goal.workspace_id)
+        steps = self.goals.steps(goal_id)
+        listed = "\n".join(
+            f"- {s.id} [{s.status}] {s.title}\n  {s.description}" for s in steps
+        )
+        prompt = (
+            f"The user has approved this plan and started it: {goal.title}\n\n"
+            f"Steps:\n{listed}\n\n"
+            "Execute it now, in order. For each step: `write` it, `verify` it, "
+            "`review` it, and `summarize` it once the critic approves. If "
+            "verification fails, take the failure back to `write` rather than "
+            "moving on. Do not re-plan, and do not ask for approval again — "
+            "that is exactly what the user just gave you.\n"
+            "When you are done, say what changed and what you verified."
+        )
+        result = await self._conduct(
+            goal_id, goal, ws.root_path or "",
+            prompt_override=prompt, intent="code_change",
+        )
+        if result.answer:
+            self.goals.publish(self._event(
+                goal_id, None, "log",
+                {"level": "info", "message": _as_prose(result.answer), "turn": True},
+            ))
+        # No status settling here, on purpose. Whatever the conductor did not
+        # finish is still the engine's responsibility, and the caller owns that
+        # decision because the caller is where the recipe lives and it can see
+        # how many steps are left. Settling the goal here would mark a
+        # half-driven plan PAUSED and take away the chance to finish it.
+        remaining = [s for s in self.goals.steps(goal_id) if s.status != "COMPLETED"]
+        if remaining:
+            self._log(
+                goal_id, None, "info",
+                f"the conductor finished with {len(remaining)} step(s) still "
+                "open — the engine will finish them: "
+                + "; ".join(s.title for s in remaining),
+            )
+
+    def _intent_brief(self, intent: str) -> str:
+        """What the gate decided, told to the conductor, and what to do with it.
+
+        This was missing at first, and a live run found it where the suite could
+        not: the conductor was never told the gate's verdict, so a request the
+        gate had already read as `code_change` arrived looking like any other
+        prompt, and the model answered it with a clarifying question instead of
+        planning. The gate classifies on every request, and its answer was being
+        computed and then dropped — which is the same discarded signal this whole
+        feature was originally built on. Handing it to the decider is what makes
+        computing it worth anything.
+        """
+        if intent == "question":
+            return (
+                "The pre-flight gate read this request as a question, so answering "
+                "directly is usually right. If it turns out to need the workspace "
+                "changed, the `ship-a-change` skill is how that is done."
+            )
+        return (
+            f"The pre-flight gate read this request as {intent!r}, which means the "
+            "user wants the workspace changed rather than explained. Read the "
+            "`ship-a-change` skill with `use_skill` and follow it: recon, then "
+            "plan, then stop so they can approve the plan. Prefer acting over "
+            "asking — ask only when the request genuinely cannot be planned "
+            "without more information, and say plainly what you are blocked on."
+        )
+
+    async def _conduct(
+        self,
+        goal_id: str,
+        goal: Goal,
+        root: str,
+        prompt_override: str | None = None,
+        intent: str = "question",
+    ) -> _Conducted:
+        """Run one conductor loop over the whole menu.
+
+        Returns what it produced rather than a bare string, because the caller
+        has to tell three outcomes apart: it answered, it planned, or it failed.
+        The last is the engine's cue to fall back to its own sequence, and "it
+        answered instead of planning" is a decision that must be honoured rather
+        than overridden — a conductor that declines to change anything has
+        decided, and re-planning over the top of it would make the brain a
+        suggestion.
+        """
+        targets = self._conductor_targets()
+        if not targets:
+            return _Conducted(answer=None, exhausted=False, planned=False)
+        provider, model, cfg = targets[0]
+        fallback = targets[1] if len(targets) > 1 else None
+        role = self._conductor_role()
+
+        skills = load_skills(root)
+        for problem in skills.problems:
+            self._log(goal_id, None, "warn", problem)
+        for shadowed in skills.shadows:
+            self._log(
+                goal_id, None, "info",
+                f"the workspace's {shadowed!r} skill replaces the built-in one",
+            )
+
+        menu = self.conductor_menu(goal_id)
+
         history = (
             self.goals.turn_history(goal.conversation_id, TURN_HISTORY_TURNS)
             if goal.conversation_id else []
         )
-        prompt = self._turn_prompt(goal)
+        prompt = prompt_override if prompt_override is not None else self._turn_prompt(goal)
+        prompt = f"{prompt}\n\n{self._intent_brief(intent)}"
+        # A change request arrives with a reminder armed, because a small model
+        # asked to plan will sometimes describe the plan and stop instead of
+        # making it. Nothing is armed for a question: answering *is* the action
+        # there, and a nudge would only add a call that says nothing new.
+        nudge = (
+            "You have not done anything yet: no move has been called and there "
+            "is no plan. Do not ask the user what to do and do not describe what "
+            "you are about to do — call `recon` now saying what you need to find "
+            "out, then call `plan`. If you genuinely cannot proceed without an "
+            "answer from them, ask for it in one sentence and stop."
+            if intent != "question" else None
+        )
         conductor = Conductor(
-            provider, model, root, list(TOOLS),
-            self._conductor_dispatch(goal_id, goal, root),
-            system_prompt=CONDUCTOR_SYSTEM_PROMPT,
-            max_turns=max_turns,
+            provider, model, root,
+            dispatch=self._conductor_dispatch(goal_id, goal, root, skills),
+            system_prompt=(
+                CONDUCTOR_SYSTEM_PROMPT
+                + "\n\nSkills available in this workspace:\n" + skills.menu()
+                + "\n\nCall `use_skill` with a skill's name when you want its full "
+                "instructions."
+            ),
+            menu=menu,
+            nudge=nudge,
+            needs_action=lambda: not self.goals.steps(goal_id),
+            max_turns=self._settings_int("conductor_max_turns", DEFAULT_MAX_TURNS),
+            max_moves=self._settings_int("conductor_max_moves", DEFAULT_MAX_MOVES),
             on_text=lambda text: self._publish_turn_delta(goal_id, text),
             on_tool=lambda name, args: self._log(
                 goal_id, None, "info", f"conductor called {name}({_clip_text(args, 200)})"
             ),
+            fallback=(fallback[0], fallback[1]) if fallback is not None else None,
+            on_fallback=self._conductor_fallback_notice(goal_id, role, targets),
         )
-        # Announced before the first call, so a turn that spends its whole budget
+        # Announced before the first call, so a run that spends its whole budget
         # is still legible as "the conductor looked at things" rather than a
         # pause with nothing in it.
         self.goals.publish(self._event(
@@ -1633,17 +2292,77 @@ class ExecutorService:
             {"role": role, "provider": cfg.provider, "model": model, "conductor": True},
         ))
         try:
-            return await conductor.run(prompt, history)
+            answer = await conductor.run(prompt, history)
         except ProviderError as exc:
-            # The provider failed mid-loop. Falling back to a plain answer is
-            # better than failing the turn: the user asked a question, and a
-            # question has an answer that does not need tools.
             self._log(
                 goal_id, None, "warn",
-                f"the conductor could not run ({exc.code}: {exc.message}) — "
-                "answering without tools",
+                f"the conductor could not run ({exc.code}: {exc.message})",
             )
+            return _Conducted(
+                answer=None, exhausted=conductor.exhausted, planned=False,
+            )
+        return _Conducted(
+            answer=answer,
+            exhausted=conductor.exhausted,
+            planned=bool(self.goals.steps(goal_id)),
+        )
+
+    def _conductor_fallback_notice(
+        self, goal_id: str, role: AgentRole, targets: list[tuple[Any, str, Any]]
+    ) -> Callable[[ProviderError, Any, str], None] | None:
+        """What the conductor's loop says when it moves onto its fallback.
+
+        The same two events a role's fallback publishes, and for the same reason:
+        a silent switch would credit the turn's answer to a model that never
+        produced it. `agent_assigned` follows the move so the call that is about
+        to happen is attributed to the target that will serve it, which is what
+        makes the usage books honest rather than merely complete.
+
+        The slugs come from the *configs*, not from the provider objects: a
+        provider knows how to talk to its endpoint and nothing about which of
+        them it is, and an event naming an empty provider is the same dishonesty
+        in a smaller font.
+
+        None when there is only one target, which is most installs: reading the
+        second target out of a one-element list raised `IndexError` while the
+        loop was still being *built*, so every goal the conductor drove died
+        before its first call.
+        """
+        if len(targets) < 2:
             return None
+        from_provider = targets[0][2].provider
+        from_model = targets[0][1]
+        to_provider = targets[1][2].provider
+        to_model = targets[1][1]
+
+        def notice(exc: ProviderError, provider: Any, model: str) -> None:
+            self.goals.publish(self._event(
+                goal_id, None, "provider_fallback",
+                {
+                    "role": role,
+                    "from": {"provider": from_provider, "model": from_model},
+                    "to": {"provider": to_provider, "model": to_model},
+                    "code": exc.code,
+                    "detail": exc.message,
+                },
+            ))
+            self.goals.publish(self._event(
+                goal_id, None, "agent_assigned",
+                {
+                    "role": role,
+                    "provider": to_provider,
+                    "model": to_model,
+                    "conductor": True,
+                    "fallback": True,
+                },
+            ))
+            self._log(
+                goal_id, None, "warn",
+                f"the conductor moved from {from_provider}/{from_model} to "
+                f"{to_provider}/{to_model} ({exc.code})",
+            )
+
+        return notice
 
     def _publish_turn_delta(self, goal_id: str, text: str) -> None:
         """Stream a chunk of the conductor's prose onto the turn's event log.
@@ -1715,6 +2434,16 @@ class ExecutorService:
         and the system prompt stay with the base row: a loop that calls tools
         wants the low temperature the roles already carry, and the prompt is
         passed in by `_conduct` regardless.
+
+        Naming a *different* provider drops the borrowed row's `base_url` and
+        `api_key_ref` rather than carrying them. Both belong to the provider the
+        row already points at: `ProviderFactory` prefers `config.base_url` over
+        the built-in catalog, so a conductor set to `openai` on a scribe row
+        parked on a local endpoint would have posted OpenAI-shaped JSON to that
+        endpoint, and `keychain.get(api_key_ref)` returns a key by reference
+        without ever asking which provider it is for. `fallback_config_for` drops
+        the same field for the same reason; this is the primary's half of that
+        argument.
         """
         if self.settings is None:
             return base
@@ -1725,12 +2454,45 @@ class ExecutorService:
             return base
         if not (provider and model):
             return base
+        moved = provider != base.provider
         return base.model_copy(update={
             "provider": provider,
             "protocol": BUILTIN_PROVIDERS.get(
                 provider, BUILTIN_PROVIDERS.get(base.provider, {})
             ).get("protocol", base.protocol),
             "model_name": model,
+            "base_url": None if moved else base.base_url,
+            "api_key_ref": None if moved else base.api_key_ref,
+        })
+
+    def _conductor_fallback_config(self, base: AgentConfig) -> AgentConfig | None:
+        """The conductor's fallback target, or None when none is configured.
+
+        Only reached when the conductor has a primary pair of its own: a
+        conductor still borrowing the scribe's row takes the scribe's own
+        fallback instead, which `_conductor_targets` decides rather than this.
+
+        Built the way `AgentRegistryService.fallback_config_for` builds a role's
+        — same row with the target fields swapped, no second constructor that
+        could disagree about credentials or protocol. The endpoint and key
+        reference are dropped rather than inherited: a fallback is a different
+        provider, and both of those fields name the one being left behind.
+        """
+        if self.settings is None:
+            return None
+        try:
+            provider = self.settings.get_str("conductor_fallback_provider")
+            model = self.settings.get_str("conductor_fallback_model")
+        except Exception:
+            return None
+        if not (provider and model):
+            return None
+        return base.model_copy(update={
+            "provider": provider,
+            "protocol": BUILTIN_PROVIDERS.get(provider, {}).get("protocol", "openai_compat"),
+            "model_name": model,
+            "base_url": None,
+            "api_key_ref": None,
         })
 
     def _conductor_role(self) -> AgentRole:
@@ -3248,7 +4010,17 @@ class ExecutorService:
         dry_run: bool,
         evidence: dict[str, Any] | None = None,
         failure_feedback: dict[str, Any] | None = None,
+        guidance: str = "",
     ) -> tuple[list[dict[str, Any]], bool]:
+        """Write one step's files.
+
+        `guidance` is what the conductor said when it asked for this write. It
+        is placed *beside* the step rather than in place of it: the plan is the
+        contract the user approved, and a conductor that could overwrite the
+        step's description with its own would be able to change what was agreed
+        without the user seeing a new plan. Guidance narrows; it does not
+        replace.
+        """
         ctx, unreadable = self._suggested_paths_context(fs, step.suggested_paths)
 
         # On a retry, the failed run's evidence is the most important part of
@@ -3293,10 +4065,17 @@ class ExecutorService:
                     f"--- {write_path} (write exactly this) ---\n{body}\n"
                     f"--- end {write_path} ---"
                 )
+        guidance_section = ""
+        if guidance.strip():
+            guidance_section = (
+                "The conductor asked for this specifically, in addition to the "
+                f"step above:\n{guidance.strip()}\n\n"
+            )
         out = await self.orchestrator.run_agent(
             "fixer", goal_id, step.id,
             f"Step: {step.title}\n{step.description}\n\n"
             f"{feedback_text}"
+            f"{guidance_section}"
             f"What the librarian found:\n{self._evidence_text(evidence or {})}\n"
             f"Suggested paths (current contents):\n{ctx}{unreadable}"
             f"{design_section}",

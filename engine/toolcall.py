@@ -31,6 +31,7 @@ text as it arrives and still runs the calls.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -134,16 +135,41 @@ def coerce_tool_reply(
     return ToolReply(text="" if recovered else text, tool_calls=recovered)
 
 
+def _last_fenced_json(body: str) -> Any:
+    """The last fenced block in `body` that parses as an object, or None.
+
+    Last rather than first: when a model writes out more than one shape, the one
+    it finished on is the move it settled on. Blocks are tried newest-first and
+    the first parse wins, so a reply with an earlier illustrative fence and a
+    later real call recovers the real call.
+    """
+    fence = re.compile(r"```[a-zA-Z0-9_-]*\n(.*?)```", re.DOTALL)
+    for match in reversed(list(fence.finditer(body))):
+        inner = match.group(1).strip()
+        if not inner.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(inner)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
 def _from_content(text: str, tools: list[ToolSpec]) -> list[ToolCall]:
     body = (text or "").strip()
     if not body:
         return []
+    # Three shapes, tried in order of how unambiguous they are, and the order is
+    # the point: the strict ones are tried first and a failure in either falls
+    # through rather than giving up.
     parsed: Any = None
     if body.startswith("{"):
         try:
             parsed = json.loads(body)
         except ValueError:
-            return []
+            parsed = None
     elif body.startswith("```"):
         # A model that writes ```json ... ``` instead of calling the tool is
         # common enough to be worth one retry, and cheap: this path only runs
@@ -154,9 +180,27 @@ def _from_content(text: str, tools: list[ToolSpec]) -> list[ToolCall]:
         try:
             parsed = json.loads(inner)
         except ValueError:
-            return []
-    else:
-        return []
+            parsed = None
+    if not isinstance(parsed, dict):
+        # Prose that *contains* a fenced call, which is the third shape a model
+        # reaches for and the one a live run found: against a 7B, the conductor
+        # said "Let's proceed with the plan.", wrote `2. design - Lock the
+        # direction`, and then emitted the call inside a ```json block instead
+        # of calling anything. The reply was returned as the turn's answer with
+        # the move never made.
+        #
+        # Reached by falling through rather than by a separate branch, because
+        # the whole-body shapes fail on this too: a reply that *opens* with a
+        # fence and then continues in prose parses as neither. Requiring a shape
+        # and then giving up is how the third one went unnoticed.
+        #
+        # Searching the body is a wider net, so it is guarded exactly the way
+        # the whole-body path is: the name has to be one of the tools the model
+        # was actually offered, checked just below alongside the other shapes. A
+        # model explaining `{"name": "read_file"}` to the user is an accepted
+        # casualty of that guard rather than a risk taken with it — the
+        # alternative is a turn that narrates work with no way to notice.
+        parsed = _last_fenced_json(body)
     if not isinstance(parsed, dict):
         return []
     raw_name = parsed.get("name")
