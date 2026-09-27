@@ -3,10 +3,10 @@
 **Codify** is a local-first, multi-agent AI coding assistant and desktop application. It decomposes high-level software engineering goals into an atomic, verified execution plan using an orchestrated pipeline of specialized subagents, sandboxed test execution, git integration, and real-time telemetry.
 
 <p align="center">
-  <img src="docs/demo.gif" alt="Codify demo: a goal running live in the chat — librarian reconnaissance, planner steps, fixer diff, verifier verdict, critic approval, and scribe summary" width="720">
+  <img src="docs/demo.gif" alt="The Codify desktop window wearing the OLED CMatrix theme: green rain falling behind the whole app, the engine connected and Live, and a model discovered from the local provider in the composer" width="720">
 </p>
 
-<sub>Live goal in the chat: reconnaissance → plan → diff → verify → commit. Click through to <a href="docs/demo.webm">docs/demo.webm</a> for the full-quality video.</sub>
+<sub>The app connected to a local engine, wearing the <b>OLED CMatrix</b> theme — one of eight, each with its own animated backdrop. Click through to <a href="docs/demo.webm">docs/demo.webm</a> for the full-quality video.</sub>
 
 ---
 
@@ -159,6 +159,37 @@ output. See [`docs/04`](docs/04-engine-data-and-runtime.md) §4.0a.2.
 
 ---
 
+## 🎨 Appearance
+
+Eight themes ship in the box, and choosing one is a **runtime swap, not a rebuild**: a theme is a map of CSS custom properties that `ui/src/appearance.ts` writes onto the document root, so the whole app repaints with no component changes and no restart.
+
+| Theme | What it is |
+|---|---|
+| **Codify Dark** | The default contract: blue-grey surfaces, green reserved for status. |
+| **OLED CMatrix** | Pure black, with the rain drawn in `#003300` — the video above. |
+| **Cyberpunk Neon** | Violet-black, a neon horizon grid and a banded sun in cyan and magenta, under a CRT veil. |
+| **Neural Constellation** | A slow web of nodes that brightens and pulses while the agent is working. |
+| **Cyberpunk HUD** | Amber instrumentation: corner brackets, two slow radar sweeps, a tick ladder. |
+| **Bioluminescent Abyss** | Spores rising in the left and right gutters, fading out before the middle. |
+| **Solar Flare** | A starfield and slow indigo-to-ultraviolet streams along the window's edges. |
+| **Monochrome ASCII Rain** | The same rain in hex bytes and grey — no component of its own, just different tokens. |
+
+Four constraints hold every one of them, and they are the reason this is a feature rather than a pile of canvas demos:
+
+- **A theme is data.** The last one added — Monochrome ASCII Rain — is five lines of tokens and no new
+  code: it publishes the variables the OLED theme already publishes, so the existing backdrop draws it.
+  A theme publishes a variable; a backdrop asks whether the active theme published it.
+- **One clock, one budget.** Every effect runs through `useAtmosphereCanvas`, which owns the canvas size
+  cap, a 30 FPS accumulator (so a 144 Hz display still gets 30), and exactly **one static frame** when
+  the user has `prefers-reduced-motion` set. Opting out removes the animation, not its speed.
+- **Decoration is never under the words being read.** Backdrops are mounted once, by the shell, beneath
+  the chrome; the content surfaces stay opaque and each effect fades out before it reaches the
+  transcript. The Neon theme's sun sits low in the frame for exactly this reason.
+- **The status hues are not themed.** Five tones, five meanings, is a contract about what "failed" looks
+  like, and a theme does not get to renegotiate it.
+
+---
+
 ## 🔒 Security & Invariants
 
 1. **Loopback Only**: The engine binds strictly to `127.0.0.1` on ports `7430–7440`.
@@ -292,7 +323,9 @@ Codify/
 ├── ui/                    # React 19 + TypeScript desktop frontend
 │   ├── src/
 │   │   ├── components/    # ChatTimeline, BottomCommandBar, SettingsModal, AgentConfigCard, …
-│   │   ├── hooks/         # useAgentConfigs hook
+│   │   ├── components/ui/ # Shared primitives + the theme backdrops (MatrixRain, CyberGrid, …)
+│   │   ├── hooks/         # useAgentConfigs, useTheme, useAtmosphereCanvas
+│   │   ├── appearance.ts  # The 8 themes: id, label, CSS custom properties, swatch
 │   │   ├── api.ts         # Tauri IPC & HTTP fallback client
 │   │   └── types.ts       # TypeScript type definitions
 │   └── vite.config.ts     # Vite configuration
