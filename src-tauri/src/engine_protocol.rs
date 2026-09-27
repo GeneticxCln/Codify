@@ -15,6 +15,26 @@ use std::path::{Path, PathBuf};
 /// which is why it lives here beside the parser rather than in two places.
 const HANDSHAKE_MARKER: &str = "CODIFY_ENGINE";
 
+/// The field carrying the engine's own bound on a stop request, in seconds.
+///
+/// The shell asks the engine to stop and then waits exactly this long before it
+/// escalates to `SIGKILL`, so an interrupted turn gets recorded instead of being
+/// cut off mid-write. It is announced rather than duplicated because a second copy
+/// in Rust is free to drift, and drift here is a turn that vanishes.
+const HANDSHAKE_HARD_EXIT_FIELD: &str = "hard_exit_s";
+
+/// What the engine said about itself on its way up.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Handshake {
+    pub token: String,
+    pub port: u16,
+    /// How long this engine promises a stop request to take, in seconds — or `None`
+    /// when the line did not say. `None` is a normal outcome, not a parse failure:
+    /// the token and port are what the app cannot boot without, and an engine that
+    /// does not announce a bound still gets asked politely.
+    pub hard_exit_s: Option<f64>,
+}
+
 /// Fences the login shell's `$PATH` in the output of [`login_path_probe`].
 ///
 /// The whole output cannot be treated as the PATH: an rc file may print anything it
@@ -99,20 +119,34 @@ pub(crate) fn project_root_from(cwd: &Path) -> PathBuf {
 /// read half-way must not park a token next to a missing port. Field order and extra
 /// whitespace do not matter: this is the other process's stdout, and a stricter
 /// parser would fail a boot over spacing.
-pub(crate) fn parse_handshake(line: &str) -> Option<(String, u16)> {
+pub(crate) fn parse_handshake(line: &str) -> Option<Handshake> {
     if !line.starts_with(HANDSHAKE_MARKER) {
         return None;
     }
     let mut token = None;
     let mut port = None;
+    let mut hard_exit_s = None;
     for field in line.split_whitespace().skip(1) {
         if let Some(value) = field.strip_prefix("token=") {
             token = Some(value.to_string());
         } else if let Some(value) = field.strip_prefix("port=") {
             port = value.parse::<u16>().ok();
+        } else if let Some(value) = field.strip_prefix(&format!("{HANDSHAKE_HARD_EXIT_FIELD}=")) {
+            // Nonsense is `None` rather than a refusal: a bad bound must not stop
+            // the app from booting. `NaN` and the infinities parse as floats and
+            // are exactly the values that would turn the stop path's arithmetic
+            // into a wait of no length or no end.
+            hard_exit_s = value
+                .parse::<f64>()
+                .ok()
+                .filter(|seconds| seconds.is_finite() && *seconds > 0.0);
         }
     }
-    token.zip(port)
+    Some(Handshake {
+        token: token?,
+        port: port?,
+        hard_exit_s,
+    })
 }
 
 /// Why `python3 -m engine` cannot deliver a handshake from `root`, when it cannot.
@@ -141,13 +175,14 @@ pub(crate) fn launch_problem(root: &Path) -> Option<String> {
 ///
 /// The checkout was there and the spawn succeeded, so the failure is inside the engine
 /// itself — a missing dependency, an unreadable config, a port it could not bind. Its
-/// traceback went to the stderr this shell inherits, which is a terminal the window user
-/// may not have in front of them, so the message has to name the command that reproduces
-/// it — and say it in the directory the shell actually ran from, not in the abstract.
+/// stderr is tailed and shown in the window (`engine_log.rs`), so the traceback is
+/// already in front of the user; this says what that tail cannot — the command to run
+/// for the whole of it, in the directory the shell actually ran from, not in the
+/// abstract.
 pub(crate) fn engine_exited_problem(root: &Path) -> String {
     format!(
-        "The engine started but exited before it reported a port. Run `python3 -m engine` in \
-         {} to see what it printed.",
+        "The engine started but exited before it reported a port. What it printed is \
+         below; run `python3 -m engine` in {} to see the whole of it.",
         root.display()
     )
 }
@@ -188,7 +223,11 @@ mod tests {
     #[test]
     fn a_boot_line_yields_its_token_and_port() {
         assert_eq!(
-            Some(("9f2c".to_string(), 7430)),
+            Some(Handshake {
+                token: "9f2c".to_string(),
+                port: 7430,
+                hard_exit_s: None
+            }),
             parse_handshake("CODIFY_ENGINE token=9f2c port=7430")
         );
     }
@@ -196,9 +235,40 @@ mod tests {
     #[test]
     fn field_order_and_extra_whitespace_do_not_matter() {
         assert_eq!(
-            Some(("9f2c".to_string(), 7431)),
+            Some(Handshake {
+                token: "9f2c".to_string(),
+                port: 7431,
+                hard_exit_s: None
+            }),
             parse_handshake("CODIFY_ENGINE   port=7431  token=9f2c  ")
         );
+    }
+
+    #[test]
+    fn the_engines_own_stop_bound_is_read_when_it_announces_one() {
+        // The shell waits this long before escalating to SIGKILL, so it is read
+        // from the engine rather than written down twice.
+        let handshake =
+            parse_handshake("CODIFY_ENGINE token=9f2c port=7430 hard_exit_s=6").expect("handshake");
+        assert_eq!(Some(6.0), handshake.hard_exit_s);
+    }
+
+    #[test]
+    fn a_bound_that_could_not_be_waited_on_is_ignored_rather_than_obeyed() {
+        // Every one of these parses as a float except the last, and every one of
+        // them is worse than no answer: `NaN` and the infinities make the stop
+        // path's arithmetic meaningless, and a zero or negative bound would have
+        // the shell kill an engine before it had been asked politely.
+        for announced in ["0", "-3", "nan", "inf", "-inf", "soon"] {
+            let handshake = parse_handshake(&format!(
+                "CODIFY_ENGINE token=9f2c port=7430 hard_exit_s={announced}"
+            ))
+            .expect("the token and port still parse");
+            assert_eq!(
+                None, handshake.hard_exit_s,
+                "must not be believed: {announced}"
+            );
+        }
     }
 
     #[test]

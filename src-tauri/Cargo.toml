@@ -24,16 +24,23 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Only what lib.rs names: `process` for the engine subprocess, `io-util` for the
 # stdout reader, `sync` for the state mutex, `time` to bound the login-shell PATH
-# lookup. It used to ask for `full`, which also pulls fs, io-std, macros, net,
-# parking_lot and signal into the build.
-# The runtime features this crate actually runs on come from the dependencies that
-# own them — tauri enables rt, rt-multi-thread, sync, fs and io-util, reqwest
-# enables net, time and macros — and cargo unifies features across the graph, so
-# naming them again here would only make this list stop describing the code.
-tokio = { version = "1", features = ["process", "io-util", "sync", "time"] }
+# lookup, and `signal` so a SIGTERM can end the app deliberately instead of by its
+# default disposition. It used to ask for `full`, which also pulls fs, io-std, macros,
+# net and parking_lot into the build.
+# The remaining runtime features this crate actually runs on come from the
+# dependencies that own them — tauri enables rt, rt-multi-thread, sync, fs and
+# io-util, reqwest enables net, time and macros — and cargo unifies features across
+# the graph, so naming them again here would only make this list stop describing the
+# code.
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "signal"] }
 reqwest = { version = "0.12", features = ["json"] }
 portable-pty = "0.9.0"
 url = "2"
+# One syscall: SIGTERM to the engine child. tokio's `Child` exposes only SIGKILL
+# (`start_kill`, `kill`), and the exit path has to *ask* first so an interrupted
+# turn is recorded rather than cut off — see `stop_engine` in lib.rs. The pid is
+# also reaped nowhere by hand: this is `kill`, and the liveness check is `kill 0`.
+libc = "0.2"
 
 [dev-dependencies]
 glob = "0.3"

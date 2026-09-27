@@ -227,6 +227,33 @@ class TestDbAndServices(unittest.TestCase):
         updated = self.goals.update_status(g.id, g.version, "PENDING")
         self.assertEqual(updated.status, "PENDING")
 
+    def test_the_rescue_names_which_of_the_two_deaths_it_was(self) -> None:
+        """The same repair, two causes, and the message has to tell them apart.
+
+        A goal failed by a restart and a goal cut short by an orderly shutdown are
+        the same row and different stories, and the story is what a user reads in
+        the event log weeks later. Hence the reason being a parameter rather than
+        prose baked into the query.
+        """
+        ws_path = self.temp_dir.name
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(ws_path)))
+        at_shutdown = self.goals.create(GoalCreate(workspace_id=ws.id, title="S", description=""))
+        self.goals.update_status(at_shutdown.id, at_shutdown.version, "RUNNING")
+
+        stopped = self.goals.fail_orphaned_active_goals("the engine is shutting down")
+
+        # A goal that is only now claiming to run, for the next boot to find.
+        at_boot = self.goals.create(GoalCreate(workspace_id=ws.id, title="B", description=""))
+        self.goals.update_status(at_boot.id, at_boot.version, "RUNNING")
+        rebooted = self.goals.fail_orphaned_active_goals()
+
+        self.assertEqual([at_shutdown.id], [goal_id for goal_id, _, _ in stopped])
+        self.assertIn("the engine is shutting down", stopped[0][2])
+        self.assertIn("RUNNING", stopped[0][2])
+        self.assertEqual([at_boot.id], [goal_id for goal_id, _, _ in rebooted],
+                         "a goal already failed is not rescued twice")
+        self.assertIn("the engine restarted", rebooted[0][2])
+
     def test_seeded_roles_name_no_model(self) -> None:
         """A fresh install must not ship hardcoded model ids.
 

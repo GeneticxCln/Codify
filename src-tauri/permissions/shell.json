@@ -12,6 +12,11 @@
       "commands": { "allow": ["codify_engine_status"] }
     },
     {
+      "identifier": "allow-codify-engine-log",
+      "description": "Returns the tail of the engine's own stderr. Read-only and bounded (200 lines, 500 characters each), and the engine is the only writer: this is the explanation for an engine that stopped, not a way to run anything.",
+      "commands": { "allow": ["codify_engine_log"] }
+    },
+    {
       "identifier": "allow-codify-list-agent-configs",
       "description": "Lists the eight role slots and their per-role configuration, with API keys redacted (docs/00 §6.4).",
       "commands": { "allow": ["codify_list_agent_configs"] }
@@ -70,10 +75,11 @@
   "set": [
     {
       "identifier": "shell",
-      "description": "Every command this app defines, as thirteen named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser.rs fails the build's test leg if the two lists ever differ. Permissions are not where a window/webview is decided: this set is referenced only by capabilities/default.json, whose `windows` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.",
+      "description": "Every command this app defines, as fourteen named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser.rs fails the build's test leg if the two lists ever differ. Permissions are not where a window/webview is decided: this set is referenced only by capabilities/default.json, whose `windows` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.",
       "permissions": [
         "allow-codify-get-engine-info",
         "allow-codify-engine-status",
+        "allow-codify-engine-log",
         "allow-codify-list-agent-configs",
         "allow-codify-update-agent-config",
         "allow-codify-repair-agent-configs",

@@ -91,6 +91,32 @@ export async function engineFailureReason(): Promise<string | null> {
 }
 
 /**
+ * The engine's own last words: the tail of its stderr, as the shell tailed it.
+ *
+ * `engineFailureReason` above answers "why did the launch fail", which is the
+ * launcher's story. This is the engine's: a traceback, a provider error, and
+ * the bounded-shutdown backstop announcing that it stopped waiting for
+ * in-flight work and exited anyway (`docs/04` §6.1). That line used to go to
+ * whatever terminal the shell was started from, which for someone using the
+ * app is nowhere — so an engine that vanished on a hung websocket showed a red
+ * pill and no reason at all.
+ *
+ * Outside Tauri there is no shell holding a pipe to tail: the browser build
+ * talks to an engine it did not spawn, and that engine's stderr belongs to
+ * whatever started it. Empty is the honest answer there, and the caller keeps
+ * the message it already had.
+ */
+export async function fetchEngineStderr(limit = 60): Promise<string[]> {
+  if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return [];
+  try {
+    const lines = await tauriInvoke<string[]>("codify_engine_log", { limit });
+    return Array.isArray(lines) ? lines : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Call a shell command.
  *
  * ## Argument names are camelCase, and that is not a style choice

@@ -2,13 +2,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod browser;
+mod engine_log;
 mod engine_protocol;
 mod terminal;
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
+// The one wait in the exit path is a future it awaits, not a thread it blocks:
+// see `stop_engine` for what a blocking version cost.
+use std::future::Future;
+use std::pin::Pin;
 
 // ── Engine process state ────────────────────────────────────────────────────
 
@@ -22,12 +28,25 @@ use tokio::sync::Mutex;
 /// "not ready yet" and "never going to be ready" looked identical from outside, so
 /// the launcher's own diagnosis had nowhere to land and the UI showed a red dot
 /// forever. It is `Some` exactly when a failure has been recorded.
+///
+/// `log` is the fourth: the engine's own stderr, tailed. `problem` can only say
+/// what the launcher knows; when the engine said it itself — a traceback, and
+/// above all the bounded-shutdown backstop announcing that it gave up waiting
+/// and exited anyway — that is the explanation, and it used to go to a terminal
+/// the window user may never see. An `Arc` rather than a value because the reader
+/// task feeds it while the window reads it (`engine_log::EngineLog`).
+///
+/// `hard_exit_s` is the engine's own bound on a stop request, announced on the
+/// handshake. It is cleared with the token and port, because it describes that
+/// process: an engine that has exited cannot be waited for.
 #[derive(Default)]
 pub struct EngineState {
     pub token: Option<String>,
     pub port: Option<u16>,
     pub child: Option<tokio::process::Child>,
     pub problem: Option<String>,
+    pub log: Arc<engine_log::EngineLog>,
+    pub hard_exit_s: Option<f64>,
 }
 
 type SharedEngineState = Arc<Mutex<EngineState>>;
@@ -36,6 +55,311 @@ type SharedEngineState = Arc<Mutex<EngineState>>;
 /// a short synchronous section and none of it is held across an await, so a
 /// `tokio` lock would only add a scheduler dependency.
 type SharedTerminals = Arc<std::sync::Mutex<terminal::Terminals>>;
+
+// ── Ending the app, whichever way it is asked to ─────────────────────────────
+
+/// The exit path's bound on waiting for the engine state lock: 500 x 10ms.
+const ENGINE_LOCK_TRIES: u32 = 500;
+const ENGINE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// How often the stop path looks to see whether the engine has gone. Small because
+/// this is the whole cost of the grace in the normal case: the engine is gone
+/// within a few hundred milliseconds and the loop only notices on its next look.
+const ENGINE_STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Slack added to the engine's announced bound before this shell escalates.
+///
+/// The announcement is what the engine *intends*, not a guarantee it reaches: it is
+/// a timer thread racing a shutdown that may be one scheduling hiccup behind, and a
+/// final `os._exit` that has to flush two streams first. Without slack the shell
+/// would kill an engine a moment before its own deadline, which is precisely the
+/// interrupted turn this path exists to record.
+const STOP_GRACE_SLACK: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// The bound to use when the engine announced none — an older build, or a handshake
+/// line whose `hard_exit_s` was nonsense. The engine's own default is 6s, so this is
+/// that plus the same slack: long enough to let a bounded shutdown finish, short
+/// enough that a wedged process is not waited on indefinitely.
+const DEFAULT_STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(7_500);
+
+/// Claimed once, by whichever exit path gets there first.
+static SHUTDOWN_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// What stopping the engine actually did, so the log can say which it was.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EngineStop {
+    /// Asked with `SIGTERM`, and it was gone inside its own bound.
+    Graceful,
+    /// Asked, and still there when its bound expired. Killed.
+    Killed,
+    /// No child to stop: the engine never started, or it had already exited.
+    NothingToStop,
+    /// The state lock stayed held for the whole bound. The engine's own bound is
+    /// what covers this case now — see `docs/04` §6.1.
+    LockUnavailable,
+}
+
+/// The first caller does the work; every later one is told it is already done.
+///
+/// Two paths reach `release_children` and they can both fire for one exit: the
+/// signal path cleans up and then asks Tauri to quit, and that quit delivers the
+/// `RunEvent::Exit` a closed window would have produced. Running it twice is
+/// harmless in effect and noisy in fact — a second bounded wait for a lock, a second
+/// "Engine process stopped" for an engine that is already gone — so the second
+/// caller leaves.
+fn claim_shutdown(claimed: &AtomicBool) -> bool {
+    !claimed.swap(true, Ordering::SeqCst)
+}
+
+/// Close the terminals and stop the engine, once, whoever asked.
+///
+/// Async because the wait has to keep the runtime turning — see [`stop_engine`].
+async fn release_children(app: &AppHandle) {
+    if !claim_shutdown(&SHUTDOWN_CLAIMED) {
+        return;
+    }
+    // The terminals go first, and unconditionally. They are the user's own shells,
+    // and one left running after the window goes is a stray process holding the
+    // workspace directory — the same defect the engine kill below exists to prevent.
+    // It runs before the lock dance on purpose: the engine lock may never be
+    // acquired, and a shell leak must not depend on that.
+    terminal::close_all(&app.state::<SharedTerminals>());
+    match stop_engine(&app.state::<SharedEngineState>()).await {
+        EngineStop::Graceful => println!("[Codify] Engine stopped inside its own bound"),
+        EngineStop::Killed => println!(
+            "[Codify] Engine outlived its shutdown bound — killed, so whatever it had \
+             not recorded is lost"
+        ),
+        EngineStop::NothingToStop => {}
+        EngineStop::LockUnavailable => eprintln!(
+            "[Codify] engine state lock still held at exit — the engine will have to \
+             notice this process is gone on its own (docs/04 §6.1)"
+        ),
+    }
+}
+
+/// Stop the engine: ask first, wait out its own bound, kill only if it outlasts it.
+///
+/// `SIGKILL` on the way out used to be the whole of this, on the grounds that a
+/// closing window should not wait. That was right about the *wait* and wrong about
+/// the *kill*: a killed engine writes nothing on its way out, so a goal that was
+/// RUNNING stays RUNNING in the database with no event saying why, and the only
+/// repair is the *next* boot's rescue — a post-mortem rather than a record, with a
+/// window of lying state in between. Asking first costs a wait the engine bounds
+/// itself, and buys the record at the moment it happens: a real engine asked this
+/// way was gone in 0.19s with the interrupted run already marked FAILED.
+///
+/// **Async, and it must stay that way.** The first version of this slept with
+/// `std::thread::sleep`, and the live run of it was a self-inflicted wound: on the
+/// signal path this runs as a tokio task, so a sleeping worker starved the very
+/// tasks the wait depends on — the reaper that collects the child and the reader
+/// that sees its pipe close. The engine exited in a fifth of a second, sat
+/// unreaped as a zombie for the whole bound, and answered `kill(pid, 0)` the entire
+/// time, so the shell waited 7.5s and then killed a process that had been gone since
+/// before the first nap. Yielding between looks is not politeness here; it is the
+/// mechanism.
+///
+/// Three things make the wait honest rather than a new way to hang:
+///
+/// * the bound is the engine's own, read from its boot handshake
+///   (`hard_exit_s`), not a number written down twice;
+/// * the shell watches for the *exit*, not for silence, and stops as soon as the
+///   process is gone — normally a few hundred milliseconds, not the bound;
+/// * the escalation is unconditional afterwards, so a process that ignores
+///   `SIGTERM` is still killed on a deadline, which is what `docs/04` §6.1 promises.
+///
+/// The state lock is released before any of that: nothing about signalling another
+/// process needs the app's state, and holding the lock for the grace would stall
+/// every in-flight IPC call for as long as the engine takes to leave.
+async fn stop_engine(shared: &SharedEngineState) -> EngineStop {
+    let Some(guard) = bounded_lock(shared).await else {
+        return EngineStop::LockUnavailable;
+    };
+    let Some(pid) = guard.child.as_ref().and_then(|child| child.id()) else {
+        return EngineStop::NothingToStop;
+    };
+    let grace = stop_grace(guard.hard_exit_s);
+    drop(guard);
+
+    if !signal_process(pid, libc::SIGTERM) {
+        // No such process: it exited between the id being read and the signal being
+        // sent, which is the ordinary state of an engine that has already crashed.
+        return EngineStop::Graceful;
+    }
+    println!(
+        "[Codify] Asked the engine to stop (SIGTERM) — up to {:.1}s before SIGKILL",
+        grace.as_secs_f64()
+    );
+    let state = shared.clone();
+    await_exit(
+        grace,
+        || !engine_has_gone(process_alive(pid), engine_reported_gone(&state)),
+        |nap| Box::pin(tokio::time::sleep(nap)),
+        || {
+            let _ = signal_process(pid, libc::SIGKILL);
+        },
+    )
+    .await
+}
+
+/// Whether the engine is gone, by either of the two things that know.
+///
+/// `alive` is `kill(pid, 0)`; `reported_gone` is the stdout reader having seen the
+/// pipe close. Gone is *either* of them — and getting that direction wrong is not a
+/// subtle bug, it is the difference between a quit that takes a moment and a quit
+/// that waits out the whole bound and then kills a corpse. The first live run of
+/// this path combined them the other way round ("alive or reported gone", a
+/// predicate that is almost always true) and duly waited 7.5s for an engine that
+/// had left 0.15s after the signal, SIGKILLed its unreaped zombie, and reported
+/// `Killed` for a shutdown that had actually been graceful.
+///
+/// The second signal is not redundant: a dead child that nobody has reaped yet
+/// still answers signal 0, and only the reader knows the difference between a
+/// process and the absence of one.
+fn engine_has_gone(alive: bool, reported_gone: bool) -> bool {
+    !alive || reported_gone
+}
+
+/// The engine's state lock, or `None` if it stayed held for the whole bound.
+///
+/// Bounded rather than skipped on purpose: every holder takes the lock across a
+/// short synchronous section, so a bounded wait lands, and the old `try_lock →
+/// return` gave up — leaking a stray engine holding the port and the database —
+/// whenever another task happened to hold the lock at that instant.
+async fn bounded_lock(
+    shared: &SharedEngineState,
+) -> Option<tokio::sync::MutexGuard<'_, EngineState>> {
+    for _ in 0..ENGINE_LOCK_TRIES {
+        if let Ok(guard) = shared.try_lock() {
+            return Some(guard);
+        }
+        tokio::time::sleep(ENGINE_LOCK_WAIT).await;
+    }
+    None
+}
+
+/// How long to let the engine take, from what it announced on the handshake.
+///
+/// `announced` is already filtered by the parser (finite, positive), which is what
+/// makes `from_secs_f64` safe here: it panics on a negative or non-finite value, and
+/// the one place that could feed it garbage is the one place that cannot.
+fn stop_grace(announced: Option<f64>) -> std::time::Duration {
+    match announced {
+        Some(seconds) => std::time::Duration::from_secs_f64(seconds) + STOP_GRACE_SLACK,
+        None => DEFAULT_STOP_GRACE,
+    }
+}
+
+/// Wait out the grace, escalating only if the engine is still there at the end.
+///
+/// `still_there`, `wait` and `force` are injected so this is a function a test can
+/// drive exactly, and `wait` is a *future* rather than a sleep: the loop has to
+/// yield to the runtime between looks, because the reaper that tells us the child
+/// is gone runs on that runtime. `await_exit` is the one place the wait exists, so
+/// there is no second, blocking version to drift back into.
+///
+/// The loop checks before it waits, which is what makes the boundary count as
+/// graceful: an engine that finished on the last nap is found gone by the look that
+/// follows it, and killing it would credit the kill with a shutdown that had
+/// already happened.
+async fn await_exit(
+    grace: std::time::Duration,
+    mut still_there: impl FnMut() -> bool,
+    mut wait: impl FnMut(std::time::Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>,
+    mut force: impl FnMut(),
+) -> EngineStop {
+    let mut waited = std::time::Duration::ZERO;
+    loop {
+        if !still_there() {
+            return EngineStop::Graceful;
+        }
+        if waited >= grace {
+            force();
+            return EngineStop::Killed;
+        }
+        wait(ENGINE_STOP_POLL).await;
+        waited += ENGINE_STOP_POLL;
+    }
+}
+
+/// Whether the stdout reader has already seen the engine's pipe close.
+///
+/// The reader watches stdout for the life of the process and clears the connection
+/// info at EOF, so "no token, no port" means the process is gone — the second of
+/// the two answers [`engine_has_gone`] combines. It is a `try_lock` because this is
+/// called from the wait loop: it must never be the thing that makes the wait slow,
+/// and a lock it cannot take is a signal it does not have rather than one to wait
+/// for.
+fn engine_reported_gone(shared: &SharedEngineState) -> bool {
+    shared
+        .try_lock()
+        .is_ok_and(|state| state.token.is_none() && state.port.is_none())
+}
+
+/// Send a signal, reporting whether there was a process there to receive it.
+///
+/// `false` means `ESRCH`: no such process. That is a normal answer on this path —
+/// the engine may have exited a moment ago — and not an error worth logging.
+fn signal_process(pid: u32, signal: i32) -> bool {
+    // SAFETY: `kill` is handed a pid and a signal and reads neither of ours; no
+    // pointer into this process is involved, and every argument is a plain integer
+    // this function has already range-checked by type.
+    unsafe { libc::kill(pid as libc::pid_t, signal) == 0 }
+}
+
+/// Whether a pid still names a process — a zombie included, deliberately.
+///
+/// Signal 0 asks the question without sending anything, and it is the only liveness
+/// question available without owning the child's reaping. The zombie case is why
+/// [`engine_reported_gone`] exists and why this is never the only answer.
+fn process_alive(pid: u32) -> bool {
+    signal_process(pid, 0)
+}
+
+/// Turn a termination signal into the same deliberate exit a closed window takes.
+///
+/// A signal never runs Tauri's exit path. SIGTERM's default disposition is to end the
+/// process where it stands, so on a keybind the window went, the terminals were left
+/// to whatever their PTY happened to do, and the engine was left to notice that its
+/// parent was gone. That last part is a backstop working as designed (`docs/04`
+/// §6.1); it is not the shell keeping its own promise, and it takes up to a second
+/// and a half longer than doing it here.
+///
+/// tokio's signal streams rather than `libc::signal`: what tokio installs writes to a
+/// pipe, and the work happens on a runtime thread, so this may touch the app's state
+/// and call into Tauri at all — none of which a signal handler may do.
+///
+/// SIGHUP is deliberately absent. A terminal that launched the app may have been
+/// started with SIGHUP ignored, and a handler installed over an inherited `SIG_IGN`
+/// would make closing that terminal kill an app that was deliberately detached.
+/// SIGTERM and SIGINT are requests to stop, with no such second reading.
+fn watch_shutdown_signals(app: AppHandle) {
+    use tokio::signal::unix::{signal, SignalKind};
+    for (name, kind) in [
+        ("SIGTERM", SignalKind::terminate()),
+        ("SIGINT", SignalKind::interrupt()),
+    ] {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let Ok(mut stream) = signal(kind) else {
+                return;
+            };
+            // `recv` resolves only when the signal arrives, which is the point: until
+            // something asks the app to stop, this task does nothing at all.
+            if stream.recv().await.is_none() {
+                return;
+            }
+            eprintln!("[Codify] {name} — closing the terminals and stopping the engine");
+            release_children(&app).await;
+            // Then the ordinary exit: `AppHandle::exit` emits the same
+            // `RunEvent::Exit` a closed window does, so the window, the webview and
+            // the compositor's idea of this surface all come down the normal path. And
+            // if the runtime cannot honour that, it exits the process itself rather
+            // than leaving a shell with no engine behind it.
+            app.exit(0);
+        });
+    }
+}
 
 // ── Serde types for Tauri commands ─────────────────────────────────────────
 
@@ -275,6 +599,35 @@ async fn codify_engine_status(state: State<'_, SharedEngineState>) -> Result<Eng
     })
 }
 
+/// The engine's own last words: the tail of its stderr, oldest first.
+///
+/// The launcher can say *that* an engine failed — no checkout, no handshake, a
+/// port it never reported — but not *why one that had been running stopped*, and
+/// the why is the part worth reading. A turn cancelled mid-flight leaves a
+/// websocket open, uvicorn waits for it, and the bounded-shutdown backstop ends
+/// the process with one line on stderr: `shutdown unfinished after 6s — exiting
+/// anyway`. That line used to go wherever this shell's stderr was pointed, which
+/// for someone using the app is nowhere they will look.
+///
+/// Read on demand rather than pushed: the interesting moment is the engine
+/// stopping, and the reader task already keeps the tail up to that point. So the
+/// window asks once, when it notices, and pays nothing while the engine is
+/// healthy.
+///
+/// The state lock is released before the log's own lock is taken, so no lock is
+/// ever held across an await and the reader is never blocked by a read.
+#[tauri::command]
+async fn codify_engine_log(
+    state: State<'_, SharedEngineState>,
+    limit: Option<u16>,
+) -> Result<Vec<String>, String> {
+    const DEFAULT_LINES: usize = 40;
+    // `Result` is the shape Tauri requires of an async command that takes
+    // references, not a claim that reading a buffer can fail.
+    let log = { state.lock().await.log.clone() };
+    Ok(log.tail(limit.map_or(DEFAULT_LINES, |l| l as usize)))
+}
+
 /// List all eight agent configs from the engine.
 #[tauri::command]
 async fn codify_list_agent_configs(
@@ -504,7 +857,7 @@ async fn launch_engine(shared: SharedEngineState) {
 /// whether to make another.
 async fn launch_engine_once(shared: SharedEngineState) -> LaunchOutcome {
     use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
     let project_root = std::env::current_dir()
         .map(|cwd| engine_protocol::project_root_from(&cwd))
@@ -553,7 +906,11 @@ async fn launch_engine_once(shared: SharedEngineState) -> LaunchOutcome {
         // its own (see `engine/watchdog.py`).
         .env("CODIFY_PARENT_PID", std::process::id().to_string())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        // Piped, not inherited — see the reader spawned below. Inheriting threw
+        // away the one diagnostic that explains an engine that exits: its own
+        // last words, which for a bounded shutdown is the backstop saying it
+        // stopped waiting and left anyway.
+        .stderr(Stdio::piped())
         // Belt: if this handle is ever dropped unexpectedly, the engine dies
         // with it instead of surviving as a stray holding the port and DB.
         .kill_on_drop(true);
@@ -583,6 +940,47 @@ async fn launch_engine_once(shared: SharedEngineState) -> LaunchOutcome {
         return LaunchOutcome::NoHandshake;
     };
     // Suspenders: park the handle where the exit handler can reach it.
+    //
+    // The engine's stderr is tailed before the child is parked, because the
+    // reader needs the pipe and the pipe only exists while we still own the
+    // child. It reads to EOF — the whole life of the process, not just the boot
+    // — so the lines a crash leaves behind are still there when the window asks.
+    let stderr_log = {
+        let s = shared.lock().await;
+        // This attempt's stderr replaces the previous run's: a banner quoting
+        // the last words of an engine that is no longer this one would be
+        // confidently wrong.
+        s.log.clear();
+        s.log.clone()
+    };
+    if let Some(stderr) = child.stderr.take() {
+        tauri::async_runtime::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut chunk = [0u8; 4096];
+            loop {
+                match reader.read(&mut chunk).await {
+                    // EOF: the engine is gone, and whatever it managed to say is
+                    // now the whole diagnosis. A read error ends the reader too —
+                    // continuing would spin on a pipe that is broken — and says so
+                    // rather than leaving a truncated tail looking complete.
+                    Ok(0) => break,
+                    Err(e) => {
+                        eprintln!("[Codify] engine stderr reader stopped: {e}");
+                        break;
+                    }
+                    Ok(n) => {
+                        for line in stderr_log.feed(&chunk[..n]) {
+                            // Exactly the bytes `Stdio::inherit` printed, so a
+                            // person watching a terminal loses nothing.
+                            eprintln!("{line}");
+                        }
+                    }
+                }
+            }
+        });
+    } else {
+        eprintln!("[Codify] engine exposed no stderr — its last words will not reach the app");
+    }
     {
         let mut s = shared.lock().await;
         s.child = Some(child);
@@ -592,14 +990,18 @@ async fn launch_engine_once(shared: SharedEngineState) -> LaunchOutcome {
     let mut handshake_done = false;
     while let Ok(Some(line)) = lines.next_line().await {
         if !handshake_done {
-            if let Some((token, port)) = engine_protocol::parse_handshake(&line) {
+            if let Some(handshake) = engine_protocol::parse_handshake(&line) {
                 let mut s = shared.lock().await;
-                s.token = Some(token);
-                s.port = Some(port);
+                s.token = Some(handshake.token);
+                s.port = Some(handshake.port);
+                // The engine's own bound on a stop request, kept so the exit path
+                // can wait exactly as long as it says and no less.
+                s.hard_exit_s = handshake.hard_exit_s;
                 // Reached the handshake, so any earlier doubt is resolved. Harmless
                 // today (one launcher, one attempt) and load-bearing the moment
                 // anything retries the launch.
                 s.problem = None;
+                let port = handshake.port;
                 println!("[Codify] Engine ready on port {port}");
                 handshake_done = true;
                 // No `break` here. Breaking drops this reader end of the pipe,
@@ -629,6 +1031,7 @@ async fn launch_engine_once(shared: SharedEngineState) -> LaunchOutcome {
         }
         s.token = None;
         s.port = None;
+        s.hard_exit_s = None;
     }
 
     // No `child.wait()` here: the handle lives in shared state and tokio's
@@ -643,8 +1046,65 @@ async fn launch_engine_once(shared: SharedEngineState) -> LaunchOutcome {
 
 // ── Entry point ────────────────────────────────────────────────────────────
 
+/// Which display backend this launch should use, given the environment.
+///
+/// `None` means "say nothing", and it is the answer in two different cases that
+/// must not be conflated: an X11 session, where GTK's own default is correct, and
+/// a `GDK_BACKEND` the user set themselves, which is a decision this shell has no
+/// business overruling.
+///
+/// The case that matters is the third one. GTK chooses its backend from the
+/// environment, and under a Wayland compositor with Xwayland running — which is
+/// every niri, sway or GNOME session with an X client on it — that choice is a
+/// coin flip decided inside GTK's build and version. Landing on X11 makes this
+/// window an X client inside a Wayland session: Xwayland draws a title bar for
+/// it, and a tiling compositor tiles a window whose decorations the app is not
+/// going to draw. Naming the backend removes the coin flip; the session being
+/// Wayland is the only condition, so an X11 session is left exactly as it was.
+fn display_backend(wayland_display: Option<&str>, requested: Option<&str>) -> Option<&'static str> {
+    if requested.is_some() {
+        return None;
+    }
+    if wayland_display.is_some() {
+        return Some("wayland");
+    }
+    None
+}
+
+/// Apply [`display_backend`] to this process, before GTK is initialised.
+///
+/// Called first thing in [`run`], because GTK reads `GDK_BACKEND` when it
+/// initialises — on the main thread, inside `Builder::build()` — and a variable
+/// set after that is a variable nothing reads. It has to be this process: the
+/// window is created here, and a child (the engine, a terminal) inherits the
+/// variable and is welcome to ignore it.
+fn apply_display_backend() {
+    let requested = std::env::var("GDK_BACKEND").ok();
+    let wayland = std::env::var("WAYLAND_DISPLAY").ok();
+    match display_backend(wayland.as_deref(), requested.as_deref()) {
+        Some(backend) => {
+            std::env::set_var("GDK_BACKEND", backend);
+            println!(
+                "[Codify] Display backend {backend} (chosen here: a Wayland compositor is \
+                 running and nothing set GDK_BACKEND)"
+            );
+        }
+        // Named even when nothing was decided, because "which backend am I on"
+        // is not answerable from inside the window: an X client and a Wayland
+        // client look identical once the compositor has drawn them, and "the
+        // title bar is back" is otherwise a bug with no cause on the launch.
+        // An X11 session stays silent — GTK's default there is not news.
+        None => {
+            if let Some(backend) = requested.filter(|b| !b.trim().is_empty()) {
+                println!("[Codify] Display backend {backend} (from GDK_BACKEND)");
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    apply_display_backend();
     let engine_state: SharedEngineState = Arc::new(Mutex::new(EngineState::default()));
     let state_clone = engine_state.clone();
 
@@ -667,7 +1127,9 @@ pub fn run() {
             // are what the launch carried (a file to open, the directory it came
             // from) — nothing consumes them yet, and the line is where you would see
             // them if something did.
-            eprintln!("[Codify] Second launch from {cwd} ({argv:?}) — revealing the running window");
+            eprintln!(
+                "[Codify] Second launch from {cwd} ({argv:?}) — revealing the running window"
+            );
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
@@ -682,7 +1144,10 @@ pub fn run() {
         .manage(SharedTerminals::new(std::sync::Mutex::new(
             terminal::Terminals::default(),
         )))
-        .setup(move |_app| {
+        .setup(move |app| {
+            // Ending deliberately is the shell's own job, whichever way it is asked:
+            // a closed window reaches the exit handler below, a signal reaches this.
+            watch_shutdown_signals(app.handle().clone());
             // Launch engine asynchronously so the window appears immediately.
             let shared = state_clone.clone();
             tauri::async_runtime::spawn(async move {
@@ -693,6 +1158,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             codify_get_engine_info,
             codify_engine_status,
+            codify_engine_log,
             codify_list_agent_configs,
             codify_update_agent_config,
             codify_repair_agent_configs,
@@ -711,39 +1177,252 @@ pub fn run() {
             // The engine is our child process: when the app goes, it goes.
             // Without this, closing Codify left a stray `python3 -m engine`
             // holding the port, the DB, and any writes it was mid-way through.
+            // A signal gets here too, through `watch_shutdown_signals` — so a quit
+            // that is not a closed window is the same deliberate exit, not a
+            // different accident.
             if let tauri::RunEvent::Exit = event {
-                // The terminals go first, and unconditionally. They are the
-                // user's own shells, and one left running after the window goes
-                // is a stray process holding the workspace directory — the same
-                // defect the engine kill below exists to prevent. It runs before
-                // the lock dance on purpose: the engine lock may never be
-                // acquired, and a shell leak must not depend on that.
-                {
-                    let terms = app.state::<SharedTerminals>();
-                    terminal::close_all(&terms);
-                }
-                let shared = app.state::<SharedEngineState>();
-                // This kill is not optional — a silently-skipped kill leaks a
-                // stray engine holding the port and DB. Every lock holder holds
-                // it across a short synchronous section only, so a bounded wait
-                // always lands; the old `try_lock → return` skipped the kill
-                // whenever another task happened to hold the lock at exit.
-                let mut guard = None;
-                for _ in 0..500 {
-                    if let Ok(g) = shared.try_lock() {
-                        guard = Some(g);
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                let Some(mut guard) = guard else {
-                    eprintln!("[Codify] engine state lock still held at exit — engine process may be leaked");
-                    return;
-                };
-                if let Some(child) = guard.child.as_mut() {
-                    let _ = child.start_kill();
-                    println!("[Codify] Engine process stopped");
-                }
+                // `block_on`, because this handler is not a future and the wait is:
+                // the engine's exit is noticed by tasks on the runtime, so the future
+                // has to be driven to completion before the process goes. The main
+                // thread is not a runtime worker, so driving it here costs the event
+                // loop — which is already tearing down — and nothing else. On the
+                // signal path the same work runs as a task and simply awaits.
+                tauri::async_runtime::block_on(release_children(app));
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        await_exit, claim_shutdown, display_backend, engine_has_gone, stop_engine, stop_grace,
+        EngineState, EngineStop, SharedEngineState, DEFAULT_STOP_GRACE, ENGINE_STOP_POLL,
+        STOP_GRACE_SLACK,
+    };
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
+
+    #[test]
+    fn a_wayland_session_gets_the_wayland_backend() {
+        assert_eq!(display_backend(Some("wayland-1"), None), Some("wayland"));
+    }
+
+    #[test]
+    fn an_x11_session_is_left_alone() {
+        // No compositor, no opinion. This is the case that must not regress:
+        // forcing Wayland onto a machine that has none is a window that never
+        // appears, which is worse than the title bar.
+        assert_eq!(display_backend(None, None), None);
+    }
+
+    #[test]
+    fn an_explicit_gdk_backend_wins() {
+        // The user's environment is a decision, not a default to improve on —
+        // and it is also how the choice is undone without a rebuild.
+        assert_eq!(display_backend(Some("wayland-1"), Some("x11")), None);
+    }
+
+    #[test]
+    fn the_cleanup_runs_once_however_many_paths_reach_it() {
+        // A closed window and a signal can both arrive for one exit, and the second
+        // has to be a no-op rather than a second bounded wait for a lock that nothing
+        // is holding and a second "stopped" line for an engine already gone.
+        let claimed = std::sync::atomic::AtomicBool::new(false);
+        assert!(claim_shutdown(&claimed), "the first caller does the work");
+        assert!(!claim_shutdown(&claimed), "the second is told it is done");
+    }
+
+    #[test]
+    fn an_engine_that_never_started_is_not_a_reason_to_wait() {
+        // A signal during boot: the launcher may not have spawned anything yet, and
+        // the exit path still has to come back promptly rather than burn its whole
+        // bound finding nothing to kill. One second against a five-second bound.
+        let shared: SharedEngineState = Arc::new(Mutex::new(EngineState::default()));
+        let started = std::time::Instant::now();
+        let outcome = tauri::async_runtime::block_on(stop_engine(&shared));
+        assert_eq!(EngineStop::NothingToStop, outcome);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "an uncontended lock must land on the first try, not after the bound"
+        );
+    }
+
+    /// Run the stop policy against a scripted engine, and report what it did.
+    ///
+    /// `polls_before_exit` is how many looks answer "still here" before the process
+    /// is gone; `None` means it never goes. The naps are *real* ones — the same
+    /// `tokio::time::sleep` the exit path uses — so these tests also prove the wait
+    /// yields rather than blocking, which is the half that was once wrong.
+    fn scripted_stop(
+        grace: Duration,
+        polls_before_exit: Option<usize>,
+    ) -> (EngineStop, usize, usize) {
+        let mut looks = 0usize;
+        let mut naps = 0usize;
+        let mut kills = 0usize;
+        let outcome = tauri::async_runtime::block_on(await_exit(
+            grace,
+            || {
+                looks += 1;
+                match polls_before_exit {
+                    Some(after) => looks <= after,
+                    None => true,
+                }
+            },
+            |nap| {
+                naps += 1;
+                Box::pin(tokio::time::sleep(nap))
+            },
+            || kills += 1,
+        ));
+        (outcome, naps, kills)
+    }
+
+    #[test]
+    fn an_engine_that_leaves_when_asked_is_never_killed() {
+        // The whole point of the change: SIGTERM, and the engine records what it
+        // was doing on the way out. One kill here would be a turn cut off mid-write.
+        let (outcome, naps, kills) = scripted_stop(Duration::from_secs(7), Some(2));
+        assert_eq!(EngineStop::Graceful, outcome);
+        assert_eq!(2, naps, "the wait ends as soon as the engine is gone");
+        assert_eq!(0, kills, "an engine that stopped politely is not killed");
+    }
+
+    #[test]
+    fn an_engine_that_ignores_the_request_is_killed_after_the_grace() {
+        let (outcome, naps, kills) = scripted_stop(Duration::from_millis(200), None);
+        assert_eq!(EngineStop::Killed, outcome);
+        assert_eq!(4, naps, "the whole grace is waited before the escalation");
+        assert_eq!(1, kills, "escalation happens exactly once");
+    }
+
+    #[test]
+    fn an_engine_that_has_already_gone_is_not_waited_for_at_all() {
+        // The ordinary case when closing the app after a crash: the process is
+        // gone, so the grace has nothing to measure.
+        let (outcome, naps, kills) = scripted_stop(Duration::from_secs(7), Some(0));
+        assert_eq!(EngineStop::Graceful, outcome);
+        assert_eq!(
+            0, naps,
+            "a dead engine must not cost the closing window a nap"
+        );
+        assert_eq!(0, kills);
+    }
+
+    #[test]
+    fn an_engine_that_exits_on_the_boundary_counts_as_having_stopped() {
+        // It finished inside the bound it announced, so it is a graceful stop even
+        // though the last look happened after the last nap. The alternative is
+        // crediting a kill with a shutdown that had already happened.
+        let (outcome, _naps, kills) = scripted_stop(ENGINE_STOP_POLL * 2, Some(2));
+        assert_eq!(EngineStop::Graceful, outcome);
+        assert_eq!(0, kills);
+    }
+
+    #[test]
+    fn a_grace_of_nothing_skips_straight_to_the_kill() {
+        // Degenerate, and the reason the escalation cannot be forgotten: with no
+        // room to wait, the only correct outcome is the one that ends the process.
+        let (outcome, naps, kills) = scripted_stop(Duration::ZERO, None);
+        assert_eq!(EngineStop::Killed, outcome);
+        assert_eq!(0, naps);
+        assert_eq!(1, kills);
+    }
+    #[test]
+    fn an_engine_the_reader_saw_leave_is_gone_even_while_its_pid_answers() {
+        // The regression, in the shape it happened. The shell combined its two
+        // liveness signals the wrong way round, so an engine that had left — and
+        // whose unreaped pid still answered signal 0 — read as alive for the whole
+        // bound, and the shell waited 7.5s and killed a zombie.
+        assert!(
+            engine_has_gone(false, false),
+            "no process and no report: gone"
+        );
+        assert!(
+            engine_has_gone(true, true),
+            "the reader saw the pipe close; an unreaped pid is not a reason to wait"
+        );
+        assert!(engine_has_gone(false, true));
+        assert!(
+            !engine_has_gone(true, false),
+            "a live engine nobody has reported gone is still here"
+        );
+    }
+
+    #[test]
+    fn an_engine_that_is_gone_by_either_signal_is_never_killed() {
+        // The end-to-end shape of the same regression, through the real wait: dead
+        // from the third look on, as a reaped process and a closed pipe would be.
+        let mut looks = 0usize;
+        let mut kills = 0usize;
+        let outcome = tauri::async_runtime::block_on(await_exit(
+            Duration::from_secs(7),
+            || {
+                looks += 1;
+                !engine_has_gone(looks > 2, looks > 2)
+            },
+            |nap| Box::pin(tokio::time::sleep(nap)),
+            || kills += 1,
+        ));
+        assert_eq!(EngineStop::Graceful, outcome, "it left; the wait must end");
+        assert_eq!(0, kills, "and it must not be killed for leaving");
+    }
+
+    #[test]
+    fn the_wait_yields_instead_of_blocking_the_thread_it_runs_on() {
+        // The bug the first live run of this path found, pinned in the shape it
+        // took. The wait used to be `std::thread::sleep` on a tokio worker, so the
+        // reaper that collects the child and the reader that sees its pipe close
+        // never ran: the engine left in a fifth of a second, sat unreaped for the
+        // whole bound answering `kill(pid, 0)`, and the shell waited 7.5s before
+        // SIGKILLing a process that had been gone since the first nap.
+        //
+        // A current-thread runtime, deliberately. A multi-thread one can hide a
+        // blocking wait behind a spare worker, which is how this survived a code
+        // review and only showed up when a person quit the app.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("a current-thread runtime with a timer");
+        runtime.block_on(async {
+            let ticks = Arc::new(AtomicUsize::new(0));
+            let counter = ticks.clone();
+            let ticker = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            let outcome = await_exit(
+                Duration::from_millis(300),
+                || true,
+                |nap| Box::pin(tokio::time::sleep(nap)),
+                || {},
+            )
+            .await;
+            ticker.abort();
+            assert_eq!(EngineStop::Killed, outcome);
+            assert!(
+                ticks.load(Ordering::SeqCst) > 0,
+                "nothing else ran during the wait, so the wait is blocking the thread \
+                 it is on — which starves the tasks that notice the engine is gone"
+            );
+        });
+    }
+
+    #[test]
+    fn the_engines_own_bound_decides_how_long_the_shell_waits() {
+        assert_eq!(
+            Duration::from_secs(6) + STOP_GRACE_SLACK,
+            stop_grace(Some(6.0)),
+            "the announced bound plus slack, so a shutdown one hiccup behind still finishes"
+        );
+        assert_eq!(
+            DEFAULT_STOP_GRACE,
+            stop_grace(None),
+            "an engine that announced nothing gets the engine's own default, plus slack"
+        );
+    }
 }

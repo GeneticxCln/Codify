@@ -499,12 +499,20 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
         line the shell has to tolerate, and one of them is a path.
         """
         import engine.app as app_module
+        import engine.watchdog as watchdog
 
         port = _free_port()
         out, err, started, bound = self._boot_with_stubbed_uvicorn(port)
 
         self.assertIn(
             f"CODIFY_ENGINE token={app_module.BOOT_TOKEN} port={port}", out.getvalue()
+        )
+        # The engine's own bound on a stop request, announced so the shell does not
+        # keep a second copy of a deadline it has to respect: a shell that waited
+        # less would SIGKILL a shutdown that was about to record an interrupted
+        # turn, which is the defect this announcement removes.
+        self.assertIn(
+            f"hard_exit_s={watchdog.HARD_EXIT_GRACE_S:g}", out.getvalue()
         )
         self.assertNotIn("isolated", out.getvalue(), "the handshake channel stays clean")
         self.assertIn("isolated", err.getvalue())

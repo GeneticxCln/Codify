@@ -9,20 +9,41 @@ matter: armed with a live pid, disarmed without one (a standalone run must behav
 exactly as it did before this existed), and a polling loop that actually reaches its
 handler instead of stopping after one look.
 
+Watching is only half of it. A stop request only *starts* a shutdown, and that
+shutdown is uvicorn's: it waits for in-flight work with no deadline of its own, so
+an open event stream or a turn still generating held the SQLite file after the port
+had already been released — the orphan as it was actually observed, reproduced
+before this existed by holding one WebSocket open and sending SIGTERM. The other
+half is therefore pinned here too: the deadline is armed *before* the graceful path
+(both from a signal and from the parent's death), it ends the process through
+`os._exit` and not through interpreter finalization, and it can be cancelled when
+the graceful path finished inside the window. The launcher's wiring — the finite
+timeout and the wrapped handler — is asserted against a real `main()` at the end.
+
 Nothing here kills a process: the loop takes its predicate and its handler as
-arguments, and only the predicates themselves are exercised against real pids.
+arguments, only the predicates themselves are exercised against real pids, and the
+launcher test stubs `Server.run` so no port is served and no process exits.
 """
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import contextlib
+import io
 import os
+import signal
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
+import uvicorn
+
 from engine import watchdog
+from engine.app import _truncate_wal, main
 
 
 def _finished_child_pid() -> int:
@@ -147,6 +168,180 @@ class WatchdogLoopTests(unittest.TestCase):
         self.assertIsNotNone(thread)
         self.assertEqual("", out.getvalue(), "nothing may be written to the handshake channel")
         self.assertIn("4321", err.getvalue())
+
+
+class HardDeadlineTests(unittest.TestCase):
+    """The bound behind the graceful path: a stop request has to end, not wait."""
+
+    def test_the_deadline_outlasts_the_graceful_window(self) -> None:
+        self.assertGreater(
+            watchdog.HARD_EXIT_GRACE_S,
+            watchdog.GRACEFUL_SHUTDOWN_S,
+            "a deadline inside the graceful window would cut off a shutdown that was "
+            "about to finish on its own",
+        )
+
+    def test_a_shutdown_that_never_finishes_is_ended_anyway(self) -> None:
+        exits: list[int] = []
+        done = threading.Event()
+
+        def exit_fn() -> None:
+            exits.append(1)
+            done.set()
+
+        timer = watchdog.arm_hard_deadline(0.05, exit_fn=exit_fn)
+        self.assertTrue(done.wait(2.0), "nothing else was going to end this process")
+        self.assertEqual([1], exits, "the deadline fires once, not once per look")
+        self.assertTrue(timer.daemon, "the timer itself must never be a reason to linger")
+
+    def test_a_shutdown_that_finishes_inside_the_window_is_not_cut_off(self) -> None:
+        exit_fn = Mock()
+        timer = watchdog.arm_hard_deadline(0.2, exit_fn=exit_fn)
+        timer.cancel()
+        time.sleep(0.35)
+        exit_fn.assert_not_called()
+
+    def test_the_deadline_says_why_it_fired(self) -> None:
+        with (
+            patch.object(watchdog, "hard_exit") as leave,
+            contextlib.redirect_stderr(io.StringIO()) as err,
+        ):
+            timer = watchdog.arm_hard_deadline(0.05)
+            timer.join(timeout=2.0)
+            self.assertTrue(leave.called, "the deadline still ends the process")
+        self.assertIn(
+            "shutdown unfinished",
+            err.getvalue(),
+            "giving up in silence is indistinguishable from being killed",
+        )
+
+    def test_hard_exit_leaves_without_waiting_for_the_interpreter(self) -> None:
+        # `os._exit` is the whole point: interpreter finalization joins the threads
+        # that cannot be cancelled, and that join is where the orphan actually sat.
+        with patch.object(os, "_exit") as leave:
+            watchdog.hard_exit(3)
+        leave.assert_called_once_with(3)
+
+    def test_a_broken_stream_cannot_hold_the_database(self) -> None:
+        class Broken:
+            def flush(self) -> None:
+                raise OSError("broken pipe")
+
+        with (
+            patch.object(os, "_exit") as leave,
+            patch.object(sys, "stdout", Broken()),
+            patch.object(sys, "stderr", Broken()),
+        ):
+            watchdog.hard_exit()
+        leave.assert_called_once_with(0)
+
+
+class ParentDeathIsBoundedTests(unittest.TestCase):
+    """The killed-window path: nobody is left to ask twice, so the clock starts here."""
+
+    def test_the_watchdog_arms_the_deadline_before_it_asks_itself_to_stop(self) -> None:
+        order: list[tuple[str, ...]] = []
+        with (
+            patch.object(
+                watchdog, "arm_hard_deadline", side_effect=lambda *a, **k: order.append(("arm",))
+            ),
+            patch.object(
+                os, "kill", side_effect=lambda pid, sig: order.append(("kill", str(pid), str(sig)))
+            ),
+            contextlib.redirect_stderr(io.StringIO()) as err,
+        ):
+            watchdog.terminate(4321)
+        self.assertEqual(
+            [("arm",), ("kill", str(os.getpid()), str(signal.SIGTERM))],
+            order,
+            "the grace starts first, and the graceful path is still SIGTERM",
+        )
+        self.assertIn("4321", err.getvalue(), "the line says which process died")
+
+
+class ShutdownCheckpointTests(unittest.TestCase):
+    """The teardown tidy-up, which was one more thing that could hold the exit.
+
+    `wal_checkpoint(TRUNCATE)` waits for every reader to release the log, and a
+    cancelled turn leaves a reader behind: the live case spent the whole deadline
+    inside it, on the shutdown's own path to the exit.
+    """
+
+    def test_a_reader_in_the_way_cannot_hold_the_shutdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "wal.db"
+            conn = sqlite3.connect(path)
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("CREATE TABLE t (x INTEGER)")
+            conn.execute("INSERT INTO t VALUES (1)")
+            conn.commit()
+            # The timeout the engine's own connection carries (`engine/db.py`): the
+            # point of the test is that shutdown does not inherit it.
+            conn.execute("PRAGMA busy_timeout = 5000")
+            reader = sqlite3.connect(path)
+            reader.execute("BEGIN")
+            reader.execute("SELECT count(*) FROM t").fetchall()
+            try:
+                started = time.monotonic()
+                _truncate_wal(conn)
+                elapsed = time.monotonic() - started
+                self.assertGreater(
+                    Path(f"{path}-wal").stat().st_size,
+                    0,
+                    "the reader has to be genuinely in the way, or this proves nothing",
+                )
+            finally:
+                reader.rollback()
+                reader.close()
+                conn.close()
+        self.assertLess(
+            elapsed,
+            1.0,
+            "a tidy-up that waits on a reader outlives the deadline hiding behind it",
+        )
+
+
+class LauncherWiringTests(unittest.TestCase):
+    """What `python3 -m engine` builds: a server that cannot wait forever.
+
+    `main()` is driven for real, with `Server.run` stubbed and no socket bound, so
+    the object asserted on is the server the launcher actually builds rather than a
+    shape this test re-declares. What it pins is the pair that made the orphan: the
+    graceful timeout (uvicorn's default, `None`, is "wait for in-flight work
+    forever") and the handler that starts the deadline before that wait begins.
+    """
+
+    def test_the_server_is_bounded_and_its_signal_path_starts_the_clock(self) -> None:
+        servers: list[uvicorn.Server] = []
+        with (
+            patch("socket.socket"),
+            patch.object(uvicorn.Server, "run", lambda self, sockets=None: servers.append(self)),
+            patch.object(watchdog, "start_parent_watchdog"),
+            patch.object(watchdog, "arm_hard_deadline") as arm,
+            patch.object(watchdog, "hard_exit") as leave,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            main()
+            # Everything below is asserted with the patches still in place: the
+            # handler under test resolves `arm_hard_deadline` through the module, so
+            # leaving the block first would arm a *real* deadline in the test runner.
+            self.assertEqual(1, len(servers), "one server, and it is the one main built")
+            server = servers[0]
+            self.assertEqual(
+                watchdog.GRACEFUL_SHUTDOWN_S,
+                server.config.timeout_graceful_shutdown,
+                "the in-flight wait has to be bounded, or a stop request is only a hope",
+            )
+            arm.assert_not_called()
+            server.handle_exit(signal.SIGTERM, None)
+            arm.assert_called_once()
+            self.assertTrue(
+                server.should_exit,
+                "the graceful path still runs — the deadline is a bound behind it, not a "
+                "replacement for it",
+            )
+            leave.assert_called_once_with()
 
 
 if __name__ == "__main__":

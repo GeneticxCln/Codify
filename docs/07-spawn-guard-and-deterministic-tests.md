@@ -10,9 +10,10 @@ Roles/pipeline: `01`. Data: `04`. Security: `03`. The Laya gate: `05`.
 
 Every process the engine starts — a verifier's sandboxed command, a git invocation
 (and, through it, any hook the repository runs), the native folder picker — dies
-with the engine. Kill the engine (a closed window SIGKILLs it, the watchdog TERMs
-it, a crash ends it) and nothing it spawned keeps a session, a port, or a write
-handle to a workspace nobody supervises.
+with the engine. End the engine (a closed window asks it to stop and kills it if
+it will not, the watchdog TERMs it — a TERM that is itself bounded, `04` §6.1 — a
+crash ends it) and nothing it spawned keeps a session, a port, or a write handle to
+a workspace nobody supervises.
 
 Both halves of the contract live in `engine/spawn_guard.py`, and no caller builds
 the shape by hand:
@@ -77,9 +78,9 @@ process that cannot outlive whatever started it — not the same boundary.
 
 The e2e scenarios in `tests/test_sandbox_orphans_e2e.py` run the same proofs
 through a real `python3 -m engine` subprocess: a fake Ollama provider drives a
-goal, the engine is SIGKILLed mid-run (exactly what closing the window does), and
-the process table plus the filesystem must show the tree gone and the heartbeat
-frozen. Nothing is patched or imported; every assertion reads the kernel's view,
+goal, the engine is SIGKILLed mid-run — the worst case for a closed window, which
+asks first and only kills what it asked (`09` §5.4.1) — and the process table plus
+the filesystem must show the tree gone and the heartbeat frozen. Nothing is patched or imported; every assertion reads the kernel's view,
 because a dead engine cannot report anything.
 
 ## 2. The static freeze: a spawn cannot appear unannounced
