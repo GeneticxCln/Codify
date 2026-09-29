@@ -337,7 +337,7 @@ script. The test doubles route on the role whose `AgentConfig` built the provide
 
 Adding a **harness** later = one catalog row, not a new class. Adding a new **wire format** = one protocol class.
 
-`test_connection`: `max_tokens=8`, prompt `ping`, 15s — enforced with `asyncio.wait_for` around the provider's own `complete` (`TEST_CONNECTION_TIMEOUT_S` in `engine/providers.py`), because a probe that inherits the generation client's 120s+ timeout is the settings screen hanging. Never echo keys.
+`test_connection`: `max_tokens=8`, prompt `ping`, 15s — enforced with `asyncio.wait_for` around the provider's own `complete` (`TEST_CONNECTION_TIMEOUT_S` in `engine/providers.py`), because a probe that inherits the generation client's 120s+ timeout is the settings screen hanging. It makes exactly one HTTP attempt — generation calls retry transient failures (`04` §4.6.1), the probe reports the first answer. Never echo keys.
 
 ## 4. Registry / Orchestrator / API
 

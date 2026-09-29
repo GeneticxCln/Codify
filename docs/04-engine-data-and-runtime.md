@@ -997,8 +997,8 @@ raise one error naming every attempt
 |---|---|
 | `missing_api_key` | the provider needs a credential and none is stored |
 | `unknown_protocol`, `invalid_base_url`, `secrets_unwritable` | the target cannot be constructed (`invalid_base_url` also covers a stored key that would be sent over plain http to a non-loopback host — docs/03 §1.2) |
-| `provider_http` | the provider answered with an error status (401, 404, 429, 5xx) |
-| `provider_unreachable` | the connection was refused or timed out |
+| `provider_http` | the provider answered with an error status (401, 404, 429, 5xx) — reported *after* the retries below, and carrying the provider's own reason |
+| `provider_unreachable` | the connection was refused, timed out, or dropped mid-stream |
 | `provider_bad_response` | the endpoint answered with something that is not JSON |
 | `agent_output_invalid` | a model answered, but not in the shape the contract requires |
 
@@ -1020,8 +1020,33 @@ message included.
 
 `provider_unreachable` and `provider_bad_response` are new codes from the same work: a refused
 connection used to escape as a raw `httpx` exception and reach the goal as `internal_error` — a code
-that blames Codify for a provider that is merely not listening. `providers.post_json` is the single
-transport path that names both.
+that blames Codify for a provider that is merely not listening. `providers.post_json` (and `open_stream`, for
+the two streamed paths) is the single transport path that names both.
+
+#### 4.6.1 Transient failures: retried before they are failures
+
+A fallback is for a target that cannot be used; a provider that said "busy, ask again in two seconds"
+can be, so the transport asks again before anything above it hears about a failure (audit 2026-09-29, H5).
+
+| | |
+|---|---|
+| **Retried** | `408`, `425`, `429`, `500`, `502`, `503`, `504`, `529`, and a connection that was refused, timed out *connecting*, was reset, or hit a protocol error before any answer |
+| **Never retried** | `400`, `401`, `403`, `404`, `422` — the same request gets the same answer, and repeating a rejected key is how an account is locked. Nor a *read* timeout: the server may still be generating, and a second request doubles the work |
+| **Attempts** | `MAX_ATTEMPTS = 3`: the first and two retries |
+| **Wait** | exponential (`1 s`, `2 s`, capped at `20 s`) with a jitter factor in `[0.5, 1)`; a `Retry-After` header — seconds or an HTTP date — replaces it. One longer than `RETRY_AFTER_CAP_S = 30` is **reported, not waited for**: the message says how long the provider asked for |
+| **Streams** | retried until the response opens; **never after the first byte**. Deltas are already on screen, so a reset is `provider_unreachable` reading `<label> stream interrupted after N characters`, and the reply is not run again |
+| **Probe** | `test_connection` makes one attempt. It reports the first answer inside its 15 s deadline; a 429 is an answer |
+
+What the error says changed with it. `provider_http` used to read `anthropic 400` and nothing else,
+because the body — the only place a provider says *why* — was dropped. It now reads
+`<label> <status>: <the provider's message>` (`error.message` for Anthropic, OpenAI and Google, the
+`error` string for Ollama, the text for a proxy), one line, at most 300 characters, and with anything
+credential-shaped (`sk-…`, `AIza…`, `Bearer …`, `api_key=…`) and the exact credential the request
+carried replaced by `[redacted]` — so invariant 4 holds for text a provider wrote as well as text we did.
+An exhausted retry says so (`… (after 3 attempts)`). `ProviderError.status` carries the number for the
+two callers that ask "did the server reject *this request*" — the OpenAI-compatible `response_format` and
+`stream` fallbacks — which now fire only on a 4xx that repeating cannot change (`refused_the_request`),
+not on a 429 or a 5xx that has already had its retries.
 
 ### 4.7 Measuring the stages
 

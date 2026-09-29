@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import ipaddress
 import json
+import math
 import os
+import random
+import re
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from collections.abc import AsyncIterator, Callable
@@ -36,10 +43,14 @@ class ProviderError(Exception):
     # had to reach for `getattr(exc, "role", None)` to stay safe.
     role: str | None = None
 
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, *, status: int | None = None):
         super().__init__(message)
         self.code = code
         self.message = message
+        # The HTTP status behind a `provider_http`, when there was one. Callers that ask "did the
+        # server *reject this request*" (a field it does not know) need the number, not a substring
+        # of `message`, which is now the provider's own words.
+        self.status = status
 
 
 # Failures that mean the target could not be used at all, and so may be retried on
@@ -68,6 +79,166 @@ FALLBACK_TRIGGER_CODES = frozenset({
 })
 
 
+# Statuses a second attempt can change: the request timed out (408), the server was not ready for it
+# (425), it is rationing (429), or it failed or was overloaded on its side (500, 502, 503, 504, and
+# Anthropic's 529). 400/401/403/404/422 are absent on purpose — the same request gets the same
+# answer, and repeating a rejected key is how an account gets locked.
+RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504, 529})
+# The first attempt and two retries. A step that has waited through more than that is better reported
+# than held: the fallback target, and the person watching the goal, are both waiting behind it.
+MAX_ATTEMPTS = 3
+BACKOFF_BASE_S = 1.0
+BACKOFF_CAP_S = 20.0
+# A provider that says "come back in 15 minutes" is not one to sleep on inside a step.
+RETRY_AFTER_CAP_S = 30.0
+# Failures that happen before an answer exists, and so cost nothing to repeat. A *read timeout* is
+# not here: the server may be halfway through generating, and a second request doubles the work.
+_TRANSIENT_TRANSPORT = (
+    httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError, httpx.ReadError,
+)
+_MAX_ERROR_BODY = 8192
+_MAX_DETAIL = 300
+
+# How many attempts a call may make. A context variable rather than a parameter on every provider
+# method: `test_connection` is a liveness probe on a 15 s deadline and must report the first answer,
+# and it reaches this module through `complete`, several calls away.
+_attempts: contextvars.ContextVar[int] = contextvars.ContextVar("codify_provider_attempts", default=MAX_ATTEMPTS)
+
+
+async def _sleep(seconds: float) -> None:
+    """The backoff wait. A module-level name so a test can stand in for it and wait for nothing."""
+    await asyncio.sleep(seconds)
+
+
+def _jitter() -> float:
+    """A factor in [0.5, 1.0): spread retries out so a burst of failed calls does not come back together."""
+    return random.SystemRandom().uniform(0.5, 1.0)
+
+
+def _backoff(attempt: int) -> float:
+    return min(BACKOFF_CAP_S, BACKOFF_BASE_S * (1 << (attempt - 1))) * _jitter()
+
+
+def parse_retry_after(value: str | None, *, now: datetime | None = None) -> float | None:
+    """Seconds a `Retry-After` header asks for, or None when it says nothing usable.
+
+    The header is either a number of seconds or an HTTP date. Anything else — empty, negative, not a
+    finite number — is treated as absent, so a garbled header falls back to ordinary backoff.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return float(max(0.0, (when - (now or datetime.now(timezone.utc))).total_seconds()))
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
+
+
+# Shapes that are credentials however they got into a body: a provider that echoes "Incorrect API key
+# provided: sk-..." would otherwise carry the key into an error, a trace event and the UI.
+_KEY_TOKEN = re.compile(r"\b(?:sk-[A-Za-z0-9_\-]{8,}|AIza[0-9A-Za-z_\-]{20,})")
+_BEARER = re.compile(r"(?i)\bBearer\s+[^\s\"',;]+")
+_NAMED_SECRET = re.compile(
+    r"(?i)\b(x-api-key|x-goog-api-key|api[_-]?key|access[_-]?token|secret)\b(\s*[:=]\s*)[^\s\"',;]+"
+)
+
+
+def redact_secrets(text: str, known: tuple[str, ...] = ()) -> str:
+    """`text` with anything credential-shaped, and every exact `known` secret, removed."""
+    for secret in known:
+        if len(secret) >= 6:
+            text = text.replace(secret, "[redacted]")
+    text = _BEARER.sub("Bearer [redacted]", text)
+    text = _NAMED_SECRET.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", text)
+    return _KEY_TOKEN.sub("[redacted]", text)
+
+
+def error_detail(body: str, known: tuple[str, ...] = ()) -> str:
+    """The provider's own reason out of an error body: one bounded line, credentials removed.
+
+    Anthropic, OpenAI and Google put it at `error.message`, Ollama's `error` is the string itself,
+    and a proxy in front of any of them answers plain text. All of them are read; the first that
+    is there wins, and the raw text is the fallback.
+    """
+    text = (body or "").strip()
+    if not text:
+        return ""
+    reason = text
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        error = parsed.get("error")
+        candidates = (
+            error.get("message") if isinstance(error, dict) else error,
+            parsed.get("message"),
+            parsed.get("detail"),
+        )
+        found = next((c for c in candidates if isinstance(c, str) and c.strip()), None)
+        if found is not None:
+            reason = found
+    reason = " ".join(redact_secrets(reason, known).split())
+    return reason if len(reason) <= _MAX_DETAIL else reason[: _MAX_DETAIL - 1] + "\u2026"
+
+
+def _known_secrets(kwargs: dict[str, Any]) -> tuple[str, ...]:
+    """The credentials this request carries, so an echo of one can be found by value."""
+    found: list[str] = []
+    headers = kwargs.get("headers") or {}
+    for name, value in headers.items():
+        if name.lower() in ("authorization", "x-api-key", "x-goog-api-key") and isinstance(value, str):
+            found.append(value.removeprefix("Bearer ").strip())
+    return tuple(found)
+
+
+def _unreachable(label: str, exc: httpx.HTTPError, attempt: int, known: tuple[str, ...]) -> ProviderError:
+    tried = f" (after {attempt} attempts)" if attempt > 1 else ""
+    return ProviderError(
+        "provider_unreachable",
+        redact_secrets(f"{label} unreachable: {type(exc).__name__}: {exc}", known) + tried,
+    )
+
+
+def _interrupted(label: str, text: str, exc: httpx.HTTPError) -> ProviderError:
+    """A stream that failed after it began. Not retried: the caller has already shown `text`."""
+    return ProviderError(
+        "provider_unreachable",
+        f"{label} stream interrupted after {len(text)} characters: {type(exc).__name__}: {exc}",
+    )
+
+
+def _refusal(
+    label: str, response: httpx.Response, body: str, attempt: int, limit: int, known: tuple[str, ...],
+) -> tuple[ProviderError, float | None]:
+    """The error for an error status, and how long to wait before asking again (None: do not)."""
+    status = response.status_code
+    detail = error_detail(body, known)
+    message = f"{label} {status}" + (f": {detail}" if detail else "")
+    if status in RETRYABLE_STATUS and limit > 1:
+        if attempt >= limit:
+            message += f" (after {attempt} attempts)"
+        else:
+            asked = parse_retry_after(response.headers.get("retry-after"))
+            if asked is None:
+                return ProviderError("provider_http", message, status=status), _backoff(attempt)
+            if asked <= RETRY_AFTER_CAP_S:
+                return ProviderError("provider_http", message, status=status), asked
+            message += f" (the provider asked for {asked:g} s; not waiting that long)"
+    return ProviderError("provider_http", message, status=status), None
+
+
 async def post_json(
     client: httpx.AsyncClient, url: str, *, label: str, **kwargs: Any
 ) -> Any:
@@ -79,15 +250,30 @@ async def post_json(
     failing (a proxy's HTML error page) had the same problem. Both are named
     here, because the fallback path has to tell "this endpoint is down" from "our
     code is broken": only the first is worth trying somewhere else.
+
+    A transient failure — a 429, a 5xx, a connection refused or reset before any
+    answer — is asked again, up to `MAX_ATTEMPTS` times with backoff and the
+    provider's `Retry-After` honoured; and the error for a status that stays
+    carries the provider's own message, not just its number.
     """
-    try:
-        response = await client.post(url, **kwargs)
-    except httpx.HTTPError as exc:
-        raise ProviderError(
-            "provider_unreachable", f"{label} unreachable: {type(exc).__name__}: {exc}"
-        ) from exc
-    if response.status_code >= 400:
-        raise ProviderError("provider_http", f"{label} {response.status_code}")
+    limit = _attempts.get()
+    known = _known_secrets(kwargs)
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            response = await client.post(url, **kwargs)
+        except httpx.HTTPError as exc:
+            if isinstance(exc, _TRANSIENT_TRANSPORT) and attempt < limit:
+                await _sleep(_backoff(attempt))
+                continue
+            raise _unreachable(label, exc, attempt, known) from exc
+        if response.status_code < 400:
+            break
+        error, wait = _refusal(label, response, response.text[:_MAX_ERROR_BODY], attempt, limit, known)
+        if wait is None:
+            raise error
+        await _sleep(wait)
     try:
         return response.json()
     except ValueError as exc:
@@ -95,6 +281,62 @@ async def post_json(
             "provider_bad_response",
             f"{label} answered with a body that is not JSON (HTTP {response.status_code})",
         ) from exc
+
+
+@contextlib.asynccontextmanager
+async def open_stream(
+    client: httpx.AsyncClient, url: str, *, label: str, **kwargs: Any
+) -> AsyncIterator[httpx.Response]:
+    """POST for a streamed reply, with `post_json`'s retries — up to the first byte, and no further.
+
+    Once the response is open and its body is being read, the deltas are already on someone's
+    screen; asking again would show the reply twice and pay for it twice. A failure after that
+    point is the caller's to report as an interruption. Before it — the connection refused, a 429,
+    a 503 — nothing has been delivered and repeating the request is safe.
+    """
+    limit = _attempts.get()
+    known = _known_secrets(kwargs)
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            response = await client.send(client.build_request("POST", url, **kwargs), stream=True)
+        except httpx.HTTPError as exc:
+            if isinstance(exc, _TRANSIENT_TRANSPORT) and attempt < limit:
+                await _sleep(_backoff(attempt))
+                continue
+            raise _unreachable(label, exc, attempt, known) from exc
+        if response.status_code < 400:
+            break
+        try:
+            body = b""
+            async for chunk in response.aiter_bytes():
+                body += chunk
+                if len(body) >= _MAX_ERROR_BODY:
+                    break
+        except httpx.HTTPError:
+            body = b""
+        finally:
+            await response.aclose()
+        error, wait = _refusal(label, response, body.decode("utf-8", "replace"), attempt, limit, known)
+        if wait is None:
+            raise error
+        await _sleep(wait)
+    try:
+        yield response
+    finally:
+        await response.aclose()
+
+
+def refused_the_request(exc: ProviderError) -> bool:
+    """True when the server *rejected this request* (a 4xx that repeating cannot change).
+
+    That is the case the OpenAI-compatible fallbacks are for — a server that does not know
+    `response_format` or `stream`. A 429 or a 5xx is not the request's fault and has already had
+    its retries; sending the same call again in another shape would only multiply them.
+    """
+    return exc.code == "provider_http" and exc.status is not None and 400 <= exc.status < 500 \
+        and exc.status not in RETRYABLE_STATUS
 
 
 # The liveness-probe deadline, from `01` §3: max_tokens=8, prompt `ping`, 15s.
@@ -309,6 +551,10 @@ class BaseProvider(ABC):
         `asyncio.wait_for` draws the documented line and reports the timeout in
         the same shape as any other failure, so the button always comes back.
         """
+        # One attempt: the button reports the first answer. A 429 is an answer — the endpoint is there
+        # and it heard the key — and retrying it inside a 15 s deadline would only turn "rate limited"
+        # into "no answer within 15s".
+        once = _attempts.set(1)
         try:
             await asyncio.wait_for(
                 self.complete("ping", "ping", model, 0.0, 8), timeout=TEST_CONNECTION_TIMEOUT_S
@@ -320,6 +566,8 @@ class BaseProvider(ABC):
             return False, exc.message
         except Exception as exc:
             return False, str(exc)
+        finally:
+            _attempts.reset(once)
 
 
 class AnthropicProvider(BaseProvider):
@@ -519,7 +767,7 @@ class OpenAICompatProvider(BaseProvider):
             try:
                 return await self._complete_streaming(payload, headers)
             except ProviderError as exc:
-                if exc.code != "provider_http":
+                if not refused_the_request(exc):
                     raise
                 saved = self.on_delta
                 self.on_delta = None
@@ -537,7 +785,7 @@ class OpenAICompatProvider(BaseProvider):
                     json=payload,
                 )
             except ProviderError as exc:
-                if not (self._json_mode and exc.code == "provider_http"):
+                if not (self._json_mode and refused_the_request(exc)):
                     raise
                 # This server rejects the field: stop sending it.
                 self._json_mode = False
@@ -583,12 +831,12 @@ class OpenAICompatProvider(BaseProvider):
         url = f"{self._base_url}/chat/completions"
         text = ""
         data: dict[str, Any] = {}
-        try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                async with client.stream("POST", url, headers=headers, json={**payload, "stream": True}) as response:
-                    if response.status_code >= 400:
-                        await response.aread()
-                        raise ProviderError("provider_http", f"openai_compat {response.status_code}")
+        async with httpx.AsyncClient(timeout=120) as client:
+            # Opening the stream is retried like any call; reading it is not (see `open_stream`).
+            async with open_stream(
+                client, url, label="openai_compat", headers=headers, json={**payload, "stream": True}
+            ) as response:
+                try:
                     async for chunk in self._stream_lines(response):
                         try:
                             obj = json.loads(chunk)
@@ -611,12 +859,8 @@ class OpenAICompatProvider(BaseProvider):
                             # obj wins per-key: the finish chunk's usage (the
                             # complete one) overrides an earlier partial.
                             data = {**data, **obj} if data else obj
-        except httpx.HTTPError as exc:
-            # A refused/dropped connection mid-stream is unreachability, not a
-            # bug — same normalization post_json applies to non-streaming calls.
-            raise ProviderError(
-                "provider_unreachable", f"openai_compat unreachable: {type(exc).__name__}: {exc}"
-            ) from exc
+                except httpx.HTTPError as exc:
+                    raise _interrupted("openai_compat", text, exc) from exc
         if not data:
             raise ProviderError(
                 "provider_bad_response",
@@ -745,21 +989,20 @@ class OllamaProvider(BaseProvider):
                 # is byte-identical to what stream=false returns.
                 text = ""
                 data = {}
-                try:
-                    async with client.stream(
-                        "POST",
-                        f"{self._base_url}/api/generate",
-                        json={
-                            "model": model,
-                            "prompt": f"{system_prompt}\n\n{user_prompt}",
-                            "options": options,
-                            **keep_alive_field,
-                            "stream": True,
-                            "format": "json",
-                        },
-                    ) as response:
-                        if response.status_code >= 400:
-                            raise ProviderError("provider_http", f"ollama {response.status_code}")
+                async with open_stream(
+                    client,
+                    f"{self._base_url}/api/generate",
+                    label="ollama",
+                    json={
+                        "model": model,
+                        "prompt": f"{system_prompt}\n\n{user_prompt}",
+                        "options": options,
+                        **keep_alive_field,
+                        "stream": True,
+                        "format": "json",
+                    },
+                ) as response:
+                    try:
                         async for line in response.aiter_lines():
                             line = (line or "").strip()
                             if not line:
@@ -772,17 +1015,14 @@ class OllamaProvider(BaseProvider):
                                 pass
                             if piece.get("done"):
                                 data = piece
-                except json.JSONDecodeError as exc:
-                    raise ProviderError(
-                        "provider_bad_response", f"ollama streamed a line that is not JSON: {exc}"
-                    ) from exc
-                except httpx.HTTPError as exc:
-                    # A refused/dropped connection is unreachability, not a bug —
-                    # the streaming twin of post_json's normalization; without it
-                    # a dead endpoint escapes the fallback machinery entirely.
-                    raise ProviderError(
-                        "provider_unreachable", f"ollama unreachable: {type(exc).__name__}: {exc}"
-                    ) from exc
+                    except json.JSONDecodeError as exc:
+                        raise ProviderError(
+                            "provider_bad_response", f"ollama streamed a line that is not JSON: {exc}"
+                        ) from exc
+                    except httpx.HTTPError as exc:
+                        # A connection that dropped after the reply began: the stream is reported as
+                        # interrupted, never re-run, because what arrived is already on screen.
+                        raise _interrupted("ollama", text, exc) from exc
                 if not data.get("done"):
                     raise ProviderError(
                         "provider_bad_response", "ollama stream ended without a done=true chunk"
