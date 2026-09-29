@@ -2469,6 +2469,12 @@ export const App: React.FC = () => {
       try {
         const convo = await createConversation(wsToUse.id, threadTitleFromPrompt(promptText));
         conversationId = convo.id;
+        // A thread made a moment ago by this very send has no history to read back, and the
+        // turn about to be dispatched is *live*, not history. Opening its tab below fires
+        // hydration, which would fetch that turn from the engine and draw it a second time
+        // beside the optimistic message (which learns its goal id only after the dispatch).
+        // Marked read before the tab opens, so the read is never made.
+        hydratedThreads.current.add(convo.id);
         updateWorkspaceConversations(convo.workspace_id, (previous) => [
           convo,
           ...previous.filter((existing) => existing.id !== convo.id),
@@ -2553,6 +2559,12 @@ export const App: React.FC = () => {
       // run the way it was asked for, and stays off until asked again.
       setRecord(false);
 
+      // The optimistic message claims its goal *now*, from what the dispatch returned, and not
+      // after the read below: hydration dedupes by goal id, so until this message carries one, a
+      // read of the thread that lands in between sees a turn nothing on screen claims.
+      setMessages((prev) =>
+        prev.map((m) => (m.id === assistantMsgId ? { ...m, goal } : m)),
+      );
       const fullGoal = await getGoal(goal.id);
       setMessages((prev) =>
         prev.map((m) =>

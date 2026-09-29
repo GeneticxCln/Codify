@@ -60,6 +60,12 @@ export interface AppOptions {
    * has nothing else to count.
    */
   onCommit?: () => void;
+  /**
+   * Awaited for every engine request, after it is recorded and before it is answered. For a test
+   * about ordering: holding one response while another completes is how a race the app's own
+   * timing almost never produces is aimed at deliberately.
+   */
+  beforeRespond?: (call: EngineCall) => Promise<void> | void;
   /** Run as the standalone browser preview: no desktop shell is present at all. */
   standalone?: boolean;
   /** Values seeded into `localStorage` before the app loads. */
@@ -139,6 +145,10 @@ export async function withApp(
   const args: Array<Record<string, unknown>> = [];
   const engine: EngineCall[] = [];
   let created = 0;
+  // What the engine remembers of the turns it was sent, so a later read of a thread finds them
+  // the way the real one does (`GET /conversations/{id}/turns` derives them from goals).
+  const goalsById = new Map<string, Record<string, unknown>>();
+  const turnsByThread = new Map<string, Array<Record<string, unknown>>>();
 
   // The shell's event bus, as the real internals keep it: `transformCallback`
   // hands out an id for each handler, `plugin:event|listen` binds an event name
@@ -246,7 +256,7 @@ export async function withApp(
     }
     const turn = /^\/conversations\/([^/]+)\/turns$/.exec(path);
     if (turn && method === "POST") {
-      return respond({
+      const goal = {
         id: `goal-${++created}`,
         workspace_id: "ws-a",
         conversation_id: turn[1],
@@ -259,8 +269,18 @@ export async function withApp(
         parallel: false,
         created_at: 1,
         updated_at: 1,
-      });
+      };
+      goalsById.set(goal.id, goal);
+      turnsByThread.set(turn[1], [
+        ...(turnsByThread.get(turn[1]) ?? []),
+        { goal_id: goal.id, conversation_id: turn[1], prompt: goal.title, status: goal.status, created_at: 1 },
+      ]);
+      return respond(goal);
     }
+    if (turn && method === "GET") return respond(turnsByThread.get(turn[1]) ?? []);
+    const goalRead = /^\/goals\/([^/]+)$/.exec(path);
+    if (goalRead && method === "GET" && goalsById.has(goalRead[1])) return respond(goalsById.get(goalRead[1]));
+    if (/^\/goals\/[^/]+\/events$/.test(path) && method === "GET") return respond([]);
     const archive = /^\/conversations\/([^/]+)\/archive$/.exec(path);
     if (archive && method === "POST") {
       const found = conversations.find((c) => c.id === archive[1]);
@@ -281,8 +301,10 @@ export async function withApp(
         payload = null;
       }
     }
-    engine.push({ method, url: url.toString(), path: url.pathname, body: payload });
+    const call: EngineCall = { method, url: url.toString(), path: url.pathname, body: payload };
+    engine.push(call);
     if (options.health === "down") throw new TypeError("Failed to fetch");
+    await options.beforeRespond?.(call);
     if (
       options.engineToken !== undefined &&
       new Headers(init?.headers).get("authorization") !== `Bearer ${options.engineToken}`
