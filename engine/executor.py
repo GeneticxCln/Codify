@@ -77,7 +77,7 @@ from engine.webview_bridge import (
     format_navigation,
     format_page,
 )
-from engine.fs import FileSystemService, PathEscapeError
+from engine.fs import FileSystemService, PathEscapeError, ProtectedRootError
 from engine.git import GitService
 from engine.library import (
     MAX_ROUND_CHARS,
@@ -139,6 +139,19 @@ class AgentOutputInvalid(Exception):
         # that role's config, credential, and discovered models instead of
         # making the user work out from the message which agent to go and check.
         self.role = role
+
+
+class PathRefused(AgentOutputInvalid):
+    """A fixer path the workspace refused, carried through the re-ask with its own code.
+
+    An `AgentOutputInvalid` in every way that matters to `run_agent` (one re-ask, then the fallback rule),
+    but its `code` is `path_escape`, so a step that still cannot name a legal path fails with the code the UI
+    and the stats already know that failure by.
+    """
+
+    def __init__(self, message: str, role: str | None = None):
+        super().__init__(message, role=role)
+        self.code = "path_escape"
 
 
 class TestsFailed(AgentOutputInvalid):
@@ -1068,14 +1081,14 @@ class AgentOrchestrator:
                     accept(parsed)
                 return parsed
             except (ValueError, TypeError, AgentOutputInvalid) as exc:
-                failures.append((
-                    label, target.provider,
-                    AgentOutputInvalid(
-                        f"{role} returned a reply that could not be used after one repair attempt: "
-                        f"{getattr(exc, 'message', None) or exc}",
-                        role=role,
-                    ),
-                ))
+                refused = AgentOutputInvalid(
+                    f"{role} returned a reply that could not be used after one repair attempt: "
+                    f"{getattr(exc, 'message', None) or exc}",
+                    role=role,
+                )
+                # A refusal with a code of its own (a path the workspace refused) keeps it.
+                refused.code = getattr(exc, "code", refused.code)
+                failures.append((label, target.provider, refused))
                 if "agent_output_invalid" not in FALLBACK_TRIGGER_CODES:
                     break
                 continue
@@ -4725,6 +4738,19 @@ class ExecutorService:
                 # the file as it exists, and only the resolved full content is a
                 # proposal "Apply" can replay deterministically later.
                 summaries = fs.apply(files, dry_run=dry_run)
+            except ProtectedRootError:
+                # About where the workspace *is*, not about anything the model wrote: asking again
+                # cannot change it, so it is not put to the model.
+                raise
+            except PathEscapeError as exc:
+                # An absolute path, one that climbs out, one inside `.git`: the model's slip, and the
+                # refusal names exactly what to change. Nothing was written (apply resolves every path
+                # before it writes), and the code stays `path_escape` if it is still wrong the second time.
+                raise PathRefused(
+                    f"{exc}. Every path must be relative to the workspace root, like src/app.py: never "
+                    "absolute, never containing '..', never inside .git.",
+                    role="fixer",
+                ) from exc
             except ValueError as exc:
                 # An edit whose old_text does not match the file is the fixer's
                 # mistake — a contract failure, not an internal error.

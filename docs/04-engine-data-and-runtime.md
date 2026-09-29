@@ -671,6 +671,22 @@ reads "…after one repair attempt"; and because `fs.apply` resolves every edit 
 refused reply has written nothing and asking again is safe. A fixer with a fallback target now reaches it for
 these failures too, as it does for any other `agent_output_invalid`.
 
+Three more slips a real small model made are handled the same way, each found by running it:
+
+- **A reply that is a list, not an object.** Every contract is one object. A list used to escape the parser as
+  `AttributeError` (reaching a user as `internal_error`); it is now refused with "the reply must be a JSON
+  object, not a list" and asked for again. The one exception is the contract's own array with nothing around it —
+  `[{"path": …}]` for the fixer, `[{"title": …}]` for the planner, every entry carrying the field only that
+  array's entries carry — which is read as `{"files": […]}` / `{"steps": […]}` (`replies.coerce_object`):
+  nothing is invented, and Qwen2.5-1.5B repeated the bare list when asked again.
+- **A planner reply that parsed but is not a plan** (`accept=` too: no steps, a step with no title). A *consult*
+  — no steps, a request for the librarian — is still a good reply.
+- **A path the workspace refuses.** An absolute path (`/src/app.py`), one that climbs out (`../`), one inside
+  `.git`: the refusal names exactly what to change, so it goes to the model once. Nothing outside the workspace is
+  ever written, an absolute path is never quietly made relative, and a step that still cannot name a legal path
+  fails with `path_escape`, the code it always had. A protected workspace *root* is not put to the model — asking
+  again cannot change where the workspace is.
+
 ### 4.0 Librarian
 
 ```json

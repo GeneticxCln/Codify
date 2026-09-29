@@ -237,5 +237,67 @@ class TestAFilesListOfTheWrongShape(ReAskCase):
         self.assertEqual("agent_output_invalid", self.events("error")[-1]["code"])
 
 
+class TestAPathTheWorkspaceRefuses(ReAskCase):
+    """A path the model wrote in the wrong form: absolute, climbing out, or inside `.git`.
+
+    The first real-model run wrote `"/src/app.py"` and `"/tests/test_app.py"` — a workspace-relative path with
+    a slash in front, the commonest small-model slip there is. The engine refused it, correctly, and the step
+    failed with `path_escape`; but the refusal names exactly what to change, so it goes back to the model.
+    The refusal itself does not move: nothing outside the workspace is ever written, and a step that still
+    cannot name a legal path fails with the same `path_escape` code it always had.
+    """
+
+    async def recovers(self, wrong_path: str) -> None:
+        wrong = {"files": [{"path": wrong_path, "action": "update", "content": "x = 1\n"}]}
+        good = {"files": [{"path": "a.py", "action": "update", "content": "x = 1\n"}]}
+        provider = self.build(wrong, good)
+
+        status = await self.run_the_step()
+
+        self.assertEqual(2, len(provider.fixer_prompts))
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertEqual("x = 1\n", self.file)
+        self.assertIn("relative to the workspace root", provider.fixer_prompts[1])
+        self.assertIn(wrong_path, provider.fixer_prompts[1], "the refusal did not name the path")
+
+    async def test_a_leading_slash_is_put_to_the_model(self) -> None:
+        await self.recovers("/a.py")
+
+    async def test_a_path_that_climbs_out_is_put_to_the_model(self) -> None:
+        await self.recovers("../a.py")
+
+    async def test_a_path_inside_git_is_put_to_the_model(self) -> None:
+        await self.recovers(".git/hooks/pre-commit")
+
+    async def test_the_same_slip_twice_fails_with_the_code_it_always_had_and_writes_nothing(self) -> None:
+        provider = self.build({"files": [{"path": "/etc/cron.d/evil", "action": "create", "content": "x\n"}]})
+
+        status = await self.run_the_step()
+
+        self.assertEqual("FAILED", status)
+        self.assertEqual(2, len(provider.fixer_prompts))
+        error = self.events("error")[-1]
+        self.assertEqual("path_escape", error["code"])
+        self.assertEqual("fixer", error["role"])
+        self.assertIn("after one repair attempt", error["message"])
+        self.assertEqual(SOURCE, self.file)
+        self.assertFalse((self.root / "etc").exists(), "an absolute path was quietly made relative and written")
+
+    async def test_a_protected_workspace_root_is_not_put_to_the_model(self) -> None:
+        # That refusal is about where the workspace *is*, not about anything the model wrote: asking again
+        # cannot change it.
+        from unittest import mock
+
+        from engine.fs import FileSystemService, ProtectedRootError
+
+        provider = self.build({"files": [{"path": "a.py", "action": "update", "content": "x\n"}]})
+        with mock.patch.object(FileSystemService, "apply", side_effect=ProtectedRootError("/", "the machine")):
+            status = await self.run_the_step()
+
+        self.assertEqual("FAILED", status)
+        self.assertEqual(1, len(provider.fixer_prompts))
+        self.assertEqual("path_escape", self.events("error")[-1]["code"])
+
+
 if __name__ == "__main__":
     unittest.main()
