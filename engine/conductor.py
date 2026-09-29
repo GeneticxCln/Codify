@@ -726,10 +726,13 @@ RECON = ToolSpec(
     name="recon",
     description=(
         "Send the librarian to read the workspace and come back with what is "
-        "actually in it. Call this BEFORE planning anything that depends on the "
+        "actually in it. Call this BEFORE planning a change that depends on the "
         "code: `plan` refuses to run without evidence, and a plan built on a "
-        "guessed file layout edits the wrong files. Ask for what you need "
-        "rather than for the whole repository."
+        "guessed file layout edits the wrong files. It is also the right tool "
+        "when what you need to know is broad. It is NOT for a question you can "
+        "answer by reading one file or searching for one symbol yourself "
+        "(`read_file`, `search_code`), and never for a greeting. Ask for what "
+        "you need rather than for the whole repository."
     ),
     parameters={
         "type": "object",

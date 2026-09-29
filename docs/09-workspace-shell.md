@@ -2478,8 +2478,25 @@ The five runs below were against `qwen2.5-coder:7b` on a local Ollama, through
    does not guess: it obeys both, and logs a warning when the gate read the
    request as a change and no plan came out, so an untouched workspace cannot
    read as an updated one.
+6. **The verdict was an order, and the classifier is not reliable enough to
+   give orders.** With the SDK gate live, "hi" took 78 s: the gate said
+   `code_change`, the brief said anything but a `question` "means the user wants
+   the workspace changed", and a 7B loaded `ship-a-change`, answered the skill's
+   text as if it were the user, and sent the librarian to analyse the repository
+   for a greeting. Two causes, both fixed. The gate was handed the goal's
+   execution mode for a *turn* — `direct-apply`, an action word — and measured
+   offline on the real SDK that alone flips "hi" and "hey" to `code_change` (with
+   `chat` they are `other`; `hello`, `thanks`, questions and real changes are
+   unaffected), so `build_state` now says `chat` for a turn. And the brief is now
+   **advice**: only the labels that describe a change (`code_change`,
+   `ops_command`) point at the recipe and arm the reminder, they say the label
+   is a guess and to go by the user's words, and `question`, `other` and an
+   unlabelled request are answered directly. The system prompt and `recon` say
+   the same from the other side: the read tools are the conductor's own, the
+   sub-agents are for what is broad or what the user asks for. The no-conductor
+   floor above is a different decision and is unchanged.
 
-The honest conclusion from 3 and 5: **the architecture is sound and a 7B local
+The honest conclusion from 3, 5 and 6: **the architecture is sound and a 7B local
 model is not good enough to drive it reliably.** That is the risk this section
 named before it was built, it is why the recipe is the floor, and it is why
 `conductor_drives_execution` exists. A model that can call three tools in a row

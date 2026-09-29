@@ -1626,6 +1626,14 @@ class ConductorTools:
         return "That step is recorded and committed."
 
 
+
+# The gate labels that describe a *change*, the only ones that point the conductor at
+# `ship-a-change` and arm its reminder. `question`, `other` and an unlabelled request
+# are answered directly (see `_intent_brief`). The fallback below, for a turn with no
+# conductor or one that could not finish, is a different decision with its own
+# rationale — planning is a superset of answering — and is not this set.
+CHANGE_INTENTS = ("code_change", "ops_command")
+
 class ExecutorService:
     def __init__(
         self,
@@ -2229,7 +2237,7 @@ class ExecutorService:
                     # change was needed) so it is not overridden; but it must not
                     # read as success either, or a workspace that nobody touched
                     # looks like one that was updated.
-                    if intent != "question":
+                    if intent in CHANGE_INTENTS:
                         self._log(
                             goal_id, None, "warn",
                             f"the gate read this as {intent!r} and the conductor "
@@ -2532,16 +2540,25 @@ class ExecutorService:
         return brief
 
     def _intent_brief(self, intent: str) -> str:
-        """What the gate decided, told to the conductor, and what to do with it.
+        """What the gate decided, told to the conductor as advice, and what to do with it.
 
         This was missing at first, and a live run found it where the suite could
         not: the conductor was never told the gate's verdict, so a request the
         gate had already read as `code_change` arrived looking like any other
         prompt, and the model answered it with a clarifying question instead of
-        planning. The gate classifies on every request, and its answer was being
-        computed and then dropped — which is the same discarded signal this whole
-        feature was originally built on. Handing it to the decider is what makes
-        computing it worth anything.
+        planning. Handing it the verdict is what makes computing it worth
+        anything.
+
+        It is *advice*, and the second live run found the other half. The brief
+        used to say that anything but a `question` "means the user wants the
+        workspace changed", so a greeting the gate labelled `other` — or, with
+        the execution mode it was once handed, `code_change` — sent a 7B to load
+        `ship-a-change` and a librarian to analyse the repository for "hi",
+        78 s later. The label is a small classifier's guess, and the model's own
+        system prompt already says to answer directly whenever nothing needs
+        changing; a brief that contradicts it wins on being later and more
+        specific. So only the labels that describe a change (`CHANGE_INTENTS`)
+        point at the recipe, and even they say to go by the user's words.
         """
         if intent == "question":
             return (
@@ -2549,13 +2566,43 @@ class ExecutorService:
                 "directly is usually right. If it turns out to need the workspace "
                 "changed, the `ship-a-change` skill is how that is done."
             )
+        if intent in CHANGE_INTENTS:
+            return (
+                f"The pre-flight gate read this request as {intent!r}. That label "
+                "is a small classifier's guess, not a fact — it has called a plain "
+                "greeting a code change — so go by the user's actual words: if "
+                "they are a greeting, thanks or a question, just reply in prose. "
+                "If they do ask for the workspace to be changed, read the "
+                "`ship-a-change` skill with `use_skill` and follow it: recon, then "
+                "plan, then stop so they can approve the plan. Prefer acting over "
+                "asking — ask only when the request genuinely cannot be planned "
+                "without more information, and say plainly what you are blocked on."
+            )
         return (
-            f"The pre-flight gate read this request as {intent!r}, which means the "
-            "user wants the workspace changed rather than explained. Read the "
-            "`ship-a-change` skill with `use_skill` and follow it: recon, then "
-            "plan, then stop so they can approve the plan. Prefer acting over "
-            "asking — ask only when the request genuinely cannot be planned "
-            "without more information, and say plainly what you are blocked on."
+            "The pre-flight gate could not tell what this request asks for "
+            f"(it read it as {intent or 'unlabelled'!r}). Go by the user's actual "
+            "words: a greeting, thanks or a question is answered directly, in "
+            "prose, with no tools. If they ask for the workspace to be changed, "
+            "`ship-a-change` is the skill for that."
+        )
+
+    def _intent_nudge(self, intent: str) -> str | None:
+        """The one reminder armed for a request the gate read as a change, else nothing.
+
+        A small model asked to plan will sometimes describe the plan and stop
+        instead of making it, so a change request arrives with a reminder. Nothing
+        is armed for anything else: answering *is* the action for a question, a
+        greeting or an unlabelled request, and a reminder there would order a
+        model that had just said "Hi!" to call `recon` on the repository.
+        """
+        if intent not in CHANGE_INTENTS:
+            return None
+        return (
+            "You have not done anything yet: no move has been called and there "
+            "is no plan. Do not ask the user what to do and do not describe what "
+            "you are about to do — call `recon` now saying what you need to find "
+            "out, then call `plan`. If you genuinely cannot proceed without an "
+            "answer from them, ask for it in one sentence and stop."
         )
 
     async def _conduct(
@@ -2600,18 +2647,7 @@ class ExecutorService:
         )
         prompt = prompt_override if prompt_override is not None else self._turn_prompt(goal)
         prompt = f"{prompt}\n\n{self._memory_brief(goal)}\n\n{self._intent_brief(intent)}"
-        # A change request arrives with a reminder armed, because a small model
-        # asked to plan will sometimes describe the plan and stop instead of
-        # making it. Nothing is armed for a question: answering *is* the action
-        # there, and a nudge would only add a call that says nothing new.
-        nudge = (
-            "You have not done anything yet: no move has been called and there "
-            "is no plan. Do not ask the user what to do and do not describe what "
-            "you are about to do — call `recon` now saying what you need to find "
-            "out, then call `plan`. If you genuinely cannot proceed without an "
-            "answer from them, ask for it in one sentence and stop."
-            if intent != "question" else None
-        )
+        nudge = self._intent_nudge(intent)
         conductor = Conductor(
             provider, model, root,
             dispatch=self._conductor_dispatch(goal_id, goal, root, skills),

@@ -37,6 +37,16 @@ class _ChangeGate(LayaService):
         )
 
 
+class _OtherGate(LayaService):
+    """A gate that cannot tell what the request is: greetings, thanks, anything unlabelled."""
+
+    async def decide(self, state: dict[str, Any], on_call: Any = None) -> LayaDecision:
+        return LayaDecision(
+            engine="sdk",
+            answers={"intent": {"choice": "other", "confidence": 0.9}},
+        )
+
+
 class _FailingConductor(_ToolProvider):
     """The model endpoint refuses the *tool* call, and ordinary calls still work.
 
@@ -394,3 +404,103 @@ class TestWhoDrivesAnApprovedPlan(ConductorTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TestTheGateLabelIsAdviceNotAnOrder(ConductorTestCase):
+    """What the gate's verdict may and may not make the conductor do.
+
+    Found live: the SDK gate labelled "hi" `code_change` (it was handed
+    `mode: direct-apply`, an execution setting that primes it toward "apply"),
+    and the engine treated every label but `question` as "the user wants the
+    workspace changed": the conductor was told to load `ship-a-change`, to
+    prefer acting over asking, and was armed with a reminder forbidding it to
+    ask anything. A 7B obeyed the more specific text over its own system prompt
+    ("answer directly whenever the workspace does not need to change") and spent
+    78 s sending a librarian to analyse the repository for a greeting.
+    """
+
+    _BRIEF_CHANGE_ORDERS = ("Prefer acting over asking", "You have not done anything yet")
+
+    def _sent(self, provider: _ToolProvider) -> str:
+        return "\n".join(
+            str(m.get("content") or "") for batch in provider.seen_messages for m in batch
+        )
+
+    async def test_a_greeting_labelled_other_is_answered_and_not_briefed_as_a_change(self) -> None:
+        provider = _ToolProvider([ToolReply(text="Hi! How can I help you today?")])
+        executor = self._executor(provider, laya=_OtherGate())
+        await executor.run_chat(self.goal.id)
+
+        sent = self._sent(provider)
+        for order in self._BRIEF_CHANGE_ORDERS:
+            self.assertNotIn(order, sent, f"an unlabelled request was ordered: {order!r}")
+        self.assertNotIn("use_skill` and follow it", sent)
+        self.assertEqual(len(provider.seen_messages), 1, "an answer needed exactly one model call")
+        self.assertEqual(self.goals.steps(self.goal.id), [])
+        self.assertEqual(self.goals.get(self.goal.id).status, "COMPLETED")
+
+    async def test_a_plain_answer_to_an_unlabelled_request_is_not_warned_about(self) -> None:
+        # The warning says "the gate read this as X and the conductor finished
+        # without planning anything: no file was changed". For `other` that is
+        # noise that reads as a failure on a turn that did exactly what was asked.
+        provider = _ToolProvider([ToolReply(text="Hi! How can I help you today?")])
+        executor = self._executor(provider, laya=_OtherGate())
+        await executor.run_chat(self.goal.id)
+        warnings = [
+            str((e.payload or {}).get("message") or "")
+            for e in self.goals.events_after(self.goal.id, 0)
+            if e.type == "log" and (e.payload or {}).get("level") == "warn"
+        ]
+        self.assertEqual([w for w in warnings if "the gate read this as" in w], [])
+
+    async def test_a_change_label_still_points_at_the_recipe_but_says_it_is_a_guess(self) -> None:
+        provider = _ToolProvider([ToolReply(text="No change is needed."), ToolReply(text="Still none.")])
+        executor = self._executor(provider, laya=_ChangeGate())
+        await executor.run_chat(self.goal.id)
+        sent = self._sent(provider)
+        self.assertIn("ship-a-change", sent)
+        self.assertIn("guess", sent, "the label was presented as fact, not as a small classifier's guess")
+        self.assertIn("greeting", sent, "the brief never says a plain message may just be answered")
+        self.assertIn("You have not done anything yet", sent, "a real change request keeps its reminder")
+
+    async def test_ops_command_is_briefed_like_a_change(self) -> None:
+        brief = self._executor(_ToolProvider(), laya=_OtherGate())._intent_brief("ops_command")
+        self.assertIn("ship-a-change", brief)
+
+    async def test_an_unlabelled_or_unknown_intent_gets_no_change_orders(self) -> None:
+        executor = self._executor(_ToolProvider(), laya=_OtherGate())
+        for intent in ("other", "", "something-new"):
+            brief = executor._intent_brief(intent)
+            for order in self._BRIEF_CHANGE_ORDERS:
+                self.assertNotIn(order, brief, f"intent {intent!r}")
+            self.assertIsNone(executor._intent_nudge(intent), f"intent {intent!r} armed a reminder")
+        self.assertIsNone(executor._intent_nudge("question"))
+        self.assertIsNotNone(executor._intent_nudge("code_change"))
+        self.assertIsNotNone(executor._intent_nudge("ops_command"))
+
+    async def test_the_prompt_tells_the_conductor_to_do_the_work_itself_and_only_names_real_tools(self) -> None:
+        # The conductor is the main agent: it has read, search, git and
+        # allowlisted-command tools of its own, and the sub-agents are for what is
+        # broad or what the user asks for. And a prompt that names a tool the
+        # menu does not offer sends a 7B looking for it, so every name in
+        # backticks must be a real one.
+        import re
+
+        from engine.chat_prompts import CONDUCTOR_SYSTEM_PROMPT
+
+        self.assertIn("Do the work yourself", CONDUCTOR_SYSTEM_PROMPT)
+        self.assertIn("A greeting", CONDUCTOR_SYSTEM_PROMPT)
+        # Tool names, plus the parameter names the prompt legitimately mentions
+        # (`task` is what a move is given, not a tool).
+        offered = {t.name for t in TOOLS} | {
+            param for t in TOOLS for param in (t.parameters.get("properties") or {})
+        }
+        named = set(re.findall(r"`([a-z_]+)`", CONDUCTOR_SYSTEM_PROMPT))
+        self.assertTrue(named, "the scan found no tool names to check")
+        self.assertEqual(sorted(named - offered), [], "the prompt names tools that are not on the menu")
+
+    async def test_recon_says_what_it_is_not_for(self) -> None:
+        recon = next(t for t in TOOLS if t.name == "recon")
+        self.assertIn("NOT for a question you can answer", recon.description)
+        self.assertIn("never for a greeting", recon.description)
+
