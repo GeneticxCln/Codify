@@ -60,6 +60,8 @@ export interface AppOptions {
    * has nothing else to count.
    */
   onCommit?: () => void;
+  /** What `POST /workspaces/browse` answers (the folder dialog). Default: the person cancelled. */
+  browse?: { status?: number; body: unknown };
   /**
    * Awaited for every engine request, after it is recorded and before it is answered. For a test
    * about ordering: holding one response while another completes is how a race the app's own
@@ -221,6 +223,9 @@ export async function withApp(
     if (path === "/health") {
       if (options.health === "stale") return respond({ code: "unauthorized", message: "missing or invalid token" }, 401);
       return respond({ ok: true, authenticated: true });
+    }
+    if (path === "/workspaces/browse" && method === "POST") {
+      return respond(options.browse?.body ?? { cancelled: true }, options.browse?.status ?? 200);
     }
     if (path === "/workspaces") return respond(workspaces);
     if (path === "/models/recent") return respond([]);

@@ -68,7 +68,7 @@ GUARDED_SPAWN_SITES: dict[str, dict[str, str]] = {
         "Popen": "the regex search worker (engine/regex_worker.py): guarded_argv/guarded_env + start_new_session, killed with SIGKILL at a hard limit. CPython's `re` cannot be interrupted and holds the GIL, so a model-supplied pattern can only be bounded by a process the engine can kill; the argv is a fixed script path, the pattern travels as JSON on stdin, pinned by tests/test_library_regex_bound.py",
     },
     "engine/app.py": {
-        "run": "the folder picker: _picker_command's guarded_argv/guarded_env + start_new_session, pinned by tests/test_sandbox.py and the live-engine e2e",
+        "Popen": "the folder picker (_run_picker): _picker_command's, and the zenity/kdialog fallbacks', guarded_argv/guarded_env + start_new_session, and a whole-group kill at PICKER_TIMEOUT_S; pinned by tests/test_sandbox.py, tests/test_workspace_browse.py and the live-engine e2e",
     },
     "benchmarks/runner.py": {
         "Popen": "a task's test command: manifest-owned argv, guarded_argv/guarded_env + start_new_session + a whole-group kill on timeout, pinned by tests/test_benchmark_runner.py. Deliberately NOT routed through SandboxService: that allowlist is a security boundary for model-proposed argv, and widening it for a reviewed manifest would weaken it for every agent in the pipeline",

@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -938,11 +939,23 @@ def _picker_command() -> tuple[list[str], dict[str, str]]:
     the user's screen. Its own function so tests can spawn the exact command the
     route runs without opening GTK.
     """
+    # Exit codes are the protocol (`PICKER_UNAVAILABLE` / `PICKER_NO_DISPLAY` below): 0 with a path on
+    # stdout is a choice, 0 with nothing is the person closing the dialog, and anything else is a
+    # dialog that could not open. The route used to read every nonzero exit as "cancelled".
     code = f"""
 # {PICKER_MARKER}
-import gi
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk
+import sys
+try:
+    import gi
+    gi.require_version('Gtk', '3.0')
+    from gi.repository import Gtk
+except Exception as exc:
+    sys.stderr.write('codify-picker:unavailable: PyGObject with GTK 3 is not importable (%s)\\n' % exc)
+    sys.exit({PICKER_UNAVAILABLE})
+initialised = Gtk.init_check()
+if not (initialised[0] if isinstance(initialised, tuple) else initialised):
+    sys.stderr.write('codify-picker:no-display: GTK could not open a display\\n')
+    sys.exit({PICKER_NO_DISPLAY})
 dialog = Gtk.FileChooserNative.new('Select Workspace Directory', None, Gtk.FileChooserAction.SELECT_FOLDER, '_Select', '_Cancel')
 res = dialog.run()
 if res == Gtk.ResponseType.ACCEPT:
@@ -957,30 +970,102 @@ while Gtk.events_pending():
     )
 
 
+# What the GTK script exits with when it cannot show a dialog (see `_picker_command`).
+PICKER_UNAVAILABLE = 3
+PICKER_NO_DISPLAY = 4
+# A dialog waits for a person, so this is long — but it is a bound: a dialog nobody answers is killed,
+# and everything it started with it, instead of being left open on a screen.
+PICKER_TIMEOUT_S = 120
+
+
+class _Picked:
+    """One attempt at a folder dialog: what it says, and whether the next one should be tried."""
+
+    def __init__(self, kind: str, detail: str = "") -> None:
+        self.kind = kind  # "chosen" | "cancelled" | "unavailable" | "failed" | "timeout"
+        self.detail = detail
+
+
+def _run_picker(argv: list[str], env: dict[str, str], *, cancel_codes: tuple[int, ...] = ()) -> _Picked:
+    """Run one dialog under the guard, in a session of its own, and classify how it ended."""
+    try:
+        proc = subprocess.Popen(
+            argv,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            # The caller's half of the guard contract (see spawn_guard.py): the guard must lead the
+            # session — and so the group — it kills.
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return _Picked("unavailable", f"the dialog could not be started: {exc.strerror or exc}")
+    try:
+        out, err = proc.communicate(timeout=PICKER_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
+        proc.communicate()
+        return _Picked("timeout", f"the folder dialog did not answer within {PICKER_TIMEOUT_S} s and was closed")
+    chosen = out.strip()
+    if proc.returncode == 0:
+        return _Picked("chosen", chosen) if chosen else _Picked("cancelled")
+    reason = " ".join(err.strip().split())[-300:]
+    if proc.returncode in (PICKER_UNAVAILABLE, PICKER_NO_DISPLAY):
+        return _Picked("unavailable", reason.split(": ", 1)[-1] if reason else "the dialog could not open")
+    if proc.returncode in cancel_codes and "display" not in err.lower():
+        # zenity and kdialog exit 1 for Cancel — and zenity exits 1 for "cannot open display" too,
+        # which only its stderr distinguishes.
+        return _Picked("cancelled")
+    return _Picked("failed", reason or f"the dialog exited with status {proc.returncode}")
+
+
+def _fallback_pickers() -> list[tuple[str, list[str]]]:
+    """Desktop dialogs to try when the GTK script cannot run: `zenity` (GNOME and most others), then `kdialog`.
+
+    A machine with a desktop and a Python that has no PyGObject — every venv, conda or pyenv — is the
+    common case, and these are what it usually does have.
+    """
+    found: list[tuple[str, list[str]]] = []
+    zenity = shutil.which("zenity")
+    if zenity:
+        found.append(("zenity", [zenity, "--file-selection", "--directory", "--title=Select Workspace Directory"]))
+    kdialog = shutil.which("kdialog")
+    if kdialog:
+        found.append(("kdialog", [kdialog, "--getexistingdirectory", str(Path.home()), "--title", "Select Workspace Directory"]))
+    return found
+
+
 @app.post("/workspaces/browse")
 async def browse_workspace(request: Request) -> dict[str, Any]:
-    def _pick() -> str | None:
+    def _pick() -> _Picked:
         argv, env = _picker_command()
-        try:
-            p = subprocess.run(
-                argv,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                # The caller's half of the guard contract (see spawn_guard.py): the
-                # guard must lead the session — and so the group — it kills.
-                start_new_session=True,
-            )
-            if p.returncode == 0 and p.stdout.strip():
-                return p.stdout.strip()
-        except Exception:
-            pass
-        return None
+        first = _run_picker(argv, env)
+        if first.kind in ("chosen", "cancelled", "timeout"):
+            return first
+        # The GTK script could not show a dialog (or died): what else does this machine have?
+        problems = [f"the GTK dialog: {first.detail}"]
+        for name, command in _fallback_pickers():
+            attempt = _run_picker(guarded_argv(command), guarded_env(), cancel_codes=(1,))
+            if attempt.kind in ("chosen", "cancelled", "timeout"):
+                return attempt
+            problems.append(f"{name}: {attempt.detail}")
+        return _Picked("unavailable", "; ".join(problems))
 
-    path = await asyncio.to_thread(_pick)
-    if not path:
+    outcome = await asyncio.to_thread(_pick)
+    if outcome.kind == "cancelled":
         return {"cancelled": True}
+    if outcome.kind != "chosen":
+        if outcome.kind == "timeout":
+            message = outcome.detail
+        else:
+            message = (
+                f"No folder dialog could be opened ({outcome.detail}). Type the folder's path instead, or "
+                "install one of: zenity, kdialog, or PyGObject for the Python that runs the engine."
+            )
+        raise ApiError(503, "picker_unavailable", message)
+    path = outcome.detail
 
     folder_name = Path(path).name or path
     ws_service: WorkspaceService = request.app.state.workspaces

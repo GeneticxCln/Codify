@@ -455,7 +455,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 |---|---|---|---|
 | `GET` | `/health` | — | `{ok:true}` (still requires Bearer) |
 | `POST` | `/workspaces` | `{name, root_path}` extra=forbid | `Workspace` |
-| `POST` | `/workspaces/browse` | — | `{cancelled} \| {cancelled:false, workspace}` (native folder picker) |
+| `POST` | `/workspaces/browse` | — | `{cancelled:true}` (the person closed the dialog — the only silent outcome) \| `{cancelled:false, workspace}` \| **503 `picker_unavailable`** with the reason and the way out (no dialog could open, or one did not answer within `PICKER_TIMEOUT_S`, 120 s, and was killed with everything it started). See "Folder dialog" below |
 | `GET` | `/workspaces` | — | `Workspace[]` |
 | `GET` | `/workspaces/{id}` | — | `Workspace` |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
@@ -574,6 +574,28 @@ The response reports what it did **and** what it skipped, because an action that
 `notes` entries are per provider, not per role: eight roles on an unreachable provider produce one caveat, not eight. An unverified role reads `left as configured: <provider>/<model> (not verified — <error>)`, never `usable` — the provider never said it works.
 
 A successful repair **invalidates the model catalog cache** (the catalog is keyed by role configs) and bumps `version` on every changed role, so the `409` version guard still protects concurrent updates. Only `provider`, `model_name`, and the protocol the catalog reports are written; `temperature`, `max_tokens`, `base_url`, and any system-prompt override are preserved. The endpoint is deliberately **not** sent, so an unchanged provider keeps the endpoint the user configured (a proxy, say) while a provider switch resets it to that provider's default.
+
+### 3.0.1 Folder dialog
+
+`POST /workspaces/browse` runs a native folder dialog in a subprocess (GTK is never imported into the engine)
+under the spawn guard, and answers with one of three things — only one of which is silent (audit of
+2026-09-29, M8: a dialog that had *crashed* was reported as `{"cancelled": true}`, so a picker that could not
+open looked exactly like one the person closed, in the API and on screen):
+
+| outcome | answer |
+|---|---|
+| a folder chosen | `{cancelled:false, workspace}` — the existing workspace for that path, or a new one |
+| the dialog closed with nothing chosen | `{cancelled:true}` |
+| no dialog could open, it crashed, or it did not answer | **503 `picker_unavailable`**, the reason, and "type the folder's path instead" |
+
+The GTK script (PyGObject, GTK 3) is tried first and speaks in exit codes: `0` with a path is a choice, `0`
+with nothing is a cancel, `3` is "PyGObject is not importable" and `4` is "GTK could not open a display".
+When it cannot run — any venv, conda or pyenv Python, which is most machines with a desktop — `zenity`, then
+`kdialog`, are tried if installed. Both exit `1` for Cancel, and zenity exits `1` for "cannot open display" as
+well, so a `1` whose stderr mentions the display is a failure, not a cancel. A real cancel from any of them
+ends the search. A dialog that has not answered within `PICKER_TIMEOUT_S` is killed with its whole process
+group, so a dialog the engine gave up on does not stay open on the screen. The UI shows the 503's message
+in its error banner; typing a path in the folder menu always works without any dialog.
 
 ### 3.1.1 The same rule at the start of every goal
 
