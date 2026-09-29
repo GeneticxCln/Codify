@@ -29,6 +29,7 @@ from typing import Any
 import httpx
 
 from engine.models import BUILTIN_PROVIDERS
+from engine.providers import key_destination_problem
 
 DISCOVERY_TIMEOUT_S = 8.0
 MAX_MODELS_PER_PROVIDER = 500
@@ -260,6 +261,12 @@ async def discover_provider(
             ok=False,
             error="no API key configured for this provider",
         )
+    # Discovery attaches the key to `/models` the same way a generation call does, so it is
+    # held to the same rule; the refusal is reported, and nothing is requested.
+    if target.api_key:
+        problem = key_destination_problem(target.base_url)
+        if problem is not None:
+            return DiscoveryResult(target.provider, target.protocol, ok=False, error=problem)
     if not target.base_url:
         return DiscoveryResult(
             target.provider, target.protocol, ok=False, error="no base_url configured"

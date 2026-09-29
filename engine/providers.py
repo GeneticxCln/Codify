@@ -140,23 +140,68 @@ def _mk_usage(inp: Any, out: Any) -> dict[str, Any] | None:
     return {"input_tokens": i, "output_tokens": o, "total_tokens": i + o}
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Loopback is decided by parsing the address, never by its spelling.
+
+    A prefix test on "127." also accepts the hostname `127.evil.example`, which resolves
+    wherever its owner points it. `ip_address` accepts only a literal, so a name that merely
+    starts with digits is not loopback.
+    """
+    host = host.lower().strip("[]")
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def validate_local_base_url(url: str) -> None:
     parsed = urlparse(url)
-    host = (parsed.hostname or "").lower().strip("[]")
-    # Loopback is decided by parsing the address, never by its spelling: a prefix
-    # test on "127." also accepts the hostname `127.evil.example`, which resolves
-    # wherever its owner points it. `ip_address` accepts only a literal, so a name
-    # that merely starts with digits falls through to the refusal below.
-    is_loopback = host == "localhost"
-    if not is_loopback:
-        try:
-            is_loopback = ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            pass
-    if not is_loopback:
+    if not _is_loopback_host(parsed.hostname or ""):
         raise ProviderError("invalid_base_url", "Local provider base_url must point at localhost")
     if parsed.scheme != "http":
         raise ProviderError("invalid_base_url", "Local provider must use http (loopback only)")
+
+
+def key_destination_problem(base_url: str) -> str | None:
+    """Why a stored API key must not be sent to `base_url`, or None when it may be.
+
+    A key goes to an `https` endpoint, or to a loopback one (a local server has no wire to
+    read), and nowhere else. `validate_local_base_url` guards the `ollama` protocol only, so
+    without this a keyed provider could be pointed at `http://10.0.0.5:8080` by picking any
+    other protocol, and every request would carry the key in the clear to whoever listened
+    there. The message names the host, never the URL: a base URL can carry userinfo.
+    """
+    parsed = urlparse(base_url or "")
+    try:
+        host = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:
+        host, port = "", None
+    if parsed.scheme not in ("http", "https") or not host:
+        return f"{base_url!r} is not an http(s) endpoint, so a stored API key will not be sent to it."
+    if parsed.scheme == "https" or _is_loopback_host(host):
+        return None
+    where = f"{host}:{port}" if port else host
+    return (
+        f"An API key is never sent to {where} over plain http, where anyone on the network path "
+        "could read it. Use an https endpoint or a loopback address, or remove the key for this "
+        "provider (a server that needs no key can stay on plain http)."
+    )
+
+
+def key_may_be_sent_to(base_url: str) -> bool:
+    return key_destination_problem(base_url) is None
+
+
+def require_safe_key_destination(api_key: str | None, base_url: str) -> None:
+    """Refuse to hold a credential for a destination that must not receive it."""
+    if not api_key:
+        return
+    problem = key_destination_problem(base_url)
+    if problem is not None:
+        raise ProviderError("invalid_base_url", problem)
 
 
 class BaseProvider(ABC):
@@ -281,6 +326,7 @@ class AnthropicProvider(BaseProvider):
     def __init__(self, api_key: str, base_url: str):
         if not api_key:
             raise ProviderError("missing_api_key", "Anthropic API key is not set")
+        require_safe_key_destination(api_key, base_url)
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
 
@@ -363,6 +409,7 @@ class AnthropicProvider(BaseProvider):
 
 class OpenAICompatProvider(BaseProvider):
     def __init__(self, api_key: str | None, base_url: str):
+        require_safe_key_destination(api_key, base_url)
         self._api_key = api_key or ""
         self._base_url = base_url.rstrip("/")
         # Three states: None = not probed yet, True/False = probed. Cached per
@@ -752,6 +799,7 @@ class GoogleProvider(BaseProvider):
     def __init__(self, api_key: str, base_url: str):
         if not api_key:
             raise ProviderError("missing_api_key", "Google API key is not set")
+        require_safe_key_destination(api_key, base_url)
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
 

@@ -24,6 +24,25 @@ def validate_local_base_url(url: str) -> None:
 
 Without this, a malicious or careless `base_url` could turn Coder/Tester/etc. into an SSRF vector against internal network services.
 
+**The other direction: a stored key follows the URL.** That guard covers the `ollama` protocol only, so
+for a long time `PUT /settings/agents/scribe {"provider": "openai", "base_url": "http://10.0.0.5:8080"}`
+was accepted and a listener there received `Authorization: Bearer <the stored key>` on `/models` and on
+every completion (audit of 2026-09-29, M5). The rule is now about the key, not the protocol
+(`providers.key_destination_problem`): **a stored API key is sent to an `https` endpoint or to a
+loopback one, and nowhere else.** A keyless plain-http server on the LAN is unaffected — there is
+nothing to protect — so refusing is conditional on a key existing. It is enforced at every place a key
+can leave: the save that would point a keyed provider (primary or fallback) at such a URL is refused
+`400 invalid_base_url` *before* the key is stored, the provider constructors refuse to hold a key for
+one (so `ProviderFactory.build` holds it for a row that got into the database some other way), and
+model discovery reports the refusal instead of requesting. The message names the host, never the URL,
+because a base URL can carry userinfo.
+
+*What this does not do.* An `https` endpoint is trusted as much as its owner: pointing a keyed
+provider at `https://attacker.example` is still accepted, because a corporate gateway or OpenRouter
+looks exactly the same. Doing that needs the boot token, and a boot-token holder can already run the
+project's tests as the user and read `secrets.json`, so a re-entry-of-the-key prompt would add a step
+without adding a boundary. This closes the cleartext leak; it does not claim more.
+
 ### 1.3 Engine–Desktop auth token
 
 On boot, the Engine generates a random token, writes it to stdout, and requires `Authorization: Bearer <token>` on every request. Desktop reads it from the child process stdout when it spawns the Engine and attaches it to every `BackendClient` call — including `/settings/agents/*`, the most sensitive routes (attacker-controlled local `base_url`, key-reference overwrite).

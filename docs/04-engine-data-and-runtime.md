@@ -932,7 +932,7 @@ raise one error naming every attempt
 | Code | Means |
 |---|---|
 | `missing_api_key` | the provider needs a credential and none is stored |
-| `unknown_protocol`, `invalid_base_url`, `secrets_unwritable` | the target cannot be constructed |
+| `unknown_protocol`, `invalid_base_url`, `secrets_unwritable` | the target cannot be constructed (`invalid_base_url` also covers a stored key that would be sent over plain http to a non-loopback host — docs/03 §1.2) |
 | `provider_http` | the provider answered with an error status (401, 404, 429, 5xx) |
 | `provider_unreachable` | the connection was refused or timed out |
 | `provider_bad_response` | the endpoint answered with something that is not JSON |

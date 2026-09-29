@@ -39,6 +39,7 @@ from engine.providers import (
     Keychain,
     ProviderError,
     ProviderFactory,
+    key_destination_problem,
     validate_local_base_url,
 )
 
@@ -318,6 +319,29 @@ class AgentRegistryService:
                 base_url_field="fallback_base_url",
                 previous_provider=cfg.fallback_provider,
             )
+        # A key is never saved toward, or pointed at, a destination that would send it in the
+        # clear — and this runs *before* the key is stored, so a refused save leaves no secret
+        # behind. Only refused when there is a key: a keyless server on the LAN is a real setup
+        # and has nothing to protect. `ProviderFactory.build` holds the same rule when a
+        # request is made, so this is the early, readable half of it.
+        switched = data.get("provider") != cfg.provider
+        for label, protocol, base_url, key in (
+            (
+                "base_url", data.get("protocol"), data.get("base_url"),
+                raw_key
+                # A role key does not follow a provider switch (see below), so it is not in play.
+                or ("" if switched else self._keychain.get(data.get("api_key_ref")))
+                or self._keychain.get_provider_key(data["provider"]),
+            ),
+            (
+                "fallback_base_url", data.get("fallback_protocol"), data.get("fallback_base_url"),
+                self._keychain.get_provider_key(data["fallback_provider"]) if data.get("fallback_provider") else "",
+            ),
+        ):
+            if key and protocol != "ollama" and base_url:
+                problem = key_destination_problem(base_url)
+                if problem is not None:
+                    raise ApiError(400, "invalid_base_url", f"{label}: {problem}")
         if raw_key:
             try:
                 data["api_key_ref"] = self._keychain.set(role, raw_key)
