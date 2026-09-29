@@ -99,7 +99,7 @@ from engine.providers import (
     ProviderError,
 )
 from engine.role_repair import config_problems
-from engine.sandbox import CommandNotAllowed, SandboxService
+from engine.sandbox import CommandNotAllowed, SandboxService, validate_argv
 from engine.services import AgentRegistryService, ApiError, GoalService, WorkspaceService
 from engine.skills import SkillSet, load_skills
 from engine.toolcall import ToolSpec
@@ -1174,9 +1174,36 @@ class ConductorTools:
         if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
             return "run_command takes a list of strings, e.g. [\"pytest\", \"-q\"]"
         reason = str(args.get("reason") or "").strip()
-        # `mode="test"`, the same mode the verifier's argv runs in. The
-        # conductor is not the librarian, so it gets the test allowlist
-        # rather than the read-only one — but it does not get a *wider* one.
+        argv = [str(a) for a in argv]
+        # What the test allowlist admits is the repository's *own code*: `python3
+        # evil.py`, `pytest` (which imports every conftest.py it finds), `npm run` of any
+        # script, `cargo test`, `go test`. docs/03 §1.4 accepts that for a goal a person
+        # has approved. A turn has no approval step, so until the goal is RUNNING this
+        # tool is the librarian's: `ls`, `wc` and read-only git, which cannot execute
+        # anything in the workspace. The gate is `write`'s own, and it reads the stored
+        # status, so nothing the model says can move it.
+        approved, _ = self.service._write_allowed(self.goal_id)
+        if not approved:
+            fs = FileSystemService(self.root)
+            try:
+                validate_argv(argv, fs, mode="read_only")
+            except CommandNotAllowed as refusal:
+                try:
+                    validate_argv(argv, fs, mode="test")
+                except CommandNotAllowed:
+                    # Not a command any mode allows: the ordinary refusal, and it must
+                    # not suggest that approval would change it.
+                    raise refusal from None
+                raise CommandNotAllowed(
+                    f"`{argv[0]}` runs this project's own code, and this goal has no "
+                    "approved plan: nothing in the repository runs until the user has "
+                    "approved a plan by starting it. Until then only reading commands run "
+                    "(ls, wc, git history). Say what you would run and why, propose the "
+                    "change as a plan, and stop."
+                ) from None
+        # `mode="test"` once approved, the same mode the verifier's argv runs in. The
+        # conductor is not the librarian, so it gets the test allowlist rather than the
+        # read-only one — but it does not get a *wider* one.
         #
         # Off the event loop, and under the lock the verifier already takes.
         # This runs a real process for up to two minutes and it used to run it
@@ -1189,7 +1216,8 @@ class ConductorTools:
         # `CommandNotAllowed` — the behaviour this tool already had.
         async with self.service._sandbox_lock:
             result = await asyncio.to_thread(
-                self.service.sandbox.run_command, self.root, [str(a) for a in argv], mode="test",
+                self.service.sandbox.run_command, self.root, argv,
+                mode="test" if approved else "read_only",
             )
         return format_command(result) + (f"\n(reason given: {reason})" if reason else "")
 

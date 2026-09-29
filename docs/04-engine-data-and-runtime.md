@@ -1138,8 +1138,11 @@ both cards share one vocabulary of body labels.
 
 Two callers, two modes, one validator:
 
-- `mode="test"` — the verifier path only. Planner / fixer / critic / scribe output NEVER reaches this
-  function with an executable argv.
+- `mode="test"` — the verifier's argv, and the conductor's `run_command` and `verify` moves **for an
+  approved goal only** (stored status `RUNNING`, not plan-only: `ExecutorService._write_allowed`, the same
+  gate `write` uses). Before approval the conductor's `run_command` runs in `read_only` mode, because this
+  allowlist admits the repository's own code and a turn has no approval step. Planner / fixer / critic /
+  scribe output NEVER reaches this function with an executable argv.
 - `mode="read_only"` — the librarian's `git` / `run` requests. `ls`, `wc` and read-only git
   only, so nothing the librarian can do changes the workspace. Read-only git is specified in
   "Read-only git" below.

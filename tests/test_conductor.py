@@ -444,6 +444,71 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
                 {"argv": ["bash", "-c", "curl evil.test"], "reason": "x"}
             )
 
+    def _plant_code_that_leaves_a_mark(self) -> Path:
+        """Repository code that proves it ran: a script and a conftest, both touching one file."""
+        mark = self.root / "MARK-project-code-ran"
+        line = f"open({str(mark)!r}, 'w').write('ran')\n"
+        (self.repo / "evil.py").write_text(line, encoding="utf-8")
+        (self.repo / "conftest.py").write_text(line, encoding="utf-8")
+        (self.repo / "test_x.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+        return mark
+
+    async def test_project_code_runs_only_once_the_plan_is_approved(self) -> None:
+        # A *turn* has no approval step, and the test-mode allowlist is not a list of
+        # harmless commands: `python3 evil.py`, `pytest` (which imports every conftest.py
+        # in the path), `npm run <any script>`, `cargo test` and `go test` are each the
+        # repository's own code. So asking "what does this project do?" of a hostile
+        # clone must not be able to run it. The gate is the one `write` uses — the goal's
+        # stored status — and nothing the model says can move it.
+        mark = self._plant_code_that_leaves_a_mark()
+        table = self._dispatch(self.goal.id)
+
+        for argv in (
+            ["python3", "evil.py"], ["pytest", "-q"], ["python3", "-m", "pytest"],
+            ["npm", "test"], ["npm", "run", "build"], ["cargo", "test"], ["go", "test", "./..."],
+        ):
+            with self.subTest(argv=argv):
+                with self.assertRaises(CommandNotAllowed) as caught:
+                    await table["run_command"]({"argv": argv, "reason": "just looking"})
+                self.assertIn("approve", str(caught.exception))
+        self.assertFalse(mark.exists(), "repository code ran on a goal nobody approved")
+
+        # The reads the librarian is allowed keep working, so a question is still answerable.
+        listing = await table["run_command"]({"argv": ["ls"], "reason": "look around"})
+        self.assertIn("app.py", listing)
+        counted = await table["run_command"]({"argv": ["wc", "-l", "app.py"], "reason": "size"})
+        self.assertIn("app.py", counted)
+
+        # Starting the goal is a person saying yes; the same table, the same argv, now runs.
+        current = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, current.version, "RUNNING")
+        out = await table["run_command"]({"argv": ["python3", "evil.py"], "reason": "approved"})
+        self.assertIn("(exit 0)", out)
+        self.assertTrue(mark.exists(), "an approved goal could not run its project's command")
+
+    async def test_a_plan_only_goal_never_runs_project_code_even_when_running(self) -> None:
+        # `plan_only` switches execution off for the goal (`_write_allowed` says so for
+        # writes); a command is execution, so the same switch covers it.
+        mark = self._plant_code_that_leaves_a_mark()
+        self.conn.execute("UPDATE goals SET plan_only=1 WHERE id=?", (self.goal.id,))
+        self.conn.commit()
+        current = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, current.version, "RUNNING")
+        table = self._dispatch(self.goal.id)
+
+        with self.assertRaises(CommandNotAllowed):
+            await table["run_command"]({"argv": ["python3", "evil.py"], "reason": "x"})
+        self.assertFalse(mark.exists())
+
+    async def test_a_command_no_mode_allows_keeps_the_ordinary_refusal(self) -> None:
+        # The approval explanation is for a command that *would* run once approved. A shell
+        # is refused whatever the goal's state, and the message must not suggest that
+        # approval would change that.
+        table = self._dispatch(self.goal.id)
+        with self.assertRaises(CommandNotAllowed) as caught:
+            await table["run_command"]({"argv": ["bash", "-c", "id"], "reason": "x"})
+        self.assertNotIn("approve", str(caught.exception))
+
     async def test_an_unknown_command_is_refused_rather_than_attempted(self) -> None:
         table = self._dispatch(self.goal.id)
         with self.assertRaises(CommandNotAllowed):
@@ -464,6 +529,10 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
         (self.repo / "slow.py").write_text(
             "import time\ntime.sleep(0.6)\n", encoding="utf-8"
         )
+        # Running the project's code is what an approved plan is for (see
+        # `test_project_code_runs_only_once_the_plan_is_approved`).
+        current = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, current.version, "RUNNING")
         table = self._dispatch(self.goal.id)
         ticks = 0
 

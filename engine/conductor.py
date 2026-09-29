@@ -495,7 +495,10 @@ RUN_COMMAND = ToolSpec(
         "Run one of the project's own commands — its tests, its type checker, "
         "its build. This is how you find out whether something is actually "
         "true. It cannot start a shell, install anything or reach the network, "
-        "and an unlisted command is refused. Always give the reason you want it "
+        "and an unlisted command is refused. Running the project's code needs "
+        "an approved plan: until the user has approved one only reading "
+        "commands run (ls, wc, git history), and asking for a test run then is "
+        "refused, not deferred. Always give the reason you want it "
         "run, so the reason is recorded with the run."
     ),
     parameters={
