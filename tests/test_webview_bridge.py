@@ -15,7 +15,6 @@ and a shell that quit leaving the engine convinced it still had a browser.
 """
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import asyncio
-import pathlib
 import time
 import unittest
 from typing import Any
@@ -28,6 +27,7 @@ from httpx import ASGITransport
 from engine import webview_bridge
 from engine.app import BOOT_TOKEN, app
 from engine.conductor import BASE_TOOLS, TOOLS
+from engine.executor import ConductorTools
 from engine.webview_bridge import (
     BridgeBusy,
     BridgeRefused,
@@ -865,10 +865,16 @@ class TestActingOnAPage(BridgeTestCase):
         self.assertEqual(click_spec.parameters["required"], ["selector"])
         type_spec = next(t for t in TOOLS if t.name == "type_page")
         self.assertEqual(type_spec.parameters["required"], ["selector", "text"])
-        # And the executor's table has both, so neither is offered-and-dead.
-        executor = pathlib.Path("engine/executor.py").read_text()
-        self.assertIn('"click_page": click_page', executor)
-        self.assertIn('"type_page": type_page', executor)
+        # And the executor answers to both, so neither is offered-and-dead. Asked
+        # of the class itself: the table is `ConductorTools.NAMES`, one coroutine
+        # method per name, and reading the source for a literal broke the day the
+        # table stopped being spelled that way while still working.
+        for name in ("click_page", "type_page"):
+            self.assertIn(name, ConductorTools.NAMES)
+            self.assertTrue(
+                asyncio.iscoroutinefunction(getattr(ConductorTools, name, None)),
+                f"{name} is in the table but has no handler",
+            )
 
     def test_the_model_is_told_typing_is_not_submitting(self) -> None:
         """The description is the only place that reaches the model unprompted.
