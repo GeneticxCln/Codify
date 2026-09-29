@@ -437,6 +437,43 @@ class FailureOfTests(unittest.TestCase):
         self.assertEqual({"agent_output_invalid": 2, "provider_http": 1}, summary["failure_codes"])
 
 
+class RecordTests(unittest.TestCase):
+    """`--record DIR` keeps what a run did, so a real model's failures can be read and committed as fixtures.
+
+    The two failure classes that mattered most in the first real-model baseline were found only because a
+    debugging wrapper turned tracing on and kept the scratch stores; the runner deletes both. Recording is
+    that wrapper, as a flag: every goal's model calls are traced (`docs/04` §8) and the per-task stores
+    and workspaces are moved to DIR instead of removed.
+    """
+
+    def test_the_stores_survive_and_hold_every_model_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = Path(tmp) / "kept"
+
+            code, _ = _run_main(["--tier", "smoke", "--only", "smoke-add-banner", "--record", str(keep)])
+
+            self.assertEqual(0, code)
+            stores = sorted(keep.glob("*.db"))
+            self.assertEqual(["smoke-add-banner.db"], [p.name for p in stores])
+            conn = sqlite3.connect(stores[0])
+            try:
+                roles = {r[0] for r in conn.execute("SELECT role FROM trace_calls")}
+            finally:
+                conn.close()
+            self.assertTrue({"planner", "fixer"} <= roles, roles)
+            self.assertTrue((keep / "smoke-add-banner" / "banner.txt").is_file(), "the workspace was not kept")
+
+    def test_without_the_flag_nothing_is_kept_and_nothing_is_traced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("benchmarks.runner.tempfile.mkdtemp", return_value=str(Path(tmp) / "w")) as made:
+            (Path(tmp) / "w").mkdir()
+
+            code, _ = _run_main(["--tier", "smoke", "--only", "smoke-add-banner"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(made.called)
+            self.assertFalse((Path(tmp) / "w").exists(), "the scratch directory was left behind")
+
+
 class RepeatAndThresholdTests(unittest.TestCase):
     """One run of a model proves little; a number is only worth having with its spread."""
 

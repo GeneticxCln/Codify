@@ -350,8 +350,12 @@ async def run_task(
     canned: bool,
     engine_db: Path | None = None,
     attempt: int = 1,
+    trace: bool = False,
 ) -> dict[str, Any]:
     """Run one task end to end: measurements, harness checks, quality checks.
+
+    `trace` records every model call in the task's own store (`docs/04` §8), which is how a real model's
+    raw replies are read afterwards and committed as fixtures.
 
     `attempt` numbers repeats of the same task, so each gets a workspace and a store of its own: two
     runs sharing either would measure the first run's leftovers.
@@ -393,6 +397,7 @@ async def run_task(
                 workspace_id=ws.id,
                 title=str(task["title"]),
                 description=str(task.get("description", "")),
+                trace=trace,
             )
         )
         executor = ExecutorService(
@@ -564,6 +569,7 @@ def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _run_one(
     task: dict[str, Any], work_root: Path, *, canned: bool, engine_db: Path | None, attempt: int,
+    trace: bool = False,
 ) -> dict[str, Any]:
     """`run_task`, with a crash turned into the failed result it is.
 
@@ -573,7 +579,9 @@ def _run_one(
     """
     started = time.monotonic()
     try:
-        return asyncio.run(run_task(task, work_root, canned=canned, engine_db=engine_db, attempt=attempt))
+        return asyncio.run(run_task(
+            task, work_root, canned=canned, engine_db=engine_db, attempt=attempt, trace=trace,
+        ))
     except BenchmarkError:
         raise
     except Exception as exc:  # noqa: BLE001 — whatever a task did, the run records it and continues
@@ -641,6 +649,14 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PCT",
         help="exit 1 when fewer than PCT%% of the runs pass — the regression floor for a recorded baseline",
     )
+    parser.add_argument(
+        "--record",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="trace every model call and keep each task's store and workspace in DIR "
+             "(so a real model's raw replies can be read, and committed as fixtures)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -683,7 +699,10 @@ def main(argv: list[str] | None = None) -> int:
         results = []
         for attempt in range(1, args.repeat + 1):
             for task in tasks:
-                result = _run_one(task, work_root, canned=canned, engine_db=args.engine_db, attempt=attempt)
+                result = _run_one(
+                    task, work_root, canned=canned, engine_db=args.engine_db, attempt=attempt,
+                    trace=args.record is not None,
+                )
                 results.append(result)
                 # As each one finishes, not only in the summary: a slow real model makes a run long, and
                 # a run that dies late should leave a record of the tasks that were done.
@@ -691,6 +710,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"finished {label}: {result['status']}, {'ok' if result['passed'] else 'FAIL'}, "
                       f"{round(result['wall_ms'] / 1000)} s", flush=True)
     finally:
+        if args.record is not None:
+            # Kept before it is removed: the stores hold the traced calls, the workspaces what was written.
+            shutil.copytree(work_root, args.record, dirs_exist_ok=True)
         shutil.rmtree(work_root, ignore_errors=True)
 
     summary = summarise(results)
