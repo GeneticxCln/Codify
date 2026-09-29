@@ -305,8 +305,14 @@ def build_state(goal: Any, workspace_root: str | None = None) -> dict[str, Any]:
     state: dict[str, Any] = {
         "title": _clip(getattr(goal, "title", "") or "", 512),
         "request": _clip(getattr(goal, "description", "") or ""),
+        # A turn is a conversation until the conductor decides otherwise. The
+        # execution mode describes how a *plan* would be applied, and handed to
+        # the classifier for a turn it primes "apply": on the real SDK "hi" and
+        # "hey" came back `code_change` with it and `other` with "chat" (measured;
+        # the change requests and questions in the same set were unaffected).
         "mode": (
-            "plan-only" if getattr(goal, "plan_only", False)
+            "chat" if getattr(goal, "mode", None) == "chat"
+            else "plan-only" if getattr(goal, "plan_only", False)
             else "dry-run" if getattr(goal, "dry_run", False)
             else "direct-apply"
         ),

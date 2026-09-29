@@ -110,6 +110,29 @@ class TestState(unittest.TestCase):
         self.assertEqual(state["mode"], "plan-only")
         self.assertEqual(state["workspace"], "ws")
 
+    def test_a_chat_turn_is_not_described_as_a_direct_apply(self) -> None:
+        # `mode` used to be the goal's execution setting even for a turn, so every
+        # message reached the classifier as "direct-apply" — an action word — and
+        # with it, measured on the real SDK, "hi" and "hey" came back `code_change`
+        # (with a neutral value they are `other`, as `hello` always was). A turn is
+        # a conversation until the conductor decides otherwise; the setting is
+        # about how a *plan* would be applied and says nothing about a greeting.
+        turn = types.SimpleNamespace(
+            title="hi", description="hi", plan_only=False, dry_run=False, mode="chat"
+        )
+        self.assertEqual(build_state(turn, "/tmp/ws")["mode"], "chat")
+        # ...and a chat turn that somehow carries the other flags is still a chat turn.
+        turn_dry = types.SimpleNamespace(
+            title="hi", description="hi", plan_only=True, dry_run=True, mode="chat"
+        )
+        self.assertEqual(build_state(turn_dry)["mode"], "chat")
+
+    def test_a_goal_that_is_not_a_chat_turn_keeps_its_execution_mode(self) -> None:
+        goal = types.SimpleNamespace(
+            title="t", description="d", plan_only=False, dry_run=False, mode="normal"
+        )
+        self.assertEqual(build_state(goal)["mode"], "direct-apply")
+
     def test_dry_run_mode_reported(self) -> None:
         goal = types.SimpleNamespace(title="t", description="d", plan_only=False, dry_run=True)
         self.assertEqual(build_state(goal)["mode"], "dry-run")
