@@ -12,7 +12,7 @@ runs everything in one pass:
 |---|---|
 | `make lint` | `ruff check engine tests scripts benchmarks` — rules and target Python pinned in `pyproject.toml` |
 | `make typecheck` | `mypy` over the same files — config (3.10 floor, pydantic plugin) pinned in `pyproject.toml` |
-| `make test-ui` | the React/TypeScript unit tests in `ui/tests/` (needs Node 22.6+) |
+| `make test-ui` | the React/TypeScript unit tests in `ui/tests/` (needs Node 22.22.2+, 24.15+ or 26+; `npm test` says so itself when it is older) |
 | `make typecheck-ui-tests` | `tsc` over `ui/src` **and** `ui/tests` — the check `npm test` cannot do |
 | `make test` | full Python suite (411 tests today — the number moves, so trust the run) |
 | `make test-streams` | the concurrency/stream-isolation tests, **by name** (not just via discovery) |

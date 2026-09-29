@@ -3,9 +3,13 @@
   "private": true,
   "version": "0.2.0",
   "type": "module",
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "pretest": "node scripts/check-node.mjs",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
     "preview": "vite preview"

@@ -33,7 +33,7 @@ mean the change is shippable.
 | `make typecheck` | `mypy` over `engine`, `tests`, `scripts` — config pinned in `pyproject.toml` |
 | `make test` | Full Python suite via `unittest` |
 | `make test-streams` | Stream-isolation tests **by name**, not just by discovery |
-| `make test-ui` | `ui/tests/` through `node --test` (needs Node 22.6+) |
+| `make test-ui` | `ui/tests/` through `node --test` (needs Node 22.22.2+, 24.15+ or 26+; checked before it runs) |
 | `make typecheck-ui-tests` | `tsc --noEmit` over `ui/src` **and** `ui/tests` — config `ui/tsconfig.test.json` |
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |
 | `make check-tauri` | `cargo check` + `cargo fmt --check` |

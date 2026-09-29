@@ -21,7 +21,7 @@ help:
 	@echo "  make test-streams - Run the concurrency/stream-isolation tests explicitly, by name"
 	@echo "  make smoke-embed  - Run the embedded-browser first-paint smoke test (needs a display)"
 	@echo "  make smoke-tabs   - Run the tab-restoration smoke test (needs a display; never touches ~/.codify)"
-	@echo "  make test-ui      - Run the React/TypeScript unit tests (node --test, needs Node 22.6+)"
+	@echo "  make test-ui      - Run the React/TypeScript unit tests (node --test, needs Node 22.22.2+, 24.15+ or 26+)"
 	@echo "  make typecheck-ui-tests - Type-check the React/TypeScript test suite (tsc over src+tests)"
 	@echo "  make lint         - Lint engine, tests and scripts with ruff (rules pinned in pyproject.toml)"
 	@echo "  make typecheck    - Static-type-check engine, tests and scripts with mypy (config in pyproject.toml)"
@@ -46,7 +46,7 @@ help:
 	@echo ""
 	@echo "Prerequisites: engine needs \`pip install -r engine/requirements.txt\` (plus \`pip install ruff mypy\`"
 	@echo "for the checks, or one \`pip install -e \".[dev]\"\`); the ui targets need \`npm install\` in ui/,"
-	@echo "and \`make test-ui\` needs Node 22.6+."
+	@echo "and \`make test-ui\` needs Node 22.22.2+, 24.15+ or 26+."
 	@echo "\`make ci\` additionally needs a python$(PY_MIN) or uv, so its floor leg runs instead of skipping."
 
 test: test-engine
@@ -99,7 +99,10 @@ smoke-tabs:
 # ui/tests/, which assert the client-side rules the chat depends on (goal stream
 # framing, model ordering, failure diagnosis, stats-history merging). They run
 # directly through `node --test` with type stripping, so they need no build step
-# and no bundler — but that flag landed in Node 22.6.
+# and no bundler — but that flag landed in Node 22.6, and 22.6 is not the suite's floor:
+# the loader needs module.registerHooks (22.15) and jsdom 30 declares 22.22.2 / 24.15 / 26.
+# `npm test` checks that before it runs (ui/scripts/check-node.mjs), so an older Node is
+# told so in one sentence instead of failing 161 tests with module-linking errors.
 #
 # The suite runs under a hard memory cap when systemd can give one. A leaking test
 # once grew to ~25 GB and had systemd-oomd kill the whole desktop session, not just
