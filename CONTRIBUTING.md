@@ -136,7 +136,7 @@ transcript's audit badges were unreachable by anything.
 than setup/teardown, because the teardown is the part that gets forgotten and a
 leaked document produces tests that pass alone and fail together.
 
-Six things to know before using it.
+Seven things to know before using it.
 
 - **Import the component from inside the callback.** `react-dom/client` reads
   `document` while it is being *imported*, so a static import at the top of a
@@ -163,6 +163,14 @@ Six things to know before using it.
   `painter.test.ts`, which drives painters against a recording context.
 - **Write tests in `.ts` with `React.createElement`.** The suite's glob is
   `tests/*.test.ts` and node's type stripping refuses JSX outside `.tsx`.
+- **Never hand an element to `assert.equal`.** `assert.equal(el, null)` builds
+  its `AssertionError` from the element's object graph, and a mounted one carries
+  React fiber pointers into the whole app: when the assertion *fails*, that took
+  25 GB and got a developer's desktop session killed by the OS. Compare a
+  boolean, `assert.ok(el === null, msg)`, or a list's `.length`. `sourceRules
+  .test.ts` scans for the shapes it knows. `make test-ui` also runs under a 6 GB
+  systemd memory cap where `systemd-run --user` exists, so a leak that gets past
+  the rule ends one test run and not your session.
 
 A static render is still the right default — it is much faster and it is the
 right claim when the question is "is this sentence on screen". Reach for the DOM

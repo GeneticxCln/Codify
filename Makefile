@@ -97,8 +97,17 @@ smoke-tabs:
 # framing, model ordering, failure diagnosis, stats-history merging). They run
 # directly through `node --test` with type stripping, so they need no build step
 # and no bundler — but that flag landed in Node 22.6.
+#
+# The suite runs under a hard memory cap when systemd can give one. A leaking test
+# once grew to ~25 GB and had systemd-oomd kill the whole desktop session, not just
+# the test run; inside a cgroup limit the kernel kills only this run. Swap is off
+# for the scope so a runaway is stopped at the cap instead of paging the machine
+# to a halt first. Where there is no user systemd (CI, macOS) the guard is empty
+# and the target is exactly `npm test`.
+UI_TEST_GUARD := $(shell systemd-run --user --scope --quiet true >/dev/null 2>&1 && echo 'systemd-run --user --scope --quiet -p MemoryMax=6G -p MemorySwapMax=0 --')
+
 test-ui:
-	cd ui && npm test
+	cd ui && $(UI_TEST_GUARD) npm test
 
 # The companion to test-ui, and the one that was missing. `tsconfig.json` has
 # "include": ["src"], so every `tsc` in this repository — `npm run build`, and
