@@ -530,6 +530,16 @@ class TestFormatsThatWouldRunGpg(RealRepoCase):
                 self.assertIsNotNone(self.attempt(*argv), f"{argv} is an ordinary format and was refused")
 
 
+class TestAHostilePathIsNotAWorkspacePath(unittest.TestCase):
+    def test_a_path_that_makes_resolve_raise_is_refused_not_a_crash(self) -> None:
+        from engine.sandbox import _is_workspace_path
+
+        fs = FileSystemService(tempfile.gettempdir())
+        for token in ("a\x00b", "\x00", "x/\x00/y"):
+            with self.subTest(token=token):
+                self.assertFalse(_is_workspace_path(fs, token))
+
+
 class TestPropertiesThatWouldHaveCaughtTheClass(unittest.TestCase):
     """Facts about the table itself, so a new spelling cannot walk around it."""
 

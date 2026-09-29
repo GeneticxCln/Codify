@@ -32,7 +32,11 @@ def _is_workspace_path(fs: FileSystemService, token: str) -> bool:
     try:
         fs.resolve(token)
         return True
-    except PathEscapeError:
+    except (PathEscapeError, ValueError):
+        # `ValueError` is what `Path.resolve` raises for an embedded NUL. `validate_argv` refuses
+        # control characters before it gets here; this is the second line for any caller that
+        # reaches a path check some other way, so a hostile path is "not a workspace path" and
+        # never a crash.
         return False
 
 
