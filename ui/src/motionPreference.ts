@@ -38,6 +38,27 @@ export const MOTION_KEY = "codify.motion";
 /** What the shell sends when it concludes the window is starving itself. */
 export const MOTION_EVENT = "codify:engine-render-starved";
 
+/**
+ * Fired on `window` after every write to either store.
+ *
+ * The loops used to hear the shell's event directly and re-read the store, while
+ * `App` wrote the verdict from its own listener on the same event. The loops'
+ * listener is registered first (children's effects run before their parent's),
+ * so it read the store *before* the verdict was written and kept animating on
+ * the machine the verdict was about. A store that announces its own changes has
+ * one order — write, then tell — and the user's "Animate anyway", which is not a
+ * shell event at all, reaches the loops the same way.
+ */
+export const MOTION_CHANGED = "codify:motion-changed";
+
+function announceChange(): void {
+  try {
+    if (typeof window !== "undefined") window.dispatchEvent(new Event(MOTION_CHANGED));
+  } catch {
+    // No window to tell: the writer still gets the state it asked for.
+  }
+}
+
 /** The states the user's choice can hold. */
 export type MotionSetting = "auto" | "allowed" | "reduced";
 
@@ -139,6 +160,7 @@ export function writeSetting(
   } catch {
     // A store that refuses writes still yields the in-memory truth.
   }
+  announceChange();
   return readMotion(explicit);
 }
 
@@ -157,6 +179,7 @@ export function applyShellStarvation(
   } catch {
     // As above: the caller still gets the state it asked for.
   }
+  announceChange();
   return readMotion(explicit);
 }
 
@@ -168,6 +191,7 @@ export function clearShellStarvation(explicit?: Partial<MotionStores>): MotionSt
   } catch {
     // Nothing to undo if the store refuses.
   }
+  announceChange();
   return readMotion(explicit);
 }
 
@@ -230,10 +254,14 @@ export function useMotionAllowed(): boolean {
         ? window.matchMedia("(prefers-reduced-motion: reduce)")
         : undefined;
     mq?.addEventListener?.("change", recompute);
+    // The store's own announcement is the authority; the shell event above can
+    // arrive before the verdict is written and is kept only as a nudge.
+    window.addEventListener(MOTION_CHANGED, recompute);
     return () => {
       cancelled = true;
       off?.();
       mq?.removeEventListener?.("change", recompute);
+      window.removeEventListener(MOTION_CHANGED, recompute);
     };
   }, []);
   return allowed;
