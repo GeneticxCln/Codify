@@ -15,6 +15,9 @@ import { getEngineInfo } from "./api.ts";
  *   to a finished goal (e.g. after Apply) without the replayed terminal event instantly
  *   closing the stream before the new run's events arrive.
  * - Optional `onReconnecting` for UI status display.
+ * - The engine closes with 4404 (there is no such goal) or 4401 (the token was refused).
+ *   Neither changes by asking again, so those closes are final: no reconnect, and `onGone`
+ *   says which. Reconnecting at the 16 s cap forever was a request nothing could answer.
  */
 export interface GoalStreamHandle {
   close: () => void;
@@ -26,10 +29,12 @@ export function openGoalStream(opts: {
   onTerminal?: (ev: Event) => void;
   onReconnecting?: (attempt: number) => void;
   onConnected?: () => void;
+  /** The engine ended the stream for good (4404 no such goal, 4401 refused token). */
+  onGone?: (code: number) => void;
   /** Events with sequence <= this are replayed history: never terminal. */
   sinceSequence?: number;
 }): GoalStreamHandle {
-  const { goalId, onEvent, onTerminal, onReconnecting, onConnected } = opts;
+  const { goalId, onEvent, onTerminal, onReconnecting, onConnected, onGone } = opts;
   const sinceSequence = opts.sinceSequence ?? 0;
 
   let ws: WebSocket | null = null;
@@ -38,6 +43,9 @@ export function openGoalStream(opts: {
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   // Terminal statuses end the stream — no point reconnecting to a finished goal.
   const TERMINAL = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
+  // `engine/app.py` `ws_goal`: 4404 after auth for an unknown goal, 4401 for a bad token.
+  const CLOSE_NO_SUCH_GOAL = 4404;
+  const CLOSE_REFUSED = 4401;
 
   const connect = () => {
     if (destroyed) return;
@@ -73,8 +81,13 @@ export function openGoalStream(opts: {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
       if (destroyed) return;
+      if (e?.code === CLOSE_NO_SUCH_GOAL || e?.code === CLOSE_REFUSED) {
+        destroyed = true;
+        onGone?.(e.code);
+        return;
+      }
       attempt += 1;
       const delay = Math.min(1000 * 2 ** (attempt - 1), 16000);
       onReconnecting?.(attempt);

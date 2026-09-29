@@ -2049,6 +2049,12 @@ export const App: React.FC = () => {
         goalId,
         onEvent: applyEvent,
         sinceSequence,
+        // The engine ended this stream for good (the goal is gone, or the token was refused).
+        // Drop the handle for the reason the terminal path below does: a handle left behind makes
+        // every later subscribeToGoal() for this goal a silent no-op.
+        onGone: () => {
+          delete goalStreams.current[goalId];
+        },
         // Terminal status: flush one final goal close, then stop streaming.
         onTerminal: () => {
           // This goal is done, so it is no longer the one the command bar offers to

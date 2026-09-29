@@ -1276,6 +1276,16 @@ CODIFY_ENGINE token=<hex> port=<int>
 
 WS URL: `ws://127.0.0.1:<port>/ws/goals/{id}`. After auth, server sends events with `sequence > 0` live; client SHOULD `GET /goals/{id}/events?after=` for gap fill.
 
+The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
+once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with
+no new events never attempts — and every finished goal that was ever viewed (the UI closes the socket
+on each terminal status) left a poller re-reading the goal four times a second for nobody: idle engine
+CPU went 0.2 % → 3.6 % → 7.0 % → 13.9 % of a core over 50, 200 and 500 views, until restart (audit of
+2026-09-29, M9; `tests/test_ws_goal_lifecycle.py`). Frames a client sends are ignored. Close codes the
+client may act on: `4401` bad token, `4404` no such goal (checked only *after* auth, so an
+unauthenticated peer cannot probe ids). Neither changes by asking again, so `ui/src/goalStream.ts`
+treats both as final — no reconnect, `onGone(code)` — while any other close reconnects with backoff.
+
 ### 6.0 Engine-level frames
 
 `ws://127.0.0.1:<port>/ws/engine` carries what belongs to *no* goal, on the same auth contract (boot

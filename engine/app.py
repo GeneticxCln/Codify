@@ -2441,6 +2441,13 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
         await websocket.close(code=4404)
         return
 
+    # The socket is read as well as written, and that is what ends this handler. It used to only
+    # write, so a client that had gone was noticed only when a `send` failed — and a goal with no
+    # new events never sends. The UI closes the socket itself on every terminal status, so every
+    # finished goal that was ever viewed left a coroutine waking four times a second to re-read the
+    # goal for nobody (idle engine CPU 0.2 % -> 13.9 % of a core over 500 views, until restart).
+    # `ws_engine` reads its socket for the same reason.
+    receiver = asyncio.create_task(websocket.receive_text())
     after = 0
     try:
         while True:
@@ -2459,9 +2466,26 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
             for event in batch:
                 await websocket.send_text(event.model_dump_json())
                 after = event.sequence
-            await asyncio.sleep(0.25)
+            # The wait for the next tick is a wait on the receiver, so a peer leaving ends the loop
+            # at once instead of at the next failed send.
+            done, _ = await asyncio.wait({receiver}, timeout=0.25)
+            if not done:
+                continue
+            if receiver.cancelled() or receiver.exception() is not None:
+                # The peer went away (a disconnect surfaces as an exception from `receive`; calling
+                # it again on a socket that has already delivered one raises, so do not).
+                return
+            # A frame from the client: this channel is one-directional and has no use for it, but a
+            # client that can send one can still receive, so read on.
+            receiver = asyncio.create_task(websocket.receive_text())
     except WebSocketDisconnect:
         pass
+    finally:
+        # Retrieved either way: an unretrieved exception from a cancelled `receive` is printed by
+        # the event loop, once per connection, for a client that merely left.
+        if not receiver.done():
+            receiver.cancel()
+        await asyncio.gather(receiver, return_exceptions=True)
 
 
 def serve() -> None:
