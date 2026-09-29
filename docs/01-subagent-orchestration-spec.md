@@ -382,15 +382,22 @@ ninth `AgentRole`, and that is a structural decision rather than a naming one:
   returns a key by reference without asking which provider it is for.
   `AgentRegistryService.fallback_config_for` drops the same field for the same
   reason.
-- A provider slug that is neither built in nor the borrowed row's own is **not a
-  target**. A custom provider's address lives on the row that defines it, and the
-  conductor's pair has no `base_url` to carry one, so `_conductor_targets` skips
-  it rather than building a provider that posts to an empty address (which read
-  as a dead endpoint, wearing the scribe's protocol as a primary and
-  `openai_compat` as a fallback). A conductor pointed at one gets no target from
-  it and the chain keeps whatever else is reachable — `test_turns.py`,
-  `TestTheConductorsTargets`. A custom provider is reachable by naming the row's
-  own slug, which keeps its address.
+- A **custom** provider slug (one the catalogue does not list) means the address of
+  the role row that defines it. Its endpoint, protocol and credential live on that
+  row — or on a fallback column that introduced it — and the conductor's own pair
+  has no `base_url` to carry them, yet the Conductor card offers "Custom
+  Provider…". So `ExecutorService._with_address` looks the slug up across the
+  eight rows, whichever role holds it, and takes the endpoint, protocol and (from
+  a primary row only, where it belongs to that provider) the credential
+  reference. A built-in slug keeps the catalogue's address. A slug **no row
+  defines** has no address anywhere, so it is not a target — building one would
+  post to an empty URL and read as a dead endpoint — and, because a person chose
+  it, the goal's log says so (`the conductor is set to provider 'x', but no role
+  defines a provider by that name…`). The same sentence form covers a chosen
+  provider that cannot be built or cannot call tools; a conductor that merely
+  *borrows* the scribe's row and has no tool support stays the quiet degradation
+  to a plain answer, with no warning at all (`tests/test_turns.py`,
+  `TestTheConductorsTargets`; `tests/test_conductor_config_is_explained.py`).
 - It is measured through the ordinary `agent_assigned` / `usage` events, so
   stats and the Settings screen need no new case.
 
