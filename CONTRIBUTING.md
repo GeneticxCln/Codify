@@ -2,6 +2,17 @@
 
 Thanks for helping. The bar for a change here is simple: **`make check` must pass.**
 
+From a fresh clone, get to a machine that can run it in two commands:
+
+```
+make setup     # .venv, the engine, the dev tools, npm ci
+make doctor    # what is still missing (system libraries, Node, a display), and how to install it
+```
+
+`make setup` uses a virtualenv because a modern distribution refuses `pip install` into the system
+Python (PEP 668). Once `./.venv` exists the Makefile puts it first on `PATH`, so nothing has to be
+activated; the desktop shell looks for the same interpreter. `make doctor` is read-only.
+
 ```
 make check
 ```

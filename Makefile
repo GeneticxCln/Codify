@@ -1,8 +1,25 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri run-app dev-app run-engine run-engine-preview run-engine-scratch check ci ci-report ci-python-floor check-history hooks clean bench bench-smoke
+.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history hooks clean bench bench-smoke
+
+# A checkout's own virtualenv (`make setup` makes one) wins over whatever `python3` is on
+# PATH, so `make setup && make check` works with nothing activated. The floor leg sets
+# CODIFY_FLOOR_LEG so its own interpreter, which the recipe below puts first on PATH, is
+# not displaced by this: a floor that quietly ran on the host Python would be the gate
+# dropping its oldest leg without saying so.
+ifneq ($(wildcard .venv/bin/python3),)
+ifndef CODIFY_FLOOR_LEG
+export PATH := $(CURDIR)/.venv/bin:$(PATH)
+PREFER_VENV := 1
+endif
+endif
 
 # mypy is a dev tool, installed like ruff (`pip install mypy` or `pip install -e ".[dev]"`);
 # when it is only in the project venv, fall back to that so `make check` works unactivated.
-MYPY ?= $(shell command -v mypy 2>/dev/null || echo .venv/bin/mypy)
+#
+# Looked up with the venv put first *inside* the $(shell): GNU make 4.3 runs $(shell) with the
+# environment make started in, not the PATH exported above, so without this a global mypy (a
+# `uv tool` or pipx one, which has no pydantic for the plugin) shadowed the venv's and failed
+# `make typecheck` on a clean clone.
+MYPY ?= $(shell $(if $(PREFER_VENV),PATH="$(CURDIR)/.venv/bin:$$PATH" ,)command -v mypy 2>/dev/null || echo .venv/bin/mypy)
 
 # The declared minimum, read from the one file that declares it. `requires-python` is a
 # deployment contract here — the desktop shell boots the engine as `python3 -m engine` —
@@ -17,6 +34,8 @@ SCRATCH_HOME ?= /tmp/codify-scratch
 
 help:
 	@echo "Codify Development Commands:"
+	@echo "  make setup        - From a fresh clone: create .venv, install the engine and dev tools, npm ci"
+	@echo "  make doctor       - Check this machine for everything make ci needs, and say how to install what is missing"
 	@echo "  make test         - Run full Python test suite (includes the concurrency/stream tests)"
 	@echo "  make test-streams - Run the concurrency/stream-isolation tests explicitly, by name"
 	@echo "  make smoke-embed  - Run the embedded-browser first-paint smoke test (needs a display)"
@@ -48,6 +67,22 @@ help:
 	@echo "for the checks, or one \`pip install -e \".[dev]\"\`); the ui targets need \`npm install\` in ui/,"
 	@echo "and \`make test-ui\` needs Node 22.22.2+, 24.15+ or 26+."
 	@echo "\`make ci\` additionally needs a python$(PY_MIN) or uv, so its floor leg runs instead of skipping."
+
+# From a fresh clone to a checkout `make check` can run in. A virtualenv rather than the
+# system Python, because a modern distribution refuses `pip install` into it (PEP 668) —
+# which is the README's old first command failing on stock Ubuntu. The Makefile puts
+# ./.venv/bin first on PATH once it exists (above), and the desktop shell looks for the
+# same interpreter, so this is the one place a checkout's Python is decided.
+setup:
+	python3 -m venv .venv
+	.venv/bin/python3 -m pip install -e ".[dev]"
+	cd ui && npm ci
+	@echo ""
+	@echo "Set up. Next: make doctor (what is still missing), then make check."
+
+# Read-only: what this machine has and what `make ci` needs, with the fix for each gap.
+doctor:
+	scripts/doctor.sh
 
 test: test-engine
 
@@ -151,12 +186,23 @@ build-ui:
 dev-ui:
 	cd ui && npm run dev
 
+# One Rust test builds real GTK widgets and fails loudly without a display, which is
+# right — no test may skip itself out of a guarantee — and which made `make check` fail
+# on every headless machine (CI, a container, an SSH session) for a reason the target
+# never mentioned. So without a display it runs the tests under Xvfb, when there is one.
+# With neither, the test fails and the line below says why, rather than leaving a GTK
+# initialisation error to explain itself.
+XVFB := $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),,$(shell command -v xvfb-run >/dev/null 2>&1 && echo "xvfb-run -a"))
+
 check-tauri:
 	cd src-tauri && cargo check
 	# The shell's pure pieces — handshake parsing, the project-root guess, role
 	# validation — live in src/engine_protocol.rs exactly so this can reach them. The
 	# rest of the crate (spawn, read, kill) needs a live process and is not unit-testable.
-	cd src-tauri && cargo test
+	@if [ -z "$(DISPLAY)$(WAYLAND_DISPLAY)" ] && [ -z "$(XVFB)" ]; then \
+	  echo "check-tauri: no display and no xvfb-run, so the one GTK test will fail — run 'make doctor'" >&2; \
+	fi
+	cd src-tauri && $(XVFB) cargo test
 	cd src-tauri && cargo fmt --check
 
 # NOTE: this only compiles the Rust lib (`cargo build`). It does NOT produce a
@@ -225,7 +271,7 @@ check: lint typecheck test-ui typecheck-ui-tests test test-streams build-ui chec
 ci-python-floor:
 	scripts/ci-python-floor.sh $(PY_MIN) $(PY_MIN_VENV)
 	@echo "==> python $(PY_MIN) leg"
-	PATH=$(PY_MIN_VENV)/bin:$$PATH $(MAKE) --no-print-directory lint typecheck test test-streams
+	PATH=$(PY_MIN_VENV)/bin:$$PATH CODIFY_FLOOR_LEG=1 $(MAKE) --no-print-directory lint typecheck test test-streams
 
 # The whole gate, locally, in one command: every leg CI covered — the host interpreter,
 # the declared minimum, the UI and the Rust shell — with the floor provisioned on demand

@@ -344,25 +344,42 @@ persistence layer, and the roadmap the settled defaults came out of — in
 
 ### Prerequisites
 
-- **Python**: 3.10+ (tested up to 3.14) — the engine is booted as `python3 -m engine`, so this is a
-  real deployment floor, not a formality
-- **Node.js**: 18+ to build the UI (tested with Node 20 / 26); **22.6+** to run the UI test suite,
-  which `make test-ui` executes with `node --experimental-strip-types`
-- **Rust / Cargo**: 1.77+ (for desktop shell)
+A list of versions in prose is where drift lives, so ask the machine instead:
+
+```bash
+make doctor
+```
+
+It checks everything below and prints the install command for whatever is missing. What it
+looks for:
+
+- **Python 3.10+ with the `venv` module.** The engine is booted as `python3 -m engine`, so 3.10
+  is a real deployment floor, not a formality. Debian and Ubuntu ship `venv` separately
+  (`python3-venv`). `make ci` also needs `uv` or a `python3.10` for its declared-minimum leg.
+- **Node 22.22.2 or newer 22, 24.15 or newer 24, or 26+** — jsdom's own range, which the UI test
+  suite inherits. `npm test` checks it and says so in one sentence.
+- **Rust (stable; built with 1.94)** and the desktop shell's system libraries: WebKitGTK 4.1, GTK 3,
+  libsoup 3, librsvg, OpenSSL and `pkg-config`. On Debian/Ubuntu this is verified:
+  `sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev libssl-dev`.
+  `make doctor` also prints Fedora and Arch names, taken from Tauri's documentation and not
+  verified here.
+- **A display**, for `make check-tauri`: one Rust test builds real GTK widgets and fails loudly
+  without one. On a headless machine install `xvfb` and the Makefile runs that leg under
+  `xvfb-run` for you.
 
 ### Setup & Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/GeneticxCln/Codify.git
 cd Codify
-
-# Install Python dependencies
-pip install -r engine/requirements.txt
-
-# Install UI dependencies
-cd ui && npm install && cd ..
+make setup      # creates .venv, installs the engine and dev tools, runs npm ci
+make doctor     # anything still missing, and how to install it
 ```
+
+Why a virtualenv rather than `pip install -r engine/requirements.txt`: stock Ubuntu 24.04, Debian 12+
+and Fedora refuse `pip install` into the system Python (PEP 668, `externally-managed-environment`).
+The Makefile and the desktop shell both use `./.venv` whenever it exists, so nothing has to be
+activated.
 
 ### Running All Verifications
 
@@ -370,12 +387,12 @@ cd ui && npm install && cd ..
 make check
 ```
 This executes:
-1. `ruff check engine tests scripts` — the Python linter, with its rule set and target Python pinned in
+1. `ruff check engine tests scripts benchmarks` — the Python linter, with its rule set and target Python pinned in
    `pyproject.toml` (`make lint`)
 2. `mypy` over the same files — static type checking with its config (the 3.10 floor, the pydantic
    plugin) pinned in `pyproject.toml` (`make typecheck`)
 3. The React/TypeScript unit tests in `ui/tests/` (`make test-ui`)
-4. Full Python test suite (411 unit & integration tests — the number moves; trust the run)
+4. Full Python test suite (about 1,400 unit & integration tests at the time of writing — the number moves; trust the run)
 5. The concurrency/stream-isolation tests explicitly, by name (`make test-streams`)
 6. UI TypeScript validation and Vite production build
 7. Tauri Rust crate typecheck via `cargo check`, plus `cargo fmt --check`
