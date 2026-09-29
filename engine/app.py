@@ -1671,6 +1671,10 @@ async def _sweep_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], 
 # whose document shape is already stored per day, while these are the
 # measurement events (what each stage achieved, and what failed). Rewriting the
 # snapshot's inputs would silently change what a stored day means.
+
+# Upper bound on events one stats request reads; see `_sweep_metrics`.
+_METRIC_SWEEP_LIMIT = 20000
+
 _METRIC_EVENT_TYPES = (
     "usage", "agent_call_failed", "stage_result", "error",
     "fix_retry", "test_result", "step_status",
@@ -1686,10 +1690,17 @@ async def _sweep_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     away.
     """
     placeholders = ",".join("?" for _ in _METRIC_EVENT_TYPES)
+    # The *newest* `_METRIC_SWEEP_LIMIT` rows, returned oldest-first. The bound
+    # has to cut from the old end: an `ORDER BY timestamp LIMIT n` keeps the
+    # first n ever written, so once the table outgrew the limit every view
+    # built on this froze on ancient history and never threw. The outer sort
+    # puts them back in the chronological order `recovery_counts` depends on.
     rows = conn.execute(
-        f"""SELECT type, payload, timestamp, goal_id, step_id, sequence FROM events
-            WHERE type IN ({placeholders})
-            ORDER BY timestamp, sequence LIMIT 20000""",
+        f"""SELECT * FROM (
+                SELECT type, payload, timestamp, goal_id, step_id, sequence FROM events
+                WHERE type IN ({placeholders})
+                ORDER BY timestamp DESC, sequence DESC LIMIT {_METRIC_SWEEP_LIMIT}
+            ) ORDER BY timestamp, sequence""",
         _METRIC_EVENT_TYPES,
     ).fetchall()
     parsed = []
