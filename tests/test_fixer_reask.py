@@ -299,5 +299,46 @@ class TestAPathTheWorkspaceRefuses(ReAskCase):
         self.assertEqual("path_escape", self.events("error")[-1]["code"])
 
 
+class TestAVerifierThatHasNothingToRun(ReAskCase):
+    """`"argv": []` is "no command", not a malformed command.
+
+    Qwen2.5-1.5B answered `{"argv": [], "verdict": "skip", "explanation": null}` on three of eleven tasks and each
+    failed the step with "verifier argv must be a non-empty string list". The contract's spelling for "nothing to
+    run" is null, but an empty list can only mean the same thing, and running nothing is the one reading that
+    can do no harm.
+    """
+
+    async def verdict_for(self, reply: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+        provider = self.build({"files": [{"path": "a.py", "action": "update", "content": "x = 1\n"}]})
+        provider.roles["verifier"] = reply
+
+        status = await self.run_the_step()
+
+        return status, self.events("test_result")
+
+    async def test_an_empty_argv_is_no_command(self) -> None:
+        status, results = await self.verdict_for({"argv": [], "verdict": "skip", "explanation": None})
+
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertEqual("skip", results[-1]["verdict"])
+        self.assertFalse(results[-1]["ran"])
+
+    async def test_an_empty_string_is_no_command_too(self) -> None:
+        status, results = await self.verdict_for({"argv": "", "verdict": "skip", "explanation": "nothing to run"})
+
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertFalse(results[-1]["ran"])
+
+    async def test_a_real_command_that_the_sandbox_refuses_is_still_refused(self) -> None:
+        # `python3 -c` is not on the allowlist (docs/04 §5). Asking to run it is a proposal, not "no command",
+        # and it must fail the way it always did.
+        status, _ = await self.verdict_for(
+            {"argv": ["python3", "-c", "print(1)"], "verdict": "pass", "explanation": None}
+        )
+
+        self.assertEqual("FAILED", status)
+        self.assertIn("sandbox refused", self.events("error")[-1]["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

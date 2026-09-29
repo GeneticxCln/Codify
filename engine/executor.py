@@ -4876,6 +4876,11 @@ class ExecutorService:
         while True:
             out = await self.orchestrator.run_agent("verifier", goal_id, step.id, prompt)
             proposed = out.get("argv")
+            # The contract spells "nothing to run" as null. An empty list or an empty string can only mean
+            # the same thing — Qwen2.5-1.5B answered `{"argv": [], "verdict": "skip"}` on three of eleven
+            # tasks — and running nothing is the one reading that cannot do harm.
+            if proposed == [] or proposed == "":
+                proposed = None
 
             # Verdict-only answer: either it never needed a command, or it has
             # just been told what happened to the one it asked for.
