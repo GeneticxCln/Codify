@@ -141,6 +141,8 @@ BUILTIN_PROVIDERS: dict[str, dict] = {
 
 Custom slug (e.g. `openrouter`, `groq`): `protocol` MUST be `openai_compat` or `anthropic` or `ollama`. `base_url` REQUIRED. `ollama` / `local_only` → `validate_local_base_url`. Remote custom URLs are allowed (single-user); still no query-token, still Bearer.
 
+**A key is required on every `openai_compat` call path, local servers included.** `complete` and `complete_with_tools` both refuse an empty key with `missing_api_key` before any request is made (`complete_with_tools` once sent an empty bearer token, so a keyless server answered the conductor and refused every role). A local OpenAI-compatible server — llama.cpp, LM Studio, vLLM — ignores the key, so any placeholder works (`benchmarks/seed_endpoint.py` stores one and says so). Genuinely keyless local servers would be a product change (discovery, repair and the settings screen all read `needs_key`), not made here.
+
 Every protocol's `complete` takes the same keyword-only `num_ctx` and `keep_alive` (see
 2.2), and **only Ollama reads either**. `num_ctx` is the one parameter these APIs expose as a
 request option, so it becomes an entry in the `options` dict sent to `/api/generate` and

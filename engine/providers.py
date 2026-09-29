@@ -689,6 +689,11 @@ class OpenAICompatProvider(BaseProvider):
         # is not a call. The conductor's prose is delivered as a `model_delta`
         # event on the turn that carries text, which is enough to show progress
         # without pretending a half-written argument object is usable.
+        if not self._api_key:
+            # The same rule `complete` holds. This path used to send `Authorization: Bearer ` with nothing
+            # after it: a keyless server answered the conductor and refused every role, and a hosted one
+            # returned a 401 that names nothing (review of 2026-09-29).
+            raise ProviderError("missing_api_key", "API key is not set")
         url = f"{self._base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self._api_key}",
