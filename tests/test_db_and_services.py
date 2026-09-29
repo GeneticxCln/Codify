@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from engine.db import _add_column, connect
+from engine.db import SCHEMA, _add_column, connect
 from typing import Any
 
 from engine.models import (
@@ -762,6 +762,45 @@ class TestRoleMigration(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM agent_configs").fetchone()[0], len(ROLES))
         finally:
             conn.close()
+
+
+class TestUpgradedGoalsKeepTheConversationForeignKey(unittest.TestCase):
+    """`goals.conversation_id` is the same column on a fresh and an upgraded install.
+
+    The fresh schema declares `REFERENCES conversations(id) ON DELETE SET NULL`;
+    the migration for an install that predates threads used to add a bare
+    `TEXT`, so deleting a thread left its goals pointing at nothing there and
+    nulled them here.
+    """
+
+    def _legacy_db(self, directory: str) -> Path:
+        # The current goals table minus the one column the migration adds: the
+        # shape an install from before conversations actually has.
+        start = SCHEMA.index("CREATE TABLE IF NOT EXISTS goals (")
+        end = SCHEMA.index(");", start) + 2
+        legacy_goals = "\n".join(
+            line for line in SCHEMA[start:end].splitlines()
+            if "conversation_id" not in line
+        )
+        path = Path(directory) / "legacy.db"
+        raw = sqlite3.connect(path)
+        raw.executescript(
+            "CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL,"
+            " root_path TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL);\n"
+            + legacy_goals
+        )
+        raw.close()
+        return path
+
+    def test_the_migrated_column_declares_the_foreign_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            conn = connect(self._legacy_db(directory))
+            self.addCleanup(conn.close)
+            refs = [
+                (row["from"], row["table"], row["on_delete"])
+                for row in conn.execute("PRAGMA foreign_key_list(goals)")
+            ]
+        self.assertIn(("conversation_id", "conversations", "SET NULL"), refs)
 
 
 if __name__ == "__main__":

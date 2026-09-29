@@ -319,7 +319,15 @@ def connect(
     # A conversation is a thread of turns, and an install that predates it keeps
     # every goal with no thread: the column is nullable on purpose, so old
     # history renders as single-turn threads rather than disappearing.
-    _add_column(conn, "goals", "conversation_id", "TEXT")
+    #
+    # It carries the same foreign key the fresh schema declares. SQLite lets
+    # `ADD COLUMN` take a `REFERENCES` clause as long as the default is NULL, and
+    # without it an upgraded install kept dangling ids after a thread was
+    # deleted while a fresh install nulled them.
+    _add_column(
+        conn, "goals", "conversation_id",
+        "TEXT REFERENCES conversations(id) ON DELETE SET NULL",
+    )
     # The index is created unconditionally — `CREATE INDEX IF NOT EXISTS` is the
     # idiom the schema already uses — because listing a conversation's turns is
     # the hot read of a tab switch and must not scan every goal.
