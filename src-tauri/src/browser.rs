@@ -194,7 +194,7 @@ pub const LABEL_PREFIX: &str = "browser-";
 
 /// Whether a page being seated into the window should be visible.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SeatVisibility {
+pub(crate) enum SeatVisibility {
     Shown,
     Hidden,
 }

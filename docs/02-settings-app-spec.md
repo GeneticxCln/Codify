@@ -45,7 +45,7 @@ provider before they could see what it served, and then asked to choose a model
 after they had left that provider's row. Side by side is the order the two
 decisions are actually made in.
 
-* **The key is written immediately.** `PUT /settings/keys` is its own route, there
+* **The key is written immediately.** `POST /settings/keys` is its own route, there
   is no "apply" for a credential, and a save re-runs discovery so the picker beside
   it fills without a second visit.
 * **The model is staged, never applied by picking.** Only
