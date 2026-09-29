@@ -934,6 +934,16 @@ the same way it fails mid-planning: `design_contract_missing`.
 
 `action=delete` ⇒ `content` null. Paths contained by workspace.
 
+`action=edit` takes `edits: [{old_text, new_text, count}]` and no `content`. One spelling is read rather than
+refused: **`edit` with a non-empty `content` and no `edits`** is a whole-file `update` — the model wrote the
+file it wants and used the wrong name for it (13 of the 43 file entries Qwen2.5-1.5B produced in the recorded
+baseline, `08` §8; asking again did not help, since it does not know what `edit` is for). The engine logs
+`fixer sent action=edit with content and no edits for <path>; treated as a whole-file update`, never does it for
+an empty `content` (that would blank the file), and never when `edits` is present — those keep their meaning and
+`content` is ignored. A reply the engine cannot apply (an `old_text` that matches the wrong number of times, a
+path outside the workspace) is put to the model once, with the reason and, for an edit, the alternatives
+(`04` §4 "One re-ask").
+
 **A batch is applied completely or not at all** (`FileSystemService.apply`; audit of 2026-09-29, M4).
 Phase one resolves and validates every operation before anything is written — containment, `.git`, the
 action name, a target that is a directory, each `edit`'s search text — against a virtual view that reflects

@@ -4720,7 +4720,10 @@ class ExecutorService:
             that would not parse gets, with this reason quoted to the model. `fs.apply` resolves every
             edit before it writes anything, so a refused reply has written nothing and asking again is safe.
             """
-            files = self._parse_files(reply)
+            notes: list[str] = []
+            files = self._parse_files(reply, notes)
+            for note in notes:
+                self._log(goal_id, step.id, "info", note)
             # The fixer may declare itself unfinished: multi-stage changes (a config
             # file in one pass, the code that reads it in the next) do not fit one
             # reply. It asks by returning needs_another_pass=true WITH a plan note;
@@ -4754,7 +4757,15 @@ class ExecutorService:
             except ValueError as exc:
                 # An edit whose old_text does not match the file is the fixer's
                 # mistake — a contract failure, not an internal error.
-                raise AgentOutputInvalid(str(exc), role="fixer") from exc
+                message = str(exc)
+                if message.startswith("edit failed for "):
+                    message += (
+                        ". For action \"edit\", old_text must match the file's current text exactly and appear "
+                        "exactly `count` times: include enough surrounding lines to make it unique, set count "
+                        "to 0 to replace every occurrence, or use action \"update\" with the file's complete "
+                        "new content."
+                    )
+                raise AgentOutputInvalid(message, role="fixer") from exc
             applied.update(files=files, summaries=summaries, wants_pass=wants_pass)
 
         await self.orchestrator.run_agent(
@@ -5343,7 +5354,7 @@ class ExecutorService:
             parsed.append({"title": title, "description": desc, "suggested_paths": [str(p) for p in paths]})
         return parsed
 
-    def _parse_files(self, out: Any) -> list[dict[str, Any]]:
+    def _parse_files(self, out: Any, notes: list[str] | None = None) -> list[dict[str, Any]]:
         files = (out or {}).get("files")
         if not isinstance(files, list):
             raise AgentOutputInvalid("fixer must return files list", role="fixer")
@@ -5361,10 +5372,29 @@ class ExecutorService:
                 raise AgentOutputInvalid("fixer file entry invalid", role="fixer")
             if action == "delete" and content is not None:
                 raise AgentOutputInvalid("fixer delete must have null content", role="fixer")
+            if (
+                action == "edit" and not f.get("edits") and isinstance(content, str) and content.strip()
+            ):
+                # `edit` with a complete file in `content` and no edits: the model wrote the file it wants
+                # and used the wrong name for it. It is the commonest fixer reply a 1.5B model produced,
+                # and asking again did not help — it does not know what `edit` is for. Only with content to
+                # write (an empty one would blank the file), and never when edits are present: those keep
+                # their contract meaning and `content` is ignored, as the prompt says.
+                if notes is not None:
+                    notes.append(
+                        f"fixer sent action=edit with content and no edits for {path}; "
+                        "treated as a whole-file update"
+                    )
+                parsed.append({"path": path, "action": "update", "content": content})
+                continue
             if action == "edit":
                 edits = f.get("edits")
                 if not isinstance(edits, list) or not edits:
-                    raise AgentOutputInvalid("fixer edit requires a non-empty edits list", role="fixer")
+                    raise AgentOutputInvalid(
+                        f"fixer edit for {path} requires a non-empty edits list of {{old_text, new_text}}; "
+                        'to replace the whole file use action "update" with its complete content',
+                        role="fixer",
+                    )
                 for e in edits:
                     if not isinstance(e, dict) or not isinstance(e.get("old_text"), str) or not isinstance(e.get("new_text"), str):
                         raise AgentOutputInvalid(
