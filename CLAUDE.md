@@ -71,6 +71,7 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
   models.py     ROLES + ROLE_JOB + ROLE_TIMING — the one place roles are defined
   default_prompts.py   one system prompt per role
   chat_prompts.py  the turn + conductor prompts — no AgentRole, so not in the file above
+  replies.py      extract_json (what a model's reply contains) and the re-ask prompt — pure, no orchestrator
   conductor.py    the loop that decides the sequence; its moves are the pipeline's own doors
   skills.py       built-in + workspace recipes (`.codify/skills/`) discovered and loaded as data
   toolcall.py     the neutral tool-calling shape and its four protocol translations

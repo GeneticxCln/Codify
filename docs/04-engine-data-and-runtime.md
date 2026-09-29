@@ -641,14 +641,14 @@ exactly the arrangement that drifts.
 
 Extra keys ignored. Missing required keys → `agent_output_invalid`.
 
-**Reading a reply** (`executor.extract_json`, audit of 2026-09-29, H4). It was "first `{` or `[` to last
+**Reading a reply** (`engine/replies.py` `extract_json`, re-exported by `engine.executor`; audit of 2026-09-29, H4). It was "first `{` or `[` to last
 `}` or `]`, then `json.loads`", which right-answered 10 of the 23 shapes in `tests/test_extract_json.py` and
 none of the eight cut-off replies: a `<think>` block that mentions braces, an example object before the real
 one, a trailing comma, single quotes and Python literals, comments. Every top-level object or array in the
 reply is now read — after stripping reasoning blocks and applying the repairs a near-miss needs (comments and
 trailing commas; Python triple-quoted `"""…"""` values, whose closing delimiter is the first one that ends a value, since the text inside is often Python with docstrings of its own; raw newlines and tabs inside strings; then Python's spelling of the same document via `ast.literal_eval`, which executes nothing) —
 and the one the role asked for is chosen: the **last dict carrying any of the role's contract keys**
-(`executor.REPLY_KEYS`), else the last dict, else the last list. A reply that stops before its document does is
+(`replies.REPLY_KEYS`), else the last dict, else the last list. A reply that stops before its document does is
 refused, unless the role tolerates dropping an unfinished tail (`REPLY_TOLERATES_TRUNCATION`, **not the
 fixer**, whose reply is file contents and must never become a half-written file): then what was finished is
 kept and the element that was not is dropped — never completed, never a string closed.
