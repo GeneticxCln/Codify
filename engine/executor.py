@@ -770,7 +770,10 @@ class AgentOrchestrator:
         text accumulated so far, roughly every 400ms — so any event the
         client sees is self-contained (a mid-run reconnect repaints the
         current text correctly instead of replaying overlapping fragments).
-        A final event carries the complete text and `final: true`.
+        A final event carries the complete text and `final: true`, and once it has
+        landed the stream's intermediate snapshots have their text blanked
+        (`GoalService.compact_superseded_deltas`): they exist so a client sees the
+        reply as it forms, and each repeats everything before it.
         """
         state: dict[str, Any] = {"buf": "", "dirty": False, "last": 0.0}
 
@@ -795,11 +798,20 @@ class AgentOrchestrator:
             # one complete reply card at the end.
             if text is not None:
                 state["buf"] = text
-            self.goals.publish(self._event(
+            final = self._event(
                 goal_id, step_id, "model_delta",
                 {"role": role, "provider": provider_name, "model": model_name,
                  "text": state["buf"], "final": True},
-            ))
+            )
+            self.goals.publish(final)
+            # The stream is over and the final snapshot holds all of it, so the
+            # intermediate ones (each a copy of the text so far) are blanked, not
+            # deleted: the sequence stays dense. Best effort: a failure to tidy
+            # must never fail the call that succeeded.
+            try:
+                self.goals.compact_superseded_deltas(goal_id, step_id, role, final.sequence)
+            except Exception:
+                pass
 
         return on_delta, flush
 
@@ -2817,10 +2829,14 @@ class ExecutorService:
         somewhere, in `engine_settings` rather than `agent_configs` because
         docs/00 §6.1 fixes `AgentRole` at eight and this is not a role.
 
-        Only the provider, the model and the credential are taken. Temperature
-        and the system prompt stay with the base row: a loop that calls tools
-        wants the low temperature the roles already carry, and the prompt is
-        passed in by `_conduct` regardless.
+        Only the provider, the model and the credential are taken. The base row's
+        temperature and token cap are not used by the loop at all: a loop that
+        calls tools wants a low temperature, so `Conductor` calls the model at a
+        fixed `temperature=0.2, max_tokens=2048` whichever row it borrowed. (This
+        docstring used to say the base row's temperature applied, which is how a
+        scribe row tuned for wording at 0.4 / 1024 came to be blamed for the
+        conductor's behaviour; it never reached it.) The system prompt is passed
+        in by `_conduct` regardless.
 
         Naming a *different* provider drops the borrowed row's `base_url` and
         `api_key_ref` rather than carrying them. Both belong to the provider the

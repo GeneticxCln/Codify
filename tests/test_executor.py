@@ -2527,21 +2527,90 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
                 return full
             return await original(system_prompt, user_prompt, model, temperature, max_tokens)
 
+        # What went out *while* the reply streamed, which is what a live client
+        # sees: the store is the transport, so a spy on `publish` is the wire.
+        published: list[Any] = []
+        real_publish = self.goals.publish
+
+        def spy(event: Any) -> Any:
+            if event.type == "model_delta":
+                published.append(event)
+            return real_publish(event)
+
+        self.goals.publish = spy  # type: ignore[method-assign]
         self.provider.complete = streaming  # type: ignore[method-assign]
         await self.executor.run_planning(self.goal.id)
         step = self.goals.steps(self.goal.id)[0]
         await self.executor.run_step(self.goal.id, step.id)
-        deltas = self._deltas(self.goal.id)
-        # Every role call flushes exactly one final; scope to the fixer's stream.
-        fixer = [d for d in deltas if d.payload["role"] == "fixer"]
-        self.assertTrue(fixer, "streamed reply must produce model_delta events")
-        self.assertFalse(fixer[0].payload["final"], "intermediate snapshots stream first")
-        finals = [d for d in fixer if d.payload["final"]]
-        self.assertEqual(len(finals), 1, "exactly one final snapshot for the role")
-        self.assertTrue(finals[0].payload["text"].startswith('{"files"'))
+
+        live = [d for d in published if d.payload["role"] == "fixer"]
+        self.assertTrue(live, "streamed reply must produce model_delta events")
+        self.assertFalse(live[0].payload["final"], "intermediate snapshots stream first")
+        self.assertTrue(live[-1].payload["final"], "and the final one closes the stream")
+        self.assertEqual(
+            len([d for d in live if d.payload["final"]]), 1,
+            "exactly one final snapshot for the role",
+        )
         self.assertTrue(
-            all(a.sequence < b.sequence for a, b in zip(fixer, fixer[1:], strict=False)),
+            all(a.sequence < b.sequence for a, b in zip(live, live[1:], strict=False)),
             "snapshots must be ordered",
+        )
+
+        # At rest, the final snapshot keeps its text and the earlier ones do not.
+        # Each snapshot repeats all the text so far, so keeping every one was
+        # quadratic: a greeting answered in 561 tokens left 88 events and 106 KB,
+        # 55 times the reply. The *rows* stay, though: a goal's sequence is dense
+        # from 1 and a client tells a lost event by a gap, so deleting them would
+        # read as data loss.
+        stored = [d for d in self._deltas(self.goal.id) if d.payload["role"] == "fixer"]
+        self.assertEqual(len(stored), len(live), "a snapshot's row was deleted; the sequence has a gap")
+        self.assertEqual([d.sequence for d in stored], [d.sequence for d in live])
+        for earlier in stored[:-1]:
+            self.assertEqual(earlier.payload["text"], "", "a superseded snapshot kept its text")
+            self.assertTrue(earlier.payload["compacted"])
+        self.assertTrue(stored[-1].payload["final"])
+        self.assertTrue(stored[-1].payload["text"].startswith('{"files"'))
+
+    async def test_a_finished_stream_compacts_only_its_own_snapshots(self) -> None:
+        # Scoped to (goal, step, role) and to snapshots that carry a `final`
+        # flag: another role still streaming, another step's stream and the
+        # conductor's own prose deltas (which have no flag) must all keep their
+        # text, and every row must survive.
+        goal_id = self.goal.id
+
+        def snap(role: str, step: str | None, text: str, final: bool) -> Any:
+            return self.executor._event(
+                goal_id, step, "model_delta", {"role": role, "text": text, "final": final}
+            )
+
+        for text in ("a", "ab", "abc"):
+            self.goals.publish(snap("fixer", "s1", text, False))
+        self.goals.publish(snap("fixer", "s2", "other step", False))
+        self.goals.publish(snap("librarian", None, "still going", False))
+        self.goals.publish(self.executor._event(
+            goal_id, None, "model_delta", {"text": "conductor prose", "role": "conductor"}
+        ))
+        final = snap("fixer", "s1", "abc", True)
+        self.goals.publish(final)
+        before = [d.sequence for d in self._deltas(goal_id)]
+
+        changed = self.goals.compact_superseded_deltas(goal_id, "s1", "fixer", final.sequence)
+        self.assertEqual(changed, 3)
+        # Idempotent: a second pass finds nothing left to blank.
+        self.assertEqual(self.goals.compact_superseded_deltas(goal_id, "s1", "fixer", final.sequence), 0)
+
+        after = self._deltas(goal_id)
+        self.assertEqual([d.sequence for d in after], before, "rows were added or removed")
+        texts = [(d.payload["role"], d.step_id, d.payload["text"]) for d in after]
+        self.assertEqual(
+            sorted(texts, key=str),
+            sorted([
+                ("fixer", "s1", ""), ("fixer", "s1", ""), ("fixer", "s1", ""),
+                ("fixer", "s2", "other step"),
+                ("librarian", None, "still going"),
+                ("conductor", None, "conductor prose"),
+                ("fixer", "s1", "abc"),
+            ], key=str),
         )
 
     async def test_non_streaming_provider_still_gets_one_final_card(self) -> None:

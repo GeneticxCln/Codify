@@ -168,7 +168,7 @@ the UI's copy a member behind both.
 | `plan_consult` | — | `{refused, material_chars}` — the planner reopened the frozen evidence pack (`MAX_PLANNER_CONSULTS`) |
 | `agent_call_failed` | any | `{role, provider, model, target: "primary"\|"fallback", code, message, duration_ms}` — a provider call that failed; the record the Settings screen's "last error" reads |
 | `usage` | any | `{role, provider, model, duration_ms, input_tokens, output_tokens, total_tokens}` — one per successful model call; feeds `/goals/{id}/usage`, the audit document, and the stats rollups. `duration_ms` is absent on events written before it existed |
-| `model_delta` | any | `{role, provider, model, text, final}` — a streaming snapshot of the reply so far (self-contained, ~every 400 ms); `final: true` closes the card. Chat-render only |
+| `model_delta` | any | `{role, provider, model, text, final}` — a streaming snapshot of the reply so far (self-contained, ~every 400 ms); `final: true` closes the card, and once it lands the stream's earlier snapshots have their `text` blanked and `compacted: true` set (each repeats all the text before it, so keeping them was quadratic: 88 events / 106 KB for a 561-token reply). The rows stay: a goal's sequence is dense from 1 and a client tells a lost event by a gap. Chat-render only |
 | `error` | any | `{code: str, message: str, role: str \| null}` |
 
 `step_id` column: `—` marks goal-level events that never carry a step; `step`

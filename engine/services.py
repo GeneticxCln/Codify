@@ -1768,6 +1768,42 @@ class GoalService:
             "files_touched": False,
         }
 
+    def compact_superseded_deltas(
+        self, goal_id: str, step_id: str | None, role: str, before_sequence: int
+    ) -> int:
+        """Blank one finished stream's intermediate snapshots. Returns how many.
+
+        A streamed reply is stored as *snapshots*, each the full text so far, so
+        that any single event is self-contained (a client that connects mid-run
+        repaints the current text instead of replaying fragments). The price is
+        that every snapshot repeats all the ones before it: stored quadratically,
+        a 561-token reply left 88 events and 106 KB. Once the stream's final
+        snapshot has landed, the earlier ones say nothing it does not.
+
+        **The rows stay; their text goes.** A goal's event sequence is dense from
+        1 (`tests/stream_isolation.py`): a client detects a lost event by a gap,
+        so deleting the rows would read as data loss. Blanking the text keeps
+        every sequence number and every row and drops the quadratic part; the UI
+        renders the newest snapshot per stream, which is the final one.
+
+        Scoped tightly, because this rewrites audit rows: the goal, the step (a
+        parallel step's stream is its own), the role, and only rows that carry a
+        `final: false` flag and have not been compacted. The conductor's prose
+        deltas carry no flag and are left alone, as is anything above
+        `before_sequence` (a later stream of the same role at the same step).
+        """
+        cur = self._db.execute(
+            "UPDATE events SET payload = json_set(payload, '$.text', '', '$.compacted', json('true')) "
+            "WHERE goal_id = ? AND type = 'model_delta' "
+            "AND sequence < ? AND step_id IS ? "
+            "AND json_extract(payload, '$.role') = ? "
+            "AND json_extract(payload, '$.final') = 0 "
+            "AND json_extract(payload, '$.compacted') IS NULL",
+            (goal_id, before_sequence, step_id, role),
+        )
+        self._db.commit()
+        return cur.rowcount
+
     def next_sequence(self, goal_id: str) -> int:
         try:
             row = self._db.execute(
