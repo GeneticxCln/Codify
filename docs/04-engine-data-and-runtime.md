@@ -110,6 +110,29 @@ the race does not crash a background task), the conductor asks "cancelled?" befo
 tool call (`Conductor(cancelled=...)`, so a Cancel takes effect within one call), and the step driver only
 drives a `RUNNING` goal (M2: a cancel during a retried step used to be followed by a full conductor run).
 
+**One driver per goal, held for the whole run** (review of 2026-09-29, finding 2). `run_chat` and `run_planning`
+claim the goal's driver (`claim_driver`) for as long as they run, as `start`, `retry` and `apply` already did.
+The conductor's `plan` move leaves the goal `PENDING` while the turn goes on to write its answer, and `PENDING` is
+what Start accepts — so without the claim, Start then began a second driver on a goal whose turn was still going
+(two conductors writing the same steps, the turn's own `write` gate opening the moment the status read `RUNNING`),
+and Delete was allowed. Now `POST /goals/{id}/start` answers `409 driver_busy` while a turn or a planning run
+holds the goal, `DELETE` answers `409 goal_in_progress`, and Cancel — deliberately — stays allowed.
+
+**A goal has one plan.** `plan_steps` is unique on `(goal_id, ordinal)`, so a second plan did not append: it
+raised a raw `IntegrityError` after the first plan was written and failed the goal as `internal_error`. It is now
+refused before it starts: the pipeline skips a goal that has steps, the conductor's `plan` move answers "this goal
+already has a plan", and a conductor whose provider fails *after* `plan` (`_Conducted.planned` is read from the
+rows, not assumed) leaves the plan standing — `PENDING`, waiting for approval — instead of running the standard
+sequence over it.
+
+**The write gate is asked at the write.** The conductor's `write` and the step runner check approval before the
+fixer's model call, and a local model takes minutes to answer. `_fixer` asks again immediately before `fs.apply`
+(`_approval_withdrawn`): a goal the person has `CANCELLED` or `PAUSED`, deleted, or switched back to plan-only
+gets no write — the reply is discarded, nothing is written, the step stays as it was, and it is not reported as
+the model's failure (`WriteWithdrawn`, stage outcome `cancelled`). Narrower than the first check on purpose: a goal
+that is `FAILED` because a parallel sibling failed has not had its approval taken back, and the batch still lets
+its healthy steps finish.
+
 ### 1.3 PlanStep
 
 ```python

@@ -2202,6 +2202,15 @@ async def start_goal(goal_id: str, body: VersionedAction, request: Request) -> G
         raise ApiError(409, "illegal_status", "planning is still in progress")
     if g.status not in ("PENDING", "PAUSED"):
         raise ApiError(409, "illegal_status", f"cannot start from {g.status}")
+    executor = getattr(request.app.state, "executor", None)
+    if executor is not None and executor.is_driving(goal_id):
+        # A turn's `plan` move leaves the goal PENDING while the turn is still running, and a second driver
+        # started now would write the same steps as the first (review of 2026-09-29, finding 2).
+        raise ApiError(
+            409, "driver_busy",
+            "this goal is still being worked on — start it once the turn has finished",
+            {"goal_id": goal_id, "status": g.status},
+        )
     goals: GoalService = request.app.state.goals
     running = goals.update_status(goal_id, body.expected_version, "RUNNING")
     _spawn(request.app, _run_steps(request.app, goal_id), goal_id)
