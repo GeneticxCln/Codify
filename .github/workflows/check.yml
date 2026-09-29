@@ -22,17 +22,28 @@ name: check
 # What was observed, so nobody has to rediscover it. Every run of this workflow, from
 # the first (#1) to the latest, failed within 3-6 seconds with no log at all: the
 # jobs never reached their first step, not even checkout. That is not a test failure
-# and no change to the code can fix it. The repository is public, and GitHub's
-# standard hosted runners are free for public repositories, so it is not this
-# repository running out of minutes either — it is the account or the repository
-# being refused runners. The reason is printed at the top of any failed job's page
-# (an annotation above the log), and it is not returned by the API.
+# and no change to the code can fix it. The reason GitHub gives, verbatim:
 #
-# Until that is resolved this file runs only when started by hand, so a push or a PR
+#   "The job was not started because your account is locked due to a billing issue."
+#
+# It is an account-wide lock, so it applies even though this repository is public
+# and GitHub's standard hosted runners are otherwise free for public repositories.
+# Nothing in a workflow file can work around it: the job is refused before it is
+# scheduled. It clears when the account's billing is resolved (Settings, Billing and
+# plans; look for a failed payment or an unpaid invoice, which is often for a paid
+# product on the account rather than for Actions itself).
+#
+# The message is on the failed job's page, and also readable without logging in, for
+# a public repository, from the check run's annotations:
+#
+#   curl -s https://api.github.com/repos/OWNER/REPO/check-runs/CHECK_RUN_ID/annotations
+#
+# Until the lock is lifted this file runs only when started by hand, so a push or a PR
 # stops carrying four red marks that say nothing about the code. The verdict that
 # matters comes from `make ci` (pre-push hook, `make hooks`), and `make ci-report`
 # publishes that verdict on the commit as a status — free, and from a machine that
-# actually ran the gate.
+# actually ran the gate. A commit status is an API call, not a job, which is why it is
+# not subject to the runner refusal above.
 #
 # To turn it back on, add `push:` and `pull_request:` under `on:` once a run of the
 # manual trigger below gets past checkout.
