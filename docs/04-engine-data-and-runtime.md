@@ -639,7 +639,28 @@ exactly the arrangement that drifts.
 
 ## 4. Agent JSON contracts
 
-Parse with `json.loads`. Extra keys ignored. Missing required keys → `agent_output_invalid`.
+Extra keys ignored. Missing required keys → `agent_output_invalid`.
+
+**Reading a reply** (`executor.extract_json`, audit of 2026-09-29, H4). It was "first `{` or `[` to last
+`}` or `]`, then `json.loads`", which right-answered 10 of the 23 shapes in `tests/test_extract_json.py` and
+none of the eight cut-off replies: a `<think>` block that mentions braces, an example object before the real
+one, a trailing comma, single quotes and Python literals, comments. Every top-level object or array in the
+reply is now read — after stripping reasoning blocks and applying the repairs a near-miss needs (comments and
+trailing commas; then Python's spelling of the same document via `ast.literal_eval`, which executes nothing) —
+and the one the role asked for is chosen: the **last dict carrying any of the role's contract keys**
+(`executor.REPLY_KEYS`), else the last dict, else the last list. A reply that stops before its document does is
+refused, unless the role tolerates dropping an unfinished tail (`REPLY_TOLERATES_TRUNCATION`, **not the
+fixer**, whose reply is file contents and must never become a half-written file): then what was finished is
+kept and the element that was not is dropped — never completed, never a string closed.
+
+**One re-ask, then the fallback.** A reply that still cannot be read is asked for **once more from the same
+target** before the fallback is considered: the original task unchanged, then what was wrong (the parser's
+reason) and what the model said, then "reply again with the corrected JSON document only". The first bad
+reply is recorded as a failed call (`agent_call_failed`, `code: agent_output_invalid`, `retrying: true`) —
+a model that needs this is something to see — and the second call has books of its own. A valid reply is never
+re-asked; prose (`raw_output`) never is; a provider error on the re-ask is a provider failure like any other;
+after a second bad reply the failure reads "…after one repair attempt" and the fallback rule is exactly what
+it was. The bound is structural: no target is asked more than twice for one call.
 
 ### 4.0 Librarian
 

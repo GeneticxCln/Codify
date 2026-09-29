@@ -27,6 +27,7 @@ Everything else in this file is unmodified.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import json
@@ -36,7 +37,7 @@ import subprocess
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 
 from dataclasses import dataclass
 
@@ -553,25 +554,285 @@ def _as_read_int(value: Any, default: int | None) -> int | None:
     return n if n >= 1 else default
 
 
-def extract_json(raw: str) -> Any:
-    raw = (raw or "").strip()
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        raw = "\n".join(lines).strip()
-    start = -1
-    for i, ch in enumerate(raw):
-        if ch in ("{", "["):
-            start = i
+# The keys each role's JSON contract carries (`engine/default_prompts.py`, docs/04 §4), so that when
+# a reply holds more than one object the one the role asked for can be told from an example, an
+# aside or a scrap of reasoning. A *preference*, not a requirement: a reply with none of them is still
+# returned, and the role reports what it is missing in its own words.
+REPLY_KEYS: dict[str, tuple[str, ...]] = {
+    "librarian": ("summary", "files", "symbols", "reads", "searches", "git", "run", "enough", "test_command"),
+    "design": ("applies",),
+    "planner": ("steps", "consult", "reads", "searches"),
+    "fixer": ("files",),
+    "verifier": ("verdict", "argv"),
+    "critic": ("decision", "reasons", "run_command"),
+    "scribe": ("commit_message", "summary"),
+}
+
+# Reasoning models put their thinking in a tag before the answer, and the thinking mentions braces.
+_THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)\b[^>]*>.*?</\1\s*>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN = re.compile(r"<(think|thinking|reasoning)\b[^>]*>", re.IGNORECASE)
+_MAX_REPAIR_CHARS = 1_000_000
+
+
+def _skip_string(text: str, i: int) -> int:
+    """`text[i]` opens a string with `"` or `'`: the index just past its closing quote (or the end)."""
+    quote = text[i]
+    i += 1
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == quote:
+            return i + 1
+        i += 1
+    return len(text)
+
+
+def _balanced_end(text: str, start: int) -> int | None:
+    """The index just past the bracket that closes the one at `start`, or None if it never closes."""
+    depth = 0
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch in "\"'":
+            i = _skip_string(text, i)
+            continue
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _strip_comments_and_trailing_commas(text: str) -> str:
+    """Remove `//` and `/* */` comments and commas before a closer, leaving strings untouched."""
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in "\"'":
+            end = _skip_string(text, i)
+            out.append(text[i:end])
+            i = end
+        elif text.startswith("//", i):
+            while i < len(text) and text[i] != "\n":
+                i += 1
+        elif text.startswith("/*", i):
+            close = text.find("*/", i + 2)
+            i = len(text) if close == -1 else close + 2
+        elif ch == ",":
+            j = i + 1
+            while j < len(text) and text[j] in " \t\r\n":
+                j += 1
+            if j < len(text) and text[j] in "}]":
+                i += 1  # a trailing comma: dropped
+            else:
+                out.append(ch)
+                i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _pythonish(text: str) -> str:
+    """JSON's `true`/`false`/`null` as Python's, outside strings, so `ast.literal_eval` can read them."""
+    out: list[str] = []
+    i = 0
+    swaps = {"true": "True", "false": "False", "null": "None"}
+    while i < len(text):
+        ch = text[i]
+        if ch in "\"'":
+            end = _skip_string(text, i)
+            out.append(text[i:end])
+            i = end
+        elif ch.isalpha():
+            j = i
+            while j < len(text) and (text[j].isalnum() or text[j] == "_"):
+                j += 1
+            word = text[i:j]
+            out.append(swaps.get(word, word))
+            i = j
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _load_repaired(span: str) -> Any:
+    """`span` as JSON after the repairs a model's near-misses need, or raise ValueError.
+
+    In order of how little they change: comments and trailing commas, then Python's spelling of the
+    same document (single quotes, `None`, `True`) via `ast.literal_eval`, which reads literals and
+    executes nothing.
+    """
+    if len(span) > _MAX_REPAIR_CHARS:
+        raise ValueError("the reply is too large to repair")
+    cleaned = _strip_comments_and_trailing_commas(span)
+    try:
+        return json.loads(cleaned)
+    except ValueError:
+        pass
+    try:
+        value = ast.literal_eval(_pythonish(cleaned))
+    except (ValueError, SyntaxError, MemoryError, RecursionError) as exc:
+        raise ValueError(f"invalid JSON that could not be repaired ({exc})") from exc
+    if not isinstance(value, (dict, list)):
+        raise ValueError("invalid JSON that could not be repaired")
+    return value
+
+
+def _close_truncated(text: str) -> Any:
+    """A reply cut off by `max_tokens`: keep what was finished, and drop the element that was not.
+
+    Nothing is invented and no string is ever closed. A value the model was in the middle of writing is
+    dropped *with the element it belongs to* — the last array item, or the last key of an object — and
+    everything before it is kept. Closing an open string instead would turn a half-written value into a
+    complete-looking one, which for a file's `content` is a truncated file written as if finished; so
+    `extract_json` only calls this when the role has said that dropping a tail is safe for it
+    (`REPLY_TOLERATES_TRUNCATION`, which excludes the fixer). The role's own contract check then decides
+    whether what is left is enough, and the re-ask is what asks again if it is not.
+    """
+    stack: list[tuple[str, int]] = []  # (closer, index just after the opener)
+    last_comma: dict[int, int] = {}    # depth -> index of the latest comma directly inside that depth
+    complete_at = -1                   # the last index at which every open container held only whole values
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in "\"'":
+            end = _skip_string(text, i)
+            if end > len(text) or text[end - 1] != ch or end - 1 == i:
+                break  # the string never closed: the reply ends inside it
+            i = end
+            continue
+        if ch in "{[":
+            stack.append(("}" if ch == "{" else "]", i + 1))
+        elif ch in "}]":
+            if not stack:
+                break
+            stack.pop()
+            for depth in [d for d in last_comma if d > len(stack)]:
+                del last_comma[depth]
+            if not stack:
+                complete_at = i + 1
+        elif ch == ",":
+            last_comma[len(stack)] = i
+        i += 1
+    if not stack:
+        return _load_repaired(text[:complete_at] if complete_at > 0 else text)
+    # A reply that ends on a *closed* container and merely lacks the outer closers is complete: nothing
+    # was half-written. Anything else at the tail — a string, a number, `tru` — may be unfinished.
+    closers_all = "".join(closer for closer, _ in reversed(stack))
+    if text.rstrip()[-1:] in ("}", "]"):
+        try:
+            return _load_repaired(text + closers_all)
+        except ValueError:
+            pass
+    # Drop the partial element: cut at the last comma directly inside the innermost open array (or, with
+    # no array open, the innermost object); with no comma there, the partial element was the first.
+    arrays = [depth for depth, (closer, _) in enumerate(stack, 1) if closer == "]"]
+    depth = arrays[-1] if arrays else len(stack)
+    cut = last_comma.get(depth, stack[depth - 1][1])
+    keep = text[:cut].rstrip().rstrip(",")
+    closers = "".join(closer for closer, _ in reversed(stack[:depth]))
+    try:
+        return _load_repaired(keep + closers)
+    except ValueError as exc:
+        raise ValueError("invalid JSON: the reply ends before the document does") from exc
+
+
+# The roles for which dropping the unfinished tail of a cut-off reply is safe. Not the fixer: its reply is
+# file contents, and a document that stops half-way is a half-written file, not a shorter list.
+REPLY_TOLERATES_TRUNCATION: frozenset[str] = frozenset(
+    {"librarian", "design", "planner", "verifier", "critic", "scribe"}
+)
+
+
+def extract_json(raw: str, expect: Sequence[str] = (), *, repair_truncation: bool = False) -> Any:
+    """The JSON document a model's reply contains, or `ValueError` saying why there is none.
+
+    Models wrap the answer in a code fence, precede it with prose, or — the reasoning ones — with a
+    `<think>` block that mentions braces; they put an example object before the real one, leave a
+    trailing comma, write single quotes and `None`, or run out of tokens mid-document. This was "first
+    `{` or `[` to last `}` or `]`, then `json.loads`", which handled the first two and none of the rest
+    (audit of 2026-09-29, H4).
+
+    So every top-level object or array in the reply is read (each one after the repairs a near-miss
+    needs), and the one the role asked for is chosen: the last dict carrying any of `expect` (the role's
+    contract keys, `REPLY_KEYS`), else the last dict, else the last list. Last, because a model states its
+    answer after its examples; a dict over a list, because a bare `[1]` in the prose is a footnote.
+
+    A reply that stops before its document does is refused unless `repair_truncation` is set (see
+    `REPLY_TOLERATES_TRUNCATION` for who may set it).
+    """
+    text = (raw or "").lstrip("\ufeff").strip()
+    if not text:
+        raise ValueError("the reply was empty")
+    stripped = _THINK_BLOCK.sub(" ", text)
+    if stripped.strip() == "" or not any(ch in stripped for ch in "{["):
+        # Either nothing is left after removing the reasoning, or the reasoning never closed.
+        opened = _THINK_OPEN.search(stripped)
+        if opened and "{" not in stripped[: opened.start()] and "[" not in stripped[: opened.start()]:
+            # An unclosed reasoning tag: whatever JSON follows it is the answer that was meant.
+            stripped = stripped[opened.end():]
+    if not any(ch in stripped for ch in "{["):
+        if _THINK_OPEN.search(text):
+            raise ValueError("the reply is only unfinished reasoning: there is no JSON in it")
+        raise ValueError("there is no JSON in the reply")
+
+    decoder = json.JSONDecoder()
+    found: list[Any] = []
+    first_problem: str | None = None
+    i = 0
+    while i < len(stripped):
+        ch = stripped[i]
+        if ch not in "{[":
+            i += 1
+            continue
+        try:
+            value, end = decoder.raw_decode(stripped, i)
+            found.append(value)
+            i = end
+            continue
+        except ValueError as exc:
+            problem = str(exc)
+            if first_problem is None:
+                first_problem = f"invalid JSON: {problem}"
+        end_at = _balanced_end(stripped, i)
+        if end_at is None:
+            # It never closes: the reply was cut off, and this is the last thing in it.
+            if repair_truncation:
+                try:
+                    found.append(_close_truncated(stripped[i:]))
+                except ValueError:
+                    pass
+            else:
+                # More specific than the parser's own complaint, and what the re-ask should quote.
+                first_problem = f"invalid JSON: the reply ends before the document does ({problem})"
             break
-    if start != -1:
-        end = max(raw.rfind("}"), raw.rfind("]"))
-        if end > start:
-            raw = raw[start : end + 1]
-    return json.loads(raw)
+        try:
+            found.append(_load_repaired(stripped[i:end_at]))
+        except ValueError:
+            pass  # `first_problem` already holds why the plain parse refused it
+        # Skip the whole span either way: a span that could not be read must not have its
+        # *inner* objects returned in its place.
+        i = end_at
+
+    containers = [v for v in found if isinstance(v, (dict, list))]
+    if not containers:
+        raise ValueError(first_problem or "there is no JSON in the reply")
+    wanted = set(expect)
+    dicts = [v for v in containers if isinstance(v, dict)]
+    with_keys = [d for d in dicts if wanted and wanted & d.keys()]
+    if with_keys:
+        return with_keys[-1]
+    if dicts:
+        return dicts[-1]
+    return containers[-1]
 
 
 class _CallAccounting:
@@ -622,6 +883,31 @@ class _CallAccounting:
 
     def duration_ms(self) -> int:
         return int((time.monotonic() - self._started) * 1000)
+
+
+_REPAIR_QUOTE_CHARS = 3000
+
+
+def _repair_prompt(user_prompt: str, problem: str, previous: str) -> str:
+    """The original task, unchanged, followed by what was wrong with the reply and what it said.
+
+    The model is shown its own reply because a small model that is told only "invalid JSON" tends to
+    produce a different wrong answer; shown the reply and the parser's reason, it usually fixes the
+    slip. Reasoning blocks are dropped from the quote (they are the bulk of a reasoning model's reply
+    and none of what was wrong), and a long reply is quoted by its head and tail.
+    """
+    quoted = _THINK_BLOCK.sub(" ", previous).strip()
+    if len(quoted) > _REPAIR_QUOTE_CHARS:
+        head = quoted[: _REPAIR_QUOTE_CHARS * 3 // 5]
+        tail = quoted[-_REPAIR_QUOTE_CHARS * 2 // 5:]
+        quoted = f"{head}\n… [{len(quoted) - len(head) - len(tail)} characters left out] …\n{tail}"
+    return (
+        f"{user_prompt}\n\n---\n"
+        f"Your previous reply could not be used: {problem}.\n"
+        "Your previous reply was:\n<<<\n"
+        f"{quoted}\n>>>\n"
+        "Reply again with the corrected JSON document only: no prose, no code fence, no thinking out loud."
+    )
 
 
 class AgentOrchestrator:
@@ -929,7 +1215,6 @@ class AgentOrchestrator:
             books = self._accounting(
                 goal_id, step_id, role, target.provider, model_name, call_started,
             )
-            recorded_usage = books.usage
             provider.usage_sink = books.sink
             on_delta, flush_deltas = self._delta_publisher(goal_id, step_id, role, target.provider, model_name)
             provider.on_delta = on_delta
@@ -970,34 +1255,107 @@ class AgentOrchestrator:
             finally:
                 provider.on_delta = None
             flush_deltas(raw)
-            if self.tracer is not None and self.tracer.enabled(goal_id):
-                # After the call, before the parse: a reply the engine could not
-                # use is still what the model said, and a recording that dropped
-                # the malformed ones would replay a run that never failed.
-                # Re-asked here rather than reusing `tracing` because the flag
-                # is a per-call read and the two are the same question; the
-                # narrowing this needs is the point.
-                self.tracer.record(
-                    goal_id, step_id,
-                    role=role, provider=target.provider, model=model_name,
-                    temperature=float(target.temperature),
-                    max_tokens=int(target.max_tokens),
-                    system_prompt=system, user_prompt=user_prompt, response=str(raw),
-                    usage=recorded_usage,
-                    duration_ms=books.duration_ms(),
-                )
+            # After the call, before the parse: a reply the engine could not use is still what
+            # the model said, and a recording that dropped the malformed ones would replay a run
+            # that never failed.
+            self._trace_call(goal_id, step_id, role, target, model_name, system, user_prompt, raw, books)
+            if raw_output:
+                return raw
+            expect = REPLY_KEYS.get(role, ())
+            tolerate_cut = role in REPLY_TOLERATES_TRUNCATION
             try:
-                return raw if raw_output else extract_json(raw)
+                return extract_json(raw, expect, repair_truncation=tolerate_cut)
+            except (ValueError, TypeError) as exc:
+                problem = str(exc)
+
+            # One re-ask, of the *same* target, before anything else is tried: a small model's single
+            # formatting slip is the commonest way a step used to fail, and the remedy costs one short
+            # call against a step's worth of work (audit of 2026-09-29, H4). The slip is recorded as
+            # the failed call it was — the cost of a model that needs this is something to see — and
+            # the second call has books of its own, so its tokens and duration are its own.
+            self.goals.publish(self._event(
+                goal_id, step_id, "agent_call_failed",
+                {
+                    "role": role,
+                    "provider": target.provider,
+                    "model": model_name,
+                    "target": label,
+                    "code": "agent_output_invalid",
+                    "message": f"{role} returned non-JSON output: {problem}; asking the same model once more",
+                    "retrying": True,
+                    "duration_ms": books.duration_ms(),
+                },
+            ))
+            repair_started = time.monotonic()
+            repair_books = self._accounting(
+                goal_id, step_id, role, target.provider, model_name, repair_started,
+            )
+            provider.usage_sink = repair_books.sink
+            repair_prompt = _repair_prompt(user_prompt, problem, str(raw))
+            try:
+                repaired = await provider.complete(
+                    system_prompt=system,
+                    user_prompt=repair_prompt,
+                    model=model_name,
+                    temperature=target.temperature,
+                    max_tokens=target.max_tokens,
+                    num_ctx=target.ollama_num_ctx,
+                    keep_alive=target.ollama_keep_alive,
+                )
+            except ProviderError as exc:
+                self.goals.publish(self._event(
+                    goal_id, step_id, "agent_call_failed",
+                    {
+                        "role": role,
+                        "provider": target.provider,
+                        "model": model_name,
+                        "target": label,
+                        "code": exc.code,
+                        "message": exc.message,
+                        "duration_ms": repair_books.duration_ms(),
+                    },
+                ))
+                failures.append((label, target.provider, self._provider_failure(role, target, label, exc)))
+                if exc.code not in FALLBACK_TRIGGER_CODES:
+                    break
+                continue
+            self._trace_call(
+                goal_id, step_id, role, target, model_name, system, repair_prompt, repaired, repair_books,
+            )
+            try:
+                return extract_json(repaired, expect, repair_truncation=tolerate_cut)
             except (ValueError, TypeError) as exc:
                 failures.append((
                     label, target.provider,
-                    AgentOutputInvalid(f"{role} returned non-JSON output: {exc}", role=role),
+                    AgentOutputInvalid(
+                        f"{role} returned non-JSON output after one repair attempt: {exc}", role=role,
+                    ),
                 ))
                 if "agent_output_invalid" not in FALLBACK_TRIGGER_CODES:
                     break
                 continue
 
         raise self._all_targets_failed(role, failures)
+
+    def _trace_call(
+        self, goal_id: str, step_id: str | None, role: str, target: Any, model_name: str,
+        system: str, user_prompt: str, raw: Any, books: _CallAccounting,
+    ) -> None:
+        """Hand one finished call to the recorder, when this goal asked to be recorded.
+
+        Asked again here rather than remembered because the flag is a per-call read.
+        """
+        if self.tracer is None or not self.tracer.enabled(goal_id):
+            return
+        self.tracer.record(
+            goal_id, step_id,
+            role=role, provider=target.provider, model=model_name,
+            temperature=float(target.temperature),
+            max_tokens=int(target.max_tokens),
+            system_prompt=system, user_prompt=user_prompt, response=str(raw),
+            usage=books.usage,
+            duration_ms=books.duration_ms(),
+        )
 
 
 @dataclass
