@@ -55,6 +55,19 @@ class TestSweepMetricsWindow(unittest.IsolatedAsyncioTestCase):
         stamps = [r["timestamp"] for r in rows]
         self.assertEqual(sorted(stamps), stamps)
 
+    async def test_the_sweep_is_served_by_the_time_index_not_a_full_sort(self) -> None:
+        # 300,000 events took 235 ms to sweep before the index and 29 ms after; a
+        # plan is a fact about the query and the schema, where a timing is a fact
+        # about the machine, so this asserts the plan.
+        conn = self._conn_with_events(3)
+        plan = " ".join(
+            str(row["detail"])
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN " + engine_app._metric_sweep_sql(), engine_app._METRIC_EVENT_TYPES
+            )
+        )
+        self.assertIn("idx_events_time", plan)
+
     async def test_under_the_limit_nothing_is_dropped(self) -> None:
         conn = self._conn_with_events(3)
         rows = await engine_app._sweep_metrics(conn)

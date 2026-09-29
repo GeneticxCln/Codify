@@ -35,6 +35,7 @@ The UI holds the token **in memory** when it runs under the desktop shell: it as
 ### 1.4 Retained from v1
 
 - Command allowlist in `SandboxService` — additionally per-agent-scoped: only the Tester Agent's proposed commands ever reach `SandboxService.run_command`, never Coder or Planner raw output.
+- **What the allowlist does not stop (accepted risk).** `validate_argv` decides *which program* runs and with which flags; it cannot decide what the program does. `pytest`, `python <script>.py`, `npm run <script>`, `cargo test` and `go test` all execute code that lives in the workspace, and the fixer is the role that writes into the workspace. So an approved goal can write a file and a verification step can then run it, as the user, with the user's permissions, in a process group that is killed on timeout. That is inherent to running a project's tests, not a hole in the allowlist, and it is why the `write` move refuses while the goal is unapproved (docs/00 §6.9) and why the environment handed to these processes is filtered (`guarded_env`). Treat approving a goal in an untrusted repository as approving that repository's test suite.
 - Per-command argument policies (not `cmd[0]` only): e.g. `python` only with `-m pytest` / script-path-inside-workspace.
 - `FileSystemService` path containment (`root_path` boundary check).
 - Engine binds to `127.0.0.1` only.

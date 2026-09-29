@@ -458,15 +458,14 @@ async def request_validation_error(
 
 
 @app.get("/health")
-async def health(request: Request) -> dict[str, bool]:
-    # authenticated=False means the request arrived without a valid bearer
-    # token — still proof the engine is up (UI uses this as a fallback when
-    # Tauri IPC has not delivered the token yet).
-    expected = getattr(request.app.state, "token", None) or BOOT_TOKEN
-    header = request.headers.get("authorization", "")
-    # Constant-time compare: /health is reachable by any local process, so its
-    # answer must not leak the token a character at a time via timing.
-    return {"ok": True, "authenticated": _same_secret(header, f"Bearer {expected}")}
+async def health() -> dict[str, bool]:
+    # Reaching this handler at all means the request carried the boot token: the
+    # auth middleware answers every other caller with a 401 before routing. The UI
+    # reads that 401 as "engine up, token stale" (`checkEngineHealth` in api.ts),
+    # so `authenticated` here is always true. It stays in the body because that is
+    # the shape clients already parse; it used to be recomputed here, which made
+    # the `false` branch unreachable code that looked like a second line of defence.
+    return {"ok": True, "authenticated": True}
 
 
 @app.get("/settings/providers")
@@ -1695,6 +1694,24 @@ _METRIC_EVENT_TYPES = (
 )
 
 
+def _metric_sweep_sql() -> str:
+    """The query behind `_sweep_metrics`, in one place so a test can plan the real one.
+
+    The *newest* `_METRIC_SWEEP_LIMIT` rows, returned oldest-first. The bound has
+    to cut from the old end: an `ORDER BY timestamp LIMIT n` keeps the first n
+    ever written, so once the table outgrew the limit every view built on this
+    froze on ancient history and never threw. The outer sort puts them back in
+    the chronological order `recovery_counts` depends on. The inner
+    `ORDER BY timestamp DESC, sequence DESC` is what `idx_events_time` serves.
+    """
+    placeholders = ",".join("?" for _ in _METRIC_EVENT_TYPES)
+    return f"""SELECT * FROM (
+                SELECT type, payload, timestamp, goal_id, step_id, sequence FROM events
+                WHERE type IN ({placeholders})
+                ORDER BY timestamp DESC, sequence DESC LIMIT {_METRIC_SWEEP_LIMIT}
+            ) ORDER BY timestamp, sequence"""  # noqa: S608 — placeholders and a module constant only
+
+
 async def _sweep_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Every measurement event, with the ids recovery counting needs.
 
@@ -1703,20 +1720,7 @@ async def _sweep_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     aggregation that answers it cannot group on a list that has thrown the ids
     away.
     """
-    placeholders = ",".join("?" for _ in _METRIC_EVENT_TYPES)
-    # The *newest* `_METRIC_SWEEP_LIMIT` rows, returned oldest-first. The bound
-    # has to cut from the old end: an `ORDER BY timestamp LIMIT n` keeps the
-    # first n ever written, so once the table outgrew the limit every view
-    # built on this froze on ancient history and never threw. The outer sort
-    # puts them back in the chronological order `recovery_counts` depends on.
-    rows = conn.execute(
-        f"""SELECT * FROM (
-                SELECT type, payload, timestamp, goal_id, step_id, sequence FROM events
-                WHERE type IN ({placeholders})
-                ORDER BY timestamp DESC, sequence DESC LIMIT {_METRIC_SWEEP_LIMIT}
-            ) ORDER BY timestamp, sequence""",
-        _METRIC_EVENT_TYPES,
-    ).fetchall()
+    rows = conn.execute(_metric_sweep_sql(), _METRIC_EVENT_TYPES).fetchall()
     parsed = []
     for row in rows:
         try:
