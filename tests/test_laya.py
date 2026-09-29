@@ -484,6 +484,82 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
             await LayaService(disabled=False).decide({"request": "x"})
         self.assertEqual(seen, [{"device": "cpu"}], "unset must mean the CPU")
 
+    async def test_warming_loads_the_router_once_and_a_decision_does_not_reload_it(self) -> None:
+        # The first message used to pay the checkpoint load (~8 s on the CPU) on
+        # top of everything else. Warming does it at start, off the request path.
+        built: list[int] = []
+
+        class Router:
+            def __init__(self, **kwargs: Any):
+                built.append(1)
+
+            def preload(self, names: list[str] | None = None) -> None:
+                pass
+
+            def predict(self, state: dict[str, Any], questions: list[Any]) -> dict[str, Any]:
+                return {"answers": {"intent": {"choice": "other"}}, "routing": {}}
+
+        _install_fake_sdk(Router)
+        service = LayaService(disabled=False)
+        worker = service.start_warming()
+        assert worker is not None, "warming did not start"
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(built, [1])
+        decision = await service.decide({"request": "hi"})
+        self.assertEqual(decision.engine, "sdk")
+        self.assertEqual(built, [1], "the first decision rebuilt a router that was already warm")
+
+    async def test_a_decision_during_warm_up_waits_for_it_instead_of_skipping(self) -> None:
+        # The alternative — skipping the gate until the load finishes — would make
+        # the first message the one that runs unguarded (or pays an LLM call for
+        # a gate the SDK is seconds from answering).
+        built: list[int] = []
+
+        class Router:
+            def __init__(self, **kwargs: Any):
+                time.sleep(0.4)
+                built.append(1)
+
+            def preload(self, names: list[str] | None = None) -> None:
+                pass
+
+            def predict(self, state: dict[str, Any], questions: list[Any]) -> dict[str, Any]:
+                return {"answers": {"intent": {"choice": "other"}}, "routing": {}}
+
+        _install_fake_sdk(Router)
+        service = LayaService(disabled=False)
+        worker = service.start_warming()
+        assert worker is not None
+        decision = await service.decide({"request": "hi"})  # arrives mid-load
+        worker.join(5)
+        self.assertEqual(decision.engine, "sdk", "a decision during warm-up was skipped")
+        self.assertEqual(built, [1], "a second router was built beside the warming one")
+
+    async def test_warming_never_raises_and_is_a_no_op_when_the_sdk_is_off(self) -> None:
+        class Router:
+            def __init__(self, **kwargs: Any):
+                raise RuntimeError("weights missing")
+
+        _install_fake_sdk(Router)
+        service = LayaService(disabled=False)
+        worker = service.start_warming()
+        assert worker is not None
+        worker.join(5)
+        self.assertIn("weights missing", service.sdk_error() or "")
+
+        # Disabled (the hermetic pin, `CODIFY_LAYA_SDK=0`): nothing starts at all.
+        self.assertIsNone(LayaService(disabled=True).start_warming())
+
+    async def test_warming_can_be_turned_off(self) -> None:
+        class Router:
+            def __init__(self, **kwargs: Any):
+                raise AssertionError("must not be built")
+
+        _install_fake_sdk(Router)
+        with mock.patch.dict(os.environ, {"CODIFY_LAYA_WARM": "0"}):
+            self.assertIsNone(LayaService(disabled=False).start_warming())
+
     def test_sdk_disable_env_forces_the_fallback(self) -> None:
         _install_fake_sdk(object)
         import os
@@ -517,6 +593,7 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         # developer's exported `CODIFY_LAYA_DEVICE` cannot reach a fake Router.
         self.assertNotIn("CODIFY_LAYA_DEVICE", os.environ)
         self.assertNotIn("CODIFY_LAYA_TIMEOUT_S", os.environ)
+        self.assertNotIn("CODIFY_LAYA_WARM", os.environ)
         _install_fake_sdk(object)
         self.assertFalse(LayaService().sdk_available())
 

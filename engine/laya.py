@@ -96,6 +96,7 @@ DEFAULT_SDK_DEVICE = "cpu"
 # these two).
 ROUTED_CHECKPOINTS = ("english", "multilingual")
 SDK_TIMEOUT_ENV = "CODIFY_LAYA_TIMEOUT_S"
+SDK_WARM_ENV = "CODIFY_LAYA_WARM"  # "0" turns the start-up warm-up off
 # Measured ~10 s for the first decision in a process (checkpoint load) and ~31 ms
 # after (docs/05). 30 s is three cold loads: past it the gate is not slow, it is
 # stuck, and a person is waiting on a reply.
@@ -370,6 +371,9 @@ class LayaService:
         # something to run two forward passes through, and a call that outlived
         # its timeout is still holding it. See `_decide_with_sdk`.
         self._sdk_lock = threading.Lock()
+        # Set from the moment warming is asked for until the load is over, so a
+        # decision that arrives meanwhile waits for it instead of being skipped.
+        self._warming = threading.Event()
         self._sdk_timeout = sdk_timeout if sdk_timeout is not None else _timeout_from_env()
 
     # --- capability probing ------------------------------------------------
@@ -422,6 +426,39 @@ class LayaService:
 
     # --- decision engines --------------------------------------------------
 
+    def start_warming(self) -> threading.Thread | None:
+        """Load the SDK's checkpoints now, in the background, instead of on the first message.
+
+        The first decision in a process pays the checkpoint load (~8 s on the CPU,
+        measured), on top of the model call it is guarding; warming moves that to
+        engine start, where nobody is waiting. Returns the thread, or None when
+        there is nothing to warm: the SDK is off, not installed, or
+        `CODIFY_LAYA_WARM=0` opted out (it holds ~4 GB of RAM from then on, where
+        loading lazily holds it only once a message has been sent).
+
+        A daemon thread and not the executor `to_thread` uses: those threads are
+        joined at interpreter exit, so an engine asked to stop mid-load would
+        wait for the load to finish. Never raises. A load that fails records why
+        in `sdk_error`, and the first decision falls back exactly as before.
+        """
+        if os.environ.get(SDK_WARM_ENV, "").strip().lower() in ("0", "false", "no", "off"):
+            return None
+        if not self.sdk_available():
+            return None
+        self._warming.set()
+        worker = threading.Thread(target=self._warm, name="laya-warm", daemon=True)
+        worker.start()
+        return worker
+
+    def _warm(self) -> None:
+        try:
+            with self._sdk_lock:
+                self._sdk_router()
+        except Exception as exc:  # `_sdk_router` catches its own; this is the last line
+            self._sdk_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            self._warming.clear()
+
     def _decide_with_sdk(self, state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         """Blocking: load the router if need be, then one forward pass. Runs on a worker thread.
 
@@ -433,7 +470,13 @@ class LayaService:
         model that is already stuck.
         """
         if not self._sdk_lock.acquire(blocking=False):
-            raise LayaSdkBusy("the laya SDK is still busy with an earlier request")
+            if not self._warming.is_set():
+                raise LayaSdkBusy("the laya SDK is still busy with an earlier request")
+            # The busy one is the start-up load, which is seconds from done and
+            # exactly what this request needs: wait for it, no longer than the
+            # request itself would have waited for the SDK.
+            if not self._sdk_lock.acquire(timeout=self._sdk_timeout):
+                raise LayaSdkBusy("the laya SDK is still loading")
         try:
             router = self._sdk_router()
             if router is None:

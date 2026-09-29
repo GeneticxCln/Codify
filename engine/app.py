@@ -167,6 +167,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The gate needs the registry for its LLM fallback when the real Laya SDK is
     # not installed; without it every goal's gate would silently skip.
     app.state.laya = LayaService(registry=app.state.registry)
+    # Load the gate's checkpoints in the background, so the first message does not
+    # pay for it. Off the event loop and never awaited: the engine's readiness
+    # (the handshake the desktop shell waits for) does not depend on it.
+    app.state.laya.start_warming()
     # Trace recording (docs/04 §8). Attached whether or not a goal asked for
     # it: the service is a reader of `goals.trace`, and a goal that has not
     # asked records nothing. Wired here rather than per-goal so switching

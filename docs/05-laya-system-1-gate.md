@@ -82,6 +82,17 @@ LLM fallback it replaces. **On the CPU** (the default, below), with the GPU hidd
 capped at four cores: loading `english` + `multilingual` takes ~8 s and peaks at ~4.4 GB of RAM
 (all three checkpoints: ~35 s and ~6.1 GB), and a decision takes **~1.2 s**.
 
+**The checkpoints are loaded at engine start, not on the first message.** `LayaService.start_warming()`
+runs the load on a daemon thread from the app's lifespan (it returns in milliseconds, so the
+engine's readiness and the desktop shell's handshake never wait on it). Measured on the real SDK:
+warm-up finishes ~7 s later, and the first decision after that takes ~1.4 s instead of paying the
+load itself. A decision that arrives *during* the load waits for it (up to the same timeout)
+rather than being skipped, so the first message is neither unguarded nor charged a second,
+fallback model call. It is a daemon thread on purpose: `asyncio.to_thread` workers are joined at
+interpreter exit, so an engine asked to stop mid-load would wait for the load. The price is ~4 GB
+of RAM held from launch instead of from the first message; `CODIFY_LAYA_WARM=0` opts out. A load
+that fails records why in `sdk_error` and the first decision falls back exactly as before.
+
 **The gate runs on the CPU unless `CODIFY_LAYA_DEVICE` says otherwise.** The machine this runs on
 is usually one where Ollama already fills the GPU with the agent's own model and the desktop needs
 some too. Loading ~6 GB of checkpoints onto it does not only crawl through CUDA out-of-memory
