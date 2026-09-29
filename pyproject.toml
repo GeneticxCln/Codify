@@ -30,6 +30,10 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
     "mypy>=1.11",
+    # Starlette's TestClient prefers this over httpx and falls back to httpx with a
+    # deprecation warning; a later Starlette will require it. Tests only — the engine's
+    # own outbound calls stay on `httpx` above.
+    "httpx2>=2.13,<3",
     # Regenerates the checked-in logo/desktop icons on demand
     # (scripts/make_logo.py); nothing in the gate invokes it.
     "pillow>=10.0",
