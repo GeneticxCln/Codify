@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri run-engine run-engine-preview run-engine-scratch check ci ci-python-floor check-history hooks clean bench bench-smoke
+.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri run-app dev-app run-engine run-engine-preview run-engine-scratch check ci ci-python-floor check-history hooks clean bench bench-smoke
 
 # mypy is a dev tool, installed like ruff (`pip install mypy` or `pip install -e ".[dev]"`);
 # when it is only in the project venv, fall back to that so `make check` works unactivated.
@@ -29,6 +29,8 @@ help:
 	@echo "  make dev-ui       - Start Vite dev server"
 	@echo "  make check-tauri  - Cargo check Tauri Rust backend"
 	@echo "  make build-tauri  - Build Tauri desktop application"
+	@echo "  make run-app      - Build the UI and launch the desktop app with it embedded (the way to open Codify)"
+	@echo "  make dev-app      - Launch the desktop app against the Vite dev server, with hot reload (needs cargo-tauri)"
 	@echo "  make run-engine   - Start Codify Python engine standalone"
 	@echo "  make run-engine-preview - Start the engine and print the token/port for the browser preview"
 	@echo "  make run-engine-scratch - Start an engine isolated under $(SCRATCH_HOME) (real ~/.codify untouched)"
@@ -156,8 +158,26 @@ check-tauri:
 # NOTE: this only compiles the Rust lib (`cargo build`). It does NOT produce a
 # desktop installer — that needs the Tauri CLI, which is not vendored in ui/
 # (`npm i -D @tauri-apps/cli`, then `npx tauri build` from the repo root).
+# A plain `cargo build` is a *dev* build: the window loads http://localhost:5173 and
+# is blank without a Vite server. Fine for the smoke scripts, which bring their own
+# page; not something to open by hand. Use `run-app` for that.
 build-tauri:
 	cd src-tauri && cargo build
+
+# The desktop app with `ui/dist` embedded (the `custom-protocol` feature), so it
+# needs no dev server. The UI is rebuilt first, and the Rust build runs under a
+# memory cap where systemd can give one, for the reason UI_TEST_GUARD gives: a
+# compile that runs away should end that compile, not the desktop session. The app
+# itself runs uncapped.
+BUILD_GUARD := $(shell systemd-run --user --scope --quiet true >/dev/null 2>&1 && echo 'systemd-run --user --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 --')
+
+run-app: build-ui
+	cd src-tauri && $(BUILD_GUARD) cargo build --features custom-protocol
+	cd src-tauri && cargo run --features custom-protocol
+
+# Hot reload: `cargo tauri dev` starts Vite (beforeDevCommand) and points the window at it.
+dev-app:
+	cd src-tauri && cargo tauri dev
 
 run-engine:
 	python3 -m engine

@@ -402,9 +402,15 @@ test, where the isolation guarantees live, and how to run hermetically.
 
 #### Option A: Tauri Desktop App
 ```bash
-cd src-tauri
-cargo run
+make run-app      # builds the UI, embeds it, launches the app
+make dev-app      # or: hot reload against the Vite dev server (needs cargo-tauri)
 ```
+
+> **Do not launch it with a bare `cargo run`.** That is a *dev* build: the window
+> loads `http://localhost:5173` and shows only a connection error unless a Vite
+> dev server is already running, which looks exactly like an app whose panes are
+> not wired. `make run-app` turns on the `custom-protocol` feature so the UI is
+> embedded; `cargo tauri dev` starts Vite for you.
 
 > **Bundled app requires Python 3.10+.** The Tauri shell does not embed the
 > engine: at startup it spawns `python3 -m engine` from the project root and

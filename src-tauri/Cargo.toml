@@ -94,3 +94,10 @@ default = ["devtools"]
 # test, debug, release — carries it; the pane's control is unconditional
 # because the feature is.
 devtools = ["tauri/devtools"]
+# Serve the embedded `ui/dist` instead of the dev server. Without this a plain
+# `cargo run` / `cargo build` is a *dev* build (`cfg(dev)`): the window loads
+# `devUrl` (http://localhost:5173) and shows nothing but a connection error
+# unless Vite happens to be running. `make run-app` turns it on; `cargo tauri
+# build` enables the same tauri feature itself. Not in `default`, on purpose:
+# `cargo tauri dev` needs the dev build so it can point the window at Vite.
+custom-protocol = ["tauri/custom-protocol"]
