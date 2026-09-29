@@ -82,7 +82,19 @@ RISK_WARN_LEVEL = 1.5             # score >= this warns (2.0 == destructive)
 CLARIFY_WARN_THRESHOLD = 0.80     # noul >= this warns about ambiguity
 
 SDK_DISABLE_ENV = "CODIFY_LAYA_SDK"  # set to "0" to force the LLM fallback
-SDK_DEVICE_ENV = "CODIFY_LAYA_DEVICE"  # e.g. "cpu": keep the gate off a GPU another model fills
+SDK_DEVICE_ENV = "CODIFY_LAYA_DEVICE"  # "cuda" opts the gate back onto the GPU
+# The gate runs on the CPU unless told otherwise. The machine this runs on is
+# usually one where Ollama already fills the GPU with the agent's own model, and
+# the desktop needs some of it too; a gate that loads ~6 GB of checkpoints there
+# races the display server for the last of it (see `_sdk_router`). On the CPU a
+# decision costs ~1.2 s, against the 20+ s of the model call it guards.
+DEFAULT_SDK_DEVICE = "cpu"
+# The checkpoints the SDK's automatic routing chooses between. The third,
+# `typed-decisions`, is reachable only by `model=`, `task=` or
+# `auto_task_detection`, none of which this gate uses, and it is ~27 s and
+# ~1.7 GB of the load (measured: 6.1 GB / 35 s for all three, 4.4 GB / 8 s for
+# these two).
+ROUTED_CHECKPOINTS = ("english", "multilingual")
 SDK_TIMEOUT_ENV = "CODIFY_LAYA_TIMEOUT_S"
 # Measured ~10 s for the first decision in a process (checkpoint load) and ~31 ms
 # after (docs/05). 30 s is three cold loads: past it the gate is not slow, it is
@@ -382,19 +394,21 @@ class LayaService:
         try:
             from laya import Router
 
-            # preload=True keeps every checkpoint resident: without it, traffic
-            # that alternates languages rebuilds a model on each request
-            # (measured at 7-10 s per switch in the upstream benchmarks).
+            # Preloaded, so routing is free and no request rebuilds a model when
+            # traffic alternates languages (7-10 s per switch upstream) -- but
+            # only the checkpoints routing can pick, not `preload=True`'s all
+            # three (see ROUTED_CHECKPOINTS).
             #
-            # `device` is passed only when asked for. A GPU that Ollama already
-            # fills makes the checkpoint load crawl through CUDA out-of-memory
-            # retries (90 s for a "hi", measured), and a small gate model has no
-            # business competing with the agent's own for it.
-            kwargs: dict[str, Any] = {"preload": True}
-            device = os.environ.get(SDK_DEVICE_ENV, "").strip()
-            if device:
-                kwargs["device"] = device
-            self._router = Router(**kwargs)
+            # The device is the CPU by default. On a GPU that Ollama already
+            # fills, torch's checkpoint load crawls through out-of-memory
+            # retries (90 s for a "hi", measured) and, worse, competes with the
+            # display server for the last VRAM: one such run logged 3,389
+            # nvidia-drm "Failed to allocate NVKMS memory" errors in a minute,
+            # which is the desktop freezing. `CODIFY_LAYA_DEVICE=cuda` opts in.
+            device = os.environ.get(SDK_DEVICE_ENV, "").strip() or DEFAULT_SDK_DEVICE
+            router = Router(device=device)
+            router.preload(list(ROUTED_CHECKPOINTS))
+            self._router = router
         except Exception as exc:  # missing weights, no network, unsupported host
             self._sdk_error = f"{type(exc).__name__}: {exc}"
             return None

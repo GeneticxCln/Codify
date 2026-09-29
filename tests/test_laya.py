@@ -287,10 +287,14 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
 
     async def test_sdk_is_preferred_over_the_llm_fallback(self) -> None:
         calls: list[dict[str, Any]] = []
+        preloaded: list[Any] = []
 
         class Router:
-            def __init__(self, preload: bool = False):
-                calls.append({"preload": preload})
+            def __init__(self, **kwargs: Any):
+                calls.append(kwargs)
+
+            def preload(self, names: list[str] | None = None) -> None:
+                preloaded.append(names)
 
             def predict(self, state: dict[str, Any], questions: list[Any]) -> dict[str, Any]:
                 self.assert_questions = questions
@@ -313,11 +317,18 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(decision.blocked)
         self.assertEqual(decision.model, "laya-noul-de")
         self.assertEqual(provider.calls, [], "SDK path must not call the fallback model")
-        self.assertEqual(calls, [{"preload": True}])
+        # On the CPU unless asked otherwise, and only the two checkpoints that
+        # automatic routing can choose: the SDK's third (`typed-decisions`) is
+        # ~27 s and ~1.7 GB of load for a model this gate never asks for.
+        self.assertEqual(calls, [{"device": "cpu"}])
+        self.assertEqual(preloaded, [["english", "multilingual"]])
 
     async def test_sdk_crash_falls_back_instead_of_failing(self) -> None:
         class Router:
-            def __init__(self, preload: bool = False):
+            def __init__(self, **kwargs: Any):
+                pass
+
+            def preload(self, names: list[str] | None = None) -> None:
                 pass
 
             def predict(self, state: dict[str, Any], questions: list[Any]) -> dict[str, Any]:
@@ -344,7 +355,10 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         # Stop, not the health probe, not another goal's stream. A ticker that
         # only runs when the loop is free is the honest witness.
         class Router:
-            def __init__(self, preload: bool = False):
+            def __init__(self, **kwargs: Any):
+                pass
+
+            def preload(self, names: list[str] | None = None) -> None:
                 pass
 
             def predict(self, state: dict[str, Any], questions: list[Any]) -> dict[str, Any]:
@@ -373,7 +387,10 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         predicts = 0
 
         class Router:
-            def __init__(self, preload: bool = False):
+            def __init__(self, **kwargs: Any):
+                pass
+
+            def preload(self, names: list[str] | None = None) -> None:
                 pass
 
             def predict(self, state: dict[str, Any], questions: list[Any]) -> dict[str, Any]:
@@ -412,28 +429,37 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(third.engine, "sdk")
         self.assertIsNone(service.sdk_error(), "a timeout must not leave a stale error in Settings")
 
-    async def test_the_sdk_device_can_be_pinned_by_environment(self) -> None:
-        # A GPU that Ollama already fills makes the gate's checkpoint load crawl
-        # through CUDA out-of-memory retries; the way out is to put the small
-        # gate model somewhere else. Unset, the SDK chooses, as before.
+    async def test_the_gate_runs_on_the_cpu_unless_told_otherwise(self) -> None:
+        # The default that matters. A GPU that Ollama already fills has no room
+        # for a second model, and torch's out-of-memory retries race the display
+        # server for the last of it: one such run logged 3,389 nvidia-drm
+        # "Failed to allocate NVKMS memory" errors in a minute, which is the
+        # desktop freezing. On the CPU the gate costs ~1.2 s a decision and
+        # cannot touch the display; `CODIFY_LAYA_DEVICE` opts back in.
         seen: list[dict[str, Any]] = []
 
         class Router:
             def __init__(self, **kwargs: Any):
                 seen.append(kwargs)
 
+            def preload(self, names: list[str] | None = None) -> None:
+                pass
+
             def predict(self, state: dict[str, Any], questions: list[Any]) -> dict[str, Any]:
                 return {"answers": {}, "routing": {}}
 
         _install_fake_sdk(Router)
-        with mock.patch.dict(os.environ, {"CODIFY_LAYA_DEVICE": "cpu"}):
-            await LayaService(disabled=False).decide({"request": "x"})
-        self.assertEqual(seen, [{"preload": True, "device": "cpu"}])
+        for env, expected in (("", "cpu"), ("   ", "cpu"), ("cuda", "cuda"), ("cuda:1", "cuda:1")):
+            seen.clear()
+            with mock.patch.dict(os.environ, {"CODIFY_LAYA_DEVICE": env}):
+                await LayaService(disabled=False).decide({"request": "x"})
+            self.assertEqual(seen, [{"device": expected}], f"CODIFY_LAYA_DEVICE={env!r}")
 
         seen.clear()
-        with mock.patch.dict(os.environ, {"CODIFY_LAYA_DEVICE": ""}):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CODIFY_LAYA_DEVICE", None)
             await LayaService(disabled=False).decide({"request": "x"})
-        self.assertEqual(seen, [{"preload": True}])
+        self.assertEqual(seen, [{"device": "cpu"}], "unset must mean the CPU")
 
     def test_sdk_disable_env_forces_the_fallback(self) -> None:
         _install_fake_sdk(object)

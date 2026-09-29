@@ -52,7 +52,7 @@ The gate reports which engine answered in `laya_decision.payload.engine`:
 
 | `engine` | When | Blocks? |
 |---|---|---|
-| `sdk` | `pip install laya` + local weights, run in-process via `Router(preload=True)` | yes |
+| `sdk` | `pip install laya` + local weights, run in-process on the CPU by default (`Router(device="cpu")`, the two routable checkpoints preloaded) | yes |
 | `llm-fallback` | the `laya` role's configured provider answers the same typed contract | yes |
 | `skipped` | neither available (no SDK, no reachable provider) | **never** |
 
@@ -60,8 +60,10 @@ A gate that cannot run is a **skipped** gate, never a broken pipeline: `LayaServ
 catches everything and the pipeline proceeds exactly as it did before Laya existed. Skipping is
 logged (`log` event, level `info`) and surfaced in Settings, so a silent no-op can't hide.
 
-`Router(preload=True)` is deliberate: without preload, traffic that alternates languages rebuilds
-a checkpoint per request (upstream measured 7–10 s per switch).
+The routable checkpoints are preloaded on purpose: without it, traffic that alternates languages
+rebuilds a checkpoint per request (upstream measured 7–10 s per switch). Only `english` and
+`multilingual` are preloaded, not `Router(preload=True)`'s all three: the third, `typed-decisions`,
+is reachable only through `model=`, `task=` or `auto_task_detection`, none of which the gate uses.
 
 Set `CODIFY_LAYA_SDK=0` to force the fallback path, and **the test suite sets it on every
 run** (`tests/hermetic.py`, beside the parent-pid variables it also always clears). The
@@ -74,9 +76,20 @@ that wants the SDK path asks for it by name: it installs a fake `laya` module an
 
 Outside a test run, leaving the variable unset is what you want: the whole point of
 installing the SDK is that `sdk_available()` is true and the gate answers in-process.
-Measured here, `Router(preload=True)` costs ~9.7 s on the first decision in a process
-(checkpoint load) and ~31 ms on every one after, against ~20.8 s and ~1.4k tokens for the
-LLM fallback it replaces.
+Measured here, `Router(preload=True)` on a free GPU cost ~9.7 s on the first decision in a
+process (checkpoint load) and ~31 ms on every one after, against ~20.8 s and ~1.4k tokens for the
+LLM fallback it replaces. **On the CPU** (the default, below), with the GPU hidden and the process
+capped at four cores: loading `english` + `multilingual` takes ~8 s and peaks at ~4.4 GB of RAM
+(all three checkpoints: ~35 s and ~6.1 GB), and a decision takes **~1.2 s**.
+
+**The gate runs on the CPU unless `CODIFY_LAYA_DEVICE` says otherwise.** The machine this runs on
+is usually one where Ollama already fills the GPU with the agent's own model and the desktop needs
+some too. Loading ~6 GB of checkpoints onto it does not only crawl through CUDA out-of-memory
+retries (90 s for a "hi"); it races the display server for the last VRAM. One such run logged 3,389
+`nvidia-drm: Failed to allocate NVKMS memory` errors in a single minute, which is the compositor
+failing to allocate its buffers: the whole desktop froze. A pre-flight gate must not be able to do
+that, and ~1.2 s a decision costs nothing against the 20+ s model call it guards. Set
+`CODIFY_LAYA_DEVICE=cuda` (or `cuda:1`) to opt back in on a GPU with room to spare.
 
 **The SDK never runs on the event loop.** `decide` is `async`, but the checkpoint load and
 `predict` are blocking, so they run on a worker thread (`asyncio.to_thread`). They used to run
@@ -93,8 +106,7 @@ no goal id to stop), the health probe, or any other stream. Three rules keep it 
   threads behind a model that is already stuck. When the stalled call finishes, the next request
   uses the SDK again; a timeout is a verdict on one request, not a switch-off, and it is kept
   out of `sdk_error` so Settings does not show a stale failure.
-- **`CODIFY_LAYA_DEVICE`** (e.g. `cpu`) is passed to `Router(device=…)` when set, so the small
-  gate model can stay off a GPU that the agent's own model needs. Unset, the SDK chooses.
+- **`CODIFY_LAYA_DEVICE`** is passed to `Router(device=…)`; unset or blank means `cpu`, as above.
 
 **The SDK has to be in the interpreter that runs the engine.** The desktop shell spawns
 the checkout's own `.venv/bin/python3` when it has one and `python3` from the login
