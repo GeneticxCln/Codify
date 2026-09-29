@@ -610,6 +610,30 @@ class _CallAccounting:
         return int((time.monotonic() - self._started) * 1000)
 
 
+def _shape(value: Any) -> str:
+    """A value's kind, as a person would name it in an error."""
+    if value is None:
+        return "null"
+    if isinstance(value, list):
+        return "a list"
+    if isinstance(value, str):
+        return "a string"
+    return type(value).__name__
+
+
+def _require_object(parsed: Any) -> dict[str, Any]:
+    """`parsed` if it is a JSON object, else `ValueError` saying what it was.
+
+    Every role's contract is one object. `extract_json` will return a list when a reply holds no object
+    (it cannot know the contract), and the parsers downstream read `.get` — so a list used to escape as
+    `AttributeError`, which reaches a user as `internal_error`: Codify blamed for a model's slip.
+    """
+    if not isinstance(parsed, dict):
+        kind = "a list" if isinstance(parsed, list) else type(parsed).__name__
+        raise ValueError(f"the reply must be a JSON object, not {kind}")
+    return parsed
+
+
 class AgentOrchestrator:
     def __init__(
         self, registry: AgentRegistryService, goals: GoalService,
@@ -973,7 +997,7 @@ class AgentOrchestrator:
             tolerate_cut = role in REPLY_TOLERATES_TRUNCATION
             what = "non-JSON output"
             try:
-                parsed = extract_json(raw, expect, repair_truncation=tolerate_cut)
+                parsed = _require_object(extract_json(raw, expect, repair_truncation=tolerate_cut))
             except (ValueError, TypeError) as exc:
                 problem = str(exc)
             else:
@@ -1040,7 +1064,7 @@ class AgentOrchestrator:
                 goal_id, step_id, role, target, model_name, system, repair_prompt, repaired, repair_books,
             )
             try:
-                parsed = extract_json(repaired, expect, repair_truncation=tolerate_cut)
+                parsed = _require_object(extract_json(repaired, expect, repair_truncation=tolerate_cut))
             except (ValueError, TypeError) as exc:
                 failures.append((
                     label, target.provider,
@@ -2134,7 +2158,9 @@ class ExecutorService:
                 round_no += 1
                 cancelled = False
                 async with self._stage(goal_id, "planner", "planner", ordinal=round_no) as plan_stage:
-                    out = await self.orchestrator.run_agent("planner", goal_id, None, prompt)
+                    out = await self.orchestrator.run_agent(
+                        "planner", goal_id, None, prompt, accept=self._accept_plan_reply,
+                    )
                     # A cancel that landed while the planner was thinking must
                     # win: a goal the user cancelled must not reappear as PENDING
                     # with a plan they explicitly stopped. (PLANNING is a legal
@@ -5262,12 +5288,32 @@ class ExecutorService:
 
     # --- parsing ------------------------------------------------------
 
+    def _accept_plan_reply(self, reply: Any) -> None:
+        """The planner's test of its own reply, run inside `run_agent` so a bad plan is asked for again.
+
+        Two replies are good: a plan, and a *consult* — no steps and a request for the librarian, which the
+        planning loop serves and then asks again. Anything else that cannot be turned into steps is refused
+        with the parser's own reason, which the model is shown.
+        """
+        consult = reply.get("consult") if isinstance(reply, dict) else None
+        if (
+            isinstance(reply, dict) and not reply.get("steps") and isinstance(consult, dict)
+            and (consult.get("reads") or consult.get("searches") or consult.get("git") or consult.get("run"))
+        ):
+            return
+        self._parse_steps(reply)
+
     def _parse_steps(self, out: Any) -> list[dict[str, Any]]:
         steps = (out or {}).get("steps")
         if not isinstance(steps, list) or not (1 <= len(steps) <= 20):
             raise AgentOutputInvalid("planner must return 1..20 steps", role="planner")
         parsed = []
         for s in steps:
+            if not isinstance(s, dict):
+                raise AgentOutputInvalid(
+                    f"each planner step must be an object with a title and a description, not {_shape(s)}",
+                    role="planner",
+                )
             title = s.get("title")
             desc = s.get("description")
             paths = s.get("suggested_paths") or []
@@ -5284,6 +5330,11 @@ class ExecutorService:
             raise AgentOutputInvalid("fixer must return files list", role="fixer")
         parsed = []
         for f in files:
+            if not isinstance(f, dict):
+                raise AgentOutputInvalid(
+                    f"each fixer file entry must be an object with a path and an action, not {_shape(f)}",
+                    role="fixer",
+                )
             path = f.get("path")
             action = f.get("action")
             content = f.get("content")

@@ -329,6 +329,79 @@ class CallHealthTests(unittest.TestCase):
         self.assertEqual({}, summarise([SummaryTests._result(True)])["call_health"])
 
 
+class ACrashedTaskIsAResultTests(unittest.TestCase):
+    """A task that blows up is a failed task, not the end of the run (audit of 2026-09-29, 3.3).
+
+    The first real-model baseline died eleven tasks in on an `AttributeError` from one model reply, and the
+    report is written at the end, so every finished task's result went with it: minutes of a slow local
+    model, gone, and no record of *which* task crashed. A benchmark's whole job is to say what happened, so
+    a crash is recorded as one — with its cause — and the rest of the run goes on.
+    """
+
+    @staticmethod
+    def _manifest(tmp: str) -> Path:
+        path = Path(tmp) / "manifest.json"
+        base = {
+            "tier": "smoke", "repo": SYNTHETIC, "title": "t", "description": "d",
+            "canned_write": [{"path": "banner.txt", "content": "X\n"}],
+            "checks": [{"type": "goal_completed"}, {"type": "files_written", "min": 1}],
+        }
+        path.write_text(json.dumps({
+            "version": 1, "tiers": {"smoke": {"description": "d", "provider": "canned"}}, "repos": [],
+            "tasks": [{**base, "id": "first"}, {**base, "id": "second"}],
+        }), encoding="utf-8")
+        return path
+
+    def _run_with_first_task_crashing(self) -> tuple[int, str, dict[str, object]]:
+        real = runner.run_task
+        calls: list[str] = []
+
+        async def flaky(task: dict[str, object], *args: object, **kwargs: object) -> dict[str, object]:
+            calls.append(str(task["id"]))
+            if task["id"] == "first":
+                raise RuntimeError("boom")
+            return await real(task, *args, **kwargs)  # type: ignore[arg-type]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            out = io.StringIO()
+            with mock.patch.object(runner, "run_task", flaky), contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = main(["--tier", "smoke", "--manifest", str(self._manifest(tmp)), "--report", str(report)])
+            data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(["first", "second"], calls, "the run stopped at the crash")
+        return code, out.getvalue(), data
+
+    def test_the_crash_is_recorded_with_its_cause_and_the_run_goes_on(self) -> None:
+        code, _, data = self._run_with_first_task_crashing()
+
+        tasks = {t["id"]: t for t in data["tasks"]}  # type: ignore[attr-defined]
+        self.assertEqual("ERRORED", tasks["first"]["status"])
+        self.assertFalse(tasks["first"]["passed"])
+        self.assertIn("RuntimeError: boom", tasks["first"]["error"])
+        self.assertTrue(tasks["second"]["passed"], "the task after the crash did not run to completion")
+        self.assertEqual(1, code)
+
+    def test_a_crash_counts_against_the_pass_rate(self) -> None:
+        _, _, data = self._run_with_first_task_crashing()
+
+        summary = data["summary"]
+        self.assertEqual(2, summary["tasks"])  # type: ignore[index]
+        self.assertEqual(1, summary["passed"])  # type: ignore[index]
+        self.assertEqual(50, summary["pass_rate"])  # type: ignore[index]
+
+    def test_each_task_reports_as_it_finishes_not_only_at_the_end(self) -> None:
+        _, out, _ = self._run_with_first_task_crashing()
+
+        lines = out.splitlines()
+        first = next(i for i, line in enumerate(lines) if line.startswith("finished first"))
+        second = next(i for i, line in enumerate(lines) if line.startswith("finished second"))
+        summary = next(i for i, line in enumerate(lines) if line.startswith("tier "))
+        self.assertLess(first, second)
+        self.assertLess(second, summary)
+        self.assertIn("ERRORED", lines[first])
+
+
 class RepeatAndThresholdTests(unittest.TestCase):
     """One run of a model proves little; a number is only worth having with its spread."""
 

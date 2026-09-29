@@ -198,6 +198,74 @@ class TestTheRepairIsBounded(ReAskCase):
         self.assertEqual("FAILED", self.goals.get(goal.id).status)
 
 
+class TestAReplyOfTheWrongShape(ReAskCase):
+    """A reply that is valid JSON but not the document the role's contract asks for.
+
+    Found by the first real-model benchmark run: a fixer reply whose `files` held lists, not objects, raised
+    `AttributeError` out of the parser and took the whole run down — to a user it would have read
+    `internal_error`, which blames Codify for a model's slip. Every role's contract is one JSON *object*, so
+    anything else is the same kind of failure as a reply that does not parse, and gets the same one re-ask.
+    """
+
+    async def test_a_bare_list_is_asked_for_again_as_an_object(self) -> None:
+        primary = self.script_primary(json.dumps([{"title": "S1"}]), GOOD_PLAN)
+        goal = self._plan()
+
+        await self.executor.run_planning(goal.id)
+
+        self.assertEqual(2, len(primary.planner_calls))
+        self.assertEqual(self._errors(goal.id), [], "a recoverable slip failed the goal")
+        self.assertIn("JSON object", primary.prompts[1])
+
+    async def test_steps_that_are_not_objects_are_asked_for_again_not_a_crash(self) -> None:
+        primary = self.script_primary(json.dumps({"steps": ["do the thing", "then the other"]}), GOOD_PLAN)
+        goal = self._plan()
+
+        await self.executor.run_planning(goal.id)
+
+        self.assertEqual(2, len(primary.planner_calls))
+        self.assertEqual(self._errors(goal.id), [])
+        self.assertEqual(1, len(self.goals.steps(goal.id)))
+
+    async def test_a_plan_with_no_steps_gets_the_engines_reason_back(self) -> None:
+        primary = self.script_primary(json.dumps({"steps": []}), GOOD_PLAN)
+        goal = self._plan()
+
+        await self.executor.run_planning(goal.id)
+
+        self.assertEqual(2, len(primary.planner_calls))
+        self.assertIn("1..20 steps", primary.prompts[1], "the contract's own reason was not passed on")
+        self.assertEqual(self._errors(goal.id), [])
+
+    async def test_a_wrong_shape_twice_fails_as_invalid_output_never_as_an_internal_error(self) -> None:
+        primary = self.script_primary(json.dumps({"steps": ["just words"]}))
+        goal = self._plan()
+
+        await self.executor.run_planning(goal.id)
+
+        self.assertEqual(2, len(primary.planner_calls))
+        errors = self._errors(goal.id)
+        self.assertEqual(1, len(errors))
+        self.assertEqual("agent_output_invalid", errors[0]["code"])
+        self.assertIn("after one repair attempt", errors[0]["message"])
+        self.assertEqual("FAILED", self.goals.get(goal.id).status)
+
+    async def test_a_consult_is_still_not_mistaken_for_a_bad_plan(self) -> None:
+        # The planner's other legitimate reply: ask the librarian something. It has no steps and must not be
+        # refused for that.
+        (self.root / "README.md").write_text("# hello\n", encoding="utf-8")
+        consult = json.dumps({"steps": [], "consult": {"reads": ["README.md"]}})
+        primary = self.script_primary(consult, GOOD_PLAN)
+        goal = self._plan()
+
+        await self.executor.run_planning(goal.id)
+
+        self.assertEqual(2, len(primary.planner_calls), "a consult and then the plan: two calls, no repair")
+        self.assertEqual(self._events(goal.id, "plan_consult")[0]["refused"], 0)
+        self.assertEqual([], self.failed_calls(goal.id))
+        self.assertEqual(self._errors(goal.id), [])
+
+
 if __name__ == "__main__":
     import unittest
 

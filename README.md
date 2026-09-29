@@ -392,7 +392,7 @@ This executes:
 2. `mypy` over the same files — static type checking with its config (the 3.10 floor, the pydantic
    plugin) pinned in `pyproject.toml` (`make typecheck`)
 3. The React/TypeScript unit tests in `ui/tests/` (`make test-ui`)
-4. Full Python test suite (about 1,400 unit & integration tests at the time of writing — the number moves; trust the run)
+4. Full Python test suite (about 1,700 unit & integration tests at the time of writing — the number moves; trust the run)
 5. The concurrency/stream-isolation tests explicitly, by name (`make test-streams`)
 6. UI TypeScript validation and Vite production build
 7. Tauri Rust crate typecheck via `cargo check`, plus `cargo fmt --check`

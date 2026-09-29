@@ -193,5 +193,38 @@ class TestAnEntryTheContractRefuses(ReAskCase):
         self.assertIn("fixer file entry invalid", provider.fixer_prompts[1])
 
 
+class TestAFilesListOfTheWrongShape(ReAskCase):
+    async def asked_again_and_recovers(self, wrong: Any) -> None:
+        # The first real-model run produced `files` holding lists, and the parser raised AttributeError.
+        good = {"files": [{"path": "a.py", "action": "update", "content": "x = 1\n"}]}
+        provider = self.build(wrong, good)
+
+        status = await self.run_the_step()
+
+        self.assertEqual(2, len(provider.fixer_prompts))
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertEqual("x = 1\n", self.file)
+
+    async def test_an_entry_that_is_a_list(self) -> None:
+        await self.asked_again_and_recovers({"files": [["a.py", "update", "x = 1\n"]]})
+
+    async def test_an_entry_that_is_a_string(self) -> None:
+        await self.asked_again_and_recovers({"files": ["a.py"]})
+
+    async def test_an_entry_that_is_null(self) -> None:
+        await self.asked_again_and_recovers({"files": [None]})
+
+    async def test_a_reply_that_is_a_bare_list(self) -> None:
+        await self.asked_again_and_recovers([{"path": "a.py", "action": "update", "content": "x = 1\n"}])
+
+    async def test_the_same_slip_twice_is_invalid_output_not_an_internal_error(self) -> None:
+        self.build({"files": [["a.py", "update", "x = 1\n"]]})
+
+        status = await self.run_the_step()
+
+        self.assertEqual("FAILED", status)
+        self.assertEqual("agent_output_invalid", self.events("error")[-1]["code"])
+
+
 if __name__ == "__main__":
     unittest.main()

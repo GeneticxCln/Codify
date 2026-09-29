@@ -537,6 +537,39 @@ def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _run_one(
+    task: dict[str, Any], work_root: Path, *, canned: bool, engine_db: Path | None, attempt: int,
+) -> dict[str, Any]:
+    """`run_task`, with a crash turned into the failed result it is.
+
+    `BenchmarkError` is not caught: it is a diagnosis of the setup (a role with no model, a missing
+    repository), true of every task, and the run should stop and say so. Anything else escaping a task is
+    that task's failure — the cause is recorded and the run goes on.
+    """
+    started = time.monotonic()
+    try:
+        return asyncio.run(run_task(task, work_root, canned=canned, engine_db=engine_db, attempt=attempt))
+    except BenchmarkError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — whatever a task did, the run records it and continues
+        error = f"{type(exc).__name__}: {exc}"
+        return {
+            "id": task["id"],
+            "attempt": attempt,
+            "tier": task.get("tier"),
+            "status": "ERRORED",
+            "error": error,
+            "wall_ms": round((time.monotonic() - started) * 1000),
+            "stage_ms": {},
+            "tokens": 0,
+            "tokens_are_synthetic": canned,
+            "checks": [{"type": "run", "kind": "harness", "status": "failed", "detail": error}],
+            "quality_checks": [],
+            "call_health": {"ran": {}, "reasks": {}, "failed_calls": {}},
+            "passed": False,
+        }
+
+
 def _positive_int(text: str) -> int:
     try:
         value = int(text)
@@ -622,13 +655,16 @@ def main(argv: list[str] | None = None) -> int:
 
     work_root = Path(tempfile.mkdtemp(prefix="codify-bench-"))
     try:
-        results = [
-            asyncio.run(run_task(
-                task, work_root, canned=canned, engine_db=args.engine_db, attempt=attempt,
-            ))
-            for attempt in range(1, args.repeat + 1)
-            for task in tasks
-        ]
+        results = []
+        for attempt in range(1, args.repeat + 1):
+            for task in tasks:
+                result = _run_one(task, work_root, canned=canned, engine_db=args.engine_db, attempt=attempt)
+                results.append(result)
+                # As each one finishes, not only in the summary: a slow real model makes a run long, and
+                # a run that dies late should leave a record of the tasks that were done.
+                label = task["id"] if args.repeat == 1 else f"{task['id']} (run {attempt})"
+                print(f"finished {label}: {result['status']}, {'ok' if result['passed'] else 'FAIL'}, "
+                      f"{round(result['wall_ms'] / 1000)} s", flush=True)
     finally:
         shutil.rmtree(work_root, ignore_errors=True)
 
