@@ -24,6 +24,7 @@ from typing import Any
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
 from engine.executor import REPLY_KEYS, REPLY_TOLERATES_TRUNCATION, extract_json
+from engine.replies import coerce_object
 
 STEPS = {"steps": [{"title": "Rename greeting", "description": "change it", "suggested_paths": ["hello.py"]}]}
 STEPS_JSON = json.dumps(STEPS)
@@ -250,6 +251,55 @@ class TestWhatARealSmallModelActuallyWrote(unittest.TestCase):
         raw = '{"files": [{"path": "a.py", "content": """ok\n"""}]}'
 
         self.assertEqual("ok\n", extract_json(raw, REPLY_KEYS["fixer"], repair_truncation=False)["files"][0]["content"])
+
+
+class TestABareListOfTheRightThings(unittest.TestCase):
+    """A reply that is the *contents* of the contract's one array, without the object around it.
+
+    Qwen2.5-1.5B answered the fixer with `[{"path": ..., "action": ...}]` instead of `{"files": [...]}`, twice in
+    a row when asked again. The meaning is unambiguous and the contract names the key, so the array is wrapped
+    in it — nothing is invented. Anything that is not plainly that array is still refused.
+    """
+
+    def test_a_list_of_file_entries_is_the_fixers_files(self) -> None:
+        entries = [{"path": "a.py", "action": "update", "content": "x\n"}]
+
+        self.assertEqual({"files": entries}, coerce_object("fixer", entries))
+
+    def test_a_list_of_steps_is_the_planners_steps(self) -> None:
+        steps = [{"title": "T", "description": "d", "suggested_paths": []}]
+
+        self.assertEqual({"steps": steps}, coerce_object("planner", steps))
+
+    def test_an_object_passes_through_untouched(self) -> None:
+        reply = {"files": [], "extra": 1}
+
+        self.assertIs(reply, coerce_object("fixer", reply))
+
+    def test_a_list_that_is_not_plainly_the_array_is_refused_with_the_reason(self) -> None:
+        for role, wrong in (
+            ("fixer", [["a.py", "update"]]), ("fixer", [{"name": "a.py"}]), ("fixer", []),
+            ("planner", ["do it"]), ("planner", [{"path": "a.py"}]),
+            ("design", [{"applies": False}]), ("critic", [{"path": "a.py"}]), ("fixer", [{"path": "a"}, "b"]),
+        ):
+            with self.subTest(role=role, reply=wrong):
+                with self.assertRaises(ValueError) as caught:
+                    coerce_object(role, wrong)
+                self.assertIn("must be a JSON object", str(caught.exception))
+
+    def test_the_real_capture_becomes_the_fixers_files(self) -> None:
+        raw = (FIXTURES / "qwen2.5-1.5b-fixer-bare-list.txt").read_text(encoding="utf-8")
+
+        reply = coerce_object("fixer", extract_json(raw, REPLY_KEYS["fixer"]))
+
+        self.assertEqual(["/src/app.py"], [f["path"] for f in reply["files"]])
+        self.assertIn("def welcome", reply["files"][0]["content"])
+
+    def test_a_scalar_is_refused_too(self) -> None:
+        for wrong in ("text", 3, None, True):
+            with self.subTest(reply=wrong):
+                with self.assertRaises(ValueError):
+                    coerce_object("fixer", wrong)
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "model_replies"

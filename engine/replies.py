@@ -32,6 +32,13 @@ REPLY_KEYS: dict[str, tuple[str, ...]] = {
     "scribe": ("commit_message", "summary"),
 }
 
+# The one array a role's contract wraps in an object, and the key every entry of it must carry. A reply that is
+# that array with nothing around it is unambiguous, so it is read as the contract's object (`coerce_object`).
+BARE_ARRAY_KEYS: dict[str, tuple[str, str]] = {
+    "fixer": ("files", "path"),
+    "planner": ("steps", "title"),
+}
+
 # Reasoning models put their thinking in a tag before the answer, and the thinking mentions braces.
 _THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)\b[^>]*>.*?</\1\s*>", re.DOTALL | re.IGNORECASE)
 _THINK_OPEN = re.compile(r"<(think|thinking|reasoning)\b[^>]*>", re.IGNORECASE)
@@ -373,3 +380,27 @@ def _repair_prompt(user_prompt: str, problem: str, previous: str) -> str:
         f"{quoted}\n>>>\n"
         "Reply again with the corrected JSON document only: no prose, no code fence, no thinking out loud."
     )
+
+
+def coerce_object(role: str, parsed: Any) -> dict[str, Any]:
+    """`parsed` as the JSON object a role's contract asks for, or `ValueError` saying what it was instead.
+
+    Every role's contract is one object, and `extract_json` returns a list when a reply holds no object
+    (it cannot know the contract) — which used to escape as `AttributeError` from the parsers downstream,
+    reaching a user as `internal_error`: Codify blamed for a model's slip.
+
+    One list is read rather than refused: the contract's own array with nothing around it. Qwen2.5-1.5B
+    answered the fixer with `[{"path": ...}]` instead of `{"files": [...]}`, twice in a row when asked again.
+    The contract names the key and every entry carries the field only that array's entries carry, so wrapping
+    it invents nothing. Anything less plain — an empty list, a mix, entries of another shape — is refused.
+    """
+    if isinstance(parsed, dict):
+        return parsed
+    shape = BARE_ARRAY_KEYS.get(role)
+    if (
+        shape is not None and isinstance(parsed, list) and parsed
+        and all(isinstance(entry, dict) and shape[1] in entry for entry in parsed)
+    ):
+        return {shape[0]: parsed}
+    kind = "a list" if isinstance(parsed, list) else type(parsed).__name__
+    raise ValueError(f"the reply must be a JSON object, not {kind}")

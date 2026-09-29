@@ -22,6 +22,7 @@ with the goal's `trace` flag on, so the recorder kept each raw reply (`trace_cal
 |---|---|
 | `qwen2.5-1.5b-fixer-triple-quoted-content` | wrote each file's `content` as a Python `"""` string, and the content held docstrings of its own |
 | `qwen2.5-1.5b-design-triple-quoted-note` | the same, for the design role's `design_md` |
+| `qwen2.5-1.5b-fixer-bare-list` | answered the fixer with the `files` array and no `{"files": ...}` around it — twice in a row when asked again — and with `"path": "/src/app.py"`, the same triple-quoted content as above |
 
 The `expect` objects were built from the replies' text by a separate script that slices between the
 delimiters — not by `extract_json`, so the expectation does not agree with the parser by construction.

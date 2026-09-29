@@ -53,6 +53,7 @@ from engine.replies import (
     REPLY_KEYS as REPLY_KEYS,
     REPLY_TOLERATES_TRUNCATION as REPLY_TOLERATES_TRUNCATION,
     _repair_prompt,
+    coerce_object,
     extract_json as extract_json,
 )
 from engine.default_prompts import (
@@ -621,19 +622,6 @@ def _shape(value: Any) -> str:
     return type(value).__name__
 
 
-def _require_object(parsed: Any) -> dict[str, Any]:
-    """`parsed` if it is a JSON object, else `ValueError` saying what it was.
-
-    Every role's contract is one object. `extract_json` will return a list when a reply holds no object
-    (it cannot know the contract), and the parsers downstream read `.get` — so a list used to escape as
-    `AttributeError`, which reaches a user as `internal_error`: Codify blamed for a model's slip.
-    """
-    if not isinstance(parsed, dict):
-        kind = "a list" if isinstance(parsed, list) else type(parsed).__name__
-        raise ValueError(f"the reply must be a JSON object, not {kind}")
-    return parsed
-
-
 class AgentOrchestrator:
     def __init__(
         self, registry: AgentRegistryService, goals: GoalService,
@@ -997,7 +985,7 @@ class AgentOrchestrator:
             tolerate_cut = role in REPLY_TOLERATES_TRUNCATION
             what = "non-JSON output"
             try:
-                parsed = _require_object(extract_json(raw, expect, repair_truncation=tolerate_cut))
+                parsed = coerce_object(role, extract_json(raw, expect, repair_truncation=tolerate_cut))
             except (ValueError, TypeError) as exc:
                 problem = str(exc)
             else:
@@ -1064,7 +1052,7 @@ class AgentOrchestrator:
                 goal_id, step_id, role, target, model_name, system, repair_prompt, repaired, repair_books,
             )
             try:
-                parsed = _require_object(extract_json(repaired, expect, repair_truncation=tolerate_cut))
+                parsed = coerce_object(role, extract_json(repaired, expect, repair_truncation=tolerate_cut))
             except (ValueError, TypeError) as exc:
                 failures.append((
                     label, target.provider,

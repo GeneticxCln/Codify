@@ -1,0 +1,18 @@
+{
+  "role": "fixer",
+  "model": "Qwen2.5-1.5B-Instruct Q4_K_M (GGUF) via llama-cpp-python 0.3.35 llama_cpp.server, temperature 0.2",
+  "expect": [
+    {
+      "path": "/src/app.py",
+      "action": "edit",
+      "content": "def welcome(name: str) -> str:\n    \"\"\"Say hello. The benchmark's tasks are measured against this file.\"\"\"\n    return f\"hello {name}\"\n\n\ndef shout(name: str) -> str:\n    \"\"\"Upper-cases the greeting. Unfinished on purpose: a task tier needs\n    something real to change, and a fixture that is already correct can only\n    prove that nothing broke.\"\"\"\n    return welcome(name).upper()\n",
+      "edits": [
+        {
+          "old_text": "greet",
+          "new_text": "welcome",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}

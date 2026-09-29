@@ -214,8 +214,19 @@ class TestAFilesListOfTheWrongShape(ReAskCase):
     async def test_an_entry_that_is_null(self) -> None:
         await self.asked_again_and_recovers({"files": [None]})
 
-    async def test_a_reply_that_is_a_bare_list(self) -> None:
-        await self.asked_again_and_recovers([{"path": "a.py", "action": "update", "content": "x = 1\n"}])
+    async def test_a_reply_that_is_a_bare_list_of_something_else(self) -> None:
+        await self.asked_again_and_recovers([["a.py", "update", "x = 1\n"]])
+
+    async def test_a_bare_list_of_file_entries_is_used_without_asking_again(self) -> None:
+        # What Qwen2.5-1.5B actually answered, twice in a row when asked to fix it: the contract's array
+        # with no object around it. The meaning is unambiguous, so it is read, and no second call is paid for.
+        provider = self.build([{"path": "a.py", "action": "update", "content": "x = 1\n"}])
+
+        status = await self.run_the_step()
+
+        self.assertEqual(1, len(provider.fixer_prompts))
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertEqual("x = 1\n", self.file)
 
     async def test_the_same_slip_twice_is_invalid_output_not_an_internal_error(self) -> None:
         self.build({"files": [["a.py", "update", "x = 1\n"]]})

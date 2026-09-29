@@ -208,7 +208,7 @@ class TestAReplyOfTheWrongShape(ReAskCase):
     """
 
     async def test_a_bare_list_is_asked_for_again_as_an_object(self) -> None:
-        primary = self.script_primary(json.dumps([{"title": "S1"}]), GOOD_PLAN)
+        primary = self.script_primary(json.dumps([["S1"], ["S2"]]), GOOD_PLAN)
         goal = self._plan()
 
         await self.executor.run_planning(goal.id)
