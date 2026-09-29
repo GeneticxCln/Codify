@@ -218,3 +218,80 @@ Before quoting any of it, read `benchmarks/manifest.json`'s `_read_this_first`.
 `tests/test_benchmark_runner.py` asserts that every task names a known tier, an
 existing repository, and a check type the runner can actually run — so a typo in
 the manifest is a test failure rather than a silently skipped check.
+
+## 8. A real-model baseline, and what it does and does not show
+
+**Read the limits before the numbers.** This is one small model per run, on one CPU-only machine, one run per
+task. It measures *those models*, not Codify: a hosted model (or a 30B local one) would do very differently, and
+none was available. A single run is an anecdote (§3, `--repeat`), so treat a difference of one task as noise.
+The workspaces in these runs were **plain directories, not git repositories** (§3 now says they are), which
+changes what a verifier sees; the numbers below are not comparable with later ones.
+
+### Setup, so someone else can rebuild it
+
+| | |
+|---|---|
+| Server | `llama-cpp-python` 0.3.35, `python -m llama_cpp.server --n_ctx 8192 --n_threads 4`, CPU only |
+| Models | `Qwen2.5-1.5B-Instruct` Q4_K_M and `Qwen2.5-Coder-3B-Instruct` Q4_K_M (GGUF) |
+| Roles | all eight on the same endpoint, written by `python3 -m benchmarks.seed_endpoint` (a placeholder key: `openai_compat` requires one, a local server ignores it) |
+| Run | `python3 -m benchmarks.runner --tier repo_scale --repeat 1 --record DIR --report FILE`, with `CODIFY_HOME`, `CODIFY_DB` and `CODIFY_SECRETS` pointed at the seeded directory |
+| Tasks | the 11 `repo_scale` tasks: small edits to a committed fixture, each with a behavioural `python3 -c` check |
+
+### Results
+
+| Model | Passed | Failed in the fixer (`agent_output_invalid`) | Verifier caught a bad change (`tests_failed`) | Critic paused the goal | Completed but wrong |
+|---|---|---|---|---|---|
+| Qwen2.5-1.5B | **2 of 11** (18%) | 7 | 0 | 0 | 2 |
+| Qwen2.5-Coder-3B | **0 of 11** (0%) | 4 | 5 | 2 | 0 |
+
+**1.5B, per task.** Passed: `repo-add-clamp`, `repo-changelog`. Fixer failures: `repo-add-version`,
+`repo-default-name`, `repo-readme-usage` (reply not valid JSON — in two of them a `new_text` string with no
+closing quote); `repo-add-whisper`, `repo-shout-exclaim` (an `edit` with an empty `old_text`);
+`repo-rename-greeting`, `repo-close-the-gap` (`old_text` that does not match the file, or matches more than
+once). Completed but failed the quality check: `repo-remove-shout` (the module was no longer importable),
+`repo-word-count` (the repository's own tests errored, though the behaviour check passed).
+
+**3B, per task.** None passed. The verifier caught a bad change (`tests_failed`) in `repo-rename-greeting`
+(renamed `greet` without updating what uses it), `repo-close-the-gap` (`app.py` no longer importable),
+`repo-default-name`, `repo-add-version` (an em dash written into Python source) and `repo-changelog` (the
+verifier proposed a `git` write, the sandbox refused it, and the verifier reported the refusal as a failed test).
+Fixer failures after the re-ask: `repo-add-whisper` (empty `old_text`), `repo-add-clamp` (a `create` whose path was
+the directory `src`), `repo-shout-exclaim` and `repo-remove-shout` (invalid JSON). Paused by the critic:
+`repo-readme-usage` (an empty README) and `repo-word-count` (the diff did not add the requested function to the
+file). The 3B planner also turned these one-edit tasks into **2 to 4 steps each**, so there were more places to go
+wrong than the task needed.
+
+### What the runs show
+
+* **The pipeline held under two weak models.** Every stage the engine owns ran; nothing broken was committed
+  (a change that broke the repository was caught by the verifier as `tests_failed`, and the goal failed instead of
+  committing it); the sandbox refused the writes the 3B verifier tried in `repo-readme-usage` (`touch README.md`,
+  `git add`, `git commit`) and in `repo-changelog` (a `git` write) — only the fixer writes; and the critic paused
+  goals whose README was empty or whose diff missed the requested file.
+* **The dominant failure is the model's edit, not the engine.** For 1.5B, seven of nine failures are the fixer's
+  reply after its one re-ask. Formatting slips are repaired (`docs/04` §4), so what is left is a model that cannot
+  hold a JSON document and a file's exact text in mind together. The 3B model writes valid JSON but often edits
+  the wrong thing: an unimportable `app.py`, a path that is a directory, an em dash inside Python source.
+* **Small models make the verifier flail when there is nothing to run.** For a README or changelog task the 3B
+  verifier proposed commands the sandbox refuses instead of giving a verdict directly, and read the refusal as a
+  failed test (`repo-changelog`); `repo-readme-usage` spent 446 s and 25 model calls that way. That is the model
+  ignoring the "no command needed" path the verifier prompt offers, and worth a prompt change tested against a real
+  model before anyone trusts it.
+
+### What reading the traces found in Codify itself
+
+A baseline is only useful if someone reads the failures. These were fixed as a result (`tests/` names each one):
+
+* a role's own stored key was ignored when deciding whether it could be called, so every role on a custom
+  provider was reported "needs a credential" on every goal, **and the Repair button repointed working roles**;
+* a string missing its closing quote was reported as a *truncated* reply, pointing at the wrong place — and that
+  sentence is what the re-ask shows the model;
+* `--record` copied only at the end, so a killed run kept nothing;
+* the console summary printed `FAIL` with no reason for a task that completed and did the wrong thing;
+* the workspaces were not repositories (see above).
+
+### Not measured
+
+Repeats (one run each, so no spread), the conductor end to end against a tool-calling local server, any hosted
+model, and any hardware but one CPU. `--min-pass-rate` exists to enforce a floor, but a floor is only worth setting
+against a baseline recorded with the model *you* use: 18% is a fact about a 1.5B model, not a target.
