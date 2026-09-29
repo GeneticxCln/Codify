@@ -126,8 +126,9 @@ test("the loops honor the store, and App folds the shell's verdict in", () => {
       `${file} does not consult the motion store`,
     );
     // The explicit preview prop still wins — a preview that cannot animate is
-    // not a preview — so the store consult sits behind `animated ??`.
-    assert.match(source, /animated \?\?/, `${file} lost the preview escape hatch`);
+    // not a preview — so the store consult sits behind an `animated` check.
+    // (`atmosphereMotion.test.ts` is the one that proves which way it plays.)
+    assert.match(source, /animated === undefined/, `${file} lost the preview escape hatch`);
   }
 });
 

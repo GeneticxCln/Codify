@@ -94,7 +94,7 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
   // belongs here, not inside the effect below): user choice, shell verdict, or
   // system preference. As a dependency it re-arms the loop when it flips —
   // which is the point: a re-render alone would leave the loop running.
-  const storeReduced = useMotionAllowed();
+  const motionAllowed = useMotionAllowed();
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -103,8 +103,9 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     if (!ctx) return;
 
     // As in the shared hook: an explicit `animated` wins (a preview must
-    // animate to be a preview), otherwise `storeReduced`, computed above.
-    const reduced = animated ?? storeReduced;
+    // animate to be a preview), otherwise the motion store, computed above.
+    // Both mean "play", and `reduced` is the opposite of that.
+    const reduced = animated === undefined ? !motionAllowed : !animated;
 
     // The theme's own colours, read live so a settings change restyles an
     // already-running canvas on its next tick without a remount.
@@ -313,7 +314,7 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
       recovery.detach();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [animated, storeReduced, fps, maxDimension]);
+  }, [animated, motionAllowed, fps, maxDimension]);
 
   // aria-hidden: the effect is decoration beside real content, and a screen
   // reader reading half-width katakana is not a service to anyone.

@@ -186,7 +186,7 @@ export function useAtmosphereCanvas(
   // The motion decision, subscribed (a hook call belongs at the top level):
   // user choice, shell verdict, or system preference, as a dependency the
   // effect below re-runs on — a re-render alone would leave the loop running.
-  const storeReduced = useMotionAllowed();
+  const motionAllowed = useMotionAllowed();
   // Kept in a ref so the effect can read the latest values without listing
   // them as dependencies — see the note above on why that is not laziness.
   const latest = useRef({ vars, create, active });
@@ -199,8 +199,12 @@ export function useAtmosphereCanvas(
     if (!ctx) return;
 
     // Whether to move at all: an explicit `animated` prop wins (a preview must
-    // animate to be a preview), otherwise `storeReduced`, computed above.
-    const reduced = animated ?? storeReduced;
+    // animate to be a preview), otherwise the motion store, computed above.
+    // Both answer "should this play", and `reduced` is the opposite of that —
+    // the store's value used to be read as if it already were the opposite, so
+    // a machine that allowed motion got one still frame and a machine that
+    // forbade it got the animation.
+    const reduced = animated === undefined ? !motionAllowed : !animated;
 
     const styles = getComputedStyle(document.documentElement);
     const read = (name: string): string => {
@@ -351,7 +355,7 @@ export function useAtmosphereCanvas(
       recovery.detach();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [animated, storeReduced, fps, maxDimension]);
+  }, [animated, motionAllowed, fps, maxDimension]);
 
   return canvasRef;
 }
