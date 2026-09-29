@@ -306,6 +306,18 @@ def connect(
         raise RuntimeError(f"database path is a directory: {db_path}")
     home.ensure_private_file(db_path)
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+    try:
+        _prepare(conn, db_path, on_role_migrated)
+    except BaseException:
+        # A schema or migration that raises must not leave the handle it opened behind — nothing else
+        # holds it, so nothing else will ever close it (review of 2026-09-29, finding 5).
+        conn.close()
+        raise
+    return conn
+
+
+def _prepare(conn: sqlite3.Connection, db_path: Path, on_role_migrated: Any | None) -> None:
+    """Everything `connect` does to an open connection: the schema, the migrations, the seed."""
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.executescript(SCHEMA)
@@ -398,7 +410,6 @@ def connect(
                 pass
     seed_agents(conn)
     conn.commit()
-    return conn
 
 
 def migrate_agent_roles(conn: sqlite3.Connection) -> list[tuple[str, str]]:

@@ -171,6 +171,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # carry that role's stored credential onto the new id in the same step.
     keychain = Keychain()
     conn = connect(on_role_migrated=keychain.rename_role_key)
+    # Closed on every road out: a service constructor or the orphan rescue raising before the app
+    # starts, or a shutdown step raising after it stopped, used to leave the store's handle open
+    # (review of 2026-09-29, finding 5).
+    try:
+        async with _serve(app, keychain, conn):
+            yield
+    finally:
+        try:
+            _truncate_wal(conn)
+        finally:
+            conn.close()
+
+
+@asynccontextmanager
+async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> AsyncIterator[None]:
+    """Wire the services onto `app.state`, run the engine, and unwire it — with the store already open."""
     factory = ProviderFactory(keychain)
     app.state.conn = conn
     app.state.keychain = keychain
@@ -324,8 +340,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
             except Exception:
                 pass
-    _truncate_wal(conn)
-    conn.close()
 
 
 # The engine's refusals, declared once and applied to every route by
