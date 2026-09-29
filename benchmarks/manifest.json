@@ -73,6 +73,124 @@
         { "type": "test_command", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"] },
         { "type": "file_contains", "path": "src/app.py", "text": "__all__" }
       ]
+    },
+    {
+      "id": "repo-add-whisper",
+      "tier": "repo_scale",
+      "repo": "synthetic-repo",
+      "title": "Add a whisper function",
+      "description": "Add a function whisper(name) to src/app.py that returns the greeting in lower case, so whisper('WORLD') returns 'hello world'. Add a test for it to tests/test_app.py.",
+      "checks": [
+        {"type": "goal_completed"},
+        {"type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"]},
+        {"type": "test_command", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"]},
+        {"type": "test_command", "argv": ["python3", "-c", "import sys; sys.path.insert(0, 'src'); from app import whisper; assert whisper('WORLD') == 'hello world'"]},
+        {"type": "file_contains", "path": "tests/test_app.py", "text": "whisper"}
+      ]
+    },
+    {
+      "id": "repo-default-name",
+      "tier": "repo_scale",
+      "repo": "synthetic-repo",
+      "title": "Give greet a default argument",
+      "description": "Give greet a default argument so that calling greet() with no arguments returns 'hello world', while greet('bob') still returns 'hello bob'.",
+      "checks": [
+        {"type": "goal_completed"},
+        {"type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"]},
+        {"type": "test_command", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"]},
+        {"type": "test_command", "argv": ["python3", "-c", "import sys; sys.path.insert(0, 'src'); from app import greet; assert greet() == 'hello world' and greet('bob') == 'hello bob'"]}
+      ]
+    },
+    {
+      "id": "repo-add-version",
+      "tier": "repo_scale",
+      "repo": "synthetic-repo",
+      "title": "Add a VERSION constant",
+      "description": "Add a module-level constant VERSION = \"0.1.0\" to src/app.py.",
+      "checks": [
+        {"type": "goal_completed"},
+        {"type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"]},
+        {"type": "test_command", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"]},
+        {"type": "test_command", "argv": ["python3", "-c", "import sys; sys.path.insert(0, 'src'); import app; assert app.VERSION == '0.1.0'"]}
+      ]
+    },
+    {
+      "id": "repo-add-clamp",
+      "tier": "repo_scale",
+      "repo": "synthetic-repo",
+      "title": "Add a util module with clamp",
+      "description": "Create src/util.py containing a function clamp(value, low, high) that returns value limited to the range low..high, so clamp(5, 0, 3) is 3, clamp(-1, 0, 3) is 0 and clamp(2, 0, 3) is 2.",
+      "checks": [
+        {"type": "goal_completed"},
+        {"type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"]},
+        {"type": "file_exists", "path": "src/util.py"},
+        {"type": "test_command", "argv": ["python3", "-c", "import sys; sys.path.insert(0, 'src'); from util import clamp; assert (clamp(5, 0, 3), clamp(-1, 0, 3), clamp(2, 0, 3)) == (3, 0, 2)"]}
+      ]
+    },
+    {
+      "id": "repo-readme-usage",
+      "tier": "repo_scale",
+      "repo": "synthetic-repo",
+      "title": "Document usage in the README",
+      "description": "Add a section headed '## Usage' to README.md that shows how to call greet.",
+      "checks": [
+        {"type": "goal_completed"},
+        {"type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"]},
+        {"type": "file_contains", "path": "README.md", "text": "## Usage"},
+        {"type": "file_contains", "path": "README.md", "text": "greet("}
+      ]
+    },
+    {
+      "id": "repo-shout-exclaim",
+      "tier": "repo_scale",
+      "repo": "synthetic-repo",
+      "title": "Make shout exclaim",
+      "description": "Make shout end with an exclamation mark, so shout('world') returns 'HELLO WORLD!', and update its test to match.",
+      "checks": [
+        {"type": "goal_completed"},
+        {"type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"]},
+        {"type": "test_command", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"]},
+        {"type": "test_command", "argv": ["python3", "-c", "import sys; sys.path.insert(0, 'src'); from app import shout; assert shout('world') == 'HELLO WORLD!'"]}
+      ]
+    },
+    {
+      "id": "repo-remove-shout",
+      "tier": "repo_scale",
+      "repo": "synthetic-repo",
+      "title": "Remove shout",
+      "description": "Delete the shout function from src/app.py and delete its test from tests/test_app.py, leaving greet and its test in place.",
+      "checks": [
+        {"type": "goal_completed"},
+        {"type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"]},
+        {"type": "test_command", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"]},
+        {"type": "test_command", "argv": ["python3", "-c", "import sys; sys.path.insert(0, 'src'); import app; assert not hasattr(app, 'shout') and hasattr(app, 'greet')"]}
+      ]
+    },
+    {
+      "id": "repo-word-count",
+      "tier": "repo_scale",
+      "repo": "synthetic-repo",
+      "title": "Add a word_count function",
+      "description": "Add a function word_count(text) to src/app.py that returns the number of whitespace-separated words in text, so word_count('a b  c') is 3 and word_count('') is 0.",
+      "checks": [
+        {"type": "goal_completed"},
+        {"type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"]},
+        {"type": "test_command", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"]},
+        {"type": "test_command", "argv": ["python3", "-c", "import sys; sys.path.insert(0, 'src'); from app import word_count; assert (word_count('a b  c'), word_count('')) == (3, 0)"]}
+      ]
+    },
+    {
+      "id": "repo-changelog",
+      "tier": "repo_scale",
+      "repo": "synthetic-repo",
+      "title": "Start a changelog",
+      "description": "Create a CHANGELOG.md at the repository root with a heading and an entry for version 0.1.0.",
+      "checks": [
+        {"type": "goal_completed"},
+        {"type": "stages", "expect": ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"]},
+        {"type": "file_exists", "path": "CHANGELOG.md"},
+        {"type": "file_contains", "path": "CHANGELOG.md", "text": "0.1.0"}
+      ]
     }
   ]
 }
