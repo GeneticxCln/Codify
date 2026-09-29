@@ -1003,9 +1003,11 @@ class _Picked:
 def _run_picker(argv: list[str], env: dict[str, str], *, cancel_codes: tuple[int, ...] = ()) -> _Picked:
     """Run one dialog under the guard, in a session of its own, and classify how it ended."""
     try:
-        proc = subprocess.Popen(
-            argv,
-            env=env,
+        proc = subprocess.Popen(  # noqa: S603 — argv is a fixed dialog command, wrapped by guarded_argv right here; no shell
+            # Guarded here, at the spawn, whoever built the argv: a caller that already did is not doubled
+            # (`guarded_argv` is idempotent) and one that forgot cannot start an unguarded dialog.
+            guarded_argv(argv),
+            env=guarded_env(env),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
@@ -1061,7 +1063,7 @@ async def browse_workspace(request: Request) -> dict[str, Any]:
         # The GTK script could not show a dialog (or died): what else does this machine have?
         problems = [f"the GTK dialog: {first.detail}"]
         for name, command in _fallback_pickers():
-            attempt = _run_picker(guarded_argv(command), guarded_env(), cancel_codes=(1,))
+            attempt = _run_picker(command, dict(os.environ), cancel_codes=(1,))
             if attempt.kind in ("chosen", "cancelled", "timeout"):
                 return attempt
             problems.append(f"{name}: {attempt.detail}")

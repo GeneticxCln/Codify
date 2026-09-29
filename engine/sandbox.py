@@ -194,7 +194,7 @@ class SandboxService:
             child_argv = [resolved, *argv[1:]]
             env = guarded_env({k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME") if k in os.environ})
         try:
-            proc = subprocess.Popen(
+            proc = subprocess.Popen(  # noqa: S603 — the argv passed `validate_argv` above; guarded, own session, no shell
                 # One process deeper than the command itself: the guard leads the new
                 # session (below) and is what removes the command's *whole tree* when
                 # this engine is gone. A timeout reads exactly as it did before — the

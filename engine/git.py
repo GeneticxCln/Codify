@@ -82,7 +82,7 @@ class GitService:
         passes one: on expiry the command's *whole group* is stopped — the guard alone
         dying would leave git running, holding the pipes — and `TimeoutExpired` is raised.
         """
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # noqa: S603 — git's own binary and an argv list already validated by the caller; guarded, no shell
             guarded_argv([self._git_bin, *args]),
             cwd=cwd,
             env=guarded_env(env),

@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args:
         args = ["discover", "-s", "tests", "-p", "test_*.py", "-v"]
 
-    proc = subprocess.run(
+    proc = subprocess.run(  # noqa: S603 — fixed `sys.executable -m unittest` prefix plus a developer's own arguments; no shell, nothing a model produced
         [sys.executable, "-m", "unittest", *args],
         capture_output=True,
         text=True,

@@ -208,7 +208,10 @@ class TestGuardDecisions(unittest.TestCase):
         """The fork/exec window: no signal can arrive for a parent that is gone, and
         no reparenting will happen later — the pid the engine passed is the only way
         this window is visible at all."""
-        self.assertTrue(Guard(expected_parent=1).started_after_the_engine_died())
+        # An engine pid that is not this process's parent, whatever launched the runner: `1` is only "not our
+        # parent" when init has not adopted us, which is exactly what `setsid` and a detached CI job do.
+        gone = os.getppid() + 1_000_000
+        self.assertTrue(Guard(expected_parent=gone).started_after_the_engine_died())
         self.assertFalse(Guard(expected_parent=os.getppid()).started_after_the_engine_died())
         # No pid handed over (a guard run by hand): the live parent is all there is.
         self.assertFalse(Guard().started_after_the_engine_died())
@@ -277,8 +280,12 @@ class TestSignallingOurOwnGroupIsRefused(unittest.TestCase):
         # group. Killing that group is the guard killing the process it exists
         # to outlive, so it refuses — and says so, because in production the
         # refusal means a spawn site has lost its flag and that is worth seeing.
+        #
+        # "Does not lead" is made true rather than assumed: a runner started by `setsid`, systemd or
+        # some CI systems *is* its own group's leader, and then the real `getpgrp()` equals the pid and
+        # the guard would (correctly) fire. The group is pinned to one that is not ours.
         with (
-            patch.object(os, "getpgrp", return_value=os.getpgrp()),
+            patch.object(os, "getpgrp", return_value=os.getpid() + 1),
             patch.object(os, "killpg") as killpg,
             patch.object(os, "_exit") as leave,
             contextlib.redirect_stderr(io.StringIO()) as err,
@@ -323,6 +330,7 @@ class TestSignallingOurOwnGroupIsRefused(unittest.TestCase):
         # makes in its own process group must not signal that group, and must not
         # take the runner with it. Reaching the end of this test is the assertion.
         with (
+            patch.object(os, "getpgrp", return_value=os.getpid() + 1),  # not the runner's real group: see above
             patch.object(os, "killpg") as killpg,
             patch.object(os, "_exit"),
             contextlib.redirect_stderr(io.StringIO()),
