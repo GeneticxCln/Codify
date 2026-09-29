@@ -13,9 +13,13 @@ this repository, so no third-party source is needed to exercise the runner.
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import json
+import os
+import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
@@ -509,6 +513,99 @@ class RecordTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(made.called)
             self.assertFalse((Path(tmp) / "w").exists(), "the scratch directory was left behind")
+
+
+class TheRecordCanBeKeptMoreThanOnceTests(unittest.TestCase):
+    """`--record` copies the scratch root after every task and again at the end, over what it already copied.
+
+    Git writes its objects read-only (0444) and `shutil.copy2` keeps the mode, so the first copy of a task's
+    workspace leaves read-only files in the record directory, and the second copy has to open one of them for
+    writing. For anyone but root that is `EACCES`: `--record` failed after the second task on every machine
+    that is not a root container, and the three tests below it in this file failed with it (found by a
+    `make ci-report` on a developer's machine, 2026-09-29). Root ignores the mode bits, which is why the run
+    that wrote it, and every run since, was green.
+
+    So these tests do not depend on who runs them: `_as_an_unprivileged_user` is what the kernel does to a
+    user who is not root, applied to the one call that writes the destination.
+    """
+
+    @staticmethod
+    def _as_an_unprivileged_user() -> Any:
+        real = shutil.copyfile
+
+        def copyfile(src: Any, dst: Any, *, follow_symlinks: bool = True) -> Any:
+            if os.path.lexists(dst) and not os.stat(dst).st_mode & stat.S_IWUSR:
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(dst))
+            return real(src, dst, follow_symlinks=follow_symlinks)
+
+        return mock.patch("shutil.copyfile", copyfile)
+
+    @staticmethod
+    def _a_workspace_with_a_git_object(root: Path, text: str) -> Path:
+        obj = root / "task" / ".git" / "objects" / "ab" / "cdef"
+        obj.parent.mkdir(parents=True, exist_ok=True)
+        if obj.exists():
+            obj.chmod(0o644)
+        obj.write_text(text, encoding="utf-8")
+        obj.chmod(0o444)
+        return obj
+
+    def test_the_emulation_fails_the_plain_copy_it_stands_in_for(self) -> None:
+        # Guard the guard: if this passed, the tests below would prove nothing about the fix.
+        with tempfile.TemporaryDirectory() as tmp:
+            work, keep = Path(tmp) / "work", Path(tmp) / "kept"
+            self._a_workspace_with_a_git_object(work, "one")
+            with self._as_an_unprivileged_user():
+                shutil.copytree(work, keep, dirs_exist_ok=True)
+                with self.assertRaises(shutil.Error):
+                    shutil.copytree(work, keep, dirs_exist_ok=True)
+
+    def test_a_second_copy_over_read_only_objects_replaces_them(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work, keep = Path(tmp) / "work", Path(tmp) / "kept"
+            self._a_workspace_with_a_git_object(work, "one")
+            with self._as_an_unprivileged_user():
+                runner._keep_record(work, keep)
+                self._a_workspace_with_a_git_object(work, "two")
+
+                runner._keep_record(work, keep)
+
+            kept = keep / "task" / ".git" / "objects" / "ab" / "cdef"
+            self.assertEqual("two", kept.read_text(encoding="utf-8"))
+
+    def test_the_copy_is_still_a_copy_not_a_move(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work, keep = Path(tmp) / "work", Path(tmp) / "kept"
+            source = self._a_workspace_with_a_git_object(work, "one")
+
+            runner._keep_record(work, keep)
+
+            self.assertEqual("one", source.read_text(encoding="utf-8"))
+            self.assertEqual(0o444, stat.S_IMODE(source.stat().st_mode), "the source's mode was changed")
+
+    def test_a_task_run_twice_through_main_keeps_a_record_a_user_can_read(self) -> None:
+        # The path a person takes, with the emulation on: two tasks, so the second copy lands on the first's files.
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = Path(tmp) / "kept"
+            manifest = Path(tmp) / "manifest.json"
+            manifest.write_text(json.dumps({
+                "version": 1,
+                "tiers": {"smoke": {"description": "d", "provider": "canned"}},
+                "repos": [],
+                "tasks": [{
+                    "id": name, "tier": "smoke", "repo": SYNTHETIC, "title": name, "description": "d",
+                    "canned_write": [{"path": "banner.txt", "content": "X\n"}],
+                    "checks": [{"type": "goal_completed"}],
+                } for name in ("first", "second")],
+            }), encoding="utf-8")
+
+            with self._as_an_unprivileged_user():
+                code, _ = _run_main(["--tier", "smoke", "--manifest", str(manifest), "--record", str(keep)])
+
+            self.assertEqual(0, code)
+            for name in ("first", "second"):
+                self.assertTrue((keep / f"{name}.db").is_file(), name)
+                self.assertTrue((keep / name / ".git").is_dir(), f"{name} lost its repository")
 
 
 class TheWorkspaceIsARealRepositoryTests(unittest.TestCase):
