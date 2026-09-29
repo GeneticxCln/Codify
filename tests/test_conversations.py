@@ -25,6 +25,8 @@ import sqlite3
 import os
 import tempfile
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -783,6 +785,31 @@ class ServiceLevelTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread.title, "")
 
 
+# `nobody`, by number: it need not exist by name for the kernel to honour the id.
+UNPRIVILEGED_UID = 65534
+
+
+@contextmanager
+def _without_root_privileges() -> Iterator[None]:
+    """Run as a user that file modes actually bind.
+
+    Root ignores `chmod 0444`, so a test that makes a database read-only to prove a
+    migration cannot run passed for everyone except whoever ran the suite as root —
+    which is what every container does, and what made `make test` fail there for a
+    reason that had nothing to do with the code. Not a skip: the same real read-only
+    failure is produced, by dropping to an unprivileged euid around the one call that
+    must be refused. A no-op when the suite is already unprivileged.
+    """
+    if os.geteuid() != 0:
+        yield
+        return
+    os.seteuid(UNPRIVILEGED_UID)
+    try:
+        yield
+    finally:
+        os.seteuid(0)
+
+
 class MigrationTestCase(unittest.TestCase):
     """A database from before conversations must still open and keep its goals.
 
@@ -905,8 +932,11 @@ class MigrationTestCase(unittest.TestCase):
         rw.commit()
         rw.close()
         os.chmod(path, 0o444)
+        # A private temp directory is 0700, which an unprivileged user cannot even
+        # enter; the file stays unwritable, which is the whole point.
+        os.chmod(path.parent, 0o755)
         try:
-            with self.assertRaises(sqlite3.OperationalError) as caught:
+            with _without_root_privileges(), self.assertRaises(sqlite3.OperationalError) as caught:
                 connect(path)
             self.assertNotIn(
                 "duplicate column",

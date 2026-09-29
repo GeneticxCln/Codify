@@ -175,7 +175,14 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 #       and there is nowhere to log it — the failure is in the viewer's event
 #       handler, not in the run. Same shape as providers.py's usage sink, which
 #       is exempted for the same reason.
+# S103 (tests/test_conversations.py)  the read-only-migration test makes its temp
+#       directory traversable (0o755) so that an unprivileged user can reach a file it
+#       cannot write, which is how the test produces a real read-only failure when the
+#       suite runs as root (root ignores file modes). The directory holds one throwaway
+#       SQLite file the test created itself under the system temp root, and it is
+#       removed with it; nothing of the developer's is exposed. Scoped to that one file.
 "tests/*" = ["S101", "S603", "S607", "S608", "S108", "S310"]
+"tests/test_conversations.py" = ["S103"]
 "engine/app.py" = ["S110", "S603", "S607", "S608"]
 "engine/conductor.py" = ["S110"]
 "engine/db.py" = ["S110"]
