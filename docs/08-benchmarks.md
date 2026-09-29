@@ -47,9 +47,11 @@ no API key. That is the same reasoning behind `scripts/fake_ollama.py` — a
 pipeline that can only be tested with a provider to hand is a pipeline that is
 tested when it is convenient to be broken.
 
-`repo_scale` tasks are written against a vendored repository (see §4). Until one
-has been fetched, the tier fails with a diagnosis naming the missing repository
-rather than scoring an empty run as a perfect one.
+The eleven `repo_scale` tasks that ship are written against that same committed
+fixture, so they need no fetch and no third-party code. A task written against a
+*vendored* repository (§4) is the other kind: until one has been fetched, the tier
+fails with a diagnosis naming the missing repository rather than scoring an empty
+run as a perfect one.
 
 ## 3. Running them
 
@@ -66,7 +68,22 @@ free in the gate; it is left out because a benchmark number in CI stops being
 read the first time it is red for reasons unrelated to the change.
 
 Useful flags: `--only <task-id>` (one task), `--report <path>` (JSON), and
-`--engine-db <path>` (read a specific engine store for a configured run).
+`--engine-db <path>` (read a specific engine store for a configured run). For a
+real model, three more matter:
+
+* `--repeat N` runs every task N times, each in a workspace and store of its own.
+  One run of a model is an anecdote; the spread is the measurement.
+* `--min-pass-rate PCT` exits 1 when fewer than PCT % of the runs pass. It is how
+  a recorded baseline is enforced (§8), and a run that beats it still prints the
+  number, so a floor that is too low is visible.
+* `--record DIR` traces every model call and keeps each task's store and
+  workspace in DIR instead of deleting them, so a model's raw replies can be read
+  (`trace_calls.response`) and committed as fixtures
+  (`tests/fixtures/model_replies/`).
+
+A task that crashes is recorded as `ERRORED` with its cause and the run goes on;
+each task prints as it finishes. A failed task carries the error that ended it, and
+the summary counts failures by code.
 
 ### The configured tier never writes into your history
 
