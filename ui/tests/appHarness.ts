@@ -227,6 +227,18 @@ export async function withApp(
     if (path === "/workspaces/browse" && method === "POST") {
       return respond(options.browse?.body ?? { cancelled: true }, options.browse?.status ?? 200);
     }
+    if (path === "/workspaces" && method === "POST") {
+      // The engine's create: the folder the person typed becomes a project.
+      const made = {
+        id: `ws-new-${++created}`,
+        name: String(payload?.name ?? ""),
+        root_path: String(payload?.root_path ?? ""),
+        design_contract_path: "",
+        created_at: 1,
+      };
+      workspaces.push(made);
+      return respond(made);
+    }
     if (path === "/workspaces") return respond(workspaces);
     if (path === "/models/recent") return respond([]);
     if (path === "/models") {

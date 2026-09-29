@@ -611,6 +611,11 @@ open looked exactly like one the person closed, in the API and on screen):
 | the dialog closed with nothing chosen | `{cancelled:true}` |
 | no dialog could open, it crashed, or it did not answer | **503 `picker_unavailable`**, the reason, and "type the folder's path instead" |
 
+The UI acts on that code rather than only showing it: on `picker_unavailable` it shows the reason **and opens
+its "Enter workspace path" form**, so a desktop with no dialog helper (a bare window manager, a container) is
+never left holding an instruction and a hunt for the control it names. Any other failure is shown and opens
+nothing; a real cancel is silent (`ui/tests/folderPicker.test.ts`).
+
 The GTK script (PyGObject, GTK 3) is tried first and speaks in exit codes: `0` with a path is a choice, `0`
 with nothing is a cancel, `3` is "PyGObject is not importable" and `4` is "GTK could not open a display".
 When it cannot run — any venv, conda or pyenv Python, which is most machines with a desktop — `zenity`, then

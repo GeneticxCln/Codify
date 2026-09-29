@@ -611,8 +611,10 @@ export async function browseWorkspace(): Promise<Workspace | null> {
   // dialog, and 503 `picker_unavailable` (with the reason) when no dialog could open; returning null
   // for both made a picker that could not open indistinguishable from one that was dismissed.
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || `HTTP ${res.status}`);
+    // The code survives so the app can act on it: `picker_unavailable` means "type the path instead",
+    // and the caller opens that form rather than leaving the person to find it.
+    const { code, message } = readErrorBody(await res.json().catch(() => ({})));
+    throw new ApiRequestError(res.status, code || null, message || `HTTP ${res.status}`);
   }
   const data = await res.json();
   if (data.cancelled || !data.workspace) return null;

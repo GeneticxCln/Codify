@@ -69,6 +69,10 @@ interface BottomCommandBarProps {
   onSelectWorkspace: (ws: Workspace) => void;
   onBrowseWorkspace: () => Promise<void>;
   onCreateWorkspace: (name: string, root_path: string) => Promise<void>;
+  /** Whether the "enter a folder path" dialog is showing. Held by the app, which opens it itself when
+   * the native folder dialog cannot. */
+  manualWorkspaceOpen: boolean;
+  onManualWorkspaceOpenChange: (open: boolean) => void;
   /** Confirms, then forgets the workspace and (after a second confirm) its goals. */
   onDeleteWorkspace: (workspaceId: string, name: string) => void;
   /**
@@ -122,6 +126,8 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   onSelectWorkspace,
   onBrowseWorkspace,
   onCreateWorkspace,
+  manualWorkspaceOpen: isManualWsModal,
+  onManualWorkspaceOpenChange: setIsManualWsModal,
   onDeleteWorkspace,
   onSetDesignContract,
   availableModels,
@@ -190,7 +196,6 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   );
 
   // Manual workspace path dialog fallback
-  const [isManualWsModal, setIsManualWsModal] = useState(false);
   const [wsName, setWsName] = useState("");
   const [wsPath, setWsPath] = useState("");
   const [wsError, setWsError] = useState<string | null>(null);
