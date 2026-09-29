@@ -9,8 +9,8 @@
  * Neither can ask the question that matters most about a strip: **does pressing
  * a tab do anything?** A strip that renders nine beautiful tabs wired to no
  * handler at all produces byte-identical markup to a working one, and the
- * `readFileSync` assertions elsewhere in these tests only prove the prop names
- * are spelled the way the caller spells them.
+ * source-text assertions that used to sit beside these only proved the prop
+ * names were spelled the way the caller spells them.
  *
  * The claims here are the ones only a press can settle:
  *
@@ -27,7 +27,6 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
 import { registerTsx } from "./tsxLoader.ts";
 registerTsx();
@@ -300,11 +299,7 @@ test("the strip no longer offers New Tab", async () => {
   await withStrip(
     { tabs: [tab({ id: "a" }), tab({ id: "b" }), tab({ id: "c" })], activeId: "a" },
     async (dom) => {
-      assert.deepEqual(
-        dom.allByLabel("New tab"),
-        [],
-        "the strip grew a new-tab control again",
-      );
+      assert.ok(dom.allByLabel("New tab").length === 0, "the strip grew a new-tab control again");
       const tablist = dom.container.querySelector('[role="tablist"]')!;
       assert.equal(
         tablist.querySelectorAll("button").length,
@@ -405,31 +400,25 @@ test("a terminal the user is watching is not badged, and the dot lands on one ta
   );
 });
 
-test("the close control is visible without a hover", () => {
+test("the close control is visible without a hover", async () => {
   // The click behind it always worked and the button was always in the
   // accessibility tree — it was `opacity-0 group-hover:opacity-100`, which is
   // a control nobody can find. A report of "the X does not show on the tabs"
-  // is a report about this class string, and the strip it was reported against
-  // held a hundred truncated labels: hover is not something a person can
-  // search. Read as source because visibility is a Tailwind class, and the
-  // text harness above renders no stylesheet at all.
-  const source = readFileSync(
-    new URL("../src/components/TabBar.tsx", import.meta.url),
-    "utf8"
-  );
-  const from = source.indexOf("aria-label={`Close ");
-  assert.ok(from >= 0, "TabBar no longer renders a close button");
-  // Comments stripped, and this is not cosmetic: the button's own comment
-  // *names* the class it stopped using, so a check that read the prose would
-  // fail on the fix's own explanation.
-  const closeButton = source
-    .slice(from, source.indexOf("</button>", from))
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^\s*\/\/.*$/gm, "");
-  assert.doesNotMatch(
-    closeButton,
-    /opacity-0|invisible|hidden/,
-    "the close button is hidden again until the pointer happens to land on it, \
-     which is a tab a user cannot see how to close"
-  );
+  // is a report about the classes the rendered button carries, and the strip it
+  // was reported against held a hundred truncated labels: hover is not
+  // something a person can search. Read off the mounted strip, because
+  // visibility is a Tailwind class and jsdom renders no stylesheet.
+  await withStrip({ tabs: [tab({ id: "a" }), tab({ id: "b" })], activeId: "a" }, async (dom) => {
+    const closers = [...dom.container.querySelectorAll('button[aria-label^="Close"]')];
+    assert.equal(closers.length, 2, "every tab has a close button");
+    const hides = /^(opacity-0|invisible|hidden)$/;
+    for (const closer of closers) {
+      // The button and everything between it and its tab, since a hidden parent
+      // hides it as well as a hidden button does.
+      for (let el: Element | null = closer; el && el.getAttribute("role") !== "tab"; el = el.parentElement) {
+        const hiding: string[] = [...el.classList].filter((c) => hides.test(c));
+        assert.deepEqual(hiding, [], `a close button is hidden again until the pointer lands on it (${el.tagName} ${[...el.classList].join(" ")})`);
+      }
+    }
+  });
 });

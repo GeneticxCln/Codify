@@ -161,6 +161,19 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
      */
     const backlogged = claimTerminal(terminalIdRef.current);
 
+    /**
+     * What earlier sessions left in this workspace's scrollback, read *now*.
+     *
+     * Not when xterm arrives: the output listener below files this shell's own
+     * chunks into the same record, so a chunk that lands in the gap while
+     * xterm is still loading would already be in the record when it was read,
+     * be written as part of the "restored session", and be written again by the
+     * buffer's flush — the first prompt twice.
+     */
+    const tail = workspaceIdRef.current
+      ? readTerminalHistory(workspaceIdRef.current)
+      : "";
+
     const publish = (grid: Grid): void => {
       if (!gridChanged(current, grid)) return;
       current = grid;
@@ -284,9 +297,6 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       // while nobody was displaying it. The backlog continues the tail; it is
       // never older than it. A shell with no backlog gets the workspace
       // replay alone, exactly as before the recorder existed.
-      const tail = workspaceIdRef.current
-        ? readTerminalHistory(workspaceIdRef.current)
-        : "";
       const restored = replayFor(tail);
       if (restored) term.write(restored);
       if (backlogged) {

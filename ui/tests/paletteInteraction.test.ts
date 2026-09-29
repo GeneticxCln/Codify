@@ -255,7 +255,7 @@ test("opening takes focus; closing gives it back to the composer", async () => {
   await withPalette({ open: false }, async (dom) => {
     const composer = dom.container.querySelector("#composer") as HTMLElement;
     composer.focus();
-    assert.equal(dom.window.document.activeElement, composer);
+    assert.ok(dom.window.document.activeElement === composer);
 
     const { CommandPalette } = await import("../src/components/CommandPalette.tsx");
     const shown = (open: boolean): Promise<void> =>
@@ -270,14 +270,10 @@ test("opening takes focus; closing gives it back to the composer", async () => {
 
     await shown(true);
     const input = dom.byLabel("Command palette");
-    assert.equal(dom.window.document.activeElement, input, "the palette opened without taking focus");
+    assert.ok(dom.window.document.activeElement === input, "the palette opened without taking focus");
 
     await shown(false);
-    assert.equal(
-      dom.window.document.activeElement,
-      dom.container.querySelector("#composer"),
-      "closing the palette left the cursor nowhere",
-    );
+    assert.ok(dom.window.document.activeElement === dom.container.querySelector("#composer"), "closing the palette left the cursor nowhere");
   });
 });
 
@@ -330,7 +326,7 @@ test("Tab is swallowed, and the input keeps focus", async () => {
     const input = dom.byLabel("Command palette");
     await dom.press(input, "Tab");
     assert.deepEqual(seen, [], "Tab reached a window-level listener");
-    assert.equal(dom.window.document.activeElement, input, "Tab walked the focus out of the palette");
+    assert.ok(dom.window.document.activeElement === input, "Tab walked the focus out of the palette");
   });
   assert.equal(report.closed, 0);
 });
@@ -360,7 +356,7 @@ test("a mousedown on the backdrop closes; one inside the panel does not", async 
 
 test("a closed palette is not in the document at all", async () => {
   await withPalette({ open: false }, async (dom) => {
-    assert.equal(dom.container.querySelector('[role="combobox"]'), null);
+    assert.ok(dom.container.querySelector('[role="combobox"]') === null);
     assert.equal(dom.text(), "Ask", "a closed palette left its text behind");
   });
 });

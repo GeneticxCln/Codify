@@ -166,6 +166,7 @@ import {
 } from "./shellEvents";
 import {
   applyShellStarvation,
+  clearShellStarvation,
   readMotion,
   rearmVerdictForBoot,
   writeSetting,
@@ -326,6 +327,23 @@ export const App: React.FC = () => {
   useEffect(() => {
     tabStateRef.current = tabState;
   }, [tabState]);
+  // A tab on screen has been seen. A shell's first prompt is nearly always
+  // printed before its tab exists (the PTY starts talking as `open` returns), so
+  // the recorder keeps that chunk for a tab that is not active yet, badges it,
+  // and the tab then opens active with the pane replaying the very bytes the
+  // badge announces. Nothing else clears a badge but focusing another tab, so a
+  // fresh terminal sat on a dot that said "unread" about the screen in front of
+  // the user.
+  useEffect(() => {
+    const active = tabState.activeId;
+    if (!active) return;
+    setUnreadTerminalIds((prev) => {
+      if (!prev.has(active)) return prev;
+      const next = new Set(prev);
+      next.delete(active);
+      return next;
+    });
+  }, [tabState.activeId, unreadTerminalIds]);
   useEffect(() => {
     let disposed = false;
     const offs: Array<() => void> = [];
@@ -3129,7 +3147,12 @@ export const App: React.FC = () => {
                   <button
                     type="button"
                     className="rounded-md border border-codify-border bg-codify-raised px-2 py-0.5 hover:bg-codify-border"
-                    onClick={() => setMotion(writeSetting("allowed"))}
+                    onClick={() => {
+                      // The choice outranks the verdict, and the verdict is
+                      // withdrawn so the banner that announced it goes too.
+                      writeSetting("allowed");
+                      setMotion(clearShellStarvation());
+                    }}
                   >
                     Animate anyway
                   </button>

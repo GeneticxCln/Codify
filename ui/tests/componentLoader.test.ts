@@ -26,7 +26,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import React from "react";
@@ -656,24 +656,8 @@ test("the empty state offers a way back to the composer", () => {
     "the skip link never becomes visible, so a sighted keyboard user cannot " +
       "see where focus is",
   );
-
-  // And the other end exists, in the component that owns the composer.
-  const bar = readFileSync(
-    new URL("../src/components/BottomCommandBar.tsx", import.meta.url),
-    "utf8",
-  );
-  assert.match(
-    bar,
-    /id=\{COMPOSER_ANCHOR_ID\}/,
-    "nothing in BottomCommandBar puts the composer's anchor id on anything, so " +
-      "the skip link has no target",
-  );
-  assert.match(
-    bar,
-    /import \{ COMPOSER_ANCHOR_ID \} from "\.\.\/composerAnchor"/,
-    "BottomCommandBar must read the id from the shared constant rather than " +
-      "writing it out, or the two ends can be renamed apart",
-  );
+  // The other end — the composer carrying that id in the mounted app — is checked in
+  // `appWiring.test.ts`.
 });
 
 test("rendering a transcript produces no React warning of any kind", () => {

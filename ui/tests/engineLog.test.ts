@@ -9,8 +9,8 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
+import { registerTsx } from "./tsxLoader.ts";
 import { STDERR_NOTABLE, notableStderrLines } from "../src/engineLog.ts";
 
 /** What the backstop prints when a graceful shutdown does not finish in time. */
@@ -116,18 +116,34 @@ test("the parent's death is notable, being how an orphan announces itself", () =
   );
 });
 
-test("App.tsx still asks the shell for the tail and renders what it says", () => {
+registerTsx();
+
+test("a window whose engine is gone shows the engine's last words, and only the notable ones", async () => {
   // The filter being right is worth nothing if nothing calls it, and the browser
-  // build cannot see this: outside Tauri `fetchEngineStderr` returns [] and the
-  // panel never appears, so every other test here passes against an App that
-  // dropped the wiring. This reads the committed source instead, the way
-  // `invokeArgs.test.ts` does for the IPC payloads.
-  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
-  assert.match(app, /fetchEngineStderr\(/, "App.tsx no longer reads the engine's stderr");
-  assert.match(app, /notableStderrLines\(/, "App.tsx no longer filters the tail");
-  assert.match(
-    app,
-    /engineStderr\.length > 0/,
-    "the tail is fetched but never rendered, which is the state this started from",
+  // build cannot see this: outside the shell `fetchEngineStderr` returns [] and
+  // the panel never appears. So this mounts the app under the shell with an engine
+  // that is not answering and a session's worth of stderr, and reads the screen.
+  const { withApp } = await import("./appHarness.ts");
+  const chatter = Array.from({ length: 80 }, (_unused, i) => `INFO: connection closed by peer ${i}`);
+  const tail = ["[engine] parent watchdog armed on pid 1234 (poll 1s)", ...chatter, BACKSTOP, "INFO: bye"];
+  await withApp(
+    { health: "down", shellAnswers: { codify_engine_log: tail } },
+    async ({ dom, shell, settle }) => {
+      await settle();
+      assert.ok(shell.calls.includes("codify_engine_log"), "the window never asked the shell for the engine's stderr");
+      const text = dom.container.textContent ?? "";
+      assert.match(text, /What the engine said before it stopped/, "the tail was fetched but never rendered");
+      assert.ok(text.includes(BACKSTOP), "the shutdown backstop's line is not on screen");
+      assert.ok(!text.includes("connection closed by peer 3"), "ordinary chatter crowded the panel");
+    },
   );
+});
+
+test("a window whose engine is up shows no engine log at all", async () => {
+  const { withApp } = await import("./appHarness.ts");
+  await withApp({ shellAnswers: { codify_engine_log: [BACKSTOP] } }, async ({ dom, shell, settle }) => {
+    await settle();
+    assert.ok(!shell.calls.includes("codify_engine_log"), "the log was fetched for a healthy engine");
+    assert.doesNotMatch(dom.container.textContent ?? "", /What the engine said before it stopped/);
+  });
 });

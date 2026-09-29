@@ -9,68 +9,94 @@
  * clicking Terminal in a browser tab feel broken even after the refusal text
  * landed: the one honest sentence the panes can give you was permanent.
  *
- * A freeze rather than a render, for the same reason as the freezes in
- * `browserPane.test.ts`: nothing in the suite mounts `App.tsx`, so the banner's
- * markup cannot be rendered in isolation. Crude on purpose — *deleting* the
- * dismiss control has to fail here rather than in someone's window.
+ * These mount the whole App against `appHarness.ts` and make a real refusal
+ * happen (the shell refusing to start a terminal), then use the banner the way a
+ * person does. They replace tests that read `App.tsx` for `onClick={() =>
+ * setError(null)}`: that string was there whether or not pressing the control
+ * did anything.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
-const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+import { registerTsx } from "./tsxLoader.ts";
+registerTsx();
 
-/** The banner's JSX, from the `error &&` guard to the end of that block. */
-const banner = app.split("{error && (")[1]?.split("\n          )}")[0];
+const { withApp } = await import("./appHarness.ts");
 
-test("the app error banner can be dismissed", () => {
-  assert.ok(banner, "App.tsx no longer renders the error banner in the expected shape");
-  assert.match(
-    banner,
-    /onClick=\{\(\) => setError\(null\)\}/,
-    "the error banner has no way to clear itself; a refusal the reader has " +
-      "understood and cannot dismiss is an obstacle, not a report",
-  );
+const alerts = (root: HTMLElement): HTMLElement[] =>
+  [...root.querySelectorAll('[role="alert"]')] as HTMLElement[];
+
+const terminalButton = (root: HTMLElement): HTMLElement => {
+  const button = root.querySelector('button[title^="Terminal"]');
+  assert.ok(button, "the panel has no Terminal control");
+  return button as HTMLElement;
+};
+
+/** Make the shell refuse to start a shell, press Terminal, and return the banner. */
+async function refuse(
+  ctx: { dom: { container: HTMLElement; click(el: Element): Promise<void> }; settle(): Promise<void> },
+): Promise<HTMLElement> {
+  await ctx.dom.click(terminalButton(ctx.dom.container));
+  await ctx.settle();
+  const [banner] = alerts(ctx.dom.container);
+  assert.ok(banner, "a refused terminal put nothing on screen");
+  return banner;
+}
+
+const REFUSAL = { codify_terminal_open: "the shell would not start: no such file" };
+
+test("a refusal is announced, and the banner can be dismissed", async () => {
+  await withApp({ shellFails: REFUSAL }, async (ctx) => {
+    const banner = await refuse(ctx);
+    // Announced to assistive technology, not just coloured red, and it says what
+    // happened rather than "something went wrong".
+    assert.equal(banner.getAttribute("role"), "alert");
+    assert.match(banner.textContent ?? "", /no such file/);
+
+    const dismiss = banner.querySelector('button[aria-label="Dismiss error"]');
+    assert.ok(
+      dismiss,
+      "the banner has no control named 'Dismiss error'; a refusal the reader has " +
+        "understood and cannot dismiss is an obstacle, not a report",
+    );
+    await ctx.dom.click(dismiss);
+    await ctx.settle();
+    assert.equal(alerts(ctx.dom.container).length, 0, "pressing dismiss did not clear the banner");
+  });
 });
 
-test("the dismiss control is an IconButton, so it cannot lose its label", () => {
-  // `IconButton` makes `label` a required prop, so a dismiss icon that reached
-  // production without an accessible name is a type error rather than something
-  // a test has to remember to check. Asserting the component here is what keeps
-  // that guarantee pointed at this control.
-  assert.match(
-    banner,
-    /<IconButton[\s\S]*?label="Dismiss error"/,
-    "the dismiss control is not an IconButton with a required label",
-  );
+test("the dismiss control has an accessible name (an icon with no label is unreadable)", async () => {
+  await withApp({ shellFails: REFUSAL }, async (ctx) => {
+    const banner = await refuse(ctx);
+    const dismiss = banner.querySelector("button");
+    assert.ok(dismiss, "the banner has no button at all");
+    const name = dismiss.getAttribute("aria-label") || dismiss.textContent?.trim() || "";
+    assert.ok(name.length > 0, "the dismiss control has no accessible name");
+  });
 });
 
-test("the banner is announced, not just coloured red", () => {
-  assert.match(
-    banner,
-    /role="alert"/,
-    "the app error banner is not announced to assistive technology",
-  );
-});
+test("a browser pane's refusal stays in its pane, not in the app banner", async () => {
+  // One surface per refusal. The panes have their own channels, and a pane whose
+  // message also went to the banner would show the same refusal twice for one
+  // mistake — which is how a dismissable banner starts hiding a message that is
+  // still being reported.
+  await withApp({}, async ({ dom, settle }) => {
+    const browser = dom.container.querySelector('button[title^="Browser"]') as HTMLElement;
+    await dom.click(browser);
+    await settle();
+    const address = dom.container.querySelector('input[aria-label="Address"]') as HTMLInputElement | null;
+    assert.ok(address, "opening a browser tab showed no address bar");
 
-test("a browser pane's refusal stays in its pane, not in the app banner", () => {
-  // One surface per refusal. The panes have their own channels (`BrowserPane`'s
-  // `error`, `TerminalPane`'s `failed`), and a pane whose message also went to
-  // the banner would show the same refusal twice for one mistake — which is how
-  // a dismissable banner starts hiding a message that is still being reported.
-  //
-  // The `assert.ok` is load-bearing: without it a regex that matched nothing
-  // would leave an empty string, and `doesNotMatch("")` passes for ever.
-  const paneRenders = app.match(/<BrowserPane[\s\S]*?\/>/)?.[0] ?? "";
-  assert.ok(paneRenders, "App.tsx no longer renders <BrowserPane>");
-  assert.match(
-    paneRenders,
-    /error=\{[\s\S]*?pendingBrowser\.error/,
-    "the browser pane is no longer handed the refusal for its own tab",
-  );
-  assert.doesNotMatch(
-    paneRenders,
-    /setError/,
-    "the browser pane's own error is being routed through the app banner as well",
-  );
+    // A loopback address is one the shell never lets a page reach.
+    await dom.fill(address, "http://127.0.0.1:7430/");
+    await dom.press(address, "Enter");
+    await settle();
+
+    const shown = alerts(dom.container);
+    assert.equal(shown.length, 1, `expected the refusal once, found ${shown.length}`);
+    const pane = dom.container.querySelector('[aria-label="Browser"]');
+    assert.ok(pane, "there is no browser pane");
+    assert.ok(pane.contains(shown[0]), "the refusal is in the app banner instead of the pane the user typed it in");
+    assert.ok(shown[0].querySelector('button[aria-label="Dismiss error"]') === null, "the pane's refusal has grown the app banner's dismiss control");
+  });
 });

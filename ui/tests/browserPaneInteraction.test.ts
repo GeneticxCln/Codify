@@ -132,11 +132,7 @@ test("the refusal clears when the next address is accepted", async () => {
     assert.ok(alert, "the refusal showed");
     await typeAddress(dom, "example.com");
     assert.deepEqual(calls.open, ["https://example.com/"]);
-    assert.equal(
-      dom.container.querySelector('[role="alert"]'),
-      null,
-      "the refusal outlived the address that fixed it"
-    );
+    assert.ok(dom.container.querySelector('[role="alert"]') === null, "the refusal outlived the address that fixed it");
   });
 });
 

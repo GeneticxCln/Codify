@@ -11,7 +11,6 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -401,7 +400,7 @@ test("the three shell surfaces are named, not left as glyphs", () => {
   assert.match(words, /Terminal/);
   assert.match(words, /Settings/);
   // And the longer sentence still has somewhere to live.
-  assert.match(markup, /title="Browser — the page opens in its own window"/);
+  assert.match(markup, /title="Browser — the page opens in this window"/);
   assert.match(markup, /title="Terminal — a shell in this workspace"/);
   assert.match(markup, /title="Keys &amp; Endpoints"/);
   assertClean(markup, "the panel with its three named badges");
@@ -476,7 +475,7 @@ test("the badges are below the threads, not above them", () => {
   // a bare word in a class list is not an anchor.
   const newProject = markup.indexOf("New Project");
   const thread = markup.indexOf('aria-label="Archive conversation"');
-  const badge = markup.indexOf('title="Browser — the page opens in its own window"');
+  const badge = markup.indexOf('title="Browser — the page opens in this window"');
   assert.ok(newProject >= 0 && thread >= 0 && badge >= 0, "a landmark went missing");
   assert.ok(newProject < thread, "New Project is no longer at the top of the panel");
   assert.ok(
@@ -507,13 +506,6 @@ test("the panel opens threads, and does not open tabs", () => {
   assert.doesNotMatch(markup, /New Thread/, "the panel is offering a second way to open a tab");
   assert.ok(markup.indexOf("New Project") >= 0, "and the button that adds a project went missing");
   assert.match(markup, /class="flex items-center gap-1"/);
-  // The menu keeps its "New thread": branching is not starting from nothing.
-  const menu = readFileSync(
-    new URL("../src/components/ThreadMenu.tsx", import.meta.url),
-    "utf8",
-  );
-  assert.match(menu, /threadMenuItems\(title !== undefined\)/);
-  assert.match(menu, /item\.id === "new" \? onNewThread/);
 });
 
 test("a surface the shell does not offer is absent, not disabled", () => {
@@ -586,48 +578,28 @@ test("the thread menu leads with New thread, then the thread's own actions", () 
   assert.doesNotMatch(shown, /Delete/);
 });
 
+/** The opening tag of every element in the markup that carries this role. */
+const withRole = (markup: string, role: string): string[] =>
+  [...markup.matchAll(/<[a-z]+\b[^>]*>/g)].map((m) => m[0]).filter((tag) => tag.includes(`role="${role}"`));
+const classesOf = (tag: string): string[] => (/class="([^"]*)"/.exec(tag)?.[1] ?? "").split(/\s+/).filter(Boolean);
+
 test("a menu item's label is on the left, not floating in the middle", () => {
   // The defect, in the shape it had: `Button`'s base is `inline-flex items-center
   // justify-center`, and the menu overrode it with a `justify-start` *class*.
   // Both utilities reached the stylesheet and the later stylesheet rule won —
   // `justify-center` — so every menu item's label sat centred in a 176px row
   // with a third of the width empty on the right. A class string cannot decide
-  // this; the primitive has to emit exactly one of the two.
-  const button = readFileSync(
-    new URL("../src/components/ui/Button.tsx", import.meta.url),
-    "utf8",
-  );
-  assert.match(
-    button,
-    /align === "start" \? "justify-start" : "justify-center"/,
-    "Button can emit two competing justify-* utilities again",
-  );
-  assert.match(
-    button,
-    /weight === "normal" \? "font-normal" : "font-semibold"/,
-    "Button can emit two competing font-weight utilities again",
-  );
-  // Comments do not emit a stylesheet rule, so they are stripped before counting
-  // — the comment explaining this bug names both utilities and would otherwise
-  // read as two more of them.
-  const code = button.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
-  const justifyCount = (code.match(/justify-(start|center)/g) || []).length;
-  assert.equal(
-    justifyCount,
-    2,
-    `Button's code has ${justifyCount} justify-* utilities; the two-branch emitter must be the only pair`,
-  );
-  // And the menu asks for the left-aligned one.
-  const menu = readFileSync(
-    new URL("../src/components/ThreadMenu.tsx", import.meta.url),
-    "utf8",
-  );
-  assert.match(menu, /align="start"/, "menu items are not left-aligned");
-  assert.doesNotMatch(
-    menu,
-    /justify-start/,
-    "the menu is fighting alignment with a class again",
-  );
+  // this; the primitive has to emit exactly one of the two, and the rendered
+  // item is where that is visible.
+  const items = withRole(menu(), "menuitem");
+  assert.equal(items.length, 3, "the menu did not render its three items");
+  for (const tag of items) {
+    const classes = classesOf(tag);
+    const justify = classes.filter((c) => /^justify-(start|center|end|between)$/.test(c));
+    assert.deepEqual(justify, ["justify-start"], `an item asks for ${justify.join(" + ") || "no"} alignment: ${tag}`);
+    const weight = classes.filter((c) => /^font-(normal|medium|semibold|bold)$/.test(c));
+    assert.deepEqual(weight, ["font-normal"], `an item carries ${weight.join(" + ") || "no"} weight: ${tag}`);
+  }
 });
 
 test("the menu is compact: no oversized floor, no heavy weight", () => {
@@ -635,26 +607,15 @@ test("the menu is compact: no oversized floor, no heavy weight", () => {
   // a 176px minimum width holding three short words, and `font-semibold` from
   // the button primitive making every item shout. Both are in the markup, so
   // both are read off it.
-  const menu = readFileSync(
-    new URL("../src/components/ThreadMenu.tsx", import.meta.url),
-    "utf8",
-  );
-  assert.doesNotMatch(menu, /min-w-44/, "the menu is back to a 176px floor");
+  const [root] = withRole(menu(), "menu");
+  assert.ok(root, "the menu has no root");
+  const classes = classesOf(root);
+  assert.ok(!classes.some((c) => /^min-w-/.test(c)), `the menu has a width floor again: ${classes.join(" ")}`);
   // An explicit width, not a floor plus shrink-to-fit: the items are `w-full`,
   // and a percentage width in a self-sizing container is a feedback loop that
   // stretched the menu to 255px to hold three words.
-  assert.match(menu, /w-36/, "the menu has no fixed compact width");
-  assert.doesNotMatch(
-    menu,
-    /min-w-\d+/,
-    "the menu is sizing itself from its own percentage-width items again",
-  );
-  // Weight is asked for as a prop for the same reason alignment is: a
-  // `font-normal` class lost to the primitive's `font-semibold` on stylesheet
-  // order, and every menu item came out bold.
-  assert.match(menu, /weight="normal"/, "menu items still carry the button's bold weight");
-  assert.doesNotMatch(menu, /font-normal/, "the menu is fighting weight with a class again");
-  assert.doesNotMatch(menu, /shadow-xl/, "the menu still has a dialog's shadow");
+  assert.ok(classes.includes("w-36"), `the menu has no fixed compact width: ${classes.join(" ")}`);
+  assert.ok(!classes.includes("shadow-xl"), "the menu still has a dialog's shadow");
 });
 
 test("the menu names the thread a New thread would be on", () => {
@@ -699,26 +660,46 @@ test("the thread menu is placed where it was asked for", () => {
   assert.doesNotMatch(corner, /left:\s*-|top:\s*-|left:\s*9999/);
 });
 
-// ── one name for an unnamed thread ───────────────────────────────────────
-//
-// How a first prompt names its thread is a behaviour, and is tested by sending one
-// in the mounted app (`appWiring.test.ts`). What stays here is the static rule that
-// no surface spells the placeholder itself.
+// The one-spelling rule for an unnamed thread's placeholder is static by nature and
+// lives in `sourceRules.test.ts`; how a first prompt names its thread is tested by
+// sending one in the mounted app (`appWiring.test.ts`).
 
-test("no surface invents its own name for an unnamed thread", () => {
-  // The one-string rule. `UNTITLED_THREAD_TITLE` is imported by the tab strip
-  // and the panel and defined once; a second literal "New chat" in either is a
-  // tab and a row that can disagree about the same thread.
-  for (const file of ["../src/tabs.ts", "../src/components/Sidebar.tsx"]) {
-    const src = readFileSync(new URL(file, import.meta.url), "utf8");
-    const withoutComments = src
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/^\s*\/\/.*$/gm, "");
-    const literals = withoutComments.match(/"New chat"/g) ?? [];
-    assert.equal(
-      literals.length,
-      0,
-      `${file} hard-codes "New chat" instead of using UNTITLED_THREAD_TITLE`
+// ── the menu, clicked ────────────────────────────────────────────────────
+
+const { withDom } = await import("./dom.ts");
+
+test("each menu item acts on the thread it names, and no other", async () => {
+  // The items are built from `threadMenuItems`, and which callback each one calls
+  // is the wiring: a menu whose Rename archived would render identically.
+  for (const [label, expected] of [
+    ["New thread", "onNewThread"],
+    ["Rename", "onRename"],
+    ["Archive", "onArchive"],
+  ] as const) {
+    const called: string[] = [];
+    await withDom(async (dom) => {
+      await dom.render(
+        React.createElement(ThreadMenu, {
+          title: "Refactor the parser",
+          parentTitle: "Refactor the parser",
+          x: 100,
+          y: 100,
+          bounds: VIEWPORT,
+          onNewThread: () => called.push("onNewThread"),
+          onRename: () => called.push("onRename"),
+          onArchive: () => called.push("onArchive"),
+          onClose: () => called.push("onClose"),
+        }),
+      );
+      const item = [...dom.container.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent?.includes(label));
+      assert.ok(item, `no menu item says ${label}`);
+      await dom.click(item);
+    });
+    assert.ok(called.includes(expected), `${label} did not call ${expected}: ${called.join(", ")}`);
+    assert.deepEqual(
+      called.filter((c) => c !== expected && c !== "onClose"),
+      [],
+      `${label} also called another item's handler`,
     );
   }
 });

@@ -325,7 +325,7 @@ test("a planning goal can be cancelled, and a finished one can be deleted", asyn
   await withTranscript(
     { messages: [assistant({ goal: goal({ status: "COMPLETED" }) })] },
     async (dom, io) => {
-      assert.deepEqual(dom.allByLabel("Cancel goal"), [], "a finished goal was still cancellable");
+      assert.ok(dom.allByLabel("Cancel goal").length === 0, "a finished goal was still cancellable");
       await dom.click(dom.byLabel("Delete goal"));
       assert.deepEqual(io.deleted, [["g1", "Ship the tint picker"]]);
     },
@@ -685,7 +685,7 @@ test("closing the recording panel puts the card back as it was", async () => {
       assert.equal(dom.allByLabel("Close recording panel").length, 1);
 
       await dom.click(dom.byLabel("Close recording panel"));
-      assert.deepEqual(dom.allByLabel("Close recording panel"), [], "the panel stayed open");
+      assert.ok(dom.allByLabel("Close recording panel").length === 0, "the panel stayed open");
       // And the control that opened it is offered again, since the recording is
       // still there.
       assert.equal(dom.allByLabel("Show recording").length, 1);

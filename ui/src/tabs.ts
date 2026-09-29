@@ -456,7 +456,7 @@ export function openBrowserTab(
   url: string,
   workspaceId?: string,
 ): TabState {
-  return openTab(state, {
+  const filled: Tab = {
     id,
     kind: "browser",
     title: hostOf(url),
@@ -468,7 +468,15 @@ export function openBrowserTab(
     workspaceId,
     url,
     history: visit(emptyHistory(), url),
-  });
+  };
+  // The tab the address bar was typed in already exists: the New Tab control
+  // opens an empty one under this id. Appending a second tab with the same id
+  // left the empty one behind on the strip, two children with one React key,
+  // and a `codify_browser_close` that closed both.
+  const at = tabIndex(state, id);
+  if (at === -1) return openTab(state, filled);
+  const tabs = state.tabs.map((t, i) => (i === at ? { ...t, ...filled } : t));
+  return { tabs, activeId: id };
 }
 
 /**

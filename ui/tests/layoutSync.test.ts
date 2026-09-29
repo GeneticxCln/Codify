@@ -26,7 +26,6 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
 import { registerTsx } from "./tsxLoader.ts";
 // Types statically (erased whole, so they can be hoisted), values dynamically
@@ -621,65 +620,62 @@ test("a store that refuses costs the strip, not the window", () => {
   );
 });
 
-// ── the wiring in App.tsx ───────────────────────────────────────────────────
+// ── the calls that carry it to the engine ───────────────────────────────────
+//
+// That the app *makes* these calls, in this order, is checked by running it
+// (`tabRestoreEndToEnd.test.ts`). What is checked here is what each call is: it
+// carries the boot token (docs/00 §6.3 — a new route is not an exemption, and a
+// new call is where that would be quietly dropped), uses the verb that means what
+// it says, and puts nothing client-chosen into the path unescaped.
 
-function appCode(): string {
-  return readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^\s*\/\/.*$/gm, "");
+const { listShellTabs, upsertShellTab, deleteShellTab, setEngineInfo } = await import("../src/api.ts");
+
+/** Run `body` with a `fetch` that records what it was asked and answers with an empty strip. */
+async function recording(
+  body: () => Promise<unknown>,
+): Promise<Array<{ url: string; method: string; authorization: string | null }>> {
+  const seen: Array<{ url: string; method: string; authorization: string | null }> = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    seen.push({ url: String(input), method: init?.method ?? "GET", authorization: headers.get("authorization") });
+    return { ok: true, status: 200, json: async () => [] } as unknown as Response;
+  }) as typeof fetch;
+  try {
+    await body();
+  } finally {
+    globalThis.fetch = real;
+  }
+  return seen;
 }
 
-test("the sync is wired to the three engine calls, and to nothing else", () => {
-  const code = appCode();
-  for (const call of ["listShellTabs", "upsertShellTab", "deleteShellTab"]) {
-    assert.match(code, new RegExp(`${call}\\(`), `${call} is never called from the window`);
-  }
-  // The engine is not the mirror: both writes have to happen, and a change that
-  // only reached one of them is a strip that is a restart old *or* a strip the
-  // other window never sees.
-  assert.match(code, /writeLayoutMirror\(layoutStorage\(\),/);
-  assert.match(code, /readLayoutMirror\(layoutStorage\(\)\)/);
-  // A close reaches the queue from the handler the tab's × calls; the tests
-  // below prove what the queue does, this only proves the app feeds it.
-  assert.match(code, /queueRemoval\(layoutMirror\.current, tab\.key\)/);
-  // And the engine is asked for the strip when the window is next looked at,
-  // which is the difference between shared and shared-on-write.
-  assert.match(code, /addEventListener\("visibilitychange", onVisible\)/);
-  assert.match(code, /addEventListener\("focus", onVisible\)/);
-  // A no-op is the point of the cost model, so the plan must be computed against
-  // what the engine is known to hold.
-  assert.match(
-    code,
-    /planChanges\(\s*tabState,\s*layoutMirror\.current,\s*engineKnown\.current,\s*engineRows\.current,?\s*\)/,
-    "the plan is not computed against the keys the engine has confirmed, so an \
-     unchanged strip is re-sent in full",
+test("every strip call carries the boot token, and each verb means what it says", async () => {
+  setEngineInfo({ port: 7777, token: "boot-token-under-test" });
+  const row = { key: "k_a_1", position: 0, kind: "browser" as const, payload: "{}" };
+  const seen = await recording(async () => {
+    await listShellTabs();
+    await upsertShellTab(row);
+    await deleteShellTab("k_a_1");
+  });
+  assert.deepEqual(
+    seen.map((c) => `${c.method} ${new URL(c.url).pathname}`),
+    ["GET /shell/tabs", "PUT /shell/tabs", "DELETE /shell/tabs/k_a_1"],
   );
+  for (const call of seen) {
+    assert.equal(call.authorization, "Bearer boot-token-under-test", `${call.method} ${call.url} does not send the boot token`);
+    assert.equal(new URL(call.url).port, "7777");
+  }
 });
 
-test("the three calls exist in api.ts, each with the boot token", () => {
-  const api = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
-  for (const name of ["listShellTabs", "upsertShellTab", "deleteShellTab"]) {
-    const start = api.indexOf(`export async function ${name}`);
-    assert.ok(start >= 0, `api.ts has no ${name}`);
-    // To the *next* exported function, not to the first `}`: a body with a
-    // nested object (the headers) would be cut in half and the token assertion
-    // would pass on a function that sends nothing.
-    const next = api.indexOf("\nexport ", start + 1);
-    const body = api.slice(start, next < 0 ? undefined : next);
-    // docs/00 §6.3: the engine binds loopback and requires the token on
-    // everything. A new route is not an exemption, and a new *call* is where that
-    // would be quietly dropped.
-    assert.match(
-      body,
-      /Authorization: `Bearer \$\{currentEngine\.token\}`/,
-      `${name} does not send the boot token`,
-    );
-  }
-  assert.match(api, /method: "PUT"/, "there is no way to write a tab");
-  assert.match(api, /method: "DELETE"/, "and no way to close one");
-  // The path is escaped: a key is client-minted, and an unescaped one is a path
-  // that can be rewritten by whatever is in it.
-  assert.match(api, /encodeURIComponent\(key\)/, "the key is not escaped into the path");
+test("a key is escaped into the path, because it is client-minted", async () => {
+  // An unescaped key is a path that can be rewritten by whatever is in it.
+  setEngineInfo({ port: 7777, token: "t" });
+  const seen = await recording(() => deleteShellTab("../settings/agents?x=1#y"));
+  assert.equal(seen.length, 1);
+  const path = new URL(seen[0].url).pathname;
+  assert.ok(path.startsWith("/shell/tabs/"), path);
+  assert.ok(!path.slice("/shell/tabs/".length).includes("/"), `the key escaped its path segment: ${path}`);
+  assert.equal(new URL(seen[0].url).search, "", "part of the key became a query string");
 });
 
 // ── the queues are filled by the code that closes and navigates ────────────

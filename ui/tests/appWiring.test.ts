@@ -264,3 +264,21 @@ test("a thread that has a parent says which, in the panel", async () => {
     assert.doesNotMatch(row("c1").textContent ?? "", /on “|thread/, "a top-level row claims a parent");
   });
 });
+
+test("the empty transcript's skip link lands on the composer that is on screen", async () => {
+  // A skip link is two halves that have to agree: the link's `href` and the
+  // element it names. Renaming one without the other produces a link that
+  // silently does nothing, so this asks the mounted app whether the id the link
+  // points at is carried by the composer.
+  await withApp({}, async ({ dom, settle }) => {
+    await settle();
+    const link = [...dom.container.querySelectorAll('a[href^="#"]')].find((a) => /prompt/i.test(a.textContent ?? ""));
+    assert.ok(link, "the empty transcript renders no skip link to the composer");
+    const target = dom.container.querySelector(`[id="${link.getAttribute("href")!.slice(1)}"]`);
+    assert.ok(target, `the skip link points at ${link.getAttribute("href")} and nothing on screen carries that id`);
+    assert.ok(
+      target.querySelector("textarea") || target.tagName === "TEXTAREA" || target.closest("form, div")?.querySelector("textarea"),
+      "the skip link's target is not the composer",
+    );
+  });
+});

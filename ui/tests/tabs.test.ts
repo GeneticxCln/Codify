@@ -10,7 +10,6 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
 import { registerTsx } from "./tsxLoader.ts";
 // Not for the JSX — `tabs.ts` has none. For the hook's `resolve` step: `src/`
@@ -306,6 +305,23 @@ test("a browser tab records its folder too", () => {
   const s = openBrowserTab(emptyTabs, "browser-1", "https://example.com", "w1");
   assert.equal(s.tabs[0].workspaceId, "w1");
   assert.equal(s.tabs[0].title, "example.com", "the folder displaced the host");
+});
+
+test("the first address fills in the empty tab it was typed in, rather than adding a second with the same id", () => {
+  // The New Tab control opens an empty browser tab; typing an address into it
+  // must complete *that* tab. Appending a second tab under the same id left a
+  // ghost "New tab" on the strip and two children with one React key.
+  let s = openConversation(emptyTabs, "c1", "one");
+  s = openTab(s, { id: "browser-1", kind: "browser", title: "New tab", key: "k_stable" });
+  s = openConversation(s, "c2", "two");
+  s = openBrowserTab(s, "browser-1", "https://example.com/a", "w1");
+  assert.equal(tabsOfKind(s, "browser").length, 1, "the empty tab stayed behind");
+  assert.equal(new Set(s.tabs.map((t) => t.id)).size, s.tabs.length, "two tabs share an id");
+  const filled = s.tabs.find((t) => t.id === "browser-1");
+  assert.equal(filled?.url, "https://example.com/a");
+  assert.equal(filled?.key, "k_stable", "filling a tab in minted it a new identity");
+  assert.equal(s.tabs.indexOf(filled!), 1, "the tab moved instead of being filled where it stood");
+  assert.equal(s.activeId, "browser-1");
 });
 
 test("a browser tab with no folder records none rather than a guess", () => {
@@ -624,10 +640,34 @@ test("a terminal tab remembers the workspace its shell was pinned to", () => {
   // a reopened pane restores.
   const s = openTerminalTab(emptyTabs, "term-1", "w-old");
   assert.equal(s.tabs[0].workspaceId, "w-old");
-  // And the pane is handed the tab's, so the two cannot disagree.
-  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
-  assert.match(app, /workspaceId=\{activeTerminalTab\.workspaceId\}/);
-  assert.match(app, /openTerminalTab\(prev, ptyId, selectedWs\.id\)/);
+});
+
+test("the app pins a terminal to the workspace it was opened in, and files its output there", async () => {
+  // The claim above, through the mounted app: the shell is asked to open the
+  // terminal in the selected workspace, and what the terminal prints is filed
+  // under *that* workspace's scrollback — the key a reopened pane restores from.
+  const { withApp } = await import("./appHarness.ts");
+  const { readTerminalHistory } = await import("../src/terminalHistory.ts");
+  await withApp(
+    {
+      workspaces: [
+        { id: "ws-a", name: "Alpha", root_path: "/tmp/e2e-alpha" },
+        { id: "ws-b", name: "Beta", root_path: "/tmp/e2e-beta" },
+      ],
+    },
+    async ({ dom, shell, emit, settle }) => {
+      await dom.click(dom.container.querySelector('button[title^="Terminal"]') as HTMLElement);
+      await settle();
+      const at = shell.calls.indexOf("codify_terminal_open");
+      assert.ok(at >= 0, "Terminal never asked the shell for a terminal");
+      assert.equal(shell.args[at].workspaceId, "ws-a", "the shell was not asked to pin the shell to the selected workspace");
+
+      await emit("terminal-output", { id: "term-1", data: "quinton@alpha:~$ make build\r\n" });
+      await settle();
+      assert.match(readTerminalHistory("ws-a"), /make build/, "the output was not filed under the tab's workspace");
+      assert.equal(readTerminalHistory("ws-b"), "", "the output leaked into another workspace's scrollback");
+    },
+  );
 });
 
 test("an exited shell is marked without losing the tab", () => {

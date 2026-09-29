@@ -424,7 +424,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
           `Button`, not `IconButton`: these are named now, and a visible name is
           the label. `title` still carries the longer sentence, which is the only
-          place "the page opens in its own window" fits. The rule above
+          place "the page opens in this window" fits. The rule above
           separates them from the list so they read as the panel's own furniture
           rather than as another thread. */}
       <div className="flex items-stretch gap-1 border-t border-codify-border pt-1.5 overflow-hidden">
@@ -433,7 +433,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             tone="subtle"
             size="sm"
             onClick={onOpenBrowser}
-            title="Browser — the page opens in its own window"
+            title="Browser — the page opens in this window"
             className="flex-1 min-w-0 flex-col gap-1"
           >
             <Globe className="w-3 h-3 flex-shrink-0" />

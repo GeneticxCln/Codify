@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 /** Test files that read something under `src/` as text, as of this change. */
-const SOURCE_TEXT_TEST_BUDGET = 32;
+const SOURCE_TEXT_TEST_BUDGET = 27;
 
 test("the number of tests that read the app's source as text has not grown", () => {
   const dir = path.dirname(fileURLToPath(import.meta.url));

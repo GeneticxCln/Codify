@@ -214,7 +214,7 @@ test("a scheme can be loaded from a file, and the file input stays usable", asyn
     // and which a source-reading test could not make: a `display: none` input
     // takes itself out of the tab order, and so does one that is not focusable.
     input.focus();
-    assert.equal(dom.window.document.activeElement, input, "the file input cannot be focused");
+    assert.ok(dom.window.document.activeElement === input, "the file input cannot be focused");
 
     await dom.selectFile(input, {
       name: "codify-colours-2026-09-28.json",

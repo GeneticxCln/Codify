@@ -33,6 +33,57 @@ export interface AppOptions {
   conversations?: Conversation[];
   /** A remembered tab strip (`CODIFY_TABS`), as the app would have written it. */
   storedTabs?: unknown;
+  /** Shell commands that answer with something other than the default `null`. */
+  shellAnswers?: Record<string, unknown | ((args: Record<string, unknown>) => unknown)>;
+  /** Shell commands that reject, with this message. */
+  shellFails?: Record<string, string>;
+  /**
+   * What `/health` says: `up` (the default), `stale` (the engine answers and
+   * refuses the token, a 401) or `down` (nothing is listening).
+   */
+  health?: "up" | "stale" | "down";
+  /**
+   * The one token the engine accepts. `/health` answers 401 to anything else, so
+   * a window holding a stale token lands on the auth-stale state and a window
+   * that learns the right one (from the shell, or pasted) recovers.
+   */
+  engineToken?: string;
+  /**
+   * Called with every shell command as it arrives, before it is answered. For a
+   * test about a race: the callback can schedule an event to land between two
+   * steps of the app, which the app's own timing never lets a test aim at.
+   */
+  onShell?: (cmd: string, args: Record<string, unknown>) => void;
+  /**
+   * Wrap the App in a `Profiler` and call this for every commit it makes. For a
+   * claim about *not* rendering: a test that says a path never re-renders the app
+   * has nothing else to count.
+   */
+  onCommit?: () => void;
+  /** Run as the standalone browser preview: no desktop shell is present at all. */
+  standalone?: boolean;
+  /** Values seeded into `localStorage` before the app loads. */
+  localStorage?: Record<string, string>;
+  /** Values seeded into `sessionStorage`: what an earlier page in this window left. */
+  sessionStorage?: Record<string, string>;
+  /** Rows the engine already holds for the shared tab strip (`GET /shell/tabs`). */
+  engineTabs?: EngineTabRow[];
+  /** Engine paths (prefix match) that answer 503, as an engine mid-restart does. */
+  failRoutes?: string[];
+  /**
+   * Give every element a real rectangle. jsdom has no layout, so a browser pane
+   * never measures itself and the app (correctly) refuses to seat a page in a
+   * zero-sized pane; a test about seating needs the pane to have a size.
+   */
+  viewport?: { width: number; height: number };
+}
+
+export interface EngineTabRow {
+  key: string;
+  position: number;
+  kind: "chat" | "browser";
+  payload: string;
+  updated_at?: number;
 }
 
 export interface AppContext {
@@ -45,6 +96,14 @@ export interface AppContext {
   settle(): Promise<void>;
   /** The strip's tabs. */
   tabs(): HTMLElement[];
+  /** The rows the engine currently holds for the shared strip. */
+  engineTabs(): EngineTabRow[];
+  /** Another window writing a row into the shared strip, behind this app's back. */
+  putEngineTab(row: EngineTabRow): void;
+  /** Emit a shell event to the listeners the app registered, the way Rust's `emit` does. */
+  emit(event: string, payload: unknown): Promise<void>;
+  /** Run a change inside React's `act`, so state it sets is flushed before you look. */
+  act(body: () => void | Promise<void>): Promise<void>;
 }
 
 const DEFAULT_WORKSPACES = [
@@ -74,21 +133,52 @@ export async function withApp(
   }));
   // Copied one level deeper than the list: a test that archives a thread must not
   // archive it for the next test that shares the fixture.
+  const strip: EngineTabRow[] = (options.engineTabs ?? []).map((r) => ({ updated_at: 1, ...r }));
   const conversations: Conversation[] = (options.conversations ?? []).map((c) => ({ ...c }));
   const calls: string[] = [];
   const args: Array<Record<string, unknown>> = [];
   const engine: EngineCall[] = [];
   let created = 0;
 
+  // The shell's event bus, as the real internals keep it: `transformCallback`
+  // hands out an id for each handler, `plugin:event|listen` binds an event name
+  // to one, and `emit` calls every handler bound to the name.
+  const callbacks = new Map<number, (payload: unknown) => void>();
+  const listeners = new Map<string, Array<{ id: number; handler: (payload: unknown) => void }>>();
+  let callbackSeq = 0;
+  let eventSeq = 0;
+
   const internals: Record<string, unknown> = {
-    transformCallback(): number {
-      return 0;
+    transformCallback(callback: unknown): number {
+      const id = ++callbackSeq;
+      if (typeof callback === "function") callbacks.set(id, callback as (payload: unknown) => void);
+      return id;
     },
     async invoke(cmd: string, a: Record<string, unknown> = {}): Promise<unknown> {
       calls.push(cmd);
       args.push(a);
-      if (cmd === "plugin:event|listen") return 1;
-      if (cmd === "codify_get_engine_info") return { port: 51820, token: "e2e-token" };
+      options.onShell?.(cmd, a);
+      if (cmd === "plugin:event|listen") {
+        const handler = callbacks.get(Number(a.handler));
+        const name = String(a.event ?? "");
+        const id = ++eventSeq;
+        if (handler && name) listeners.set(name, [...(listeners.get(name) ?? []), { id, handler }]);
+        return id;
+      }
+      if (cmd === "plugin:event|unlisten") {
+        // A listener the app removed must stop hearing events, as in the real
+        // shell: otherwise every effect re-run leaves a ghost handler behind and
+        // one popup announcement opens as many tabs as the app has re-rendered.
+        const name = String(a.event ?? "");
+        listeners.set(name, (listeners.get(name) ?? []).filter((l) => l.id !== Number(a.eventId)));
+        return null;
+      }
+      if (options.shellFails && cmd in options.shellFails) throw new Error(options.shellFails[cmd]);
+      if (options.shellAnswers && cmd in options.shellAnswers) {
+        const answer = options.shellAnswers[cmd];
+        return typeof answer === "function" ? (answer as (x: Record<string, unknown>) => unknown)(a) : answer;
+      }
+      if (cmd === "codify_get_engine_info") return { port: 51820, token: options.engineToken ?? "e2e-token" };
       if (cmd === "codify_engine_status") return { error: null };
       if (cmd === "codify_terminal_open") return "term-1";
       if (cmd.startsWith("codify_list_") || cmd.includes("configs")) return [];
@@ -101,7 +191,27 @@ export async function withApp(
     ({ ok: status < 400, status, json: async () => data }) as unknown as Response;
 
   const route = (path: string, method: string, query: URLSearchParams, payload: Record<string, unknown> | null): Response => {
-    if (path === "/health") return respond({ ok: true, authenticated: true });
+    if ((options.failRoutes ?? []).some((prefix) => path.startsWith(prefix))) {
+      return respond({ code: "unavailable", message: "engine is restarting" }, 503);
+    }
+    if (path === "/shell/tabs" && method === "GET") return respond([...strip].sort((a, b) => a.position - b.position));
+    if (path === "/shell/tabs" && method === "PUT") {
+      const row = { updated_at: 1, ...(payload as unknown as EngineTabRow) };
+      const at = strip.findIndex((r) => r.key === row.key);
+      if (at >= 0) strip[at] = row;
+      else strip.push(row);
+      return respond([...strip].sort((a, b) => a.position - b.position));
+    }
+    const removal = /^\/shell\/tabs\/([^/]+)$/.exec(path);
+    if (removal && method === "DELETE") {
+      const at = strip.findIndex((r) => r.key === decodeURIComponent(removal[1]));
+      if (at >= 0) strip.splice(at, 1);
+      return respond([...strip].sort((a, b) => a.position - b.position));
+    }
+    if (path === "/health") {
+      if (options.health === "stale") return respond({ code: "unauthorized", message: "missing or invalid token" }, 401);
+      return respond({ ok: true, authenticated: true });
+    }
     if (path === "/workspaces") return respond(workspaces);
     if (path === "/models/recent") return respond([]);
     if (path === "/models") {
@@ -172,6 +282,13 @@ export async function withApp(
       }
     }
     engine.push({ method, url: url.toString(), path: url.pathname, body: payload });
+    if (options.health === "down") throw new TypeError("Failed to fetch");
+    if (
+      options.engineToken !== undefined &&
+      new Headers(init?.headers).get("authorization") !== `Bearer ${options.engineToken}`
+    ) {
+      return respond({ code: "unauthorized", message: "missing or invalid token" }, 401);
+    }
     return route(url.pathname, method, url.searchParams, payload);
   }) as unknown as typeof fetch;
 
@@ -185,8 +302,16 @@ export async function withApp(
   try {
     await withDom(async (dom) => {
       const win = globalThis.window as unknown as Record<string, unknown>;
-      win.__TAURI_INTERNALS__ = internals;
-      win.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
+      if (!options.standalone) {
+        win.__TAURI_INTERNALS__ = internals;
+        win.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
+      }
+      for (const [key, value] of Object.entries(options.localStorage ?? {})) {
+        dom.window.localStorage.setItem(key, value);
+      }
+      for (const [key, value] of Object.entries(options.sessionStorage ?? {})) {
+        dom.window.sessionStorage.setItem(key, value);
+      }
       globalThis.fetch = fakeFetch;
       if (!(globalThis as Record<string, unknown>).self) {
         (globalThis as Record<string, unknown>).self = dom.window;
@@ -194,6 +319,76 @@ export async function withApp(
       if (options.storedTabs !== undefined) {
         dom.window.localStorage.setItem("CODIFY_TABS", JSON.stringify(options.storedTabs));
       }
+      if (options.viewport) {
+        const { width, height } = options.viewport;
+        const rect = { x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height, toJSON: () => ({}) };
+        // One character cell, for xterm's measuring element: a cell as large as the
+        // pane would make every terminal two columns wide.
+        const cell = { ...rect, right: 9, bottom: 18, width: 9, height: 18 };
+        Object.defineProperty(dom.window.HTMLElement.prototype, "getBoundingClientRect", {
+          value(this: Element) {
+            return (this.classList?.contains("xterm-char-measure-element") ? cell : rect) as DOMRect;
+          },
+          configurable: true,
+          writable: true,
+        });
+        // xterm measures one character by the offset size of a 32-character probe;
+        // jsdom answers 0, and a terminal with no character size has no grid.
+        for (const [prop, of] of [["offsetWidth", (el: Element) => (el.classList?.contains("xterm-char-measure-element") ? 9 * 32 : width)], ["offsetHeight", (el: Element) => (el.classList?.contains("xterm-char-measure-element") ? 18 : height)]] as const) {
+          Object.defineProperty(dom.window.HTMLElement.prototype, prop, {
+            get(this: Element) {
+              return of(this);
+            },
+            configurable: true,
+          });
+        }
+        // xterm's fit addon sizes a terminal from the host's computed width and
+        // height, which jsdom leaves empty; without them it never proposes a grid
+        // and a pane never tells the shell its size.
+        const realComputed = dom.window.getComputedStyle.bind(dom.window);
+        dom.window.getComputedStyle = ((el: Element, pseudo?: string | null) => {
+          const style = realComputed(el, pseudo);
+          return new Proxy(style, {
+            get(target, prop) {
+              if (prop === "getPropertyValue") {
+                return (name: string) => {
+                  const own = target.getPropertyValue(name);
+                  if (own && own !== "auto") return own;
+                  if (name === "width") return `${width}px`;
+                  if (name === "height") return `${height}px`;
+                  // Unset padding is zero, not NaN: the fit addon does arithmetic on it.
+                  return name.startsWith("padding-") ? "0px" : own;
+                };
+              }
+              const value = Reflect.get(target, prop);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+        }) as typeof dom.window.getComputedStyle;
+        // A ResizeObserver that reports once on observe, the way a real one does
+        // when it starts watching an element that already has a size.
+        const observer = class {
+          constructor(private readonly callback: ResizeObserverCallback) {}
+          observe(target: Element): void {
+            this.callback([{ target, contentRect: rect as DOMRectReadOnly } as ResizeObserverEntry], this as never);
+          }
+          unobserve(): void {}
+          disconnect(): void {}
+        };
+        for (const target of [globalThis, dom.window] as unknown as Record<string, unknown>[]) {
+          Object.defineProperty(target, "ResizeObserver", { value: observer, configurable: true, writable: true });
+        }
+      }
+      // `api.ts` decides its starting engine address once, when it is first
+      // imported, and keeps it in module state. Without this, the first mount in a
+      // process sees the seeded `CODIFY_PORT` and every later one inherits
+      // whatever the previous test's app ended on — a test that seeds a stale
+      // address for the app to (not) believe would silently test nothing.
+      const api = await import("../src/api.ts");
+      api.setEngineInfo({
+        port: Number(options.localStorage?.CODIFY_PORT ?? 7430),
+        token: options.localStorage?.CODIFY_TOKEN ?? "",
+      });
       const React = (await import("react")).default;
       const { App } = await import("../src/App.tsx");
 
@@ -204,16 +399,43 @@ export async function withApp(
           await new Promise((r) => requestAnimationFrame(() => r(null)));
         }
       };
-      await dom.render(React.createElement(App));
+      await dom.render(
+        options.onCommit
+          ? React.createElement(React.Profiler, { id: "app", onRender: () => options.onCommit?.() }, React.createElement(App))
+          : React.createElement(App),
+      );
       await settle();
 
+      const act = React.act as (b: () => Promise<void> | void) => Promise<void>;
+      try {
+        await runBody();
+      } finally {
+        // Unmount, so the app's effects clean up. A mounted app keeps probing the
+        // engine every few seconds through the shared API client, and the next
+        // test's app would then be sharing its connection state with a ghost.
+        await dom.render(React.createElement(React.Fragment));
+      }
+      async function runBody(): Promise<void> {
       await body({
         dom,
         shell: { calls, args },
         engine,
         settle,
         tabs: () => [...dom.container.querySelectorAll('[role="tab"]')] as HTMLElement[],
+        engineTabs: () => [...strip],
+        putEngineTab: (row) => {
+          const at = strip.findIndex((r) => r.key === row.key);
+          if (at >= 0) strip[at] = { updated_at: 1, ...row };
+          else strip.push({ updated_at: 1, ...row });
+        },
+        async emit(event, payload) {
+          await act(async () => {
+            for (const { handler } of listeners.get(event) ?? []) handler({ event, id: ++eventSeq, payload });
+          });
+        },
+        act: (fn) => act(async () => { await fn(); }),
       });
+      }
     });
   } finally {
     globalThis.fetch = realFetch;
