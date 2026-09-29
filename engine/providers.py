@@ -490,8 +490,14 @@ class BaseProvider(ABC):
         model: str,
         temperature: float,
         max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> ToolReply:
         """One turn of a tool-calling conversation. Overridden per protocol.
+
+        `num_ctx` and `keep_alive` are keyword-only with a default on **every** provider, as they are on
+        `complete`: the conductor passes both on every call, and only Ollama consumes either. A provider
+        that omitted them raised `TypeError` on its first call, which is how the conductor came to work on
+        Ollama and nowhere else (`tests/test_providers_take_what_the_conductor_passes.py`).
 
         Deliberately a *separate* method from `complete` rather than an extra
         keyword on it. `complete`'s signature is the contract every role and
@@ -620,6 +626,7 @@ class AnthropicProvider(BaseProvider):
         model: str,
         temperature: float,
         max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> ToolReply:
         url = f"{self._base_url}/v1/messages"
         async with httpx.AsyncClient(timeout=120) as client:
@@ -677,6 +684,7 @@ class OpenAICompatProvider(BaseProvider):
         model: str,
         temperature: float,
         max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> ToolReply:
         # One call per provider class rather than four: every `openai_compat`
         # entry in BUILTIN_PROVIDERS (openai, deepseek, openrouter, groq, and
@@ -1061,6 +1069,7 @@ class GoogleProvider(BaseProvider):
         model: str,
         temperature: float,
         max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> ToolReply:
         # Google's function calling is the one dialect here that is not
         # OpenAI-shaped: `functionDeclarations` on the tool list, and the
