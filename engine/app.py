@@ -346,6 +346,20 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 app = FastAPI(title="Codify Engine", lifespan=lifespan, responses=ERROR_RESPONSES)
 
 
+def _same_secret(offered: str, expected: str) -> bool:
+    """Constant-time equality for a credential the *client* chose the bytes of.
+
+    `secrets.compare_digest` refuses two `str` arguments when either has a
+    non-ASCII character and raises `TypeError` instead of answering. A header
+    value or a websocket auth message is attacker-chosen, so the raise escaped
+    the auth check: an unauthenticated request with `Authorization: Bearer é`
+    got a 500 and a traceback from every route, `/health` included, where it
+    should have got a 401. Comparing the UTF-8 bytes keeps the constant-time
+    property and cannot raise on content.
+    """
+    return secrets.compare_digest(offered.encode("utf-8"), expected.encode("utf-8"))
+
+
 @app.middleware("http")
 async def auth(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     # CORS preflights carry no Authorization header; let them through.
@@ -353,7 +367,7 @@ async def auth(request: Request, call_next: Callable[[Request], Awaitable[Respon
         return await call_next(request)
     expected = getattr(request.app.state, "token", None) or BOOT_TOKEN
     header = request.headers.get("authorization", "")
-    if not expected or not secrets.compare_digest(header, f"Bearer {expected}"):
+    if not expected or not _same_secret(header, f"Bearer {expected}"):
         return JSONResponse({"code": "unauthorized", "message": "missing or invalid token"}, status_code=401)
     return await call_next(request)
 
@@ -452,7 +466,7 @@ async def health(request: Request) -> dict[str, bool]:
     header = request.headers.get("authorization", "")
     # Constant-time compare: /health is reachable by any local process, so its
     # answer must not leak the token a character at a time via timing.
-    return {"ok": True, "authenticated": secrets.compare_digest(header, f"Bearer {expected}")}
+    return {"ok": True, "authenticated": _same_secret(header, f"Bearer {expected}")}
 
 
 @app.get("/settings/providers")
@@ -2250,7 +2264,7 @@ async def ws_engine(websocket: WebSocket) -> None:
     """
     expected_token = getattr(websocket.app.state, "token", None) or BOOT_TOKEN
     auth_header = websocket.headers.get("authorization", "")
-    authenticated = secrets.compare_digest(auth_header, f"Bearer {expected_token}")
+    authenticated = _same_secret(auth_header, f"Bearer {expected_token}")
 
     await websocket.accept()
 
@@ -2259,7 +2273,7 @@ async def ws_engine(websocket: WebSocket) -> None:
             msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
             auth_msg = json.loads(msg)
             token = str(auth_msg.get("token") or "")
-            if auth_msg.get("type") == "auth" and secrets.compare_digest(token, expected_token):
+            if auth_msg.get("type") == "auth" and _same_secret(token, expected_token):
                 authenticated = True
         except Exception:
             pass
@@ -2330,7 +2344,7 @@ async def ws_engine(websocket: WebSocket) -> None:
 async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
     expected_token = getattr(websocket.app.state, "token", None) or BOOT_TOKEN
     auth_header = websocket.headers.get("authorization", "")
-    authenticated = secrets.compare_digest(auth_header, f"Bearer {expected_token}")
+    authenticated = _same_secret(auth_header, f"Bearer {expected_token}")
 
     await websocket.accept()
 
@@ -2339,7 +2353,7 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
             msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
             auth_msg = json.loads(msg)
             token = str(auth_msg.get("token") or "")
-            if auth_msg.get("type") == "auth" and secrets.compare_digest(token, expected_token):
+            if auth_msg.get("type") == "auth" and _same_secret(token, expected_token):
                 authenticated = True
         except Exception:
             pass
