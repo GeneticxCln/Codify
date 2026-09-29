@@ -509,6 +509,53 @@ class RecordTests(unittest.TestCase):
             self.assertFalse((Path(tmp) / "w").exists(), "the scratch directory was left behind")
 
 
+class TheReasonATaskFailedIsPrintedTests(unittest.TestCase):
+    """A task that completes and then fails its *quality* check says why, in the console summary.
+
+    The summary listed only the harness checks under a failed task, and a task that completes but does the
+    wrong thing fails no harness check: `repo-remove-shout` and `repo-word-count` printed `FAIL` and nothing
+    beneath it, and the reason (the module had been deleted; the repo's own tests errored) was in the JSON
+    report alone (second audit pass, 2026-09-29). For a benchmark, why a task failed is the line that matters.
+    """
+
+    def _summary(self, quality: list[dict[str, str]]) -> str:
+        real = runner._run_one
+
+        def wrapper(task: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
+            result = real(task, *args, **kwargs)
+            result["quality_checks"] = quality
+            result["passed"] = all(q["status"] == "passed" for q in quality)
+            return result
+
+        out = io.StringIO()
+        with mock.patch.object(runner, "_run_one", wrapper), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            main(["--tier", "smoke", "--only", "smoke-add-banner"])
+        return out.getvalue()
+
+    def test_a_failed_quality_check_is_named_with_its_detail(self) -> None:
+        text = self._summary([
+            {"type": "test_command", "kind": "quality", "status": "failed",
+             "detail": "exit 1: ModuleNotFoundError: No module named 'app'"},
+        ])
+        self.assertIn("FAIL smoke-add-banner", text)
+        self.assertIn("test_command: exit 1: ModuleNotFoundError: No module named 'app'", text)
+
+    def test_a_skipped_quality_check_is_not_listed_under_a_passing_task(self) -> None:
+        # A canned run skips every quality check, and the summary already counts them on one line.
+        text = self._summary([
+            {"type": "file_exists", "kind": "quality", "status": "skipped",
+             "detail": "needs a real provider — a canned run cannot claim task quality"},
+        ])
+        self.assertNotIn("needs a real provider", text.split("smoke-add-banner", 2)[-1])
+
+    def test_a_passing_quality_check_is_not_listed(self) -> None:
+        text = self._summary([
+            {"type": "file_exists", "kind": "quality", "status": "passed", "detail": "src/util.py exists"},
+        ])
+        self.assertNotIn("src/util.py exists", text)
+
+
 class RepeatAndThresholdTests(unittest.TestCase):
     """One run of a model proves little; a number is only worth having with its spread."""
 
