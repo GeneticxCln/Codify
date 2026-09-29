@@ -80,6 +80,7 @@ class _GoalAwareProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         role = next(
             (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"

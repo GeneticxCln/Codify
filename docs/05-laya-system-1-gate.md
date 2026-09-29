@@ -63,8 +63,27 @@ logged (`log` event, level `info`) and surfaced in Settings, so a silent no-op c
 `Router(preload=True)` is deliberate: without preload, traffic that alternates languages rebuilds
 a checkpoint per request (upstream measured 7–10 s per switch).
 
-Set `CODIFY_LAYA_SDK=0` to force the fallback path (useful for tests and for judging the
-LLM-based contract on its own).
+Set `CODIFY_LAYA_SDK=0` to force the fallback path, and **the test suite sets it on every
+run** (`tests/hermetic.py`, beside the parent-pid variables it also always clears). The
+SDK is optional by design, and that is exactly what made it a hazard in the suite: a
+developer who followed the install advice got a `make test` that downloaded checkpoints
+and preloaded them on the first gate decision, and five tests silently changed what they
+proved — the fallback tests saw `engine == "sdk"`, the skip tests saw a verdict. A test
+that wants the SDK path asks for it by name: it installs a fake `laya` module and passes
+`disabled=False`. `test_hermetic_run_pins_the_sdk_off` fails if the pin is ever dropped.
+
+Outside a test run, leaving the variable unset is what you want: the whole point of
+installing the SDK is that `sdk_available()` is true and the gate answers in-process.
+Measured here, `Router(preload=True)` costs ~9.7 s on the first decision in a process
+(checkpoint load) and ~31 ms on every one after, against ~20.8 s and ~1.4k tokens for the
+LLM fallback it replaces.
+
+**The SDK has to be in the interpreter that runs the engine.** The desktop shell spawns
+the checkout's own `.venv/bin/python3` when it has one and `python3` from the login
+shell's PATH otherwise, so `make test` and the app share one environment. Installing the
+SDK into a different interpreter than the one the app spawns is the failure mode worth
+naming: nothing errors, `sdk_available()` is simply false, and every goal quietly pays
+the LLM call anyway.
 
 **Context limits.** Laya's checkpoints have 512–1024 token contexts, so an arbitrary user prompt
 cannot fit whole. `build_state` clips over-long requests to 4000 characters **keeping both ends**
@@ -119,6 +138,15 @@ payload (`payload.policy`) so the UI never has to hardcode them.
 Answers are read tolerantly (nested `{"choice": …}` or flat), because both shapes appear in the
 wild. `GET /settings/laya` returns the capability report: `sdk_installed`, `sdk_disabled`,
 `sdk_error`, the question set, and the policy. It loads no weights.
+
+`GET /settings/runtime` is the other half of that answer. This route says *which engine is
+gating*; that one says *which interpreter is gating*, and whether it can import the SDK at all.
+The failure it exists for is invisible from the gate's own report: the SDK installed into
+`.venv`, the shell spawning `/usr/bin/python3`, and every goal quietly paying the fallback
+model's latency for a package sitting in the same checkout. `sdk_installed` is `false` in that
+state, which is true and useless — the report now names both interpreters and says which one is
+running. The same facts are on stderr at boot (`engine/capabilities.py`), so they are in
+`codify.log` before anyone thinks to open Settings.
 
 ## 6. Role slot
 

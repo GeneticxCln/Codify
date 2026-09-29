@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState } from "react";
-import { AgentRole, ChatMessage, Event, PlanStep } from "../types";
+import type { AgentRole, ChatMessage, Event, PlanStep } from "../types";
 import {
   DesignDeliverableCard,
   PinOutcome,
@@ -11,13 +11,15 @@ import { traceGoalId } from "../tracePanel";
 import { statusTone, stepTone } from "../statusTone";
 import { replyPreview } from "../replyPreview";
 import { Badge, toneText } from "./ui/Badge";
+import { Wordmark } from "./ui/Wordmark";
 import { FailureDiagnosisPanel } from "./FailureDiagnosisPanel";
 import { DiffViewer } from "./DiffViewer";
-import { LayaDecision } from "../types";
+import type { LayaDecision } from "../types";
 import { getGoalUsage, GoalUsage, getGoalAudit } from "../api";
 import { AuditReport } from "./AuditReport";
 import { TracePanel } from "./TracePanel";
 import { canArmTrace } from "../traceSummary";
+import { COMPOSER_ANCHOR_ID } from "../composerAnchor";
 import {
   isConversationalTurn,
   turnAlerts,
@@ -28,7 +30,6 @@ import {
   User,
   Bot,
   Route,
-  Sparkles,
   CheckCircle2,
   Clock,
   PlayCircle,
@@ -196,9 +197,9 @@ const StepTimelineBars: React.FC<{
               <div
                 className={`absolute h-full rounded ${
                   w.end === null
-                    ? "bg-blue-500 animate-pulse"
+                    ? "bg-codify-accent animate-pulse"
                     : hasOverlap
-                      ? "bg-blue-600/70"
+                      ? "bg-codify-accent/70"
                       : "bg-codify-border"
                 }`}
                 style={{
@@ -208,7 +209,7 @@ const StepTimelineBars: React.FC<{
               />
               {hasOverlap && (
                 <div
-                  className="absolute h-full bg-blue-400/40"
+                  className="absolute h-full bg-codify-accent/40"
                   title="overlap window"
                   style={{
                     left: `${Math.max(left, 0)}%`,
@@ -222,7 +223,7 @@ const StepTimelineBars: React.FC<{
                 card), so a live goal counts up in place. */}
             <span
               className={`text-2xs font-mono tabular-nums flex-shrink-0 ${
-                w.end === null ? "text-blue-400" : "text-gray-500"
+                w.end === null ? "text-codify-info" : "text-codify-muted"
               }`}
             >
               {duration}
@@ -231,7 +232,7 @@ const StepTimelineBars: React.FC<{
         );
       })}
       {running && (
-        <span className="text-2xs text-gray-500 font-mono">running…</span>
+        <span className="text-2xs text-codify-muted font-mono">running…</span>
       )}
     </div>
   );
@@ -251,7 +252,7 @@ const LayaGateCard: React.FC<{ payload: Record<string, any> }> = ({
 
   if (engine === "skipped") {
     return (
-      <div className="flex items-start gap-1.5 pl-2 text-gray-500">
+      <div className="flex items-start gap-1.5 pl-2 text-codify-muted">
         <ShieldCheck className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
         <span>
           Laya gate skipped —{" "}
@@ -262,10 +263,10 @@ const LayaGateCard: React.FC<{ payload: Record<string, any> }> = ({
   }
 
   const tone = blocked
-    ? "text-red-300"
+    ? "text-codify-danger"
     : warnings.length
-      ? "text-amber-300"
-      : "text-emerald-300";
+      ? "text-codify-warning"
+      : "text-codify-success";
   const engineLabel = engine === "sdk" ? "Laya SDK" : "Laya via fallback model";
 
   return (
@@ -277,26 +278,26 @@ const LayaGateCard: React.FC<{ payload: Record<string, any> }> = ({
           <span className="font-semibold">
             {blocked ? "blocked" : "passed"}
           </span>
-          <span className="font-mono text-gray-500"> ({engineLabel})</span>
+          <span className="font-mono text-codify-muted"> ({engineLabel})</span>
         </span>
       </div>
-      <div className="pl-5 text-xs text-gray-400 flex flex-wrap gap-x-3 gap-y-0.5">
+      <div className="pl-5 text-xs text-codify-muted flex flex-wrap gap-x-3 gap-y-0.5">
         {intent !== null && intent !== undefined && (
           <span>
-            intent <span className="text-gray-200">{String(intent)}</span>
+            intent <span className="text-codify-secondary">{String(intent)}</span>
           </span>
         )}
         {risk !== null && (
           <span>
-            risk <span className="text-gray-200">{risk.toFixed(2)}</span>
+            risk <span className="text-codify-secondary">{risk.toFixed(2)}</span>
           </span>
         )}
         {injection !== null && (
           <span>
             injection{" "}
-            <span className="text-gray-200">{injection.toFixed(2)}</span>
+            <span className="text-codify-secondary">{injection.toFixed(2)}</span>
             {typeof threshold === "number" && (
-              <span className="text-gray-600"> / block at {threshold}</span>
+              <span className="text-codify-muted"> / block at {threshold}</span>
             )}
           </span>
         )}
@@ -305,7 +306,7 @@ const LayaGateCard: React.FC<{ payload: Record<string, any> }> = ({
         <div className="pl-5 text-xs">{decision.block_reason}</div>
       )}
       {warnings.map((w, i) => (
-        <div key={i} className="pl-5 text-xs text-amber-400">
+        <div key={i} className="pl-5 text-xs text-codify-warning">
           {w}
         </div>
       ))}
@@ -344,15 +345,15 @@ const TurnExchange: React.FC<{
 
   return (
     <div className="space-y-2">
-      <div className="rounded-2xl rounded-tl-sm border border-codify-border bg-codify-surface px-4 py-2.5 text-sm leading-relaxed text-gray-100 whitespace-pre-wrap break-words">
+      <div className="rounded-2xl rounded-tl-sm border border-codify-border bg-codify-surface px-4 py-2.5 text-sm leading-relaxed text-codify-primary whitespace-pre-wrap break-words">
         {reply ??
           live ??
           (active ? (
-            <span className="text-gray-400 italic animate-pulse">
+            <span className="text-codify-muted italic animate-pulse">
               Thinking…
             </span>
           ) : (
-            <span className="text-gray-500">(no answer)</span>
+            <span className="text-codify-muted">(no answer)</span>
           ))}
       </div>
       {alerts.length > 0 && (
@@ -364,7 +365,7 @@ const TurnExchange: React.FC<{
               <div
                 key={`${alert.kind}-${i}`}
                 className={`flex items-start gap-1.5 pl-2 text-xs ${
-                  alert.kind === "error" ? "text-red-300" : "text-amber-300"
+                  alert.kind === "error" ? "text-codify-danger" : "text-codify-warning"
                 }`}
               >
                 <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
@@ -383,10 +384,10 @@ const TurnExchange: React.FC<{
           type="button"
           onClick={onToggleTrace}
           aria-expanded={traceOpen}
-          className="flex items-center gap-1.5 pl-2 text-2xs text-gray-400 hover:text-blue-400 transition-colors"
+          className="flex items-center gap-1.5 pl-2 text-2xs text-codify-muted hover:text-codify-info transition-colors"
           title={traceOpen ? "Hide the recording" : "Show this turn's recording"}
         >
-          <Radio className="w-3 h-3 text-red-400" />
+          <Radio className="w-3 h-3 text-codify-danger" />
           Recording
         </button>
       )}
@@ -411,7 +412,7 @@ const PlanStepEditor: React.FC<{
   const [saving, setSaving] = useState(false);
 
   const inputCls =
-    "w-full bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500/60";
+    "w-full bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-info/60";
 
   const handleSave = async () => {
     // Send only what the user actually changed, so the engine's plan_updated
@@ -451,11 +452,11 @@ const PlanStepEditor: React.FC<{
 
   return (
     <div className="flex flex-col gap-2.5">
-      <div className="flex items-center gap-1.5 text-xs font-semibold text-blue-300 uppercase tracking-wider">
+      <div className="flex items-center gap-1.5 text-xs font-semibold text-codify-info uppercase tracking-wider">
         <Pencil className="w-3 h-3" /> Editing Step {step.ordinal + 1}
       </div>
       <label className="flex flex-col gap-1">
-        <span className="text-2xs font-semibold text-gray-400 uppercase tracking-wider">
+        <span className="text-2xs font-semibold text-codify-muted uppercase tracking-wider">
           Title
         </span>
         <input
@@ -466,7 +467,7 @@ const PlanStepEditor: React.FC<{
         />
       </label>
       <label className="flex flex-col gap-1">
-        <span className="text-2xs font-semibold text-gray-400 uppercase tracking-wider">
+        <span className="text-2xs font-semibold text-codify-muted uppercase tracking-wider">
           Description
         </span>
         <textarea
@@ -477,7 +478,7 @@ const PlanStepEditor: React.FC<{
         />
       </label>
       <label className="flex flex-col gap-1">
-        <span className="text-2xs font-semibold text-gray-400 uppercase tracking-wider">
+        <span className="text-2xs font-semibold text-codify-muted uppercase tracking-wider">
           Target Paths (comma-separated)
         </span>
         <input
@@ -492,18 +493,18 @@ const PlanStepEditor: React.FC<{
           type="button"
           onClick={handleSave}
           disabled={saving}
-          className="flex items-center gap-1 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg shadow transition-colors disabled:opacity-50"
+          className="flex items-center gap-1 px-2.5 py-1 bg-codify-accent text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg shadow transition-colors disabled:opacity-50"
         >
           <Check className="w-3 h-3" /> {saving ? "Saving…" : "Save Step"}
         </button>
         <button
           type="button"
           onClick={onCancel}
-          className="flex items-center gap-1 px-2.5 py-1 bg-codify-raised hover:bg-codify-border text-gray-300 border border-codify-border text-xs font-semibold rounded-lg transition-colors"
+          className="flex items-center gap-1 px-2.5 py-1 bg-codify-raised hover:bg-codify-border text-codify-secondary border border-codify-border text-xs font-semibold rounded-lg transition-colors"
         >
           <X className="w-3 h-3" /> Cancel
         </button>
-        <span className="text-2xs text-gray-500 font-mono">
+        <span className="text-2xs text-codify-muted font-mono">
           plan v{version}
         </span>
       </div>
@@ -541,13 +542,13 @@ const UsageCard: React.FC<{ goalId: string }> = ({ goalId }) => {
   return (
     <div className="p-2.5 rounded-xl bg-codify-bg border border-codify-border text-xs">
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-gray-400">
-          <Coins className="w-3.5 h-3.5 text-amber-400" />
+        <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-codify-muted">
+          <Coins className="w-3.5 h-3.5 text-codify-warning" />
           Token Usage
         </div>
-        <div className="font-mono text-xs text-gray-300">
+        <div className="font-mono text-xs text-codify-secondary">
           {fmt(usage.totals.total_tokens)} tokens
-          <span className="text-gray-500">
+          <span className="text-codify-muted">
             {" "}
             ({fmt(usage.totals.input_tokens)} in /{" "}
             {fmt(usage.totals.output_tokens)} out) · {usage.calls} call
@@ -558,11 +559,11 @@ const UsageCard: React.FC<{ goalId: string }> = ({ goalId }) => {
       {roles.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
           {roles.map(([role, b]) => (
-            <span key={role} className="text-xs text-gray-400">
-              <span className="font-mono text-gray-300">{role}</span>{" "}
+            <span key={role} className="text-xs text-codify-muted">
+              <span className="font-mono text-codify-secondary">{role}</span>{" "}
               {fmt(b.total_tokens)}
               {b.calls > 1 && (
-                <span className="text-gray-500"> ({b.calls})</span>
+                <span className="text-codify-muted"> ({b.calls})</span>
               )}
             </span>
           ))}
@@ -573,12 +574,12 @@ const UsageCard: React.FC<{ goalId: string }> = ({ goalId }) => {
           sequential run is peak 1 and stays silent; the number only appears
           when it says something. */}
       {usage.parallel_peak > 1 && (
-        <div className="mt-2 flex items-center gap-1.5 text-xs text-blue-300">
+        <div className="mt-2 flex items-center gap-1.5 text-xs text-codify-info">
           <Workflow className="w-3 h-3" />
           Peak {usage.parallel_peak} step{usage.parallel_peak === 1 ? "" : "s"}{" "}
           in parallel
           {usage.parallel_waves > 1 && (
-            <span className="text-gray-500">
+            <span className="text-codify-muted">
               {" "}
               · {usage.parallel_waves} wave
               {usage.parallel_waves === 1 ? "" : "s"}
@@ -725,7 +726,6 @@ interface ChatTimelineProps {
   /** Confirms, then deletes the goal and its recorded history. */
   onDeleteGoal: (goalId: string, title: string) => void;
   onRetryStep: (goalId: string, stepId: string, version: number) => void;
-  onQuickPrompt: (prompt: string) => void;
   /** Opens Settings on the tab that holds the fix. */
   onOpenSettings: (tab: "keys" | "agents") => void;
   /** Opens a file picker and imports an exported audit JSON as a report message. */
@@ -759,7 +759,6 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   onSetGoalTrace,
   onDeleteGoal,
   onRetryStep,
-  onQuickPrompt,
   onOpenSettings,
   onImportAudit,
   onPinDesignContract,
@@ -847,46 +846,47 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
             and the transcript alike. It used to sit in this branch, which made it
             a `max-w-2xl` column of glyphs that vanished the moment a message
             existed — the mount point was the bug, not the animation. */}
-        <div className="relative w-12 h-12 rounded-2xl bg-blue-600/10 border border-blue-500/20 flex items-center justify-center text-blue-400 mb-4 shadow-inner">
-          <Sparkles className="w-6 h-6" />
-        </div>
-        <h2 className="relative text-xl font-bold text-gray-100 mb-2">
-          What would you like to build or fix?
-        </h2>
-        <p className="relative text-xs text-gray-400 max-w-md mb-8 leading-relaxed">
-          Select a project folder and your preferred model below. Codify will
-          inspect your codebase, plan atomic steps, propose file diffs, and
-          verify tests automatically.
-        </p>
+        {/* The name, and nothing else. This used to be an icon, a heading and a
+            paragraph describing the pipeline — "select a project folder… inspect
+            your codebase, plan atomic steps, propose file diffs, and verify
+            tests" — to someone who had not yet typed anything. An empty window
+            that explains itself is a window asking to be read before it has been
+            used, and the wordmark takes the theme's own colours, so it is also
+            the one thing on screen that shows which theme is active.
 
-        {/* Quick Suggestion Pills */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full">
-          {[
-            "Add JWT authentication and protected routes",
-            "Find failing tests and fix syntax errors",
-            "Refactor API error handling and logging",
-            "Generate unit tests for core services",
-          ].map((suggestion) => (
-            <button
-              key={suggestion}
-              type="button"
-              onClick={() => onQuickPrompt(suggestion)}
-              className="relative text-left p-3 rounded-xl bg-codify-surface border border-codify-border hover:border-blue-500/40 hover:bg-codify-raised transition-all text-xs text-gray-300 group"
-            >
-              <div className="flex items-center gap-2 font-medium text-gray-200 group-hover:text-blue-400">
-                <FileCode className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
-                <span className="truncate">{suggestion}</span>
-              </div>
-            </button>
-          ))}
-        </div>
+            It also used to carry four starter-prompt pills underneath, and those
+            were the same mistake in a quieter costume: four sentences about work
+            this codebase might plausibly be asked to do, sitting under a window
+            that has not been asked to do any of it yet. They made the empty state
+            a menu, so the one thing worth reading — the name, in the theme you
+            just picked — had to compete with four rows of small type. The four
+            went, and so did the `mb-10` that existed only to clear them: the
+            import button below owns the only margin here now, because it is the
+            only thing with something under it.
+
+            Removing the pills left this with one focusable control, and it is the
+            wrong one to be the only one: "Import audit report…" opens a file
+            picker, so a keyboard user who tabbed into the middle of the window
+            hit a dead end. The composer is auto-focused, so on load they do land
+            on it — but that is a one-shot on mount, and nothing brings focus back
+            once it has gone. Hence the skip link, which is the one control here
+            that is *about* the window rather than *in* it, and which is invisible
+            until a keyboard asks for it. */}
+        <a
+          href={`#${COMPOSER_ANCHOR_ID}`}
+          className="sr-only focus:not-sr-only focus:absolute focus:left-1/2 focus:top-2 focus:z-10 focus:-translate-x-1/2 focus:rounded-lg focus:border focus:border-codify-accent focus:bg-codify-raised focus:px-3 focus:py-1.5 focus:text-xs focus:font-medium focus:text-codify-primary"
+        >
+          Skip to the prompt
+        </a>
+
+        <Wordmark />
 
         {/* Import an exported audit document back into the transcript as a
             readable report — a closed artifact, reviewable with no engine. */}
         <button
           type="button"
           onClick={onImportAudit}
-          className="relative mt-4 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-codify-surface border border-codify-border hover:border-blue-500/40 text-xs text-gray-400 hover:text-blue-400 transition-colors"
+          className="relative mt-4 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-codify-surface border border-codify-border hover:border-codify-accent text-xs text-codify-muted hover:text-codify-accent transition-colors"
           title="Open an exported audit-trail JSON and view it as a report"
         >
           <FileUp className="w-3.5 h-3.5" />
@@ -899,8 +899,8 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 max-w-4xl mx-auto w-full">
       {exportError && (
-        <div className="flex items-start gap-2 p-2.5 rounded-xl bg-red-950/40 border border-red-800 text-xs text-red-300">
-          <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-red-400" />
+        <div className="flex items-start gap-2 p-2.5 rounded-xl bg-codify-danger/20 border border-codify-danger/60 text-xs text-codify-danger">
+          <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-codify-danger" />
           <span className="leading-relaxed">{exportError}</span>
         </div>
       )}
@@ -1026,11 +1026,11 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                     />
                   ) : msg.auditDoc ? (
                     <>
-                      <div className="flex items-center gap-2 text-xs font-semibold text-gray-300 border-b border-codify-border/60 pb-3">
-                        <FileUp className="w-3.5 h-3.5 text-blue-400" />
+                      <div className="flex items-center gap-2 text-xs font-semibold text-codify-secondary border-b border-codify-border/60 pb-3">
+                        <FileUp className="w-3.5 h-3.5 text-codify-info" />
                         Imported audit report
                         {msg.content && (
-                          <span className="ml-auto font-normal text-2xs text-gray-500">
+                          <span className="ml-auto font-normal text-2xs text-codify-muted">
                             {msg.content}
                           </span>
                         )}
@@ -1042,7 +1042,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       {/* Header: Title and Status */}
                       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-codify-border/60 pb-3">
                         <div className="flex items-center gap-2">
-                          <span className="font-semibold text-sm text-gray-200">
+                          <span className="font-semibold text-sm text-codify-secondary">
                             {msg.goal?.title || "Agent Execution"}
                           </span>
                           {msg.goal && (
@@ -1053,18 +1053,18 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             </span>
                           )}
                           {msg.goal?.dry_run && (
-                            <span className="text-2xs px-1.5 py-0.5 rounded bg-amber-950/40 border border-amber-800 text-amber-300 font-semibold">
+                            <span className="text-2xs px-1.5 py-0.5 rounded bg-codify-warning/20 border border-codify-warning/60 text-codify-warning font-semibold">
                               DRY RUN
                             </span>
                           )}
                           {msg.goal?.plan_only && (
-                            <span className="text-2xs px-1.5 py-0.5 rounded bg-blue-950/40 border border-blue-800 text-blue-300 font-semibold">
+                            <span className="text-2xs px-1.5 py-0.5 rounded bg-codify-info/20 border border-codify-info/60 text-codify-info font-semibold">
                               PLAN ONLY
                             </span>
                           )}
                           {msg.goal?.parallel && (
                             <span
-                              className="text-2xs px-1.5 py-0.5 rounded bg-purple-950/40 border border-purple-800 text-purple-300 font-semibold"
+                              className="text-2xs px-1.5 py-0.5 rounded bg-codify-design/20 border border-codify-design/60 text-codify-design font-semibold"
                               title="Independent steps of this goal may run concurrently"
                             >
                               PARALLEL
@@ -1125,7 +1125,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                   <button
                                     type="button"
                                     onClick={jump("edits")}
-                                    className={`${badgeCls} bg-violet-950/40 border-violet-800 text-violet-300 hover:bg-violet-900/60`}
+                                    className={`${badgeCls} bg-codify-design/20 border-codify-design/60 text-codify-design hover:bg-codify-design/30`}
                                     title={`Plan steps were edited after planning — click to cycle through each edit${positionSuffix("edits")}`}
                                     aria-label={`Plan steps were edited after planning — click to cycle through each edit${positionSuffix("edits")}`}
                                   >
@@ -1137,7 +1137,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                   <button
                                     type="button"
                                     onClick={jump("fallbacks")}
-                                    className={`${badgeCls} bg-teal-950/40 border-teal-800 text-teal-300 hover:bg-teal-900/60`}
+                                    className={`${badgeCls} bg-codify-knowledge/20 border-codify-knowledge/60 text-codify-knowledge hover:bg-codify-knowledge/30`}
                                     title={`Model calls that fell back — click to cycle through each fallback${positionSuffix("fallbacks")}`}
                                     aria-label={`Model calls that fell back — click to cycle through each fallback${positionSuffix("fallbacks")}`}
                                   >
@@ -1149,7 +1149,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                   <button
                                     type="button"
                                     onClick={jump("errors")}
-                                    className={`${badgeCls} bg-red-950/40 border-red-800 text-red-300 hover:bg-red-900/60`}
+                                    className={`${badgeCls} bg-codify-danger/20 border-codify-danger/60 text-codify-danger hover:bg-codify-danger/30`}
                                     title={`Errors recorded during the run — click to cycle through each error${positionSuffix("errors")}`}
                                     aria-label={`Errors recorded during the run — click to cycle through each error${positionSuffix("errors")}`}
                                   >
@@ -1176,7 +1176,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                       msg.goal!.version,
                                     )
                                   }
-                                  className="flex items-center gap-1 px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-lg shadow transition-colors"
+                                  className="flex items-center gap-1 px-2.5 py-1 bg-codify-warning text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg shadow transition-colors"
                                   title="Lift the plan-only guard and begin execution"
                                 >
                                   <Play className="w-3 h-3" /> Execute Plan
@@ -1191,7 +1191,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                   onClick={() =>
                                     onStartGoal(msg.goal!.id, msg.goal!.version)
                                   }
-                                  className="flex items-center gap-1 px-2.5 py-1 bg-green-600 hover:bg-green-500 text-white text-xs font-semibold rounded-lg shadow transition-colors"
+                                  className="flex items-center gap-1 px-2.5 py-1 bg-codify-success text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg shadow transition-colors"
                                 >
                                   <Play className="w-3 h-3" /> Start
                                 </button>
@@ -1203,7 +1203,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => onApplyGoal(msg.goal!.id)}
-                                  className="flex items-center gap-1 px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-lg shadow transition-colors"
+                                  className="flex items-center gap-1 px-2.5 py-1 bg-codify-warning text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg shadow transition-colors"
                                   title="Write the proposed changes for real, then re-run tests, review, and commit"
                                 >
                                   <Check className="w-3 h-3" /> Apply these
@@ -1217,7 +1217,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 onClick={() =>
                                   onPauseGoal(msg.goal!.id, msg.goal!.version)
                                 }
-                                className="flex items-center gap-1 px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-lg shadow transition-colors"
+                                className="flex items-center gap-1 px-2.5 py-1 bg-codify-warning text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg shadow transition-colors"
                               >
                                 <Pause className="w-3 h-3" /> Pause
                               </button>
@@ -1239,7 +1239,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 onClick={() =>
                                   onCancelGoal(msg.goal!.id, msg.goal!.version)
                                 }
-                                className="p-1 text-gray-400 hover:text-red-400 rounded-lg transition-colors"
+                                className="p-1 text-codify-muted hover:text-codify-danger rounded-lg transition-colors"
                                 title="Cancel Goal"
                                 aria-label="Cancel goal"
                               >
@@ -1260,7 +1260,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 onClick={() =>
                                   onDeleteGoal(msg.goal!.id, msg.goal!.title)
                                 }
-                                className="p-1 text-gray-500 hover:text-red-400 rounded-lg transition-colors"
+                                className="p-1 text-codify-muted hover:text-codify-danger rounded-lg transition-colors"
                                 title="Delete this goal and its event log (your files are not touched)"
                                 aria-label="Delete goal"
                               >
@@ -1282,7 +1282,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               <button
                                 type="button"
                                 onClick={() => setTraceFor(msg.goal!.id)}
-                                className="p-1 text-gray-500 hover:text-amber-400 rounded-lg transition-colors"
+                                className="p-1 text-codify-muted hover:text-codify-warning rounded-lg transition-colors"
                                 title="This run was recorded — inspect or delete its model calls"
                                 aria-label="Show recording"
                               >
@@ -1330,7 +1330,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                   );
                                 }
                               }}
-                              className="p-1 text-gray-400 hover:text-blue-400 rounded-lg transition-colors"
+                              className="p-1 text-codify-muted hover:text-codify-info rounded-lg transition-colors"
                               title="Export audit trail (plan edits, fallbacks, failures)"
                               aria-label="Export audit trail"
                             >
@@ -1346,7 +1346,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       {msg.goal?.steps && msg.goal.steps.length > 0 && (
                         <div className="space-y-2">
                           <div className="flex items-center justify-between gap-2">
-                            <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                            <div className="text-xs font-semibold text-codify-muted uppercase tracking-wider">
                               Execution Plan ({msg.goal.steps.length} Steps)
                             </div>
                             {/* How many steps are in flight right now. >1 is the
@@ -1355,7 +1355,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               msg.goal.steps.filter(
                                 (s: PlanStep) => s.status === "IN_PROGRESS",
                               ).length > 1 && (
-                                <span className="flex items-center gap-1 text-2xs font-mono px-2 py-0.5 rounded-full bg-blue-950/50 border border-blue-800 text-blue-300">
+                                <span className="flex items-center gap-1 text-2xs font-mono px-2 py-0.5 rounded-full bg-codify-info/25 border border-codify-info/60 text-codify-info">
                                   <PlayCircle className="w-3 h-3 animate-pulse" />
                                   {
                                     msg.goal.steps.filter(
@@ -1430,7 +1430,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                             className={`w-4 h-4 flex-shrink-0 ${toneText(stepTone(step.status))}`}
                                           />
                                         )}
-                                        <span className="text-xs font-semibold text-gray-200">
+                                        <span className="text-xs font-semibold text-codify-secondary">
                                           Step {step.ordinal + 1}: {step.title}
                                         </span>
                                         {/* This step is one of several running right now —
@@ -1468,7 +1468,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                 stepId: step.id,
                                               })
                                             }
-                                            className="flex items-center gap-1 px-2 py-0.5 bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 border border-blue-700/50 rounded text-xs font-semibold transition-colors"
+                                            className="flex items-center gap-1 px-2 py-0.5 bg-codify-info/20 hover:bg-codify-info/40 text-codify-info border border-codify-info/50 rounded text-xs font-semibold transition-colors"
                                             title="Edit this step's title, description, and target paths"
                                           >
                                             <Pencil className="w-3 h-3" /> Edit
@@ -1489,14 +1489,14 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                 msg.goal!.version,
                                               )
                                             }
-                                            className="flex items-center gap-1 px-2 py-0.5 bg-amber-600/30 hover:bg-amber-600/50 text-amber-300 border border-amber-700/50 rounded text-xs font-semibold transition-colors"
+                                            className="flex items-center gap-1 px-2 py-0.5 bg-codify-warning/30 hover:bg-codify-warning/50 text-codify-warning border border-codify-warning/50 rounded text-xs font-semibold transition-colors"
                                           >
                                             <RotateCcw className="w-3 h-3" />{" "}
                                             Retry
                                           </button>
                                         ) : null}
 
-                                        <span className="text-2xs uppercase font-mono px-1.5 py-0.5 rounded bg-codify-surface text-gray-400">
+                                        <span className="text-2xs uppercase font-mono px-1.5 py-0.5 rounded bg-codify-surface text-codify-muted">
                                           {step.status}
                                         </span>
                                       </div>
@@ -1519,7 +1519,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                       />
                                     ) : (
                                       <>
-                                        <p className="text-xs text-gray-400 pl-6 leading-relaxed">
+                                        <p className="text-xs text-codify-muted pl-6 leading-relaxed">
                                           {step.description}
                                         </p>
 
@@ -1540,7 +1540,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                         )}
 
                                         {step.review_notes && (
-                                          <div className="ml-6 mt-1 p-2 rounded-lg bg-amber-950/30 border border-amber-800/60 text-xs text-amber-300 flex items-start gap-1.5">
+                                          <div className="ml-6 mt-1 p-2 rounded-lg bg-codify-warning/15 border border-codify-warning/60 text-xs text-codify-warning flex items-start gap-1.5">
                                             <ShieldCheck className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
                                             <div>
                                               <span className="font-semibold">
@@ -1552,8 +1552,8 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                         )}
 
                                         {step.commit_message && (
-                                          <div className="ml-6 mt-1 text-xs font-mono text-gray-400 flex items-center gap-1">
-                                            <Check className="w-3 h-3 text-green-400" />
+                                          <div className="ml-6 mt-1 text-xs font-mono text-codify-muted flex items-center gap-1">
+                                            <Check className="w-3 h-3 text-codify-success" />
                                             <span>
                                               Commit: {step.commit_message}
                                             </span>
@@ -1582,7 +1582,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       {/* Event Stream (Diffs & Results) */}
                       {msg.events && msg.events.length > 0 && (
                         <div className="space-y-3 pt-2 border-t border-codify-border/60">
-                          <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+                          <div className="text-xs font-semibold text-codify-muted uppercase tracking-wider flex items-center gap-1.5">
                             <Terminal className="w-3.5 h-3.5" />
                             {msg.goal?.dry_run
                               ? "Proposed Changes (Dry Run — nothing written)"
@@ -1598,8 +1598,8 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 }
                                 className={`ml-auto flex items-center gap-1 px-2 py-0.5 rounded-full border text-2xs font-semibold normal-case tracking-normal transition-colors cursor-pointer ${
                                   issueOnly
-                                    ? "bg-amber-950/40 text-amber-300 border-amber-800"
-                                    : "bg-codify-bg text-gray-400 border-codify-border hover:text-gray-200"
+                                    ? "bg-codify-warning/20 text-codify-warning border-codify-warning/60"
+                                    : "bg-codify-bg text-codify-muted border-codify-border hover:text-codify-secondary"
                                 }`}
                               >
                                 <AlertCircle className="w-3 h-3" />
@@ -1744,11 +1744,11 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                     {ev.type === "library_evidence" && (
                                       <div className="p-2.5 rounded-lg bg-codify-bg border border-codify-border flex flex-col gap-1.5">
                                         <div className="flex items-center gap-1.5">
-                                          <BookOpen className="w-3.5 h-3.5 text-cyan-400" />
-                                          <span className="font-semibold text-xs uppercase tracking-wider text-gray-400">
+                                          <BookOpen className="w-3.5 h-3.5 text-codify-knowledge" />
+                                          <span className="font-semibold text-xs uppercase tracking-wider text-codify-muted">
                                             Reconnaissance
                                           </span>
-                                          <span className="text-2xs text-gray-500">
+                                          <span className="text-2xs text-codify-muted">
                                             {ev.payload.files?.length ?? 0}{" "}
                                             file(s) cited from{" "}
                                             {ev.payload.counts?.considered ?? 0}{" "}
@@ -1760,7 +1760,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                           </span>
                                         </div>
                                         {ev.payload.summary && (
-                                          <p className="text-xs text-gray-300 leading-relaxed">
+                                          <p className="text-xs text-codify-secondary leading-relaxed">
                                             {ev.payload.summary}
                                           </p>
                                         )}
@@ -1780,16 +1780,16 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                   key={i}
                                                   className="text-xs flex items-start gap-1.5"
                                                 >
-                                                  <span className="font-mono text-cyan-300/90">
+                                                  <span className="font-mono text-codify-knowledge/90">
                                                     {f.path}
                                                   </span>
                                                   {f.evidence && (
-                                                    <span className="text-2xs text-gray-500">
+                                                    <span className="text-2xs text-codify-muted">
                                                       [{f.evidence}]
                                                     </span>
                                                   )}
                                                   {f.why && (
-                                                    <span className="text-gray-400">
+                                                    <span className="text-codify-muted">
                                                       — {f.why}
                                                     </span>
                                                   )}
@@ -1799,17 +1799,17 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                           </div>
                                         )}
                                         {ev.payload.test_command && (
-                                          <div className="text-xs font-mono text-gray-400">
+                                          <div className="text-xs font-mono text-codify-muted">
                                             test command:{" "}
                                             {ev.payload.test_command.join(" ")}
-                                            <span className="text-2xs text-gray-500 ml-1">
+                                            <span className="text-2xs text-codify-muted ml-1">
                                               (unverified)
                                             </span>
                                           </div>
                                         )}
                                         {ev.payload.conventions &&
                                           ev.payload.conventions.length > 0 && (
-                                            <div className="text-xs text-gray-400">
+                                            <div className="text-xs text-codify-muted">
                                               conventions:{" "}
                                               {ev.payload.conventions.join(
                                                 "; ",
@@ -1818,7 +1818,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                           )}
                                         {ev.payload.risks &&
                                           ev.payload.risks.length > 0 && (
-                                            <div className="text-xs text-amber-400/90">
+                                            <div className="text-xs text-codify-warning/90">
                                               risks:{" "}
                                               {ev.payload.risks.join("; ")}
                                             </div>
@@ -1826,7 +1826,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                         {ev.payload.dropped_paths &&
                                           ev.payload.dropped_paths.length >
                                             0 && (
-                                            <div className="flex items-start gap-1.5 text-xs text-amber-400/90">
+                                            <div className="flex items-start gap-1.5 text-xs text-codify-warning/90">
                                               <ShieldAlert className="w-3 h-3 flex-shrink-0 mt-0.5" />
                                               <span className="font-mono">
                                                 never opened, dropped:{" "}
@@ -1883,22 +1883,22 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                           <span
                                             className={`font-semibold uppercase text-xs px-1.5 py-0.5 rounded ${
                                               ev.payload.verdict === "pass"
-                                                ? "bg-green-950 text-green-300 border border-green-800"
+                                                ? "bg-codify-success/20 text-codify-success border border-codify-success/60"
                                                 : ev.payload.verdict === "fail"
-                                                  ? "bg-red-950 text-red-300 border border-red-800"
-                                                  : "bg-codify-raised text-gray-300 border border-codify-border"
+                                                  ? "bg-codify-danger/15 text-codify-danger border border-codify-danger/60"
+                                                  : "bg-codify-raised text-codify-secondary border border-codify-border"
                                             }`}
                                           >
                                             {ev.payload.verdict}
                                           </span>
                                           {ev.payload.argv && (
-                                            <span className="font-mono text-gray-400">
+                                            <span className="font-mono text-codify-muted">
                                               {ev.payload.argv.join(" ")}
                                             </span>
                                           )}
                                         </div>
                                         {ev.payload.explanation && (
-                                          <p className="text-gray-400 pl-1">
+                                          <p className="text-codify-muted pl-1">
                                             {ev.payload.explanation}
                                           </p>
                                         )}
@@ -1913,7 +1913,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                 (d: string, i: number) => (
                                                   <div
                                                     key={i}
-                                                    className="flex items-start gap-1.5 text-xs text-amber-400/90"
+                                                    className="flex items-start gap-1.5 text-xs text-codify-warning/90"
                                                   >
                                                     <Palette className="w-3 h-3 flex-shrink-0 mt-0.5" />
                                                     <span className="font-mono">
@@ -1933,7 +1933,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                 (r: string, i: number) => (
                                                   <div
                                                     key={i}
-                                                    className="flex items-start gap-1.5 text-xs text-amber-400/90"
+                                                    className="flex items-start gap-1.5 text-xs text-codify-warning/90"
                                                   >
                                                     <ShieldAlert className="w-3 h-3 flex-shrink-0 mt-0.5" />
                                                     <span className="font-mono">
@@ -1943,7 +1943,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                 ),
                                               )}
                                               {ev.payload.ran === false && (
-                                                <span className="text-xs text-gray-500 pl-4">
+                                                <span className="text-xs text-codify-muted pl-4">
                                                   No command ran — this verdict
                                                   is the tester's judgement, not
                                                   a test result.
@@ -1962,11 +1962,11 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               being retried: shown so a goal that takes longer
                               than usual explains itself. */}
                                     {ev.type === "fixer_pass" && (
-                                      <div className="flex items-start gap-1.5 pl-2 text-sky-300">
+                                      <div className="flex items-start gap-1.5 pl-2 text-codify-info">
                                         <ShieldAlert className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                                         <span className="leading-relaxed">
                                           Fixer asked for another pass
-                                          <span className="font-mono text-gray-400">
+                                          <span className="font-mono text-codify-muted">
                                             {" "}
                                             (pass {ev.payload.attempt},{" "}
                                             {ev.payload.passes_left} of{" "}
@@ -1977,13 +1977,13 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                     )}
 
                                     {ev.type === "plan_consult" && (
-                                      <div className="flex items-start gap-1.5 pl-2 text-cyan-300">
+                                      <div className="flex items-start gap-1.5 pl-2 text-codify-knowledge">
                                         <BookOpen className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                                         <span className="leading-relaxed">
                                           Planner asked the librarian for a
                                           follow-up
                                           {ev.payload.refused > 0 && (
-                                            <span className="font-mono text-gray-400">
+                                            <span className="font-mono text-codify-muted">
                                               {" "}
                                               ({ev.payload.refused} request
                                               {ev.payload.refused === 1
@@ -1997,18 +1997,18 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                     )}
 
                                     {ev.type === "fix_retry" && (
-                                      <div className="flex items-start gap-1.5 pl-2 text-amber-300">
+                                      <div className="flex items-start gap-1.5 pl-2 text-codify-warning">
                                         <ShieldAlert className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                                         <span className="leading-relaxed">
                                           Tests failed — asking the fixer to try
                                           again
-                                          <span className="font-mono text-gray-400">
+                                          <span className="font-mono text-codify-muted">
                                             {" "}
                                             (attempt {ev.payload.attempt}/
                                             {ev.payload.max_attempts})
                                           </span>
                                           {ev.payload.reason && (
-                                            <span className="block text-xs text-gray-500 font-mono">
+                                            <span className="block text-xs text-codify-muted font-mono">
                                               {ev.payload.reason}
                                             </span>
                                           )}
@@ -2045,7 +2045,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                         // not reduced to whichever branch won the if/else.
                                         return (
                                           <div
-                                            className="flex items-start gap-1.5 pl-2 text-violet-300 rounded"
+                                            className="flex items-start gap-1.5 pl-2 text-codify-design rounded"
                                             data-audit-marker="edits"
                                           >
                                             <Pencil className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
@@ -2055,19 +2055,19 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                 {stepTitle}
                                               </span>
                                               {pathChanged && (
-                                                <span className="block font-mono text-xs text-gray-400">
+                                                <span className="block font-mono text-xs text-codify-muted">
                                                   paths:{" "}
-                                                  <span className="text-red-400/80 line-through">
+                                                  <span className="text-codify-danger/80 line-through">
                                                     {fmtPaths(paths.before)}
                                                   </span>{" "}
                                                   →{" "}
-                                                  <span className="text-green-400">
+                                                  <span className="text-codify-success">
                                                     {fmtPaths(paths.after)}
                                                   </span>
                                                 </span>
                                               )}
                                               {titleChanged && (
-                                                <span className="block text-gray-400">
+                                                <span className="block text-codify-muted">
                                                   renamed from “
                                                   {ch.title.before}”
                                                 </span>
@@ -2075,7 +2075,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                               {ch.description &&
                                                 ch.description.before !==
                                                   ch.description.after && (
-                                                  <span className="block text-gray-400">
+                                                  <span className="block text-codify-muted">
                                                     description updated
                                                   </span>
                                                 )}
@@ -2086,7 +2086,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                   ch.description.before !==
                                                     ch.description.after
                                                 ) && (
-                                                  <span className="text-gray-400">
+                                                  <span className="text-codify-muted">
                                                     updated
                                                   </span>
                                                 )}
@@ -2100,7 +2100,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               model, and the transcript must not credit the wrong one. */}
                                     {ev.type === "provider_fallback" && (
                                       <div
-                                        className="flex items-start gap-1.5 pl-2 text-teal-300 rounded"
+                                        className="flex items-start gap-1.5 pl-2 text-codify-knowledge rounded"
                                         data-audit-marker="fallbacks"
                                       >
                                         <Route className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
@@ -2109,19 +2109,19 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                             {ev.payload.role}
                                           </span>{" "}
                                           fell back to{" "}
-                                          <span className="font-mono text-gray-300">
+                                          <span className="font-mono text-codify-secondary">
                                             {ev.payload.to?.provider}/
                                             {ev.payload.to?.model}
                                           </span>{" "}
                                           —{" "}
-                                          <span className="font-mono text-gray-400">
+                                          <span className="font-mono text-codify-muted">
                                             {ev.payload.from?.provider}/
                                             {ev.payload.from?.model ||
                                               "no model"}
                                           </span>{" "}
                                           could not be used
                                           {ev.payload.detail && (
-                                            <span className="text-gray-500">
+                                            <span className="text-codify-muted">
                                               {" "}
                                               ({ev.payload.detail})
                                             </span>
@@ -2136,7 +2136,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               Settings screen's "last error" reads these too. */}
                                     {ev.type === "agent_call_failed" && (
                                       <div
-                                        className="flex items-start gap-1.5 pl-2 text-amber-300/90 rounded"
+                                        className="flex items-start gap-1.5 pl-2 text-codify-warning/90 rounded"
                                         data-audit-marker="errors"
                                       >
                                         <ShieldAlert className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
@@ -2145,7 +2145,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                             {ev.payload.role}
                                           </span>{" "}
                                           could not call{" "}
-                                          <span className="font-mono text-gray-300">
+                                          <span className="font-mono text-codify-secondary">
                                             {ev.payload.provider}/
                                             {ev.payload.model}
                                           </span>{" "}
@@ -2154,7 +2154,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                             {ev.payload.code}
                                           </span>
                                           {ev.payload.duration_ms != null && (
-                                            <span className="text-gray-500">
+                                            <span className="text-codify-muted">
                                               {" "}
                                               after{" "}
                                               {ev.payload.duration_ms < 1000
@@ -2167,7 +2167,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                     )}
 
                                     {ev.type === "file_change_summary" && (
-                                      <div className="flex items-start gap-1.5 pl-2 text-blue-300">
+                                      <div className="flex items-start gap-1.5 pl-2 text-codify-info">
                                         <FileCode className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                                         <span>
                                           Files touched:{" "}
@@ -2175,7 +2175,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                             ? ev.payload.paths.join(", ")
                                             : "none"}
                                           {ev.payload.dry_run && (
-                                            <span className="ml-1 text-amber-400">
+                                            <span className="ml-1 text-codify-warning">
                                               (dry run — nothing written)
                                             </span>
                                           )}
@@ -2184,7 +2184,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                     claimed. Named rather than dropped: "none" alone
                                     reads as though the fixer said nothing. */}
                                           {!!ev.payload.unchanged?.length && (
-                                            <span className="ml-1 text-gray-400">
+                                            <span className="ml-1 text-codify-muted">
                                               ({ev.payload.unchanged.join(", ")}{" "}
                                               already matched — left alone)
                                             </span>
@@ -2197,10 +2197,10 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                       <div
                                         className={`font-mono text-xs pl-2 border-l-2 ${
                                           ev.payload.level === "warn"
-                                            ? "border-amber-500 text-amber-300"
+                                            ? "border-codify-warning text-codify-warning"
                                             : ev.payload.level === "error"
-                                              ? "border-red-500 text-red-300"
-                                              : "border-blue-500 text-gray-300"
+                                              ? "border-codify-danger text-codify-danger"
+                                              : "border-codify-info text-codify-secondary"
                                         }`}
                                       >
                                         {ev.payload.message}
@@ -2209,7 +2209,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
 
                                     {ev.type === "error" && (
                                       <div
-                                        className="p-2 rounded-lg bg-red-950/40 border border-red-800 text-red-300 font-semibold flex flex-col gap-2"
+                                        className="p-2 rounded-lg bg-codify-danger/20 border border-codify-danger/60 text-codify-danger font-semibold flex flex-col gap-2"
                                         data-audit-marker="errors"
                                       >
                                         <span>
@@ -2227,9 +2227,9 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                               role: ev.payload.role ?? null,
                                             })
                                           }
-                                          className="flex w-fit items-center gap-1.5 px-2 py-1 bg-codify-raised hover:bg-codify-border border border-codify-border text-gray-200 text-xs font-semibold rounded transition-colors"
+                                          className="flex w-fit items-center gap-1.5 px-2 py-1 bg-codify-raised hover:bg-codify-border border border-codify-border text-codify-secondary text-xs font-semibold rounded transition-colors"
                                         >
-                                          <ShieldAlert className="w-3 h-3 text-red-400" />
+                                          <ShieldAlert className="w-3 h-3 text-codify-danger" />
                                           Why did this fail?
                                         </button>
                                       </div>
@@ -2249,7 +2249,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 rendered.push(
                                   <div
                                     key="issues-empty"
-                                    className="text-xs text-gray-500 pl-2 border-l-2 border-amber-500/60 py-0.5"
+                                    className="text-xs text-codify-muted pl-2 border-l-2 border-codify-warning/60 py-0.5"
                                   >
                                     Nothing else to show — no warnings or errors
                                     in this run.
@@ -2276,7 +2276,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                           className={`rounded-lg border font-mono text-xs leading-relaxed ${
                                             head.final
                                               ? "bg-codify-surface border-codify-border text-codify-muted"
-                                              : "bg-codify-bg border-blue-800/60 text-blue-100"
+                                              : "bg-codify-bg border-codify-info/60 text-codify-info"
                                           }`}
                                         >
                                           <button

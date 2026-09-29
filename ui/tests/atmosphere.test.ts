@@ -237,7 +237,16 @@ test("the bounds live in one hook, and every effect goes through it", () => {
   // being correct, it being the only way to get a clock at all.
   assert.match(clock, /Math\.min\(1, maxDimension \/ Math\.max\(cssW, cssH\)\)/);
   assert.match(clock, /1000 \/ Math\.max\(1, fps\)/);
-  assert.match(clock, /prefers-reduced-motion: reduce/);
+  // The opt-out used to be the media query inline; it is now the motion store
+  // (`useMotionAllowed`), which folds the user's choice and the shell's
+  // starvation verdict in with that same query — so the contract is the
+  // subscription, and the query string lives (once) in `motionPreference.ts`.
+  assert.match(clock, /useMotionAllowed\(\)/);
+  const motion = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "motionPreference.ts"),
+    "utf8",
+  );
+  assert.match(motion, /prefers-reduced-motion: reduce/);
   assert.match(clock, /\/\/ The static frame[\s\S]*?painter\.draw\(ctx, size, tick\);/);
   assert.match(clock, /if \(!reduced\) raf = requestAnimationFrame\(loop\);/);
   assert.match(clock, /cancelAnimationFrame/);

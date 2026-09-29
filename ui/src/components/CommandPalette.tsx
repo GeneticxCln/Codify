@@ -170,7 +170,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           aria-label="Command palette"
           aria-autocomplete="list"
           aria-controls="command-palette-list"
-          className="w-full bg-transparent px-4 py-3 text-sm text-gray-100 outline-none border-b border-codify-border placeholder:text-codify-muted"
+          className="w-full bg-transparent px-4 py-3 text-sm text-codify-primary outline-none border-b border-codify-border placeholder:text-codify-muted"
         />
         <ul
           id="command-palette-list"
@@ -206,8 +206,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                   className={
                     "flex items-center justify-between gap-3 px-3 py-2 rounded-lg cursor-pointer text-sm " +
                     (isSelected
-                      ? "bg-codify-raised text-gray-100"
-                      : "text-gray-400 hover:bg-codify-raised/60")
+                      ? "bg-codify-raised text-codify-primary"
+                      : "text-codify-muted hover:bg-codify-raised/60")
                   }
                 >
                   <span className="truncate">{item.title}</span>

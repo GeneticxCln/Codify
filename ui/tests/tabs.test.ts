@@ -27,11 +27,11 @@ registerTsx();
 // below.
 const {
   activeTab,
-  closeBrowserTab,
   closeTab,
   emptyTabs,
   focusTab,
   openConversation,
+  openBlankTab,
   closeConversation,
   withWorkspace,
   UNTITLED_THREAD_TITLE,
@@ -66,13 +66,6 @@ const shell = (id: string): Tab => ({
   id,
   kind: "terminal",
   title: "zsh",
-});
-
-const browser = (id: string, title = "example.com"): Tab => ({
-  id,
-  kind: "browser",
-  title,
-  url: "https://example.com/",
 });
 
 const stateWith = (...tabs: Tab[]): TabState => ({
@@ -128,18 +121,129 @@ test("reopening a thread focuses the tab already showing it", () => {
 // rather than replacing the one you were reading. What has not changed is that
 // one thread never gets two tabs.
 
-test("a new thread gets its own tab, and the old one stays", () => {
-  // The rule that the single-tab model broke. Under it this length was 1 and the
-  // thread you were reading was gone from the strip the moment you started
-  // another; the transcript was still there in the side panel, but nothing in
-  // the strip said what you had open.
-  let s = openConversation(emptyTabs, "c1", "Fix the flaky test");
-  s = openConversation(s, "c2", "Refactor the parser");
-  assert.equal(s.tabs.length, 2, "two threads, two tabs");
+test("a thread in a project you are not looking at gets its own tab", () => {
+  // The rule that the single-tab model broke, in the form that still holds: a
+  // thread you open from somewhere else must not take over the tab you are
+  // reading. The ⌘K case — the palette can name a thread in another project,
+  // and that project has to become visible to be read.
+  let s = openConversation(emptyTabs, "c1", "Fix the flaky test", "w1");
+  s = openConversation(s, "c2", "Refactor the parser", "w2");
+  assert.equal(s.tabs.length, 2, "two projects, two tabs");
   assert.equal(s.tabs[0].conversationId, "c1", "and the first is untouched");
   assert.equal(s.tabs[0].title, "Fix the flaky test");
   assert.equal(s.tabs[1].conversationId, "c2");
   assert.equal(s.activeId, s.tabs[1].id, "the new one is showing");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// One project per tab
+//
+// A tab is a project's window and the threads inside it are what it shows in
+// turn. These are the four cases `openConversation` has to tell apart, and each
+// of them was one of the answers being wrong: a thread that hijacks a window, a
+// clean slate that spawns a second window, a thread moved out of the tab that
+// already had it, or a thread landing in a project it does not belong to.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("a clean slate is a project with a place to type, and no thread", () => {
+  // The New Tab button's whole effect. It creates nothing on the engine, so
+  // there is nothing here but a tab that is waiting: no conversation, and the
+  // placeholder name a tab with nothing in it is called by.
+  const s = openBlankTab(emptyTabs, "w1");
+  assert.equal(s.tabs.length, 1);
+  assert.equal(s.tabs[0].kind, "chat");
+  assert.equal(s.tabs[0].workspaceId, "w1", "a tab is a project, so it records one");
+  assert.equal(s.tabs[0].conversationId, undefined, "a clean slate has no thread to show");
+  assert.equal(s.tabs[0].title, UNTITLED_THREAD_TITLE);
+  assert.equal(s.activeId, s.tabs[0].id, "and it is the tab you are looking at");
+});
+
+test("the first prompt's thread lands in the clean slate rather than a new tab", () => {
+  // What the send path does after it creates the conversation. If this opened a
+  // tab instead, the clean slate would sit there empty next to the thread that
+  // was just typed into it — which is the one artefact a clean slate exists to
+  // avoid.
+  const s = openConversation(openBlankTab(emptyTabs, "w1"), "c1", "Fix the flaky test", "w1");
+  assert.equal(s.tabs.length, 1, "the thread took a second tab");
+  assert.equal(s.tabs[0].conversationId, "c1");
+  assert.equal(s.tabs[0].title, "Fix the flaky test", "the tab kept the placeholder name");
+  assert.equal(s.tabs[0].workspaceId, "w1");
+});
+
+test("choosing a thread in the panel shows it in that project's tab", () => {
+  // The side panel's whole job now. Two threads of one project are two things
+  // one tab shows in turn, not two tabs, and the thread you were reading is
+  // still in the panel to come back to.
+  let s = openConversation(emptyTabs, "c1", "Fix the flaky test", "w1");
+  s = openConversation(s, "c2", "Refactor the parser", "w1");
+  assert.equal(s.tabs.length, 1, "one project, one tab");
+  assert.equal(activeTab(s)?.conversationId, "c2");
+  assert.equal(activeTab(s)?.title, "Refactor the parser");
+  assert.equal(activeTab(s)?.workspaceId, "w1", "and the tab is still the project's");
+
+  // And back again, which is the case a strip could not have made obvious.
+  s = openConversation(s, "c1", "Fix the flaky test", "w1");
+  assert.equal(s.tabs.length, 1);
+  assert.equal(activeTab(s)?.conversationId, "c1");
+});
+
+test("a thread already open in a background tab is focused, not moved", () => {
+  // Rule 1 before rule 2, and the order is the whole point: two tabs of one
+  // project are possible (New Tab twice), so a thread can be open in a tab that
+  // is not on screen. Choosing it in the panel must bring that tab forward. If
+  // rule 2 ran first it would show the thread in the tab you are already in and
+  // leave the other one pointing at a thread that is now on screen twice.
+  let s = openConversation(emptyTabs, "c1", "Fix the flaky test", "w1");
+  const first = s.tabs[0].id;
+  s = openBlankTab(s, "w1"); // a second window onto the same project, now on screen
+  const second = s.tabs[1].id;
+  s = openConversation(s, "c1", "Fix the flaky test", "w1");
+  assert.equal(s.tabs.length, 2, "no third tab");
+  assert.equal(s.activeId, first, "the tab that had the thread came forward");
+  assert.notEqual(s.activeId, second);
+  assert.equal(s.tabs[1].conversationId, undefined, "and the other tab is still a clean slate");
+});
+
+test("an empty tab in the project is filled before a new one is made", () => {
+  // The ⌘K case within one project: a terminal is on screen, and the project has
+  // a clean slate in the strip. The thread goes in the slate, because opening
+  // another tab when one is free is how a strip fills with near-identical rows.
+  let s = openTerminalTab(openBlankTab(emptyTabs, "w1"), "term-1", "w1");
+  assert.equal(activeTab(s)?.kind, "terminal");
+  s = openConversation(s, "c1", "Fix the flaky test", "w1");
+  assert.equal(s.tabs.length, 2, "a third tab for a project that already had one free");
+  assert.equal(activeTab(s)?.kind, "chat");
+  assert.equal(activeTab(s)?.conversationId, "c1");
+});
+
+test("two clean slates in one project are two tabs, because that is what New Tab means", () => {
+  // The other direction: a second window onto the same project is a thing the
+  // button offers, so quietly focusing the existing tab would make the control a
+  // no-op that looks like it worked.
+  let s = openBlankTab(emptyTabs, "w1");
+  s = openBlankTab(s, "w1");
+  assert.equal(s.tabs.length, 2);
+  assert.equal(new Set(s.tabs.map((t) => t.workspaceId)).size, 1, "one project, two windows");
+});
+
+test("a thread whose project is not known does not take over a tab", () => {
+  // The safety direction. A tab with no recorded folder is not evidence of a
+  // shared project, so a thread we cannot place gets a tab of its own rather
+  // than being shown in a window that may belong to somewhere else.
+  const s = openConversation(openBlankTab(emptyTabs, "w1"), "c1", "Fix the flaky test");
+  assert.equal(s.tabs.length, 2);
+  assert.equal(s.tabs[0].conversationId, undefined, "the clean slate was filled by a thread it cannot host");
+  assert.equal(activeTab(s)?.conversationId, "c1");
+});
+
+test("a terminal on screen is not a tab a thread can be shown in", () => {
+  // Rule 2 is about chat tabs. A live shell is a window onto a cwd, and a
+  // transcript shown in it would replace the scrollback.
+  let s = openTerminalTab(emptyTabs, "term-1", "w1");
+  s = openConversation(s, "c1", "Fix the flaky test", "w1");
+  assert.equal(s.tabs.length, 2);
+  assert.equal(activeTab(s)?.kind, "chat");
+  assert.equal(tabsOfKind(s, "terminal").length, 1);
 });
 
 test("re-opening a thread focuses its tab instead of adding a second", () => {
@@ -241,17 +345,24 @@ test("a folder cannot be stamped onto a tab that is not open", () => {
   assert.equal(s, emptyTabs);
 });
 
-test("archiving a thread closes its tab and leaves the others", () => {
-  // The tab pointed at an archived conversation would be a transcript with no
-  // row above it. The chat column is not at risk: every other thread has its own
-  // tab, and "New chat" is one click away.
-  let s = openConversation(emptyTabs, "c1", "one");
-  s = openConversation(s, "c2", "two");
-  const c2 = s.tabs[1].id;
+test("archiving a thread blanks its tab and leaves the others", () => {
+  // The tab is the project's window now, so it outlives the thread that was in
+  // it: closing it would destroy a window the person is still working in, and
+  // archiving one thread should not be a way to lose a project. What is left is
+  // a clean slate — the same state New Tab opens, and a state a tab is allowed
+  // to be in.
+  let s = openConversation(emptyTabs, "c1", "one", "w1");
+  s = openTerminalTab(s, "term-1", "w1");
+  const chat = s.tabs[0].id;
   s = closeConversation(s, "c1");
-  assert.equal(s.tabs.length, 1);
-  assert.equal(s.tabs[0].id, c2, "the thread you are still reading survives");
+  assert.equal(s.tabs.length, 2, "archiving a thread did not close a tab");
+  assert.equal(s.tabs[0].id, chat, "and the chat tab is the one that went blank");
+  assert.equal(s.tabs[0].conversationId, undefined, "the tab still points at the archived thread");
+  assert.equal(s.tabs[0].title, UNTITLED_THREAD_TITLE, "and still calls it by the old name");
+  assert.equal(s.tabs[0].workspaceId, "w1", "the project is the tab, so it stays");
   assert.equal(tabForConversation(s, "c1"), undefined);
+  // The shell tab is untouched: archiving a thread says nothing about shells.
+  assert.equal(tabsOfKind(s, "terminal").length, 1);
 });
 
 test("archiving a thread you never opened changes nothing", () => {
@@ -259,16 +370,6 @@ test("archiving a thread you never opened changes nothing", () => {
   // not close some other thread's tab by falling through to "close something".
   const s = openConversation(emptyTabs, "c1", "one");
   assert.deepEqual(closeConversation(s, "c2"), s);
-});
-
-test("a chat tab is never closed by a browser close signal", () => {
-  // `closeBrowserTab` takes an id and a kind. A transcript sharing an id with a
-  // webview must be untouchable by it, or closing a page takes a thread away.
-  let s = openConversation(emptyTabs, "same", "one");
-  s = openBrowserTab(s, "same", "https://example.com");
-  const after = closeBrowserTab(s, "same");
-  assert.equal(after.tabs.length, 1, "the browser tab went, the chat tab stayed");
-  assert.equal(tabForConversation(after, "same")?.title, "one");
 });
 
 test("a terminal and a chat may both be open", () => {
@@ -334,49 +435,6 @@ test("closing one of two lands on the survivor whichever side it was", () => {
   assert.equal(closeTab(left, "c2").activeId, "c1");
   const right = { ...stateWith(chat("c1"), chat("c2")), activeId: "c1" };
   assert.equal(closeTab(right, "c1").activeId, "c2");
-});
-
-// ── a browser window closing takes its tab with it ──────────────────────
-
-test("a closed webview window closes the tab behind it", () => {
-  // The browser tab's webview is its own OS window, so it can be closed with
-  // its own close button and nothing about it passes through the strip. The
-  // shell's event lands here, and the tab goes with the window — landing on
-  // the left neighbour like any other close.
-  const s = {
-    ...stateWith(chat("c1"), browser("tab-1")),
-    activeId: "tab-1",
-  };
-  const after = closeBrowserTab(s, "tab-1");
-  assert.deepEqual(after.tabs.map((t) => t.id), ["c1"]);
-  assert.equal(after.activeId, "c1");
-});
-
-test("the event that follows a tab we closed ourselves changes nothing", () => {
-  // Closing the tab asks the shell to destroy the webview, and the shell
-  // announces the destruction. The tab is already gone; this has to be a
-  // no-op rather than a second close.
-  const s = stateWith(chat("c1"));
-  assert.equal(closeBrowserTab(s, "tab-1"), s);
-  assert.equal(closeBrowserTab(s, ""), s);
-});
-
-test("a close signal never closes a chat or terminal tab", () => {
-  // The signal is a fact about a webview window. A chat tab sharing an id with
-  // one (or a terminal tab) must be untouchable by it.
-  const s = { ...stateWith(chat("tab-1"), shell("tab-2")), activeId: "tab-2" };
-  assert.equal(closeBrowserTab(s, "tab-1"), s);
-  assert.equal(closeBrowserTab(s, "tab-2"), s);
-});
-
-test("a webview closing for a background tab leaves the active tab alone", () => {
-  const s = {
-    ...stateWith(browser("tab-1"), chat("c1")),
-    activeId: "c1",
-  };
-  const after = closeBrowserTab(s, "tab-1");
-  assert.deepEqual(after.tabs.map((t) => t.id), ["c1"]);
-  assert.equal(after.activeId, "c1");
 });
 
 // ── reordering ──────────────────────────────────────────────────────────
@@ -591,20 +649,3 @@ test("marking an exit reaches no tab but a terminal one", () => {
   assert.deepEqual(markTerminalExited(s, "absent").tabs, s.tabs);
 });
 
-test("a browser close signal can never mark a terminal as exited", () => {
-  // The two streams both carry an id, and both arrive at handlers that change
-  // tab state. A cross is the kind of bug that only shows up when a user has
-  // both kinds of tab open, which is every user.
-  const s = openTerminalTab(
-    openBrowserTab(emptyTabs, "browser-1", "https://example.com"),
-    "term-1",
-    "w1"
-  );
-  const afterBrowserClose = closeBrowserTab(s, s.tabs[0].id);
-  assert.equal(afterBrowserClose.tabs.length, 1);
-  assert.equal(
-    afterBrowserClose.tabs[0].exited,
-    undefined,
-    "closing a browser tab marked a terminal as exited"
-  );
-});

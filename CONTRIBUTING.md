@@ -18,6 +18,7 @@ runs everything in one pass:
 | `make test-streams` | the concurrency/stream-isolation tests, **by name** (not just via discovery) |
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |
 | `make check-tauri` | `cargo check` + `cargo fmt --check` on the desktop shell |
+| `make check-history` | every commit in `HISTORY_RANGE` (default `origin/<branch>..HEAD`) builds, not just the tip |
 
 The Python suite must run on **3.10 and 3.14** — 3.10 because `pyproject.toml`
 declares it and the desktop shell boots the engine with whatever `python3` is on
@@ -39,6 +40,33 @@ minimum, bringing that interpreter up on demand (it downloads one with `uv`, or 
 same targets split by toolchain, but GitHub Actions is not available to this
 repository — **`make ci` is the gate.**
 
+### The gate is about the tip; the history is a separate question
+
+`make ci` asks whether the tree you are about to share is green. It cannot ask
+whether every commit on the way to that tip was green, and in this repository
+those come apart more easily than you would expect: the UI suite asserts
+against *source text* as much as behaviour, so a commit that adds a component
+and a test asserting the shell mounts it is red until the commit that mounts
+it. Split a coherent change into "the parts" and "the wiring" and you get a
+history that reads well and that `git bisect` cannot walk.
+
+```
+make check-history
+```
+
+walks the range and runs the decisive legs at each commit, in its own detached
+`git worktree` outside the repository — your working tree is never checked out,
+so this is safe to run with unsaved work in flight. It reports the commit, the
+leg, and the first line of the failure, because a table of thirty "FAIL"s with
+no reasons is a table nobody acts on.
+
+It is deliberately **not** part of `check` or `ci`: it asks a different question
+of different commits, and the declared-minimum and Rust legs stay out because
+they cannot be what decides a split and they cost minutes per commit. A
+one-commit range has no middle, so the target says so and exits rather than
+walking anything — which is what makes it affordable enough to run on every
+push that could possibly need it.
+
 Install the hooks once per clone and the cheap failures stop reaching a push:
 
 ```
@@ -48,7 +76,7 @@ make hooks
 | Hook | Runs | Why |
 |---|---|---|
 | `pre-commit` | `make lint typecheck` | seconds, so the obvious failure lands while the change is still in your hands — it checks the working tree, so pre-push remains the real proof |
-| `pre-push` | `make ci` | the whole gate, every toolchain |
+| `pre-push` | `make ci`, then `make check-history` | the whole gate on the tip, then the commits under it. Ordered that way because a red tip is the cheaper thing to be told about and the per-commit sweep is minutes |
 
 Both are versioned in `.githooks/` (`core.hooksPath` is the whole install, `git config
 --unset core.hooksPath` the whole uninstall), so they work on a fresh clone instead of
@@ -94,13 +122,76 @@ rendered is a primitive whose markup nothing checks. And a render must produce n
 React warning at all: a list child without a unique key reconciles by index, which
 is a state-mixing bug rather than a cosmetic one.
 
+**And when a control has to be *used*, there is now a DOM for it.** The rules
+above are all about `react-dom/server`, and a static render has one blind spot
+that is not small: it runs no effects and no events, so a button wired to nothing
+produces perfect markup. Six of this repo's own tests were written to cover
+that blind spot by opening the **source file** and matching a regex against it —
+which is a test of the file, and which passed happily while the radiogroup's
+arrow keys, the colour wells, the file input, the palette's Escape key and the
+transcript's audit badges were unreachable by anything.
+
+`ui/tests/dom.ts` is the answer, and it is a `jsdom` document with
+`React.act` around every interaction. `withDom` is opt-in and a callback rather
+than setup/teardown, because the teardown is the part that gets forgotten and a
+leaked document produces tests that pass alone and fail together.
+
+Six things to know before using it.
+
+- **Import the component from inside the callback.** `react-dom/client` reads
+  `document` while it is being *imported*, so a static import at the top of a
+  test file gives React no document and the harness mounts nothing while every
+  assertion passes. `appearanceInteraction.test.ts` shows the shape.
+- **Seed `localStorage` before rendering.** Components read storage in a
+  `useState` initialiser, so anything written afterwards is too late and a test
+  that forgets asserts about the default theme without saying so.
+- **The `fetch` in place refuses, on purpose.** `api.ts` builds its URL from the
+  engine's port and calls the bare global, so a component that fetches on mount
+  would otherwise open a real socket to `127.0.0.1` — the developer's engine, or
+  a stranger's. The installed one records the attempt in `dom.fetches` and
+  rejects, naming the URL. Assign `globalThis.fetch` **from inside** the
+  callback — the harness installs its own as it sets up, so a stub assigned from
+  outside is overwritten before the component ever runs. `settle()` after the
+  answer you installed, so the update lands inside `act`.
+- **Scrolling is answered and recorded.** jsdom has no `Element.prototype
+  .scrollIntoView` at all, and no document with no layout has a scroll position;
+  the element that was named goes into `dom.scrolls` and nothing moves. "The
+  second edit was brought into view" is a claim about *which* element was
+  named, and that is all there is to claim.
+- **There is no assertion about pixels here.** The canvas is stubbed so a
+  component can mount; a claim about what was painted belongs in
+  `painter.test.ts`, which drives painters against a recording context.
+- **Write tests in `.ts` with `React.createElement`.** The suite's glob is
+  `tests/*.test.ts` and node's type stripping refuses JSX outside `.tsx`.
+
+A static render is still the right default — it is much faster and it is the
+right claim when the question is "is this sentence on screen". Reach for the DOM
+when the question is "can a person do this", and the difference is not academic:
+breaking `commitTints` so a pick stops persisting fails four interaction tests
+and passes all fifty-eight static ones. The same holds for the surfaces that
+were the worst of it: the palette (`paletteInteraction.test.ts`), the tab strip
+(`tabStripInteraction.test.ts`) and the transcript (`transcriptInteraction
+.test.ts`) each have a file whose claims are about the second listener and not
+about the words — a key that stops at the input, an × that closes a tab without
+selecting it, a goal action carrying the version it was rendered from.
+
+**What the DOM does not reach.** `App.tsx` itself is not mounted by any test, and
+this is a decision rather than an oversight: it is the shell that boots the
+engine, opens sockets and drives a Tauri webview, and a jsdom document would
+prove nothing about it that its own files do not. The claims that live only in
+`App.tsx` — that a tab strip sits inside the main split, that a terminal pane is
+handed its *tab's* workspace — stay as source reads, and the reason they are not
+being replaced is worth saying: a regex over a file is a weak claim, but a DOM
+test for a component that only exists inside the shell is a *fake* one. Test the
+component where the component lives.
+
 **Never touch the developer's real state.** Tests run hermetically via
 `tests/hermetic.py`; an isolated engine moves *both* the database and the
 credentials with `CODIFY_HOME` and disables the OS keychain (see
 `engine/home.py`). If your change needs state, put it under `CODIFY_HOME`.
 
 **`CLAUDE.md` is a distillation, not a second source of truth.** It is the
-agent-facing version of this file and `docs/00`–`08`, and it is deliberately
+agent-facing version of this file and `docs/00`–`10`, and it is deliberately
 short: depth is a pointer, not a copy. When the two disagree, this file and
 `docs/` win and `CLAUDE.md` is the bug —
 `tests/test_claude_md_contracts.py` fails if the invariants it quotes drift
@@ -170,8 +261,9 @@ then point the roles' base_url at `http://127.0.0.1:11435` in Settings.
 
 ## Docs
 
-Architecture lives in `docs/00`–`08` (`07` is the spawn guard and the
-deterministic tests; `08` is the benchmark harness and the vendoring policy). If
+Architecture lives in `docs/00`–`10` (`07` is the spawn guard and the
+deterministic tests; `08` is the benchmark harness and the vendoring policy;
+`10` is the agent-memory model). If
 your change alters a documented contract — orchestration, settings, security,
 model discovery, the Laya gate, the spawn guard, what a benchmark number is
 allowed to claim — update the matching doc in the same PR. The docs have lied

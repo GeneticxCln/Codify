@@ -178,26 +178,65 @@ test("the Tauri icon set carries the same mark, not the default squares", () => 
 });
 
 // ── the component half ──────────────────────────────────────────────────────
+//
+// The badge is inline SVG now, so these assertions are about the *mark* rather
+// than about a file path. The GIF assertions above still stand and still matter:
+// `ui/index.html` points the favicon at it, a favicon cannot read the page's
+// variables, and a browser tab has no theme. Only the in-app badge moved.
 
 const markup = (props: Record<string, unknown>): string =>
   renderToStaticMarkup(React.createElement(Logo, props));
 
-test("Logo renders the animated asset by default", () => {
+test("Logo draws the mark inline, so it can read a theme variable", () => {
   const out = markup({ size: 24 });
-  assert.match(out, /src="\/logo\.gif"/);
-  // Decorative by position: the wordmark beside it says the name already.
-  assert.match(out, /alt=""/);
+  assert.match(out, /<svg/, "the badge is an <img> again, so it is back to baked-in pixels");
   assert.match(out, /width="24"/);
   assert.match(out, /height="24"/);
+  // Decorative by position: the wordmark beside it says the name already.
+  assert.match(out, /aria-hidden="true"/);
+  // The tile and the mark are the only two things painted, and both are filled
+  // from a class the stylesheet resolves — never a hex written here. A hex in
+  // this file is the bug the SVG was made to remove.
+  assert.doesNotMatch(out, /#[0-9a-f]{3,8}/i, "the mark carries a literal colour, so it cannot follow a theme");
 });
 
-test("Logo serves the static companion when motion is reduced", () => {
-  // Explicit, because the test process owns no media query to ask.
+test("the badge takes its colours from theme variables, not literals", () => {
+  // The whole point of the change. `ui/src/index.css` is where the variables
+  // become paint, and the two that matter are the tile and the mark.
+  const css = readFileSync(path.join(HERE, "..", "src", "index.css"), "utf8");
+  assert.match(css, /\.codify-logo-tile\s*\{[^}]*fill:\s*var\(--codify-surface\)/);
+  assert.match(css, /\.codify-logo-mark\s*\{[^}]*stroke:\s*var\(--codify-success\)/);
+  // And the mark's colour is one every theme publishes, which is what makes it
+  // correct in all nineteen by construction rather than nineteen regenerations.
+  const source = readFileSync(
+    path.join(HERE, "..", "src", "components", "ui", "Logo.tsx"),
+    "utf8",
+  );
+  assert.match(source, /--codify-success/);
+});
+
+test("Logo stops the blink when motion is reduced", () => {
+  // The GIF could not read the media query, so the component picked a different
+  // file for these users. The inline mark reads it directly, and refuses to add
+  // the animation class at all — which is what this asserts.
   const out = markup({ size: 24, animated: false });
-  assert.match(out, /src="\/logo-static\.gif"/);
-  assert.doesNotMatch(out, /logo\.gif/, "the animated asset must not be reachable");
+  assert.doesNotMatch(out, /codify-logo-caret-live/, "the caret blinks for a user who asked it not to");
+  assert.match(out, /codify-logo-caret/, "the caret itself is still drawn; it is the motion that stops");
 });
 
 test("an explicit animated prop overrides the default in both directions", () => {
-  assert.match(markup({ animated: true }), /src="\/logo\.gif"/);
+  assert.match(markup({ animated: true }), /codify-logo-caret-live/);
+  assert.doesNotMatch(markup({ animated: false }), /codify-logo-caret-live/);
+});
+
+test("the caret blink is a keyframe the reduced-motion query can reach", () => {
+  // A keyframe in the component's own JS would be invisible to the stylesheet's
+  // media block, so the motion preference could not reach it.
+  const css = readFileSync(path.join(HERE, "..", "src", "index.css"), "utf8");
+  assert.match(css, /@keyframes\s+codify-caret/);
+  assert.match(
+    css,
+    /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[^}]*\.codify-logo-caret-live\s*\{[^}]*animation:\s*none/,
+    "reduced motion can opt the mark out of its own animation",
+  );
 });

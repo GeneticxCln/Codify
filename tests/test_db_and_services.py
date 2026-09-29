@@ -1,9 +1,10 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
-from engine.db import connect
+from engine.db import _add_column, connect
 from typing import Any
 
 from engine.models import (
@@ -270,6 +271,71 @@ class TestDbAndServices(unittest.TestCase):
             self.assertEqual(cfg.provider, "ollama")
             self.assertEqual(cfg.protocol, "ollama")
 
+    def test_seeded_roles_carry_a_context_window(self) -> None:
+        """A fresh install must not start out silently truncated.
+
+        Ollama's default window is 4096 and it truncates *without erroring* — the
+        model answers from a partial prompt and returns something plausible. That
+        makes it the worst default to inherit: the field exists, is documented,
+        and sits empty on every role, so a new install ran its whole pipeline
+        truncated and nothing said so.
+
+        The assertion is on every role rather than the four big ones, because the
+        failure it guards is a new role being added without a window — which is
+        exactly how this regressed once already.
+        """
+        for role in ROLES:
+            cfg = self.registry.get_config(role)
+            self.assertIsNotNone(
+                cfg.num_ctx, f"{role} ships no context window, so it starts at 4096"
+            )
+            assert cfg.num_ctx is not None  # narrowed for the arithmetic below
+            self.assertGreaterEqual(
+                cfg.num_ctx, 8192, f"{role} is seeded at or below Ollama's own default"
+            )
+
+    def test_the_roles_holding_the_evidence_pack_get_the_model_ceiling(self) -> None:
+        """The window is allocated by *payload*, not by seniority.
+
+        Four roles are handed something built out of the librarian's evidence
+        pack — the librarian quoting what it read, the designer reasoning over
+        it, the planner planning against it, and the fixer receiving it plus the
+        inlined contents of every file the step touches. Give the planner or the
+        fixer a small window and the exact bug `num_ctx` was added to fix comes
+        straight back, on the two roles whose output is the change itself.
+        """
+        for role in ("librarian", "design", "planner", "fixer"):
+            cfg = self.registry.get_config(role)
+            self.assertEqual(
+                cfg.num_ctx, 32768,
+                f"{role} is handed the evidence pack and needs the full window",
+            )
+
+    def test_the_small_roles_stay_small(self) -> None:
+        """A window costs KV cache whether or not the prompt needs it.
+
+        ~56 KB/token for a 7B GQA model, so 32768 is about 1.8 GB against 4096's
+        230 MB. The gate's state is clipped to 4000 characters by `build_state`
+        and the scribe answers with a summary — neither is reading a repository,
+        and neither should cost the memory of one.
+        """
+        for role, expected in (("laya", 8192), ("scribe", 8192), ("verifier", 16384), ("critic", 16384)):
+            cfg = self.registry.get_config(role)
+            self.assertEqual(cfg.num_ctx, expected, role)
+
+    def test_a_cleared_window_still_returns_to_the_servers_own(self) -> None:
+        """Seeding must not make "unset" unreachable.
+
+        The seeded value is a normal stored value the user can change, and
+        clearing the field is how someone with a small model says so. If null
+        stopped clearing, the only way back to Ollama's own window would be to
+        know the number and type it.
+        """
+        role = "librarian"
+        self.registry.set_config(role, AgentConfigUpdate(num_ctx=None))
+        self.assertIsNone(self.registry.get_config(role).num_ctx)
+        self.assertIsNone(self.registry.get_config(role).ollama_num_ctx)
+
     def test_engine_settings_roundtrip_clamp_and_corrupt_value(self) -> None:
         """The persisted settings store: defaults, clamps, and recovery.
 
@@ -372,6 +438,47 @@ class TestDbAndServices(unittest.TestCase):
         events = self.goals.events_after(goal.id, 0)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].id, "e1")
+
+    def test_a_bounded_read_pages_and_loses_nothing(self) -> None:
+        """The WebSocket tick's read: a page at a time, and still lossless.
+
+        Without the bound the tick re-parsed the goal's whole remaining log every
+        250 ms to keep 500 events, so a long streamed goal got slower to watch
+        the longer it ran. The property that makes the bound safe is that the
+        tick advances its watermark only to what it actually sent — so walking
+        the log in pages must visit every event exactly once, in order.
+        """
+        ws_path = Path(self.temp_dir.name) / "workspace_paging"
+        ws_path.mkdir()
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(ws_path)))
+        goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="Goal", description=""))
+        for i in range(7):
+            self.goals.publish(
+                Event(
+                    id=f"e{i}",
+                    goal_id=goal.id,
+                    step_id=None,
+                    type="log",
+                    payload={"level": "info", "message": f"{i}"},
+                    timestamp=float(i),
+                    sequence=self.goals.next_sequence(goal.id),
+                )
+            )
+
+        self.assertEqual(len(self.goals.events_after(goal.id, 0, limit=3)), 3)
+        # `limit=0` is a page with nothing in it, distinct from "no limit".
+        self.assertEqual(self.goals.events_after(goal.id, 0, limit=0), [])
+
+        seen: list[str] = []
+        after = 0
+        while True:
+            page = self.goals.events_after(goal.id, after, limit=3)
+            if not page:
+                break
+            self.assertLessEqual(len(page), 3)
+            seen.extend(e.id for e in page)
+            after = page[-1].sequence
+        self.assertEqual(seen, [f"e{i}" for i in range(7)])
 
     def test_recent_run_models_reads_what_answered_not_what_was_asked_for(self) -> None:
         """The model menu's recency signal.
@@ -512,6 +619,53 @@ class TestDbAndServices(unittest.TestCase):
         # An explicit null means "go back to the provider's own endpoint".
         cleared = self.registry.set_config("critic", AgentConfigUpdate(base_url=None))
         self.assertEqual(cleared.base_url, BUILTIN_PROVIDERS["deepseek"]["base_url"])
+
+
+class TestAMigrationThatCannotRunSaysSo(unittest.TestCase):
+    """`_add_column`: "already there" is quiet, and nothing else is.
+
+    Fifteen call sites used to write `except Exception: pass` around these
+    `ALTER TABLE`s, which made a locked file, a full disk and a database that is
+    not a database indistinguishable from a successful migration: the engine
+    started and then read a column nobody had added. Only SQLite's own
+    "duplicate column name" is the expected outcome of an idempotent migration.
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.conn = connect(Path(self.temp_dir.name) / "migrate.db")
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    def test_adding_a_column_twice_is_the_quiet_outcome(self) -> None:
+        _add_column(self.conn, "goals", "probe", "TEXT")
+        # The second call is what every startup does on an install that already
+        # has the column. It must not raise.
+        _add_column(self.conn, "goals", "probe", "TEXT")
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(goals)")}
+        self.assertIn("probe", cols)
+
+    def test_a_failure_that_is_not_a_duplicate_column_comes_out(self) -> None:
+        # A missing table stands in for the real failures (locked, full disk,
+        # corrupt file): what matters is that it is *not* the duplicate-column
+        # case, so it must reach the caller rather than being swallowed.
+        with self.assertRaises(sqlite3.OperationalError):
+            _add_column(self.conn, "ghosts", "probe", "TEXT")
+
+    def test_a_corrupt_database_does_not_start_the_engine(self) -> None:
+        """The end-to-end version: a file that is not a database is not a fresh one.
+
+        The failure mode this rules out is the one that reads as a working
+        install — a store that opens, migrates "successfully" and then serves
+        requests against columns that were never added, with the real error
+        (not a database, no space, permission denied) nowhere in any log.
+        """
+        corrupt = Path(self.temp_dir.name) / "corrupt.db"
+        corrupt.write_bytes(b"this is not a sqlite database\n" * 40)
+        with self.assertRaises(sqlite3.DatabaseError):
+            connect(corrupt)
 
 
 class TestRoleMigration(unittest.TestCase):

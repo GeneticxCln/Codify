@@ -41,6 +41,187 @@ const RUNGS = 14;
 const STUTTER_EVERY = 83;
 const STUTTER_FRAMES = 3;
 
+/**
+ * The drawing logic, as a module-level factory rather than a closure inside
+ * the component below.
+ *
+ * Nothing outside a component could reach a `create` defined in its body, and
+ * the UI suite has no renderer and no canvas — so this, the part worth
+ * testing, was the part no test could see. `ui/tests/atmosphere.test.ts`
+ * drives it against a recording context.
+ */
+/**
+ * The colours one frame is painted in.
+ *
+ * A parameter rather than a closure over the factory, because the colours are
+ * resolved inside `draw` — see the note there. The three helpers below are
+ * defined outside `draw` so they can be unit-driven, and a closure would have
+ * forced them to capture the colours at *creation* time, which is exactly the
+ * bug this shape removes: a theme or a custom tint would repaint the chrome and
+ * leave the horizon three colours behind until the next remount.
+ */
+interface GridPalette {
+  bg: string;
+  cyan: string;
+  magenta: string;
+  amber: string;
+}
+
+export function createCyberGridPainter(read: (name: string) => string): AtmospherePainter {
+  /** Read once per frame, not once per painter. */
+  const palette = (): GridPalette => ({
+    bg: read("--codify-bg"),
+    cyan: channelsOf(read("--cyber-cyan")),
+    magenta: channelsOf(read("--cyber-magenta")),
+    amber: channelsOf(read("--cyber-amber")),
+  });
+
+  let phase = 0;
+
+  // ── the sun ────────────────────────────────────────────────────────────
+  // One gradient-filled circle, then the bands are *cut out* of it with
+  // sky-coloured rectangles that thicken toward the horizon.
+  //
+  // It was drawn the other way round first — a rect per band, each sized to
+  // its own chord — and that reads as a staircase, because a chord is the
+  // width at one height and a band is a range of them. Drawing the disc once
+  // and subtracting is both smoother and the same amount of work: one `arc`,
+  // one gradient, one rect per band. The gradient is the only thing in this
+  // component that costs more than a fill, and it costs it once per frame
+  // over one disc — which is the difference between "no gradients" as a
+  // per-glyph rule and "no gradients" as a superstition.
+  const drawSun = (
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    horizonY: number,
+    { bg, amber, magenta }: GridPalette,
+  ): void => {
+    const r = Math.min(width, horizonY) * 0.13;
+    const cx = width / 2;
+    const cy = horizonY - r * 0.25;
+    const top = cy - r;
+
+    const body = ctx.createLinearGradient(0, top, 0, horizonY);
+    body.addColorStop(0, withAlpha(amber, 0.78));
+    body.addColorStop(1, withAlpha(magenta, 0.78));
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // The cut. Bands thicken as they approach the horizon, which is both the
+    // synthwave convention and the thing that makes a set of stripes read as
+    // a sun rather than as a barcode.
+    let band = Math.max(1, r * 0.05);
+    let y = top + band * 1.6;
+    while (y < horizonY) {
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, y, width, band);
+      band *= 1.18;
+      y += band;
+    }
+  };
+
+  // ── the floor ──────────────────────────────────────────────────────────
+  const drawGrid = (
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    horizonY: number,
+    { cyan, magenta }: GridPalette,
+  ): void => {
+    const depth = height - horizonY;
+    const weight = Math.max(1, width / 900);
+
+    // The converging lines: every one of them is a segment from the
+    // vanishing point to the near edge, so the whole fan is 15 strokes.
+    ctx.lineWidth = weight;
+    ctx.strokeStyle = withAlpha(cyan, 0.34);
+    ctx.beginPath();
+    for (let i = 0; i <= VANES; i++) {
+      ctx.moveTo(width / 2, horizonY);
+      ctx.lineTo((i / VANES) * width, height);
+    }
+    ctx.stroke();
+
+    // The rungs: `y = horizonY + depth / z`, so z = 1 is the near edge and
+    // large z crowds into the horizon. The scroll is a modulo over a fixed
+    // set of offsets, which means a resize cannot desynchronise the rungs
+    // from each other and no line state has to be stored.
+    //
+    // Each rung is stroked on its own because each carries its own colour and
+    // its own fade: magenta at the near edge, cyan where they vanish into the
+    // horizon. The fan above is a single stroke, because its lines do not need
+    // a gradient and 15 strokes beat one stroke only when the strokes differ.
+    const scroll = phase % MAX_Z;
+    for (let i = 0; i < RUNGS; i++) {
+      const z = 1 + (((i * (MAX_Z / RUNGS) - scroll) % MAX_Z) + MAX_Z) % MAX_Z;
+      const y = horizonY + depth / z;
+      if (y > height + weight) continue;
+      const near = 1 - (z - 1) / MAX_Z;
+      ctx.strokeStyle = withAlpha(mix(cyan, magenta, near), 0.1 + near * 0.5);
+      ctx.lineWidth = weight;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+    }
+
+    // The horizon itself: a bright one-pixel edge where the floor meets the
+    // sky, because a grid with no vanishing line reads as wallpaper. Kept
+    // dimmer than the first version's 0.85: it sits at the same height as
+    // the composer bar, and a bright rule under text is the same mistake as
+    // a bright picture behind it.
+    ctx.fillStyle = withAlpha(cyan, 0.5);
+    ctx.fillRect(0, horizonY - weight, width, weight);
+  };
+
+  // The stutter: a whole-frame wash plus one shifted band, on a fixed period.
+  // Deterministic on purpose — a random glitch is a flicker, and a flicker a
+  // user cannot predict is a flicker they cannot read past.
+  const drawStutter = (
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    frame: number,
+    { cyan, magenta }: GridPalette,
+  ): void => {
+    if (frame % STUTTER_EVERY >= STUTTER_FRAMES) return;
+    ctx.fillStyle = withAlpha(cyan, 0.07);
+    ctx.fillRect(0, 0, width, height);
+    const bandY = (frame * 61) % Math.max(1, height - height * 0.05);
+    ctx.fillStyle = withAlpha(magenta, 0.16);
+    ctx.fillRect(0, bandY, width, height * 0.02);
+  };
+
+  return {
+    // One z unit per second reads as a floor rather than a sheet of paper:
+    // 26 units is one full recycle in 26 seconds. `dt` not a frame count, so
+    // halving the frame rate does not halve the speed.
+    step(dt) {
+      phase += dt;
+    },
+    draw(ctx, size, tick) {
+      // Resolved per frame rather than once at creation, so a theme or a custom
+      // tint restyles this canvas on the next frame instead of waiting for a
+      // remount. See the hook's note on live reads.
+      const pal = palette();
+      const { width, height } = size;
+      // Below centre, not above it: above centre the sun owns the middle of
+      // the window, which is where the idle hero's heading and its paragraph
+      // live. Lower down, the sun clears the empty state and the floor gets
+      // the run it needs to read as motion.
+      const horizonY = height * 0.62;
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = pal.bg;
+      ctx.fillRect(0, 0, width, height);
+      drawSun(ctx, width, horizonY, pal);
+      drawGrid(ctx, width, height, horizonY, pal);
+      drawStutter(ctx, width, height, tick.frame, pal);
+    },
+  };
+}
+
 export const CyberGrid: React.FC<CyberGridProps> = ({
   className = "",
   maxDimension = 480,
@@ -55,152 +236,8 @@ export const CyberGrid: React.FC<CyberGridProps> = ({
     "--codify-bg": "#0a0616",
   };
 
-  const create = (read: (name: string) => string): AtmospherePainter => {
-    const bg = read("--codify-bg");
-    const cyan = channelsOf(read("--cyber-cyan"));
-    const magenta = channelsOf(read("--cyber-magenta"));
-    const amber = channelsOf(read("--cyber-amber"));
 
-    let phase = 0;
-
-    // ── the sun ────────────────────────────────────────────────────────────
-    // One gradient-filled circle, then the bands are *cut out* of it with
-    // sky-coloured rectangles that thicken toward the horizon.
-    //
-    // It was drawn the other way round first — a rect per band, each sized to
-    // its own chord — and that reads as a staircase, because a chord is the
-    // width at one height and a band is a range of them. Drawing the disc once
-    // and subtracting is both smoother and the same amount of work: one `arc`,
-    // one gradient, one rect per band. The gradient is the only thing in this
-    // component that costs more than a fill, and it costs it once per frame
-    // over one disc — which is the difference between "no gradients" as a
-    // per-glyph rule and "no gradients" as a superstition.
-    const drawSun = (
-      ctx: CanvasRenderingContext2D,
-      width: number,
-      horizonY: number,
-    ): void => {
-      const r = Math.min(width, horizonY) * 0.13;
-      const cx = width / 2;
-      const cy = horizonY - r * 0.25;
-      const top = cy - r;
-
-      const body = ctx.createLinearGradient(0, top, 0, horizonY);
-      body.addColorStop(0, withAlpha(amber, 0.78));
-      body.addColorStop(1, withAlpha(magenta, 0.78));
-      ctx.fillStyle = body;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      ctx.fill();
-
-      // The cut. Bands thicken as they approach the horizon, which is both the
-      // synthwave convention and the thing that makes a set of stripes read as
-      // a sun rather than as a barcode.
-      let band = Math.max(1, r * 0.05);
-      let y = top + band * 1.6;
-      while (y < horizonY) {
-        ctx.fillStyle = bg;
-        ctx.fillRect(0, y, width, band);
-        band *= 1.18;
-        y += band;
-      }
-    };
-
-    // ── the floor ──────────────────────────────────────────────────────────
-    const drawGrid = (
-      ctx: CanvasRenderingContext2D,
-      width: number,
-      height: number,
-      horizonY: number,
-    ): void => {
-      const depth = height - horizonY;
-      const weight = Math.max(1, width / 900);
-
-      // The converging lines: every one of them is a segment from the
-      // vanishing point to the near edge, so the whole fan is 15 strokes.
-      ctx.lineWidth = weight;
-      ctx.strokeStyle = withAlpha(cyan, 0.34);
-      ctx.beginPath();
-      for (let i = 0; i <= VANES; i++) {
-        ctx.moveTo(width / 2, horizonY);
-        ctx.lineTo((i / VANES) * width, height);
-      }
-      ctx.stroke();
-
-      // The rungs: `y = horizonY + depth / z`, so z = 1 is the near edge and
-      // large z crowds into the horizon. The scroll is a modulo over a fixed
-      // set of offsets, which means a resize cannot desynchronise the rungs
-      // from each other and no line state has to be stored.
-      //
-      // Each rung is stroked on its own because each carries its own colour and
-      // its own fade: magenta at the near edge, cyan where they vanish into the
-      // horizon. The fan above is a single stroke, because its lines do not need
-      // a gradient and 15 strokes beat one stroke only when the strokes differ.
-      const scroll = phase % MAX_Z;
-      for (let i = 0; i < RUNGS; i++) {
-        const z = 1 + (((i * (MAX_Z / RUNGS) - scroll) % MAX_Z) + MAX_Z) % MAX_Z;
-        const y = horizonY + depth / z;
-        if (y > height + weight) continue;
-        const near = 1 - (z - 1) / MAX_Z;
-        ctx.strokeStyle = withAlpha(mix(cyan, magenta, near), 0.1 + near * 0.5);
-        ctx.lineWidth = weight;
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(width, y);
-        ctx.stroke();
-      }
-
-      // The horizon itself: a bright one-pixel edge where the floor meets the
-      // sky, because a grid with no vanishing line reads as wallpaper. Kept
-      // dimmer than the first version's 0.85: it sits at the same height as
-      // the composer bar, and a bright rule under text is the same mistake as
-      // a bright picture behind it.
-      ctx.fillStyle = withAlpha(cyan, 0.5);
-      ctx.fillRect(0, horizonY - weight, width, weight);
-    };
-
-    // The stutter: a whole-frame wash plus one shifted band, on a fixed period.
-    // Deterministic on purpose — a random glitch is a flicker, and a flicker a
-    // user cannot predict is a flicker they cannot read past.
-    const drawStutter = (
-      ctx: CanvasRenderingContext2D,
-      width: number,
-      height: number,
-      frame: number,
-    ): void => {
-      if (frame % STUTTER_EVERY >= STUTTER_FRAMES) return;
-      ctx.fillStyle = withAlpha(cyan, 0.07);
-      ctx.fillRect(0, 0, width, height);
-      const bandY = (frame * 61) % Math.max(1, height - height * 0.05);
-      ctx.fillStyle = withAlpha(magenta, 0.16);
-      ctx.fillRect(0, bandY, width, height * 0.02);
-    };
-
-    return {
-      // One z unit per second reads as a floor rather than a sheet of paper:
-      // 26 units is one full recycle in 26 seconds. `dt` not a frame count, so
-      // halving the frame rate does not halve the speed.
-      step(dt) {
-        phase += dt;
-      },
-      draw(ctx, size, tick) {
-        const { width, height } = size;
-        // Below centre, not above it: above centre the sun owns the middle of
-        // the window, which is where the idle hero's heading and its paragraph
-        // live. Lower down, the sun clears the empty state and the floor gets
-        // the run it needs to read as motion.
-        const horizonY = height * 0.62;
-        ctx.clearRect(0, 0, width, height);
-        ctx.fillStyle = bg;
-        ctx.fillRect(0, 0, width, height);
-        drawSun(ctx, width, horizonY);
-        drawGrid(ctx, width, height, horizonY);
-        drawStutter(ctx, width, height, tick.frame);
-      },
-    };
-  };
-
-  const canvasRef = useAtmosphereCanvas({ maxDimension, fps, animated, active, vars, create });
+  const canvasRef = useAtmosphereCanvas({ maxDimension, fps, animated, active, vars, create: createCyberGridPainter });
 
   return (
     <canvas

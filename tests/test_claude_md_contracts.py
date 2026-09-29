@@ -1,4 +1,4 @@
-"""`CLAUDE.md`, `.claude/agents/` and `.claude/commands/` must stay true.
+"""`CLAUDE.md`, the README, `.claude/agents/` and `.claude/commands/` must stay true.
 
 `CLAUDE.md` is the agent-facing distillation of `CONTRIBUTING.md` and `docs/00`–`07`.
 That is exactly the shape of thing that goes stale: it is a *copy* of a contract that
@@ -21,6 +21,20 @@ What it guarantees:
   catch. The sets are compared, not counted;
 * every repository path any of these files names actually exists, in backticks *and*
   in the fenced layout tree;
+* the numbered `docs/` files are registered everywhere registration is owed: a row
+  in `docs/00` §5's document-set table, a row in `CLAUDE.md`'s depth table, and the
+  `00–NN` range lines in `CLAUDE.md`'s layout tree and `CONTRIBUTING.md`. Adding
+  `docs/10` meant editing four places by hand, and hand-edited tables are the exact
+  thing that silently drifts — so the directory itself is now the source of truth
+  and  the tables are compared against it, in both directions (a file with no row,
+  and a row with no file);
+* the README points at the same set. It is the one place a reader *outside* this
+  repository is sent, and it linked five of the eleven docs, so six
+  specifications — the settings app, the security spec, the spawn guard, the
+  benchmarks, the workspace shell, the architecture overview — were reachable
+  only by a reader who already knew they existed. Every `docs/` link it makes
+  must also resolve, which is the only check here covering the demo assets;
+
 * `CLAUDE.md` still says that `CONTRIBUTING.md` and `docs/` outrank it, because a
   distillation that can silently outrank its source is the failure mode of the idea;
 * the agent and command files carry the frontmatter Claude Code reads, and their
@@ -266,6 +280,111 @@ def _tracked_doc_files() -> list[Path]:
     return found
 
 
+NUMBERED_DOC = re.compile(r"^(\d{2})-[^/]*\.md$")
+CONTRIBUTING_MD = PROJECT_ROOT / "CONTRIBUTING.md"
+README_MD = PROJECT_ROOT / "README.md"
+
+# A reference the README makes *into* `docs/`, in either syntax it uses: a Markdown
+# link target, or the `src`/`href` of the `<img>`/`<a>` tags the hero images and the
+# demo link are written in. Both halves are needed — reading only `](` would check
+# the specifications and skip the three assets the README opens with, and reading
+# only the tags would find none of the prose.
+#
+# Fenced blocks are deliberately not scanned. The project-structure tree draws
+# `docs/` as a directory with a comment beside it; that is a picture of the layout,
+# not a link anybody follows, and treating it as one would be checking a claim the
+# file does not make.
+README_LINK = re.compile(
+    r"""\]\(\s*<?(docs/[^)\s>]+)>?\s*\)     # [`docs/04`](docs/04-....md)
+    |  (?:src|href)\s*=\s*["'](docs/[^"']+)["']   # <img src="docs/demo.gif">
+    """,
+    re.VERBOSE,
+)
+
+
+def _readme_doc_links() -> dict[str, int]:
+    """`{target: line}` for every reference the README makes into `docs/`.
+
+    Line numbers are kept so a failure names the line to edit rather than only the
+    file, which matters in a document where the same sentence gets rewritten long
+    after the defect is found. Repeated targets collapse to their first mention:
+    the README legitimately cites `docs/04` from four sections, and that is not a
+    defect, so counting citations would only reward a link being added twice.
+
+    Fragments and the `<...>` form are stripped, so `(docs/04-....md#sql)` and
+    `(docs/demo.webm)` both report the file they point at rather than a string
+    nothing on disk can match.
+    """
+    links: dict[str, int] = {}
+    for number, line in enumerate(README_MD.read_text(encoding="utf-8").splitlines(), start=1):
+        for match in README_LINK.finditer(line):
+            target = (match.group(1) or match.group(2)).split("#", 1)[0]
+            links.setdefault(target, number)
+    return links
+
+
+def _numbered_docs() -> dict[int, str]:
+    """`{number: filename}` for every numbered file in `docs/`, read from the
+    directory itself.
+
+    The directory is the source of truth *by enumeration*: a new numbered doc
+    appears here the moment the file does, which is what makes the registration
+    checks below able to fail. A doc that is written but not registered is
+    precisely the drift this catches — and it is invisible to every other check
+    in this module, because an unregistered doc is usually still referenced by
+    number in prose that resolves.
+    """
+    docs: dict[int, str] = {}
+    for path in sorted((PROJECT_ROOT / "docs").glob("*.md")):
+        match = NUMBERED_DOC.match(path.name)
+        if match:
+            docs[int(match.group(1))] = path.name
+    return docs
+
+
+def _section(text: str, heading_prefix: str) -> str:
+    """The body of the first `##` heading starting with `heading_prefix`, up to
+    the next `##` heading. Scoping keeps a stray mention elsewhere in the file
+    from satisfying a registration the real table does not carry."""
+    start = text.find(heading_prefix)
+    if start == -1:
+        return ""
+    end = text.find("\n## ", start + len(heading_prefix))
+    return text[start:end if end != -1 else len(text)]
+
+
+def _doc_set_table_numbers() -> set[int]:
+    """Numbers with a row in `docs/00` §5's document-set table."""
+    section = _section(ARCHITECTURE.read_text(encoding="utf-8"), "## 5.")
+    found: set[int] = set()
+    for row in section.splitlines():
+        match = re.match(r"^\|\s*`(\d{2})-[^`]*\.md`\s*\|", row)
+        if match:
+            found.add(int(match.group(1)))
+    return found
+
+
+def _depth_table_numbers() -> set[int]:
+    """Numbers with a row in `CLAUDE.md`'s depth table."""
+    section = _section(CLAUDE_MD.read_text(encoding="utf-8"), "## Depth, on demand")
+    return {
+        int(match.group(1))
+        for match in re.finditer(r"^\|\s*`docs/(\d{2})`\s*\|", section, re.MULTILINE)
+    }
+
+
+def _claudes_layout_range() -> int | None:
+    """The `NN` in the layout tree's `docs/ 00–NN, below` line, or None."""
+    match = re.search(r"^docs/\s+00.?(\d{2})\b", CLAUDE_MD.read_text(encoding="utf-8"), re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
+def _contributing_ranges() -> list[int]:
+    """Every `NN` in CONTRIBUTING.md's `` `docs/00`–`NN` `` ranges."""
+    text = CONTRIBUTING_MD.read_text(encoding="utf-8")
+    return [int(n) for n in re.findall(r"docs/00`–`(\d{2})", text)]
+
+
 class ClaudeMdContractsTest(unittest.TestCase):
     def test_claude_md_exists(self) -> None:
         # The rest of this module is about keeping one file true. If the file is
@@ -433,6 +552,136 @@ class ClaudeMdContractsTest(unittest.TestCase):
                     "but that path resolves now. The referenced file has been "
                     f"written — remove the {referenced!r} entry from KNOWN_DANGLING "
                     "so the exemption cannot outlive its own reason",
+                )
+
+    def test_every_numbered_doc_has_a_row_in_both_tables(self) -> None:
+        """The directory is the source of truth; both tables must match it.
+
+        `docs/00` §5's document-set table and `CLAUDE.md`'s depth table are the
+        two registrations a new numbered doc owes, and both were maintained by
+        hand until this test existed — which is to say, by remembering. A doc
+        written without its rows is invisible to every other check here (its
+        prose still resolves, its invariants are still quoted), so this is the
+        one place the drift can be caught, per doc, by name.
+        """
+        docs = _numbered_docs()
+        self.assertTrue(docs, "no numbered docs found — the check lost its subject")
+        doc_set = _doc_set_table_numbers()
+        depth = _depth_table_numbers()
+        for number, filename in sorted(docs.items()):
+            with self.subTest(doc=filename):
+                self.assertIn(
+                    number, doc_set,
+                    f"{filename} exists but has no row in docs/00 §5's document-set "
+                    "table. Add the row — a doc the document set does not name is a "
+                    "doc nobody is told to read",
+                )
+                self.assertIn(
+                    number, depth,
+                    f"{filename} exists but has no row in CLAUDE.md's depth table. "
+                    "Add the row — an agent-facing map that skips a doc points every "
+                    "reader around it",
+                )
+
+    def test_no_table_row_names_a_doc_that_does_not_exist(self) -> None:
+        """The comparison is two-directional, like `KNOWN_DANGLING`'s.
+
+        A row naming a file nobody wrote is a promise of depth that does not
+        exist — the exact failure `KNOWN_DANGLING`'s docstring records, where a
+        table entry outlives what it names and nothing ever re-examines it.
+        The history is real here: `docs/08-benchmarks.md` was cited before it
+        was written, and the exemption was only removed when the file landed.
+        """
+        docs = _numbered_docs()
+        for label, numbers in (
+            ("docs/00 §5 document-set table", _doc_set_table_numbers()),
+            ("CLAUDE.md depth table", _depth_table_numbers()),
+        ):        
+            for number in sorted(numbers):
+                with self.subTest(table=label, doc=number):
+                    self.assertIn(
+                        number, docs,
+                        f"{label} has a row for docs/{number:02d}, but no such file "
+                        "exists in docs/. Write the doc or delete the row — a table "
+                        "that names absent files is how the docs started lying before",
+                    )
+
+    def test_the_registered_range_matches_the_doc_set(self) -> None:
+        """`docs/ 00–NN` and `docs/00`–`NN` name the highest registered doc.
+
+        Four hand-maintained lines say how far the set runs — CLAUDE.md's layout
+        tree, and the range lines in CONTRIBUTING.md (two there). Each drifted
+        when `docs/10` was added and was fixed by hand, which is the moment to
+        make the fix permanent: the range must name exactly the highest
+        numbered file, and CONTRIBUTING's every range must agree with itself.
+        """
+        docs = _numbered_docs()
+        highest = max(docs)
+        layout_range = _claudes_layout_range()
+        self.assertIsNotNone(
+            layout_range,
+            "CLAUDE.md's layout tree no longer has a `docs/  00–NN, below` line",
+        )
+        self.assertEqual(
+            layout_range, highest,
+            f"CLAUDE.md's layout tree says the docs run 00–{layout_range:02d} but "
+            f"docs/{highest:02d} exists. Bump the range when you add a numbered doc",
+        )
+        contributing = _contributing_ranges()
+        self.assertTrue(
+            contributing,
+            "CONTRIBUTING.md no longer carries a `docs/00`–`NN` range to check",
+        )
+        for value in contributing:
+            with self.subTest(file="CONTRIBUTING.md", range=value):
+                self.assertEqual(
+                    value, highest,
+                    f"CONTRIBUTING.md says `docs/00`–`{value:02d}` but docs/{highest:02d} "
+                    "exists. Ranges are how a reader is told where the set ends",
+                )
+
+    def test_the_readme_links_every_numbered_doc(self) -> None:
+        """Every numbered doc is cited from the section that describes it.
+
+        The three registrations above are the ones an *agent* follows; this is the
+        one a *person* meets first, and nothing tested it. The README cited five of
+        eleven docs, so half the specifications were reachable only by knowing in
+        advance that they existed — which is the situation the document-set table
+        exists to prevent inside the repository and nothing was preventing outside
+        it.
+        """
+        docs = _numbered_docs()
+        self.assertTrue(docs, "no numbered docs found — the check lost its subject")
+        links = _readme_doc_links()
+        for filename in sorted(docs.values()):
+            with self.subTest(doc=filename):
+                self.assertIn(
+                    f"docs/{filename}", links,
+                    f"docs/{filename} exists but the README never links it. Cite it "
+                    "from the feature section that describes it — a specification "
+                    "nobody is sent to is maintained only for whoever wrote it",
+                )
+
+    def test_every_readme_doc_link_resolves(self) -> None:
+        """No reference the README makes into `docs/` points at a missing file.
+
+        The other direction, and the one a rename produces. A doc retitled
+        `docs/04-engine-and-runtime.md` leaves the README citing a path that is
+        gone, and a broken link in the repository's front page is a reader's first
+        impression of it — the one failure mode in this module that a person, not
+        an agent, is the one to notice.
+
+        Existence rather than `NUMBERED_DOC`, so the three demo assets are covered
+        too: they are the first thing the README renders, they are the only files
+        in `docs/` a browser ever fetches, and nothing else here would notice one
+        of them going missing.
+        """
+        for target, line in sorted(_readme_doc_links().items()):
+            with self.subTest(link=target):
+                self.assertTrue(
+                    (PROJECT_ROOT / target).is_file(),
+                    f"README.md:{line} links to {target}, which does not exist. "
+                    "Every reference the README makes into docs/ must resolve",
                 )
 
     def test_agent_and_command_files_are_well_formed(self) -> None:

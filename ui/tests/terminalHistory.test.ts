@@ -27,11 +27,25 @@ test("a workspace that has never had a terminal has nothing to restore", () => {
 });
 
 test("what a terminal said is what the next pane restores", () => {
+  // The record keeps the whole session, **including** the line with no newline
+  // in it: that is the prompt, and a shell has not printed one since. Dropping
+  // it here (as this used to) did not tidy the record, it deleted the last
+  // thing the session said — from the tail *and* from the pane that restores
+  // from it, so a pane that went away and came back showed the build and not
+  // the prompt under it.
   const tail = appendScrollback("", "$ ls\r\nREADME.md\r\n$ ");
-  // The trailing half-line goes: a read boundary lands mid-line, and replaying
-  // half a command above a new prompt reads as corruption, not as a boundary.
-  assert.equal(tail, "$ ls\r\nREADME.md\r\n");
+  assert.equal(tail, "$ ls\r\nREADME.md\r\n$ ");
+  // And the half-line is still not *replayed*: a read boundary lands mid-line,
+  // and half a command above a new prompt reads as corruption, not a boundary.
+  // Trimming at display rather than at record is the whole difference.
   assert.equal(replayFor(tail), SEAM + "$ ls\r\nREADME.md\r\n");
+});
+
+test("a record that is only a partial line has nothing to replay", () => {
+  // The pane is told to write nothing rather than a seam above nothing, which
+  // is the case the pane's `restored` branch exists for.
+  assert.equal(replayFor("$ "), "");
+  assert.equal(replayFor(""), "");
 });
 
 test("the seam is what stops a restored session reading as a live one", () => {
@@ -103,10 +117,22 @@ test("a cut that lands inside an emoji does not leave half a character", () => {
 
 test("a tail with no newline in it is not a partial line to show", () => {
   // The first chunk a terminal emits can be a bare escape sequence or a
-  // carriage return with no content yet. Keeping it would put a stray control
-  // code at the top of the restored pane.
-  assert.equal(appendScrollback("", "\x1b[?2004h", 1000), "");
-  assert.equal(appendScrollback("", "no newline here", 1000), "");
+  // carriage return with no content yet. Showing it would put a stray control
+  // code at the top of the restored pane — so `replayFor` shows nothing, which
+  // is where the question of showing belongs.
+  //
+  // The record keeps the bytes. That is the half this used to get wrong: a
+  // shell's prompt is a line with no newline in it, so trimming at append time
+  // meant every session's record stopped one line short and those bytes were
+  // gone from every store the app has, not merely unshown.
+  assert.equal(appendScrollback("", "\x1b[?2004h", 1000), "\x1b[?2004h");
+  assert.equal(replayFor(appendScrollback("", "\x1b[?2004h", 1000)), "");
+  assert.equal(appendScrollback("", "no newline here", 1000), "no newline here");
+  assert.equal(replayFor(appendScrollback("", "no newline here", 1000)), "");
+  // Once a line is complete, it replays — the trim is about the *end* of the
+  // record, not about lines in general.
+  const mixed = appendScrollback("", "no newline here", 1000);
+  assert.equal(replayFor(appendScrollback(mixed, "\r\n", 1000)), SEAM + "no newline here\r\n");
 });
 
 test("an empty chunk changes nothing", () => {

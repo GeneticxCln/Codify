@@ -187,6 +187,52 @@ it is never reported as "your model was retired").
 
 `EventBus.next_sequence(goal_id)` is atomic (`UPDATE goals SET event_seq = event_seq + 1 ... RETURNING`).
 
+### 1.4.1 Recall: the events table, read by a model
+
+Everything above is written for the statistics screen and the transcript. `recall`
+is the one tool that reads this table back, and it is a conductor tool — the same
+loop that can read a file can now ask *has this happened here before, and did a
+retry get past it?* The security shape is §1.8 in `03`; what lives here is the
+query half:
+
+- **`GoalService.recall_events(workspace_id, *, window_days=0, limit=None,
+  now=None)`** returns recent allow-listed events for one workspace, newest
+  first, as plain dicts: `goal_id`, `step_id`, `type`, `payload` (still a JSON
+  string — parsing is `recall`'s job), `timestamp`, and the goal's `title` for
+  context. It lives on `GoalService` because that class owns `events` and already
+  queries across them for the stats rollups; a second service would be a second
+  reader of the same table.
+- **The type list is interpolated from the allow-list.** The query's `IN` clause
+  is built from `recall.RECALLABLE`'s keys rather than repeated here, so a type
+  added to the allow-list cannot be forgotten in the SQL, and a type left out of
+  the allow-list is unreachable no matter what is stored.
+- **The workspace scope is in the `JOIN` on goals**, not a Python filter — the
+  other workspace's rows are never read in order to be discarded (§1.8 in `03`).
+- **The window is optional and defaults to all time.** `window_days > 0` adds a
+  `timestamp >= now - days` cutoff; `limit` caps the scan (default
+  `MAX_SCAN_EVENTS = 2 000`). Both are bounded so a question on the hot path of a
+  turn cannot become a full-table scan on a workspace with 200k events.
+- **`recall.search` does the rest** (`engine/recall.py`): `project` turns a row
+  into fixed, clipped, allow-listed fields or `None`; `recovered_pairs` delegates
+  to `metrics.recovered_steps`; `format_recall` renders the result the model
+  reads. The split keeps the SQL testable against a real database and the
+  projection testable against plain dicts.
+- **The thread grain: `GoalService.thread_recall(workspace_id, *, limit=50)`** is
+  the query half of the sibling tool `recall_threads` — what a *new* conversation
+  can learn from the workspace's earlier ones. One grouped query over
+  `conversations LEFT JOIN goals` returns, per live (non-archived) thread:
+  `title`, `last_touched`, `runs`, and the `completed`/`failed`/`cancelled`
+  counts, plus the thread's most recent asks (goal `description`s, newest first,
+  clipped at `MAX_ASK_CHARS = 120` in the query — an oversized prompt is never
+  read whole to decide a match). Scope is the same `WHERE c.workspace_id = ?` as
+  `recall_events`: the other workspace's threads are never read in order to be
+  discarded. `recall.search_threads` optionally narrows by matching the query
+  against thread names and asks, caps at `MAX_THREADS = 5`, and
+  `format_thread_recall` labels the asks as what was *asked for* — not a claim
+  that any of it was done. Deliberately not `turn_history`: that serves a
+  continuing thread its own (prompt, reply) pairs, chat goals only; this serves
+  a new thread its workspace neighbours, pipeline runs and chat turns both.
+
 ## 2. SQL (`~/.codify/codify.db`)
 
 ### 2.0 Where the state directory is, and the isolated-run guarantee
@@ -297,6 +343,10 @@ CREATE TABLE agent_configs (
   system_prompt_override TEXT,
   temperature REAL NOT NULL,
   max_tokens INTEGER NOT NULL,
+  -- Ollama's context window for the role; NULL = the server default.
+  num_ctx INTEGER,
+  -- How long Ollama keeps the model resident; NULL = the server's own window.
+  keep_alive TEXT,
   fallback_provider TEXT,
   fallback_model_name TEXT NOT NULL DEFAULT '',
   fallback_protocol TEXT,
@@ -424,6 +474,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `DELETE` | `/stats/import` | — | forgets the stored import; idempotent, returns the day count cleared |
 | `GET` | `/settings/providers` | — | `{builtins, custom}` (`01` §2.1) |
 | `GET` | `/settings/laya` | — | gate capability report (`sdk` \| `llm-fallback` \| `skipped`) |
+| `GET` | `/settings/runtime` | — | the engine's self-check (`engine/capabilities.py`): which interpreter is running, whether *it* can import the gate's SDK, and any warnings. Separate from `/settings/laya` because that route also honours `CODIFY_LAYA_SDK` and this one is a fact about the interpreter — a gate can be off because it was told to be or because the package is not there, and those need different fixes. Names filesystem paths, so it is behind the boot token like everything else |
 | `GET` | `/settings/keys` | — | per-provider key status + `storage`/`storage_detail`/`storage_reason` (`04` §7) |
 | `POST` | `/settings/keys` | `{provider, api_key}` | `{ok, provider, storage}` |
 | `GET` | `/settings/agents` | — | `AgentConfig[]`, fixed role order |
@@ -584,7 +635,16 @@ Requests are executed by `engine/library.py`:
   opt into regex with `{"query": …, "regex": true}` (and may narrow it with `glob`): a
   model-supplied pattern is untrusted input, so it is bounded at `MAX_REGEX_PATTERN` (200 chars)
   with a `PER_LINE_REGEX_SECONDS` (0.5s) per-file-line deadline against catastrophic backtracking,
-  and an invalid or oversized pattern comes back as a refusal, not a crash.
+  and an invalid or oversized pattern comes back as a refusal, not a crash. A conductor `search_code`
+  call may also opt into the second strategy with `mode: "keyword"`: the same walk under the same
+  caps, indexed into an **in-memory** FTS5 table (one row per file) and ranked by BM25 — for
+  multi-word questions no single line answers, so matches are whole files (`line: 0`, the result says
+  to pass the path to `read_file`) and the ranking, not the path sort, decides the order. FTS5 is a
+  SQLite compile-time option, so the strategy degrades rather than refuses: a probe establishes
+  availability, and when it is absent — or the connection fails, or FTS5 refuses the query — the
+  literal substring answer is computed and returned labelled `strategy: "substring_fallback"`. The
+  result always says which strategy ran; substring (the default) carries no marker, so the evidence
+  checker's read of `matches[].path` / `files_scanned` is unchanged.
 - `git` / `run` → `SandboxService.run_command(mode="read_only")`: `ls`, `wc`, and a read-only git
   subcommand allowlist, with `-C`, `--git-dir`, `--work-tree`, `--output`, `-o`, `--ext-diff` and
   `--no-index` refused.
@@ -1082,7 +1142,9 @@ Two callers, two modes, one validator:
 - `mode="read_only"` — the librarian's `git` / `run` requests. `ls`, `wc` and a read-only git
   subcommand allowlist only, so nothing the librarian can do changes the workspace.
 
-`argv[0]` basename only (no `/`). Resolved as `shutil.which` then executed with `cwd=workspace.root_path`, `env` stripped to `PATH`, `HOME`, `LANG`, `TERM`.
+`argv[0]` basename only (no `/`). Resolved as `shutil.which` then executed with `cwd=workspace.root_path`, `env` stripped to `PATH`,
+`HOME`, `LANG`, `TERM`, `VIRTUAL_ENV`, `PYTHONPATH`, `PYTHONHOME`, and `shell=False`, in a new session so a timeout can kill the
+whole process group.
 
 | argv[0] | Allowed remaining args |
 |---|---|
@@ -1095,6 +1157,22 @@ Two callers, two modes, one validator:
 | `git` | `status`, `diff`, `log -1` only (no write) |
 
 Anything else → `command_not_allowed`. No shell (`shell=False`).
+
+**What this is, plainly, because the name oversells it: an argv-shape allowlist and nothing more.** It is
+not a sandbox in the containment sense, and the table above is not a boundary around the code that runs
+inside it. An allowlisted command is *the repository's own code* — `npm test` runs whatever `package.json`
+says, `python3 script.py` runs the workspace's script, `pytest` imports every `conftest.py` in the path — and
+it runs as the user, with the user's `HOME` in the environment, able to read and write anything the user can.
+The properties this service does provide, each asserted in `tests/test_sandbox.py`: credentials are stripped
+from the environment (`GitService._workspace_env` and the list above, so a checked-in test script cannot read
+a provider key out of `os.environ`), no shell is involved, the argv cannot name a path outside the workspace,
+and the command's whole process tree dies with its timeout or with the engine.
+
+So the honest reading of `mode="test"` is that it admits the repo's own code, whoever proposed the argv — the
+verifier's proposal or the conductor's `run_command` / `verify` moves (invariant 6, `docs/00` §6.6), which
+share this allowlist rather than a wider one. Running a repository's tests means running the repository's code.
+Containment, if it is ever wanted, is a container/namespace decision that belongs above this function
+(`03` §1), not a longer argv table here.
 
 A refusal is **not** a step failure: the command never executed, and the verifier is the agent that can pick
 another one, so the rejection goes back to it as feedback (`04` §4.3). The step only fails if the verifier
@@ -1176,6 +1254,18 @@ than two copies free to drift.
 thread and the threads left here are exactly the ones nobody can cancel: the `asyncio.to_thread` workers
 behind a sandboxed command or the native folder picker. A deadline that ran through that join would have
 no bound at all. The engine's own children are the other half of the same contract: `07` §1.
+
+Two holes the first version of this machinery left, both the shape of "the guard died guarding". The
+handler's first act was the receipt — the stderr line naming the dead parent — and the engine's stderr
+is a pipe whose reader is the shell: after a `SIGKILL` that reader is gone, so the write raised
+`BrokenPipeError`, the watchdog thread died with the deadline unarmed and the signal unsent, and the
+engine outlived its shell forever, with no log to explain it because the log *was* the pipe. The
+delivery order is therefore fixed — deadline, signal, then the receipt, guarded so a write can never
+undo a delivered stop — and the second hole closed with it: the watch armed only in `serve()`, after
+the imports, so a shell dying mid-boot orphaned an engine that never armed anything. `python3 -m engine`
+now starts the watch before the first import (`engine/__main__.py`); the later call from `serve()` is
+a no-op while that one lives. Pinned end to end by `tests/test_watchdog_dead_pipe.py`, which runs the
+death handler against a stderr pipe with no reader, in a real child, on both engines.
 
 The backstop says so on the way out, on stderr: `shutdown unfinished after 6s — exiting anyway`. That
 line is the entire explanation of an engine that vanished holding a hung websocket, which is why the
@@ -1307,3 +1397,41 @@ recording is the thing that matters. It is also not silent. The reason is kept a
 Without that, "I never armed it" and "I armed it and the write failed" are the same row of zeros,
 and the only one a user can act on is the second. The summary reports `null` normally, so the
 field's shape does not change depending on whether something broke.
+
+## 9. The browser bridge
+
+Three routes, all behind the same bearer token as everything else (`01` §5, `03` §1.3), and deliberately
+not a WebSocket. Every socket in this engine carries exactly one goal's events and nothing else, and a
+second long-lived socket on the same paths is how two conversations end up interleaved
+(`tests/stream_isolation.py`). A long poll is a request with a reply: it cannot outlive its caller and
+it cannot land a frame on anybody's event stream.
+
+| Route | Who calls it | What it is |
+|---|---|---|
+| `GET /bridge/state` | shell | `{attached, inflight, claimed, timeout_s, max_chars}` — read-only, so the shell can decide whether to start polling at all |
+| `GET /bridge/next?wait=<s>` | shell | the oldest unanswered question, or `{"id": null}` when `wait` seconds pass with none. `op` is `read_page` or `navigate`; `navigate` carries `url` |
+| `POST /bridge/answer` | shell | `{"id", "ok", "result" \| "error"}`; `{"accepted": false}` for an id nobody issued |
+
+`wait` is clamped to 0–60 s. The shell reads the base URL and boot token on **every** poll rather than
+capturing them at startup, because the engine can be restarted underneath a running shell and a base URL
+remembered from boot is wrong by the time it is next used.
+
+Two facts about liveness and refusal, both asserted in `tests/test_webview_bridge.py`:
+
+- **Calling `/bridge/next` is the liveness signal.** There is no "connect" step; a poll that arrives
+  refreshes the bridge's idea of when a shell was last seen, and three polls of silence means it is gone.
+  A sticky `attached` flag would outlive the app that set it — the user quits Codify mid-turn, and every
+  later turn spends its read timeout waiting for a window that no longer exists.
+- **The in-process queue is one queue.** The routes and `ExecutorService`'s `read_page` share one
+  `WebviewBridge` on `app.state`. A read waits on a future only the answer route can land, so a second
+  bridge instance would be a read that times out forever, and the refusal has to arrive *before* the
+  wait rather than after it: an engine with no shell behind it — a benchmark, a CLI turn, a headless test
+  — answers in one sentence instead of spending a conductor turn's budget on silence.
+- **One operation at a time, whichever it is.** `_busy` covers reads *and* navigations, because the thing
+  being serialised is the user's one visible page. Queueing a navigation behind a read would let the read
+  return the text of a page the move had already left.
+
+The librarian does not browse. Its reply contract is a fixed JSON document (`04` §4.0) and adding a
+network-shaped field to it would be a change to every role's prompt for a capability the conductor
+already has. `read_page` is a conductor tool instead, and evidence it gathered can be quoted in a
+`recon` task like anything else.

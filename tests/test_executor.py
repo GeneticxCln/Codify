@@ -8,6 +8,7 @@ import tempfile
 import time
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,8 @@ class MockProvider(BaseProvider):
         model: str,
         temperature: float,
         max_tokens: int,
+        *,
+        num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         self.calls.append({
             "system_prompt": system_prompt,
@@ -452,6 +455,7 @@ class _ScriptedProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         role = next(
             (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -796,6 +800,7 @@ class _FailingProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         # Real providers report their token usage through the sink the
         # orchestrator attaches; the double does the same so latency tests can
@@ -867,6 +872,7 @@ class _QueuedProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         role = self.current_role or "unknown"
         self.calls.append((role, system_prompt, user_prompt))
@@ -1282,6 +1288,7 @@ class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
         async def completing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
+            *, num_ctx: int | None = None, keep_alive: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -1531,6 +1538,7 @@ class _HoldingProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         role = next(
             (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -1611,6 +1619,7 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
         async def completing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
+            *, num_ctx: int | None = None, keep_alive: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -1733,6 +1742,7 @@ class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
         async def completing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
+            *, num_ctx: int | None = None, keep_alive: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -1847,6 +1857,7 @@ class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
         async def completing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
+            *, num_ctx: int | None = None, keep_alive: str | None = None,
         ) -> str:
             text = await real_complete(system_prompt, user_prompt, model, temperature, max_tokens)
             scripted._report_usage("ollama", {"response": text, "prompt_eval_count": 10, "eval_count": 5})
@@ -1989,6 +2000,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         async def completing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
+            *, num_ctx: int | None = None, keep_alive: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -2474,6 +2486,7 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
         async def streaming(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
+            *, num_ctx: int | None = None, keep_alive: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -2528,6 +2541,7 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
         async def failing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
+            *, num_ctx: int | None = None, keep_alive: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -2606,6 +2620,7 @@ class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
         async def completing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
+            *, num_ctx: int | None = None, keep_alive: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -2930,12 +2945,12 @@ class TestLibrarianLineRangeReads(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reqs[1][1]["offset"], 1)
         self.assertEqual(reqs[2][1]["offset"], 1)
 
-    def test_a_line_range_read_serves_that_slice_of_the_file(self) -> None:
+    async def test_a_line_range_read_serves_that_slice_of_the_file(self) -> None:
         (self.root / "big.py").write_text(
             "\n".join(f"line {i}" for i in range(1, 51)) + "\n", encoding="utf-8"
         )
         lib = LibraryService(self.ws.root_path)
-        text, opened, matched, refused = self.executor._serve_library_requests(
+        text, opened, matched, refused = await self.executor._serve_library_requests(
             "goal-x",
             lib,
             self._requests({"reads": [{"path": "big.py", "offset": 45, "limit": 5}]}),
@@ -2947,15 +2962,56 @@ class TestLibrarianLineRangeReads(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(opened, {"big.py"})
         self.assertEqual(refused, 0)
 
-    def test_a_beyond_eof_window_reports_an_empty_range_not_a_failure(self) -> None:
+    async def test_a_beyond_eof_window_reports_an_empty_range_not_a_failure(self) -> None:
         (self.root / "big.py").write_text("only\n", encoding="utf-8")
         lib = LibraryService(self.ws.root_path)
-        text, opened, matched, refused = self.executor._serve_library_requests(
+        text, opened, matched, refused = await self.executor._serve_library_requests(
             "goal-x", lib,
             self._requests({"reads": [{"path": "big.py", "offset": 999, "limit": 5}]}),
         )
         self.assertIn("empty range", text)
         self.assertEqual(refused, 0)
+
+    async def test_a_librarian_command_does_not_hold_the_event_loop(self) -> None:
+        """`git` and `run` start a process; they must not start it in the loop.
+
+        Each command is allowed up to twenty seconds, and while one ran the
+        engine could not answer a WebSocket tick, a `/health` probe or a cancel
+        request — which the UI reads as "Offline". The ticker is the smallest
+        thing that needs the loop back.
+
+        The command itself is patched rather than found: the librarian may only
+        run `ls`, `wc` and read-only git, and none of those is reliably slow
+        enough to measure on every machine. What is under test is that the
+        serving door hands a command to a thread at all.
+        """
+        lib = LibraryService(self.ws.root_path)
+        ticks = 0
+
+        def slow_command(args: list[str]) -> dict[str, Any]:
+            time.sleep(0.6)
+            return {"argv": args, "exit_code": 0, "stdout": "ok\n", "stderr": ""}
+
+        async def tick() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.05)
+                ticks += 1
+
+        ticker = asyncio.create_task(tick())
+        try:
+            with mock.patch.object(lib, "run", slow_command):
+                text, _opened, _matched, refused = await self.executor._serve_library_requests(
+                    "goal-x", lib, [("run", ["wc", "-c", "app.py"])],
+                )
+        finally:
+            ticker.cancel()
+
+        self.assertIn("(exit 0)", text)
+        self.assertEqual(refused, 0)
+        self.assertGreaterEqual(
+            ticks, 5, "the event loop was blocked for the whole command"
+        )
 
 
 if __name__ == "__main__":

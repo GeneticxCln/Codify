@@ -482,6 +482,7 @@ name = "codify-desktop"
 version = "0.2.0"
 dependencies = [
  "glob",
+ "gtk",
  "libc",
  "portable-pty",
  "reqwest 0.12.28",

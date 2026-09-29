@@ -207,19 +207,47 @@ def _read_file(path: Path, source: str) -> tuple[Skill | None, str | None]:
     return parse_skill(text, path.stem.lower(), source)
 
 
-def _skill_files(directory: Path) -> list[Path]:
+def _skill_files(directory: Path) -> tuple[list[Path], list[str]]:
+    """The skill files in `directory`, and a sentence for every entry refused.
+
+    **A symlink is refused, and that is the whole point of this function.**
+    `Path.is_file()` follows links, so a cloned repository could ship
+    `.codify/skills/notes.md -> ~/.ssh/id_rsa` — or `/etc/passwd`, or anything
+    else on this machine — and the shell would read it *as instructions* and
+    hand the contents to the model, which has a browser that can send data out
+    (`docs/01`). Skill files are repository content, so the rule is the one the
+    filesystem service already applies to every other workspace path: the file
+    that is opened has to be the file that was named, inside the workspace.
+
+    A refused entry is reported rather than skipped in silence: a skill a user
+    can see in their repository and not in the menu is a mystery, and the
+    sentence is what makes it a fact instead.
+    """
     if not directory.is_dir():
-        return []
-    return sorted(
-        (p for p in directory.iterdir() if p.is_file() and p.suffix == ".md"),
-        key=lambda p: p.name,
-    )
+        return [], []
+    root = directory.resolve()
+    files: list[Path] = []
+    problems: list[str] = []
+    for path in sorted(directory.iterdir(), key=lambda p: p.name):
+        if path.suffix != ".md":
+            continue
+        if path.is_symlink() or path.resolve().parent != root:
+            problems.append(
+                f"{path.name}: refused — a skill file must be a real file inside "
+                f"{SKILLS_DIRNAME}, not a link to one somewhere else"
+            )
+            continue
+        if path.is_file():
+            files.append(path)
+    return files, problems
 
 
 def builtin_skills() -> tuple[list[Skill], list[str]]:
     skills: list[Skill] = []
     problems: list[str] = []
-    for path in _skill_files(BUILTIN_DIR):
+    files, refused = _skill_files(BUILTIN_DIR)
+    problems.extend(f"built-in skill ignored — {problem}" for problem in refused)
+    for path in files:
         skill, problem = _read_file(path, "built-in")
         if skill is not None:
             skills.append(skill)
@@ -232,9 +260,11 @@ def workspace_skills(root: str | None) -> tuple[list[Skill], list[str]]:
     if not root:
         return [], []
     directory = Path(root) / SKILLS_DIRNAME
-    files = _skill_files(directory)
+    files, refused = _skill_files(directory)
     skills: list[Skill] = []
-    problems: list[str] = []
+    problems: list[str] = [
+        f"workspace skill ignored — {problem}" for problem in refused
+    ]
     if len(files) > MAX_WORKSPACE_SKILLS:
         problems.append(
             f"{SKILLS_DIRNAME} holds {len(files)} skills; only the first "

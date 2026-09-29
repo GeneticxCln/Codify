@@ -178,7 +178,13 @@ class BaseProvider(ABC):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str: ...
+    # `num_ctx` is Ollama's per-request context window and `keep_alive` is how
+    # long it holds the model afterwards. Both are keyword-only with a default on
+    # every provider so the callers can pass them uniformly; only Ollama consumes
+    # either (see there), because OpenAI-style APIs size the window server-side
+    # and have no resident process to keep alive.
 
     @property
     def supports_tools(self) -> bool:
@@ -284,6 +290,7 @@ class AnthropicProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         url = f"{self._base_url}/v1/messages"
         async with httpx.AsyncClient(timeout=120) as client:
@@ -429,6 +436,7 @@ class OpenAICompatProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         if not self._api_key:
             raise ProviderError("missing_api_key", "API key is not set")
@@ -591,6 +599,7 @@ class OllamaProvider(BaseProvider):
         model: str,
         temperature: float,
         max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> ToolReply:
         # `/api/chat` rather than `/api/generate`: only the chat endpoint takes
         # a `tools` array and returns `message.tool_calls`. The generate
@@ -601,7 +610,13 @@ class OllamaProvider(BaseProvider):
         # That field is how the eight roles get a wire guarantee of JSON, and
         # forcing it here would tell Ollama to answer the *tool call* with a
         # JSON document instead of calling the tool.
+        # Same `num_ctx` story as `complete`: the conductor's move arguments
+        # and the librarian's pack are exactly the payloads this window has
+        # been silently cutting.
         by_name = {t.name: t for t in tools}
+        options: dict[str, Any] = {"temperature": temperature, "num_predict": max_tokens}
+        if num_ctx is not None:
+            options["num_ctx"] = num_ctx
         async with httpx.AsyncClient(timeout=180) as client:
             data = await post_json(
                 client,
@@ -615,10 +630,12 @@ class OllamaProvider(BaseProvider):
                     ],
                     "tools": [t.to_openai() for t in tools],
                     "stream": False,
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": max_tokens,
-                    },
+                    "options": options,
+                    # A top-level field, not an `options` entry: Ollama reads
+                    # `keep_alive` beside the request rather than inside it, and
+                    # nesting it under `options` is accepted-but-ignored, which
+                    # would look like the setting does nothing.
+                    **({"keep_alive": keep_alive} if keep_alive is not None else {}),
                 },
             )
         message = data.get("message") or {}
@@ -643,8 +660,25 @@ class OllamaProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         stream = self.on_delta is not None
+        # `num_ctx` is the one option here that changes *what the model can
+        # see*. Without it Ollama sizes the window from its own default (4096)
+        # and silently truncates anything longer — the librarian's evidence
+        # pack and the design contract simply do not fit, and the failure is
+        # a degraded plan rather than an error, so nothing ever points here.
+        # A role config that sets `num_ctx` is the fix; None keeps Ollama's
+        # default rather than guessing a value on its behalf.
+        options: dict[str, Any] = {"temperature": temperature, "num_predict": max_tokens}
+        if num_ctx is not None:
+            options["num_ctx"] = num_ctx
+        # `keep_alive` is a sibling of `options` in Ollama's request, not a
+        # member of it, and is sent only when the role asked for one — an
+        # unconfigured role leaves the server's own five-minute window alone.
+        # Nesting it under `options` is accepted-but-ignored, which would look
+        # exactly like a setting that does nothing.
+        keep_alive_field = {"keep_alive": keep_alive} if keep_alive is not None else {}
         async with httpx.AsyncClient(timeout=180) as client:
             if not stream:
                 data = await post_json(
@@ -654,7 +688,8 @@ class OllamaProvider(BaseProvider):
                     json={
                         "model": model,
                         "prompt": f"{system_prompt}\n\n{user_prompt}",
-                        "options": {"temperature": temperature, "num_predict": max_tokens},
+                        "options": options,
+                        **keep_alive_field,
                         "stream": False,
                         "format": "json",
                     },
@@ -673,7 +708,8 @@ class OllamaProvider(BaseProvider):
                         json={
                             "model": model,
                             "prompt": f"{system_prompt}\n\n{user_prompt}",
-                            "options": {"temperature": temperature, "num_predict": max_tokens},
+                            "options": options,
+                            **keep_alive_field,
                             "stream": True,
                             "format": "json",
                         },
@@ -791,6 +827,7 @@ class GoogleProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         url = f"{self._base_url}/models/{model}:generateContent"
         payload = {

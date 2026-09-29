@@ -66,25 +66,47 @@ export const SEAM =
   "\r\n\x1b[2m— earlier session in this workspace —\x1b[0m\r\n";
 
 /**
+ * `tail` cut to at most `limit` bytes, whole characters only.
+ *
+ * A JS string is UTF-16, and slicing a *suffix* to a byte count can cut an emoji
+ * in half — but only in one direction. The kept text always ends on a real
+ * character, so the damage a suffix slice can do is at the *start*: a lone low
+ * surrogate, which renders as a replacement character at the top of the restored
+ * scrollback and would be there on every restore from then on, because the
+ * stored tail is the cut one. Dropping it costs at most one character and leaves
+ * a string that renders; keeping it would put a replacement glyph above every
+ * future restore.
+ *
+ * Deliberately no line trimming here: the backlog a terminal earns while no pane
+ * displays it (`terminalBuffer.ts`) is replayed for *display*, and a shell's
+ * warm-up is a prompt with no newline in it — trimming to whole lines would
+ * swallow exactly the bytes the pane is waiting for. The workspace record trims
+ * its trailing partial line at **replay** rather than here, for the same reason:
+ * see `replayFor`.
+ */
+export function trimTail(tail: string, limit: number = MAX_SCROLLBACK_BYTES): string {
+  if (tail.length <= limit) return tail;
+  const next = tail.slice(tail.length - limit);
+  const first = next.charCodeAt(0);
+  if (first >= 0xdc00 && first <= 0xdfff) return next.slice(1);
+  return next;
+}
+
+/**
  * `tail` with `chunk` appended, never exceeding `limit` bytes.
  *
  * Trimming happens on every append rather than on read, because the alternative
  * is a string that grows to the size of a full build and only then gets cut —
  * which for a terminal in a long-running app is a slow leak rather than a bound.
  *
- * The two corrections afterwards are the ones that make the result *usable*
- * rather than merely short:
- *
- * - **A partial leading surrogate is dropped.** A JS string is UTF-16, and
- *   slicing a *suffix* to a byte count can cut an emoji in half — but only in
- *   one direction. The kept text always ends on a real character, so the damage
- *   a suffix slice can do is at the *start*: a lone low surrogate, which renders
- *   as a replacement character at the top of the restored scrollback and would be
- *   there on every restore from then on, because the stored tail is the cut one.
- * - **A partial trailing line is dropped.** `terminal.rs` reads in 4 KiB chunks
- *   and emits whatever it read, so a tail almost always stops mid-line. Replaying
- *   half a line puts a fragment of a command on screen above the new prompt, and
- *   it reads as corruption rather than as a boundary.
+ * The bound and the surrogate repair live in `trimTail`, and that is all this
+ * does: the record keeps every byte it is given, **including a trailing line with
+ * no newline in it**. It used to drop that line here, which read as tidiness and
+ * was the opposite — a shell's prompt has no newline, so every session's record
+ * ended one line short of the truth, and those bytes were gone from every store
+ * the app has. A pane that went away and came back restored the build and not
+ * the prompt under it. The half-line is a *display* problem, and `replayFor` is
+ * where it is solved.
  */
 export function appendScrollback(
   tail: string,
@@ -92,33 +114,29 @@ export function appendScrollback(
   limit: number = MAX_SCROLLBACK_BYTES
 ): string {
   if (!chunk) return tail;
-  let next = tail + chunk;
-  if (next.length > limit) next = next.slice(next.length - limit);
-  // A suffix slice can land between the two halves of a surrogate pair, and only
-  // at the front: a high surrogate is always followed by its low partner, so the
-  // tail's last code unit is a whole character and the only thing that can be
-  // stranded is a low one at the start. Dropping it costs at most one character
-  // and leaves a string that renders; keeping it would put a replacement glyph
-  // above every future restore.
-  const first = next.charCodeAt(0);
-  if (first >= 0xdc00 && first <= 0xdfff) next = next.slice(1);
-  // And it can land mid-line, for the reason above.
-  const lastNewline = next.lastIndexOf("\n");
-  if (lastNewline === -1) return "";
-  return next.slice(0, lastNewline + 1);
+  return trimTail(tail + chunk, limit);
 }
 
 /**
  * What a reopened pane should write: the tail, with the seam in front of it.
  *
- * Empty for a workspace that has never had a terminal, which is the case the pane
- * has to handle anyway — and it is why the caller writes nothing rather than a
- * blank line. A workspace whose tail is *only* a partial line trims to nothing
- * above, and so does too: there is nothing to show and no session to mark.
+ * A partial trailing line is **not** replayed. `terminal.rs` reads in 4 KiB
+ * chunks and emits whatever it read, so a record almost always stops mid-line;
+ * putting half a command on screen above the new prompt reads as corruption
+ * rather than as a boundary. The bytes stay in the record — they are this
+ * session's, and the next line that arrives completes them — and it is the
+ * showing that trims, not the keeping.
+ *
+ * Empty for a workspace that has never had a terminal, and empty for one whose
+ * record is *only* a partial line, which is the case the pane has to handle
+ * anyway — and why the caller writes nothing rather than a blank line.
  */
 export function replayFor(tail: string): string {
   if (!tail) return "";
-  return SEAM + tail;
+  const lastNewline = tail.lastIndexOf("\n");
+  if (lastNewline === -1) return "";
+  const complete = tail.slice(0, lastNewline + 1);
+  return SEAM + complete;
 }
 
 // ── the store ─────────────────────────────────────────────────────────────

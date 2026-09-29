@@ -14,8 +14,10 @@ import type {
   StatsOverview,
   EngineSettings,
   Event,
+  EngineRuntime,
   Goal,
   GoalMode,
+  ShellTabRow,
   GoalStatus,
   LayaStatus,
   ModelCatalog,
@@ -220,7 +222,13 @@ async function fallbackHttpInvoke<T>(cmd: string, args?: Record<string, any>): P
     // default below is for.
     case "codify_browser_open":
     case "codify_browser_navigate":
+    case "codify_browser_focus":
+    case "codify_browser_resize":
     case "codify_browser_close":
+    case "codify_browser_devtools_open":
+    case "codify_browser_devtools_close":
+    case "codify_browser_devtools_state":
+    case "codify_browser_devtools_available":
     case "codify_terminal_open":
     case "codify_terminal_write":
     case "codify_terminal_resize":
@@ -301,6 +309,24 @@ export async function getLayaStatus(): Promise<LayaStatus> {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) throw await engineError(res, "Failed to fetch Laya status");
+  return res.json();
+}
+
+/**
+ * The engine's self-check: which interpreter is running, and what it can import.
+ * Cheap — it probes for the SDK without loading weights — so it is safe to call
+ * whenever the settings screen opens.
+ *
+ * Throws with the engine's code/message on failure; callers render the
+ * "unavailable" state from the catch rather than from a silent null, because a
+ * missing self-check and a healthy one must not look the same.
+ */
+export async function getEngineRuntime(): Promise<EngineRuntime> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/settings/runtime`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to fetch engine runtime");
   return res.json();
 }
 
@@ -809,11 +835,87 @@ export async function attachGoalToConversation(
  * ("browser webviews load http(s) on non-loopback hosts only") says more than
  * any message written here would, because it is the same sentence as the rule.
  */
+/** Where a browser page sits inside the main window, in logical pixels. */
+export interface BrowserBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Open (embed) a browser page for a tab, or navigate the one that exists.
+ *
+ * `bounds` is the pane's content rectangle in **logical** pixels — the units
+ * CSS speaks — measured by the UI, which owns the layout. A child webview is
+ * placed where its pane says, not where a guess about the window's chrome
+ * puts it.
+ */
 export async function openBrowserWebview(
   tabId: string,
-  url: string
+  url: string,
+  bounds: BrowserBounds
 ): Promise<string> {
-  return tauriInvoke<string>("codify_browser_open", { tabId, url });
+  return tauriInvoke<string>("codify_browser_open", { tabId, url, bounds });
+}
+
+/**
+ * Show this browser tab's page and hide the others.
+ *
+ * Visibility is the stacking order for embedded pages: only the active tab's
+ * page is shown, so switching tabs is one call and no z-order bookkeeping.
+ * An empty `tabId` means no browser tab is showing — every page hidden, which
+ * is what a switch to a chat or terminal tab asks for.
+ */
+export async function focusBrowserWebview(tabId: string): Promise<string> {
+  return tauriInvoke<string>("codify_browser_focus", { tabId });
+}
+
+/**
+ * Resize every browser page to the pane's current content rectangle.
+ *
+ * One call for all pages, not one per tab: they share the same rectangle by
+ * construction, and a resize while five browser tabs are open is five chances
+ * to leave one behind. Sent on the pane's ResizeObserver, debounced upstream.
+ */
+export async function resizeBrowserWebviews(bounds: BrowserBounds): Promise<void> {
+  return tauriInvoke<void>("codify_browser_resize", { bounds });
+}
+
+/**
+ * Open the page's DevTools inspector.
+ *
+ * The inspector is a shell-side surface over the webview — it grants the
+ * page nothing. The crate builds with tauri's `devtools` feature, so the
+ * command exists in every build.
+ */
+export async function openBrowserDevtools(tabId: string): Promise<string> {
+  return tauriInvoke<string>("codify_browser_devtools_open", { tabId });
+}
+
+/** Close the page's DevTools inspector. */
+export async function closeBrowserDevtools(tabId: string): Promise<string> {
+  return tauriInvoke<string>("codify_browser_devtools_close", { tabId });
+}
+
+/**
+ * Does this build have a DevTools inspector at all?
+ *
+ * The pane asks instead of hardcoding the build shape; a build without the
+ * feature answers `false` and the control is hidden rather than dead.
+ */
+export async function browserDevtoolsAvailable(): Promise<boolean> {
+  return tauriInvoke<boolean>("codify_browser_devtools_available");
+}
+
+/**
+ * Is the page's DevTools inspector open?
+ *
+ * Asked when the pane mounts a page, so the control shows the inspector's
+ * real state rather than the pane's guess about it.
+ */
+export async function browserDevtoolsState(tabId: string): Promise<boolean> {
+  return tauriInvoke<boolean>("codify_browser_devtools_state", { tabId });
 }
 
 /**
@@ -908,14 +1010,15 @@ export async function closeTerminal(terminalId: string): Promise<void> {
 }
 
 /**
- * Ask the shell to destroy a browser tab's webview window.
+ * Close a browser tab's page.
  *
- * The other half of the close signal: closing the tab in the strip has to close
- * the window too, or the page keeps running with nothing pointing at it. The
- * shell answers with `browser-window-closed` (see `shellEvents.ts`), which the
- * main window treats as a no-op because this side already closed the tab.
+ * Closing the tab in the strip has to close the page too, or it keeps running
+ * with nothing pointing at it — a hidden webview still spends memory and
+ * still runs its scripts. An embedded page cannot close itself (a child has
+ * no window events), so the strip is the only closer and this is the only
+ * path.
  *
- * Errors when there is no window, which is a caller error rather than a fault
+ * Errors when there is no page, which is a caller error rather than a fault
  * to report: `App.handleCloseTab` skips the call for a browser tab that never
  * got a URL, so the user is never shown the shell's "no browser tab is open"
  * for a tab they never gave a page to.
@@ -1310,6 +1413,67 @@ export async function retryStep(
       Authorization: `Bearer ${currentEngine.token}`,
     },
     body: JSON.stringify({ expected_version }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * The open tab strip, and the engine's half of it (docs/09 §2.1).
+ *
+ * Three calls because the strip has three kinds of change and each one is a
+ * different statement: a tab that appeared or moved or navigated is an upsert
+ * of *that* tab, a tab that was closed is a delete of *that* key, and a window
+ * that is catching up asks for the lot. Every one of the two writes returns the
+ * merged strip, so the caller adopts what the other window did in the same
+ * breath as its own change — the windows do not wait for each other, they meet
+ * in the response.
+ *
+ * Keyed by the tab's durable `key`, never by its `id`: `id` is minted per
+ * process and names this window's webview, which the engine has never heard of.
+ */
+export async function listShellTabs(): Promise<ShellTabRow[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/shell/tabs`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function upsertShellTab(tab: {
+  key: string;
+  position: number;
+  kind: "chat" | "browser";
+  payload: string;
+}): Promise<ShellTabRow[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/shell/tabs`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${currentEngine.token}`,
+    },
+    body: JSON.stringify(tab),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteShellTab(key: string): Promise<ShellTabRow[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/shell/tabs/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

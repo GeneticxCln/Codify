@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from engine import home
-from engine.models import DEFAULT_AGENTS, LEGACY_ROLE_RENAMES
+from engine.models import DEFAULT_AGENTS, LEGACY_ROLE_RENAMES, AgentConfig
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -110,6 +110,11 @@ CREATE TABLE IF NOT EXISTS agent_configs (
   system_prompt_override TEXT,
   temperature REAL NOT NULL,
   max_tokens INTEGER NOT NULL,
+  -- Ollama's context window for the role; NULL = the server default. Added
+  -- after the fallback columns, so existing installs gain it by the ALTER below.
+  num_ctx INTEGER,
+  -- How long Ollama keeps the model resident; NULL = the server default.
+  keep_alive TEXT,
   fallback_provider TEXT,
   fallback_model_name TEXT NOT NULL DEFAULT '',
   fallback_protocol TEXT,
@@ -193,12 +198,85 @@ CREATE TABLE IF NOT EXISTS stats_imports (
   source TEXT NOT NULL DEFAULT '',
   imported_at REAL NOT NULL
 );
+
+-- The tabs that are open, in the order they are in. The one piece of the
+-- window's state that means something *outside* it, so a second window opens
+-- onto the same strip rather than onto its own copy of a profile.
+--
+-- A table and not a blob of JSON, because a shared strip has more than one
+-- writer and a blob cannot say which tab a write meant: `key` is the tab's
+-- durable identity (minted by the client, and the reason the strip is not keyed
+-- by position — two windows have their own order until they sync), `position` is
+-- the reading order, and a delete is a delete of one tab rather than a rewrite
+-- of everything anybody else had open.
+--
+-- `payload` is opaque here on purpose, and that is the line this feature draws:
+-- the engine holds *which tabs exist and in what order* — a fact it can reason
+-- about, and the only one two windows share — while the client holds *what each
+-- tab is showing* (an address, a back/forward stack), which is a fact only the
+-- window showing it can use. The engine bounds it and checks that it is JSON;
+-- it does not learn a tab's shape, because a store that learns a view's shape
+-- is how the two get out of step. `localStorage` remains the mirror of this row
+-- for the same reason it existed before this table: the strip must come back
+-- when the engine does not answer.
+CREATE TABLE IF NOT EXISTS shell_tabs (
+  key TEXT PRIMARY KEY,
+  position INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  updated_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_shell_tabs_position ON shell_tabs(position);
+
+-- Agent memory, the durable half (docs/10 §6): one observation per workspace
+-- and subject, refined by later runs rather than appended to. `proof` is how
+-- many supporting events every scan including the first has seen; `evidence`
+-- carries the most recent supporting event ids, newest first, so a claim can
+-- always be checked against the rows that back it.
+CREATE TABLE IF NOT EXISTS observations (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  subject TEXT NOT NULL,
+  lesson TEXT NOT NULL,
+  example TEXT NOT NULL DEFAULT '',
+  proof INTEGER NOT NULL DEFAULT 1,
+  evidence TEXT NOT NULL DEFAULT '[]',
+  created_at REAL NOT NULL,
+  refined_at REAL NOT NULL,
+  UNIQUE (workspace_id, subject)
+);
+
+CREATE INDEX IF NOT EXISTS idx_observations_workspace
+  ON observations(workspace_id, refined_at DESC);
 """
 
 
 def default_db_path() -> Path:
     """Where the store lives, decided in `engine/home.py` and nowhere else."""
     return home.db_path()
+
+
+def _add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """`ALTER TABLE ... ADD COLUMN`, where "it is already there" is the quiet outcome.
+
+    Migrations here are idempotent, so SQLite refusing because the column exists
+    is expected and must not be an error. **Everything else it can say is.** The
+    eight hand-rolled blocks this replaced all wrote `except Exception: pass`,
+    which made "the column is already there" and "the database is locked", "the
+    disk is full" and "the file is not a database" the same event: the engine
+    started, and then read a column that had never been added, with the real
+    cause gone. A migration that cannot run belongs at startup, where the
+    message can still name the file.
+
+    `table` and `column` are literals in this module, never model or user input —
+    the SQL is assembled rather than parameterised for exactly that reason.
+    """
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
 
 
 def connect(
@@ -219,53 +297,29 @@ def connect(
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.executescript(SCHEMA)
-    # Migrate columns if existing db
-    for col in ("provider", "model"):
-        try:
-            conn.execute(f"ALTER TABLE goals ADD COLUMN {col} TEXT")
-        except Exception:
-            pass
-    try:
-        conn.execute("ALTER TABLE goals ADD COLUMN plan_only INTEGER NOT NULL DEFAULT 0")
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE goals ADD COLUMN parallel INTEGER NOT NULL DEFAULT 0")
-    except Exception:
-        pass
+    # ── migrations: an existing database gains this build's columns ──────
+    # Every one of these goes through `_add_column`, whose only quiet outcome is
+    # "the column is already there" — see its docstring for what the hand-rolled
+    # `except Exception: pass` blocks hid.
+    _add_column(conn, "goals", "provider", "TEXT")
+    _add_column(conn, "goals", "model", "TEXT")
+    _add_column(conn, "goals", "plan_only", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "goals", "parallel", "INTEGER NOT NULL DEFAULT 0")
     # A workspace's brand contract is a column on the workspace row, not a second
     # table: one row, one pin. An existing install gains it unset, so nothing is
     # requoted and no workspace loses its name or root.
-    try:
-        conn.execute(
-            "ALTER TABLE workspaces ADD COLUMN design_contract_path TEXT NOT NULL DEFAULT ''"
-        )
-    except Exception:
-        pass
+    _add_column(conn, "workspaces", "design_contract_path", "TEXT NOT NULL DEFAULT ''")
     # Goal mode rides the same rule: an existing database gains the column
     # defaulted, so every old goal stays a 'normal' run.
-    try:
-        conn.execute(
-            "ALTER TABLE goals ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'"
-        )
-    except Exception:
-        pass
+    _add_column(conn, "goals", "mode", "TEXT NOT NULL DEFAULT 'normal'")
     # Tracing is opt-in per goal and off by default: a recording holds model
     # output about the user's code, so an existing install gains the column
     # defaulted to "record nothing" rather than starting to keep copies.
-    try:
-        conn.execute(
-            "ALTER TABLE goals ADD COLUMN trace INTEGER NOT NULL DEFAULT 0"
-        )
-    except Exception:
-        pass
+    _add_column(conn, "goals", "trace", "INTEGER NOT NULL DEFAULT 0")
     # A conversation is a thread of turns, and an install that predates it keeps
     # every goal with no thread: the column is nullable on purpose, so old
     # history renders as single-turn threads rather than disappearing.
-    try:
-        conn.execute("ALTER TABLE goals ADD COLUMN conversation_id TEXT")
-    except Exception:
-        pass
+    _add_column(conn, "goals", "conversation_id", "TEXT")
     # The index is created unconditionally — `CREATE INDEX IF NOT EXISTS` is the
     # idiom the schema already uses — because listing a conversation's turns is
     # the hot read of a tab switch and must not scan every goal.
@@ -282,21 +336,15 @@ def connect(
     # the column unset, so every thread that already exists reads as a
     # top-level thread rather than disappearing or needing a wipe.
     #
-    # Unlike the migrations around it, this one does not swallow every failure.
+    # This one was written strictly first, and for a reason that outlives it:
     # `_row_to_conversation` reads `parent_id` on *every* conversation read, so a
-    # migration that quietly failed turns into an `IndexError` — a 500 on the
-    # first request that lists a thread — with the real cause (a locked file, a
-    # corrupt database, a full disk) nowhere in sight. Only "the column is
-    # already there" is the expected outcome; anything else is a real error and
-    # belongs at startup where the message can still name the file.
-    try:
-        conn.execute(
-            "ALTER TABLE conversations ADD COLUMN parent_id TEXT "
-            "REFERENCES conversations(id) ON DELETE SET NULL"
-        )
-    except sqlite3.OperationalError as exc:
-        if "duplicate column" not in str(exc).lower():
-            raise
+    # migration that quietly failed turned into an `IndexError` — a 500 on the
+    # first request that lists a thread. That is now the rule for all of them
+    # rather than the exception for one of them; see `_add_column`.
+    _add_column(
+        conn, "conversations", "parent_id",
+        "TEXT REFERENCES conversations(id) ON DELETE SET NULL",
+    )
     # The read a panel does on every render: a conversation's children.
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_conversations_parent "
@@ -311,11 +359,13 @@ def connect(
         ("fallback_model_name", "TEXT NOT NULL DEFAULT ''"),
         ("fallback_protocol", "TEXT"),
         ("fallback_base_url", "TEXT"),
+        # Ollama's context window for the role; NULL = the server default.
+        ("num_ctx", "INTEGER"),
+        # How long Ollama keeps the model resident after a request; NULL = the
+        # server's own window, which is what an install that never set this wants.
+        ("keep_alive", "TEXT"),
     ):
-        try:
-            conn.execute(f"ALTER TABLE agent_configs ADD COLUMN {col} {decl}")
-        except Exception:
-            pass
+        _add_column(conn, "agent_configs", col, decl)
     for old_role, new_role in migrate_agent_roles(conn):
         if on_role_migrated is not None:
             try:
@@ -394,35 +444,33 @@ def migrate_agent_roles(conn: sqlite3.Connection) -> list[tuple[str, str]]:
 
 
 def seed_agents(conn: sqlite3.Connection) -> None:
+    """Insert one untouched row per role, ignoring any that already exist.
+
+    The column list is **derived from the model**, not written out. It was a
+    hand-written list, and a hand-written list is a second thing to forget: it
+    went on naming fifteen columns when the model had seventeen, so `num_ctx`
+    and `keep_alive` were silently absent and every seeded role came up NULL —
+    which for `num_ctx` is not a null, it is Ollama's 4096 and a pipeline that
+    truncates without saying so. Nothing failed; the field simply never arrived.
+
+    Two symptoms of the same omission appeared in this repo before it was
+    noticed, so the list is gone rather than corrected: a new field now reaches
+    a fresh install by being declared on `AgentConfig`, which is the one place
+    it has to be added anyway. `model_fields` is in declaration order and the
+    values are read off the config by the same names, so the two cannot drift
+    in step — only by both being wrong, which is the model being wrong, and
+    that is the failure this is for.
+    """
+    columns = list(AgentConfig.model_fields)
+    placeholders = ",".join("?" for _ in columns)
+    # S608: the only interpolated values are `AgentConfig`'s own field names —
+    # Python identifiers fixed at import time, never a request, an environment
+    # variable or anything a user can reach. Every *value* is still a bound
+    # parameter. Inlining the names to quiet this instead would be the copy that
+    # rots, which is the thing the docstring above is about.
+    sql = f"INSERT OR IGNORE INTO agent_configs ({','.join(columns)}) VALUES ({placeholders})"  # noqa: S608
     for cfg in DEFAULT_AGENTS:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO agent_configs (
-              role, display_name, provider, protocol, model_name,
-              api_key_ref, base_url, system_prompt_override,
-              temperature, max_tokens,
-              fallback_provider, fallback_model_name, fallback_protocol, fallback_base_url,
-              updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                cfg.role,
-                cfg.display_name,
-                cfg.provider,
-                cfg.protocol,
-                cfg.model_name,
-                cfg.api_key_ref,
-                cfg.base_url,
-                cfg.system_prompt_override,
-                cfg.temperature,
-                cfg.max_tokens,
-                cfg.fallback_provider,
-                cfg.fallback_model_name,
-                cfg.fallback_protocol,
-                cfg.fallback_base_url,
-                cfg.updated_at,
-            ),
-        )
+        conn.execute(sql, tuple(getattr(cfg, name) for name in columns))
 
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

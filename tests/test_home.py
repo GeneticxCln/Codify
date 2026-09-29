@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import types
 import unittest
 from pathlib import Path
@@ -38,6 +39,13 @@ def _stub_module(name: str, **attrs: Any) -> types.ModuleType:
     module = types.ModuleType(name)
     module.__dict__.update(attrs)
     return module
+
+
+def app_module_boot_token() -> str:
+    """The engine's import-time token, read the way the boot tests read it."""
+    import engine.app as app_module
+
+    return app_module.BOOT_TOKEN
 
 
 def _free_port() -> int:
@@ -463,6 +471,13 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
         listened on for real, and the handshake is whatever actually got printed.
         `started` is the sockets uvicorn was handed; `bound` is the port each one
         was on, read before the stub closes them.
+
+        `serve()`, not `main()`. `main` ends the process through
+        `watchdog.hard_exit`, which is right for `python3 -m engine` and fatal
+        for a test: calling it here used to `os._exit(0)` the test runner about
+        halfway through the suite, so the rest of `tests/` never ran and `make`
+        still reported success. The split is pinned from both sides — this call
+        and `test_main_leaves_the_way_the_deadline_does`.
         """
         import engine.app as app_module
 
@@ -486,10 +501,10 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
         out, err = io.StringIO(), io.StringIO()
         with self.env(**{home.ENV_HOME: str(self.scratch)}), patch.dict(
             sys.modules, {"uvicorn": fake_uvicorn}
-        ), patch.object(app_module, "pick_port", return_value=port), contextlib.redirect_stdout(
+        ), patch.object(app_module, "pick_port", return_value=port        ), contextlib.redirect_stdout(
             out
         ), contextlib.redirect_stderr(err):
-            app_module.main()
+            app_module.serve()
         return out, err, started, bound
 
     def test_the_boot_notice_is_a_stderr_line_and_the_handshake_stays_on_stdout(self) -> None:
@@ -556,6 +571,63 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
         )
         self.assertEqual(bound, [port], "the boot path bound a port of its own")
         self.assertEqual(len(started), 1, "the server is still started")
+
+    def test_serve_returns_instead_of_ending_the_process(self) -> None:
+        """The split that keeps the suite alive, asserted from the caller's side.
+
+        Reaching the line below at all is most of the test: if `serve` ever went
+        back to hard-exiting, this process would be gone before the assertion
+        ran, and the suite would truncate exactly as it did before. The
+        assertion is on the handshake, which is only complete if `serve` bound,
+        announced and came back.
+        """
+        port = _free_port()
+        out, _err, started, bound = self._boot_with_stubbed_uvicorn(port)
+        self.assertIn(
+            f"CODIFY_ENGINE token={app_module_boot_token()} port={port}", out.getvalue()
+        )
+        self.assertEqual(bound, [port])
+        self.assertEqual(len(started), 1)
+
+    def test_main_leaves_the_way_the_deadline_does(self) -> None:
+        """`main()` must still `os._exit`, and this is what holds that line.
+
+        Splitting `serve` out of `main` is the fix for the suite truncating at
+        exit 0. The obvious wrong fix is to delete the hard exit instead, which
+        restores the orphan `hard_exit` documents: finalization joins threads
+        nobody can cancel, so a stopping engine can sit in that join forever
+        holding its database and its port.
+
+        So this runs `main()` in a child and asks the only question that
+        distinguishes the two: does the process still reach its interpreter
+        shutdown, or does it stop mid-teardown? `os._exit` skips the
+        `atexit`/finalization path, so the marker written by an `atexit` hook is
+        there for a clean return and gone for the hard exit.
+        """
+        marker = self.scratch / "reached-exit.txt"
+        program = textwrap.dedent(
+            f"""
+            import atexit, pathlib, runpy, sys
+            atexit.register(lambda: pathlib.Path({str(marker)!r}).write_text("clean"))
+            sys.argv = ["engine"]
+            from unittest import mock
+            import engine.app as app_module
+            with mock.patch.object(app_module, "serve", lambda: None):
+                app_module.main()
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", program],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, f"main() did not exit cleanly: {result.stderr}")
+        self.assertFalse(
+            marker.exists(),
+            "the process reached interpreter finalization, so main() returned instead "
+            "of taking the hard exit — that is the orphan bug, not a fix for it",
+        )
 
 
 if __name__ == "__main__":

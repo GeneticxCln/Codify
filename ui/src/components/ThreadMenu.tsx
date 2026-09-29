@@ -218,7 +218,7 @@ export const ThreadMenu: React.FC<ThreadMenuProps> = ({
               onClick={run(action)}
               className={
                 "w-full rounded-md px-2.5 text-left " +
-                (item.caution ? "text-amber-300" : "")
+                (item.caution ? "text-codify-warning" : "")
               }
             >
               <Icon className="w-3 h-3 flex-shrink-0" />

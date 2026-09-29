@@ -49,32 +49,32 @@ export const KnowledgeDeliverableCard: React.FC<{
       <div className="flex items-center gap-1.5">
         {/* Cyan, because the composer's Knowledge toggle is cyan and the two
             are the same choice seen from two places. */}
-        <BookOpen className="w-3.5 h-3.5 text-cyan-400" />
-        <span className="font-semibold text-xs uppercase tracking-wider text-gray-400">
+        <BookOpen className="w-3.5 h-3.5 text-codify-knowledge" />
+        <span className="font-semibold text-xs uppercase tracking-wider text-codify-muted">
           {deliverableHeading(payload.mode)}
         </span>
         {payload.artifact && (
-          <span className="text-2xs font-mono text-gray-500">
+          <span className="text-2xs font-mono text-codify-muted">
             {payload.artifact}
           </span>
         )}
       </div>
       {payload.direction && (
-        <p className="text-xs text-gray-300 leading-relaxed">
+        <p className="text-xs text-codify-secondary leading-relaxed">
           {payload.direction}
         </p>
       )}
       {body ? (
         <>
-          <div className="flex items-start gap-1.5 text-2xs text-gray-500">
-            <ShieldCheck className="w-3 h-3 flex-shrink-0 mt-0.5 text-cyan-400/80" />
+          <div className="flex items-start gap-1.5 text-2xs text-codify-muted">
+            <ShieldCheck className="w-3 h-3 flex-shrink-0 mt-0.5 text-codify-knowledge/80" />
             <span>{readiness.note}</span>
           </div>
-          <details className="text-xs text-gray-400" open>
-            <summary className="cursor-pointer text-gray-500">
+          <details className="text-xs text-codify-muted" open>
+            <summary className="cursor-pointer text-codify-muted">
               {path} ({body.length} chars) — {readiness.bodyLabel}
             </summary>
-            <pre className="mt-1.5 p-2 rounded bg-codify-surface border border-codify-raised text-2xs text-gray-300 whitespace-pre-wrap max-h-72 overflow-auto">
+            <pre className="mt-1.5 p-2 rounded bg-codify-surface border border-codify-raised text-2xs text-codify-secondary whitespace-pre-wrap max-h-72 overflow-auto">
               {body}
             </pre>
           </details>
@@ -84,26 +84,26 @@ export const KnowledgeDeliverableCard: React.FC<{
               was given, and the reason a plausible-looking prior is not a safe
               one. */}
           {previous && (
-            <details className="text-xs text-gray-400">
-              <summary className="cursor-pointer text-gray-500">
+            <details className="text-xs text-codify-muted">
+              <summary className="cursor-pointer text-codify-muted">
                 replacing {previous.path} ({previous.chars} chars)
                 {previous.stale_paths.length > 0 &&
                   ` — ${previous.stale_paths.length} path(s) it named are already gone`}
               </summary>
               <div className="flex flex-col gap-1.5 mt-1.5">
                 {previous.stale_paths.length > 0 && (
-                  <div className="text-2xs text-amber-400/90">
+                  <div className="text-2xs text-codify-warning/90">
                     the engine told the drafter to disregard these:{" "}
                     <span className="font-mono">{previous.stale_paths.join(", ")}</span>
                   </div>
                 )}
                 {previous.truncated && (
-                  <div className="text-2xs text-gray-500">
+                  <div className="text-2xs text-codify-muted">
                     shown from the top — the file is longer than the {previous.chars}{" "}
                     chars the drafter read
                   </div>
                 )}
-                <pre className="p-2 rounded bg-codify-surface border border-codify-raised text-2xs text-gray-400 whitespace-pre-wrap max-h-48 overflow-auto">
+                <pre className="p-2 rounded bg-codify-surface border border-codify-raised text-2xs text-codify-muted whitespace-pre-wrap max-h-48 overflow-auto">
                   {previous.text}
                 </pre>
               </div>
@@ -115,7 +115,7 @@ export const KnowledgeDeliverableCard: React.FC<{
            an empty one means the drafter failed or is still answering — there
            is nothing to show, and blaming the write step for it would be
            naming the wrong stage. */
-        <span className="text-2xs text-gray-500">
+        <span className="text-2xs text-codify-muted">
           no body authored — the drafter has not produced one to write
         </span>
       )}

@@ -20,8 +20,10 @@ import {
   goForward,
   hostOf,
   normaliseAddress,
+  pageNavigation,
   visit,
   type BrowserHistory,
+  type InFlightNavigations,
 } from "../src/browserHistory.ts";
 
 /** A stack built by visiting `urls` in order, as the pane would. */
@@ -120,4 +122,109 @@ test("a tab's title is the host, and never throws", () => {
   assert.equal(hostOf("https://example.com:8443/x?q=1"), "example.com:8443");
   assert.equal(hostOf(""), "");
   assert.equal(hostOf("not a url"), "not a url");
+});
+
+/** The shell has been asked to load `url` for `tabId`, and nothing else. */
+const commanded = (tabId: string, url: string): InFlightNavigations => ({
+  [tabId]: url,
+});
+
+test("a link the user clicked is a place they have been", () => {
+  // The whole point: the stack was fed only by what the user typed, so a click
+  // through a search result to a site left Back with nothing to offer but the
+  // search — which is the complaint this answers.
+  const onSearch = visited("https://google.com/search?q=youtube");
+  const out = pageNavigation(
+    {} as InFlightNavigations,
+    "t1",
+    "https://www.youtube.com/",
+    onSearch
+  );
+  assert.deepEqual(out.history.entries, [
+    "https://google.com/search?q=youtube",
+    "https://www.youtube.com/",
+  ]);
+  assert.equal(currentUrl(out.history), "https://www.youtube.com/");
+  const back = goBack(out.history);
+  assert.equal(back?.url, "https://google.com/search?q=youtube");
+});
+
+test("the address the shell was asked for is not a second visit", () => {
+  const history = visited("https://example.com/");
+  const out = pageNavigation(
+    commanded("t1", "https://example.com/"),
+    "t1",
+    "https://example.com/",
+    history
+  );
+  assert.equal(out.history, history, "the very same object: nothing changed");
+  // And the command is spent, so the *next* load of the same address is
+  // reported by a page rather than by this caller.
+  assert.deepEqual(out.commands, {});
+});
+
+test("Back is not undone by the load event that answered it", () => {
+  // The trap. Back moves the cursor and leaves the forward entries alone, and
+  // then the page announces the address Back just went to. If that announcement
+  // were treated as a new visit, `visit` would truncate the forward branch —
+  // Forward would stop working the moment Back had been used once.
+  const onVideo = visited(
+    "https://google.com/search?q=youtube",
+    "https://www.youtube.com/watch?v=1"
+  );
+  const back = goBack(onVideo);
+  assert.ok(back);
+  const out = pageNavigation(
+    commanded("t1", back.url),
+    "t1",
+    back.url,
+    back.history
+  );
+  assert.equal(out.history, back.history);
+  assert.equal(goForward(out.history)?.url, "https://www.youtube.com/watch?v=1");
+});
+
+test("a command for a tab is dropped by whatever the page does next", () => {
+  // The page went somewhere else, so the shell's pending load is no longer
+  // what is happening. Left behind, a stale command would make this page's own
+  // load look like an answer to it — and the visit would be swallowed.
+  const history = visited("https://example.com/");
+  const out = pageNavigation(
+    commanded("t1", "https://example.com/"),
+    "t1",
+    "https://iana.org/",
+    history
+  );
+  assert.deepEqual(out.commands, {});
+  assert.deepEqual(out.history.entries, [
+    "https://example.com/",
+    "https://iana.org/",
+  ]);
+  // Two tabs, two commands: forgetting one must not forget the other.
+  const both: InFlightNavigations = {
+    t1: "https://a.example/",
+    t2: "https://b.example/",
+  };
+  const first = pageNavigation(both, "t1", "https://c.example/", history);
+  assert.deepEqual(first.commands, { t2: "https://b.example/" });
+  const second = pageNavigation(first.commands, "t2", "https://b.example/", history);
+  assert.equal(second.history, history, "t2's own command was still the answer");
+});
+
+test("a redirect is a visit, and the module says so", () => {
+  // Named cost, not an accident: the target does not match the command, so it
+  // becomes an entry of its own and Back steps through it. The alternative —
+  // treating *any* in-flight command as the answer — makes Back walk into the
+  // place the command is leaving, which the test above pins against.
+  const history = visited("https://example.org/");
+  const out = pageNavigation(
+    commanded("t1", "https://example.org/"),
+    "t1",
+    "https://www.example.org/",
+    history
+  );
+  assert.deepEqual(out.history.entries, [
+    "https://example.org/",
+    "https://www.example.org/",
+  ]);
 });

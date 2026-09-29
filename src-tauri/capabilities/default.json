@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability: the main window may invoke the engine-bridge commands, and nothing else. The `shell` permission set (src-tauri/permissions/shell.json) is this app's ACL manifest — before it existed, Tauri let a *local*-origin invoke of any `codify_*` command through with no capability check at all, which is the bypass this capability now closes. It names the fourteen commands one by one rather than granting a wildcard, and `windows` is `[\"main\"]` so nothing reaches a `browser-*` webview. No shell or filesystem scope is granted: the frontend only uses `invoke`, and the engine is spawned by the Rust backend over tokio, not through the shell plugin.",
-  "windows": ["main"],
+  "description": "Default capability: the app's own webview may invoke the engine-bridge commands, and nothing else. Matched on `webviews: [\"main\"]`, NOT `windows: [\"main\"]` — the main window now hosts untrusted child webviews (browser-*) alongside the UI's own, and a child reports its parent's window label; a window-matched grant would be inherited by every page seated in the window and hand the whole `codify_*` surface to untrusted content. The `shell` permission set (src-tauri/permissions/shell.json) is this app's ACL manifest — before it existed, Tauri let a *local*-origin invoke of any `codify_*` command through with no capability check at all, which is the bypass this capability also closes. It names the sixteen commands one by one rather than granting a wildcard. No shell or filesystem scope is granted: the frontend only uses `invoke`, and the engine is spawned by the Rust backend over tokio, not through the shell plugin.",
+  "webviews": ["main"],
   "permissions": ["core:default", "shell"]
 }

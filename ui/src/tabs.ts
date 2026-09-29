@@ -9,10 +9,12 @@
  * `node --test` can reach it directly.
  *
  * Three kinds of tab share one strip because the user thinks of them the same
- * way: "what have I got open". A chat tab is one thread; a terminal
- * and a browser tab own their own state and are not bound to a thread — which
- * is why a browser tab's back/forward stack lives *on the tab* (`history`) and
- * dies with it, rather than in a side table App has to remember to prune.
+ * way: "what have I got open". **A chat tab is a project with a thread in it**,
+ * not a thread: one project per tab, and a project's threads are opened *into*
+ * its tab rather than each taking a tab of their own. A terminal and a browser
+ * tab own their own state and are bound to no thread — which is why a browser
+ * tab's back/forward stack lives *on the tab* (`history`) and dies with it,
+ * rather than in a side table App has to remember to prune.
  */
 import type { BrowserHistory } from "./browserHistory";
 import { emptyHistory, hostOf, visit } from "./browserHistory";
@@ -33,9 +35,15 @@ export interface Tab {
   /** What the strip shows. A conversation's title, or a shell label, or a URL. */
   title: string;
   /**
-   * The thread a chat tab shows, and the key that makes "open this thread"
-   * idempotent. Undefined for terminal and browser tabs, and undefined on a
-   * chat tab for as long as its thread is still unnamed.
+   * The thread a chat tab is showing, and the key that makes "open this thread"
+   * idempotent.
+   *
+   * Undefined for terminal and browser tabs, for a chat tab for as long as its
+   * thread is still unnamed, and — the case this model exists for — for a
+   * **clean slate**: a chat tab in a project that has not been given a thread
+   * yet. A clean slate is a real state and a useful one, because a tab that
+   * starts empty is a tab that does not have to be undone; see
+   * [`openBlankTab`].
    */
   conversationId?: string;
   /**
@@ -50,6 +58,22 @@ export interface Tab {
   url?: string;
   /** A browser tab's back/forward stack. See `browserHistory.ts`. */
   history?: BrowserHistory;
+  /**
+   * This tab's identity across processes, and the key the engine holds it under.
+   *
+   * Distinct from `id` on purpose, because they answer different questions and
+   * have different lifetimes. `id` is minted per process by [`tabId`] and names
+   * this window's webview or PTY — a shell-side handle that must not outlive the
+   * process, because the next one would mint the same string for a different
+   * thing. A shared tab strip needs the other kind: an identity that survives a
+   * restart, so a tab the engine is holding can be recognised as the same tab
+   * when it comes back. `layoutSync.ensureKeys` mints one, and the engine's
+   * `/shell/tabs` rows are keyed by it.
+   *
+   * Absent on a terminal tab (never remembered) and briefly on any tab that has
+   * not been through `ensureKeys` yet.
+   */
+  key?: string;
   /**
    * A terminal tab's PTY, once the shell has answered.
    *
@@ -66,10 +90,11 @@ export interface Tab {
    * The folder this tab belongs to — the workspace it was opened in.
    *
    * On a terminal tab it is the one `pin_cwd` resolved at open time; on a chat
-   * tab it is the workspace the thread lives in. The tab remembers it rather
-   * than reading the composer's current selection, because a shell's working
-   * directory was decided the moment it started and changing the composer's
-   * workspace afterwards must not pretend otherwise.
+   * tab it is **the tab's identity**: one project per tab, so this is what
+   * decides whether an opened thread belongs in this tab or in another one. The
+   * tab remembers it rather than reading the composer's current selection,
+   * because a shell's working directory was decided the moment it started and
+   * changing the composer's workspace afterwards must not pretend otherwise.
    *
    * It is also the answer to "which folder am I in", which used to be one pill
    * in the header claiming the composer's workspace for every tab at once. With
@@ -121,8 +146,8 @@ export function tabIndex(state: TabState, id: string): number {
  * Open a tab and show it.
  *
  * For the browser and terminal kinds, which are one tab per instance: two
- * browser tabs are two webview windows and two terminals are two shells, and
- * collapsing either would make the second one unreachable.
+ * browser tabs are two pages with two histories and two terminals are two
+ * shells, and collapsing either would make the second one unreachable.
  *
  * **Chat does not come through here.** A thread is opened by
  * [`openConversation`], which has one job this does not: a thread that is
@@ -151,7 +176,7 @@ export function focusTab(state: TabState, id: string): TabState {
  *
  * Closing the last tab leaves the shell open on nothing — `activeId: null` —
  * rather than inventing a tab to land on. An empty shell is the honest state,
- * and it is what the sidebar's "New chat" is for.
+ * and it is what the header's New Tab control is for.
  */
 export function closeTab(state: TabState, id: string): TabState {
   const at = tabIndex(state, id);
@@ -164,25 +189,6 @@ export function closeTab(state: TabState, id: string): TabState {
   return { tabs, activeId: next.id };
 }
 
-/**
- * Close the browser tab the shell says has gone.
- *
- * A browser tab's webview is its own OS window, so it can be closed without the
- * tab bar's permission — the user clicking that window's own close button. This
- * is that fact arriving, and the tab goes with it, through the same neighbour
- * arithmetic every other close gets.
- *
- * Refuses anything that is not a browser tab with that id, which makes this
- * safe to call on *any* close signal: an unknown id is the ordinary case when
- * the tab bar already closed the tab and the event is merely the consequence of
- * it, and a chat or terminal tab must never be closable because something
- * about a webview window was reported.
- */
-export function closeBrowserTab(state: TabState, tabId: string): TabState {
-  const tab = state.tabs.find((t) => t.id === tabId && t.kind === "browser");
-  if (!tab) return state;
-  return closeTab(state, tabId);
-}
 
 /**
  * Move a tab from one position to another.
@@ -211,23 +217,70 @@ export function renameTab(state: TabState, id: string, title: string): TabState 
 }
 
 /**
- * Open a thread in the strip, or bring its tab forward if it is already open.
+ * A new tab in a project, with nothing in it yet.
  *
- * ## One tab per thread, and why the obvious "dedupe" is the rule
+ * ## A clean slate, and why no thread is created here
  *
- * Two tabs pointed at one conversation would be two live event streams over the
- * same goal, and a duplicated view is a duplicated mistake — so opening the same
- * thread twice focuses the tab that exists rather than adding a second. That is
- * the whole of the idempotence, and it is a *deduplication*, not a *cap*: there
- * is no fixed number of chat tabs, the strip grows with the threads you are
- * actually working in, and the one you want is the one you last opened.
+ * The old New Tab called the engine before it opened anything, so a tab was a
+ * conversation the moment it appeared — and pressing the button "to look
+ * around" left a conversation behind, named from a prompt that was never
+ * written. Here the tab is *only* a project and a place to type: the thread is
+ * created by the first prompt, in the send path, which is the one place that
+ * has the prompt to name it with. Nothing is created until there is something
+ * to record, so a tab opened and abandoned costs nothing and is not a row in the
+ * side panel.
  *
- * This replaced a single shared "Chats" tab, which was tried and reversed. It
- * looked tidier and it was wrong in the way that matters: with one tab, starting
- * a new thread silently replaced the thread you were reading, and the strip
- * held no record of what you had open. The side panel already lists every
- * thread, so the strip's job is not to be a second list of them — it is to be
- * the set of things currently open, which for a chat means the thread.
+ * It is a new tab rather than "the tab for this project" on purpose: the button
+ * is the one way to get a second window onto the same project, and quietly
+ * focusing an existing tab instead would make the control a no-op that looks
+ * like it worked.
+ */
+export function openBlankTab(state: TabState, workspaceId: string): TabState {
+  return openTab(state, {
+    id: tabId("chat"),
+    kind: "chat",
+    title: UNTITLED_THREAD_TITLE,
+    workspaceId,
+  });
+}
+
+/**
+ * Show a thread: in the tab that already has it, in the tab you are looking at,
+ * or in a new one.
+ *
+ * ## One project per tab, and the project's threads live in it
+ *
+ * A tab is a project's window, not a thread's, so opening a thread is a question
+ * about *which project* it belongs to and never about making room. Three
+ * answers, in this order:
+ *
+ * 1. **A tab already showing it** — focus that tab. Two tabs pointed at one
+ *    conversation would be two live event streams over the same goal, and a
+ *    duplicated view is a duplicated mistake. This is a *deduplication*, not a
+ *    cap: nothing here is limited.
+ * 2. **The tab you are looking at, if it is a chat tab in that project** — show
+ *    the thread there, replacing whatever was in it. This is the side panel's
+ *    entire job now: the panel lists a project's threads, and choosing one shows
+ *    it in the project's tab. It is why the panel no longer offers a new-tab
+ *    control: opening a thread is not opening a tab.
+ * 3. **Otherwise** — a new tab for that project. The strip is the set of
+ *    projects you currently have open, and a project you are not looking at is
+ *    one you cannot see.
+ *
+ * Rule 2 is what "multiple threads per project" means in practice: a project's
+ * threads are not a queue of tabs waiting to be opened, they are the things one
+ * tab shows in turn. A single shared "Chats" tab was tried and reversed long ago
+ * for looking tidier while destroying the record of what was open, and this is
+ * not that: the project is still a tab, still in the strip, and still yours to
+ * close.
+ *
+ * ## The project has to be known before rules 2 and 3 can apply
+ *
+ * Both match on `workspaceId`, and a thread whose folder is not known yet
+ * matches neither — which sends it to a new tab, exactly as before this change.
+ * That is the safe direction: a tab with no recorded folder is not evidence of a
+ * shared project, and claiming one would put a thread from somewhere else into a
+ * window that is not its own.
  *
  * ## The title is taken as given, empty included
  *
@@ -255,6 +308,10 @@ export function openConversation(
       title || open.title,
     );
   }
+
+  const shown = showIn(state, conversationId, title, workspaceId);
+  if (shown) return shown;
+
   return openTab(state, {
     id: tabId("chat"),
     kind: "chat",
@@ -262,6 +319,53 @@ export function openConversation(
     conversationId,
     workspaceId,
   });
+}
+
+/**
+ * Rules 2 and 3, returning `undefined` when neither applies.
+ *
+ * Separate from `openConversation` so the *fallback* — a new tab — is the last
+ * thing that function does, rather than a branch threaded through the middle of
+ * it. Every early return here is a case where a tab already existed.
+ */
+function showIn(
+  state: TabState,
+  conversationId: string,
+  title: string,
+  workspaceId: string | undefined,
+): TabState | undefined {
+  if (!workspaceId) return undefined;
+
+  // Rule 2: the tab being looked at, when it is a chat tab in the same project.
+  const active = activeTab(state);
+  if (active && active.kind === "chat" && active.workspaceId === workspaceId) {
+    return {
+      ...state,
+      tabs: state.tabs.map((t) =>
+        t.id === active.id
+          ? { ...t, conversationId, title: title || UNTITLED_THREAD_TITLE, workspaceId }
+          : t,
+      ),
+    };
+  }
+
+  // Rule 3: a clean slate in this project that is not the one on screen. A tab
+  // holding another thread is left alone — the person chose that thread.
+  const blank = state.tabs.find(
+    (t) => t.kind === "chat" && t.workspaceId === workspaceId && !t.conversationId,
+  );
+  if (blank) {
+    return {
+      ...state,
+      activeId: blank.id,
+      tabs: state.tabs.map((t) =>
+        t.id === blank.id
+          ? { ...t, conversationId, title: title || UNTITLED_THREAD_TITLE }
+          : t,
+      ),
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -286,16 +390,16 @@ export function withWorkspace(
         : t,
     ),
   };
-}
-
-/**
+}/**
  * Close the tab showing a thread that is leaving the panel.
  *
- * Archiving hides a thread, and its tab goes with it: a tab left pointing at an
- * archived conversation is a transcript with no row above it, and the strip is
- * meant to be what is open. The chat column is not at risk the way it was under
- * the single-tab model — every other thread has its own tab, and "New chat" is
- * one click away.
+ * The tab does not go with the thread any more, and that is the whole change:
+ * a tab is a *project*, so closing a project window because one thread in it was
+ * archived would destroy a window the person is still working in. The tab goes
+ * blank instead — a clean slate in the same project, which is a state a tab is
+ * allowed to be in and is the same state a new tab opens in. Archiving a thread
+ * you were reading leaves you in its project with nothing in it, which is what
+ * archiving a thread is.
  *
  * A thread with no tab is the ordinary case (archived from the panel without
  * being read) and changes nothing.
@@ -306,7 +410,14 @@ export function closeConversation(
 ): TabState {
   const open = tabForConversation(state, conversationId);
   if (!open) return state;
-  return closeTab(state, open.id);
+  return {
+    ...state,
+    tabs: state.tabs.map((t) =>
+      t.id === open.id
+        ? { ...t, conversationId: undefined, title: UNTITLED_THREAD_TITLE }
+        : t,
+    ),
+  };
 }
 
 /** The shell tabs, in strip order. Chat tabs are the default filter. */
@@ -414,4 +525,69 @@ export function setBrowserUrl(
         : t
     ),
   };
+}
+
+/**
+ * A browser tab's back/forward stack, moved by something other than the shell.
+ *
+ * Separate from [`setBrowserUrl`] because the two are different facts: that one
+ * lands an address the user *asked for* (and re-titles the tab by host, since a
+ * fresh address means the old name is stale), this one records a place the page
+ * went on its own and touches nothing else. The address bar still follows the
+ * page through [`setBrowserPageUrl`]; what lands here is only the way back to
+ * where the click came from, which is what `browserHistory.pageNavigation`
+ * decides and this only applies.
+ */
+export function setBrowserHistory(
+  state: TabState,
+  id: string,
+  history: BrowserHistory
+): TabState {
+  return {
+    ...state,
+    tabs: state.tabs.map((t) =>
+      t.id === id && t.kind === "browser" ? { ...t, history } : t
+    ),
+  };
+}
+
+/**
+ * The page's live address, as it reported itself.
+ *
+ * A redirect lands here: what the address bar says follows the page, not the
+ * last address the user typed. The title is re-derived from the host only
+ * when the tab is still showing host-shaped names — a page that has titled
+ * itself keeps its title, and `renameBrowserTab` is what moves it.
+ */
+export function setBrowserPageUrl(state: TabState, id: string, url: string): TabState {
+  let changed = false;
+  const tabs = state.tabs.map((t) => {
+    if (t.id === id && t.kind === "browser" && t.url !== url) {
+      changed = true;
+      return { ...t, url };
+    }
+    return t;
+  });
+  // The same state out when nothing matched: a fact for a tab that is gone
+  // is a no-op, and the reference says so — no caller re-renders on it.
+  return changed ? { ...state, tabs } : state;
+}
+
+/**
+ * The page's own title, from `on_document_title_changed`.
+ *
+ * The tab shows what the page calls itself; a title that arrives for an
+ * unknown or non-browser tab changes nothing, and an empty one is no answer
+ * (the reader in `browserPageState` refuses it before this runs).
+ */
+export function renameBrowserTab(state: TabState, id: string, title: string): TabState {
+  let changed = false;
+  const tabs = state.tabs.map((t) => {
+    if (t.id === id && t.kind === "browser" && t.title !== title) {
+      changed = true;
+      return { ...t, title };
+    }
+    return t;
+  });
+  return changed ? { ...state, tabs } : state;
 }

@@ -57,6 +57,15 @@ def _cap_output(text: str) -> str:
     if len(text) > MAX_COMMAND_OUTPUT_CHARS:
         return text[:MAX_COMMAND_OUTPUT_CHARS] + "\n… (output truncated)"
     return text
+
+
+def _signal_alone(pid: int, sig: int) -> None:
+    """Signal one pid, escalating nothing. A pid that is already gone is success."""
+    try:
+        os.kill(pid, signal.SIGKILL if sig == signal.SIGKILL else sig)
+    except ProcessLookupError:
+        pass
+
 # `-C` / `--git-dir` point git somewhere else; `--output` writes a file; `-o` is
 # shorthand for it; `--ext-diff` and `--no-index` run external readers.
 # `-d`/`-D`/`--delete` remove refs; `-m`/`-M`/`-f`/`--force` let the other
@@ -67,7 +76,40 @@ DANGEROUS_GIT_FLAGS = (
     "-C", "--git-dir", "--work-tree", "--output", "-o", "--ext-diff", "--no-index",
     "-d", "-D", "--delete", "-m", "-M", "-f", "--force",
     "-O", "--open-files-in-pager", "--pager", "--exec", "--exec-path",
+    # Long forms that mutate without a name to give them away: `-u`/`-m`/`-c`
+    # take a *value* the positional rule below would refuse, but the attached
+    # form has no separate token, and `--edit-description` takes no argument at
+    # all and opens an editor instead of returning.
+    "--set-upstream-to", "--unset-upstream", "--edit-description", "--copy", "--move",
 )
+# `branch` and `tag` **read only in their listing forms**. `git branch NAME`
+# creates a ref, `git tag NAME` tags a commit, `git branch -c NAME` copies one,
+# and `git tag -a NAME` opens an editor and hangs for the whole timeout — every
+# one of them arrives as a bare word that no flag denylist can see, because it
+# is not a flag. So for these two, a positional is refused unless a listing flag
+# is what the caller asked with: those flags mean "show me", and their presence
+# is the difference between a pattern and a name.
+# Per subcommand, not shared: `-a` lists for one and *annotates* for the other,
+# so a single set would let `git tag -a NAME` through as a listing (measured —
+# that is how the first version of this rule failed).
+GIT_LISTING_FLAGS: dict[str, frozenset[str]] = {
+    "branch": frozenset({
+        "-l", "--list", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
+        "--contains", "--merged", "--no-merged", "--points-at", "--sort", "--format",
+        "--column",
+    }),
+    "tag": frozenset({
+        "-l", "--list", "-n", "-v", "--verify", "--verbose", "--contains", "--merged",
+        "--no-merged", "--points-at", "--sort", "--format", "--column",
+    }),
+}
+GIT_LISTING_SUBCOMMANDS = frozenset(GIT_LISTING_FLAGS)
+
+
+def _is_listing_token(tok: str) -> bool:
+    """One token, as a possible listing flag (`-n5` counts as `-n`)."""
+    head = tok.split("=", 1)[0]
+    return head in GIT_LISTING_FLAGS["tag"] and head.startswith("-n") and head[2:].isdigit()
 # Letters that are dangerous in any combined short cluster (see the check in
 # `_validate_read_only`). Kept separate from DANGEROUS_GIT_FLAGS because the
 # flag meanings above are subcommand-dependent; these letters are unsafe in
@@ -89,6 +131,12 @@ def _validate_read_only(argv: list[str], fs: FileSystemService) -> None:
             raise CommandNotAllowed("git requires a read-only subcommand")
         if rest[0] not in READ_ONLY_GIT_SUBCOMMANDS:
             raise CommandNotAllowed(f"git {rest[0]} is not a read-only git command")
+        allowed_listing = GIT_LISTING_FLAGS.get(rest[0], frozenset())
+        listing = any(
+            tok.split("=", 1)[0] in allowed_listing or _is_listing_token(tok)
+            for tok in rest[1:]
+        )
+        mutating_form = rest[0] in GIT_LISTING_SUBCOMMANDS and not listing
         for tok in rest:
             if any(tok == flag or tok.startswith(flag + "=") for flag in DANGEROUS_GIT_FLAGS):
                 raise CommandNotAllowed(f"git flag not allowed: {tok}")
@@ -99,6 +147,14 @@ def _validate_read_only(argv: list[str], fs: FileSystemService) -> None:
             if tok.startswith("-") and not tok.startswith("--"):
                 if any(ch in DANGEROUS_GIT_SHORT for ch in tok[1:]):
                     raise CommandNotAllowed(f"git flag not allowed: {tok}")
+            elif not tok.startswith("-") and tok != rest[0] and mutating_form:
+                # The argument is a *name*: `git branch NAME` and `git tag NAME`
+                # are writes, whatever they are called, and the model is the
+                # caller. Listing forms keep their patterns.
+                raise CommandNotAllowed(
+                    f"git {rest[0]} {tok} creates a ref; only the listing forms "
+                    f"of {rest[0]} are read-only"
+                )
         return
     flags = LS_FLAGS if cmd == "ls" else WC_FLAGS
     for tok in rest:
@@ -248,14 +304,56 @@ class SandboxService:
     def _kill_group(pid: int, sig: int = signal.SIGTERM) -> None:
         """Signal the child's whole process group; fall back to the child alone.
 
-        The group may already be gone (the child exited between the timeout and
-        the kill) — ProcessLookupError there is success, not a problem.
+        The child may already be gone when this runs — exited between the timeout
+        and the kill, and fully reaped, not merely a zombie (a zombie still
+        answers `getpgid`; a reaped pid does not). `ProcessLookupError` from the
+        lookup is success, not a problem — but it is not the end of the story:
+        whatever the child spawned is still in the group it led, so a vanished
+        leader *redirects* the group kill rather than cancelling it. The pid that
+        named the leader still names that group, because the only way this class
+        spawns is `start_new_session=True` — the child led the group, so the
+        group's id is its pid. A group that is gone entirely answers ESRCH below,
+        which is the same success it is everywhere else in this function.
+
+        The redirect carries the same refusal the normal path has. A leaderless
+        `killpg(pid)` reaches either the dead leader's group or nothing at all —
+        a pid that was never a group leader does not name a group — so the one
+        way it could land on *our* group is `pid == os.getpgrp()`, and that is
+        refused: a group we lead and are alive in is a group we must not signal.
+
+        **The one group this must never signal is its own.** `getpgid` is a
+        question about a pid, not a promise about which session that pid is in.
+        A child that was never given its own session answers with *this* process's
+        group, and `killpg` then delivers SIGTERM — or SIGKILL, on the second
+        call — to the engine, the desktop shell that launched it, and everything
+        else sharing the group. The call *succeeds*, so nothing in the `except`
+        below would notice; a timeout in a sandboxed command would take the app
+        down instead of the command. `start_new_session=True` is what makes the
+        group the child's, and this asks rather than assumes: a group we lead is
+        a group we must not signal, so the child is signalled on its own.
+
+        This is also what makes the function safe to call from a test, where the
+        answer is the runner's group essentially every time.
         """
         try:
-            os.killpg(os.getpgid(pid), sig)
+            group = os.getpgid(pid)
+        except ProcessLookupError:
+            # The leader is reaped; the group it led may not be. Redirect the
+            # group signal to the leader's pid — which is the group's id, since
+            # this class only spawns session leaders — with the same refusal the
+            # normal path carries: a group we lead is a group we must not
+            # signal, and we are demonstrably alive. There is no `_signal_alone`
+            # here — the pid is gone, there is nobody alone to signal.
+            if pid != os.getpgrp():
+                try:
+                    os.killpg(pid, sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            return
+        if group == os.getpgrp():
+            _signal_alone(pid, sig)
+            return
+        try:
+            os.killpg(group, sig)
         except (ProcessLookupError, PermissionError):
-            try:
-                proc_kill = signal.SIGKILL if sig == signal.SIGKILL else sig
-                os.kill(pid, proc_kill)
-            except ProcessLookupError:
-                pass
+            _signal_alone(pid, sig)

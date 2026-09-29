@@ -52,6 +52,8 @@ class CannedProvider(BaseProvider):
         model: str,
         temperature: float,
         max_tokens: int,
+        *,
+        num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         role = self.current_role or "unknown"
         self.calls.append(role)

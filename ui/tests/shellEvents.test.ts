@@ -1,48 +1,58 @@
 /**
- * The shell-event boundary: what a `browser-window-closed` payload may be, and
- * what subscribing looks like when there is no shell to subscribe to.
+ * The shell-event boundary: what a `browser-popup-requested` payload may be,
+ * and what subscribing looks like when there is no shell to subscribe to.
  *
  * The event itself crosses a process boundary and cannot be exercised here —
- * that would need the desktop app running, and the browser webview that emits
- * it needs a display. What *can* be pinned is the part that decides: the
- * payload reader (a malformed payload must close no tab at all) and the
- * no-Tauri posture, which is what the UI's effect depends on to unmount
- * cleanly in a plain browser.
+ * that would need the desktop app running, and the page that asks for a popup
+ * needs a display. What *can* be pinned is the part that decides: the payload
+ * reader (a malformed payload must open no tab at all) and the no-Tauri
+ * posture, which is what the UI's effect depends on to unmount cleanly in a
+ * plain browser.
  *
  * The event *name* is pinned on the Rust side instead: a test in
  * `src-tauri/src/browser.rs` reads this directory's `shellEvents.ts` and fails
  * if the two ends drift, because no type system spans a Rust constant and a
  * TypeScript string.
+ *
+ * The event this file used to pin — `browser-window-closed` — is gone with
+ * the separate window it announced: pages are child webviews of the main
+ * window now, a child cannot close itself, and the tab strip is the only
+ * closer. The Rust test that reads this file also fails if that name comes
+ * back, which is why there is no `BROWSER_WINDOW_CLOSED` export to import
+ * here.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  BROWSER_WINDOW_CLOSED,
+  BROWSER_POPUP_REQUESTED,
   listenShellEvent,
-  readBrowserWindowClosed,
-  readTerminalExit,
-  readTerminalOutput,
-  TERMINAL_EXIT,
-  TERMINAL_OUTPUT,
+  readBrowserPopupRequested,
 } from "../src/shellEvents.ts";
 
 test("the event name is the one the shell emits", () => {
   // Not the interesting assertion — `browser.rs`'s test is, which reads this
   // file and fails if the two names differ. Written here so a reader of the UI
   // side sees the wire name rather than having to go looking for it.
-  assert.equal(BROWSER_WINDOW_CLOSED, "browser-window-closed");
+  assert.equal(BROWSER_POPUP_REQUESTED, "browser-popup-requested");
 });
 
-test("a well-formed payload yields its tab id", () => {
-  assert.equal(readBrowserWindowClosed({ tab_id: "tab-1" }), "tab-1");
-  // Extra fields are a future Rust struct, not a reason to refuse the id.
-  assert.equal(readBrowserWindowClosed({ tab_id: "tab-2", label: "x" }), "tab-2");
+test("a well-formed payload names the tab that asked and the address it asked for", () => {
+  assert.deepEqual(readBrowserPopupRequested({ tab_id: "tab-1", url: "https://a.example" }), {
+    tab_id: "tab-1",
+    url: "https://a.example",
+  });
+  // Extra fields are a future Rust struct, not a reason to refuse the payload.
+  assert.deepEqual(
+    readBrowserPopupRequested({ tab_id: "tab-2", url: "https://b.example", label: "x" }),
+    { tab_id: "tab-2", url: "https://b.example" },
+  );
 });
 
-test("anything that is not that payload yields nothing to close", () => {
-  // Each of these reaches a handler that closes a *tab*. A payload that is
-  // null, a string, or missing the field must close nothing at all.
+test("anything that is not that payload opens no tab at all", () => {
+  // Each of these reaches a handler that *opens a tab*. A payload that is
+  // null, a string, or missing either field must open nothing rather than a
+  // tab pointed nowhere.
   for (const payload of [
     null,
     undefined,
@@ -51,14 +61,17 @@ test("anything that is not that payload yields nothing to close", () => {
     {},
     [],
     { tab_id: "" },
-    { tab_id: 7 },
-    { tab_id: null },
-    { tab: "tab-1" },
+    { tab_id: "tab-1" },
+    { tab_id: 7, url: "https://a.example" },
+    { tab_id: null, url: "https://a.example" },
+    { tab_id: "tab-1", url: "" },
+    { tab_id: "tab-1", url: 7 },
+    { tab: "tab-1", url: "https://a.example" },
   ]) {
     assert.equal(
-      readBrowserWindowClosed(payload),
+      readBrowserPopupRequested(payload),
       null,
-      `${JSON.stringify(payload)} must not name a tab`,
+      `${JSON.stringify(payload)} must not open anything`,
     );
   }
 });
@@ -69,71 +82,11 @@ test("subscribing outside the desktop shell is a no-op, not a throw", async () =
   // unconditionally in cleanup, so it has to be a function that does nothing —
   // and calling it twice must not throw either.
   let called = 0;
-  const unlisten = await listenShellEvent(BROWSER_WINDOW_CLOSED, () => {
+  const unlisten = await listenShellEvent(BROWSER_POPUP_REQUESTED, () => {
     called += 1;
   });
   assert.equal(typeof unlisten, "function");
   assert.doesNotThrow(() => unlisten());
   assert.doesNotThrow(() => unlisten());
   assert.equal(called, 0, "no shell means no events, and no handler calls");
-});
-
-// ── terminal streams ──────────────────────────────────────────────────────
-//
-// One step stricter than `readBrowserWindowClosed`, because the payload it
-// guards does not close a tab — it is written straight into a live terminal.
-// A shape that passed here would put the word "undefined" on the user's screen.
-
-test("a terminal-output payload is read only when both halves are strings", () => {
-  assert.deepEqual(readTerminalOutput({ id: "term-1", data: "hello" }), {
-    id: "term-1",
-    data: "hello",
-  });
-  // Escape sequences are data, not noise: a coloured prompt must survive.
-  assert.deepEqual(readTerminalOutput({ id: "term-1", data: "\x1b[32m$ \x1b[0m" }), {
-    id: "term-1",
-    data: "\x1b[32m$ \x1b[0m",
-  });
-  for (const bad of [
-    null,
-    undefined,
-    "term-1",
-    42,
-    [],
-    {},
-    { id: "term-1" },
-    { data: "hello" },
-    { id: "", data: "hello" },
-    { id: 1, data: "hello" },
-    { id: "term-1", data: null },
-    { id: "term-1", data: 7 },
-    { id: "term-1", data: ["hello"] },
-  ]) {
-    assert.equal(readTerminalOutput(bad), null, `${JSON.stringify(bad)} is not a chunk`);
-  }
-});
-
-test("an empty chunk is a chunk", () => {
-  // A PTY read can return bytes the lossy decode turns into nothing, and the
-  // reader thread emits it regardless. Refusing it here would be a second place
-  // deciding what a real chunk looks like.
-  assert.deepEqual(readTerminalOutput({ id: "term-1", data: "" }), {
-    id: "term-1",
-    data: "",
-  });
-});
-
-test("a terminal-exit payload names a terminal or nothing", () => {
-  assert.equal(readTerminalExit({ id: "term-1" }), "term-1");
-  for (const bad of [null, undefined, "term-1", 3, [], {}, { id: "" }, { id: 9 }]) {
-    assert.equal(readTerminalExit(bad), null, `${JSON.stringify(bad)} is not an exit`);
-  }
-});
-
-test("the event names are the ones terminal.rs emits", () => {
-  // The other end of the same wire, and the same reason the browser's is
-  // pinned: nothing in either type system spans the two, so a rename in Rust
-  // would leave a terminal that silently never receives a byte.
-  assert.equal(TERMINAL_OUTPUT, "terminal-output");
-  assert.equal(TERMINAL_EXIT, "terminal-exit");
 });

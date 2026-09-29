@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from engine import home, watchdog
+from engine import capabilities, home, watchdog
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.laya import LayaService
@@ -30,6 +30,7 @@ from engine.role_repair import plan_role_repair
 from engine.spawn_guard import guarded_argv, guarded_env
 from engine.stats import build_overview, normalize_window
 from engine.trace import TraceService
+from engine.webview_bridge import BridgeAnswer, WebviewBridge
 from engine.metrics import (
     STAGE_SUCCESS_OUTCOMES,
     failure_breakdown,
@@ -59,6 +60,8 @@ from engine.models import (
     GoalDetail,
     PlanStep,
     PlanStepUpdate,
+    ShellTab,
+    ShellTabWrite,
     ProviderKeyUpdate,
     ROLES,
     TurnCreate,
@@ -76,6 +79,7 @@ from engine.services import (
     ConversationService,
     GoalService,
     SettingsService,
+    ShellTabService,
     WorkspaceService,
 )
 
@@ -145,6 +149,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Threads of turns — what a tab points at. Separate from `goals` because a
     # goal is one run and a conversation is the question several runs answer.
     app.state.conversations = ConversationService(conn)
+    # The open tabs and their order — the one piece of the window's state that
+    # means something outside the window, so a second window opens onto the same
+    # strip. What each tab is *showing* stays in the window that shows it.
+    app.state.shell_tabs = ShellTabService(conn)
     app.state.goals = GoalService(conn)
     app.state.sandbox = SandboxService()
     app.state.settings = SettingsService(conn)
@@ -164,6 +172,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # asked records nothing. Wired here rather than per-goal so switching
     # tracing on mid-run takes effect on the very next call.
     app.state.traces = TraceService(conn)
+    # The queue of page questions the shell is polling for (docs/04 §9). One
+    # instance, shared: the routes and the executor's `read_page` must be
+    # looking at the same pending set, or a read waits on a future nobody holds.
+    app.state.bridge = WebviewBridge()
     app.state.executor = ExecutorService(
         app.state.goals,
         app.state.workspaces,
@@ -171,6 +183,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.sandbox,
         laya=app.state.laya,
         tracer=app.state.traces,
+        bridge=app.state.bridge,
     )
     app.state.executor.settings = app.state.settings
     app.state.token = BOOT_TOKEN
@@ -358,6 +371,14 @@ async def auth(request: Request, call_next: Callable[[Request], Awaitable[Respon
 UI_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    # The IPv6 loopback, because the dev server binds it and a browser that
+    # lands on `http://[::1]:5173` — address bar, bookmark, or a restored tab —
+    # sends that literal as its Origin. `localhost` and `[::1]` are different
+    # origins to a browser (separate localStorage, separate Origin header), so
+    # "the localhost URL works" does not cover this one: without it every
+    # request from such a tab dies at preflight and the app shows Offline
+    # behind a perfectly healthy engine. Pinned in tests/test_cors.py.
+    "http://[::1]:5173",
     "http://tauri.localhost",
     "https://tauri.localhost",
     "tauri://localhost",
@@ -450,6 +471,85 @@ async def laya_status(request: Request) -> dict[str, Any]:
     """
     laya: LayaService = getattr(request.app.state, "laya", None) or LayaService()
     return laya.status()
+
+
+@app.get("/settings/runtime")
+async def runtime_capabilities() -> dict[str, Any]:
+    """What this engine is running as, and what that interpreter can import.
+
+    Separate from `/settings/laya` on purpose. That route answers "which engine is
+    gating goals" and honours `CODIFY_LAYA_SDK`; this one answers "which interpreter
+    is this, and could it use the SDK at all". Collapsing them into one number is how
+    a UI ends up contradicting itself — the gate can be off because it was told to be,
+    or because the package is not there, and those need different fixes.
+
+    No request state: the answer is a property of the process, so it is the same
+    every call and worth having even when the gate is healthy.
+    """
+    return capabilities.capability_report()
+
+
+def _bridge(request: Request) -> WebviewBridge:
+    """The one bridge, created on first use rather than only at lifespan.
+
+    The tests that mount the app without booting it — which is most of them —
+    reach a route before any lifespan has run, and a route that raised
+    `AttributeError` there would be testing the harness rather than the
+    bridge. Same shape as `/settings/laya`'s own fallback.
+    """
+    bridge: WebviewBridge | None = getattr(request.app.state, "bridge", None)
+    if bridge is None:
+        bridge = WebviewBridge()
+        request.app.state.bridge = bridge
+    return bridge
+
+
+@app.get("/bridge/state")
+async def bridge_state(request: Request) -> dict[str, Any]:
+    """Whether a shell is polling, and what is in flight.
+
+    Read-only and cheap, and it exists so the shell can decide whether to
+    start polling at all rather than discovering on its first long poll that
+    the engine it just restarted is not the one it thought.
+    """
+    return _bridge(request).state()
+
+
+@app.get("/bridge/next")
+async def bridge_next(
+    request: Request,
+    wait: float = Query(20.0, ge=0.0, le=60.0),
+) -> dict[str, Any]:
+    """The oldest unanswered page question, or `{"id": null}`.
+
+    A long poll rather than a WebSocket, deliberately. Every socket in this
+    engine carries one goal's events and nothing else, and a second long-lived
+    socket on the same paths is how two conversations end up interleaved
+    (see `tests/stream_isolation.py`). This route is a request with a reply,
+    so it cannot outlive its caller or land a frame on anybody's stream.
+
+    Calling it is also the liveness signal: a poll that arrives refreshes the
+    bridge's idea of when a shell was last seen, and one that never arrives
+    again is how the engine learns the desktop app is gone.
+    """
+    pending = await _bridge(request).next_request(wait_s=wait)
+    if pending is None:
+        return {"id": None}
+    return pending
+
+
+@app.post("/bridge/answer")
+async def bridge_answer(request: Request, body: BridgeAnswer) -> dict[str, Any]:
+    """Land one page answer on the question it belongs to.
+
+    `accepted: false` is the ordinary answer to a late or forged one, not an
+    error: the id is checked against the questions actually outstanding, and a
+    page is free to fetch the reply URL as many times as it likes.
+    """
+    bridge = _bridge(request)
+    payload = body.result if body.ok else {"error": body.error or "no reason given"}
+    accepted = bridge.answer(body.id, body.ok, payload)
+    return {"accepted": accepted}
 
 
 @app.get("/settings/keys")
@@ -1158,6 +1258,51 @@ async def delete_conversation(
     """
     conversations: ConversationService = request.app.state.conversations
     return conversations.delete(conversation_id)
+
+
+@app.get("/shell/tabs", response_model=list[ShellTab])
+async def list_shell_tabs(request: Request) -> list[ShellTab]:
+    """The open tabs, in the order they are read.
+
+    The read half of a shared strip, and the reason a second window opens onto
+    the same tabs rather than onto whatever its own profile happened to hold.
+    It is also how a window learns what *another* window did: the two do not
+    wait for each other, they meet here and in the response to a write.
+    """
+    shell_tabs: ShellTabService = request.app.state.shell_tabs
+    return shell_tabs.list_tabs()
+
+
+@app.put("/shell/tabs", response_model=list[ShellTab])
+async def upsert_shell_tab(
+    body: ShellTabWrite, request: Request
+) -> list[ShellTab]:
+    """Record one tab — opened, navigated, retitled — and return the strip.
+
+    One tab per call rather than the whole layout, because the whole layout is
+    the thing two windows disagree about until they sync. A per-tab write is
+    the unit two writers can both be right about: the tab I changed, at the
+    place I put it, and nothing of anybody else's.
+
+    The response is the merged strip, so the caller's own write and everything
+    else it had not seen arrive together.
+    """
+    shell_tabs: ShellTabService = request.app.state.shell_tabs
+    return shell_tabs.upsert(body)
+
+
+@app.delete("/shell/tabs/{key}", response_model=list[ShellTab])
+async def delete_shell_tab(key: str, request: Request) -> list[ShellTab]:
+    """Close a tab for every window, and return the strip that is left.
+
+    Shared-strip semantics, which is the whole reason this is not a per-window
+    preference: a tab closed in one window is closed in all of them, and the
+    windows that had it showing fall back to a neighbour the way a closed tab
+    does in a single window. `localStorage` mirrors this so a window that was
+    offline when the tab closed removes it when it next talks to the engine.
+    """
+    shell_tabs: ShellTabService = request.app.state.shell_tabs
+    return shell_tabs.remove(key)
 
 
 @app.put("/goals/{goal_id}/conversation", response_model=Goal)
@@ -2203,31 +2348,43 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
 
     after = 0
     try:
-        misses = 0
         while True:
             try:
                 websocket.app.state.goals.get(goal_id)
             except ApiError:
                 await websocket.close(code=4404)
                 return
-            batch = websocket.app.state.goals.events_after(goal_id, after)[:500]
+            # `limit` rather than `[...][:500]`: the slice happened *after* the
+            # read, so every tick parsed the goal's whole remaining log to send
+            # at most 500 of it. A deleted goal is caught by the `get` above on
+            # the next tick, which is 250 ms away — the counter that used to
+            # stand here counted misses and then reset itself without ever
+            # changing what the loop did.
+            batch = websocket.app.state.goals.events_after(goal_id, after, limit=500)
             for event in batch:
                 await websocket.send_text(event.model_dump_json())
                 after = event.sequence
-            if not batch:
-                misses += 1
-            else:
-                misses = 0
-            if misses > 20:
-                # Goal deleted mid-loop would otherwise spin forever; re-check
-                # above already closes it. Reset counter to keep polling cheap.
-                misses = 0
             await asyncio.sleep(0.25)
     except WebSocketDisconnect:
         pass
 
 
-def main() -> None:
+def serve() -> None:
+    """Bind, announce, and run until the server stops. Returns; never exits.
+
+    **Why this is not `main()`.** The process entry point has to leave the way
+    the deadline does — `os._exit`, because interpreter finalization joins
+    threads nobody can cancel, and that join is where an orphan engine came
+    from. That is correct for a process and fatal for a test: calling `main()`
+    in-process took the *test runner* down with it, silently, at exit 0, roughly
+    halfway through the suite. `make` saw a clean exit and reported success while
+    549 of 1054 tests had never run, so a broken engine could not be caught by a
+    green gate — the gate was the thing that was broken.
+
+    So the guarantee lives on the entry point and the work lives here. A test can
+    boot the real server without ending the world, and `tests/test_home.py` says
+    so where it calls it.
+    """
     import socket
 
     import uvicorn
@@ -2238,10 +2395,18 @@ def main() -> None:
     # being discovered later by finding a smoke-test key in a real keychain.
     # stderr, because the Tauri shell parses stdout for the boot handshake.
     print(home.startup_notice(), file=sys.stderr, flush=True)
+    # Which interpreter this actually is, and whether the gate's SDK is importable
+    # *by it*. A capability installed into a different environment than the one the
+    # shell spawned fails silently otherwise — see engine/capabilities.py.
+    for line in capabilities.startup_lines():
+        print(line, file=sys.stderr, flush=True)
     # Armed before the port is claimed: a shell that dies while this engine is
     # binding must not be the reason the next launch finds the port taken. Inert
     # unless the desktop shell set `CODIFY_PARENT_PID` — see engine/watchdog.py.
-    watchdog.start_parent_watchdog()
+    # The handler is the pipe-safe one: after a hard shell death the stderr pipe
+    # below this process may have no reader, and a handler that prints before it
+    # acts dies on its own log line (`arm_death_signal` explains that order).
+    watchdog.start_parent_watchdog(on_parent_death=watchdog.on_parent_gone)
     # Bind and LISTEN before announcing readiness. The handshake is the boot
     # contract: whoever reads `CODIFY_ENGINE token=… port=…` is promised a
     # connectable socket, and announcing before `listen()` left a window where
@@ -2294,7 +2459,19 @@ def main() -> None:
     # Reached only when no signal arrived — a captured one is re-raised on the way out
     # of `capture_signals`, which ends the process inside `run`. Everything the engine
     # has to say or write has been said, and what is left is interpreter finalization,
-    # which waits on threads that cannot be cancelled; leave the way the deadline does.
+    # which waits on threads that cannot be cancelled; `main` leaves the way the
+    # deadline does, and this function simply returns.
+
+
+def main() -> None:
+    """The process entry point: serve, then leave the way the deadline does.
+
+    Kept separate from `serve()` on purpose, and the separation is a test —
+    `test_main_leaves_the_way_the_deadline_does` runs this in a child process and
+    fails if the hard exit is ever dropped, because dropping it looks like a fix
+    for the truncation above and is in fact the orphan bug `hard_exit` documents.
+    """
+    serve()
     watchdog.hard_exit()
 
 

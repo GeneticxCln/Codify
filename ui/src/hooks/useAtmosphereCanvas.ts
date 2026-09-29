@@ -1,5 +1,13 @@
 import { useEffect, useRef } from "react";
 
+import {
+  bindContextRecovery,
+  makeFrameBudget,
+  makeFrameGuard,
+  FRAMES_BEFORE_GIVING_UP,
+} from "../canvasRecovery.ts";
+import { useMotionAllowed } from "../motionPreference.ts";
+
 /**
  * The clock every atmosphere shares.
  *
@@ -152,6 +160,13 @@ export const ACTIVE_RATE = 1.8;
  * pace. A step change would be a snap, and a snap in the corner of the eye while
  * reading something else is exactly the kind of motion §7 is about.
  */
+/**
+ * The `.ts` on the import above is not a style choice. This module is a plain
+ * `.ts` file, and `tests/stateReactiveWeather.test.ts` imports *it* directly —
+ * through no bundler, so Node's ESM resolver needs the extension. A relative
+ * specifier without one is a module-not-found at import time, which is how a
+ * working build turns into a red suite.
+ */
 export function nextRate(current: number, active: boolean, dt: number): number {
   const target = active ? ACTIVE_RATE : 1;
   return current + (target - current) * Math.min(1, dt * 1.6);
@@ -168,6 +183,10 @@ export function useAtmosphereCanvas(
 ): React.RefObject<HTMLCanvasElement | null> {
   const { maxDimension, fps, animated, active, vars, create } = options;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // The motion decision, subscribed (a hook call belongs at the top level):
+  // user choice, shell verdict, or system preference, as a dependency the
+  // effect below re-runs on — a re-render alone would leave the loop running.
+  const storeReduced = useMotionAllowed();
   // Kept in a ref so the effect can read the latest values without listing
   // them as dependencies — see the note above on why that is not laziness.
   const latest = useRef({ vars, create, active });
@@ -179,11 +198,9 @@ export function useAtmosphereCanvas(
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const reduced =
-      animated ??
-      (typeof window !== "undefined" &&
-        typeof window.matchMedia === "function" &&
-        window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    // Whether to move at all: an explicit `animated` prop wins (a preview must
+    // animate to be a preview), otherwise `storeReduced`, computed above.
+    const reduced = animated ?? storeReduced;
 
     const styles = getComputedStyle(document.documentElement);
     const read = (name: string): string => {
@@ -221,8 +238,59 @@ export function useAtmosphereCanvas(
     // what `step` is handed, so drift and phase stay consistent with each other
     // and a capped canvas still moves at the same speed per second.
     let rate = 1;
+
+    // A painter that throws throws again next frame, and the one after, thirty
+    // times a second for as long as the window is open. The loop re-arms its own
+    // rAF on the first line, so nothing here would ever stop it.
+    const guard = makeFrameGuard({
+      onGiveUp: (error) => {
+        console.error(
+          `[atmosphere] painter "${latest.current.create.name || "anonymous"}" failed on ` +
+            `${FRAMES_BEFORE_GIVING_UP} consecutive frames; leaving the backdrop still. ` +
+            "The window stays usable and the rest of the UI is unaffected.",
+          error,
+        );
+        if (raf) cancelAnimationFrame(raf);
+        raf = 0;
+      },
+    });
+
+    // Whether this machine can afford the animation at all, measured by the
+    // frames the compositor actually delivers. A backdrop is decoration; a
+    // backdrop that costs a core of software rasterisation per frame is a window
+    // that stops answering input, and the user cannot tell that apart from a
+    // crash. So the loop stops itself, once, and says why — see `makeFrameBudget`
+    // for the numbers and DESIGN.md §7 for the contract.
+    const budget = makeFrameBudget({
+      targetMs: frameMs,
+      onTooSlow: (measuredMs) => {
+        console.warn(
+          `[atmosphere] the compositor is delivering a frame every ` +
+            `${measuredMs.toFixed(0)}ms against a ${frameMs.toFixed(0)}ms request, so the ` +
+            "backdrop is left still rather than spending the window's frame budget on " +
+            "decoration. The window stays responsive and the rest of the UI is unaffected.",
+        );
+        if (raf) cancelAnimationFrame(raf);
+        raf = 0;
+      },
+    });
+
+    // The frame guard is on the loop and nowhere else. A throw at mount, on a
+    // resize, or on a restore happens once and is a real fault worth surfacing;
+    // swallowing it behind a guard would turn a broken painter into a blank
+    // canvas with no error, which is the failure this file exists to prevent.
+    // The flood it does prevent can only happen in a loop.
     const loop = (t: number): void => {
       raf = requestAnimationFrame(loop);
+      // Judged before the accumulator, because the interval being judged is
+      // delivery, not drawing: a machine that cannot present 30 frames is not
+      // fixed by drawing fewer of them, and the accumulator would hide exactly
+      // the evidence that it cannot.
+      if (budget.observe(t) === "too-slow") return;
+      // A lost context makes every draw a silent no-op, so the frame budget is
+      // being spent painting into a void. The rAF stays armed so the clock is
+      // where it was when the context comes back.
+      if (recovery.isLost()) return;
       if (t - last < frameMs) return;
       const dt = last === 0 ? 0 : Math.min((t - last) / 1000, frameMs / 1000);
       last = t;
@@ -230,9 +298,26 @@ export function useAtmosphereCanvas(
       const scaled = dt * rate;
       tick.seconds += scaled;
       tick.frame += 1;
-      painter.step?.(scaled, tick);
-      painter.draw(ctx, size, tick);
+      guard.run(() => {
+        painter.step?.(scaled, tick);
+        painter.draw(ctx, size, tick);
+      });
     };
+
+    // Context loss is a driver reset, a lid closing, or a monitor renegotiating
+    // its mode — all ordinary on a machine left open. Without this the backdrop
+    // is gone until the app is reloaded, and there is no error to explain it.
+    const recovery = bindContextRecovery(canvas, {
+      onRestored: () => {
+        // The canvas comes back blank, and possibly a different size, and the
+        // clock's last frame may be minutes old. Re-measure, repaint, and reset
+        // the accumulator so the first frame back is a full dt rather than a
+        // leap that skips the painter forward.
+        layout();
+        last = 0;
+        painter.draw(ctx, size, tick);
+      },
+    });
 
     let observer: ResizeObserver | undefined;
     layout();
@@ -241,9 +326,20 @@ export function useAtmosphereCanvas(
     painter.draw(ctx, size, tick);
     if (!reduced) raf = requestAnimationFrame(loop);
 
+    // A window that has just come back was suspended, not slow: its frames
+    // arrived at roughly 1 Hz because nobody was looking, and that measurement
+    // must not be the one that stops the backdrop for the rest of the session.
+    const onVisibility = (): void => {
+      budget.reset();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     if (typeof ResizeObserver !== "undefined") {
       observer = new ResizeObserver(() => {
         layout();
+        // Same reason the loop checks: a lost context makes the draw a no-op, and
+        // the restore handler is what will repaint when it comes back.
+        if (recovery.isLost()) return;
         painter.draw(ctx, size, tick);
       });
       observer.observe(canvas);
@@ -252,8 +348,10 @@ export function useAtmosphereCanvas(
     return () => {
       if (raf) cancelAnimationFrame(raf);
       observer?.disconnect();
+      recovery.detach();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [animated, fps, maxDimension]);
+  }, [animated, storeReduced, fps, maxDimension]);
 
   return canvasRef;
 }

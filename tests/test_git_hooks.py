@@ -79,6 +79,9 @@ class HookTestBase(unittest.TestCase):
         self._script(
             path / "make",
             f'printf "%s\\n" "$*" >> "{self.make_log}"\n'
+            # STUB_MAKE_FAIL names one target to refuse, so a test can say "the
+            # tip is green and the history is not" without two stub binaries.
+            'if [ -n "${STUB_MAKE_FAIL:-}" ] && [ "$*" = "${STUB_MAKE_FAIL}" ]; then exit 1; fi\n'
             'exit "${STUB_MAKE_STATUS:-0}"\n',
         )
         return path
@@ -90,14 +93,16 @@ class HookTestBase(unittest.TestCase):
         path.chmod(0o700)
 
     def run_hook(
-        self, name: str, stdin: str = "", *, make_status: int = 0
+        self, name: str, stdin: str = "", *, make_status: int = 0, make_fail: str = ""
     ) -> subprocess.CompletedProcess[str]:
         """Run one of the hooks the way git does: stdin carries the refs, the exit
-        status decides. `make_status` is what the stub `make` exits with."""
+        status decides. `make_status` is what the stub `make` exits with;
+        `make_fail` names one target it should refuse and nothing else."""
         env = {
             "PATH": str(self.bin),
             "HOME": str(self.root),
             "STUB_MAKE_STATUS": str(make_status),
+            "STUB_MAKE_FAIL": make_fail,
         }
         return subprocess.run(
             [str(self.root / ".githooks" / name)],
@@ -130,12 +135,18 @@ class HookTestBase(unittest.TestCase):
 class TestPrePushHook(HookTestBase):
     def test_a_branch_push_runs_the_whole_gate(self) -> None:
         """The gate is `make ci` — one command, every toolchain. If the hook ever
-        called a narrower target the push would be checked less than the gate claims."""
+        called a narrower target the push would be checked less than the gate claims.
+
+        And then `make check-history`, which asks the question `ci` cannot: not
+        "is the tip green" but "was every commit on the way green". Both are
+        asked, in that order, because a red tip is the cheaper thing to be told
+        about and a per-commit sweep costs minutes.
+        """
         result = self.run_hook(
             "pre-push", self.push_line("refs/heads/master", REAL_SHA, "refs/heads/master", REAL_SHA)
         )
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(["ci"], self.asked_make())
+        self.assertEqual(["ci", "check-history"], self.asked_make())
 
     def test_a_push_of_head_onto_a_branch_is_gated(self) -> None:
         """The regression this suite exists for.
@@ -148,11 +159,16 @@ class TestPrePushHook(HookTestBase):
             "pre-push", self.push_line("HEAD", REAL_SHA, "refs/heads/topic", NULL_SHA)
         )
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(["ci"], self.asked_make())
+        self.assertEqual(["ci", "check-history"], self.asked_make())
 
     def test_a_failing_gate_blocks_the_push(self) -> None:
         """A red gate must stop the push — and name the deliberate way past it, so the
-        override is a decision rather than a discovery."""
+        override is a decision rather than a discovery.
+
+        And it stops before the history sweep: `asked_make` is exactly `["ci"]`,
+        which is how "a red tip costs seconds, not minutes" is kept true rather
+        than merely intended.
+        """
         result = self.run_hook(
             "pre-push",
             self.push_line("refs/heads/master", REAL_SHA, "refs/heads/master", REAL_SHA),
@@ -161,6 +177,33 @@ class TestPrePushHook(HookTestBase):
         self.assertEqual(1, result.returncode)
         self.assertIn("BLOCKED", result.stderr)
         self.assertIn("--no-verify", result.stderr)
+        self.assertEqual(["ci"], self.asked_make())
+
+    def test_a_green_tip_with_a_broken_middle_still_blocks(self) -> None:
+        """The case this second leg exists for, and the reason it is not a
+        duplicate of the first: `make ci` passes, the tip builds, and the push is
+        still refused because a commit in the middle does not. A hook that only
+        ran `ci` would have pushed it and called it green."""
+        result = self.run_hook(
+            "pre-push",
+            self.push_line("refs/heads/master", REAL_SHA, "refs/heads/master", REAL_SHA),
+            make_fail="check-history",
+        )
+        self.assertEqual(1, result.returncode)
+        self.assertIn("BLOCKED", result.stderr)
+        self.assertIn("does not build", result.stderr)
+        # The message has to name the escape hatch that is specific to this leg.
+        self.assertIn("make check-history", result.stderr)
+        self.assertIn("squash", result.stderr)
+        self.assertEqual(["ci", "check-history"], self.asked_make())
+
+    def test_the_history_sweep_is_announced_before_it_costs_minutes(self) -> None:
+        """A gate that goes quiet for a long time is a gate people `--no-verify`.
+        The sweep says what it is about to do, on stdout, before it starts."""
+        result = self.run_hook(
+            "pre-push", self.push_line("refs/heads/master", REAL_SHA, "refs/heads/master", REAL_SHA)
+        )
+        self.assertIn("every commit in this push builds, not just the tip", result.stdout)
 
     def test_a_multi_branch_push_runs_the_gate_once(self) -> None:
         """Two branches in one push is still one gate, not two: the cost is the gate,
@@ -170,7 +213,7 @@ class TestPrePushHook(HookTestBase):
         )
         result = self.run_hook("pre-push", stdin)
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(["ci"], self.asked_make())
+        self.assertEqual(["ci", "check-history"], self.asked_make())
 
     def test_a_tag_only_push_does_not_run_the_gate(self) -> None:
         """A tag adds no source for the suite to judge — and says so out loud, because
@@ -258,7 +301,7 @@ class TestTheHooksAndTheProjectAgree(unittest.TestCase):
         """A hook calling a target nobody defines fails at push time, not at check
         time — the one moment nobody can afford to discover it."""
         makefile = (PROJECT_ROOT / "Makefile").read_text()
-        for target in ("ci", "lint", "typecheck"):
+        for target in ("ci", "lint", "typecheck", "check-history"):
             self.assertRegex(makefile, rf"(?m)^{target}:", f"the Makefile has no {target} target")
 
     def test_the_install_points_git_at_the_versioned_hooks(self) -> None:

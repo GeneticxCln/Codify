@@ -18,8 +18,13 @@
 # the caller's cache directory (CI_CACHE in the Makefile).
 #
 # Usage: scripts/ci-python-floor.sh <version> <venv-dir>
-# The venv path must end in -<version>, so the rebuild below can only ever remove a
-# directory that is demonstrably this script's to own.
+# The venv path must end in -<version>, and the rebuild below deletes only a
+# directory this script owns: one carrying its .ci-python-floor-stamp, or one under
+# the default CI cache root the Makefile provisions. The suffix alone once carried
+# the whole guarantee, and it does not — a hand-typed
+# `ci-python-floor.sh 3.10 ~/proj-backup-3.10` satisfies it on the way to deleting
+# the backup. Anything without that provenance is refused with exit 2, never
+# deleted.
 
 set -euo pipefail
 
@@ -47,6 +52,11 @@ tools=( "ruff>=0.6" "mypy>=1.11" )
 
 python="$venv/bin/python"
 stamp_file="$venv/.ci-python-floor-stamp"
+# Where the Makefile's default CI_CACHE lives, derived the same way it derives it
+# (a set-and-non-empty XDG_CACHE_HOME wins over $HOME/.cache). An explicitly
+# overridden CI_CACHE needs no exception here: a venv the script built at an
+# overridden location carries the stamp, which is the first check below.
+cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/codify"
 # A checksum of the pins, not a timestamp: a fresh checkout rewrites mtimes without
 # changing what is installed, and a genuinely changed requirements file must reinstall.
 want="$( { cat "$requirements"; printf '%s\n' "${tools[@]}"; } | cksum )"
@@ -56,9 +66,29 @@ have_version() {
   [ "$("$python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" = "$version" ]
 }
 
+# The rebuild is the one destructive thing this script does, so it asks first
+# whether the directory is its to delete. A stamp means this script finished a
+# build here (the stamp is written only after the installs succeed); the default
+# cache root covers a build interrupted before the stamp was written. A
+# directory carrying neither — a backup that merely ends in -$version, say — is
+# refused rather than deleted: a gate that guesses wrong here does not get a
+# second guess.
+owned_by_this_script() {
+  [ -f "$stamp_file" ] && return 0
+  case "${venv%/}" in
+    "$cache_root"/*) return 0 ;;
+  esac
+  return 1
+}
+
 if [ -d "$venv" ] && ! have_version; then
-  echo "==> python $version: replacing $venv (not a working python $version)"
-  rm -rf "$venv"
+  if owned_by_this_script; then
+    echo "==> python $version: replacing $venv (not a working python $version)"
+    rm -rf "$venv"
+  else
+    echo "ci-python-floor: refusing to replace '${venv%/}': no working python $version in it, no stamp of this script's on it, and it is not under $cache_root — remove it by hand if it is really a venv of yours" >&2
+    exit 2
+  fi
 fi
 
 if have_version && [ -f "$stamp_file" ] && [ "$(cat "$stamp_file")" = "$want" ]; then

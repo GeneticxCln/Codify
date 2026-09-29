@@ -181,14 +181,14 @@ test("what was buffered before xterm existed is flushed into it", () => {
   // with a test suite that is still green because `drainOutput` is itself
   // perfectly correct and nobody called it.
   const openAt = source.indexOf("term.open(hostRef.current)");
-  const flushAt = source.indexOf("drainOutput(buffer, terminalIdRef.current)");
+  const flushAt = source.indexOf("drainOutput(outputBuffer, terminalIdRef.current)");
   assert.ok(openAt > 0, "the pane never opens the terminal");
   assert.ok(flushAt > 0, "the pane never flushes what it buffered");
   assert.ok(
     openAt < flushAt,
     "the buffered output is drained before the terminal exists to receive it"
   );
-  const [, afterFlush] = source.split("drainOutput(buffer, terminalIdRef.current)");
+  const [, afterFlush] = source.split("drainOutput(outputBuffer, terminalIdRef.current)");
   assert.match(
     afterFlush.slice(0, 200),
     /term\.write\(held\)/,
@@ -204,7 +204,7 @@ test("a restored session is written before the live one, and recorded as it arri
   // close, or a terminal that was never closed — the common case — files
   // nothing.
   const replayAt = source.indexOf("replayFor(");
-  const drainAt = source.indexOf("drainOutput(buffer, terminalIdRef.current)");
+  const drainAt = source.indexOf("drainOutput(outputBuffer, terminalIdRef.current)");
   assert.ok(replayAt > 0, "the pane never restores a previous session");
   assert.ok(replayAt < drainAt, "the live prompt is written above the restored one");
   assert.match(source, /readTerminalHistory\(workspaceIdRef\.current\)/);
@@ -217,12 +217,23 @@ test("a restored session is written before the live one, and recorded as it arri
     "output is not filed into the workspace's scrollback, so a reopened pane " +
       "has nothing to restore"
   );
-  // And filed before the pane check, so a chunk belonging to a tab the user has
-  // since closed still counts as something this workspace said.
+  // …and filed **after** the pane check, because the app-level recorder
+  // (`terminalBuffer.ts`) is what owns a chunk no pane is displaying. Filing
+  // another terminal's bytes here as well is how they come to be on screen
+  // twice: the sibling pane that happens to be mounted files this terminal's
+  // background build into the same workspace record the backlog replays from,
+  // so every line of that build is written to xterm a second time when its pane
+  // comes back. The other half of the promise — a tab closed in the background
+  // is still part of what this workspace restores — is the store's, and
+  // `terminalBuffer.test.ts` pins it.
+  const guardAt = body.indexOf("if (chunk.id !== terminalIdRef.current)");
+  const fileAt = body.indexOf("appendTerminalHistory(");
+  assert.ok(guardAt > 0, "the pane never checks whose chunk this is");
   assert.ok(
-    body.indexOf("appendTerminalHistory(") < body.indexOf("if (chunk.id !== terminalIdRef.current)"),
-    "only this tab's own output is filed; another terminal's in the same " +
-      "workspace is part of the same answer"
+    fileAt > guardAt,
+    "a pane files chunks that are not its own terminal's, and the store " +
+      "files them too — so a background build is written to the workspace " +
+      "scrollback twice and a returning pane shows every line of it twice"
   );
 });
 
@@ -326,5 +337,160 @@ test("the output path writes to the terminal and never to React state", () => {
     /setFailed|useState/,
     "the output handler is reaching React state — a PTY emits faster than a " +
       "frame, so every chunk would re-render the pane and everything above it"
+  );
+});
+
+test("a pane claims its terminal on mount and hands it back on unmount", () => {
+  // The background-output guarantee is a relay, not a duplication: the store
+  // records only what nobody displays, so the pane must take ownership when it
+  // arrives (taking the backlog earned in its absence) and release it when it
+  // goes. Drop the claim and the recorder buffers a live tab's output forever;
+  // drop the release and a backgrounded tab's output is never caught again.
+  const claimAt = source.indexOf("claimTerminal(terminalIdRef.current)");
+  assert.ok(claimAt > 0, "the pane never claims its terminal from the store");
+  // Claimed in the effect body — before the async half subscribes — so no
+  // chunk can slip between mounting and owning.
+  const asyncAt = source.indexOf("void (async () => {");
+  assert.ok(asyncAt > claimAt, "the claim happens after the subscription went up");
+  const cleanupAt = source.indexOf("return () => {", claimAt);
+  const cleanup = source.slice(cleanupAt, source.indexOf("}, []);", cleanupAt));
+  assert.match(
+    cleanup,
+    /releaseTerminal\(terminalIdRef\.current\)/,
+    "the pane never hands the terminal back — background output after this " +
+      "unmount is dropped on the floor"
+  );
+  // The backlog earned while the pane was away is replayed into xterm, not
+  // just taken and dropped — and behind the resume seam, because the tail it
+  // continues was already on screen before the pane went away.
+  assert.match(
+    source,
+    /term\.write\(\(restored \? RESUME_SEAM : ""\) \+ backlogged\)/,
+    "the claimed backlog is never written, or written without the resume " +
+      "seam — switching tabs ate the output the recorder was built to keep, " +
+      "or replayed it as if the shell had never had a gap"
+  );
+});
+
+test("the pane is keyed by terminal id, so two shells are two terminals", () => {
+  // Without a key, React reuses one pane — one xterm, one subscription, one
+  // claim — across different PTYs when the user switches tabs: the second
+  // shell's prompt lands in the first shell's scrollback and neither claim
+  // nor release ever runs for the terminal that was switched away from.
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const branch = app.slice(
+    app.indexOf("activeTerminalTab ? ("),
+    app.indexOf(") : (", app.indexOf("activeTerminalTab ? ("))
+  );
+  assert.match(branch, /<TerminalPane/, "the terminal branch no longer renders the pane");
+  assert.match(
+    branch,
+    /key=\{activeTerminalTab\.id\}/,
+    "the terminal pane has no key, so switching terminal tabs reuses one " +
+      "xterm across different shells"
+  );
+});
+
+test("App records what no pane is there to catch", () => {
+  // The app-level recorder is the other half of the relay: one subscription
+  // at app scope, keyed to the app's mount, feeding the store. The needles
+  // name the store's functions because that is the contract — a recorder that
+  // calls anything else is a second filer, and two filers is how bytes land
+  // on screen twice.
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(app, /recordOutput\(/, "no app-level recorder: background output is still dropped");
+  assert.match(app, /recordExit\(/, "background exits are never recorded");
+  assert.match(
+    app,
+    /retireTerminal\(ptyId, ws\)/,
+    "an unowned shell that finishes is never filed into its workspace"
+  );
+  assert.match(
+    app,
+    /ownsTerminal\(ptyId\)/,
+    "the recorder does not ask who owns the terminal before filing"
+  );
+  // And closing a background tab files what its shell said since, before the
+  // PTY is closed — the pane that would have claimed it will never exist.
+  const closeBody = app
+    .split("const handleCloseTab = useCallback")[1]
+    ?.split("[tabState.tabs],")[0];
+  assert.ok(closeBody, "App.tsx no longer defines handleCloseTab in the expected shape");
+  assert.match(
+    closeBody,
+    /retireTerminal\(id, tab\.workspaceId\)/,
+    "a background tab closed with its shell still talking loses everything it " +
+      "said while unmounted"
+  );
+});
+
+test("the badge is driven by kept chunks, never by the active tab's own output", () => {
+  // `recordOutput`'s boolean is the whole event source: true means the store
+  // kept the chunk, which means no pane displayed it. The active-tab guard is
+  // still needed because of the claim window — chunks that arrive between a
+  // pane mounting and its claim landing are kept by the store even though the
+  // user is looking at that very tab — and badging the tab the user is
+  // reading would make the badge lie about attention.
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const handlerAt = app.indexOf("const kept = recordOutput(chunk.id, chunk.data)");
+  assert.ok(handlerAt > 0, "the recorder ignores whether the store kept the chunk");
+  const handlerBody = app.slice(handlerAt, handlerAt + 800);
+  assert.match(
+    handlerBody,
+    /if \(active === chunk\.id\) return;/,
+    "the badge can land on the tab the user is reading — the claim window's " +
+      "kept chunks are not unread"
+  );
+  assert.match(
+    handlerBody,
+    /setUnreadTerminalIds/,
+    "kept chunks never reach the badge state"
+  );
+});
+
+test("the badge clears when the tab is shown, and goes with it when closed", () => {
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const focusBody = app
+    .split("onFocus={(id) => {")[1]
+    ?.split("unreadTerminalIds={[")[0];
+  assert.ok(focusBody, "App.tsx no longer defines the tab-strip onFocus inline");
+  assert.match(
+    focusBody,
+    /setUnreadTerminalIds[\s\S]{0,200}?next\.delete\(id\)/,
+    "focusing a badged tab leaves the badge up — the strip keeps announcing " +
+      "output the user is now looking at"
+  );
+  const closeBody = app
+    .split("const handleCloseTab = useCallback")[1]
+    ?.split("[tabState.tabs],")[0];
+  assert.ok(closeBody, "App.tsx no longer defines handleCloseTab in the expected shape");
+  assert.match(
+    closeBody,
+    /setUnreadTerminalIds[\s\S]{0,200}?next\.delete\(id\)/,
+    "a closed tab keeps its badge — a dot for a tab that no longer exists"
+  );
+  // And the strip is handed the ids at all.
+  assert.match(
+    app,
+    /unreadTerminalIds=\{\[\.\.\.unreadTerminalIds\]\}/,
+    "TabBar is never told which terminal tabs are unread"
+  );
+});
+
+test("an exit clears the badge only where the user is watching", () => {
+  // A background exit is the moment the badge matters most — the shell
+  // finished (or failed) while the user was elsewhere, and the output is
+  // still unseen. Clearing there would silence the one notification the
+  // feature exists to deliver; clearing on an *owned* exit is right, because
+  // the user just watched it happen.
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const exitStart = app.indexOf("listenShellEvent<unknown>(TERMINAL_EXIT");
+  assert.ok(exitStart > 0, "the app recorder never listens for terminal-exit");
+  const exitBody = app.slice(exitStart, app.indexOf("}, []);", exitStart));
+  assert.match(
+    exitBody,
+    /if \(ownsTerminal\(ptyId\)\) \{[\s\S]{0,300}?next\.delete\(ptyId\)/,
+    "the badge is cleared on the wrong side of the ownership line — either a " +
+      "watched exit keeps its badge, or a background one loses it"
   );
 });

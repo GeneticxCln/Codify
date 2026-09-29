@@ -6,6 +6,19 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
+# The read-only argv law lives in `engine/sandbox.py` and it is the *only*
+# copy: the librarian's `run_command(mode="read_only")` and this class's
+# `read_only` are two doors onto one decision, because two tables for one
+# concept had already drifted — `sandbox.READ_ONLY_GIT_SUBCOMMANDS` allowed
+# seventeen subcommands and this module's own list eight, with different flag
+# rules, and the conductor's door checked neither flag nor argument beyond
+# `args[0]`.
+from engine.fs import FileSystemService
+from engine.sandbox import (
+    READ_ONLY_GIT_SUBCOMMANDS,
+    CommandNotAllowed,
+    validate_argv,
+)
 from engine.spawn_guard import guarded_argv, guarded_env
 
 
@@ -106,20 +119,24 @@ class GitService:
         res = self._run_text(["status", "--porcelain"], cwd=str(Path(root_path).resolve()))
         return res.stdout
 
-    # Read-only subcommands. A *list*, not a prefix rule: `log` is safe and
-    # `log --output=x` is not, so anything that could write is named rather
-    # than inferred from its first argument.
-    READ_ONLY_ARGV: tuple[str, ...] = (
-        "log", "show", "status", "diff", "blame", "branch", "rev-parse", "ls-files",
-    )
+    # Read-only subcommands, and the list has **one owner**: `sandbox.py`,
+    # next to the flags that decide what a read-only command may say. This used
+    # to be a second literal — eight subcommands against the librarian's
+    # seventeen, with no flag checking on this side at all — and the two had
+    # already drifted apart when it was replaced. `git_history` offered
+    # `branch` and `tag` to a model, and `git branch NAME` creates a ref.
+    READ_ONLY_ARGV: tuple[str, ...] = tuple(sorted(READ_ONLY_GIT_SUBCOMMANDS))
 
     def read_only(self, root_path: str, args: list[str]) -> str:
         """Run one read-only git subcommand and return its output.
 
         The public door for the conductor's `git_history` tool, and the reason
-        the conductor is not reaching into `_run_text`. A subcommand outside
-        `READ_ONLY_ARGV` is refused rather than attempted: the caller here is a
-        model, and "the model asked for it" is not a reason to run `git commit`.
+        the conductor is not reaching into `_run_text`. The argv is validated by
+        `sandbox.validate_argv(mode="read_only")` — the same call the librarian's
+        commands go through — rather than by a check of its own: the caller here
+        is a model, and "the model asked for it" is not a reason to run
+        `git commit`, write a file with `--output`, read one with `--no-index`,
+        or create a branch by naming one.
 
         Returns a sentence on refusal instead of raising — the conductor shows
         tool results to the model, and a sentence it can read and route around
@@ -127,12 +144,21 @@ class GitService:
         """
         if not args or not all(isinstance(a, str) for a in args):
             return "git_history takes a list of strings, e.g. [\"log\", \"-5\"]"
-        if args[0] not in self.READ_ONLY_ARGV:
-            allowed = " ".join(self.READ_ONLY_ARGV)
+        try:
+            # `["git", *args]`: the validator speaks argv, whose first word is the
+            # binary this class already resolved. Handing it `args` made it read
+            # `log` as the binary name and refuse every call for the wrong reason.
+            validate_argv(["git", *args], FileSystemService(root_path), mode="read_only")
+        except CommandNotAllowed as refusal:
             return (
-                f"git {args[0]!r} is not a read-only git command ({allowed}). "
-                "This tool only reads history; to change the repository, use delegate."
+                f"git {' '.join(args)} is refused: {refusal}. This tool only reads "
+                "history and cannot change the repository or touch a file outside "
+                "it; use delegate for a change."
             )
+        # Validation before the repository check, and that order is the answer a
+        # caller needs: `git commit` is refused on its own terms in a workspace
+        # that is not a repository at all, rather than being told there is no
+        # history to read — which reads as "try a different subcommand".
         if not self.is_git_repo(root_path):
             return "This workspace is not a git repository, so there is no history to read."
         res = self._run_text(list(args), cwd=str(Path(root_path).resolve()))

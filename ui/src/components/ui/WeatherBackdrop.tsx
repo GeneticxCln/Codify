@@ -1,10 +1,20 @@
 import React from "react";
 import {
+  ANON_FLUID,
   BIOLUMINESCENT_ABYSS,
+  CYBER_ORGANISM,
   CYBERPUNK_NEON,
+  ELECTRIC_ARC,
+  EVENT_HORIZON,
+  FESTIVE_NIGHT,
   HUD_TACTICAL,
+  LIQUID_MERCURY,
   NEURAL_CONSTELLATION,
   SOLAR_FLARE,
+  SOLARIZED_FLARE,
+  TOXIC_LAB,
+  VECTOR_WIREFRAME,
+  WINTER_SNOW,
   type AppearanceTheme,
 } from "../../appearance";
 import { useTheme } from "../../hooks/useTheme";
@@ -14,6 +24,15 @@ import { CyberGrid } from "./CyberGrid";
 import { HudSweep } from "./HudSweep";
 import { NeuralWeb } from "./NeuralWeb";
 import { NebulaFlow } from "./NebulaFlow";
+import { SnowFall } from "./SnowFall";
+import { SolarWind } from "./SolarWind";
+import { CyberOrganism } from "./CyberOrganism";
+import { EventHorizon } from "./EventHorizon";
+import { VectorWire } from "./VectorWire";
+import { Nanofluid } from "./Nanofluid";
+import { ElectricArc } from "./ElectricArc";
+import { ToxicLab } from "./ToxicLab";
+import { AnonFluid } from "./AnonFluid";
 
 /**
  * The window's weather, for every theme that has some, in one component.
@@ -91,6 +110,94 @@ const ATMOSPHERES: Readonly<Record<string, Atmosphere>> = {
     Canvas: NebulaFlow,
     vignette: null,
   },
+  // Two entries, one painter. The split is here rather than inside `SnowFall`
+  // only because the *vignette* genuinely differs — a cool corner darkening for
+  // a blue-black night, a warm one for a green-black one — and the vignette is
+  // a CSS background this component already owns. The lights are not mentioned
+  // here at all: a theme that publishes a glow colour gets them, and that is
+  // decided by `SnowFall` reading its own variables.
+  [WINTER_SNOW.id]: {
+    trigger: "--snow-flake",
+    Canvas: SnowFall,
+    vignette:
+      "radial-gradient(ellipse at center, transparent 46%, rgba(3, 8, 18, 0.58) 100%)",
+  },
+  [FESTIVE_NIGHT.id]: {
+    trigger: "--snow-flake",
+    Canvas: SnowFall,
+    vignette:
+      "radial-gradient(ellipse at center, transparent 46%, rgba(10, 16, 9, 0.55) 100%)",
+  },
+  // Five more, and every one of them a canvas that confines itself to the
+  // margins — which is why each vignette is the *coolest* thing here: the
+  // darkening exists to keep the eye in the middle of the window, and four of
+  // the five effects only exist near the edges.
+  [SOLARIZED_FLARE.id]: {
+    trigger: "--sun-core",
+    Canvas: SolarWind,
+    // Very slight, and warmer than the others: this is a CRT, and a CRT's
+    // corners are darker than its middle because of the tube, not the theme.
+    vignette:
+      "radial-gradient(ellipse at center, transparent 40%, rgba(26, 14, 0, 0.5) 100%)",
+  },
+  [CYBER_ORGANISM.id]: {
+    trigger: "--organ-node",
+    Canvas: CyberOrganism,
+    vignette:
+      "radial-gradient(ellipse at center, transparent 44%, rgba(2, 12, 28, 0.55) 100%)",
+  },
+  [EVENT_HORIZON.id]: {
+    trigger: "--void-arc",
+    Canvas: EventHorizon,
+    // The faintest here, and the reason is the effect rather than the palette:
+    // the orbital disc already reads as depth, and a heavy vignette over it
+    // turns the arcs into four grey corners.
+    vignette:
+      "radial-gradient(ellipse at center, transparent 58%, rgba(0, 0, 0, 0.34) 100%)",
+  },
+  [VECTOR_WIREFRAME.id]: {
+    trigger: "--vector-line",
+    Canvas: VectorWire,
+    vignette: null,
+  },
+  [LIQUID_MERCURY.id]: {
+    trigger: "--fluid-crest",
+    Canvas: Nanofluid,
+    // The one metal theme, so the corners go *cool* rather than dark: a steel
+    // edge is a highlight, not a shadow.
+    vignette:
+      "linear-gradient(90deg, rgba(51, 65, 85, 0.5) 0%, transparent 22%, transparent 78%, rgba(51, 65, 85, 0.5) 100%)",
+  },
+  // Three more margins, and the vignettes are the same shape as the five above
+  // them for the same reason: each of these effects exists only near the edges,
+  // so the corner darkening is what keeps the eye in the middle of the window.
+  [ELECTRIC_ARC.id]: {
+    trigger: "--arc-core",
+    Canvas: ElectricArc,
+    // Deeper than most, because this theme's brightest colour is a near-white
+    // and a white discharge that survives into the transcript is the worst
+    // legibility failure in the app.
+    vignette:
+      "radial-gradient(ellipse at center, transparent 40%, rgba(3, 3, 20, 0.6) 100%)",
+  },
+  [TOXIC_LAB.id]: {
+    trigger: "--reagent",
+    Canvas: ToxicLab,
+    // A fume hood is dark at the corners because that is where the sash is,
+    // and because a green wash across the whole window would read as a filter
+    // over the content rather than as air in a room.
+    vignette:
+      "radial-gradient(ellipse at center, transparent 42%, rgba(4, 12, 6, 0.58) 100%)",
+  },
+  [ANON_FLUID.id]: {
+    trigger: "--fluid-bit",
+    Canvas: AnonFluid,
+    // The faintest of the three, and deliberately so: a terminal's black is
+    // already the darkest thing in the app, and darkening the corners of a
+    // black window only makes the gutters harder to see.
+    vignette:
+      "radial-gradient(ellipse at center, transparent 52%, rgba(0, 10, 5, 0.36) 100%)",
+  },
 };
 
 export interface WeatherBackdropProps {
@@ -128,7 +235,17 @@ export const WeatherBackdrop: React.FC<WeatherBackdropProps> = ({ active }) => {
           this box is the window, not a column. A perspective grid is cheaper
           than a glyph shower, but the cap is not about this frame's cost — it
           is about what happens on a 4K panel the user has maximised. */}
-      <Canvas className="absolute inset-0 h-full w-full" maxDimension={1024} active={active} />
+      {/* `codify-atmosphere-canvas` is the edge fade, and it is passed here
+          rather than added inside each of the ~20 painters: every one of them
+          renders the same `<canvas className={`pointer-events-none ${className}`}>`
+          and threading a class through that one call site is what keeps a new
+          effect from shipping without the fade. The class itself is in
+          `index.css` — one mask definition, not twenty inline styles. */}
+      <Canvas
+        className="codify-atmosphere-canvas absolute inset-0 h-full w-full"
+        maxDimension={1024}
+        active={active}
+      />
       {overlayClass && <div className={`${overlayClass} absolute inset-x-0 top-0`} />}
       {vignette && <div className="absolute inset-0" style={{ background: vignette }} />}
     </div>

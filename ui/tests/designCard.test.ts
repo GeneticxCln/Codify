@@ -373,7 +373,7 @@ test("the body is there to be read, behind a click", () => {
   // list would otherwise swallow the transcript it is sitting in.
   const markup = render(goal({ steps: [step({ status: "COMPLETED" })] }));
   // `renderToStaticMarkup` emits `class=`, not JSX's `className=`.
-  assert.match(markup, /<details class="text-xs text-gray-400">/);
+  assert.match(markup, /<details class="text-xs text-codify-muted">/);
   assert.doesNotMatch(markup, /<details[^>]*\bopen\b/);
   assert.ok(markup.includes("ink #0d1117"), "the body is rendered, not merely counted");
   assert.match(text(markup), new RegExp(`\\(${BODY.length} chars\\)`));

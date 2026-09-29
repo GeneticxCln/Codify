@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { AgentConfig, AgentConfigPatch, AgentRole } from "../types";
+import type { AgentConfig, AgentConfigPatch, AgentRole } from "../types.ts";
 import { tauriInvoke } from "../api";
 
 /**

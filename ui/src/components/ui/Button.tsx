@@ -25,15 +25,27 @@ export type ButtonSize = "sm" | "md";
  * reached by keyboard, which is the defect `DESIGN.md` §5 rules out.
  */
 const TONES: Record<ButtonTone, string> = {
+  // `brightness`, not a second colour. These two tones used to be
+  // `hover:bg-codify-accent` and `hover:bg-codify-danger/20` — a themed fill that snapped back
+  // to Tailwind the moment you touched it, which is the "click the button and it
+  // stops matching the theme" report exactly. A filter derives from whatever the
+  // theme published, so hover and rest can never be two different palettes, and
+  // a tenth theme needs no edit here.
+  //
+  // `text-codify-bg` rather than white: the app's own background is the one token
+  // guaranteed to contrast with a saturated fill in every theme. It is also the
+  // *better* answer in the default theme — near-black on `#418cf8` is 5.7:1
+  // where white is 3.4:1, and white on ASCII rain's near-white accent would have
+  // been a white button with no writing on it.
   primary:
-    "bg-codify-accent text-white hover:bg-blue-500 active:bg-blue-600 shadow",
+    "bg-codify-accent text-codify-bg hover:brightness-110 active:brightness-95 shadow",
   subtle:
     "bg-codify-raised text-codify-secondary border border-codify-border " +
     "hover:bg-codify-border hover:text-codify-primary",
   ghost:
     "bg-transparent text-codify-muted border border-transparent " +
     "hover:bg-codify-raised hover:text-codify-primary",
-  danger: "bg-codify-danger text-white hover:bg-red-500 shadow",
+  danger: "bg-codify-danger text-codify-bg hover:brightness-110 shadow",
 };
 
 const SIZES: Record<ButtonSize, string> = {

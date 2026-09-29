@@ -17,6 +17,7 @@ import {
   ModelOption,
   AgentConfig,
   RecentRunModel,
+  ShellTabRow,
 } from "./types";
 import { buildModelSignals } from "./modelSignals";
 import { openEngineStream } from "./engineStream";
@@ -59,8 +60,17 @@ import {
   closeTerminal,
   navigateBrowserWebview,
   openBrowserWebview,
+  openBrowserDevtools,
+  closeBrowserDevtools,
+  browserDevtoolsAvailable,
+  focusBrowserWebview,
+  resizeBrowserWebviews,
+  type BrowserBounds,
   openTerminal,
   resizeTerminal,
+  listShellTabs,
+  upsertShellTab,
+  deleteShellTab,
 } from "./api";
 import {
   runGoalAction,
@@ -81,20 +91,38 @@ import { Logo } from "./components/ui/Logo";
 import { Toggle } from "./components/ui/Toggle";
 import { statusTone } from "./statusTone";
 import { BottomCommandBar, ExecutionMode } from "./components/BottomCommandBar";
+import { StaleAuthBanner } from "./components/StaleAuthBanner";
 import { Sidebar } from "./components/Sidebar";
 import { TabBar } from "./components/TabBar";
+import { NewTabButton } from "./components/NewTabButton";
+import {
+  acknowledge,
+  activeKeyOf,
+  ensureKeys,
+  layoutFrom,
+  layoutStorage,
+  planChanges,
+  readLayoutMirror,
+  reconcile,
+  writeLayoutMirror,
+  type Mirror,
+} from "./layoutSync";
+import { restoreTabs } from "./tabPersistence";
 import {
   activeTab,
-  closeBrowserTab,
   closeTab,
   emptyTabs,
   focusTab,
   markTerminalExited,
   openBrowserTab,
   openConversation,
+  openBlankTab,
   openTab,
   openTerminalTab,
+  renameBrowserTab,
   renameTab,
+  setBrowserHistory,
+  setBrowserPageUrl,
   setBrowserUrl,
   tabForConversation,
   closeConversation,
@@ -104,10 +132,14 @@ import {
 import {
   goBack,
   goForward,
+  pageNavigation,
   visit,
+  hostOf,
   type BrowserHistory,
+  type InFlightNavigations,
 } from "./browserHistory";
 import { BrowserPane } from "./components/BrowserPane";
+import { classifyBrowserAddress } from "./browserDispatch";
 import { TerminalPane } from "./components/TerminalPane";
 import { DEFAULT_GRID, type Grid } from "./terminalModel";
 import { StatsPanel } from "./components/StatsPanel";
@@ -118,11 +150,37 @@ import { CommandPalette } from "./components/CommandPalette";
 import { buildPaletteItems, type PaletteItem } from "./commandPalette";
 import { resolveShortcut } from "./shortcuts";
 import {
-  BROWSER_WINDOW_CLOSED,
+  BROWSER_PAGE_LOADED,
+  BROWSER_PAGE_LOADING,
+  BROWSER_PAGE_TITLED,
+  BROWSER_POPUP_REQUESTED,
   listenShellEvent,
-  readBrowserWindowClosed,
+  readBrowserPopupRequested,
+  readTerminalExit,
+  readTerminalOutput,
+  TERMINAL_EXIT,
+  TERMINAL_OUTPUT,
 } from "./shellEvents";
+import {
+  applyShellStarvation,
+  readMotion,
+  rearmVerdictForBoot,
+  writeSetting,
+  MOTION_EVENT,
+  type MotionState,
+} from "./motionPreference";
+import {
+  LOADING_TIMEOUT_MS,
+  pageTitlePayload,
+  readBrowserPageState,
+} from "./browserPageState";
 import { openGoalStream, GoalStreamHandle } from "./goalStream";
+import {
+  ownsTerminal,
+  recordExit,
+  recordOutput,
+  retireTerminal,
+} from "./terminalBuffer";
 import { readRejection } from "./rejection.ts";
 import { threadTitleFromPrompt } from "./threadTitle";
 import {
@@ -201,11 +259,167 @@ export const App: React.FC = () => {
   // arithmetic (`ui/src/tabs.ts`) because "where do I land when a tab closes"
   // is the kind of thing that is easy to get subtly wrong and impossible to see
   // in markup.
-  const [tabState, setTabState] = useState<TabState>(emptyTabs);
-  // Threads in the selected workspace, for the side panel. Owned by the engine
-  // and listed here, so a conversation outlives the window that opened it.
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [conversationsLoading, setConversationsLoading] = useState(false);
+  //
+  // Restored from the shell's own storage, synchronously, before the first
+  // paint: the pages are native webviews of *this* process, so waiting for the
+  // engine would only delay a strip that does not need it. Ids are minted
+  // fresh on the way in (`tabPersistence.ts` says why) and the tab order and
+  // the focused tab are the ones that were left. A store that is empty,
+  // unreadable or has never held a layout all restore to `emptyTabs`, which
+  // is exactly what a first run is.
+  //
+  // The mirror first, with no round trip: the pages are native webviews of
+  // *this* process, so a window that waits for the engine to draw its tabs is a
+  // window that shows nothing when the engine is down — even though the pages
+  // would have painted. The engine's copy of the strip is folded in underneath
+  // this one by the effect below, which is also where a tab that only the
+  // engine knows about arrives.
+  const [tabState, setTabState] = useState<TabState>(() =>
+    ensureKeys(
+      restoreTabs(
+        emptyTabs,
+        readLayoutMirror(layoutStorage()).layout,
+      ),
+    ).state,
+  );
+  // The mirror, and what the engine has and has not been told. A ref, not state:
+  // it is bookkeeping for the sync effect, and putting it in state would mean a
+  // strip write re-rendering the window that made it.
+  const layoutMirror = useRef<Mirror>(readLayoutMirror(layoutStorage()));
+  // Keys the engine has confirmed it holds, so an unchanged strip costs nothing
+  // on a poll. Seeded from the mirror's pending writes: a tab this window pushed
+  // but never had acknowledged is still "not known" until the engine says so.
+  const engineKnown = useRef<Set<string>>(new Set());
+  // Terminal tabs whose shell spoke while no pane was displaying: the tab
+  // strip badges them, the way a mail client badges a background folder. The
+  // facts arrive one chunk at a time from the recorder below — `recordOutput`
+  // returns whether it *kept* the chunk, which is exactly "nobody was
+  // displaying this terminal" — and they are cleared the moment the user
+  // shows the tab. Kept in App, not in the store: which tabs the user has
+  // looked at is a view concern, and the store's answer (the backlog) is
+  // already the durable half.
+  const [unreadTerminalIds, setUnreadTerminalIds] = useState<Set<string>>(
+    () => new Set()
+  );
+
+  // ── the terminal recorder: what no mounted pane is there to catch ──────
+  //
+  // A pane subscribes only while it is mounted, and it is mounted only while
+  // its tab is active — so a background terminal's output used to be emitted
+  // to nobody and dropped, gone from the live pane and from the workspace
+  // scrollback alike. This subscription lives at the app, for as long as the
+  // app does, and the store (`terminalBuffer.ts`) decides per chunk who
+  // records it: an unowned terminal's chunk is held as backlog, an owned
+  // terminal's chunk is left to its pane, which displays and files it.
+  //
+  // Read through a ref rather than state so the subscription is keyed to the
+  // mount alone — the same discipline `TerminalPane` uses. `setTabState` in
+  // the updater would otherwise be a dependency that re-subscribes every time
+  // a tab moves, and the point of this listener is that it never does.
+  const tabStateRef = useRef(tabState);
+  useEffect(() => {
+    tabStateRef.current = tabState;
+  }, [tabState]);
+  useEffect(() => {
+    let disposed = false;
+    const offs: Array<() => void> = [];
+    const track = (pending: Promise<() => void>): void => {
+      void pending.then((off) => {
+        if (disposed) off();
+        else offs.push(off);
+      });
+    };    track(
+      listenShellEvent<unknown>(TERMINAL_OUTPUT, (payload) => {
+        const chunk = readTerminalOutput(payload);
+        if (!chunk) return;
+        const kept = recordOutput(chunk.id, chunk.data);
+        if (!kept) return;
+        // The recorder kept the chunk, so no pane is displaying this terminal
+        // — but the *active tab* check still matters: in the window between a
+        // pane mounting and its claim landing, chunks are kept by the store
+        // even though the user is looking at the tab. Badging the tab the
+        // user is reading would make the badge a lie about attention, which
+        // is the one thing a badge must not be.
+        const active = tabStateRef.current.activeId;
+        if (active === chunk.id) return;
+        setUnreadTerminalIds((prev) => {
+          if (prev.has(chunk.id)) return prev;
+          const next = new Set(prev);
+          next.add(chunk.id);
+          return next;
+        });
+      })
+    );
+    track(
+      listenShellEvent<unknown>(TERMINAL_EXIT, (payload) => {
+        const ptyId = readTerminalExit(payload);
+        if (!ptyId) return;
+        recordExit(ptyId);
+        // An unowned shell finished unseen: its record is complete as of
+        // now, so file it while the store still holds it. An owned one's
+        // pane does this itself — that bargain lives in the store's docs.
+        if (!ownsTerminal(ptyId)) {
+          const ws = tabStateRef.current.tabs.find(
+            (t) => t.id === ptyId && t.kind === "terminal"
+          )?.workspaceId;
+          retireTerminal(ptyId, ws);
+        }
+        // The badge outlives the shell: a background exit is precisely the
+        // moment the user most needs pointing at the tab — the build finished
+        // (or failed) while they were elsewhere, and the output is still
+        // unseen. What *is* seen is an exit on a pane the user is watching,
+        // which is the owned case: clear it there.
+        if (ownsTerminal(ptyId)) {
+          setUnreadTerminalIds((prev) => {
+            if (!prev.has(ptyId)) return prev;
+            const next = new Set(prev);
+            next.delete(ptyId);
+            return next;
+          });
+        }
+      })
+    );
+    return () => {
+      disposed = true;
+      for (const off of offs) off();
+    };
+  }, []);
+  // Threads are cached by workspace so switching projects changes only the
+  // side-panel list, never the global set of open tabs. A late response for one
+  // project cannot replace the list belonging to another.
+  const [conversationsByWorkspace, setConversationsByWorkspace] = useState<
+    Record<string, Conversation[]>
+  >({});
+  const conversations = selectedWs
+    ? conversationsByWorkspace[selectedWs.id] ?? []
+    : [];
+  const [conversationsLoadingByWorkspace, setConversationsLoadingByWorkspace] =
+    useState<Record<string, boolean>>({});
+  const conversationsLoading = selectedWs
+    ? Boolean(conversationsLoadingByWorkspace[selectedWs.id])
+    : false;
+  const conversationRequestsByWorkspace = useRef<Record<string, number>>({});
+  const conversationRevisionsByWorkspace = useRef<Record<string, number>>({});
+  const selectedWorkspaceIdRef = useRef<string | undefined>(selectedWs?.id);
+  useEffect(() => {
+    selectedWorkspaceIdRef.current = selectedWs?.id;
+  }, [selectedWs?.id]);
+  const updateWorkspaceConversations = useCallback(
+    (
+      workspaceId: string,
+      update: (current: Conversation[]) => Conversation[],
+    ) => {
+      conversationRevisionsByWorkspace.current[workspaceId] =
+        (conversationRevisionsByWorkspace.current[workspaceId] ?? 0) + 1;
+      setConversationsByWorkspace((previous) => ({
+        ...previous,
+        [workspaceId]: update(previous[workspaceId] ?? []),
+      }));
+    },
+    [],
+  );
+  // Threads belong to the engine and are listed by their project, so they
+  // outlive the window that opened them.
   const [isLoading, setIsLoading] = useState(false);
   // The goal currently in flight, so the command bar can offer to stop it. This is
   // deliberately not `isLoading`: that flag is set while a goal is being *dispatched*
@@ -223,6 +437,31 @@ export const App: React.FC = () => {
   };
   const [error, setError] = useState<string | null>(null);
   const [engineUp, setEngineUp] = useState<boolean | null>(null); // null = checking
+  // The motion store, as React state so a change re-renders the tree and every
+  // backdrop's effect re-reads it on the way past (the loops read the store at
+  // effect time, not per frame — a decision that belongs to the mount, not the
+  // clock). The shell's starvation verdict arrives through this: the one party
+  // that pays for a software-rasterised backdrop is the process that announces
+  // it, and a frozen window cannot reach a settings pane to ask for relief.
+  const [motion, setMotion] = useState<MotionState>(() => {
+    rearmVerdictForBoot();
+    return readMotion();
+  });
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let cancelled = false;
+    void listenShellEvent<number>(MOTION_EVENT, (measuredMs) => {
+      if (cancelled) return;
+      setMotion(applyShellStarvation({ at: Date.now(), measuredMs }));
+    }).then((unlisten) => {
+      if (cancelled) unlisten();
+      else off = unlisten;
+    });
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, []);
   /**
    * What the engine said on its way out, read from the shell that tailed its
    * stderr. Shown only while the engine is down, and fetched once per outage:
@@ -242,6 +481,8 @@ export const App: React.FC = () => {
   const loadWorkspacesRef = useRef<(() => void) | null>(null);
   const loadModelsRef = useRef<((refresh?: boolean) => void) | null>(null);
   const loadModelSignalsRef = useRef<(() => void) | null>(null);
+  // The health probe's latest body, for the auth-stale banner's retry button.
+  const forceHealthProbeRef = useRef<(() => void) | null>(null);
 
   // Live engine liveness probe — replaces the old hardcoded green pill.
   // Polls /health every 3s; backs off while the tab is hidden.
@@ -256,9 +497,47 @@ export const App: React.FC = () => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const probe = async () => {
       if (cancelled) return;
+      // **Ask the shell before believing the address we cached.** `api.ts`
+      // seeds `currentEngine` from `localStorage`, and that is a fact about a
+      // *previous* process — an address that can name a live engine belonging
+      // to somebody else: another build, another `CODIFY_HOME`, or a test run
+      // whose window shares this WebKit profile (a dev server is one origin,
+      // so `localStorage` is one origin's). A health check cannot tell "our
+      // engine" from "an engine": the cached token is a real one and the other
+      // engine answers as authenticated. So the shell — the only party that
+      // watched *this* window's handshake — is asked first, and its answer is
+      // applied before anything reads or writes the strip. The cost of not
+      // asking is measured, and it landed in the developer's real strip: a
+      // `make smoke-tabs` run wrote its own tab into whichever engine the cache
+      // named, once per run, 129 rows of `example.com/tabs-smoke` deep.
+      //
+      // Outside the shell there is nothing to ask and the cached pair is the
+      // only address there is; `refreshEngineInfoFromIpc` returns null there
+      // (see its doc), so the standalone browser build is unchanged.
+      const fromShell = await refreshEngineInfoFromIpc();
+      if (cancelled) return;
+      if (fromShell) {
+        // A different engine is a different set of configured providers, so
+        // the two loads the recovery path below already makes are made here
+        // too — once, because this only answers when the pair *changed*.
+        loadWorkspacesRef.current?.();
+        loadModelsRef.current?.(true);
+      }
       let health = await checkEngineHealth();
       if (cancelled) return;
-      if (health.ok && !health.authenticated) {
+      // Ask the shell for fresh connection info on **either** half of a stale
+      // connection, not just the authenticated one. `ok && !authenticated` is
+      // the case this recovery was built for — some engine *is* there, it just
+      // does not know us. But `!ok` has a second reading the old guard
+      // silently dropped: nothing answered at the port we hold, and the reason
+      // may be that the engine is alive somewhere else. The shell tracks the
+      // live process's handshake, so it is the one party that can say; a
+      // changed answer is applied and the probe re-runs immediately. Without
+      // this, an engine that moved ports after a restart (or a desktop app
+      // whose localStorage names a port another session chose) leaves the
+      // window red until a restart of the whole app — `!ok` was read as "the
+      // engine is down", and "down somewhere else" is a different fact.
+      if ((health.ok && !health.authenticated) || !health.ok) {
         const fresh = await refreshEngineInfoFromIpc();
         if (cancelled) return;
         if (fresh) {
@@ -278,9 +557,14 @@ export const App: React.FC = () => {
       const next = document.hidden ? 15000 : 3000;
       timer = setTimeout(probe, next);
     };
+    // The auth-stale banner's "Retry now" runs the same probe — one code path
+    // for the automatic check and the user's, so a retry cannot disagree with
+    // what the poll would have concluded.
+    forceHealthProbeRef.current = probe;
     probe();
     return () => {
       cancelled = true;
+      forceHealthProbeRef.current = null;
       if (timer) clearTimeout(timer);
     };
   }, []);
@@ -611,59 +895,133 @@ export const App: React.FC = () => {
   // ── the side panel ────────────────────────────────────────────────
 
   const loadConversations = useCallback(async () => {
-    if (!selectedWs) {
-      setConversations([]);
-      return;
-    }
-    setConversationsLoading(true);
+    const workspaceId = selectedWs?.id;
+    if (!workspaceId) return;
+
+    const requestId =
+      (conversationRequestsByWorkspace.current[workspaceId] ?? 0) + 1;
+    conversationRequestsByWorkspace.current[workspaceId] = requestId;
+    let revision = conversationRevisionsByWorkspace.current[workspaceId] ?? 0;
+    setConversationsLoadingByWorkspace((previous) => ({
+      ...previous,
+      [workspaceId]: true,
+    }));
     try {
-      setConversations(await fetchConversations(selectedWs.id));
-    } catch (err: any) {
-      setError(readRejection(err, "Failed to load conversations"));
+      while (
+        conversationRequestsByWorkspace.current[workspaceId] === requestId
+      ) {
+        let loaded: Conversation[];
+        try {
+          loaded = await fetchConversations(workspaceId);
+        } catch (err) {
+          if (
+            conversationRequestsByWorkspace.current[workspaceId] !== requestId
+          ) {
+            return;
+          }
+          const currentRevision =
+            conversationRevisionsByWorkspace.current[workspaceId] ?? 0;
+          // A create, rename or archive may have completed while the request
+          // was in flight. Retry so the selected project's list is complete.
+          if (currentRevision !== revision) {
+            revision = currentRevision;
+            continue;
+          }
+          if (selectedWorkspaceIdRef.current === workspaceId) {
+            setError(readRejection(err, "Failed to load conversations"));
+          }
+          return;
+        }
+
+        if (
+          conversationRequestsByWorkspace.current[workspaceId] !== requestId
+        ) {
+          return;
+        }
+        const currentRevision =
+          conversationRevisionsByWorkspace.current[workspaceId] ?? 0;
+        if (currentRevision !== revision) {
+          revision = currentRevision;
+          continue;
+        }
+        // The engine query is already project-scoped; verify the response too
+        // so a malformed or stale payload can never cross the panel boundary.
+        setConversationsByWorkspace((previous) => ({
+          ...previous,
+          [workspaceId]: loaded.filter(
+            (conversation) => conversation.workspace_id === workspaceId,
+          ),
+        }));
+        return;
+      }
     } finally {
-      setConversationsLoading(false);
+      if (conversationRequestsByWorkspace.current[workspaceId] === requestId) {
+        setConversationsLoadingByWorkspace((previous) => ({
+          ...previous,
+          [workspaceId]: false,
+        }));
+      }
     }
-  }, [selectedWs]);
+  }, [selectedWs?.id]);
 
   useEffect(() => {
     void loadConversations();
   }, [loadConversations]);
 
-  /** Start a thread and open its tab. The panel's only creation action. */
-  const handleNewChat = useCallback(async () => {
-    if (!selectedWs) return;
-    try {
-      const convo = await createConversation(selectedWs.id);
-      setConversations((prev) => [convo, ...prev]);
-      setTabState((prev) =>
-        openConversation(prev, convo.id, convo.title, convo.workspace_id),
-      );
-    } catch (err: any) {
-      setError(readRejection(err, "Failed to start a conversation"));
-    }
-  }, [selectedWs]);
+  /**
+   * Open a clean slate in the selected project.
+   *
+   * ## No conversation is created, and that is the change
+   *
+   * This used to call the engine before it opened anything, so a tab *was* a
+   * conversation from the moment it appeared \u2014 pressing the button to look
+   * around left an empty conversation behind, named from a prompt nobody wrote,
+   * and the side panel grew a row for it. A tab is now a project's window and
+   * nothing else: the thread is created by the first prompt, in the send path,
+   * which is the only place that has the prompt to name it with. So the button
+   * is now synchronous, cannot fail, and leaves no trace if the tab is closed
+   * again unused.
+   *
+   * It is also the *only* new-tab control. The side panel lost its New Thread
+   * button, because that button created a thread and opened a tab for it \u2014
+   * which is this control wearing a different name, in the wrong place, with
+   * two steps.
+   */
+  const handleNewTab = useCallback(() => {
+    const workspaceId = selectedWs?.id;
+    if (!workspaceId) return;
+    setTabState((prev) => openBlankTab(prev, workspaceId));
+  }, [selectedWs?.id]);
 
   /**
-   * Start a thread *on* the thread the gesture was made in, and open its tab.
+   * Start a thread *on* the thread the gesture was made in, and show it.
    *
    * The menu's "New thread", and the reason it is a separate handler from
-   * `handleNewChat` rather than a second call to it. A new thread with no
+   * `handleNewTab` rather than a second call to it. A new thread with no
    * `parent_id` is a brand-new chat: a different object that happened to be
    * triggered by a button with the same name, and the reader has no way to tell
    * them apart until an unrelated empty tab is already open. `parentConversationId`
    * undefined — nothing is showing — is a top-level thread, which is the honest
    * answer rather than a failure: there was no chat to branch off.
+   *
+   * The thread is *created* here, unlike a blank tab, because a menu item that
+   * opens a branch must be about something to branch from. A clean slate is not
+   * about a thread at all, so it waits for the first prompt to make one.
    */
   const handleNewThread = useCallback(
     async (parentConversationId?: string) => {
-      if (!selectedWs) return;
+      const workspaceId = selectedWs?.id;
+      if (!workspaceId) return;
       try {
         const convo = await createConversation(
-          selectedWs.id,
+          workspaceId,
           "",
           parentConversationId,
         );
-        setConversations((prev) => [convo, ...prev]);
+        updateWorkspaceConversations(convo.workspace_id, (previous) => [
+          convo,
+          ...previous.filter((existing) => existing.id !== convo.id),
+        ]);
         setTabState((prev) =>
           openConversation(prev, convo.id, convo.title, convo.workspace_id),
         );
@@ -671,15 +1029,17 @@ export const App: React.FC = () => {
         setError(readRejection(err, "Failed to start a thread"));
       }
     },
-    [selectedWs],
+    [selectedWs?.id, updateWorkspaceConversations],
   );
 
   /**
-   * Show a thread, in its own tab.
+   * Show a thread, in its project's tab.
    *
-   * `openConversation` is where "already open means focus it, not open it twice"
-   * lives, so this handler does not have to know: one tab per thread, and the
-   * strip is the set of threads you currently have open.
+   * `openConversation` is where the whole rule lives: a thread already on screen
+   * is focused, a thread in the project of the tab you are looking at replaces
+   * what that tab was showing, and anything else gets a tab of its own. This
+   * handler only has to name the thread \u2014 which is the side panel's entire job
+   * now, and why the panel has no new-tab control left to get wrong.
    */
   const handleSelectConversation = useCallback(
     (conversationId: string) => {
@@ -718,15 +1078,16 @@ export const App: React.FC = () => {
   );
 
   // Every close in the shell goes through here — the strip's close button, the
-  // ⌘W shortcut, and the browser pane — because a browser tab's webview is a
-  // separate OS window that has to be told to go. Two seams would be two ways
-  // to orphan a running page: close the tab one way and the window stays.
+  // ⌘W shortcut, and the browser pane — because a browser tab's page is a
+  // child webview of this window that has to be told to go. Two seams would be
+  // two ways to orphan a running page: close the tab one way and the webview
+  // survives, still painting itself over whatever the user switched to.
   //
   // The kind is read from this render's tab list rather than from inside the
   // state updater: an updater must stay pure, and React runs it twice under
   // StrictMode — a shell call inside it would fire twice per click.
   //
-  // `tab.url` is the test for "does this tab own a window". A browser tab that
+  // `tab.url` is the test for "does this tab own a page". A browser tab that
   // was opened but never given an address has no webview, and `close` refuses
   // a tab that has none — so calling it would put the shell's "no browser tab
   // is open" on screen as an error the user caused by closing an empty tab.
@@ -735,6 +1096,23 @@ export const App: React.FC = () => {
       setTabState((prev) => closeTab(prev, id));
       const tab = tabState.tabs.find((t) => t.id === id);
       if (tab?.kind === "terminal") {
+        // A pane that is not mounted never claimed its terminal, so the store
+        // still holds what the shell said while this tab sat in the
+        // background — and nothing mounted will ever claim it now. File the
+        // backlog into the workspace's scrollback before the PTY goes: the
+        // guarantee is that what a terminal said is what the next pane in
+        // this workspace restores, including one the user has since closed.
+        // (An owned terminal's release happens in the pane's own cleanup.)
+        if (!ownsTerminal(id)) {
+          retireTerminal(id, tab.workspaceId);
+        }
+        // And the badge goes with the tab: there is nothing left to point at.
+        setUnreadTerminalIds((prev) => {
+          if (!prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
         // No `ptyId` guard, unlike a browser tab's `url`. `terminal::close`
         // returns `Ok(())` for an id it does not hold, so calling it for a tab
         // whose shell has already exited is the documented quiet path rather
@@ -746,7 +1124,7 @@ export const App: React.FC = () => {
       if (tab?.kind === "browser" && tab.url) {
         void closeBrowserWebview(id).catch((err: any) =>
           setError(
-            readRejection(err, "Could not close that tab's browser window"),
+            readRejection(err, "Could not close that tab's browser page"),
           ),
         );
       }
@@ -767,14 +1145,181 @@ export const App: React.FC = () => {
   // when it arrived would be a lie. Navigating a second tab while one is in
   // flight is not lost either — the first error is cleared by the second
   // `setPending`, and the second tab keeps its own history.
+  // The content rectangle the browser pages are seated on, in logical pixels,
+  // as the active pane last reported it. A ref, not state: the pages all share
+  // one rectangle by construction, and a layout report must not re-render the
+  // tree it is measuring. Read by `handleOpenBrowser` — the only call that
+  // creates a page, and one that can only follow a mount-time report.
+  const browserBoundsRef = useRef<BrowserBounds | null>(null);
+  // Tabs whose page the shell has already been asked for, this process. One set
+  // answering one question for *both* callers — the address bar and the restore
+  // seat below — because the question is the same and the answer has to be
+  // shared: if only the seat path recorded, it would re-open a page the address
+  // bar had just opened, and an in-flight seat would then land *after* a
+  // navigation the user had already asked for and drag the page back to where it
+  // was. There is no "is this webview open?" command to ask instead: the pages
+  // live in the shell process, and the UI is told about them, not able to query
+  // them.
+  const attemptedSeats = useRef<Set<string>>(new Set());
+  // The same rectangle as state, for the one caller that must *react* to it:
+  // the effect that seats a restored page. The ref above is deliberate for
+  // every other reader — a layout report must not re-render the tree it is
+  // measuring — and a restored tab is exactly the case where waiting for a
+  // render is the point, since the page cannot be seated before the pane has
+  // been measured (the shell refuses a zero-sized pane by design, §7.2).
+  const [browserBounds, setBrowserBounds] = useState<BrowserBounds | null>(null);
+  const browserResizeTimerRef = useRef<number | null>(null);
+  const handleBrowserBounds = useCallback((bounds: BrowserBounds) => {
+    browserBoundsRef.current = bounds;
+    setBrowserBounds((prev) =>
+      prev &&
+      prev.x === bounds.x &&
+      prev.y === bounds.y &&
+      prev.width === bounds.width &&
+      prev.height === bounds.height
+        ? prev
+        : bounds
+    );
+    // The pane's observer fires on every layout change; the shell's resize is
+    // cheap but not free, and a drag across the window edge would otherwise
+    // queue dozens. Coalesced, the last rectangle wins — the one the user
+    // ended on.
+    if (browserResizeTimerRef.current !== null) {
+      window.clearTimeout(browserResizeTimerRef.current);
+    }
+    browserResizeTimerRef.current = window.setTimeout(() => {
+      browserResizeTimerRef.current = null;
+      const current = browserBoundsRef.current;
+      if (current) void resizeBrowserWebviews(current).catch(() => {});
+    }, 120);
+  }, []);
+
+  // The DevTools inspector's state, as the shell last reported it. One tab at
+  // a time holds it — the inspector belongs to one page — and the toggle is
+  // optimistic-free: the state changes when the shell confirms, so the
+  // control's `aria-pressed` is the inspector's fact, not the press's.
+  const [devtoolsTabId, setDevtoolsTabId] = useState<string | null>(null);
+  // Whether this build has an inspector at all, as the shell answers. Asked
+  // once per mount rather than hardcoded: a build without the feature hides
+  // the control instead of offering a command the shell does not have. In the
+  // standalone (no-shell) build the answer is a refusal, and refusing to show
+  // an inspector is the correct reading of it.
+  const [devtoolsAvailable, setDevtoolsAvailable] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void browserDevtoolsAvailable()
+      .then((available) => {
+        if (!cancelled) setDevtoolsAvailable(available);
+      })
+      .catch(() => {
+        if (!cancelled) setDevtoolsAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const handleToggleDevtools = useCallback(
+    (id: string) => {
+      if (devtoolsTabId === id) {
+        void closeBrowserDevtools(id)
+          .then(() => setDevtoolsTabId(null))
+          .catch((err: any) =>
+            setPendingBrowser({ tabId: id, error: readRejection(err, "Could not close the inspector") }),
+          );
+        return;
+      }
+      // Opening over another tab's inspector closes that one in the shell's
+      // own accounting only if the shell says so; here the state simply moves.
+      void openBrowserDevtools(id)
+        .then(() => setDevtoolsTabId(id))
+        .catch((err: any) =>
+          setPendingBrowser({ tabId: id, error: readRejection(err, "Could not open the inspector") }),
+        );
+    },
+    [devtoolsTabId],
+  );
+
+  // ── the page's life, as it reports itself ─────────────────────────────
+  //
+  // Three facts arrive from the shell: a load started, a load finished
+  // (carrying the address it actually reached — redirects included), and
+  // the document titled itself. They land on the tab strip: a loading
+  // marker with a bounded lifetime, and a tab titled by the page.
+  //
+  // Bounded is load-bearing. The runtime has no failed-load event, so
+  // "loading" means "Started, no Finished yet" — and a page that dies into
+  // WebKit's TLS interstitial never sends Finished. The marker expires on
+  // a timer (LOADING_TIMEOUT_MS) and the interstitial is the story, not a
+  // spinner that lies about progress forever.
+  const [loadingBrowserIds, setLoadingBrowserIds] = useState<Set<string>>(
+    () => new Set()
+  );
+  const loadingTimersRef = useRef<Map<string, number>>(new Map());
+  const clearLoadingTimer = useCallback((id: string) => {
+    const timer = loadingTimersRef.current.get(id);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      loadingTimersRef.current.delete(id);
+    }
+  }, []);
+  const startLoading = useCallback(
+    (id: string) => {
+      clearLoadingTimer(id);
+      setLoadingBrowserIds((prev) => {
+        if (prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+      // The expiry, not a guess of success: a load that finished clears its
+      // own marker before this fires, and one that never finishes stops
+      // spinning here.
+      loadingTimersRef.current.set(
+        id,
+        window.setTimeout(() => {
+          loadingTimersRef.current.delete(id);
+          setLoadingBrowserIds((prev) => {
+            if (!prev.has(id)) return prev;
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        }, LOADING_TIMEOUT_MS)
+      );
+    },
+    [clearLoadingTimer]
+  );
+  const stopLoading = useCallback(
+    (id: string) => {
+      clearLoadingTimer(id);
+      setLoadingBrowserIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
+    [clearLoadingTimer]
+  );
+
   const [pendingBrowser, setPendingBrowser] = useState<{
     tabId: string;
     error: string | null;
   } | null>(null);
 
+  // Every address the shell is loading right now, per tab.
+  //
+  // This is the whole of what tells a navigation the user asked for from one a
+  // page decided on its own — the shell announces both through the same
+  // `browser-page-loading` event, and the two are indistinguishable once they
+  // arrive. Recorded *before* the invoke rather than after it, because the
+  // load event for this very navigation can beat the invoke's own answer back.
+  const inFlightBrowserCommands = useRef<InFlightNavigations>({});
+
   const sendToBrowser = useCallback(
     async (tabId: string, url: string, history: BrowserHistory) => {
       setPendingBrowser({ tabId, error: null });
+      inFlightBrowserCommands.current[tabId] = url;
       try {
         await navigateBrowserWebview(tabId, url);
         setTabState((prev) => setBrowserUrl(prev, tabId, url, history));
@@ -782,6 +1327,10 @@ export const App: React.FC = () => {
         // The tab is left exactly where it was. Recording the address before
         // the shell accepted it would have the address bar claim a page that
         // never loaded, and Back would walk into a place the user never was.
+        // The command goes with it: a refused address loads nothing, so no
+        // load event will ever answer it, and a stale command would make the
+        // next page-initiated load look like an answer to this one.
+        delete inFlightBrowserCommands.current[tabId];
         setPendingBrowser({
           tabId,
           error: readRejection(err, "Could not open that address"),
@@ -789,6 +1338,31 @@ export const App: React.FC = () => {
       }
     },
     [],
+  );
+
+  // A page announced an address: is it somewhere new the user has been?
+  //
+  // The decision is `browserHistory.pageNavigation`'s and the ref is written
+  // outside the state updater, because an updater may run more than once in a
+  // render and a ref that "forgets a spent command" must forget it once. When
+  // the answer is "the shell asked for this", `pageNavigation` hands the very
+  // same history object back, and that identity is what says no state changed.
+  const notePageNavigation = useCallback(
+    (tabId: string, url: string) => {
+      const tab = tabState.tabs.find((t) => t.id === tabId && t.kind === "browser");
+      if (!tab?.history) return;
+      const outcome = pageNavigation(
+        inFlightBrowserCommands.current,
+        tabId,
+        url,
+        tab.history
+      );
+      inFlightBrowserCommands.current = outcome.commands;
+      if (outcome.history !== tab.history) {
+        setTabState((prev) => setBrowserHistory(prev, tabId, outcome.history));
+      }
+    },
+    [tabState.tabs]
   );
 
   // The address bar's first move, which is the only one that creates a window.
@@ -804,8 +1378,23 @@ export const App: React.FC = () => {
   // id no tab had is how typing an address came to do nothing at all.
   const handleOpenBrowser = useCallback(async (id: string, url: string) => {
     setPendingBrowser({ tabId: id, error: null });
+    // The mirror's pre-flight: an address the shell will refuse is refused
+    // here, before the round trip, so no page is ever seated for one. The
+    // shell stays the enforcement point; this is the same answer, earlier.
+    const classified = classifyBrowserAddress(url, id);
+    if (classified.kind === "refuse") {
+      setPendingBrowser({ tabId: id, error: classified.reason });
+      return;
+    }
     try {
-      await openBrowserWebview(id, url);
+      await openBrowserWebview(
+        id,
+        url,
+        browserBoundsRef.current ?? { x: 0, y: 0, width: 0, height: 0 },
+      );
+      // The shell has this page now, so the restore seat must not open it a
+      // second time (see `attemptedSeats`).
+      attemptedSeats.current.add(id);
       // The folder is recorded for the same reason a chat tab records one: the
       // strip says which folder a tab is in, and a browser tab that never did
       // was the odd one out.
@@ -830,6 +1419,220 @@ export const App: React.FC = () => {
     [tabState.tabs, sendToBrowser],
   );
 
+  // Seat a page the shell has no webview for, because the tab that wants it
+  // was restored from storage and every webview died with the last process.
+  //
+  // Deliberately *not* `handleOpenBrowser`: that one creates a tab from an
+  // address bar, and creating the tab is what resets its stack
+  // (`openBrowserTab` starts a fresh one-entry history). A restored tab's stack
+  // is the thing this feature exists to keep, so this opens the page and
+  // touches no tab state at all — the tab already says which address it is on
+  // and where it has been.
+  //
+  // The address is not re-classified here because it was classified on the way
+  // in (`tabPersistence.ts` runs every restored address through the same
+  // `classifyBrowserAddress` a typed one goes through) and the shell's
+  // `navigation_allowed` is the enforcement point regardless.
+  const seatBrowserTab = useCallback(
+    async (id: string, url: string, bounds: BrowserBounds) => {
+      setPendingBrowser({ tabId: id, error: null });
+      try {
+        await openBrowserWebview(id, url, bounds);
+      } catch (err: any) {
+        // The tab keeps its address, so the next attempt is a retype rather
+        // than a hunt. The shell's wording is the whole explanation — and the
+        // one refusal a restored tab can hit is the zero-sized pane, which
+        // cannot happen here because the effect only runs once the pane has
+        // reported a real rectangle.
+        setPendingBrowser({
+          tabId: id,
+          error: readRejection(err, "Could not reopen that page"),
+        });
+      }
+    },
+    [],
+  );
+
+  // Seat restored pages, once the pane has been measured.
+  //
+  // One tab at a time on purpose: the pane only exists for the active tab, so a
+  // background tab's rectangle is not known — and a webview seated at 0×0 is
+  // refused by the shell (§7.2's zero-bounds refusal). Focusing a restored tab
+  // is what re-runs this effect for it, which is the same moment the pane
+  // mounts for it.
+  //
+  // What selects a tab here is that it has an address, which is true of every
+  // page the shell has been asked to open — the address bar records the address
+  // *after* the shell accepts it — so "has a url" means "needs a webview" only
+  // for a tab that came from storage. `attemptedSeats` is the other half: it
+  // already holds every id the address bar has opened, so this only ever fires
+  // for a restored tab. Marking before the call keeps a refusal from retrying
+  // on every keystroke of geometry; a user who wants that page again types the
+  // address, which is a different path with a different error.
+  useEffect(() => {
+    if (!browserBounds) return;
+    const tab = activeTab(tabState);
+    if (!tab || tab.kind !== "browser" || !tab.url) return;
+    if (attemptedSeats.current.has(tab.id)) return;
+    attemptedSeats.current.add(tab.id);
+    void seatBrowserTab(tab.id, tab.url, browserBounds);
+  }, [browserBounds, tabState, seatBrowserTab]);
+
+  // Keep the strip remembered, and shared.
+  //
+  // Three things happen here, in this order, and the order is the design (see
+  // `layoutSync.ts` for the whole argument):
+  //
+  // 1. **Mirror, synchronously.** Every tab gets a durable `key` if it has not
+  //    got one, and the layout is written to `localStorage`. This is what makes
+  //    the *next* boot work, including a boot with no engine at all, and it is
+  //    not deferred behind the round trip below.
+  // 2. **Push, coalesced.** Only tabs the engine has not been told about, by
+  //    `planChanges`. A strip that has not changed costs one `GET`, not a write
+  //    per tab; a title change costs one `PUT`.
+  // 3. **Adopt the answer.** Both the push and the pull return the merged
+  //    strip, so a tab closed in *another* window disappears here in the same
+  //    round trip — which is what makes a close shared rather than local.
+  //
+  // The window's own active tab is excluded from what it pushes, deliberately:
+  // which tab a window is *showing* is that window's business (two windows on
+  // one strip show different ones, and neither is wrong), and the engine has no
+  // use for it.
+  useEffect(() => {
+    if (engineUp !== true) return;
+    const keyed = ensureKeys(tabState);
+    if (keyed.state !== tabState) {
+      setTabState(keyed.state);
+      return;
+    }
+    // One plan, computed once against the keys the engine has confirmed. The
+    // mirror is written from the *keyed* strip, so what a crash leaves behind is
+    // a layout whose tabs all have keys — a mirror that could not be pushed is
+    // still a mirror the next boot can read.
+    const plan = planChanges(tabState, layoutMirror.current, engineKnown.current);
+    layoutMirror.current = { ...layoutMirror.current, layout: layoutFrom(tabState) };
+    writeLayoutMirror(layoutStorage(), layoutMirror.current);
+
+    const active = activeKeyOf(tabState);
+    let cancelled = false;
+    void (async () => {
+      try {
+        // Removals first. A tab closed in another window must stop existing
+        // before this window's upserts are read back, or the row it deleted is
+        // simply written again by the next call.
+        let rows: ShellTabRow[] = [];
+        for (const key of plan.removals) {
+          rows = await deleteShellTab(key);
+        }
+        for (const tab of plan.upserts) {
+          rows = await upsertShellTab(tab);
+        }
+        // The catch-up read is what makes the *other* window's changes visible
+        // here, and it is the only call when this window had nothing to say —
+        // which is most runs of this effect, since it fires on every change.
+        if (rows.length === 0) {
+          rows = await listShellTabs();
+        }
+        if (cancelled) return;
+        // What the engine had confirmed *before* this answer is what makes an
+        // absence meaningful: a key that was there and is not now was closed,
+        // while a key it has never heard of is simply not pushed yet. Passing
+        // the post-response set instead would make a fresh engine's empty strip
+        // look like "every tab was closed", and the window would empty itself.
+        const confirmedBefore = engineKnown.current;
+        const known = new Set(rows.map((row) => row.key));
+        engineKnown.current = known;
+        layoutMirror.current = acknowledge(
+          { ...layoutMirror.current, layout: layoutFrom(tabState) },
+          plan,
+          known,
+        );
+        writeLayoutMirror(layoutStorage(), layoutMirror.current);
+        setTabState((prev) =>
+          reconcile(
+            prev,
+            rows,
+            active,
+            layoutMirror.current.pendingRemovals,
+            confirmedBefore,
+          ),
+        );
+      } catch {
+        // The engine is down, mid-restart, or refusing. The mirror is already
+        // written, so this window's strip survives; the next run — the next
+        // change, or the poll below — tries again. A layout the user cannot see
+        // failing to reach the other window is not worth an error banner.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tabState, engineUp]);
+
+  // And the other direction, for a window that is *not* changing: a strip the
+  // other window closed a tab in has to appear here even if this window is
+  // perfectly idle, or "shared" means shared-on-write and nothing else.
+  //
+  // **Pulled on attention, not on a timer**, and the reason is worth stating
+  // because the obvious implementation is an interval:
+  //
+  // - A timer is a resource nobody can see. A window that is closed, hidden or
+  //   — as `tests/terminalEndToEnd.test.ts` does — mounted without unmounting
+  //   keeps a timer armed forever, and an armed timer keeps the event loop
+  //   alive, which is how a suite ends in "Promise resolution is still pending
+  //   but the event loop has already resolved".
+  // - The thing a poll is standing in for is a push, and there is no channel
+  //   for one: the engine's websocket is scoped to a goal's events (see
+  //   `layoutSync`), so a strip change has nowhere to arrive through it. What a
+  //   window *can* observe is the moment it was next looked at.
+  //
+  // So the strip is read when the window is shown, when it regains focus, and
+  // once when the engine comes up. The honest cost: a window that is visible and
+  // focused *behind* another one shows a strip that is stale until it is touched.
+  // Two windows side by side is a thing a person does; two windows side by side
+  // where one of them must update invisibly is a thing nobody has asked for, and
+  // the day they do, the fix is a new engine stream rather than a shorter timer.
+  useEffect(() => {
+    if (engineUp !== true) return;
+    let cancelled = false;
+    const pull = async () => {
+      if (cancelled || document.visibilityState === "hidden") return;
+      try {
+        const rows = await listShellTabs();
+        if (cancelled) return;
+        // Same distinction as the push: only a key the engine had confirmed can
+        // be retired by its absence.
+        const confirmedBefore = engineKnown.current;
+        engineKnown.current = new Set(rows.map((row) => row.key));
+        const mirror = layoutMirror.current;
+        setTabState((prev) => {
+          const next = reconcile(
+            prev,
+            rows,
+            activeKeyOf(prev),
+            mirror.pendingRemovals,
+            confirmedBefore,
+          );
+          return next === prev ? prev : next;
+        });
+      } catch {
+        // Same reasoning as the push: an engine that is not answering is not a
+        // reason to interrupt anyone.
+      }
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void pull();
+    };
+    void pull();
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [engineUp]);
+
   const handleForwardBrowser = useCallback(
     (id: string) => {
       const tab = tabState.tabs.find((t) => t.id === id);
@@ -838,6 +1641,80 @@ export const App: React.FC = () => {
     },
     [tabState.tabs, sendToBrowser],
   );
+
+  // The page's life, subscribed once: start (marker on), finish (marker
+  // off, and the live address — redirects included — into the address bar),
+  // title (the tab shows what the page calls itself). Payloads for tabs
+  // that are gone are dropped by the reader and the reducers' own kind
+  // check, not by luck.
+  useEffect(() => {
+    let unlisteners: Array<() => void> = [];
+    let cancelled = false;
+    void (async () => {
+      const offLoading = await listenShellEvent<unknown>(
+        BROWSER_PAGE_LOADING,
+        (payload) => {
+          const fact = readBrowserPageState(payload);
+          if (!fact) return;
+          startLoading(fact.tab_id);
+          // A load is the page's own account of where it is going, and a link
+          // the user clicked inside a page is a visit the stack would otherwise
+          // never hear of — Back would then have nothing to offer but the last
+          // address they typed. `notePageNavigation` tells the two apart.
+          notePageNavigation(fact.tab_id, fact.url);
+        }
+      );
+      const offLoaded = await listenShellEvent<unknown>(
+        BROWSER_PAGE_LOADED,
+        (payload) => {
+          const fact = readBrowserPageState(payload);
+          if (!fact) return;
+          stopLoading(fact.tab_id);
+          setTabState((prev) => setBrowserPageUrl(prev, fact.tab_id, fact.url));
+        }
+      );
+      const offTitled = await listenShellEvent<unknown>(
+        BROWSER_PAGE_TITLED,
+        (payload) => {
+          const fact = readBrowserPageState(payload);
+          if (!fact) return;
+          const named = pageTitlePayload(fact);
+          if (named) {
+            setTabState((prev) =>
+              renameBrowserTab(prev, named.tabId, named.title)
+            );
+          }
+        }
+      );
+      if (cancelled) {
+        offLoading();
+        offLoaded();
+        offTitled();
+        return;
+      }
+      unlisteners = [offLoading, offLoaded, offTitled];
+    })();
+    return () => {
+      cancelled = true;
+      unlisteners.forEach((off) => off());
+      // And every expiry timer: a listener teardown that left one behind
+      // would setState on an unmounted tree.
+      loadingTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      loadingTimersRef.current.clear();
+    };
+  }, [startLoading, stopLoading, notePageNavigation]);
+
+  // Visibility is the stacking order. Exactly one browser page is shown at a
+  // time — the active tab's — and switching to anything else hides them all,
+  // which is one command and no z-order bookkeeping. Fires on every change of
+  // the active tab, including to and from no browser tab at all; pages that do
+  // not exist yet are simply absent when their turn comes.
+  const activeBrowserId = activeBrowserTab?.id ?? "";
+  useEffect(() => {
+    void focusBrowserWebview(activeBrowserId).catch((err: any) =>
+      setError(readRejection(err, "Could not switch browser pages")),
+    );
+  }, [activeBrowserId]);
 
   // ── the terminal's three moves ─────────────────────────────────────────
   //
@@ -915,36 +1792,48 @@ export const App: React.FC = () => {
     setTabState((prev) => openTab(prev, { id, kind: "browser", title: "New tab" }));
   }, []);
 
-  // A browser webview can also be closed the other way round — the user
-  // clicking the OS window's own close button — and nothing about that reaches
-  // the strip. The shell announces it (`browser-window-closed`); the tab goes
-  // with the window, through the same neighbour arithmetic every close gets.
+  // A page can still ask the shell for something — a popup window. The shell
+  // refuses it (`window.open` returns null to the page, the same answer a
+  // popup blocker gives) and announces the target instead, so the *user*
+  // decides: one press opens the address as a real tab through the same
+  // guarded path as any other. Google sign-in, file pickers and every
+  // `target=_blank` link land here rather than nowhere.
   //
-  // Closing the tab ourselves emits the same event, and this handler is a
-  // no-op for it: the tab is already gone, and `closeBrowserTab` refuses an
-  // unknown id on purpose.
+  // A malformed payload opens nothing, for the same reason
+  // `readBrowserPopupRequested` exists: the event crosses a process boundary
+  // and its reader is the thing that decides.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
-    void listenShellEvent<unknown>(BROWSER_WINDOW_CLOSED, (payload) => {
-      const tabId = readBrowserWindowClosed(payload);
-      if (tabId) setTabState((prev) => closeBrowserTab(prev, tabId));
+    void listenShellEvent<unknown>(BROWSER_POPUP_REQUESTED, (payload) => {
+      const popup = readBrowserPopupRequested(payload);
+      if (!popup) return;
+      const id = tabId("browser");
+      setTabState((prev) =>
+        openTab(prev, {
+          id,
+          kind: "browser",
+          title: hostOf(popup.url),
+          workspaceId: selectedWs?.id,
+        }),
+      );
+      void handleOpenBrowser(id, popup.url);
     })
       .then((off) => {
         // The unlisten can land after unmount — StrictMode mounts, unmounts
         // and remounts in development, and the promise has no idea. Dropping it
-        // on the floor would leave a listener calling setState for a window
+        // on the floor would leave a listener calling setState for a tab set
         // that is gone.
         if (cancelled) off();
         else unlisten = off;
       })
       .catch((err: any) => {
-        // A shell that cannot deliver events cannot have opened a browser
-        // window either. Report it rather than leaving a listener that
+        // A shell that cannot deliver events cannot have refused a popup
+        // audibly either. Report it rather than leaving a listener that
         // silently never fires.
         if (!cancelled) {
           setError(
-            readRejection(err, "Could not listen for browser window events"),
+            readRejection(err, "Could not listen for browser popup requests"),
           );
         }
       });
@@ -952,7 +1841,7 @@ export const App: React.FC = () => {
       cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, [handleOpenBrowser, selectedWs?.id]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -960,7 +1849,7 @@ export const App: React.FC = () => {
       if (!action) return;
       switch (action.type) {
         case "new-tab":
-          void handleNewChat();
+          handleNewTab();
           break;
         case "close-active-tab":
           // Through the same seam as the strip's close button, so ⌘W on a
@@ -990,7 +1879,7 @@ export const App: React.FC = () => {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [handleNewChat, handleCloseTab, tabState.activeId]);
+  }, [handleNewTab, handleCloseTab, tabState.activeId]);
 
   /** Palette pick. The item carries data; this switch is the whole act. */
   const handlePaletteSelect = (item: PaletteItem) => {
@@ -1021,15 +1910,17 @@ export const App: React.FC = () => {
   const nameThread = useCallback(
     async (conversationId: string, title: string) => {
       const updated = await renameConversation(conversationId, title);
-      setConversations((prev) =>
-        prev.map((c) => (c.id === updated.id ? updated : c)),
+      updateWorkspaceConversations(updated.workspace_id, (previous) =>
+        previous.map((conversation) =>
+          conversation.id === updated.id ? updated : conversation,
+        ),
       );
       setTabState((prev) => {
         const tab = tabForConversation(prev, conversationId);
         return tab ? renameTab(prev, tab.id, updated.title) : prev;
       });
     },
-    [],
+    [updateWorkspaceConversations],
   );
 
   const handleRenameConversation = useCallback(
@@ -1054,14 +1945,16 @@ export const App: React.FC = () => {
   const handleArchiveConversation = useCallback(
     async (conversationId: string) => {
       try {
-        await archiveConversation(conversationId);
-        setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+        const archived = await archiveConversation(conversationId);
+        updateWorkspaceConversations(archived.workspace_id, (previous) =>
+          previous.filter((conversation) => conversation.id !== conversationId),
+        );
         setTabState((prev) => closeConversation(prev, conversationId));
       } catch (err: any) {
         setError(readRejection(err, "Failed to archive the conversation"));
       }
     },
-    [],
+    [updateWorkspaceConversations],
   );
 
   // Subscribe to live goal events via WebSocket (reconnects with backoff,
@@ -1206,13 +2099,18 @@ export const App: React.FC = () => {
         // lost because the filing failed, but a filing that failed must not be
         // silent either.
         let threadId = goal.conversation_id ?? null;
-        if (!threadId && selectedWs) {
+        if (!threadId) {
+          // A restored legacy goal belongs to its recorded workspace, not
+          // whichever project happens to be selected when History is clicked.
           const convo = await createConversation(
-            selectedWs.id,
+            goal.workspace_id,
             (goal.description || goal.title).slice(0, 200),
           );
           threadId = convo.id;
-          setConversations((prev) => [convo, ...prev]);
+          updateWorkspaceConversations(convo.workspace_id, (previous) => [
+            convo,
+            ...previous.filter((existing) => existing.id !== convo.id),
+          ]);
           try {
             await attachGoalToConversation(goalId, convo.id);
           } catch (err: any) {
@@ -1270,7 +2168,7 @@ export const App: React.FC = () => {
         setRestoring(false);
       }
     },
-    [restoring, subscribeToGoal, selectedWs],
+    [restoring, subscribeToGoal, updateWorkspaceConversations],
   );
 
   // Goals whose execution we have already kicked off in direct mode. Without
@@ -1517,7 +2415,10 @@ export const App: React.FC = () => {
       try {
         const convo = await createConversation(wsToUse.id, threadTitleFromPrompt(promptText));
         conversationId = convo.id;
-        setConversations((prev) => [convo, ...prev]);
+        updateWorkspaceConversations(convo.workspace_id, (previous) => [
+          convo,
+          ...previous.filter((existing) => existing.id !== convo.id),
+        ]);
         setTabState((prev) =>
           openConversation(prev, convo.id, convo.title, convo.workspace_id),
         );
@@ -1971,7 +2872,7 @@ export const App: React.FC = () => {
     // `relative` for the rain: the OLED theme's backdrop is a child of this box
     // and needs a positioned ancestor to be the window rather than the viewport's
     // idea of it. See `ui/src/components/ui/RainBackdrop.tsx`.
-    <div className="relative flex flex-col h-screen bg-codify-bg text-gray-200 font-sans">
+    <div className="relative flex flex-col h-screen bg-codify-bg text-codify-secondary font-sans">
       {/* The window's weather, under everything and mounted once. It used to be
           inside the idle hero, which is why it showed down the middle and left
           when the first message arrived; both were the mount point, and a
@@ -1995,9 +2896,9 @@ export const App: React.FC = () => {
           decoration, and the two are not the same thing. */}
       <WeatherBackdrop active={canStop} />
       {/* Top Header Bar */}
-      <header className="relative bg-codify-chrome border-b border-codify-border px-4 py-2.5 flex items-center justify-between z-10 flex-shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 font-bold text-sm tracking-tight text-white">
+      <header className="relative bg-codify-chrome border-b border-codify-border px-4 py-2.5 flex items-center gap-3 z-10 flex-shrink-0">
+        <div className="flex items-center gap-3 flex-shrink-0">
+          <div className="flex items-center gap-2 font-bold text-sm tracking-tight text-codify-primary">
             {/* The mark, not a stand-in: `logo.gif` is generated into the brand
                 palette by `scripts/make_logo.py`, and the primitive swaps the
                 static companion in under `prefers-reduced-motion` — DESIGN.md
@@ -2005,18 +2906,42 @@ export const App: React.FC = () => {
             <Logo size={24} />
             <span>CODIFY</span>
           </div>
-
-          {/*
-            No folder pill here. It used to sit beside the logo naming
-            `selectedWs` — one global claim about which folder the app was in —
-            and it was wrong for every tab but the one the composer happened to
-            point at. The folder is per tab now (`Tab.workspaceId`), because two
-            tabs in two folders cannot both be described by one label in the
-            header. See `TabBar.tsx`.
-          */}
+          {/* New Tab, immediately after the name of the app and before the strip
+              that grows. It was at the far end of the strip, which meant its
+              distance from the pointer grew with the number of open tabs — the
+              one control whose cost went up with the thing it was there to
+              shorten. */}
+          <NewTabButton onNewTab={handleNewTab} workspaceId={selectedWs?.id} />
         </div>
 
-        <div className="flex items-center gap-3">
+        {/* What is open. A chat tab is a project; the threads inside it are chosen
+            from the side panel, which is why the panel no longer offers a
+            new-tab control of its own. */}
+        <TabBar
+          tabs={tabState.tabs}
+          activeId={tabState.activeId}
+          onFocus={(id) => {
+            setTabState((prev) => focusTab(prev, id));
+            // Showing the tab is seeing it: the badge announces output the
+            // user has not been shown, and the pane about to mount will claim
+            // and replay the backlog that backs it.
+            setUnreadTerminalIds((prev) => {
+              if (!prev.has(id)) return prev;
+              const next = new Set(prev);
+              next.delete(id);
+              return next;
+            });
+          }}
+          unreadTerminalIds={[...unreadTerminalIds]}
+          onClose={handleCloseTab}
+          busyTabIds={tabState.tabs
+            .filter((t) => t.conversationId && activeGoalIds.has(t.conversationId))
+            .map((t) => t.id)}
+          loadingTabIds={[...loadingBrowserIds]}
+          workspaces={workspaces}
+        />
+
+        <div className="flex items-center gap-3 flex-shrink-0">
           {/* The engine connection, as four words: Live, Checking, Auth stale,
               Offline. It used to answer with the port number when healthy, which
               made the number the headline and the state the decoration; the port
@@ -2077,11 +3002,10 @@ export const App: React.FC = () => {
           </Toggle>
 
           {/* Browser, Terminal and Keys & Endpoints used to be here, as three
-              labelled buttons. They are badges on the side panel now: the header
-              is for state (which workspace, is the engine up), and a second row
-              of actions for unrelated things was pushing the connection pill out
-              of the room it needed. The panel is already "the things you can
-              open". */}
+              labelled buttons. They are utilities on the side panel now: the
+              header stays focused on the brand, open tabs, and app-wide status,
+              rather than a second row of unrelated actions. The panel is already
+              "the things you can open". */}
         </div>
       </header>
 
@@ -2103,10 +3027,11 @@ export const App: React.FC = () => {
             below. */}
         <Sidebar
           conversations={conversations}
+          selectedWorkspaceId={selectedWs?.id}
           workspaces={workspaces}
           activeConversationId={activeConversationId}
-          onNewChat={() => void handleNewChat()}
-      onNewThread={(parentId) => void handleNewThread(parentId)}
+          onNewThread={(parentId) => void handleNewThread(parentId)}
+          onNewProject={() => void handleBrowseWorkspace()}
           onSelect={handleSelectConversation}
           onRename={(id, title) => void handleRenameConversation(id, title)}
           onArchive={(id) => void handleArchiveConversation(id)}
@@ -2131,19 +3056,74 @@ export const App: React.FC = () => {
             <div className="mx-auto mt-3 mb-1 w-full max-w-4xl px-4">
               <div
                 role="alert"
-                className="flex items-start gap-2 p-2.5 rounded-xl bg-red-950/40 border border-red-800 text-xs text-red-300"
+                className="flex items-start gap-2 p-2.5 rounded-xl bg-codify-danger/40 border border-codify-danger text-xs text-codify-danger"
               >
-                <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-red-400" />
+                <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-codify-danger" />
                 <span className="leading-relaxed flex-1">{error}</span>
                 <IconButton
                   label="Dismiss error"
                   onClick={() => setError(null)}
-                  className="text-red-300 hover:text-red-100"
+                  // Dimming, not a second hue: the banner already says what it
+                  // is, and a hover that could not change colour is a hover that
+                  // looks broken.
+                  className="text-codify-danger hover:opacity-60"
                 >
                   <X className="w-3.5 h-3.5" />
                 </IconButton>
               </div>
             </div>
+          )}
+          {/* Auth stale gets a banner of its own, because it is the one failure
+              state that has a fix a *browser* tab cannot apply by itself: the
+              fresh token lives with the engine's spawner, and no amount of
+              retrying in-page can mint it. The banner names the make target and
+              shows the two console statements filled in, so the fix is a copy
+              and a reload instead of the silent 401 loop every other request
+              was stuck in. Desktop never sees this — IPC self-heals first, and
+              the probe re-checks before the pill settles. */}
+          {/* The shell watched its own main thread and concluded this window is
+              being rasterised in software: the animated backdrops cost more than
+              the machine can pay, and the cost was landing on input. The verdict
+              is one per boot and this banner is its receipt — naming the
+              measurement and handing back the choice, because relief that a
+              person cannot see and reverse is not a setting, it is a takeover. */}
+          {motion.shellStarved && (
+            <div className="mx-auto mt-2 mb-1 w-full max-w-4xl px-4">
+              <div className="rounded-xl border border-codify-info bg-codify-info/10 p-2.5 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-codify-info">
+                    Animated backdrops were stopped: the desktop shell measured its main thread
+                    spending ~{Math.min(99, motion.shellStarved.measuredMs)}% of a core painting
+                    this window, which was starving input. This clears next launch.
+                  </span>
+                  <button
+                    type="button"
+                    className="rounded-md border border-codify-border bg-codify-raised px-2 py-0.5 hover:bg-codify-border"
+                    onClick={() => setMotion(writeSetting("allowed"))}
+                  >
+                    Animate anyway
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {engineConnection === "auth-stale" && (
+            <StaleAuthBanner
+              port={getEngineInfo().port}
+              onRetry={() => {
+                // Re-sync the API client from localStorage first. The paste
+                // lands in localStorage; `currentEngine` is a module-level
+                // copy made at page load, so a retry that skipped this would
+                // re-probe with the stale token, fail, and call the banner a
+                // liar — the exact loop the first live verification hit.
+                setEngineInfo({
+                  port: Number(localStorage.getItem("CODIFY_PORT") || "7430"),
+                  token: localStorage.getItem("CODIFY_TOKEN") || "",
+                });
+                forceHealthProbeRef.current?.();
+              }}
+              onDismiss={() => setAuthOk(true)}
+            />
           )}
           {/* What the engine said before it stopped answering.
               Its own stderr, not the launcher's diagnosis: the difference between
@@ -2155,45 +3135,42 @@ export const App: React.FC = () => {
               traceback line cut off at the right edge is the line that mattered. */}
           {engineStderr.length > 0 && (
             <div className="mx-auto mt-2 mb-1 w-full max-w-4xl px-4">
-              <div className="rounded-xl border border-amber-900/60 bg-amber-950/20 p-2.5 text-xs">
-                <div className="mb-1.5 flex items-center gap-1.5 text-amber-300">
+              <div className="rounded-xl border border-codify-warning/40 bg-codify-warning/10 p-2.5 text-xs">
+                <div className="mb-1.5 flex items-center gap-1.5 text-codify-warning">
                   <ScrollText className="h-3.5 w-3.5 flex-shrink-0" />
                   <span>What the engine said before it stopped</span>
                 </div>
-                <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-amber-200/90">
+                <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-codify-warning/90">
                   {engineStderr.join("\n")}
                 </pre>
-                <p className="mt-1.5 text-[11px] text-amber-300/70">
+                <p className="mt-1.5 text-[11px] text-codify-warning/70">
                   The shell stops the engine rather than restarting it, so a new
                   engine means relaunching the app.
                 </p>
               </div>
             </div>
           )}
-          {/* What is open. The strip is the only place that knows a tab is busy
-              when it is not the one on screen, so it takes the ids of the goals
-              still streaming. */}
-          <TabBar
-            tabs={tabState.tabs}
-            activeId={tabState.activeId}
-            onFocus={(id) => setTabState((prev) => focusTab(prev, id))}
-            onClose={handleCloseTab}
-            busyTabIds={tabState.tabs
-              .filter((t) => t.conversationId && activeGoalIds.has(t.conversationId))
-              .map((t) => t.id)}
-            workspaces={workspaces}
-          />
           {/* What the active tab is. A browser tab replaces the transcript
               rather than sitting under it: the chat column and the composer are
               a conversation, and a page that arrived in the strip has its own
               controls. Rendering both would leave a user with a goal transcript
               they are not reading sitting under an address bar they are.
 
-              The page itself is a separate OS window (`docs/09` §7.2) —
-              `BrowserPane` is its address bar, not a viewport, and says so. */}
+              The page is native to this window and inside this app: a
+              child webview of the main window, seated over `BrowserPane`'s
+              measured content area (`docs/09` §7.3). So the pane is both its
+              address bar and the rectangle it paints in, and there is nowhere
+              else for the page to be. */}
           {activeBrowserTab ? (
             <BrowserPane
               tabId={activeBrowserTab.id}
+              onBounds={handleBrowserBounds}
+              onToggleDevtools={
+                devtoolsAvailable
+                  ? () => handleToggleDevtools(activeBrowserTab.id)
+                  : undefined
+              }
+              devtoolsOpen={devtoolsTabId === activeBrowserTab.id}
               url={activeBrowserTab.url}
               history={activeBrowserTab.history}
               onOpen={(url) => void handleOpenBrowser(activeBrowserTab.id, url)}
@@ -2212,6 +3189,7 @@ export const App: React.FC = () => {
             />
           ) : activeTerminalTab ? (
             <TerminalPane
+              key={activeTerminalTab.id}
               terminalId={activeTerminalTab.id}
               workspaceId={activeTerminalTab.workspaceId}
               exited={activeTerminalTab.exited}
@@ -2231,7 +3209,6 @@ export const App: React.FC = () => {
               onSetGoalTrace={handleSetGoalTrace}
               onRetryStep={handleRetryStep}
               onDeleteGoal={handleDeleteGoal}
-              onQuickPrompt={(text) => handleSendMessage(text)}
               onOpenSettings={openSettings}
               onImportAudit={handleImportAudit}
               onPinDesignContract={handleSetDesignContract}
@@ -2283,7 +3260,7 @@ export const App: React.FC = () => {
           <aside className="w-[28rem] max-w-[60%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
             <div className="flex items-center justify-between px-4 py-3 border-b border-codify-border">
               <div className="flex items-center gap-2 text-sm font-semibold text-codify-primary">
-                <BarChart3 className="w-4 h-4 text-blue-400" />
+                <BarChart3 className="w-4 h-4 text-codify-info" />
                 Statistics
               </div>
               <IconButton
@@ -2304,7 +3281,7 @@ export const App: React.FC = () => {
           <aside className="w-80 max-w-[50%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
             <div className="flex items-center justify-between px-4 py-3 border-b border-codify-border">
               <div className="flex items-center gap-2 text-sm font-semibold text-codify-primary">
-                <History className="w-4 h-4 text-blue-400" />
+                <History className="w-4 h-4 text-codify-info" />
                 Goal history
               </div>
               <div className="flex items-center gap-2">

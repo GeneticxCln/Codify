@@ -376,12 +376,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Header */}
         <div className="flex items-start justify-between border-b border-codify-border px-6 py-4 flex-shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
+            <div className="w-9 h-9 rounded-xl bg-codify-info/20 border border-codify-info/30 flex items-center justify-center text-codify-info">
               <Key className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-gray-100">Settings</h2>
-              <p className="text-xs text-gray-400">
+              <h2 className="text-base font-bold text-codify-primary">Settings</h2>
+              <p className="text-xs text-codify-muted">
                 {tab === "keys"
                   ? needsKeyCount > 0
                     ? `${needsKeyCount} of ${keys.length} providers still need a key — their models cannot be listed or called until then.`
@@ -395,7 +395,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="text-gray-400 hover:text-gray-200 p-1.5 rounded-lg hover:bg-codify-raised transition-colors"
+            className="text-codify-muted hover:text-codify-secondary p-1.5 rounded-lg hover:bg-codify-raised transition-colors"
             title="Close (Esc)"
           >
             <X className="w-5 h-5" />
@@ -409,13 +409,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             onClick={() => setTab("keys")}
             className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "keys"
-                ? "bg-codify-raised text-gray-100 border border-codify-border"
-                : "text-gray-400 hover:text-gray-200"
+                ? "bg-codify-raised text-codify-primary border border-codify-border"
+                : "text-codify-muted hover:text-codify-secondary"
             }`}
           >
             <Key className="w-3.5 h-3.5" /> Provider Keys
             {needsKeyCount > 0 && (
-              <span className="ml-0.5 text-2xs px-1.5 rounded-full bg-amber-950/60 border border-amber-800/60 text-amber-300">
+              <span className="ml-0.5 text-2xs px-1.5 rounded-full bg-codify-warning/40 border border-codify-warning/60 text-codify-warning">
                 {needsKeyCount}
               </span>
             )}
@@ -425,8 +425,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             onClick={() => setTab("agents")}
             className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "agents"
-                ? "bg-codify-raised text-gray-100 border border-codify-border"
-                : "text-gray-400 hover:text-gray-200"
+                ? "bg-codify-raised text-codify-primary border border-codify-border"
+                : "text-codify-muted hover:text-codify-secondary"
             }`}
           >
             <Sliders className="w-3.5 h-3.5" /> Agent Roles
@@ -436,8 +436,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             onClick={() => setTab("appearance")}
             className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "appearance"
-                ? "bg-codify-raised text-gray-100 border border-codify-border"
-                : "text-gray-400 hover:text-gray-200"
+                ? "bg-codify-raised text-codify-primary border border-codify-border"
+                : "text-codify-muted hover:text-codify-secondary"
             }`}
           >
             <Palette className="w-3.5 h-3.5" /> Appearance
@@ -449,13 +449,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {tab === "keys" && (
             <div className="space-y-4">
               {error && (
-                <div className="flex items-start gap-2 p-3 bg-red-950/40 border border-red-800 rounded-xl text-xs text-red-300">
+                <div className="flex items-start gap-2 p-3 bg-codify-danger/20 border border-codify-danger/60 rounded-xl text-xs text-codify-danger">
                   <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <span>{error}</span>
                 </div>
               )}
               {catalogError && (
-                <div className="flex items-start gap-2 p-3 bg-amber-950/30 border border-amber-800/60 rounded-xl text-xs text-amber-300">
+                <div className="flex items-start gap-2 p-3 bg-codify-warning/20 border border-codify-warning/60 rounded-xl text-xs text-codify-warning">
                   <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <span>{catalogError}</span>
                 </div>
@@ -464,26 +464,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {/* Where a key actually goes. Saying "your OS keychain" when the key
                   is really written to a file would be a lie the user cannot see. */}
               {storage && (
-                <div className="flex items-start gap-2 text-xs text-gray-400 bg-codify-bg border border-codify-border rounded-xl px-3.5 py-2.5">
+                <div className="flex items-start gap-2 text-xs text-codify-muted bg-codify-bg border border-codify-border rounded-xl px-3.5 py-2.5">
                   {storage === "keyring" ? (
-                    <Lock className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-green-400" />
+                    <Lock className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-codify-success" />
                   ) : (
-                    <HardDrive className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-amber-400" />
+                    <HardDrive className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-codify-warning" />
                   )}
                   <span className="leading-relaxed">
                     {storageReason === "keyring" ? (
                       <>Keys are stored in your OS keychain.</>
                     ) : storageReason === "isolated_run" ? (
                       <>
-                        Keys are stored in <span className="font-mono text-gray-300">{storageDetail}</span>
+                        Keys are stored in <span className="font-mono text-codify-secondary">{storageDetail}</span>
                         . That is by design here, not a missing keychain: this engine was started with its
                         own state directory, so it cannot read or write the real one.
                       </>
                     ) : (
                       <>
-                        Keys are stored in <span className="font-mono text-gray-300">{storageDetail}</span>{" "}
+                        Keys are stored in <span className="font-mono text-codify-secondary">{storageDetail}</span>{" "}
                         — this machine has no usable OS keychain, so Codify keeps them in an owner-only
-                        file instead. Install <span className="font-mono text-gray-300">keyring</span>{" "}
+                        file instead. Install <span className="font-mono text-codify-secondary">keyring</span>{" "}
                         (with a Secret Service / Keychain backend) to move them there.
                       </>
                     )}{" "}
@@ -553,7 +553,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         {/* Footer */}
         <div className="border-t border-codify-border px-6 py-3 flex items-center justify-between flex-shrink-0">
-          <span className="flex items-center gap-2 text-xs text-gray-500">
+          <span className="flex items-center gap-2 text-xs text-codify-muted">
             {discoveredFooter(models.length, modelStatus.filter((s) => s.ok).length)}
             {/* The list re-discovers on its own now, so it can change while
                 somebody is reading it. Saying when the last answer arrived is
@@ -561,7 +561,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {checked && (
               <span
                 className={
-                  checking === "auto" ? "text-sky-400/90 flex items-center gap-1" : undefined
+                  checking === "auto" ? "text-codify-info/90 flex items-center gap-1" : undefined
                 }
                 title={
                   checking === "auto"
@@ -573,7 +573,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </span>
             )}
             {catalogError && (
-              <span className="text-amber-400/90" title={catalogError}>
+              <span className="text-codify-warning/90" title={catalogError}>
                 — last check failed
               </span>
             )}
@@ -582,7 +582,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               onClick={() => loadCatalog(true)}
               disabled={catalogLoading}
               title="Ask every configured provider what it serves right now"
-              className="flex items-center gap-1 text-gray-400 hover:text-gray-200 disabled:opacity-50 cursor-pointer"
+              className="flex items-center gap-1 text-codify-muted hover:text-codify-secondary disabled:opacity-50 cursor-pointer"
             >
               <RefreshCw className={catalogLoading ? "w-3 h-3 animate-spin" : "w-3 h-3"} />
               Refresh
@@ -591,7 +591,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-1.5 bg-codify-raised hover:bg-codify-border text-gray-200 rounded-lg text-xs font-semibold transition-colors"
+            className="px-4 py-1.5 bg-codify-raised hover:bg-codify-border text-codify-secondary rounded-lg text-xs font-semibold transition-colors"
           >
             Done
           </button>

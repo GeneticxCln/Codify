@@ -91,6 +91,22 @@ function formatCallDuration(durationMs: number | null): string {
 
 // One icon per ability: the librarian reads, the design agent locks a direction,
 // the fixer writes, the verifier runs, the critic judges, the scribe records.
+//
+// These eight hues are **not** theme tokens, deliberately, and they are the one
+// thing in the settings panel that does not follow the active theme. Mapping them
+// onto the status tones was tried and is wrong twice over: there are eight roles
+// and six tones, so it silently gives two pairs the same colour — the collision
+// `tailwind.config.js` records having already cost one pair of features its
+// identity — and it would claim a role *is* a status, which is what the tones
+// mean. A role's colour says which role this is; a tone says what is happening to
+// it. Giving the contract eight role tokens is the fix, and it belongs to whoever
+// wants role identity to be part of the theme rather than a fact about roles.
+//
+// It has now been swept into tokens *twice*, by two different passes over the
+// tree, and reverted twice. That is the argument for what a comment cannot do:
+// `ui/tests/hardcodedPalette.test.ts` names these eight classes as exceptions and
+// fails if any of them stops appearing, so the third sweep breaks a test instead
+// of quietly making four roles two colours.
 const ROLE_ICONS: Record<AgentRole, React.ReactNode> = {
   laya: <Zap className="w-5 h-5 text-emerald-400" />,
   librarian: <BookOpen className="w-5 h-5 text-cyan-400" />,
@@ -191,6 +207,14 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
         base_url: active.base_url || undefined,
         temperature: active.temperature,
         max_tokens: active.max_tokens,
+        // null is meaningful here: it returns the role to Ollama's default
+        // window, so an emptied field must arrive as null rather than as
+        // "no change".
+        num_ctx: active.num_ctx ?? null,
+        // Same reasoning: null returns the role to Ollama's own window rather
+        // than leaving a stale value behind, so an emptied field must arrive
+        // as null and not as "no change".
+        keep_alive: active.keep_alive?.trim() || null,
         system_prompt_override: active.system_prompt_override?.trim() || null,
         // An empty string is how the engine is told "no fallback": the desktop
         // shell passes this patch through a typed struct, where an explicit null
@@ -233,7 +257,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
   return (
     <div
       className={`bg-codify-surface border rounded-lg p-5 flex flex-col gap-4 shadow-sm transition-colors ${
-        stale ? "border-amber-700/70" : "border-codify-border hover:border-codify-border-strong"
+        stale ? "border-codify-warning/70" : "border-codify-border hover:border-codify-border-strong"
       }`}
     >
       {/* Header */}
@@ -243,37 +267,37 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             {ROLE_ICONS[role]}
           </div>
           <div>
-            <h3 className="font-semibold text-base text-gray-100 flex items-center gap-2">
+            <h3 className="font-semibold text-base text-codify-primary flex items-center gap-2">
               {active.display_name}
-              <span className="text-xs px-2 py-0.5 bg-codify-raised text-gray-400 rounded-full font-mono font-normal">
+              <span className="text-xs px-2 py-0.5 bg-codify-raised text-codify-muted rounded-full font-mono font-normal">
                 {role}
               </span>
             </h3>
-            <p className="text-xs text-gray-400">
-              Assigned model: <span className="font-mono text-gray-300">{active.provider}/{active.model_name}</span>
+            <p className="text-xs text-codify-muted">
+              Assigned model: <span className="font-mono text-codify-secondary">{active.provider}/{active.model_name}</span>
               {hasFallback && (
                 <>
-                  <span className="text-gray-500"> · falls back to </span>
-                  <span className="font-mono text-gray-400">
+                  <span className="text-codify-muted"> · falls back to </span>
+                  <span className="font-mono text-codify-muted">
                     {fallbackProvider}/{active.fallback_model_name}
                   </span>
                 </>
               )}
             </p>
             {info && (
-              <p className="text-xs text-gray-500 mt-0.5 max-w-2xl leading-relaxed">
-                <span className="text-gray-400">{info.job}</span>{" "}
-                <span className="whitespace-nowrap text-gray-500">
+              <p className="text-xs text-codify-muted mt-0.5 max-w-2xl leading-relaxed">
+                <span className="text-codify-muted">{info.job}</span>{" "}
+                <span className="whitespace-nowrap text-codify-muted">
                   · runs {info.timing}
                   {GOAL_LEVEL.includes(role) && role !== "laya" ? " (not per step)" : ""}
                 </span>
               </p>
             )}
             {callStat && (callStat.last_call || callStat.last_error || (callStat.runs ?? 0) > 0) && (
-              <p className="text-xs text-gray-500 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+              <p className="text-xs text-codify-muted mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
                 {(callStat.runs ?? 0) > 0 && (
                   <span
-                    className="whitespace-nowrap text-gray-500"
+                    className="whitespace-nowrap text-codify-muted"
                     title={
                       Object.entries(callStat.outcomes ?? {})
                         .map(([name, n]) => `${n} ${name.replace(/_/g, " ")}`)
@@ -284,24 +308,24 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
                     <span
                       className={`font-mono ${
                         (callStat.success_rate ?? 0) >= 90
-                          ? "text-green-400/90"
+                          ? "text-codify-success/90"
                           : (callStat.success_rate ?? 0) >= 60
-                            ? "text-amber-300/90"
-                            : "text-red-300/90"
+                            ? "text-codify-warning/90"
+                            : "text-codify-danger/90"
                       }`}
                     >
                       {callStat.success_rate == null ? "—" : `${callStat.success_rate}%`}
                     </span>{" "}
-                    <span className="text-gray-600">
+                    <span className="text-codify-muted">
                       over {callStat.runs} run{callStat.runs === 1 ? "" : "s"}
                     </span>
                   </span>
                 )}
                 {callStat.last_call && (
-                  <span className="whitespace-nowrap text-gray-400">
+                  <span className="whitespace-nowrap text-codify-muted">
                     · last call {formatCallDuration(callStat.last_call.duration_ms)}
                     {callStat.last_call.provider && (
-                      <span className="font-mono text-gray-500">
+                      <span className="font-mono text-codify-muted">
                         {" "}({callStat.last_call.provider}/{callStat.last_call.model})
                       </span>
                     )}
@@ -309,7 +333,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
                 )}
                 {callStat.last_error && (
                   <span
-                    className="whitespace-nowrap text-amber-400/90"
+                    className="whitespace-nowrap text-codify-warning/90"
                     title={callStat.last_error.message ?? undefined}
                   >
                     · last error <span className="font-mono">{callStat.last_error.code}</span>
@@ -321,14 +345,14 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          {saveError && <span className="text-xs text-red-400 font-medium">{saveError}</span>}
+          {saveError && <span className="text-xs text-codify-danger font-medium">{saveError}</span>}
           <button
             onClick={handleSave}
             disabled={saving}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded transition-colors ${
               saved
-                ? "bg-green-600 text-white"
-                : "bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50"
+                ? "bg-codify-success text-codify-bg"
+                : "bg-codify-accent text-codify-bg hover:brightness-110 disabled:opacity-50"
             }`}
           >
             {saved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
@@ -344,7 +368,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
           comes back 404 for a model the provider retired or renamed. Verdict
           computed by SettingsPanel, so it matches the panel's summary. */}
       {stale && (
-        <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg px-3 py-2">
+        <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg px-3 py-2">
           <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             {stale.reportedCount > 0 ? (
@@ -371,7 +395,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
           repair refreshed the store). The draft keeps the user's edits — this
           names that fact and offers the server values in one click. */}
       {externallyUpdated && dirty && (
-        <div className="flex items-start gap-2 text-xs text-blue-300 bg-blue-950/30 border border-blue-800/60 rounded-lg px-3 py-2">
+        <div className="flex items-start gap-2 text-xs text-codify-info bg-codify-info/15 border border-codify-info/60 rounded-lg px-3 py-2">
           <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed flex-1">
             The saved config changed underneath your unsaved edits (a repair or another save).
@@ -387,7 +411,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               setDirty(false);
               setExternallyUpdated(false);
             }}
-            className="flex-shrink-0 text-xs px-2 py-0.5 rounded border border-blue-700/60 hover:bg-blue-900/40 transition-colors"
+            className="flex-shrink-0 text-xs px-2 py-0.5 rounded border border-codify-info/60 hover:bg-codify-info/20 transition-colors"
           >
             Load server values
           </button>
@@ -458,15 +482,15 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
           counts as one — both a provider and a model, or it is not a fallback. */}
       <div className="border border-codify-border rounded-lg p-3.5 flex flex-col gap-3 bg-codify-bg">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
-            <Route className="w-3.5 h-3.5 text-teal-400" />
+          <div className="flex items-center gap-2 text-xs font-semibold text-codify-secondary">
+            <Route className="w-3.5 h-3.5 text-codify-knowledge" />
             Fallback target
             {hasFallback ? (
-              <span className="font-mono font-normal text-teal-300">
+              <span className="font-mono font-normal text-codify-knowledge">
                 {fallbackProvider}/{active.fallback_model_name}
               </span>
             ) : (
-              <span className="font-normal text-gray-500">none</span>
+              <span className="font-normal text-codify-muted">none</span>
             )}
           </div>
           <button
@@ -490,7 +514,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
                 setFallbackOpen(true);
               }
             }}
-            className="text-xs px-2 py-1 rounded border border-codify-border text-gray-300 hover:text-gray-100 hover:border-codify-border-strong transition-colors"
+            className="text-xs px-2 py-1 rounded border border-codify-border text-codify-secondary hover:text-codify-primary hover:border-codify-border-strong transition-colors"
           >
             {showFallback ? "Remove" : "Add a fallback"}
           </button>
@@ -498,7 +522,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
 
         {showFallback ? (
           <>
-            <p className="text-xs text-gray-500 leading-relaxed">
+            <p className="text-xs text-codify-muted leading-relaxed">
               Used when the primary target cannot be called at all: no credential stored, the
               endpoint unreachable, the model no longer served, or a reply the contract cannot
               parse. Tried once per call — never a retry loop. The role's temperature and max
@@ -541,7 +565,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               )}
             </div>
             {staleFallback && (
-              <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg px-3 py-2">
+              <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg px-3 py-2">
                 <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                 <span className="leading-relaxed">
                   {staleFallback.reportedCount > 0 ? (
@@ -565,14 +589,14 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               </div>
             )}
             {!hasFallback && (
-              <span className="text-xs text-amber-300/90">
+              <span className="text-xs text-codify-warning/90">
                 Not in force yet: a fallback needs a model as well as a provider, and half of one
                 fails exactly when it is needed.
               </span>
             )}
           </>
         ) : (
-          <p className="text-xs text-gray-500 leading-relaxed">
+          <p className="text-xs text-codify-muted leading-relaxed">
             Without one, a failure on the primary target ends the goal. Adding a fallback lets a
             goal keep running when a key is missing or a provider is down.
           </p>
@@ -585,11 +609,11 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
           <div className="flex justify-between">
             <label
               htmlFor={`temperature-${role}`}
-              className="text-xs font-semibold text-gray-400 uppercase tracking-wider"
+              className="text-xs font-semibold text-codify-muted uppercase tracking-wider"
             >
               Temperature
             </label>
-            <span className="text-xs font-mono text-gray-300">{active.temperature}</span>
+            <span className="text-xs font-mono text-codify-secondary">{active.temperature}</span>
           </div>
           <input
             id={`temperature-${role}`}
@@ -599,16 +623,16 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             step={0.05}
             value={active.temperature}
             onChange={(e) => updateDraft({ temperature: parseFloat(e.target.value) })}
-            className="w-full accent-blue-500 cursor-pointer"
+            className="w-full accent-codify-accent cursor-pointer"
           />
         </div>
 
         <div className="flex flex-col gap-1.5">
           <div className="flex justify-between">
-            <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+            <label className="text-xs font-semibold text-codify-muted uppercase tracking-wider">
               Max Tokens
             </label>
-            <span className="text-xs font-mono text-gray-300">{active.max_tokens.toLocaleString()}</span>
+            <span className="text-xs font-mono text-codify-secondary">{active.max_tokens.toLocaleString()}</span>
           </div>
           <input
             type="number"
@@ -617,10 +641,80 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             step={256}
             value={active.max_tokens}
             onChange={(e) => updateDraft({ max_tokens: parseInt(e.target.value, 10) || 4096 })}
-            className="bg-codify-bg border border-codify-border rounded px-3 py-1.5 text-sm text-gray-200 font-mono"
+            className="bg-codify-bg border border-codify-border rounded px-3 py-1.5 text-sm text-codify-secondary font-mono"
           />
         </div>
       </div>
+
+      {/* Context window — Ollama only. OpenAI-style APIs size it server-side,
+          so the field would be a lie on every other provider. */}
+      {active.protocol === "ollama" && (
+        <div className="flex flex-col gap-1.5">
+          <div className="flex justify-between">
+            <label className="text-xs font-semibold text-codify-muted uppercase tracking-wider">
+              Context Window
+            </label>
+            <span className="text-xs font-mono text-codify-secondary">
+              {active.num_ctx ? active.num_ctx.toLocaleString() : "server default (4096)"}
+            </span>
+          </div>
+          <input
+            type="number"
+            min={512}
+            max={1000000}
+            step={1024}
+            placeholder="4096"
+            value={active.num_ctx ?? ""}
+            onChange={(e) => {
+              const raw = e.target.value.trim();
+              updateDraft({ num_ctx: raw === "" ? null : parseInt(raw, 10) || null });
+            }}
+            className="bg-codify-bg border border-codify-border rounded px-3 py-1.5 text-sm text-codify-secondary font-mono"
+          />
+          {/* The one warning worth its row: an empty field here is not "smaller
+              and cheaper", it is "silently truncates whatever does not fit" —
+              the failure mode that ships degraded plans with no error anywhere. */}
+          <p className="text-[11px] leading-relaxed text-codify-muted">
+            Raise this for roles that send large prompts (evidence packs, contracts).
+            Ollama silently truncates to its default — 4096 — which degrades the
+            reply without erroring. qwen2.5-coder supports 32768.
+          </p>
+        </div>
+      )}
+
+      {/* Keep-alive — Ollama only, and beside the window because the two are
+          different questions about the same machine. This one is about the gap
+          *between* calls, not within one: Ollama unloads a model five minutes
+          after its last request, so a role you touch every ten minutes pays a
+          full reload each time. The wording says so rather than implying it
+          makes the current call faster, which it does not. */}
+      {active.protocol === "ollama" && (
+        <div className="flex flex-col gap-1.5">
+          <div className="flex justify-between">
+            <label className="text-xs font-semibold text-codify-muted uppercase tracking-wider">
+              Keep Alive
+            </label>
+            <span className="text-xs font-mono text-codify-secondary">
+              {active.keep_alive?.trim() || "server default (5m)"}
+            </span>
+          </div>
+          <input
+            type="text"
+            maxLength={32}
+            placeholder="5m"
+            value={active.keep_alive ?? ""}
+            onChange={(e) => updateDraft({ keep_alive: e.target.value })}
+            className="bg-codify-bg border border-codify-border rounded px-3 py-1.5 text-sm text-codify-secondary font-mono"
+          />
+          <p className="text-[11px] leading-relaxed text-codify-muted">
+            How long Ollama holds this model loaded after a request finishes — a
+            duration (<code>30m</code>, <code>1h30m</code>), bare seconds,{" "}
+            <code>-1</code> for until the server stops. It does not make a call
+            faster; it stops the model being reloaded between goals. Longer
+            means more memory held.
+          </p>
+        </div>
+      )}
 
       {/* System Prompt Override */}
       <PromptOverrideEditor

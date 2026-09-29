@@ -96,9 +96,9 @@ const StatCard: React.FC<{
   value: string;
   sub: string;
   tone?: string;
-}> = ({ icon, value, sub, tone = "text-gray-100" }) => (
+}> = ({ icon, value, sub, tone = "text-codify-primary" }) => (
   <div className="bg-codify-bg border border-codify-border rounded-xl p-3.5 flex flex-col gap-1 min-w-0">
-    <div className="flex items-center gap-1.5 text-2xs font-semibold uppercase tracking-wider text-gray-500">
+    <div className="flex items-center gap-1.5 text-2xs font-semibold uppercase tracking-wider text-codify-muted">
       {icon}
       {sub}
     </div>
@@ -117,18 +117,18 @@ const UsageTable: React.FC<{
   if (entries.length === 0) return null;
   return (
     <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
-      <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
+      <div className="text-xs font-semibold uppercase tracking-wider text-codify-muted mb-2">
         {title}
       </div>
       <div className="flex flex-col gap-1.5">
         {entries.map(([name, lane]) => (
           <div key={name} className="flex items-center gap-2 text-xs">
-            <span className="font-mono text-gray-300 truncate min-w-0 flex-1">
+            <span className="font-mono text-codify-secondary truncate min-w-0 flex-1">
               {name}
             </span>
             <div className="h-1.5 w-24 bg-codify-surface rounded-full overflow-hidden flex-shrink-0">
               <div
-                className="h-full bg-blue-600 rounded-full"
+                className="h-full bg-codify-accent rounded-full"
                 style={{
                   width: `${Math.max(
                     2,
@@ -139,10 +139,10 @@ const UsageTable: React.FC<{
                 }}
               />
             </div>
-            <span className="font-mono text-gray-400 w-14 text-right flex-shrink-0">
+            <span className="font-mono text-codify-muted w-14 text-right flex-shrink-0">
               {fmtTokens(lane.total_tokens)}
             </span>
-            <span className="text-gray-500 w-20 text-right flex-shrink-0">
+            <span className="text-codify-muted w-20 text-right flex-shrink-0">
               {lane.calls} call{lane.calls === 1 ? "" : "s"} ·{" "}
               {fmtDuration(lane.avg_duration_ms)}
             </span>
@@ -164,11 +164,11 @@ const SuccessRateChart: React.FC<{ days: MergedDay[] }> = ({ days }) => {
   const today = new Date().toISOString().slice(0, 10);
   return (
     <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
-      <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
-        <TrendingUp className="w-3.5 h-3.5 text-blue-400" />
+      <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-codify-muted mb-2">
+        <TrendingUp className="w-3.5 h-3.5 text-codify-info" />
         Day by day
         {days.some((d) => d.source === "snapshot") && (
-          <span className="normal-case font-normal text-gray-500">
+          <span className="normal-case font-normal text-codify-muted">
             · saved days survive restarts
           </span>
         )}
@@ -181,37 +181,37 @@ const SuccessRateChart: React.FC<{ days: MergedDay[] }> = ({ days }) => {
           const isToday = d.date === today;
           return (
             <div key={d.date} className="flex items-center gap-2 text-xs">
-              <span className="font-mono text-gray-500 w-20 flex-shrink-0">
+              <span className="font-mono text-codify-muted w-20 flex-shrink-0">
                 {isToday ? "today" : d.date.slice(5)}
               </span>
               <div className="flex-1 h-2 bg-codify-surface rounded-full overflow-hidden min-w-0">
                 <div
                   className={`h-full rounded-full ${
                     rate == null
-                      ? "bg-gray-600/60"
+                      ? "bg-codify-neutral/60"
                       : rate < 50
-                        ? "bg-amber-600/80"
-                        : "bg-green-600/70"
+                        ? "bg-codify-warning/80"
+                        : "bg-codify-success/70"
                   }`}
                   style={{ width: `${rate == null ? 2 : Math.max(4, rate)}%` }}
                 />
               </div>
-              <span className="text-gray-400 w-56 text-right flex-shrink-0 truncate">
-                {isToday && <span className="text-blue-300 mr-1">●</span>}
+              <span className="text-codify-muted w-56 text-right flex-shrink-0 truncate">
+                {isToday && <span className="text-codify-info mr-1">●</span>}
                 {rate == null ? "no terminal goals" : `${rate}% ok`}
                 {" · "}
                 {d.created} started
                 {d.failed > 0 && (
-                  <span className="text-red-400/80"> · {d.failed} failed</span>
+                  <span className="text-codify-danger/80"> · {d.failed} failed</span>
                 )}
                 {d.cancelled > 0 && (
-                  <span className="text-amber-400/80">
+                  <span className="text-codify-warning/80">
                     {" "}
                     · {d.cancelled} cancelled
                   </span>
                 )}
                 {d.total_tokens > 0 && (
-                  <span className="text-gray-500">
+                  <span className="text-codify-muted">
                     {" "}
                     · {fmtTokens(d.total_tokens)} tok · {d.calls} call
                     {d.calls === 1 ? "" : "s"}
@@ -237,7 +237,7 @@ const StageTable: React.FC<{ rows: StageCost[] }> = ({ rows }) => {
   if (!hasStageData(rows)) {
     return (
       <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
-        <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">
+        <div className="text-xs font-semibold uppercase tracking-wider text-codify-muted mb-1">
           By stage
         </div>
         <p className="text-xs text-codify-muted">
@@ -277,7 +277,7 @@ const StageTable: React.FC<{ rows: StageCost[] }> = ({ rows }) => {
               </span>
               <div className="h-1.5 w-20 bg-codify-surface rounded-full overflow-hidden flex-shrink-0">
                 <div
-                  className="h-full bg-emerald-600 rounded-full"
+                  className="h-full bg-codify-success rounded-full"
                   style={{ width: shareWidth(row.token_share) }}
                 />
               </div>
@@ -315,9 +315,9 @@ const RoleOutcomeTable: React.FC<{ roles: Record<string, RoleOutcome> }> = ({
   if (entries.length === 0) return null;
   return (
     <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
-      <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">
+      <div className="text-xs font-semibold uppercase tracking-wider text-codify-muted mb-1">
         Per role
-        <span className="normal-case font-normal text-gray-500">
+        <span className="normal-case font-normal text-codify-muted">
           {" "}
           · did the role do its job, not did the goal succeed
         </span>
@@ -326,18 +326,18 @@ const RoleOutcomeTable: React.FC<{ roles: Record<string, RoleOutcome> }> = ({
         {entries.map((role) => (
           <div key={role.role} className="flex flex-col gap-0.5 min-w-0">
             <div className="flex items-baseline gap-1.5">
-              <span className="text-xs text-gray-300 truncate">
+              <span className="text-xs text-codify-secondary truncate">
                 {role.role}
               </span>
               <span className={`text-xs font-mono ${roleRateTone(role)}`}>
                 {roleRateLabel(role)}
               </span>
-              <span className="text-2xs text-gray-600 font-mono ml-auto">
+              <span className="text-2xs text-codify-muted font-mono ml-auto">
                 {fmtTokens(role.tokens)}
               </span>
             </div>
             <span
-              className="text-2xs text-gray-600 truncate"
+              className="text-2xs text-codify-muted truncate"
               title={roleRunSummary(role)}
             >
               {roleRunSummary(role)}
@@ -362,29 +362,29 @@ const FailureView: React.FC<{ breakdown: FailureBreakdown | null }> = ({
   const empty = failureEmptyMessage(breakdown.total, breakdown.retries);
   return (
     <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
-      <div className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
+      <div className="text-xs font-semibold uppercase tracking-wider text-codify-muted mb-2">
         Failures
         {topFailure(breakdown) && (
-          <span className="normal-case font-normal text-gray-400">
+          <span className="normal-case font-normal text-codify-muted">
             {" "}
             · {topFailure(breakdown)}
           </span>
         )}
       </div>
       {empty ? (
-        <p className="text-xs text-gray-500">{empty}</p>
+        <p className="text-xs text-codify-muted">{empty}</p>
       ) : (
         <div className="flex flex-col gap-1.5">
           {breakdown.causes.slice(0, 6).map((cause) => (
             <div key={cause.code} className="flex items-center gap-2 text-xs">
-              <span className="font-mono text-red-300 w-44 flex-shrink-0 truncate">
+              <span className="font-mono text-codify-danger w-44 flex-shrink-0 truncate">
                 {cause.code}
               </span>
-              <span className="font-mono text-gray-400 w-8 text-right flex-shrink-0">
+              <span className="font-mono text-codify-muted w-8 text-right flex-shrink-0">
                 {cause.count}
               </span>
               <span
-                className="text-gray-500 truncate min-w-0"
+                className="text-codify-muted truncate min-w-0"
                 title={cause.message}
               >
                 {cause.message}
@@ -393,7 +393,7 @@ const FailureView: React.FC<{ breakdown: FailureBreakdown | null }> = ({
           ))}
         </div>
       )}
-      <p className="text-2xs text-gray-600 mt-2">{recoveryLabel(breakdown)}</p>
+      <p className="text-2xs text-codify-muted mt-2">{recoveryLabel(breakdown)}</p>
     </div>
   );
 };
@@ -577,28 +577,28 @@ export const StatsPanel: React.FC = () => {
             onClick={() => setWindowDays(w.days)}
             className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
               windowDays === w.days
-                ? "bg-blue-950/40 text-blue-300 border-blue-800"
-                : "bg-codify-bg text-gray-400 border-codify-border hover:text-gray-200"
+                ? "bg-codify-info/20 text-codify-info border-codify-info/60"
+                : "bg-codify-bg text-codify-muted border-codify-border hover:text-codify-secondary"
             }`}
           >
             {w.label}
           </button>
         ))}
         {stats && (
-          <span className="ml-auto text-2xs text-gray-500">
+          <span className="ml-auto text-2xs text-codify-muted">
             {stats.goals.goals} goal{stats.goals.goals === 1 ? "" : "s"} in view
           </span>
         )}
       </div>
 
       {failed && (
-        <p className="text-xs text-red-300 bg-red-950/40 border border-red-800 rounded-lg p-2.5">
+        <p className="text-xs text-codify-danger bg-codify-danger/20 border border-codify-danger/60 rounded-lg p-2.5">
           Could not load statistics from the engine.
         </p>
       )}
 
       {!failed && !stats && (
-        <p className="text-xs text-gray-500 px-1 py-2">Loading statistics…</p>
+        <p className="text-xs text-codify-muted px-1 py-2">Loading statistics…</p>
       )}
 
       <div className="flex items-center justify-end gap-2">
@@ -606,7 +606,7 @@ export const StatsPanel: React.FC = () => {
           type="button"
           onClick={importHistory}
           disabled={importBusy}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-codify-border bg-codify-bg text-xs text-gray-400 hover:text-blue-400 hover:border-blue-500/40 transition-colors"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-codify-border bg-codify-bg text-xs text-codify-muted hover:text-codify-info hover:border-codify-info/40 transition-colors"
           title="Open a Codify stats-history JSON export and add its frozen days to this view"
         >
           <FileUp className="w-3.5 h-3.5" />
@@ -616,7 +616,7 @@ export const StatsPanel: React.FC = () => {
           <button
             type="button"
             onClick={clearImportedHistory}
-            className="px-2.5 py-1.5 rounded-lg border border-codify-border bg-codify-bg text-xs text-gray-400 hover:text-red-300 hover:border-red-500/40 transition-colors"
+            className="px-2.5 py-1.5 rounded-lg border border-codify-border bg-codify-bg text-xs text-codify-muted hover:text-codify-danger hover:border-codify-danger/40 transition-colors"
             title="Remove the stored imported history from the engine and this view"
           >
             Clear imported
@@ -628,7 +628,7 @@ export const StatsPanel: React.FC = () => {
           disabled={
             (history.length === 0 && importedHistory.length === 0) || exporting
           }
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-codify-border bg-codify-bg text-xs text-gray-400 hover:text-blue-400 hover:border-blue-500/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-codify-border bg-codify-bg text-xs text-codify-muted hover:text-codify-info hover:border-codify-info/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           title="Export every frozen statistics day as one JSON file"
         >
           <FileDown className="w-3.5 h-3.5" />
@@ -636,7 +636,7 @@ export const StatsPanel: React.FC = () => {
         </button>
       </div>
       {importedFileName && (
-        <p className="text-2xs text-blue-300/80 text-right leading-relaxed">
+        <p className="text-2xs text-codify-info/80 text-right leading-relaxed">
           Imported {importedHistory.length} frozen day
           {importedHistory.length === 1 ? "" : "s"} from {importedFileName} and
           stored it in the engine, so it survives a restart. Merge:{" "}
@@ -646,7 +646,7 @@ export const StatsPanel: React.FC = () => {
         </p>
       )}
       {importError && (
-        <p className="text-xs text-red-300 bg-red-950/40 border border-red-800 rounded-lg p-2.5">
+        <p className="text-xs text-codify-danger bg-codify-danger/20 border border-codify-danger/60 rounded-lg p-2.5">
           {importError}
         </p>
       )}
@@ -657,36 +657,36 @@ export const StatsPanel: React.FC = () => {
           {/* Headline numbers */}
           <div className="grid grid-cols-2 xl:grid-cols-4 gap-2.5">
             <StatCard
-              icon={<CheckCircle2 className="w-3 h-3 text-green-400" />}
+              icon={<CheckCircle2 className="w-3 h-3 text-codify-success" />}
               sub="Success rate"
               value={
                 stats.goals.success_rate == null
                   ? "—"
                   : `${stats.goals.success_rate}%`
               }
-              tone="text-green-400"
+              tone="text-codify-success"
             />
             <StatCard
-              icon={<XCircle className="w-3 h-3 text-red-400" />}
+              icon={<XCircle className="w-3 h-3 text-codify-danger" />}
               sub="Failed"
               value={String(stats.goals.failed)}
-              tone="text-red-300"
+              tone="text-codify-danger"
             />
             <StatCard
-              icon={<Ban className="w-3 h-3 text-amber-400" />}
+              icon={<Ban className="w-3 h-3 text-codify-warning" />}
               sub="Cancelled"
               value={String(stats.goals.cancelled)}
-              tone="text-amber-300"
+              tone="text-codify-warning"
             />
             <StatCard
-              icon={<Coins className="w-3 h-3 text-blue-400" />}
+              icon={<Coins className="w-3 h-3 text-codify-info" />}
               sub="Tokens"
               value={fmtTokens(stats.usage.total_tokens)}
-              tone="text-blue-300"
+              tone="text-codify-info"
             />
           </div>
 
-          <p className="text-xs text-gray-500 leading-relaxed px-0.5">
+          <p className="text-xs text-codify-muted leading-relaxed px-0.5">
             {stats.goals.goals === 0
               ? "No goals in this window yet."
               : `${stats.goals.active} still active · ${stats.usage.calls} model call${
@@ -695,7 +695,7 @@ export const StatsPanel: React.FC = () => {
                   stats.usage.avg_duration_ms,
                 )}`}
             {". "}
-            <span className="text-gray-600">
+            <span className="text-codify-muted">
               Success counts completed goals only — cancelled and failed are
               kept apart.
             </span>
@@ -713,7 +713,7 @@ export const StatsPanel: React.FC = () => {
           {stats.usage.calls === 0 &&
             stats.usage.failures === 0 &&
             stats.goals.goals > 0 && (
-              <p className="text-xs text-gray-500 px-0.5 flex items-center gap-1.5">
+              <p className="text-xs text-codify-muted px-0.5 flex items-center gap-1.5">
                 <Zap className="w-3 h-3" />
                 No model calls recorded in this window (plan-only, or an engine
                 run before usage was logged).

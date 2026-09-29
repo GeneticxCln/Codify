@@ -8,9 +8,10 @@ the browser's isolation in `src-tauri/src/browser.rs` and
 `src-tauri/capabilities/browser.json` in §7.2, and the pane that drives that in
 §7.3.
 
-**What is still not built is an embedded page.** A browser tab is a separate OS
-window, so its pane is an address bar and not a viewport. §7.3 explains why that
-is a decision rather than an omission, and what it would cost to change.
+**The page is embedded now.** A browser tab's webview is a child of the main
+window, seated over the pane's measured content rectangle — the pane is the
+address bar *and* the viewport. §7.3 has the mechanics and §7.2 the isolation
+story for a page that now shares a window with the app's own UI.
 
 ## 1. What this fixes
 
@@ -64,6 +65,133 @@ Three decisions in that shape, and why:
 Indexes: `idx_goals_conversation (conversation_id, created_at)` and
 `idx_conversations_workspace (workspace_id, updated_at)`. Listing a thread's
 turns is the hot read of a tab switch.
+
+### 2.1 The tab strip, which is an engine record with a client mirror
+
+The rule above is *records in the engine, view state in the client*, and a
+conversation is a record. The tab strip used to argue it was the other half —
+"only the shell process can re-create a webview, so only the client needs the
+layout" — and that argument was correct until the first person opened a second
+window and asked where the other window's tabs were. A layout one process holds
+is a layout one window sees. The strip is now an engine record; what stayed in
+the client is the half the rule was always about: `id`s and the active tab (this
+process's webviews, this process's attention), and a mirror for the moments the
+engine is not answering.
+
+**What it closes.** Nothing remembered the strip at all. `tabState` was
+`useState<TabState>(emptyTabs)`, so every browser tab died with the process —
+not just the tab but the address it was on and its whole back/forward stack,
+which is the half that is actually missed. Chat tabs were the least affected,
+because a thread can always be re-opened from the panel, one click per thread
+instead of one click for the arrangement.
+
+**The two stores, and who owns what.**
+
+- **The engine** holds `shell_tabs` (`engine/db.py`): `key`, `position`,
+  `kind`, and a `payload` of JSON the engine never opens. Three authenticated
+  routes (`engine/app.py`): `GET /shell/tabs` returns the strip ordered by
+  position; `PUT /shell/tabs` upserts *one tab* and answers with the whole
+  strip (a push is also a read — the writer learns the other window's state in
+  the same round trip); `DELETE /shell/tabs/{key}` is idempotent and answers
+  with what remains. `ShellTabService` validates only that the payload is
+  JSON; what a payload must contain to be restorable is the client's law
+  (`layoutSync.ts` decodes with the same refusals `tabPersistence.ts` applies
+  to the mirror), because the engine cannot have an opinion about a shape it
+  treats as opaque.
+- **The client** mirrors the strip to `localStorage` under one key
+  (`CODIFY_TABS`, `ui/src/tabPersistence.ts`), written through on every change
+  *before* the engine is told. The mirror exists so a restore is synchronous
+  at first render — a window whose pages would paint fine does not lose its
+  strip because the engine is restarting — and so a crash leaves a readable
+  layout whose tabs all carry keys.
+
+**Identity is the key, and it is minted once.** Every remembered tab carries a
+`k_<base36 time>_<counter>` key (`ensureKeys`), assigned when the tab is first
+seen and never re-minted — not on restore, not on adoption. The key is the only
+thing that says "the same tab" across windows: two rows for one address are two
+tabs, and a window that re-keyed a tab on arrival would turn one shared tab into
+two. `position` is order, not identity. Terminal tabs stay local (a PTY is a
+live process of this shell; there is nothing to share), so they have no key and
+no row.
+
+**Every shape is checked on the way in**, because a stored value is not a type
+and a row's payload is a stranger's JSON, and the degradation is always *less*:
+an unreadable value is an empty strip, a tab that cannot be made whole is
+dropped rather than repaired, and nothing here surfaces an error, for the reason
+`modelFreshness.ts` gives. Two rules are worth naming:
+
+- **An address the shell would refuse takes the whole tab with it.** Restored
+  addresses go through `classifyBrowserAddress` — the same mirror a typed one
+  goes through, so a stored `example.com` comes back as `https://example.com/`
+  and a stored `http://127.0.0.1:7430/` is refused here rather than seated. The
+  shell's `navigation_allowed` remains the enforcement point; this is the same
+  refusal arriving before a webview exists.
+- **A redirect moves the current entry; it does not add one.** The page reports
+  its live address after a redirect and `setBrowserPageUrl` records that on the
+  tab alone, so the stack's cursor names the address the redirect came *from* —
+  which is every page that redirects, and most pages do. Writing that as-is
+  would drop the whole stack on nearly every site, silently costing the user
+  their back button, and the round-trip test is what caught it. The current entry
+  is replaced at the cursor instead.
+
+Capped at 24 tabs (keeping the tab that was showing, plus the leftmost of the
+rest) and 100 history entries (the most recent, ending at the cursor). Both are
+generous enough that a real session never reaches them and both exist to bound
+what is written on every navigation.
+
+**Restoring is synchronous, from the mirror, before the engine answers.** The
+strip is rehydrated where it is created; what the engine eventually says is a
+*merge* (below), not a replacement, so a window that rendered from the mirror
+keeps the tabs it already showed. The *pages* cannot be seated at restore: a
+webview opened before the pane has been measured is refused by the shell (§7.2's
+zero-bounds refusal), and only the pane knows its own rectangle. So a separate
+effect opens a restored tab's page once a real rectangle has arrived — through a
+path that opens the page and **touches no tab state**, because
+`handleOpenBrowser` creates the tab from an address bar and `openBrowserTab`
+starts a fresh one-entry history, which would throw away the very stack the
+restore brought back. `ui/tests/tabPersistence.test.ts` pins that wiring by
+reading `App.tsx`, alongside the pure half.
+
+Two honest limits, neither of which is hidden by a heuristic. A **workspace that
+has been deleted** leaves its tabs behind: the tab stays (the strip is the
+user's arrangement and is not silently pruned) and shows no folder pill, because
+`workspaceId` is optional and a tab with no folder shows none rather than a
+guess. A **chat tab whose thread is gone** hydrates into whatever the panel says
+about a thread that is not there, which is the same thing clicking that thread in
+History would have done.
+
+**The merge, in one sentence and then in its rules.** A window reconciles the
+engine's strip against its own — local wins on a key both have, the engine's
+rows are adopted where it has none, and a local tab is dropped only when the
+engine has *confirmed* it and then stopped listing it.
+
+- **A keyed local tab wins over its row.** The window showing the page is the
+  authority on it; the push that follows tells the engine, and the other window
+  converges on its next round trip. Windows agree by exchange, not by a
+  referee.
+- **A row whose key nobody here has is somebody else's tab, and is adopted**
+  with a fresh local `id` — the webview does not exist here yet, and the pane
+  seats it from the row's own address. The engine's `position` is where it
+  lands, so both windows show one order.
+- **Only a *confirmed* absence is a close.** A key the engine held a moment ago
+  and does not list now is gone everywhere; a key the engine has never heard of
+  is simply not pushed yet. This `known`-qualification is the difference
+  between sharing a strip and losing one: a fresh engine (a new `codify.db`, a
+  restart in progress) answers with an empty strip that must retire nothing.
+  The set of confirmed keys costs one boot-time read, is refreshed by every
+  answer, and the alternative — trusting emptiness — emptied a full mirror in
+  the test that pinned this rule.
+- **A window's own unacknowledged closes are held back.** Until the engine has
+  answered the `DELETE`, its row is the pre-close one; adopting it would put
+  back the tab the user closed. The removal queue survives an offline close
+  for exactly this reason.
+- **A merge that changes nothing returns the state it was given.** The
+  reconciler runs inside `setTabState((prev) => ...)`, so a rebuilt-but-equal
+  strip is a re-render, and a re-render re-fires the push, and the push pulls
+  again — the loop that kept `terminalEndToEnd` pending forever and would have
+  request-looped against a real engine. Local tab objects are kept by identity,
+  never re-decoded (a decode mints a fresh `id`), and the no-op answer is the
+  *same* object. `ui/tests/layoutSync.test.ts` pins this contract directly.
 
 ## 3. HTTP surface
 
@@ -123,8 +251,8 @@ interface Tab {
   id: string;
   kind: TabKind;
   title: string;
-  conversationId?: string;   // the thread a chat tab shows
-  workspaceId?: string;      // the folder this tab belongs to
+  conversationId?: string;   // the thread a chat tab shows; absent on a clean slate
+  workspaceId?: string;      // the project this tab belongs to — a chat tab's identity
   url?: string;              // a browser tab's current address
   // plus `history`, `ptyId` and `exited` for the browser and terminal kinds
 }
@@ -133,28 +261,81 @@ interface TabState { tabs: Tab[]; activeId: string | null }
 
 Settled decisions:
 
-- **One tab per thread.** The strip grows with the threads you have open, and
-  starting a new thread adds a tab rather than replacing the one you were
-  reading. A single shared "Chats" tab was tried and reversed: it looked tidier
-  and it was wrong in the way that matters — a new thread silently took over the
-  chat column, and the strip held no record of what was open. The side panel
-  already lists every thread, so the strip's job is not to be a second list of
-  them; it is the set of things currently open, which for a chat means the
-  thread. `openConversation(state, conversationId, title)` is the only way in.
+- **New Tab sits between the CODIFY badge and the strip; the side panel is the
+  selected project's thread list, and it opens threads rather than tabs.**
+  `App.tsx` renders `NewTabButton` in the header, immediately after the badge and
+  immediately before one global `TabBar`, above the two-column workspace. It was
+  the *last* thing in the strip, which is the wrong end for it: a strip of ten
+  tabs is a ten-tab walk to the one control that shortens the strip, so the
+  control whose cost rose with the number of open tabs was the one furthest from
+  the pointer. It is disabled until a project is selected — a tab is a project's
+  window, and there is no window without one. The side panel offers **New
+  Project** (browse and add/select a folder) and nothing else in its button row;
+  its **New Thread** button is gone, because it created a thread *and* opened a
+  tab for it, which made it a second New Tab in a second place that also left a
+  conversation behind before anything was typed. A thread is now made by typing
+  in a clean slate. The panel's right-click menu still starts a thread *on*
+  another thread (`parent_id`), which is a different act with a different parent
+  and the only "new" the panel offers. Chat tabs stay open when the project
+  picker changes, because each tab records its own `workspaceId` and a project
+  switch must not close transcripts or live terminal/browser instances. The
+  sidebar names the selected project and shows only that project's unarchived
+  conversations. The API query is scoped by `workspace_id`; the client caches
+  lists by workspace, ignores stale fetches, and the sidebar filters again at
+  its boundary. With no project selected the panel says so and shows no threads.
+  `ui/tests/shell.test.ts` covers placement, the absence of the panel's new-tab
+  control, scope isolation, and the empty-project state;
+  `ui/tests/tabStripInteraction.test.ts` covers the control itself and the fact
+  that the strip no longer offers one.
+- **One project per tab, and a project's threads live in it.** A chat tab is a
+  *project's window*, not a thread's. Opening a thread is therefore a question
+  about which project it belongs to and never about making room, and
+  `openConversation(state, conversationId, title, workspaceId)` is the only way
+  in. It answers in three steps, and each step is a case the previous one got
+  wrong: a tab already showing the thread is **focused**; otherwise the tab you
+  are looking at, if it is a chat tab in that project, **shows the thread**,
+  replacing what was in it; otherwise a **new tab** for that project. The strip
+  is the set of projects you currently have open, and several tabs of one
+  project are possible — New Tab twice is two windows onto the same project,
+  which is the control's whole use. This is *not* the single shared "Chats" tab
+  that was tried and reversed: the project is still a tab, still in the strip,
+  and still yours to close; what is not a tab is each individual thread.
 - **Opening a thread you already have open focuses its tab; it does not open a
-  second one.** `tabForConversation` keys on `conversationId`, so two tabs on one
-  conversation — two live event streams over the same goal — are unreachable.
-  That is a *deduplication*, not a cap: there is no fixed number of chat tabs.
-  Terminals and browser tabs are unaffected — those are one tab per live
-  instance, because two terminals are two shells and two browser tabs are two
-  webview windows, and collapsing either would make the second unreachable.
+  second one, and it does not move it either.** `tabForConversation` keys on
+  `conversationId`, so two tabs on one conversation — two live event streams over
+  the same goal — are unreachable. Because two tabs of one project can coexist,
+  this step has to come *before* the one above it: choosing a thread that is
+  already open in a background tab must bring that tab forward rather than show
+  the thread in the tab you are already in, which would leave one thread on
+  screen twice. This is a *deduplication*, not a cap: there is no fixed number of
+  chat tabs. Terminals and browser tabs are unaffected — those are one tab per
+  live instance, because two terminals are two shells and two browser tabs are
+  two webview windows, and collapsing either would make the second unreachable.
+- **New Tab opens a clean slate, and creates nothing.** `openBlankTab(state,
+  workspaceId)` is a chat tab with a project and no `conversationId` — a state a
+  tab is allowed to be in. The old New Tab called `createConversation` before it
+  opened anything, so a tab *was* a conversation from the moment it appeared, and
+  pressing the button to look around left an empty conversation behind, named
+  from a prompt nobody wrote, with a row in the side panel. The thread is now
+  made by the first prompt, in the send path, which is the only place that has
+  the prompt to name it with — so a tab opened and abandoned costs nothing. The
+  send path then hands the new conversation to `openConversation`, which finds
+  the very tab it was typed in (a clean slate in the same project) and fills it,
+  so the first prompt does not leave an empty tab beside the thread it created.
+- **Archiving a thread blanks its tab rather than closing it.** The tab is the
+  project's window, so closing it would destroy a window the person is still
+  working in, and archiving one thread should not be a way to lose a project.
+  What is left is the same clean slate New Tab opens, in the same project. A
+  thread with no tab is the ordinary case (archived from the panel without being
+  read) and changes nothing.
 - **A thread is called by its name, by its folder, or by nothing else.** The
   engine stores no title until something gives a thread one, so the strip and
   the panel both need a fallback and must use the *same* one: `threadLabel` in
-  `threadTitle.ts`, used by `TabBar` and `Sidebar`. A named thread is called by
-  its name. An **unnamed** one is called by its **folder** — the workspace's
-  short name, never its path. `"New chat"` is the last resort, for a thread that
-  has neither.
+  `threadTitle.ts`, used by `TabBar` and `Sidebar`.  A named thread is called by its name. An **unnamed** one is called by its
+  **folder** — the workspace's short name, never its path. `"New chat"` is the
+  last resort, for a thread that has neither. A **clean slate** is the second
+  case, not the third: a tab with nothing in it is in a project, so the folder is
+  a real answer, and "New chat" would name nothing at all.
   The folder is there because `"New chat"` names *nothing*: not the thread, not
   where it is, not which of three identical tabs you are looking at, and
   opening any one of them looks exactly like nothing happened. The folder names
@@ -176,11 +357,10 @@ Settled decisions:
   across a workspace switch is deliberate — two projects at once is legitimate
   and closing the strip would destroy live transcripts — which is exactly why
   the folder had to move off the header and onto the tab.
-- **A thread's first prompt is its name.** This became load-bearing with one tab
-  per thread, and it is the difference between the feature working and not
-  working at all: a thread made by "New chat" starts unnamed, and the engine
-  stores exactly what it is told, so three untitled threads are three tabs all
-  labelled "New chat" and opening one is indistinguishable from opening
+- **A thread's first prompt is its name.** This is the difference between the
+  feature working and not working at all: a thread starts unnamed, and the engine
+  stores exactly what it is told, so a tab showing a thread nobody has typed into
+  is a tab labelled "New chat" and opening one is indistinguishable from opening
   nothing. `threadTitleFromPrompt` (`ui/src/threadTitle.ts`) collapses the
   prompt's whitespace and cuts it at 60 characters **on a word boundary** — a
   tab is 224px wide, and "so every row h" is a name you read twice. The turn
@@ -188,17 +368,13 @@ Settled decisions:
   never overwritten, and `nameThread` moves the *tab* with the rename, because a
   name the engine accepted that the strip never learned about is the same
   invisible-thread problem one layer down.
-- **Archiving a thread closes its tab** (`closeConversation`). A tab left
-  pointing at an archived conversation is a transcript with no row above it. A
-  thread that was never opened has no tab and changes nothing — which is the
-  ordinary case, and the reason the lookup is by thread and not "close
-  something".
 - **Closing lands on the tab to the left**, or the one that slid into the slot
   when the closed tab was first. A transcript read to the bottom leaves you
   wanting the tab you were on before.
 - **Closing the last tab leaves `activeId: null`.** An empty shell is the honest
   state; inventing a tab to land on would mean closing everything and still
-  looking at a transcript. "New chat" is the way back.
+  looking at a transcript. The header's New Tab button, beside the badge, is the
+  way back.
 - **Reordering clamps.** A drag that lands past the last tab is a move to the end,
   not a tab that vanishes.
 - **A tab's id is not its conversation's id.** Tabs are generated; look up by
@@ -373,6 +549,43 @@ that never appears, which is worse than a title bar), and an explicit
 `GDK_BACKEND` wins — which is also how a user undoes this without a rebuild. The
 launch says which one it did, once, because "the title bar is back" is otherwise
 a bug whose cause cannot be read off the launch.
+
+### 5.3.1 The pill, and what it does when the engine moves
+
+The header pill is a poll, not a decoration: `checkEngineHealth` asks `/health`
+every 3s (15s while the tab is hidden) and the pill reads `Live`, `Offline`,
+`Checking` or `Auth stale`. Two of those four mean *the connection we hold is
+stale*, and they want opposite answers about what to do.
+
+`Auth stale` is the one the banner exists for: an engine is there, it rejects
+our token, and the fresh token lives with the engine's spawner, so the page
+cannot mint it. The other staleness is quieter and used to be misread. `!ok` was
+taken to mean "the engine is down" — but nothing answering at the port we hold
+has a second reading, *the engine is up on a different port*, and the two look
+identical from inside the page. An engine that restarts and takes a new port
+leaves an **open** window showing a red pill beside a perfectly healthy engine,
+forever, because the boot-time fetch of engine info has long since run and the
+poll was the only thing still looking.
+
+So the poll asks the shell. `codify_get_engine_info` is the one party that
+watched the live handshake, and on either staleness — `ok && !authenticated`
+**or** `!ok` — the probe asks it; a changed answer is applied to the API client
+and its localStorage write-through, the workspace and model loaders re-run
+because a fresh token may name a different engine's providers, and the probe
+re-runs **immediately** rather than leaving a user to stare at a wrong answer
+for another three seconds. Nothing is invented: an unchanged answer means the
+engine really is gone and the pill says `Offline`, which is the honest report.
+
+The open window is the case worth testing, and it is the one
+`ui/tests/healthProbeRecovery.test.ts` holds: a cold boot already recovers on
+its own (the mount effect fetches engine info from the shell), so a test that
+only seeds a dead port passes without this branch at all. The test therefore
+mounts the real `App` against a fetch that refuses the held port, lets the boot
+settle, asserts the pill honestly reads `Offline`, and *then* moves the engine —
+which only the shell is told about — and waits for the app's own 3s poll. That
+last part is deliberate: driving the probe through `forceHealthProbeRef` would
+pass with the automatic path deleted, and the automatic path is where the bug
+lived.
 
 ### 5.4 How the app ends, whichever way it is asked
 
@@ -605,11 +818,13 @@ the module's own docs:
   path could point a user's shell at anywhere on the machine.
 - **Closing reaps.** `codify_terminal_close` kills the shell, and so does the
   app's exit handler — a terminal left running after the window goes is a stray
-  process holding the workspace, the same defect the engine kill prevents.
+  process holding the workspace, the same defect the engine kill prevents. The
+  kill escalates: SIGHUP first, then a hard kill for a shell that ignores it,
+  and the exit status is collected either way rather than leaving a zombie.
 
 Commands: `codify_terminal_open`, `codify_terminal_write`,
 `codify_terminal_resize`, `codify_terminal_close`. Events: `terminal-output`,
-`terminal-exit`. Eight Rust tests pin the refusals and the reaping; the freeze is
+`terminal-exit`. Nine Rust tests pin the refusals and the reaping; the freeze is
 mutation-tested — a rogue `Command::new(...).spawn()` in `src-tauri/src/` fails
 `tests/test_no_unguarded_spawns.py`.
 
@@ -648,8 +863,15 @@ inconsistencies and are not:
 - **The terminal is drawn in the main window; the browser is not.** §7.3.
 
 `terminalModel.test.ts` covers the grid, the de-dupe and the buffer;
-`terminalHistory.test.ts` covers the scrollback below; `terminalPane.test.ts`
-covers the markup and freezes the decisions a static render cannot reach. **The
+`terminalHistory.test.ts` covers the scrollback below; `terminalBuffer.test.ts`
+covers the background backlog; `terminalPane.test.ts`
+covers the markup and freezes the decisions a static render cannot reach.
+`terminalEndToEnd.test.ts` is the one that sees the **relay** rather than a part
+of it: it mounts `App` itself over a fake shell, opens two shells, runs a build
+in the background one, switches tabs, and reads the result out of a real xterm.
+The pieces above can each be right while the wiring between them is backwards —
+and the double-filing and dropped-prompt defects above were both invisible to
+all of them. **The
 PTY itself is Rust's** and its tests live in `src-tauri/src/terminal.rs` — the
 UI suite never spawns a shell, and a terminal that a user has to trust is one
 whose refusals are tested next to the code that refuses.
@@ -661,6 +883,85 @@ with it, and reopening the tab gave a bare prompt. `ui/src/terminalHistory.ts`
 keeps a **bounded tail of the output stream, per workspace, in memory for the
 session**, and a reopened pane writes it back into a fresh xterm before the live
 shell says anything.
+
+**The record keeps every byte; the replay does not keep every line.** A line
+with no newline in it is trimmed when a pane *writes the tail back*, not when
+the tail is appended to, because a shell's last word is almost always such a
+line: the prompt, or half a command the user is still typing. Trimming at
+append time read as tidiness and was the opposite — every session's record
+stopped one line short of the truth and those bytes were gone from every store
+the app has, not merely unshown. The half-line is a display problem, and
+`replayFor` is where it is solved.
+
+#### Output a terminal earns while no pane displays it
+
+A pane mounts only while its tab is active, and the shell behind an inactive
+tab never stops — so every byte a background build printed used to be emitted
+to nobody and dropped, gone from the live pane on return and from the workspace
+scrollback too, because the scrollback append lived in the same unmounting
+listener. `ui/src/terminalBuffer.ts` is the fix, and it is a **separation of
+recording from rendering**: rendering stays active-tab-only (the same decision
+the browser pane made, and unchanged); recording moves to a subscription at
+app scope, alive for as long as the app is.
+
+The rule that keeps every byte displayed once and filed once is **ownership**.
+A pane claims its terminal's id on mount (taking what the shell said in its
+absence) and releases it on unmount; the recorder holds a chunk only when
+nobody owns the terminal that said it, and leaves an owned terminal's chunk to
+its pane, which displays and files it. **A pane files its own terminal's bytes
+and nobody else's** — the pane for a chunk it displays, the store for the rest.
+It used to file every chunk that arrived, before the pane check, on the theory
+that anything a workspace's terminals said belongs to that workspace; that was
+true when the pane was the only listener and became a duplicate the moment the
+recorder existed, because the *sibling* pane then filed this terminal's
+background build into the same record the backlog replays from, and the
+returning pane printed every line of that build twice. An unowned terminal is
+in one of three states, each with one answer: **backlog** — its tab exists but
+its pane does not, so chunks are held bounded (64 KiB, the same bound the
+workspace tail uses, no line trim, because a shell's warm-up is a prompt with
+no newline) and replayed by the next pane to claim it; **abandoned** — the tab
+was closed with the pane unmounted, and `handleCloseTab` retires the backlog
+into the workspace's scrollback, honouring the guarantee above; **exit while
+unowned** — the recorder files the backlog plus an exit marker on
+`terminal-exit`, because a marker that only ever reached a mounted pane would
+leave a background shell's record looking open.
+
+Ordering on return is chronological and therefore display order: the workspace
+replay (earlier sessions, under its seam), then a **resume seam** — *output
+missed while this pane was away* — then the backlog, then the live stream. The
+backlog continues the tail rather than replacing it: everything a mounted pane
+displayed was already filed as it was displayed, so the backlog is strictly
+newer, and without the seam the gap would read as one unbroken stream. Claiming
+is also the moment the backlog is **filed**: the store deleted those bytes when
+the pane took them, so the pane writing them into xterm is the one copy that
+exists, and a shell's first prompt is nearly always backlog — the PTY prints
+before the tab does, so the recorder catches it while no pane owns it. Filing
+only what arrived *after* the claim left that prompt on screen and absent from
+the workspace record, so the next pane in the workspace restored everything
+except the start of the session.
+
+**The badge.** `recordOutput` returns whether it kept a chunk — exactly the
+moments a background terminal said something — and App turns those into an
+unread set the tab strip renders as a dot next to the busy dot, with *new
+output* in the tab's accessible name. Two guards keep it honest: a kept chunk
+on the *active* tab (the claim window, between a pane mounting and its claim
+landing) is not unread, because badging the tab the user is reading would make
+the badge lie about attention; and the badge clears when the tab is shown,
+dies with its tab, and survives a *background* exit — a shell that finished
+unwatched is the one moment the badge matters most. What clears is an exit the
+user watched (the owned case). The set lives in App, not the store: which tabs
+the user has looked at is a view concern, and the store's durable answer — the
+backlog — is already where the badge's evidence is.
+
+| Decision | Why |
+|---|---|
+| **Record at the app, render in the pane** | A recorder keyed to any pane's mount has exactly the outage the feature exists to prevent. App scope is also the only scope that survives a tab switch, which is the common case. |
+| **Ownership, not timestamps** | Deciding "was this chunk displayed?" from arrival times re-derives React's mount order and gets it wrong at the edges; a claim/release pair is the mount order, stated by the component that knows it. |
+| **The backlog is bounded like the tail and has no line trim** | Two bounds would invite the question of which applies. The line trim exists for replay of a *stored* tail; a returning pane wants the prompt the shell is mid-writing, which trimming would swallow. |
+| **A pane files only its own terminal's bytes** | One owner per chunk: the pane for what it displays, the store for the rest. Filing a sibling terminal's chunk is a second filer, and a second filer is how a background build ends up on screen twice. |
+| **Merge at session boundaries only** | Chunks the pane displayed are already in the tail and never entered the backlog; chunks in the backlog were never filed, and the pane that claims them files them as it replays them. Disjoint by construction, so the merge is a concatenation and no byte is counted twice. |
+| **Background exit files the marker itself** | The pane's marker is display-only and never reaches the tail; a background shell's record must end visibly, or it reads as open. |
+| **The unread badge survives a background exit** | A shell that finished unwatched is the moment the user most needs pointing at the tab. What clears the badge is showing the tab, closing it, or watching the exit happen — never the exit itself. |
 
 | Decision | Why |
 |---|---|
@@ -692,11 +993,22 @@ already written.
 
 `src-tauri/src/browser.rs`, `src-tauri/capabilities/browser.json`,
 `src-tauri/permissions/shell.json`, commands
-`codify_browser_open` / `codify_browser_navigate` / `codify_browser_close`.
-One webview window per browser tab, labelled `browser-<tab>`. This is the first
-surface in Codify that renders untrusted content; every other pixel is
-engine-owned or shell-owned. Four layers of isolation, and the Rust tests in
-`browser.rs` pin them:
+`codify_browser_open` / `codify_browser_navigate` / `codify_browser_focus` /
+`codify_browser_resize` / `codify_browser_close` /
+`codify_browser_devtools_open` / `codify_browser_devtools_close` /
+`codify_browser_devtools_state` / `codify_browser_devtools_available` —
+exactly those nine, and the list is not a memory: it is checked against
+`invoke_handler![]` in both directions by
+`the_docs_name_the_browser_commands_that_exist`. A tenth command, in this list
+once, handed a page's current URL to the operating system's own opener; §7.3
+says why it is gone, and naming it here would only put a dead command back
+into circulation.
+
+One embedded **page** per browser tab, labelled `browser-<tab>` — a child
+webview of the main window, not a window of its own. This is the first surface
+in Codify that renders untrusted content, and it now renders it *inside* the
+window the app's own UI runs in. Five layers of isolation, and the Rust tests
+in `browser.rs` pin them:
 
 **1. An empty capability set.** `capabilities/browser.json` covers
 `browser-*` with an empty `permissions` list — no `invoke`, no event listeners,
@@ -736,7 +1048,7 @@ check at all — local meaning relative to the `devUrl` or the app's own assets
 (`tauri://localhost`, `http://tauri.localhost`). That was the whole reason the
 main window worked on `core:default` alone, and it meant layer 1 had nothing to
 deny with: a browser webview was kept out by its *origin*, and only by its
-origin. `src-tauri/permissions/shell.json` is now the manifest — thirteen
+origin. `src-tauri/permissions/shell.json` is now the manifest — twenty
 `allow-codify-*` permissions, one per command, collected into a `shell` set.
 Two properties matter more than the count:
 
@@ -814,18 +1126,91 @@ a throw.
 ### 7.3 The browser pane — built
 
 `ui/src/components/BrowserPane.tsx`, driven by `ui/src/browserHistory.ts`,
-`ui/src/tabs.ts` and three calls in `ui/src/api.ts`
+`ui/src/browserDispatch.ts`, `ui/src/tabs.ts` and five calls in `ui/src/api.ts`
 (`openBrowserWebview` → `codify_browser_open`, `navigateBrowserWebview` →
-`codify_browser_navigate`, `closeBrowserWebview` → `codify_browser_close`).
+`codify_browser_navigate`, `focusBrowserWebview` → `codify_browser_focus`,
+`resizeBrowserWebviews` → `codify_browser_resize`, `closeBrowserWebview` →
+`codify_browser_close`).
 `App.tsx` renders the pane **instead of** the transcript and composer when the
 active tab is a browser tab, and the header's Browser button opens a tab with no
 address.
 
-**The pane is the address bar, not a viewport, and it says so on screen.** The
-page is a separate OS window (§7.2), so this is chrome with no document under
-it — the pane carries a line saying the page is in its own window rather than
-leaving the user to work out why. That is the honest shape for what the shell
-builds, and it is worth being explicit about the alternative:
+**The pane is the address bar *and* the viewport.** The page is a child webview
+of the main window (§7.2), seated over the pane's measured content rectangle:
+the pane reports its geometry (`onBounds`, logical pixels, from a
+ResizeObserver on the content div), the shell places the native view exactly
+there, and the coalesced `codify_browser_resize` keeps it there through every
+layout change.
+
+**…and on Linux, "the shell places it" was not true for as long as the pane has
+existed.** This is the one paragraph of §7.3 that a reader should not take on
+trust, because it was wrong, it looked exactly like a rendering bug, and the
+whole smoke suite was green through it:
+
+- Tauri builds **every** webview into the window's default `gtk::Box` —
+  `tauri-runtime-wry`'s `WebviewKind::WindowChild => build_gtk(default_vbox())`
+  — including the app's own UI and every page.
+- wry's `add_to_container` takes the `GtkBox` branch and does
+  `pack_start(webview, true, true, 0)`: expand and fill, **with the bounds it
+  was handed never read**. Its `GtkFixed` branch is the one that honours
+  `put(webview, x, y)`, and `set_bounds` afterwards is guarded by
+  `is_in_fixed_parent`, which wry records at *creation* — so on Linux both the
+  position and every later `resize` were silent no-ops.
+- A `GtkBox` lays children out in a line and cannot overlap them, so two
+  expanding children in one window is a window split in half. Users saw exactly
+  that: the browser opening over **half** of Codify, and then over all of it.
+- The paint smoke could not see any of it, because it asked for `0,0 800×600` —
+  which is what "the box gave the page the whole window" already looks like.
+
+**The fix is the container the toolkit needs.** Tauri exposes no way to create a
+webview into a container of our choosing (its builder has no `build_gtk`, its
+`Webview` no `gtk_widget`), so `browser.rs`'s `page_layer` module does the
+container work itself from `Window::default_vbox()`: on the first page, the
+app's webview becomes the main child of a `gtk::Overlay` this crate owns, every
+page then lives in a `gtk::Fixed` layered above it, and placement is driven by
+hand — `fixed.move_` plus `set_size_request` on every `open` and every
+`resize`, with nothing calling wry's `set_bounds`, which would stay a no-op on
+this platform however the tree is arranged. The layer is built lazily, so a user
+who never opens a browser tab has a window that was never restructured; the
+whole module is `cfg`-gated to exactly the platforms whose toolkit behaves this
+way, and every other platform keeps the native `set_bounds` path.
+
+**…and that container is built on GTK's thread, which is not the thread the
+command runs on.** `codify_browser_open` and its siblings are `async` commands,
+so Tauri runs them on a tokio worker, and GTK asserts on every widget call —
+its assert reads "GTK may only be used from the main thread". The first real
+click on a browser tab died on that assert, before the page existed, and the
+paint smoke could not see it: the smoke seats its page from `setup`, on the main
+thread, and a user's click does not. So `page_layer` has exactly one door,
+`on_main`, and every entry point (`prepare`, `adopt`, `place`, `release`,
+`geometry`) goes through it. It asks the toolkit's own question before touching
+a widget — `gtk::glib::MainContext::default().is_owner()`: tao initialises GTK
+on the main thread and `gtk::init` **acquires and leaks** the default main
+context (gtk-rs#186), so that thread is its owner for the life of the process.
+When this already is that thread the work runs inline, because hopping from the
+main thread would queue a closure behind the call that is waiting for it;
+otherwise it goes through `Window::run_on_main_thread` and blocks for the
+answer, the same shape Tauri itself uses for `add_child`.
+`browser::tests::the_layer_touches_gtk_only_from_the_thread_gtk_allows` names
+the regression and fails the build if a door stops asking.
+
+**And the smoke now measures what it never did.** It seats its page at
+`24,24 560×420` — deliberately not the origin and not the window's size, so "the
+toolkit discarded the request and used the whole window" cannot coincide with a
+pass — and 700ms later reads the widget's **real GTK allocation** and fails the
+run if it is not that rectangle. Measured on this machine: `embed-smoke: page
+geometry (24, 24, 560, 420) — the page is where the pane asked`. The control run
+is the part that matters: with the placement call removed, the smoke exits **1**
+with `browser page "browser-smoke" is not in the page layer`, so the check bites
+rather than describing whatever it finds. The read is taken from a spawned task
+— a tokio worker, the thread a click arrives on — so the smoke exercises the
+thread the command does, and a GTK assert inside it is caught and reported as a
+named `FAILED` instead of leaving the run to finish and report a green that says
+nothing about where the page is. Every other leg of that smoke measures
+the page's *content* — a page covering the entire app passes all of them, which
+is how this stayed hidden. This replaced a separate OS window, which the docs here used to
+defend — and the defence was real, which is why it is worth quoting against
+itself:
 
 > Embedding the page in the main window means building a **child** webview. A
 > child webview reports its *parent's* window label, and `resolve_access` in
@@ -838,6 +1223,516 @@ builds, and it is worth being explicit about the alternative:
 > isolation argument of §7.2, and a child webview has no window event, so the
 > close signal of §7.2 would have to be rebuilt as well. That is a change worth
 > making deliberately; it is not a side effect of adding an address bar.
+
+That is what shipped, deliberately, and each cost named there was paid:
+
+- **The grant was re-pointed, in the same change.** `default.json` matches on
+  `webviews: ["main"]` and `browser.json` on `webviews: ["browser-*"]`; both
+  files match on `webviews` and on nothing else, and
+  `browser.rs::no_capability_grants_through_a_window_pattern` fails the build
+  if any capability that grants anything ever matches through a `windows`
+  pattern again — the shape that would let a child inherit the grant. The
+  reach test now asserts `main` matches through the *webview* label.
+- **The close signal was not rebuilt, because the problem dissolved.** A child
+  webview cannot close itself and has no window events, so there is nothing to
+  announce: the strip is the only closer, and the separate-window build's
+  `browser-window-closed` event is gone from both ends (the Rust test reading
+  `shellEvents.ts` fails if the name comes back). A page can still ask for
+  something — a popup — and that is the one event the shell now emits: refused
+  at the webview, announced to the UI, opened by the user as a real tab
+  through the same guarded path as a typed address.
+
+**Why embed at all: the user asked for the browser to be in the app, and the
+separate window was also the certificate-error story.** A page that failed TLS
+verification painted WebKit's interstitial in a window of its own, detached
+from the tab that asked for it — and the first report of this app's browser
+was exactly that: `google.com` opening "a separate window with some
+certificate error". Embedded, the same interstitial paints *in the tab*, and
+the failure has no code path of ours to lie about: wry 0.55.1's
+`PageLoadEvent` is `Started | Finished` and nothing else (checked against the
+vendored source), so the shell is never told of a failed load and never
+pretends to handle one. The certificate question is answered where it lives —
+the system trust store, which is what WebKitGTK verifies against — and never
+by a flag on this app: there is no bypass, offered or hidden.
+
+**The page reports itself, and the strip says so.** Three shell events carry a
+page's life to the UI: `browser-page-loading` and `browser-page-loaded` (from
+tauri's `on_page_load`, the payload carrying the address being loaded) and
+`browser-page-titled` (from `on_document_title_changed`). The tab strip shows
+two facts from them: a **loading marker** — a pulse, not a progress bar,
+because the runtime has no load-fraction event and a fake percentage would be
+a lie with a keyframe — and the **page's own title**, which replaces the host
+the moment the page names itself. The load events also keep the address bar
+honest: the *live* address lands in `Tab.url`, so a redirect is what the bar
+says, while the history stack keeps the visit the user actually made.
+
+The loading marker is **bounded on purpose**. The runtime has no failed-load
+event (wry 0.55.1's `PageLoadEvent` is `Started | Finished` and nothing else,
+checked against the vendored source), so "loading" means "Started, no Finished
+yet" — and a page that dies into WebKit's TLS interstitial never sends
+Finished. The marker expires on a timer (`LOADING_TIMEOUT_MS`, 15s, pinned in
+`ui/tests/browserPageState.test.ts`); the interstitial is the story, not a
+spinner that lies forever. The decisions live in `ui/src/browserPageState.ts`
+(`node --test`-able, like every pure module here); a tab that is gone drops
+the fact by shape, and both reducers answer with the *same* state object when
+nothing matched, so a stale event cannot re-render anything.
+
+**One escape, and it does not widen the page.** The pane carries a **DevTools**
+control and nothing else that leaves. The inspector is a shell-side surface
+opened *over* the webview — it grants the page nothing, and the crate builds
+with tauri's `devtools` feature so it exists in release builds too; the
+pane's control states the inspector's real state (`aria-pressed` from
+`codify_browser_devtools_state`, confirmed — not the press).
+
+There used to be a second one. **Open in system browser** handed the page's
+**current** URL to the OS's own opener (`open::that_detached`), on the
+reasonable argument that some page needs the profile, extensions and
+certificate trust a real browser carries. It is gone, and the reason is the
+shape of the answer rather than the quality of the argument: a page that can
+be opened outside Codify is a page whose session, cookies and credentials
+leave with it, and the answer to "this site renders badly in an embedded
+view" is to make the embedded view handle the site. **Every website Codify
+can open is a tab in Codify, a popup is a tab in Codify, and there is no
+code in the shell that could hand a URL to anything else** — which is an
+absence, and absences need pinning: `browser.rs`'s
+`the_only_escape_is_the_inspector_and_the_module_spawns_nothing` asserts
+`open_external`, `open::that_detached` and `Command::new` are *absent* (the
+inverse of the assertion that used to require them), and
+`the_open_crate_is_not_a_dependency_and_nothing_reaches_for_it` holds the
+stronger claim the first one could not — that no `open` dependency is declared
+in `Cargo.toml` **and** no live code in any file under `src/` reaches for one.
+That gap was real rather than theoretical: the command was gone, the test was
+green, and `open = "5"` sat in the manifest outliving its last caller, pulling
+`windows-sys` and `is-wsl` into a build graph that had no user for them. An
+unused dependency is not an error to any leg of the gate, so nothing said so
+until something looked.
+`the_ui_knows_the_escape_commands` reads `ui/src/api.ts` so the two ends
+cannot drift, and `ui/tests/browserPane.test.ts` asserts the pane renders no
+such control even for a page whose address it knows.
+
+#### What the embed actually renders, and what the smoke can see
+
+`make smoke-embed --url <url>` seats a real page in a real webview on a real
+display. It now reports **two** things, because one of them was answering the
+wrong question: a first paint, and what the page says it is showing
+(`SMOKE_PROBE_SCRIPT`, reported over the title and printed as
+`embed-smoke: report …`). A run ends when it has both, or at 20s.
+
+The second half exists because a paint verdict is worthless for a *site*. Every
+page composites its first frame in about a second — including one that is
+showing the user an error. Measured on this checkout before the probe existed:
+`www.youtube.com`, `accounts.google.com` and a GitHub issue each reported
+`painted` in 1.2–3.6s, which said nothing at all about whether any of them
+worked.
+
+| Site | Reports | Verdict |
+|---|---|---|
+| `github.com/tauri-apps/tauri/issues/1` | real page title, 3469 chars, 250 subresources, `readyState=interactive` | **works** |
+| `www.reddit.com/` | real page title, 9060 chars, 74 scripts, 113 subresources, `readyState=complete` | **works** |
+| `accounts.google.com` | `Sign in - Google Accounts`, 135 chars, **2 frames** | **unmeasured** — the probe cannot see inside a cross-origin frame |
+| `www.youtube.com/` | between **6 and 2090** chars across runs, 2 frames | **unreliable** |
+| `www.youtube.com/watch?v=…` | **0 chars, no title, 0 media**, `readyState=loading` after 842ms | **the load stalls** |
+
+Three of those five rows are not "broken", and the difference matters more than
+any of them:
+
+- **`content-behind-an-iframe` is a limit of the probe, not a verdict on the
+  site.** `innerText` reaches the top document only, so a sign-in flow that puts
+  its form in a cross-origin frame renders perfectly and reads here as 135
+  characters. Google did **not** serve its embedded-OAuth refusal on this
+  measurement — the refusal markers (`may not be secure` and friends) are
+  matched and did not fire — so nothing here says Google blocks the embed.
+  Whether a sign-in *completes* is not measured at all, and it is the thing a
+  user would actually care about.
+- **The YouTube variance is the finding.** The same URL reported 6 characters in
+  one run and 2090 in the next. A page that renders differently on two
+  consecutive runs is not a page whose rendering has been diagnosed, and no
+  `canPlayType` reading settles it: this WebKit answered `probably` for both
+  H.264 and AAC on a machine where **no `<video>` element ever appeared** on any
+  YouTube page. `canPlayType` is an engine-level claim about the MIME database,
+  not evidence that a frame of video decodes — proving playback needs a real
+  `play()` and a `timeupdate`, which no paint smoke can supply.
+- **What is still unknown, stated as unknown.** Why a YouTube watch page
+  renders nothing: no subresource failure was captured, no console output, and
+  no network record. The candidates worth *measuring* are a blocked or failed
+  subresource, WebKitGTK's default cookie policy (no third-party cookies, which
+  would explain a sign-in flow stalling), and the user-agent string — and each
+  is a hypothesis, not a fix. Changing any of them on this evidence would be a
+  guess dressed as a repair, which is the one thing this table exists to stop.
+  Nothing here is routed anywhere: the hatch that would have sent a failing
+  user to another browser was removed above, and the honest answer to "this site
+  does not work in the embed" is this sentence rather than another app.
+
+#### What a blank page is made of
+
+The table above says "renders nothing" for a page that stopped progressing. The
+smoke now captures the **mechanism** alongside the symptom, because the two are
+different bugs with different fixes, and a symptom sends the reader to the
+wrong layer. The page is asked, from the first script and before any of its own
+code runs: which subresources **failed** (a capture-phase `error` listener —
+a resource that 404s fires on the element, and a bubbling listener on `window`
+hears nothing), what the page **threw** (`unhandledrejection`, which is how a
+modern SPA fails: no error event, no failed resource, a blank page), what it
+**logged** (`console.warn`/`error`, patched before the page runs), how many
+subresources **completed**, its `readyState`, and its **user agent**.
+
+Run against a YouTube watch page, that is the whole answer:
+
+```
+readyState=loading after 842ms, 12 script(s), 0 stylesheet(s), 8 subresource(s) completed
+ERROR: WebKit encountered an internal error … internallyFailedLoadTimerFired()
+```
+
+**The page stops making progress about 800ms in and never reaches `complete`.**
+Not one subresource failed, nothing threw, nothing was logged, no codec was
+asked for, and no video element ever existed — the document simply stalls
+mid-load until WebKit's own network process gives up on it
+(`internallyFailedLoadTimerFired` is that watchdog). The last probe report
+arrives at 842ms, which is itself part of the finding: the page's own timers
+had stopped running by then.
+
+And it is **not** "embedded browsers can't render modern sites", which is the
+reading the symptom invites. Measured on the same machine, the same run: Reddit
+completes at 5266ms with 74 scripts and 113 subresources and renders 9060
+characters; GitHub reaches `interactive` with 250 subresources completed. Heavy
+SPAs work. The fault is in what YouTube's delivery does to this engine, and
+until something measures *which* request stalls, the honest sentence is that —
+not a guess at a fix, and not a hatch to another browser.
+
+**The user agent is now honest, and it was not the cause.** wry's WebKitGTK
+default announced `Version/60.5 Safari/605.1.15` — Safari 15.4, released in
+2022, with Apple's build number for it — on a **WebKitGTK 2.52** engine.
+`browser::page_user_agent` now gives every page
+`Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko)
+Codify/<version>`, with the crate's version read at compile time. The
+`AppleWebKit/<n> (KHTML, like Gecko)` token stays on purpose: the engine really
+is WebKit, it is the one token every parser already looks for, and dropping it
+would make Codify read as an unknown client to more sites than the lie ever
+did. The Safari release, the `Version/` token and the Apple build number go.
+`a_page_advertises_codify_and_not_a_2022_release_of_safari` and
+`every_browser_page_is_given_the_user_agent` pin both halves.
+
+**Re-measured after the change, and the verdict is "not fixed".** Four runs of
+the same two URLs on the same machine:
+
+| URL | Run | Verdict | `readyState` | Text | Media |
+|---|---|---|---|---|---|
+| `youtube.com/` | 1 | `rendered` | `complete` @ 2028ms | 2090 chars | 1 element |
+| `youtube.com/` | 2 | `content-behind-an-iframe` | `loading` @ 998ms | 6 chars | 0 |
+| `youtube.com/watch?v=…` | 1 | `content-behind-an-iframe` | `complete` @ 2029ms | 21 chars | **1 element** |
+| `youtube.com/watch?v=…` | 2 | `rendered-nothing` | `loading` @ 1112ms | 21 chars | 0 |
+
+So it is still a coin flip per run, on both pages, and the honest conclusion is
+that the user agent was a **true statement and a red herring**: the stall is
+not a site branching on a version string. Two things did move, and both are
+about what the *completing* runs do — the watch page now reaches `complete`
+with a `<video>` element present and `h264=probably aac=probably`, where the
+earlier measurement had no video element at all, and the homepage's good runs
+complete 92 subresources rather than 59. The next thing to measure is *which*
+request stalls, and the probe already has the field for it: `performance`
+entries and `readyState` at ~1s say the load stops between two subresources,
+not which one.
+
+**Does the string matter? Measured, with a switch to measure it.**
+`CODIFY_PAGE_USER_AGENT` (`browser::UA_ENV`) replaces the string for every page,
+and `make smoke-embed --user-agent {honest,safari-default,chrome}` sends each of
+the three. It is an env var rather than a setting because it cannot be
+persisted by accident and it is visible in the process listing; empty falls back
+to the honest default, so a harness that forgets to pass one gets the real
+thing. `an_override_replaces_the_whole_string_and_nothing_else` pins that an
+override reaches the page byte-for-byte — a comparison that quietly sent
+something else would produce a confident conclusion about a string no page ever
+saw.
+
+Four sites, two runs each, eight runs per column, twenty-four in all, on this
+machine. Verdict, then characters of text and `readyState`:
+
+| Site | honest | safari-default (the control) | chrome |
+|---|---|---|---|
+| `youtube.com/` | iframe 6ch loading · **rendered 2093ch complete** | iframe 6ch loading · iframe 6ch loading | iframe 6ch loading · iframe 6ch loading |
+| `…/watch?v=…` | nothing 0ch loading · iframe 20ch loading | **rendered 2378ch complete** · nothing 0ch loading | nothing 0ch loading · iframe 27ch interactive |
+| `github.com/python/cpython/issues` | rendered 2411ch · rendered 2608ch | rendered 2608ch · rendered 2608ch | rendered 2608ch · rendered 2608ch |
+| `accounts.google.com/` | iframe 135ch complete · iframe 135ch complete | iframe 135ch complete · iframe 135ch complete | iframe 135ch complete · iframe 135ch complete |
+
+**No site in this set behaves differently by user agent.** Every verdict that
+differs between columns also differs *within* a column — YouTube produces
+`rendered` and `rendered-nothing` under every one of the three strings, which
+is the run-to-run variance documented above. GitHub's issue list is
+character-for-character identical across all three (2608 chars, 250
+subresources), and Google's sign-in is an iframe in all six runs. The one good
+YouTube render in the `honest` column is a sample of one, not a result, and
+saying otherwise would be the same mistake as reading a single run.
+
+Two things the matrix *did* settle, both UA-independent: **GitHub's CSP blocks
+the bridge channel** (`never-answered` under all three strings, so `read_page`
+cannot work there whatever we call ourselves), and Google's sign-in always puts
+its content behind an iframe. The honest string stays because it is true, not
+because it changes a verdict — and the stalls are network, not identity.
+
+**Which request is outstanding, and a verdict for it.** Every field the probe
+reported counted something that had *happened*: resources completed (`rp`),
+scripts present (`sc`), failures (`x`), throws (`j`). None of them can see a
+request still in flight, and that is the question a stuck page asks. Resource
+timing cannot close the gap, and the reason is worth writing down because it
+is load-bearing: **a resource timing entry only exists once a response has
+finished**, and a cross-origin response with no `Timing-Allow-Origin` produces
+no entry at all — in flight or complete. So `rp` counts what arrived and is
+blind to what has not, which on a video site is exactly the half that matters:
+youtube.com's media lives on googlevideo.com.
+
+So the outstanding half is counted where the request is *made*. The probe
+patches `window.fetch` and `XMLHttpRequest.prototype.send` — strictly
+observationally, the page's own call is what returns — and reads a media
+element that is fetching *right now* off the element itself
+(`networkState === 2` is `NETWORK_LOADING`, with a `currentSrc`). A
+capture-phase `loadstart` gives a real start time; anything the report finds
+already loading reports **no age** rather than a zero, because "waiting 0ms"
+for something that has been waiting for two seconds is the most plausible-looking
+lie available here. The report grows three fields: `q` (the outstanding rows:
+kind, address, method, age), `le` (the document's own `loadEventEnd`, so
+"still loading" and "its load event has never fired" stop being the same
+sentence) and `lz` (the last thing that *arrived*, from the resource timing
+entries — the other half of `q`, and on a stuck page the gap between the two is
+the finding).
+
+The run reads those into a **second verdict**: `loaded`, `waiting-on-request`,
+`waiting-on-media`, `load-never-fired`, `no-stall-data`, `no-report`. The names
+follow the rule the rest of the harness follows — a limit of the measurement
+must never read as a fault in the site. `no-stall-data` is the load-bearing
+one: a report with no `q` at all (a build predating the field, a page that
+defeated the patches, a report the channel cut) is *not* a page with nothing
+outstanding, and reading it as one is the same confident mistake a missing
+bridge line used to cause. `load-never-fired` names the other honest limit: the
+document has not finished and nothing outstanding is visible, which means what
+it waits for is something this probe cannot see.
+
+**Measured, twenty runs of the watch page, and what each one named.** The
+verdict is worth having precisely because building it produced this.
+
+| Verdict | Runs | What was named |
+|---|---|---|
+| `waiting-on-request` | 1, 10, 20 | `POST rr2---sn-8xgn5uxa-cxgz.googlevideo.com/videoplayback?` (fetch, 155ms); `POST rr8---sn-8xgn5uxa-cxge.googlevideo.com/videoplayback?` (fetch, 123ms); a `MEDIASOURCE blob:https://www.youtube.com/6648ae0b…`; `POST www.youtube.com/api/stats/qoe?`; `POST www.youtube.com/youtubei/v1/player?` |
+| `waiting-on-media` | — | (the shape the tests pin; every real run's media row is a `blob:` handle, so it lands in the row above) |
+| `load-never-fired` | 2, 11, 16, 18, 19 | nothing visible, and the sentence says why: last arrival `i.ytimg.com/generate_204` at 111ms / `fonts.googleapis.com/css2?` at 836ms / `i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg` at 945ms, then nothing |
+| `loaded` | 4, 6, 7, 9, 12, 13, 15, 17 | a `MEDIASOURCE blob:…` and telemetry POSTs (`/api/jnn/v1/GenerateIT`), which are polls; `readyState=complete` at ~2.0s |
+| `truncated-report` | 3, 5, 8, 14 | the payload was cut mid-`ua`; the stall verdict beside it read `no-stall-data`, never `loaded` |
+
+**The answer, on the runs where it stalled.** Two `POST` requests to
+`videoplayback` on **two different googlevideo CDN hosts** (`rr2---sn-8xgn5uxa-cxgz`
+and `rr8---sn-8xgn5uxa-cxge`), 123ms and 155ms old when the report was taken,
+with the document's load event still unfired and the last thing that had arrived
+being a `tpc.googlesyndication.com/sodar/…` beacon two seconds earlier. That is
+the page asking two CDNs for media segments and getting neither, and the
+harness now says it in a sentence instead of leaving `readyState=loading` and 92
+completed subresources as the whole story.
+
+**Four defects the measurement exposed, all of them in the measurement.**
+
+1. **The channel is about 980 characters wide, and a report that overflows it
+   comes back cut off mid-field.** Measured repeatedly and at the same
+   character: a 907-character payload arrived whole, a 981-character one was cut
+   inside `ua`. A cut payload decodes to nothing, so before this the run reported
+   `no-report` about a page that had described itself — a harness limit
+   reported as a silent site. Fixed on both ends, and the residue is **named**:
+   `truncated-report`, with the stall verdict beside it reading `no-stall-data`
+   rather than `loaded`.
+2. **No per-field cap predicts the total for a page nobody has run before**, so
+   the page measures its own encoded payload and spends the channel in order of
+   usefulness: `c9`, `x`, `j`, `lz`, `q`, `ua`, dropping until it fits and
+   saying which in `df`. Measured doing its job — one run came to 940 characters,
+   dropped `lz`, and kept all three outstanding requests, which is the trade the
+   order exists to make. What no verdict is built on is never droppable: what
+   the page shows, its frame, codec and refusal state, and its readyState.
+3. **A `blob:` URL is a Media Source handle, not an address on the network.**
+   YouTube's player names one on every watch-page run. Printed as host+path it
+   reads as `www.youtube.com/6648ae0b-…`, which is a fetch that was never
+   requested. The probe keeps the scheme, labels the row `MEDIASOURCE`, and the
+   sentence says what it is: the bytes come from requests the page cannot see, so
+   the one behind it is not named here.
+4. **The harness's own traffic appeared in its own findings.** One run answered
+   "waiting on `GET codify-bridge://reply/smoke0001/0/0/…`" — the page replying
+   to the smoke's question, reported as youtube.com waiting on something. A
+   measurement inside its own results is worse than one that is blind, because
+   it is believed. The probe skips the bridge's scheme, and a test pins it
+   against `webview_bridge::BRIDGE_SCHEME`, because a renamed bridge would put
+   the harness back in the middle with nothing failing.
+
+Plus one that is only a disagreement rather than a defect: `readyState`
+`complete` beside `loadEventEnd` `0` in the same report, seen in four runs of
+seventeen. The engine answers those at different moments, so the page prints the
+disagreement instead of the alarming half — a verdict that says the document
+finished must not sit beside "its load event has never fired".
+
+**What the verdict does not claim.** An outstanding request is a request the
+page has not got back, which is a fact. That it is *what is holding the
+document* is a different claim the page cannot make: the load event does not
+wait for a `fetch`, so an open XHR and an undelivered subresource can both be
+true at once with only one of them the story. The sentence therefore names what
+has not come back, prints the last thing that did arrive where there is room,
+and leaves the reader to look at the gap.
+
+**So: which request stalls YouTube.** Two `videoplayback` POSTs to googlevideo
+CDN, on the runs where it names anything at all. Of twenty runs: **eight
+finished** (`readyState=complete` at ~2.0s, outstanding rows are Media Source
+handles and telemetry POSTs, which are polls), **eight never finished** — three
+of them naming the two CDN requests above, five naming nothing the probe can see,
+which the verdict says in those words rather than inventing a request — and
+**four lost their report to the channel**, which is now a named verdict rather
+than a silent one. The variance is real and it is **not** the user agent (the
+matrix above). The next thing worth measuring is the network: whether
+googlevideo is reachable from this machine at all, which is a question no amount
+of reading the page's own performance entries can answer, because the entries
+for those requests never arrive.
+
+**A real defect this re-run exposed, in the bridge rather than in the browser**
+— and fixing it turned up a second, larger one underneath. The smoke's third leg
+had never passed. It printed `bridge fail There is no browser tab called
+"smoke". The open tabs are: none.` and then printed `PASS … and read back
+through the bridge` anyway, because the clause was attached whenever *any*
+`embed-smoke: bridge` line had been parsed and silence was treated as the only
+failure. Three things were wrong, and each is pinned:
+
+1. **`get_webview_window("main")` returns `None` from the moment the first page
+   is seated.** Tauri's `is_webview_window` is defined as "has no child
+   webviews", so `main` stops being one exactly when there is a page to talk
+   to, and `open_tabs` answered "there are no browser tabs open" about an app
+   with one open. This was never a smoke problem: **`read_page` could not have
+   worked in the running app either.** Both lookups now go through the manager —
+   `app.webviews()` and `app.get_webview(&label)` — and the same trap was fixed
+   in `lib.rs`, where a second launch unminimised through
+   `get_webview_window("main")` and so revealed nothing at all, silently.
+   `a_page_is_found_by_its_label_and_not_through_the_main_window` fails if the
+   call comes back.
+2. **Two interpolated values were not JavaScript literals.** `var ID =
+   smoke0001;` and `var SCHEME = codify-bridge;` are both plausible-looking and
+   both throw on the *first* line of every script — a `ReferenceError` for an
+   undeclared variable, before `send()` is ever called. The only evidence was
+   the page's own console, which nothing was reading; the id's *shape* check
+   passed the whole time, because `smoke0001` is a well-formed id. Both are
+   JSON-escaped now, and
+   `every_value_the_template_interpolates_is_a_literal_and_not_a_bare_word`
+   checks all six holes in all three scripts.
+3. **A failed read is a failure, not a line.** `bridge_clause` derives the
+   PASS clause from the *verdict*: only `answered` says "read back through the
+   bridge", `answered-nothing` says the page was reached and had nothing to
+   give, and anything else gets no claim at all. `bridge_failed` keeps a
+   refused leg out of the PASS branch, so `make smoke-embed` exits non-zero and
+   says why — "This run is a FAIL because the AI cannot read the page, not
+   because of this site."
+
+Measured after all three, on this machine:
+
+| URL | Bridge leg | Run |
+|---|---|---|
+| `example.org/` | `ok` — 129 chars, one link, `readyState=complete` | PASS in 1.8s |
+| `youtube.com/` | `ok` — url, title, links; `answered-nothing` because the document was still `loading` at 1.5s | PASS in 3.3s |
+| `reddit.com/` | `never-answered` — the page's CSP forbids every channel (four `unhandled rejection: Load failed`) | **FAIL after 17.0s**, exit 1 |
+
+The third row is the one that used to print PASS.
+
+The judgement half — what a report *means* — is pure and lives in
+`scripts/embed_smoke.py`, with `tests/test_embed_probe.py` freezing it against
+the reports above, because the display is the slow half of this harness and the
+verdict is the half worth freezing.
+
+#### Driving a page from the agent (built)
+
+The conductor gets page verbs on an **existing** role — never a ninth one — and
+the agent can navigate, read a page's text, click and type, with the page
+staying a sealed guest. Four verbs, two mechanisms:
+
+| Verb | Tool | How it travels | What comes back |
+|---|---|---|---|
+| move a tab | `navigate_page` | `browser::navigate`, host-side, no page involvement | the shell's own echo |
+| read | `read_page` | the page answers over the reply scheme | text, links, address, title |
+| click | `click_page` | the page clicks itself and answers | which element, where it pointed |
+| type | `type_page` | the page types into a field and answers | the tag, the character count |
+
+`back` and `forward` are deliberately **not** here. The webview's history is
+unreachable from Rust (tauri 2.11 has `navigate` and `reload` and nothing
+else), so the stack lives in `browserHistory.ts` beside the user; a model
+asking to go back is asking for a thing only the shell's own strip knows, and
+the honest answer today is the history it can already read from a page read.
+
+**The page cannot answer through IPC, and that is deliberate.** Tauri resolves
+every IPC against the calling webview's ACL, and a remote origin is denied app
+commands outright (tauri 2.11's `webview/mod.rs`: the check runs when the
+command is a plugin command, or the app has an ACL manifest, or *the origin is
+not local* — a page at `https://example.com` is the third case whatever the
+manifest says). `capabilities/browser.json` is empty and a test fails the build
+if it is not. So there is no `invoke` for a page to call, and the answer
+channel cannot be one.
+
+**The channel is a custom URI scheme, and it is one-directional.** The page is
+asked to fetch `codify-bridge://reply/<id>/<seq>/<last>/<chunk>`; the shell's
+scheme handler answers **204 to everything on that scheme**, used or not, so a
+page never gets a console line for a reply it was entitled to send. Three
+delivery attempts per chunk — `fetch`, `new Image().src`,
+`navigator.sendBeacon` — because a page's CSP can forbid any one of them, and a
+bridge that reported "the page said nothing" when the cause was a CSP would
+send everyone looking in the wrong place. The failure mode is stated rather
+than discovered in the field: **a page that forbids all three cannot be driven**,
+and the shell says so in a sentence after its own 15s timeout rather than
+hanging.
+
+One handler, four ops, two kinds of thing — and the difference is the whole
+security argument. `navigate` is three lines of Rust that touch the webview
+from outside and never let the page speak, so a page cannot make itself look
+like it navigated, or refuse to, to influence the model. `read`, `click` and
+`type` need the page's cooperation, so everything they return is *the page's
+claim*: a click reports what was clicked, never that it landed, and the way to
+see where a click went is to read the page again. The click script refuses a
+disabled control rather than reporting a click that would have done nothing,
+and the type script refuses a `<div>` or a checkbox rather than pretending a
+field was filled.
+
+**Typing is the only verb that writes, so it is the one that says the least.**
+`element.value = x` is silently discarded by any page that has replaced the
+instance setter — which is what a React-controlled input does — so the script
+sets the value through the element's *own* `value` setter and then dispatches
+`input` and `change`, because a page that listens for them is how "type"
+becomes "submit". What it never does is *press* anything: `format_action` ends
+a typed result with *"This tool typed and pressed nothing, so it confirmed
+nothing — but do not assume the text stayed put: a page may send what it is
+given as you type, and clicking something that submits is what submits it"*,
+and the tool's own description says so before the model has typed anything. A
+model told a field was typed into will otherwise tell a user it signed in.
+
+That wording is deliberately weaker than it used to be. The sentence claimed
+"nothing was submitted, sent or confirmed", which the engine cannot know: a
+search box that queries on every keystroke sends the text the moment it lands,
+and nothing on this side can see that happen. What it can honestly claim is
+which button *it* pressed. It is the same reason `navigate_page` carries no
+egress guard — see `03` §1.5.
+
+**Every answer is cleaned to a fixed shape before the model sees it.**
+`_clean_result`, `_clean_navigation` and `_clean_action` each return a literal
+dict of the fields the formatter already knows how to print, so a page cannot
+smuggle a key of its own into the model's context by naming one — the one
+containment rule every verb in this file obeys, and the reason a page's answer
+is a data structure rather than a blob. An acting answer falls back to *the
+selector the engine asked for*, so a page that reports only `{"ok": true}`
+still produces a result the model can tie to an action rather than to nothing.
+
+**Both acting verbs refuse locally what the shell would refuse anyway**, so a
+mistake costs no round trip the user watches: no selector, a selector over 200
+characters, no text, more than 2000 characters of it. And the ops are fixed
+strings in `webview_bridge.py`, never the model's to choose — a model that
+could name its own op would be choosing from a set nobody enumerated, which is
+the difference between a capability and an unbounded one.
+
+**Refusals are one sentence, in one place, shown before the round trip.**
+`ui/src/browserDispatch.ts` mirrors `navigation_allowed` — same rules, same
+canonicalised loopback spellings, the shell's wording verbatim — and the pane
+classifies what the user typed before any shell call. The mirror is pinned in
+both directions: the Rust test
+`the_ui_dispatch_mirror_agrees_with_the_navigation_guard` reads the UI test's
+tables and runs them through the real guard (through the pane's own
+normalisation, including the typed-scheme refusal that stops Node's URL parser
+rescuing `tauri://`'s authority into a host), and the UI test asserts every
+allowance is one the guard makes. A mirror that disagreed would dead-end
+working addresses or seat pages the shell refuses; the two-directional pin is
+what makes it a mirror instead of a second opinion.
 
 **Why the app keeps its own history.** Tauri v2 exposes `navigate` and `reload`
 on a webview and nothing else — no `go_back`, no `can_go_back` (checked against
@@ -894,19 +1789,26 @@ is a browser, and (per the paragraph above) produced no visible message at all.
 
 **Two browser tabs on one address are two tabs**, the opposite of
 `openConversation`. A duplicate chat tab is a duplicated transcript streaming
-the same events twice; two browser tabs are two webview windows with two
-histories, and collapsing them would make the second unreachable.
+the same events twice; two browser tabs are two pages with two histories, and
+collapsing them would make the second unreachable.
 
-**What the suite cannot do.** `browserHistory.test.ts` covers the stack and
-`browserPane.test.ts` the markup, but the harness renders statically: it runs no
-effects and no event handlers, so nothing presses Back. The delivery path
-(Enter in the address bar reaching a real window) needs a display and is not
-exercised here at all. What the freezes in `browserPane.test.ts` *do* cover is
-the wiring that was silently wrong: the id handed to `codify_browser_open` is
-the tab's own id, and a refusal is keyed to a tab that exists. Both were found
-by typing an address into a running dev server and watching nothing happen —
-neither had a test, and a test that renders the pane in isolation could not have
-found either.
+**What the suite does now, and what it still cannot.** `browserHistory.test.ts`
+covers the stack, `browserDispatch.test.ts` the mirror (pinned in both
+directions against the Rust guard), `browserPane.test.ts` the markup and the
+wiring freezes, and `browserPaneInteraction.test.ts` drives the pane through
+the DOM harness: typing, Enter, a refusal appearing and clearing, Escape
+restoring the committed address, and the mount-time bounds report. What the
+harness still cannot reach is the native half — a real webview seated on the
+reported rectangle needs a display — and that is where the delivery path's last
+step used to be exercised *nowhere*: for as long as the pane existed, Linux
+ignored the rectangle and the smoke asked for the one rectangle that made the
+ignorance invisible. `make smoke-embed` now reads the widget's real allocation
+and fails the run when it is not what the pane asked for (§7.3). The
+freezes exist for the wiring that was silently wrong before: the id handed to
+`codify_browser_open` is the tab's own id, and a refusal is keyed to a tab
+that exists. Both were found by typing an address into a running dev server
+and watching nothing happen — neither had a test, and a static render could
+not have found either.
 
 **Both panes were found the same way, and the fixes are the same shape.** Run in
 a plain browser tab — no Rust process — every pane command reached the
@@ -930,6 +1832,224 @@ understood and cannot clear is an obstacle, not a report. The control is an
 production without an accessible name is a type error rather than something a
 test has to remember to check.
 
+### 7.4 First paint, and the smoke that measures it
+
+Everything above stops one step short of the display. A page can pass the
+guard, resolve no capability, report its own load — and still never put a
+pixel on the screen. The Rust tests here are the ones that freeze that
+boundary deliberately: the guard and the capability set are testable without a
+compositor, and *a webview that resolves its guard, loads its HTML and paints*
+is the one claim only a real run can make.
+
+**Four ways that goes wrong, three of them outside this crate's reach.** They
+are diagnosed rather than worked around, because a heuristic that "fixes" the
+sandbox by disabling it weakens isolation for everyone to unblock one machine:
+
+1. **The single-instance guard.** `tauri-plugin-single-instance` claims the
+   session-bus name inside `Builder::build()` — before this app's own `setup`,
+   which is why the engine launch sits behind it. On `NameTaken` the plugin has
+   the **newcomer** call the incumbent's `ExecuteCallback` and then
+   `std::process::exit(0)` (checked against the vendored source,
+   `tauri-plugin-single-instance-2.4.5/src/platform_impl/linux.rs:69-88`). So a
+   second launch is not a hung first paint: it is an exit, before any webview
+   exists, **with status 0 and no output of its own** — the "Second launch…"
+   line a person waits for is printed by the *other* instance. Measured here by
+   running two smokes at once: one painted in 0.9s, the other died at 0.1s
+   with no mode line at all.
+2. **WebKit's bubblewrap sandbox.** If `/usr/bin/bwrap` is missing or
+   `kernel.unprivileged_userns_clone` is 0, the web process never starts: the
+   page loads nothing and paints nothing. This is a broken webview, not a
+   hanging one.
+3. **The DMABUF renderer.** On some driver/compositor combinations first paint
+   hangs in the GL path. The known workaround is
+   `WEBKIT_DISABLE_DMABUF_RENDERER=1`, and **this app never sets it itself** —
+   it is the user's environment to decide, which is why the diagnostic reads
+   the variable and says who set it.
+4. **A zero-sized pane** (mechanism 0 of §7.2) seats nothing at all; the
+   refusal names the recovery so the pane can re-ask.
+
+`browser::log_environment_diagnostics` prints one line per fact — session bus,
+sandbox, DMABUF, display backend — at the top of `run()`, before anything can
+fail. It changes no behaviour, and `run_prints_the_environment_diagnostics_first`
+holds that it stays first: a boot that dies in `build()` has already said
+which fact it died on.
+
+**`make smoke-embed` is the run that measures it.** It builds the shell if
+needed, launches it with `CODEIFY_EMBED_SMOKE=<url>` and never starts an
+engine, relays the output, and passes only on a paint:
+
+- The page is seated exactly as `codify_browser_open` seats a tab — same guard,
+  same `add_child`, same `page_layer` placement — at `24,24 560×420`, and the
+  run **checks the toolkit's own allocation** against that rectangle 700ms
+  later, from a worker thread rather than from `setup`, so the check covers the
+  thread a user's click arrives on and not only the one that already worked. The
+  geometry *is* the variable now: it used to be 800×600 at the
+  origin, which a discarded request imitates perfectly (§7.3).
+- `SMOKE_PAINT_SCRIPT` is injected at document start and asks for **two**
+  `requestAnimationFrame`s. The second callback is the one that proves the
+  compositor consumed a frame; "the document loaded" is weaker again, which is
+  the whole reason a script exists.
+- **The page announces by setting its document title**, and the shell's own
+  `on_document_title_changed` hook re-announces it as a Tauri event. This is a
+  measured correction, not a preference. The first version had the page call
+  `__TAURI_INTERNALS__.invoke("plugin:event|emit_to", …)` itself, on the
+  reasoning that a one-way event is harmless. It is not: `emit_to` is an
+  ACL-governed command like any other, this page holds the empty `browser-*`
+  capability set *on purpose*, and the invoke was refused. So the smoke could
+  only ever fail, and its failure read as "first paint is broken" on a machine
+  where painting was fine — on a Wayland session whose four diagnostics all
+  read healthy, the page was in fact painting in **0.9s** while the smoke
+  reported a 20s timeout. The title hook is the one channel a page needs no
+  permission for, and it is the same mechanism the tab strip's live title
+  already depends on. `the_paint_script_announces_the_event_the_lib_listens_for`
+  holds the choice: the script may not grow an `invoke` back, and
+  `SMOKE_PAINT_MARKER == SMOKE_PAINTED_EVENT` keeps the page's word and the
+  shell's word from drifting.
+- **The process status is real.** `AppHandle::exit` only *requests* an exit
+  (it raises `RunEvent::ExitRequested`/`Exit` and unwinds; tauri 2.11.6
+  `app.rs:574`), so the code it is given rides on the event and the process
+  still ends **0** — a failed first paint that exits 0 is a failure to
+  anything reading the status. `smoke_exit` flushes both streams and calls
+  `std::process::exit` instead, which is safe here and only here: smoke mode
+  never starts an engine, so there is no child to reap and no lease to break.
+
+**The harness is written to say which story it is in**, because "it didn't
+work" is the failure mode of a first-paint report. It distinguishes the two
+cases that look identical in the child's output — a *stale binary* (no
+diagnostics, no mode line: it printed neither, so the binary predates both) and
+the *guard refusing a second launch* (diagnostics present, then silence: the
+launch ended inside `build()`) — and replays the boot diagnostics with every
+failure. Both are "this run measured nothing", and the difference is a
+`cargo build` versus stopping another instance.
+
+`make smoke-embed` is a local target, deliberately not part of `check` or `ci`:
+it needs a display, and GitHub Actions is unavailable to this repository
+anyway (see `check.yml`). The unit tests keep the wiring honest; this keeps the
+claim honest.
+
+#### The strip comes back: `make smoke-tabs`
+
+The embed smoke proves a page paints; it says nothing about §2.1's other half —
+that a strip the engine holds comes back as tabs a window shows. Every unit test
+of that chain stops one step short of the whole: `tests/test_shell_tabs.py`
+proves the engine's three routes, the UI suites prove the mirror, the merge and
+the restore against fakes, and none of them can claim the chain a second window
+performs without thinking — engine row → pull → adopt → restore → seat — because
+its middle lives in a React effect that only runs in a real window, and its two
+ends live in two different processes.
+
+`make smoke-tabs` runs the claim. It builds the shell if needed, launches it
+with `CODEIFY_TABS_SMOKE=1` under a throwaway `CODIFY_HOME` — the one
+non-negotiable in the harness: the smoke writes rows into an engine's database,
+and without the isolation the seed would land in the developer's real strip
+and come back on their next boot — and the shell does the rest as its own mode
+(`tabs_smoke_mode` in `src-tauri/src/lib.rs`):
+
+1. boot **the ordinary way** — engine, handshake, UI, exactly as a user's
+   launch, because the round trip is the subject and a special-cased boot would
+   be measuring a different thing;
+2. wait for the handshake, then seed `PUT /shell/tabs` with one browser row
+   through the same authenticated route a window writes through — a refusal is
+   a finding, since the smoke sends exactly what a real window sends;
+3. focus the window, because attention is what the pull runs on (§2.1's honest
+   cost — a smoke that never looks at the window would be testing a pull that
+   never happens);
+4. wait for a webview seated at the seed's address, then read the strip back
+   from the engine, print one `tabs-smoke: restored <kind> <key>` per row,
+   `tabs-smoke: PASS`, and exit for real through `smoke_exit`. While waiting it
+   samples the window's own page every few seconds (`tabs-smoke: probe {…}` —
+   tab count, localStorage engine port, visibility, error-banner text), because
+   a failure that names its stage is useful and a failure that shows the strip
+   growing or not growing while it names it is usable.
+
+The proof is the seat, and it is really two halves. The strip half lives in the
+**key**: the seed is `k_tabs_smoke_seed`, which satisfies the UI's own key law
+(`k_` prefix, bounded length) but **cannot be minted by `tabKey`** — that
+factory emits exactly two `_` separators with base36 between them, and the seed
+carries a third. A key that cannot be minted can only be received, so a seed
+key in the strip means the row arrived through the engine and was adopted as a
+stranger by the merge. The webview half lives in the **address**: the UI seats
+a webview only for the active tab's address (by local `id`, never by key — the
+label cannot be the fingerprint), and that address exists in the UI only
+because the seeded row was restored into it. A webview at the seed's address
+therefore means the restored tab was not just data but a page the window is
+showing. The UI has no smoke branch at all — everything the verdict needs is
+already observable from the shell, so the production path is the only path
+there is.
+
+The harness (`scripts/tabs_smoke.py`) reads the run through the `tabs-smoke:`
+lines and nothing else, requires the seed in the strip its PASS claims, and
+diagnoses a silent child the same way the embed smoke does: the two stories a
+silent boot can tell — a stale binary and the single-instance guard's newcomer
+exit — are printed together, because stdout cannot distinguish them. Like
+`smoke-embed`, it is a local target, not part of `check`/`ci`, for the same
+reason: it needs a display and a real engine boot. Its judgement logic, unlike
+the launch, is testable without either — `tests/test_tabs_smoke.py` replays
+recorded runs through a fake child and holds the contract strings from both
+sides.
+
+### 7.5 The AI reads the tab (built)
+
+The conductor can call `read_page` and be told what the webview the user is
+looking at is showing. It is the first path between a running turn and a live
+page, and it is split across two processes that had never spoken: the question
+goes engine → shell over the bridge routes in `04` §9, the shell puts it to a
+webview with `Webview::eval`, and the answer comes back on a custom URI scheme
+(`03` §1.6).
+
+**"The page you are looking at" has to be a fact, not a guess.** `is_visible`
+is not on tauri 2.11's `Webview` surface — `browser::focus` shows one view and
+hides the rest precisely because it cannot ask which is which — so the shell
+cannot work it out after the fact. `codify_browser_focus` calls
+`webview_bridge::note_active(&tab_id)` on the way through, which is the only
+moment the answer is known. From there `resolve_tab` prefers it, falls back to
+the only open tab, and **refuses with the tab names** when there are several
+and none was named. A model guessing which of five tabs to read is the failure
+this ordering exists to prevent.
+
+**It can move the tab, and the guard is the user's guard.** `navigate_page` lets
+the model put an address in the bar, and it does that by calling
+`browser::navigate` — the function `codify_browser_navigate` calls for a click.
+So a model-proposed URL meets `parse_navigation` rather than a reimplementation
+of it: http(s) only, no loopback in any spelling, and `on_navigation` guards the
+redirects afterwards (`03` §1.5). `navigate_tab` in `webview_bridge.rs` contains
+no host check at all, and a test fails the build if one appears.
+
+What it will not do is open a *new* tab. `browser::open` takes the content
+rectangle the pane measures and owns, so a tab the bridge invented would have no
+geometry and would sit somewhere the pane does not describe; `resolve_tab`
+refuses and names the open tabs instead.
+
+Reading and navigating are still one operation at a time. Queueing them would
+let a read of the page and a move of the page interleave, so a read could return
+the text of a page the user is no longer looking at, with nothing saying so.
+
+**And the smoke measures it.** The first-paint smoke has three deliverables now:
+the page composited a frame, the page described itself, and *the same page read
+back through the bridge*. The third is `webview_bridge::smoke_probe`, which
+builds a request locally and hands it to the same `serve` the engine's poll loop
+uses — smoke mode never starts an engine (`browser.rs`'s
+`the_smoke_mode_is_gated_reports_and_never_starts_the_engine`), so there is no
+`/bridge/next` to poll and nothing to hand the question out. Everything the
+answer depends on is therefore measured for real: the `eval`, the custom
+scheme, the chunk reassembly, the JSON. Only the two HTTP routes are not, and
+those are frozen without a display in `tests/test_webview_bridge.py`.
+
+A page that renders beautifully and answers nothing fails the smoke, by name.
+That is the failure this leg exists to catch, because a `Content-Security-Policy`
+forbidding `connect-src`, `img-src` *and* `sendBeacon` looks from the outside
+exactly like a working site — the symptom a user would otherwise report is "the
+AI says the page is blank". `--no-bridge` is the escape hatch, opt-out rather
+than opt-in on purpose: a smoke that quietly stops measuring the bridge is how a
+bridge that cannot reach a page becomes a passing build.
+
+The reply channel carries text only and is deliberately **not** the document
+title, which is the one channel a page with no capability is guaranteed to have
+and which `browser.rs`'s smoke probe uses. The title renames the tab, and a
+user reading a page while the model reads it too is not the smoke's throwaway
+webview. `webview_bridge.rs` explains the rest, including why the script tries
+`fetch`, `Image().src` and `sendBeacon` rather than one of them.
+
 ## 8. The keyboard layer (built)
 
 `ui/src/shortcuts.ts` maps a keystroke to a shell action, `ui/src/commandPalette.ts`
@@ -941,7 +2061,7 @@ of decisions — AltGr, shifted digits, what ⌘9 means — that markup cannot s
 
 | Keystroke | Acts as |
 |---|---|
-| ⌘/Ctrl+T | New tab — a new conversation, the same act as the sidebar's "New chat" |
+| ⌘/Ctrl+T | New Tab — a clean, empty tab in the selected project, the same act as the header's New Tab button |
 | ⌘/Ctrl+W | Close the active tab, landing on the left neighbour (§4 arithmetic) |
 | ⌘/Ctrl+1..8 | Focus the tab in that strip position |
 | ⌘/Ctrl+9 | Focus the **last** tab — the browser convention, so a strip past nine stays reachable at its end |
@@ -958,8 +2078,9 @@ Decisions, and why:
 - **The listener runs in the capture phase** — a shell shortcut beats the
   focused control — and consumes its keystroke with `preventDefault`. ⌘W closes
   the active tab through the same `handleCloseTab` seam as the strip's close
-  button, because a browser tab's webview is a separate OS window that has to be
-  told to go (§7.2); the listener therefore re-binds when the tab set changes,
+  button, because a browser tab's embedded page has to be told to go (§7.2) —
+  the strip is the only closer a child webview has; the listener therefore
+  re-binds when the tab set changes,
   which is cheap, and buys the single seam that keeps a page from being orphaned
   by closing its tab one way and kept alive by closing it another.
 - **Escape belongs to the palette alone** while it is open: the input stops
@@ -1090,7 +2211,7 @@ the pipeline already makes, through the same service:
 |---|---|---|
 | `read_file` | `LibraryService.read` | path escape refused by `FileSystemService` |
 | `search_code` | `LibraryService.search` | same |
-| `git_history` | `GitService.read_only` | an explicit subcommand list, not a prefix rule |
+| `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")`: subcommand names *and* their flags, one owner |
 | `run_command` | `SandboxService.run_command` | `validate_argv`, `test` mode (docs/00 §6.6) |
 | `recon` | `ExecutorService._librarian` | read-only, bounded rounds |
 | `design` | `ExecutorService._design` | no tools at all; decides from the evidence |
@@ -1107,8 +2228,26 @@ method under the fixer's own validation, and the move that commits is the
 scribe's after the critic approved. §10.14 is the section on how that holds when
 the model — not the code — is choosing the order.
 
-`git_history` is worth calling out: it is an allowlist of subcommand *names*, not
-a prefix rule, because `log` is safe and `log --output=x` is not. The caller is a
+**What it can say to them.** `recon`, `design`, `plan` and `write` each carry a
+line of the conductor's own text, and each delivers it: the ask is placed beside
+the goal and labelled as an addition, because the goal is what the user asked
+for and a conductor that could rewrite it would be sending a sub-agent after
+something nobody requested. `docs/01` §5.1a has the table. Two limits are worth
+knowing before you rely on it: the three step moves are addressed by `step_id`
+alone, so the conductor cannot say what `review` should focus on, and the gate
+itself is not one of the seven — it has already run, before the loop existed.
+
+`git_history` is worth calling out, because it is where "the model asked for it"
+was once the whole check. It now runs `sandbox.validate_argv(mode="read_only")` —
+**the librarian's validator, not a copy of it**. Until that call replaced its own
+private list it had two defects at once: a subcommand list eight names long against
+the librarian's seventeen, so the two had already drifted; and no flag or argument
+check at all, so `git log --output=<any path>` wrote a file outside the workspace
+with content the model chose, `git diff --no-index /etc/hostname /dev/null` read
+one, and `git branch NAME` created a ref — each of them a bare word or a flag no
+name list can see. `git branch` and `git tag` are now read-only only in their
+listing forms, which is why the rule is per-subcommand and not one shared set of
+listing flags (`-a` lists for one and annotates for the other). The caller is a
 model, and "the model asked for it" is not a reason to run `git commit`.
 
 ### 10.7 The loop terminates, and says so

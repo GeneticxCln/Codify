@@ -11,23 +11,23 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ path, diffText }) => {
 
   return (
     <div className="bg-codify-bg border border-codify-border rounded-lg overflow-hidden my-2 font-mono text-xs">
-      <div className="bg-codify-surface px-3 py-2 border-b border-codify-border flex items-center gap-2 text-gray-300 font-medium">
-        <FileCode className="w-4 h-4 text-blue-400" />
+      <div className="bg-codify-surface px-3 py-2 border-b border-codify-border flex items-center gap-2 text-codify-secondary font-medium">
+        <FileCode className="w-4 h-4 text-codify-info" />
         <span>{path}</span>
       </div>
       <div className="p-2 overflow-x-auto max-h-96">
         {lines.map((line, idx) => {
-          let color = "text-gray-400";
+          let color = "text-codify-muted";
           let bg = "transparent";
           if (line.startsWith("+") && !line.startsWith("+++")) {
-            color = "text-green-400";
-            bg = "bg-green-950/30";
+            color = "text-codify-success";
+            bg = "bg-codify-success/15";
           } else if (line.startsWith("-") && !line.startsWith("---")) {
-            color = "text-red-400";
-            bg = "bg-red-950/30";
+            color = "text-codify-danger";
+            bg = "bg-codify-danger/15";
           } else if (line.startsWith("@@")) {
-            color = "text-purple-400";
-            bg = "bg-purple-950/20";
+            color = "text-codify-design";
+            bg = "bg-codify-design/10";
           }
 
           return (

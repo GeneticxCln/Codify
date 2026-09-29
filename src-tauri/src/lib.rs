@@ -5,11 +5,12 @@ mod browser;
 mod engine_log;
 mod engine_protocol;
 mod terminal;
+mod webview_bridge;
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Listener, Manager, State};
 use tokio::sync::Mutex;
 // The one wait in the exit path is a future it awaits, not a thread it blocks:
 // see `stop_engine` for what a blocking version cost.
@@ -332,6 +333,161 @@ fn process_alive(pid: u32) -> bool {
 /// SIGHUP is deliberately absent. A terminal that launched the app may have been
 /// started with SIGHUP ignored, and a handler installed over an inherited `SIG_IGN`
 /// would make closing that terminal kill an app that was deliberately detached.
+// ── the render-starvation watchdog ──────────────────────────────────────────
+//
+// On a machine whose WebKitGTK composites in software (an Nvidia/Wayland
+// session without a working dma-buf path), a full-window 30 FPS backdrop costs
+// about a whole core *in this process* — and the cost lands on the GTK main
+// loop, so the window stops answering input. The page cannot see the problem:
+// its frames keep being delivered, its painter is cheap, and the burn is here.
+// So the shell, the one party that pays, is the party that says so: it watches
+// its own main-thread CPU, and when the app has been idle-and-burning long
+// enough, it announces `codify:engine-render-starved` and the page stops the
+// effects. See `ui/src/motionPreference.ts` for the other end.
+
+/// The shell event the watchdog announces, and the payload it carries.
+pub const RENDER_STARVED_EVENT: &str = "codify:engine-render-starved";
+
+/** The thresholds, named once so a reader (and the freeze test) can judge them. */
+pub mod render_watchdog {
+    /// A sample is a fraction of one core spent by one thread in 1 s: the
+    /// kernel counts 100 ticks per core-second (`CLK_TCK` on Linux).
+    pub const SAMPLE_TICKS: u64 = 100;
+    /// How much of a core, held across the window, is starvation: ~0.55. Below
+    /// this a busy repaint is uncomfortable; above it the main loop is losing
+    /// most of its time to the rasterizer and input is what dies first.
+    pub const STARVE_NUMERATOR: u64 = 55;
+    /// The burn must be sustained, but software rasterisation arrives in
+    /// *bursts* — measured on the machine that froze, the main thread alternated
+    /// ~3 s at ~90% of a core with ~3 s at ~34%, so a consecutive-streak rule
+    /// missed the verdict by one second, twice. The rule is therefore windowed:
+    /// this many hot samples out of the last [`HOT_WINDOW`] announce, which a
+    /// page load (one spike) cannot reach and the burst pattern reaches on its
+    /// second burst.
+    pub const HOT_NEEDED: usize = 6;
+    /// The window [`HOT_NEEDED`] is counted over, in 1 s samples.
+    pub const HOT_WINDOW: usize = 10;
+
+    /// One CPU sample of one thread, as ticks between two readings.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Sample {
+        pub hot: bool,
+        pub fraction_x100: u64,
+    }
+
+    /// Judge one interval: did this thread spend ≥ `STARVE_NUMERATOR`% of a
+    /// core between `previous` and `now` ticks?
+    pub fn sample(previous: u64, now: u64) -> Sample {
+        let delta = now.saturating_sub(previous);
+        let fraction_x100 = delta * 100 / SAMPLE_TICKS;
+        Sample {
+            hot: fraction_x100 >= STARVE_NUMERATOR,
+            fraction_x100,
+        }
+    }
+
+    /// The starvation verdict, from hot samples counted over a sliding window.
+    ///
+    /// A state machine rather than a counter in the loop, so the rule is a pure
+    /// function a test can drive: [`HOT_NEEDED`] hot samples of the last
+    /// [`HOT_WINDOW`] announce — exactly once, and then the machine stops for
+    /// the rest of the boot.
+    #[derive(Default)]
+    pub struct Verdict {
+        window: [bool; HOT_WINDOW],
+        oldest: usize,
+        filled: usize,
+        pub announced: bool,
+    }
+
+    impl Verdict {
+        pub fn observe(&mut self, hot: bool) -> bool {
+            if self.announced {
+                return false;
+            }
+            self.window[self.oldest] = hot;
+            self.oldest = (self.oldest + 1) % HOT_WINDOW;
+            self.filled = (self.filled + 1).min(HOT_WINDOW);
+            if self.filled == HOT_WINDOW && self.window.iter().filter(|h| **h).count() >= HOT_NEEDED
+            {
+                self.announced = true;
+                return true;
+            }
+            false
+        }
+    }
+}
+
+/// Watch this process's main thread and announce starvation, once, when found.
+///
+/// The verdict is deliberately *once per boot*, because false positives here
+/// cost the user their backdrop for the whole session (the page keeps it), and
+/// because announcing at most once is what makes the user's "animate anyway"
+/// stick — a second announcement an hour later would override a choice the
+/// user had already made.
+///
+/// This runs on the async runtime; reading `/proc` is a plain file read and the
+/// emit is a one-way message, so nothing here needs the main thread it watches.
+fn watch_render_starvation(app: tauri::AppHandle) {
+    const WINDOW_SAMPLES: usize = 30;
+    tauri::async_runtime::spawn(async move {
+        let mut verdict = render_watchdog::Verdict::default();
+        let mut previous: Option<u64> = None;
+        // The first samples of a boot are the app starting — layout, the mount
+        // storm, the engine handshake — and are not evidence of anything. The
+        // verdict arms only after this long.
+        const ARM_AFTER_MS: u64 = 5_000;
+        let started = std::time::Instant::now();
+        for _ in 0..WINDOW_SAMPLES {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let Some(ticks) = main_thread_cpu_ticks() else {
+                continue;
+            };
+            let Some(prev) = previous.replace(ticks) else {
+                continue; // the first reading establishes the baseline only
+            };
+            if started.elapsed().as_millis() < u128::from(ARM_AFTER_MS) {
+                continue;
+            }
+            // A window nobody can see is not starving anybody: a minimised or
+            // fully-occluded window still repaints, but there is no user under
+            // the burn. `unwrap_or(true)`: if the answer cannot be had, count
+            // the sample — a false positive needs the user to see it anyway.
+            let visible = app
+                .get_webview_window("main")
+                .and_then(|w| w.is_visible().ok())
+                .unwrap_or(true);
+            let read = render_watchdog::sample(prev, ticks);
+            let hot = visible && read.hot;
+            if verdict.observe(hot) {
+                println!(
+                    "[Codify] render watchdog: this window is being rasterised in software \
+                     (main thread hot on {} of the last {} sampled seconds) — asking \
+                     the page to stop the animated backdrops",
+                    render_watchdog::HOT_NEEDED,
+                    render_watchdog::HOT_WINDOW,
+                );
+                use tauri::Emitter;
+                let _ = app.emit(RENDER_STARVED_EVENT, read.fraction_x100);
+                return; // once per boot
+            }
+        }
+    });
+}
+
+/// The main thread's accumulated CPU ticks, from `/proc/self/stat` fields 14+15.
+fn main_thread_cpu_ticks() -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // The comm field can contain spaces, so the parse starts after the final ')'.
+    let after = stat.rsplit_once(")")?.1;
+    let mut fields = after.split_whitespace();
+    // Fields after the ')' run from field 3 (state is field 3, the first token
+    // here), so utime — field 14 — is the 12th token, and stime follows it.
+    let utime: u64 = fields.nth(11)?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+    Some(utime + stime)
+}
+
 /// SIGTERM and SIGINT are requests to stop, with no such second reading.
 fn watch_shutdown_signals(app: AppHandle) {
     use tokio::signal::unix::{signal, SignalKind};
@@ -537,23 +693,27 @@ async fn codify_terminal_close(
     terminal::close(&terminals, &terminal_id)
 }
 
-/// Open a browser webview for a tab (or bring the existing one forward).
+/// Open (embed) a browser page for a tab, or navigate the one that exists.
 ///
-/// The webview runs the page with an empty capability set and a loopback URL
+/// The page runs with an empty capability set and behind the loopback URL
 /// guard — both enforced and asserted in [`browser`], which owns the whole
-/// boundary. This command exists only so the main window can ask for a tab;
-/// the browser webview itself cannot invoke it, or anything else.
+/// boundary. The geometry arrives from the UI, which measures its own layout
+/// in logical pixels; a child webview is placed where its pane says, not
+/// where a guess about the window's chrome puts it. This command exists only
+/// so the UI's webview can ask for a tab; a browser page itself cannot
+/// invoke it, or anything else.
 #[tauri::command]
 async fn codify_browser_open(
     app: tauri::AppHandle,
     tab_id: String,
     url: String,
+    bounds: browser::Bounds,
 ) -> Result<String, String> {
-    browser::open(&app, &tab_id, &url)
+    browser::open(&app, &tab_id, &url, bounds)
 }
 
-/// Navigate an open browser tab. Guarded twice: here for a refusal the UI can
-/// show, and in `on_navigation` for enforcement no caller routes around.
+/// Navigate an open browser page. Guarded twice: here for a refusal the UI
+/// can show, and in `on_navigation` for enforcement no caller routes around.
 #[tauri::command]
 async fn codify_browser_navigate(
     app: tauri::AppHandle,
@@ -563,10 +723,73 @@ async fn codify_browser_navigate(
     browser::navigate(&app, &tab_id, &url)
 }
 
-/// Close a browser tab's webview.
+/// Show this browser tab's page and hide the others.
+#[tauri::command]
+async fn codify_browser_focus(app: tauri::AppHandle, tab_id: String) -> Result<String, String> {
+    // Recorded before the focus, and recorded here because this is the only
+    // moment the fact is known: `is_visible` is not on tauri 2.11's `Webview`
+    // surface, so `browser::focus` cannot be asked which tab it just showed.
+    // It is what makes the model's "the page you are looking at" mean the page
+    // the user is actually looking at.
+    webview_bridge::note_active(&tab_id);
+    browser::focus(&app, &tab_id)
+}
+
+/// Resize every browser page to the UI's current content rectangle.
+#[tauri::command]
+async fn codify_browser_resize(
+    app: tauri::AppHandle,
+    bounds: browser::Bounds,
+) -> Result<(), String> {
+    browser::resize(&app, bounds)
+}
+
+/// Close a browser tab's page.
 #[tauri::command]
 async fn codify_browser_close(app: tauri::AppHandle, tab_id: String) -> Result<String, String> {
     browser::close(&app, &tab_id)
+}
+
+/// Open a browser page's DevTools inspector.
+///
+/// Shell-side surface over the webview, granted to the app's webview alone.
+/// The crate builds with tauri's `devtools` feature, so this exists in every
+/// build; remove that feature and this call stops compiling — the loud kind
+/// of removal, which is the kind this crate prefers.
+#[tauri::command]
+async fn codify_browser_devtools_open(
+    app: tauri::AppHandle,
+    tab_id: String,
+) -> Result<String, String> {
+    browser::open_devtools(&app, &tab_id)
+}
+
+/// Close a browser page's DevTools inspector.
+#[tauri::command]
+async fn codify_browser_devtools_close(
+    app: tauri::AppHandle,
+    tab_id: String,
+) -> Result<String, String> {
+    browser::close_devtools(&app, &tab_id)
+}
+
+/// Is a browser page's DevTools inspector open?
+#[tauri::command]
+async fn codify_browser_devtools_state(
+    app: tauri::AppHandle,
+    tab_id: String,
+) -> Result<bool, String> {
+    browser::devtools_open(&app, &tab_id)
+}
+
+/// Does this build have an inspector at all?
+///
+/// Compile-time metadata, answered so the UI never hardcodes the build
+/// shape: the pane asks, the shell answers, and a build that loses the
+/// feature has the UI's back regardless of what the frontend assumed.
+#[tauri::command]
+async fn codify_browser_devtools_available() -> Result<bool, String> {
+    Ok(browser::devtools_available())
 }
 
 /// Return the current engine connection info so the UI can build its HTTP client.
@@ -893,8 +1116,16 @@ async fn launch_engine_once(shared: SharedEngineState) -> LaunchOutcome {
         None => None,
     };
 
-    // Locate `python3` on PATH — fall back gracefully.
-    let mut engine = tokio::process::Command::new("python3");
+    // Which `python3` actually runs: the checkout's own `.venv` when it has one,
+    // and the PATH otherwise. `make test` already uses the venv, and the two can
+    // hold different installs — the Laya gate's SDK lives in the venv, and an
+    // engine on `/usr/bin/python3` cannot see it, so it would keep paying an LLM
+    // call per goal for an SDK that is installed in the same checkout. One
+    // interpreter for the whole project; `engine_interpreter` is where the
+    // fallback is decided and tested.
+    let interpreter = engine_protocol::engine_interpreter(&project_root);
+    eprintln!("[Codify] Engine interpreter: {}", interpreter.display());
+    let mut engine = tokio::process::Command::new(&interpreter);
     engine
         .args(["-m", "engine"])
         .current_dir(&project_root)
@@ -1102,9 +1333,456 @@ fn apply_display_backend() {
     }
 }
 
+/// Leave a smoke run with a *real* process status.
+///
+/// `AppHandle::exit` only requests an exit: in tauri 2.11.6 it hands the
+/// code to `RuntimeHandle::request_exit`, which raises
+/// `RunEvent::ExitRequested`/`Exit` and unwinds the normal shutdown — the
+/// code rides on the event and the process still ends 0. A first-paint
+/// failure that exits 0 is a failure to anything reading the status, which
+/// is most of what a smoke test is for, so the smoke exits for real instead.
+///
+/// Taking the process down with it is safe *here* and only here: smoke mode
+/// never starts an engine (frozen by browser.rs's
+/// `the_smoke_mode_is_gated_reports_and_never_starts_the_engine`), so there
+/// is no child to reap and no lease to break, and the harness that drives
+/// this terminates the child on every path out anyway. Both streams are
+/// flushed first, because the verdict is the last thing said.
+fn smoke_exit(code: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(code);
+}
+
+// ── the tabs smoke: one boot that proves tab restoration end to end ────────
+
+/// The environment variable that turns a boot into the tabs smoke.
+pub const TABS_SMOKE_ENV: &str = "CODEIFY_TABS_SMOKE";
+
+/// The line prefix every verdict of this smoke carries; `scripts/tabs_smoke.py`
+/// reads its run through these lines and nothing else.
+pub const TABS_SMOKE_LINE: &str = "tabs-smoke: ";
+
+/// The row the smoke seeds, and the one key in the whole run this window
+/// **could not have minted**: `tabKey`'s output carries exactly two `_` — the
+/// prefix's and the time/counter separator — and everything between them is
+/// base36. A third `_` cannot be minted, only received, so a tab carrying this
+/// key arrived through the engine round trip this smoke exists to measure. It
+/// still satisfies the UI's own key law (`k_` prefix, bounded length), so a
+/// restored tab may carry it.
+pub const TABS_SMOKE_SEED_KEY: &str = "k_tabs_smoke_seed";
+
+/// Where the seeded tab points: a real, refusable-by-nothing https address on
+/// the embed smoke's own default host. The seat does not wait for the page to
+/// paint, so the verdict does not depend on the network — a webview is seated
+/// for the tab whether the page loads or not.
+fn tabs_smoke_seed_url() -> &'static str {
+    "https://example.com/tabs-smoke"
+}
+
+/// The whole run's deadline, from mode engagement. The engine's launch retries,
+/// its migrations on a fresh `CODIFY_HOME`, the UI's boot, and the seat wait
+/// all live inside it; a smoke that can outlive its own harness's patience is
+/// a hang wearing a smoke's clothes.
+pub const TABS_SMOKE_DEADLINE_SECS: u64 = 75;
+
+/// Whether this boot is the tabs smoke. Presence is the switch, exactly as
+/// `CODEIFY_EMBED_SMOKE` is: an empty value engages with the defaults, so a
+/// harness never has to invent a value to say "run it".
+fn tabs_smoke_requested(read: impl Fn(&str) -> Option<String>) -> bool {
+    read(TABS_SMOKE_ENV).is_some()
+}
+
+/// The window's own webview — the UI, not one of the seated pages — for the
+/// one channel diagnosis may use: asking the app what it sees about itself.
+/// Reaches for `get_webview` first (a webview window whose children are the
+/// seated pages resolves its *own* webview there) and falls back to scanning
+/// for the label that is not a page's.
+fn get_ui_webview(window: &tauri::WebviewWindow<tauri::Wry>) -> Option<tauri::Webview<tauri::Wry>> {
+    if let Some(ui) = window.get_webview("main") {
+        return Some(ui);
+    }
+    window
+        .webviews()
+        .into_iter()
+        .map(|(_, page)| page)
+        .find(|page| !page.label().starts_with(crate::browser::LABEL_PREFIX))
+}
+
+/// The body the smoke seeds, as the engine's `PUT /shell/tabs` receives it.
+///
+/// A pure function so the freeze test can hold it: the payload is what the UI's
+/// own decoder will refuse-or-restore, and the shape it must have — a browser
+/// kind, an address, a history whose cursor names the address — is the mirror
+/// format of `tabPersistence`, not anything the engine understands. The engine
+/// will take any JSON; this smoke must send the JSON a real window writes.
+fn tabs_smoke_seed_body() -> serde_json::Value {
+    serde_json::json!({
+        "key": TABS_SMOKE_SEED_KEY,
+        "position": 0,
+        "kind": "browser",
+        "payload": serde_json::json!({
+            "kind": "browser",
+            "url": tabs_smoke_seed_url(),
+            "history": {"entries": [tabs_smoke_seed_url()], "index": 0},
+        })
+        .to_string(),
+    })
+}
+
+/// The tabs smoke's driver: start the engine as an ordinary boot does, seed the
+/// engine's strip with one row this window has never seen, and wait for the
+/// window to rehydrate it.
+///
+/// `CODEIFY_TABS_SMOKE` (any value) turns the app's own launch into the test —
+/// the sibling of `browser::smoke_mode`, and different from it in the one way
+/// that matters: this smoke's subject **is** the engine round trip, so the
+/// engine starts and the UI boots exactly as a user's boot does. What it adds
+/// is a seed and a verdict:
+///
+/// 1. wait for the boot handshake (`CODIFY_ENGINE token=… port=…`), failing
+///    fast if the launcher recorded a problem — an engine that cannot start is
+///    this smoke's subject failing, not an accident of the harness;
+/// 2. seed `PUT /shell/tabs` with [`tabs_smoke_seed_body`] over the same
+///    authenticated route a window writes through;
+/// 3. focus the window — attention is what the UI's pull runs on (docs/09
+///    §2.1's honest cost), and a smoke that never looks at the window would be
+///    testing a pull that never happens;
+/// 4. watch for a webview at the seed's address: the UI seats a webview only
+///    for the active tab's address, and that address exists here only because
+///    the engine-only row was adopted and restored — so the seat is the
+///    end-to-end proof;
+/// 5. read the strip back from the engine and print one
+///    `tabs-smoke: restored <kind> <key>` line per row — the strip the window
+///    is showing, as the engine holds it — then `tabs-smoke: PASS` and exit 0.
+///    Every failure says which stage did not happen, and [`smoke_exit`] makes
+///    the code real.
+///
+/// The UI is deliberately untouched: no smoke branch in the app, no init
+/// script. Everything the verdict needs is already observable from the shell —
+/// the seats and the engine's HTTP surface — so the production code path is the
+/// only path there is.
+fn tabs_smoke_mode(app: tauri::AppHandle, state: SharedEngineState) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("the main window does not exist".to_string());
+    };
+    tauri::async_runtime::spawn(async move {
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(TABS_SMOKE_DEADLINE_SECS);
+        // 1. The handshake. The launcher owns the retries; this loop only
+        //    watches for its answer, and takes the problem line as the verdict
+        //    when the launcher has already given up.
+        let (token, port) = loop {
+            let engine = state.lock().await;
+            if let (Some(token), Some(port)) = (&engine.token, engine.port) {
+                break (token.clone(), port);
+            }
+            if let Some(problem) = &engine.problem {
+                println!("{TABS_SMOKE_LINE}FAILED the engine could not launch: {problem}");
+                smoke_exit(1);
+            }
+            drop(engine);
+            if tokio::time::Instant::now() >= deadline {
+                println!("{TABS_SMOKE_LINE}FAILED no engine handshake within {TABS_SMOKE_DEADLINE_SECS}s");
+                smoke_exit(1);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        };
+        println!("{TABS_SMOKE_LINE}engine is up on {port}");
+
+        // 2. Seed, through the route a window writes. One attempt: a refusal
+        //    is a finding — the smoke sends exactly what a real window sends.
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/shell/tabs");
+        let sent = client
+            .put(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&tabs_smoke_seed_body())
+            .send()
+            .await;
+        match sent {
+            Ok(resp) if resp.status().is_success() => {
+                println!("{TABS_SMOKE_LINE}seeded {}", TABS_SMOKE_SEED_KEY);
+            }
+            Ok(resp) => {
+                println!(
+                    "{TABS_SMOKE_LINE}FAILED the engine refused the seed (HTTP {}) — the smoke \
+                     sends what a real window sends, so this is a finding, not a harness bug",
+                    resp.status()
+                );
+                smoke_exit(1);
+            }
+            Err(e) => {
+                println!("{TABS_SMOKE_LINE}FAILED could not reach the engine: {e}");
+                smoke_exit(1);
+            }
+        }
+
+        // 3. Attention, repeated. The pull runs when the window is next looked
+        //    at — `visibilitychange` and `focus`, not a timer (docs/09 §2.1) —
+        //    and a set_focus alone is a no-op when the window already *has*
+        //    focus. So this performs the user action the contract is defined
+        //    on: looking away, then back. It is done **in the seat loop, every
+        //    ATTN_PULSE_SECS**, not once: the UI registers its pull listeners
+        //    only when its own health probe flips `engineUp`, which can be up
+        //    to one probe interval after the seed lands — a single pulse at
+        //    seed time lands on a window that is not listening yet (measured:
+        //    one pulse, then `tabs: 0` at the timeout with the seed still in
+        //    the engine). A user glances back more than once; so does this.
+
+        // 4. Wait for the seat. The UI seats webviews by *tab id* — the label
+        //    names a local `id` this window minted at restore, never a key —
+        //    so the label cannot be the fingerprint. The address is: the
+        //    seed's URL is the one address in the whole run, a webview is
+        //    seated only for the active tab's address, and that address exists
+        //    in the UI only because the seeded row was adopted and restored.
+        //    (Trailing-slash-insensitive, because URL normalisation is the
+        //    loader's business and not the verdict's.) Before waiting: the
+        //    UI's engine connection comes from `localStorage` when it holds
+        //    one (WebKit's storage lives under the app identifier and is
+        //    *not* scoped by CODIFY_HOME), and a stale pair from a previous
+        //    session would point the window at an engine that exists but holds
+        //    a different database — the pull would run, the seed would not be
+        //    in what it read back, and the smoke would time out here. The
+        //    stale-auth recovery the UI already has needs the answer to change
+        //    first; answering with this boot's real pair up front removes the
+        //    stale half of that loop.
+        let (fresh_token, fresh_port) = (token.clone(), port);
+        if let Err(e) = window.eval(&format!(
+            "localStorage.setItem('CODIFY_PORT', '{fresh_port}'); \
+             localStorage.setItem('CODIFY_TOKEN', '{fresh_token}');",
+        )) {
+            println!("{TABS_SMOKE_LINE}FAILED could not reach the window's webview: {e}");
+            smoke_exit(1);
+        }
+        let seed = tabs_smoke_seed_url().trim_end_matches('/');
+        let ui = get_ui_webview(&window);
+        let iteration = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        // Every child label this run has already URL-checked. Seats are
+        // monotonic in practice (a page is seated once per restore), so the
+        // expensive question is asked once per label and the loop's steady
+        // state is the pure label scan.
+        let mut seen_seats: std::collections::HashSet<String> = window
+            .webviews()
+            .into_iter()
+            .map(|(_, page)| page.label().to_string())
+            .collect();
+        loop {
+            // Live probe, every fourth iteration (~6s): what the window's own
+            // page says about itself, while it is happening rather than at
+            // the timeout. `port` is which engine the page *thinks* it talks
+            // to; `banner` is the shell's own error surface, whose text names
+            // the port a failed request tried; `tabs` is the strip's DOM.
+            if let Some(ui) = &ui {
+                let n = iteration.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n % 4 == 0 {
+                    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+                    let tx = std::sync::Mutex::new(Some(tx));
+                    let script = "JSON.stringify({tabs: document.querySelectorAll('[role=\"tab\"]').length, \
+                        port: localStorage.getItem('CODIFY_PORT'), \
+                        vis: document.visibilityState, \
+                        banner: (document.querySelector('[role=\"alert\"]')?.textContent || '').slice(0, 140)})";
+                    if ui
+                        .eval_with_callback(script, move |answer| {
+                            if let Ok(mut slot) = tx.lock() {
+                                if let Some(sender) = slot.take() {
+                                    let _ = sender.send(answer);
+                                }
+                            }
+                        })
+                        .is_ok()
+                    {
+                        if let Ok(Ok(answer)) =
+                            tokio::time::timeout(std::time::Duration::from_secs(3), rx).await
+                        {
+                            println!("{TABS_SMOKE_LINE}probe {answer}");
+                        }
+                    }
+                }
+            }
+            // The attention pulse, from inside the loop: see the comment
+            // above. Driven as the **event the contract names**, not as a
+            // window-manager gesture: a WM minimise/restore cycle was tried
+            // first and killed the whole app on this desktop (frameless
+            // Wayland window, `decorations: false` — GTK's minimise took the
+            // window down with it, measured: seed, then a clean exit two
+            // seconds later with no verdict). The pull listens for `focus` on
+            // the app's window object, so the pulse is that event, dispatched
+            // into the app's own webview; `visibilityState` is already
+            // "visible" (the timeout diagnosis prints it), so the guard the
+            // pull checks passes and the read runs. Same input signal a user's
+            // alt-tab produces, minus the window manager that ate it.
+            let _ = get_ui_webview(&window)
+                .map(|ui| ui.eval("window.dispatchEvent(new Event('focus'));"));
+            tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+            // The seat check: two stages, and the first one has no dispatcher
+            // call in it. `Webview::url()` crosses to the web process, and the
+            // webview being asked is the one whose page is allowed to be
+            // failing to load — measured: a run whose example.com page sat in
+            // "Load failed" took 189s to reach a verdict that should have
+            // taken ten, with neither the shell's 75s deadline nor the
+            // harness's timer firing, because the `url()` call stalled this
+            // task and sleeps elsewhere kept the process alive. So: labels
+            // first (a pure in-process scan; the label names the tab id, and
+            // tab ids are `tab-<n>`, minted at restore in strip order), and
+            // only when a *new* label appears does the URL question get
+            // asked, once, bounded.
+            let labels: Vec<String> = window
+                .webviews()
+                .into_iter()
+                .map(|(_, page)| page.label().to_string())
+                .collect();
+            let mut seated = false;
+            for label in &labels {
+                if seen_seats.contains(label) {
+                    continue;
+                }
+                seen_seats.insert(label.clone());
+                if let Some((_, page)) = window
+                    .webviews()
+                    .into_iter()
+                    .find(|(_, p)| p.label() == label.as_str())
+                {
+                    let url = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        tauri::async_runtime::spawn_blocking(move || {
+                            page.url().map(|u| u.as_str().to_string())
+                        }),
+                    )
+                    .await;
+                    let matches = match url {
+                        Ok(Ok(Ok(text))) => text.trim_end_matches('/') == seed,
+                        _ => false,
+                    };
+                    if matches {
+                        seated = true;
+                        break;
+                    }
+                }
+            }
+            if seated {
+                // 5. The strip, from the engine's side: what the window is
+                //    showing, one line per row. The engine's answer is the
+                //    shared truth; the window adopted it, and the seat above
+                //    is the proof of the adopting half.
+                match client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => match resp.json::<serde_json::Value>().await {
+                        Ok(rows) => {
+                            if let Some(list) = rows.as_array() {
+                                for row in list {
+                                    let key =
+                                        row.get("key").and_then(|k| k.as_str()).unwrap_or("?");
+                                    let kind =
+                                        row.get("kind").and_then(|k| k.as_str()).unwrap_or("?");
+                                    println!("{TABS_SMOKE_LINE}restored {kind} {key}");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("{TABS_SMOKE_LINE}note: the strip read did not decode: {e}")
+                        }
+                    },
+                    Err(e) => println!("{TABS_SMOKE_LINE}note: the strip read did not answer: {e}"),
+                }
+                println!("{TABS_SMOKE_LINE}PASS");
+                smoke_exit(0);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                // The strip, as the engine holds it, then the window's own
+                // account of itself. The two together separate every half of
+                // the chain: "the engine lost the seed", "the engine has it
+                // and the window never came to look", "the window came and
+                // the merge refused it", "the tab is in the DOM and the seat
+                // never ran". The eval is diagnosis only — its answer names
+                // the stage in the FAILED line's footnotes and never passes
+                // the run.
+                match client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => match resp.json::<serde_json::Value>().await {
+                        Ok(rows) => {
+                            let keys: Vec<String> = rows
+                                .as_array()
+                                .map(|list| {
+                                    list.iter()
+                                        .filter_map(|row| {
+                                            row.get("key")?.as_str().map(String::from)
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            if keys.is_empty() {
+                                println!("{TABS_SMOKE_LINE}strip at timeout: empty");
+                            } else {
+                                println!("{TABS_SMOKE_LINE}strip at timeout: {}", keys.join(", "));
+                            }
+                        }
+                        Err(e) => println!("{TABS_SMOKE_LINE}strip at timeout: undecodable ({e})"),
+                    },
+                    Err(e) => println!("{TABS_SMOKE_LINE}strip at timeout: unreachable ({e})"),
+                }
+                let ui = get_ui_webview(&window);
+                if let Some(ui) = ui {
+                    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+                    let tx = std::sync::Mutex::new(Some(tx));
+                    let asked = ui.eval_with_callback(
+                        "JSON.stringify({vis: document.visibilityState, \
+                         tabs: document.querySelectorAll('[role=\"tab\"]').length, \
+                         seed: location.href.includes('tabs-smoke'), \
+                         port: localStorage.getItem('CODIFY_PORT'), \
+                         token: (localStorage.getItem('CODIFY_TOKEN') || '').slice(0, 8)})",
+                        move |answer| {
+                            if let Ok(mut slot) = tx.lock() {
+                                if let Some(sender) = slot.take() {
+                                    let _ = sender.send(answer);
+                                }
+                            }
+                        },
+                    );
+                    match asked {
+                        Ok(()) => match tokio::time::timeout(std::time::Duration::from_secs(3), rx)
+                            .await
+                        {
+                            Ok(Ok(answer)) => {
+                                println!("{TABS_SMOKE_LINE}window at timeout: {answer}");
+                            }
+                            _ => println!("{TABS_SMOKE_LINE}window at timeout: no answer"),
+                        },
+                        Err(e) => {
+                            println!("{TABS_SMOKE_LINE}window at timeout: eval refused ({e})")
+                        }
+                    }
+                }
+                println!(
+                    "{TABS_SMOKE_LINE}FAILED the seeded tab was never seated within \
+                     {TABS_SMOKE_DEADLINE_SECS}s — the pull, the adopt, the restore or the \
+                     seat did not happen; the strip and window lines above say which half held",
+                );
+                smoke_exit(1);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    });
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     apply_display_backend();
+    // The first-paint facts, on the launch log: the session bus the
+    // single-instance guard claims, the WebKit sandbox's ability to start a
+    // web process, the DMABUF rendering path, the display backend. Diagnosis
+    // only — nothing here changes behaviour (see browser.rs's rationale).
+    browser::log_environment_diagnostics();
     let engine_state: SharedEngineState = Arc::new(Mutex::new(EngineState::default()));
     let state_clone = engine_state.clone();
 
@@ -1130,7 +1808,11 @@ pub fn run() {
             eprintln!(
                 "[Codify] Second launch from {cwd} ({argv:?}) — revealing the running window"
             );
-            if let Some(window) = app.get_webview_window("main") {
+            // `get_window`, not `get_webview_window`: the latter answers `None`
+            // as soon as the main window has a child webview — which is the
+            // moment anybody is using this app — so a second launch would
+            // reveal nothing at all and say nothing about having failed.
+            if let Some(window) = app.get_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -1144,15 +1826,140 @@ pub fn run() {
         .manage(SharedTerminals::new(std::sync::Mutex::new(
             terminal::Terminals::default(),
         )))
+        // The one channel a `browser-*` webview may speak on. A page needs no
+        // capability to reach it — which is the point: it is not a Tauri
+        // command, it carries text only, and `webview_bridge::deliver` drops
+        // anything whose id this process did not issue.
+        .register_uri_scheme_protocol(webview_bridge::BRIDGE_SCHEME, |context, request| {
+            webview_bridge::scheme_handler(context, request)
+        })
         .setup(move |app| {
+            // The embed smoke test, when asked: seat the page, watch for the
+            // paint, report, exit. Runs INSTEAD of the engine launch so the
+            // test is about the embed path and nothing else — see
+            // browser::smoke_mode for what it claims and scripts/embed_smoke.py
+            // for the harness that runs it.
+            if let Ok(url) = std::env::var("CODEIFY_EMBED_SMOKE") {
+                let url = if url.trim().is_empty() {
+                    "https://example.com/".to_string()
+                } else {
+                    url
+                };
+                println!("embed-smoke: mode engaged ({url})");
+                browser::smoke_mode(&url, app.handle())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                // `Listener` comes from the Manager/AppHandle side, not the
+                // Window: the event is announced by browser::smoke_mode from
+                // the shell's own title hook, and the app is the listener.
+                // Nothing the page says is trusted here — the page cannot
+                // reach this event at all, it can only set a title.
+                let listener_sink = app.handle().clone();
+                // The smoke now has **three** deliverables — a paint, the
+                // page's report of what it is showing, and the same page read
+                // back through the bridge the AI uses — and the run ends when
+                // all are in. Exiting on paint alone was correct when paint
+                // was all there was, and wrong the moment the probe landed: the
+                // first report is scheduled at 800ms because it must let the
+                // paint markers clear, so a run that ended on the marker at
+                // ~400ms ended before the first report and printed
+                // "no-report" about a page it had never asked. Three flags, one
+                // exit, and the timeout below is the backstop for any of them.
+                //
+                // The third leg is opt-out rather than opt-in, because a smoke
+                // that quietly stops measuring the bridge is how a bridge that
+                // cannot reach a page becomes a passing build. `--no-bridge`
+                // is the escape hatch, and it is a harness flag so the reason
+                // is on the command line that produced the run.
+                let bridge_leg = webview_bridge::smoke_bridge_enabled();
+                let flags = std::sync::Arc::new(std::sync::Mutex::new([false; 3]));
+                let paint_flags = flags.clone();
+                let report_flags = flags.clone();
+                let bridge_flags = flags.clone();
+                listener_sink.listen_any(browser::SMOKE_PAINTED_EVENT, move |_event| {
+                    println!("embed-smoke: painted");
+                    if let Ok(mut seen) = paint_flags.lock() {
+                        seen[0] = true;
+                        if seen.iter().all(|leg| *leg) {
+                            smoke_exit(0);
+                        }
+                    }
+                });
+                listener_sink.listen_any(browser::SMOKE_REPORT_EVENT, move |_event| {
+                    if let Ok(mut seen) = report_flags.lock() {
+                        seen[1] = true;
+                        if seen.iter().all(|leg| *leg) {
+                            smoke_exit(0);
+                        }
+                    }
+                });
+                if bridge_leg {
+                    listener_sink.listen_any(webview_bridge::SMOKE_BRIDGE_EVENT, move |_event| {
+                        if let Ok(mut seen) = bridge_flags.lock() {
+                            seen[2] = true;
+                            if seen.iter().all(|leg| *leg) {
+                                smoke_exit(0);
+                            }
+                        }
+                    });
+                    // Started here rather than from a page event: the question
+                    // is the shell's own, and a page that cannot be scripted
+                    // would otherwise be able to skip the leg that proves the
+                    // AI can reach it.
+                    webview_bridge::smoke_probe(app.handle().clone(), webview_bridge::SMOKE_TAB);
+                } else {
+                    println!(
+                        "embed-smoke: bridge leg skipped ({})",
+                        webview_bridge::SMOKE_BRIDGE_SKIP_ENV
+                    );
+                }
+                // The timeout, from the same thread: a page that never paints,
+                // never reports, or never answers the bridge must fail the
+                // smoke rather than hang it.
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                    println!(
+                        "embed-smoke: FAILED no first paint, page report or page \
+                         read within 20s"
+                    );
+                    smoke_exit(1);
+                });
+                // The engine never starts in smoke mode: this run is about
+                // the embed path, and an engine would be a second variable.
+                return Ok(());
+            }
+            // The tabs smoke, when asked: run the ordinary boot — engine and all
+            // — then seed the strip and watch the window rehydrate it. Its
+            // verdict is printed and the process exits for real; see
+            // `tabs_smoke_mode` for what it claims and scripts/tabs_smoke.py
+            // for the harness that runs it.
+            if tabs_smoke_requested(|name| std::env::var(name).ok()) {
+                println!("tabs-smoke: mode engaged");
+                if let Err(reason) = tabs_smoke_mode(app.handle().clone(), state_clone.clone()) {
+                    println!("{TABS_SMOKE_LINE}FAILED {reason}");
+                    smoke_exit(1);
+                }
+                // The engine launch below still runs: this smoke's subject is
+                // the round trip through it, and `tabs_smoke_mode` exits the
+                // process on its own when the verdict is in.
+            }
             // Ending deliberately is the shell's own job, whichever way it is asked:
             // a closed window reaches the exit handler below, a signal reaches this.
             watch_shutdown_signals(app.handle().clone());
+            // The render watchdog: the one party that pays for a software-rasterised
+            // backdrop is this process, so this is the party that notices and says
+            // so. See the block comment above `watch_render_starvation`.
+            watch_render_starvation(app.handle().clone());
             // Launch engine asynchronously so the window appears immediately.
             let shared = state_clone.clone();
             tauri::async_runtime::spawn(async move {
                 launch_engine(shared).await;
             });
+            // The bridge's other end: poll the engine for page questions and
+            // put them to the webview the user is looking at. Started here, not
+            // inside `launch_engine`, because it must survive an engine
+            // restart — the base URL and token are re-read on every poll for
+            // exactly that reason.
+            webview_bridge::start(app.handle().clone(), state_clone.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1169,7 +1976,13 @@ pub fn run() {
             codify_terminal_close,
             codify_browser_open,
             codify_browser_navigate,
+            codify_browser_focus,
+            codify_browser_resize,
             codify_browser_close,
+            codify_browser_devtools_open,
+            codify_browser_devtools_close,
+            codify_browser_devtools_state,
+            codify_browser_devtools_available,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codify application")
@@ -1196,12 +2009,250 @@ pub fn run() {
 mod tests {
     use super::{
         await_exit, claim_shutdown, display_backend, engine_has_gone, stop_engine, stop_grace,
-        EngineState, EngineStop, SharedEngineState, DEFAULT_STOP_GRACE, ENGINE_STOP_POLL,
-        STOP_GRACE_SLACK,
+        tabs_smoke_requested, tabs_smoke_seed_body, tabs_smoke_seed_url, EngineState, EngineStop,
+        SharedEngineState, DEFAULT_STOP_GRACE, ENGINE_STOP_POLL, STOP_GRACE_SLACK, TABS_SMOKE_ENV,
+        TABS_SMOKE_LINE, TABS_SMOKE_SEED_KEY,
     };
+    use super::{render_watchdog, RENDER_STARVED_EVENT};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn the_render_watchdog_announces_once_after_four_hot_seconds() {
+        // The streak rule is the simplest shape of the verdict: a burn held for
+        // the whole window. Six hot of ten must announce — exactly once, since
+        // the page keeps the verdict for the session and a second announcement
+        // would override the user's own "animate anyway".
+        let mut verdict = render_watchdog::Verdict::default();
+        for _ in 0..9 {
+            assert!(!verdict.observe(true));
+        }
+        assert!(verdict.observe(true), "six hot of ten must announce");
+        assert!(!verdict.observe(true), "and never announce again");
+    }
+
+    #[test]
+    fn a_bursty_rasteriser_is_caught_but_a_single_spike_is_not() {
+        // Measured on the machine that froze: the main thread alternates ~3 s
+        // at ~90% of a core with ~3 s at ~34%. A consecutive-streak rule missed
+        // that verdict by one second, twice — the honest reason this rule is
+        // windowed. Three hot in a burst plus three in the next crosses the
+        // six-of-ten line on the second burst; a one-off page load (two hot in
+        // the window, however hot) never does.
+        let mut verdict = render_watchdog::Verdict::default();
+        let burst: Vec<bool> = [true, true, true, false, false, false]
+            .into_iter()
+            .collect();
+        for hot in burst.iter().cycle().take(9) {
+            assert!(
+                !verdict.observe(*hot),
+                "nine samples of a 3s-burst pattern must not announce"
+            );
+        }
+        assert!(
+            verdict.observe(true),
+            "the second burst completes the window"
+        );
+
+        let mut verdict = render_watchdog::Verdict::default();
+        let spike: Vec<bool> = [
+            true, true, false, false, false, false, false, false, false, false,
+        ]
+        .into_iter()
+        .collect();
+        for hot in spike {
+            assert!(!verdict.observe(hot));
+        }
+        assert!(
+            !verdict.announced,
+            "a single spike must stay a single spike"
+        );
+    }
+
+    #[test]
+    fn a_cool_second_resets_the_streak() {
+        // Cool samples age out of the window, so a near-miss from minutes ago
+        // cannot count toward the next spike: only the last ten seconds vote.
+        let mut verdict = render_watchdog::Verdict::default();
+        for _ in 0..5 {
+            verdict.observe(true);
+        }
+        for _ in 0..render_watchdog::HOT_WINDOW {
+            verdict.observe(false);
+        }
+        for _ in 0..5 {
+            assert!(!verdict.observe(true));
+        }
+        assert!(
+            !verdict.announced,
+            "five old hot samples must have aged out of the window"
+        );
+        assert!(
+            verdict.observe(true),
+            "and the window must still be able to announce"
+        );
+    }
+
+    #[test]
+    fn the_hot_threshold_is_just_over_half_a_core() {
+        // Named numbers, so the calibration is visible in a test rather than
+        // buried in a loop: 54 ticks in a second is busy-but-below, 55 is the
+        // verdict, and a clock (100 ticks) is exactly the edge.
+        assert!(!render_watchdog::sample(0, 54).hot);
+        assert!(render_watchdog::sample(0, 55).hot);
+        assert!(render_watchdog::sample(0, 100).hot);
+        assert_eq!(render_watchdog::sample(0, 100).fraction_x100, 100);
+        // And a quiet second is nowhere near it, including after wrap-free
+        // subtraction of a larger previous reading (saturating, never negative).
+        assert!(!render_watchdog::sample(900, 950).hot);
+        assert_eq!(render_watchdog::sample(950, 900).fraction_x100, 0);
+    }
+
+    #[test]
+    fn the_main_thread_reading_parses_this_kernel_layout() {
+        // Field 1 is pid, field 2 is comm *in parens*, field 3 is state, then
+        // eight more fields to utime at field 14 — so the parse starts after
+        // the LAST `)` (a thread named `codify (tty)` would otherwise shift
+        // every field) and skips 11 tokens: state is index 0, utime index 11,
+        // stime index 12.
+        let stat = "600786 (codify-desktop) R 4113 0 0 0 0 0 0 0 0 0 1234 567 0 0";
+        let after = stat.rsplit_once(")").unwrap().1;
+        let mut fields = after.split_whitespace();
+        let utime: u64 = fields.nth(11).unwrap().parse().unwrap();
+        let stime: u64 = fields.next().unwrap().parse().unwrap();
+        assert_eq!(utime + stime, 1234 + 567);
+        // A comm field containing a `)` must not shift the parse.
+        let tricky = "42 (codify (tty)) R 7 0 0 0 0 0 0 0 0 0 5 6 0 0";
+        let after = tricky.rsplit_once(")").unwrap().1;
+        let mut fields = after.split_whitespace();
+        let utime: u64 = fields.nth(11).unwrap().parse().unwrap();
+        let stime: u64 = fields.next().unwrap().parse().unwrap();
+        assert_eq!(utime + stime, 5 + 6);
+    }
+
+    #[test]
+    fn the_watchdog_is_wired_into_setup_and_names_the_page_event() {
+        // A monitor that nothing calls monitors nothing. The setup block must
+        // start it, and the event it emits must be the one `shellEvents.ts`
+        // and `motionPreference.ts` listen for — nothing in the two type
+        // systems spans the gap, so this test is the bridge.
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("watch_render_starvation(app.handle().clone());"),
+            "setup never starts the render watchdog"
+        );
+        assert_eq!(
+            RENDER_STARVED_EVENT, "codify:engine-render-starved",
+            "the event name drifted from the UI's listener"
+        );
+        let ui = include_str!("../../ui/src/motionPreference.ts");
+        assert!(
+            ui.contains("codify:engine-render-starved"),
+            "the UI store no longer listens for the shell's verdict"
+        );
+    }
+
+    #[test]
+    fn the_tabs_smoke_is_gated_on_its_env_var_alone() {
+        // The same switch rule as the embed smoke: presence engages, absence
+        // does not, and the value is nobody's business — a harness never has
+        // to invent a value to say "run it".
+        assert!(!tabs_smoke_requested(|_| None));
+        assert!(tabs_smoke_requested(|_| Some(String::new())));
+        assert!(tabs_smoke_requested(|_| Some("1".to_string())));
+    }
+
+    #[test]
+    fn the_seed_is_a_row_a_real_window_would_restore() {
+        // The engine takes any JSON; this smoke must send the JSON a window
+        // writes. The body's four fields, the browser kind, and a history
+        // whose cursor names its only entry — the mirror format of
+        // tabPersistence, which is what the UI's decoder restores.
+        let body = tabs_smoke_seed_body();
+        assert_eq!(body["key"], TABS_SMOKE_SEED_KEY);
+        assert_eq!(body["position"], 0);
+        assert_eq!(body["kind"], "browser");
+        let payload: serde_json::Value =
+            serde_json::from_str(body["payload"].as_str().expect("payload is a string"))
+                .expect("the payload is valid JSON, or PUT /shell/tabs would refuse it");
+        assert_eq!(payload["kind"], "browser");
+        assert_eq!(
+            payload["url"], "https://example.com/tabs-smoke",
+            "https on a non-loopback host — the one shape the shell's own guard allows"
+        );
+        assert_eq!(payload["history"]["entries"][0], payload["url"]);
+        assert_eq!(
+            payload["history"]["index"], 0,
+            "the cursor names the address"
+        );
+        // And the address the seed carries is one the shell's own navigation
+        // guard would allow: a seed the guard refuses is a seed the UI's
+        // decoder drops on arrival, and the smoke would spend its whole
+        // deadline waiting for a seat that can never happen.
+        let target = crate::browser::parse_navigation(tabs_smoke_seed_url());
+        assert!(
+            target.is_ok(),
+            "the seed URL must pass the shell's own guard"
+        );
+    }
+
+    #[test]
+    fn the_seed_key_is_one_this_window_could_not_have_minted() {
+        // The proof rests on this: the UI's own key law (layoutSync's
+        // `isTabKey`, mirrored here) accepts the seed — so a restored tab may
+        // carry it — while the key factory cannot produce it. `tabKey` is
+        // `k_` + base36 time + `_` + base36 counter: exactly two separators,
+        // and nothing but base36 between them. A third `_` can only arrive
+        // from somewhere that is not this process's clock.
+        assert!(TABS_SMOKE_SEED_KEY.starts_with("k_"));
+        assert!(TABS_SMOKE_SEED_KEY.len() <= 64);
+        let rest = TABS_SMOKE_SEED_KEY
+            .strip_prefix("k_")
+            .expect("every key starts k_");
+        let mut parts = rest.split('_');
+        let (time, counter) = (
+            parts.next().unwrap_or_default(),
+            parts.next().unwrap_or_default(),
+        );
+        assert!(
+            parts.next().is_some(),
+            "the seed has a third separator, which tabKey cannot emit"
+        );
+        let base36 = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        };
+        assert!(base36(time) && base36(counter));
+    }
+
+    #[test]
+    fn the_tabs_smoke_lines_name_the_reader_that_waits_for_them() {
+        // The verdict channel is stdout, and the reader is a Python script
+        // this crate cannot import; the contract is the prefix itself. The
+        // script reads the run through these lines and nothing else, so a
+        // rename here is a rename there, and the freeze says so.
+        let reader = include_str!("../../scripts/tabs_smoke.py");
+        assert!(reader.contains(TABS_SMOKE_LINE));
+        assert!(reader.contains(TABS_SMOKE_ENV));
+        assert!(
+            reader.contains("--rebuild"),
+            "the harness builds the shell it runs"
+        );
+        assert!(
+            reader.contains("Popen"),
+            "the harness launches the built binary"
+        );
+        assert!(
+            reader.contains("XDG_DATA_HOME") && reader.contains("XDG_CACHE_HOME"),
+            "the harness stopped isolating the webview's own storage. \
+             `CODIFY_HOME` moves the engine's database and nothing else, while \
+             the cached engine address and the layout mirror live in the shared \
+             WebKit profile — which is how this smoke wrote its own tab into \
+             the developer's real strip, one row per run, 137 of them"
+        );
+    }
 
     #[test]
     fn a_wayland_session_gets_the_wayland_backend() {

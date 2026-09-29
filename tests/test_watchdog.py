@@ -42,7 +42,7 @@ from unittest.mock import Mock, patch
 
 import uvicorn
 
-from engine import watchdog
+from engine import spawn_guard, watchdog
 from engine.app import _truncate_wal, main
 
 
@@ -82,6 +82,52 @@ class ParentPidTests(unittest.TestCase):
     def test_the_real_environment_is_read_when_no_mapping_is_passed(self) -> None:
         with patch.dict(os.environ, {watchdog.ENV_PARENT_PID: "999"}):
             self.assertEqual(999, watchdog.parent_pid_from_env())
+
+
+class InheritedWatchdogTests(unittest.TestCase):
+    """The suite must not arrive already armed.
+
+    `engine.app.serve` arms the parent watchdog from the environment, with no
+    code call and no opt-out: a test that boots the engine inherits whatever
+    `CODIFY_PARENT_PID` the developer's shell happens to carry. When that pid is
+    gone — or was never this process's parent — `watchdog.terminate` runs, arms
+    the hard deadline and SIGTERMs the runner. The suite would end mid-file at a
+    signal, with an exit status that reads as success to a `make` that never saw
+    a summary. That is the same failure as the `os._exit` in `main`, reached
+    without any code changing.
+
+    So the two parent-pid variables are cleared on every run, ahead of both
+    branches of `activate` — including the branch that respects an externally set
+    `CODIFY_HOME`, which is the CI case and the one where an inherited value is
+    most likely.
+    """
+
+    def test_both_parent_variables_are_cleared(self) -> None:
+        names = (watchdog.ENV_PARENT_PID, spawn_guard.ENV_PARENT_PID)
+        self.assertNotEqual(
+            names[0],
+            names[1],
+            "the engine's parent and the sandbox guard's parent are different "
+            "variables, and the test is weaker if they are not",
+        )
+        with patch.dict(os.environ, {name: "4321" for name in names}):
+            hermetic.disarm_parent_watchdogs()
+            for name in names:
+                self.assertNotIn(name, os.environ, f"{name} survived the disarm")
+
+    def test_this_process_is_disarmed_right_now(self) -> None:
+        """The invariant, asserted about the suite that is running it."""
+        for name in (watchdog.ENV_PARENT_PID, spawn_guard.ENV_PARENT_PID):
+            self.assertNotIn(
+                name,
+                os.environ,
+                f"{name} is set in the test process — every test that boots the engine "
+                "is running with a live parent-death watchdog behind it",
+            )
+
+    def test_the_disarm_is_idempotent(self) -> None:
+        hermetic.disarm_parent_watchdogs()
+        hermetic.disarm_parent_watchdogs()  # must not raise on an absent variable
 
 
 class GoneTests(unittest.TestCase):

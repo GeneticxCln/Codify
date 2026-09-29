@@ -149,14 +149,48 @@ class Guard:
         so the group is the command and everything it spawned. SIGKILL rather than
         TERM: the engine is gone, so there is nobody left to escalate, and a command
         that ignores TERM would outlive us all. This never returns.
+
+        **The leadership check is the whole reason this is safe to call at all.**
+        `guarded_argv` cannot supply `start_new_session` itself — it is the
+        caller's flag on the Popen — so a guard spawned without it shares the
+        engine's process group, and `killpg(getpgrp(), SIGKILL)` would then be a
+        SIGKILL to the engine, the desktop shell, and every sibling in that group:
+        the guard killing the thing it exists to outlive. Comparing the group to
+        our own pid is the only question that answers "is this group mine?", and a
+        group we do not lead is a group we must not signal. We still leave — the
+        command's pipes have to stop being held — but we leave alone.
+
+        The refusal is announced rather than silent, because in production it means
+        a spawn site has lost `start_new_session=True` and that is a bug worth
+        seeing in the log rather than inferring from a missing kill.
         """
-        try:
-            os.killpg(os.getpgrp(), signal.SIGKILL)
-        finally:
-            # Belt for the impossible case: SIGKILL is not blockable, but if this
-            # process is somehow still here, holding the command's pipes open and
-            # doing nothing is the one outcome that must not happen.
-            os._exit(1)
+        group = os.getpgrp()
+        if group == os.getpid():
+            try:
+                os.killpg(group, signal.SIGKILL)
+            finally:
+                # Belt for the impossible case: SIGKILL is not blockable, but if
+                # this process is somehow still here, holding the command's pipes
+                # open and doing nothing is the one outcome that must not happen.
+                self._leave(1)
+        else:
+            print(
+                f"[spawn-guard] pid {os.getpid()} does not lead process group {group}; "
+                "refusing to signal it and leaving the command to its own timeout",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._leave(1)
+
+    def _leave(self, code: int) -> None:
+        """End this guard. A seam so `kill_group` is callable from a test.
+
+        `os._exit` through the module attribute rather than a bound default, so
+        the suite's standing `patch.object(os, "_exit")` is what intercepts it —
+        the same substitution every other exit site in the engine relies on, and
+        the reason this one is not written as `os._exit` inline.
+        """
+        os._exit(code)
 
     def on_term(self, _signum: int, _frame: object) -> None:
         """The engine's TERM: a group timeout, or the engine's death. Tell them apart.

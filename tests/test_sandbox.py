@@ -1,4 +1,6 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import contextlib
+import io
 import os
 import signal
 import subprocess
@@ -7,6 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from engine.app import PICKER_MARKER, _picker_command
 from engine.fs import FileSystemService
@@ -212,6 +215,195 @@ class TestGuardDecisions(unittest.TestCase):
 
     def test_a_live_parent_is_not_a_dead_engine(self) -> None:
         self.assertFalse(Guard().engine_is_gone())
+
+
+class TestSignallingOurOwnGroupIsRefused(unittest.TestCase):
+    """The two sites that can signal a group, and the check each one makes first.
+
+    Both existed to kill *somebody else's* processes: a timed-out command, and a
+    command tree outliving a dead engine. Both reached their target through
+    `os.getpgid(pid)` / `os.getpgrp()`, and neither asked whether the group it
+    had been handed was its own. In a test runner that answer is the runner's
+    group essentially every time, so calling either one unpatched ends the
+    suite; in production the same question has a bad answer whenever a child was
+    spawned without `start_new_session=True`, and then a command timeout takes
+    the engine and the desktop shell down with it.
+
+    Every call below is made in this process, deliberately, with the two
+    primitives that would do the damage patched — so the test proves the guard
+    branch runs rather than proving nothing happened.
+    """
+
+    def test_a_command_whose_group_is_ours_is_signalled_alone(self) -> None:
+        with (
+            patch.object(os, "getpgid", return_value=os.getpgrp()),
+            patch.object(os, "killpg") as killpg,
+            patch.object(os, "kill") as kill,
+        ):
+            SandboxService._kill_group(os.getpid())
+        killpg.assert_not_called()
+        kill.assert_called_once()
+
+    def test_a_commands_own_group_is_still_killed_whole(self) -> None:
+        # The refusal above must not become a blanket "never killpg" — a command
+        # that spawned children is the reason the group kill exists.
+        child_group = os.getpgrp() + 1_000
+        with (
+            patch.object(os, "getpgid", return_value=child_group),
+            patch.object(os, "killpg") as killpg,
+            patch.object(os, "kill") as kill,
+        ):
+            SandboxService._kill_group(4321, sig=signal.SIGKILL)
+        killpg.assert_called_once_with(child_group, signal.SIGKILL)
+        kill.assert_not_called()
+
+    def test_a_guard_that_leads_its_group_still_kills_it(self) -> None:
+        # The production shape: a guard spawned with `start_new_session=True`
+        # leads the group, so the group kill proceeds. `getpgrp` is made to
+        # answer with our own pid rather than the runner's real group, so the
+        # test exercises the destructive branch without being in a position to
+        # survive the wrong one.
+        with (
+            patch.object(os, "getpgrp", return_value=os.getpid()),
+            patch.object(os, "killpg") as killpg,
+            patch.object(os, "_exit") as leave,
+        ):
+            Guard().kill_group()
+        killpg.assert_called_once_with(os.getpid(), signal.SIGKILL)
+        leave.assert_called_once_with(1)
+
+    def test_a_guard_that_does_not_lead_its_group_kills_nothing(self) -> None:
+        # A guard spawned without `start_new_session=True` shares the engine's
+        # group. Killing that group is the guard killing the process it exists
+        # to outlive, so it refuses — and says so, because in production the
+        # refusal means a spawn site has lost its flag and that is worth seeing.
+        with (
+            patch.object(os, "getpgrp", return_value=os.getpgrp()),
+            patch.object(os, "killpg") as killpg,
+            patch.object(os, "_exit") as leave,
+            contextlib.redirect_stderr(io.StringIO()) as err,
+        ):
+            Guard().kill_group()
+        killpg.assert_not_called()
+        leave.assert_called_once_with(1)
+        self.assertIn("does not lead process group", err.getvalue())
+
+    def test_a_vanished_childs_group_is_still_signalled_through_its_pid(self) -> None:
+        # The audit's race, at the primitive layer: the child exited and was
+        # reaped before the kill arrived, so `getpgid` answers ESRCH. The old
+        # code raised straight out of `_kill_group` — and, worse, treated a
+        # vanished *leader* as a vanished *group*, abandoning whatever the
+        # child had spawned. The fix redirects the group signal to the pid,
+        # which is still the group's id for anything this class spawns.
+        vanished = os.getpgrp() + 1_000
+        with (
+            patch.object(os, "getpgid", side_effect=ProcessLookupError),
+            patch.object(os, "killpg") as killpg,
+            patch.object(os, "kill") as kill,
+        ):
+            SandboxService._kill_group(vanished, sig=signal.SIGKILL)
+        killpg.assert_called_once_with(vanished, signal.SIGKILL)
+        kill.assert_not_called()
+
+    def test_a_vanished_pid_that_names_our_own_group_is_refused(self) -> None:
+        # The redirect must carry the normal path's refusal. A leaderless own
+        # group is a real state — our leader was reaped while we, its members,
+        # are alive — and `killpg(pgid)` there is a signal to ourselves.
+        with (
+            patch.object(os, "getpgid", side_effect=ProcessLookupError),
+            patch.object(os, "killpg") as killpg,
+            patch.object(os, "kill") as kill,
+        ):
+            SandboxService._kill_group(os.getpgrp(), sig=signal.SIGKILL)
+        killpg.assert_not_called()
+        kill.assert_not_called()
+
+    def test_kill_group_is_callable_from_a_test_at_all(self) -> None:
+        # The point of the two checks above, stated as one fact: the call a test
+        # makes in its own process group must not signal that group, and must not
+        # take the runner with it. Reaching the end of this test is the assertion.
+        with (
+            patch.object(os, "killpg") as killpg,
+            patch.object(os, "_exit"),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            Guard().kill_group()
+        self.assertFalse(
+            killpg.called,
+            "kill_group signalled a process group in a process that does not lead it",
+        )
+
+
+class TestAVanishedLeaderIsStillCollected(unittest.TestCase):
+    """The timeout-to-kill window where the child is already reaped.
+
+    Two layers, each honest about the one thing it simulates. The kernel-level
+    test simulates nothing on the signal path: a real session leader is reaped
+    (via `wait()`, a real waitpid) while its grandchild lives, `getpgid` then
+    really raises, and the old code really lost the grandchild. The
+    `run_command` test injects only the lookup — the child, the pipes, the
+    group and both kills are real — because the reaping inside `run_command`
+    happens behind `communicate()`, which is the very call whose timeout
+    creates the window; there is no honest way to reap the child from outside
+    between those two statements, so the lookup stands in for the reap and
+    everything around it stays live.
+    """
+
+    MARKER = "codify-killgroup-race-probe"
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+
+    def tearDown(self) -> None:
+        for pid in pids_matching(self.MARKER):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid), signal.SIGKILL)
+        self.temp_dir.cleanup()
+
+    def test_a_reaped_leaders_grandchild_is_collected_without_raising(self) -> None:
+        grandchild = self.root / f"{self.MARKER}.py"
+        grandchild.write_text("import time; time.sleep(30)\n", encoding="utf-8")
+        # The leader leads its own session (the sandbox's only spawn shape),
+        # spawns the grandchild into that group, and exits at once; the
+        # grandchild outlives it in the leader's group.
+        leader_script = (
+            "import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, sys.argv[1]])\n"
+        )
+        leader = subprocess.Popen(
+            [sys.executable, "-c", leader_script, str(grandchild)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        leader.wait()  # a real reap: the leader's pid is gone from the table
+
+        # The precondition, witnessed rather than assumed — this is the
+        # ProcessLookupError the old code let escape.
+        with self.assertRaises(ProcessLookupError):
+            os.getpgid(leader.pid)
+        # The group outlived its leader: the grandchild is still in it.
+        self.assertTrue(wait_until(self.MARKER, matches=True, timeout=5))
+
+        SandboxService._kill_group(leader.pid, sig=signal.SIGKILL)
+        # `wait_until` answers "was the wanted state reached" — True on success
+        # here, since `matches=False` asks for a quiet table. (The inversion
+        # this comment guards against is the one the helper's own docstring
+        # warns about: assertFalse(wait_until(..., matches=False)) asserts the
+        # grandchild *survived*.)
+        self.assertTrue(wait_until(self.MARKER, matches=False, timeout=5))
+
+    def test_timeout_with_a_vanished_child_reports_124_not_a_leaked_error(self) -> None:
+        (self.root / "sleepy.py").write_text("import time; time.sleep(60)\n", encoding="utf-8")
+        sandbox = SandboxService()
+        # With the lookup answering ESRCH, the old code leaked
+        # ProcessLookupError out of the timeout path and the caller never saw
+        # a verdict; the fixed code redirects the group signal and reports 124.
+        with patch.object(os, "getpgid", side_effect=ProcessLookupError):
+            result = sandbox.run_command(str(self.root), ["python3", "sleepy.py"], timeout_s=2)
+        self.assertEqual(124, result["exit_code"])
+        self.assertIn("timed out after 2s", result["stderr"])
 
 
 class TestGuardedCommands(unittest.TestCase):

@@ -56,6 +56,7 @@ class ScriptedProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         self.prompts.append((self.role or "?", system_prompt, user_prompt))
         if self.usage_sink is not None:

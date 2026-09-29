@@ -6,14 +6,18 @@ Normative. If a later doc contradicts this file on product shape (8 roles, Setti
 
 The original design was solid for a single-LLM, single-agent tool. The v2 requirement changes the core execution model:
 
-- One orchestrating AI controls **8 roles**: the `laya` pre-flight gate plus 7 pipeline stages
-  (`librarian`, `design`, `planner`, `fixer`, `verifier`, `critic`, `scribe`).
+- One orchestrating AI controls **8 roles**: the `laya` pre-flight gate plus 7 role slots
+  (`librarian`, `design`, `planner`, `fixer`, `verifier`, `critic`, `scribe`). The slot count is
+  fixed; the *order* is not — a conductor loop picks which run through **moves**, and the
+  familiar librarian → design → planner → fixer → verifier → critic → scribe sequence is the
+  built-in `ship-a-change` skill (`engine/builtin_skills/ship-a-change.md`) rather than a
+  compiled path. See `01` §1.
 - Each sub-agent MAY be assigned a different model from a different provider.
 - Sub-agents are configurable **only** from the Settings screen. Nowhere else in the app MAY change which model a sub-agent uses.
 
 | Surface | Change |
 |---|---|
-| Engine execution core | `ExecutorService` no longer calls one `LLMService`. It calls an `AgentOrchestrator` that routes to 7 role-specific agents. |
+| Engine execution core | `ExecutorService` no longer calls one `LLMService`. It calls an `AgentOrchestrator` that routes to 7 role-specific agents, and a **conductor** that decides which of them run. |
 | Data model | New `AgentConfig` entity, one per role, persisted. |
 | API | New `/settings/agents` namespace, deliberately separate from `/goals` and `/workspaces`. |
 | Desktop | New Settings screen is the **only** mutator of agent config. Every other screen only displays which agent/model ran (read-only). |
@@ -36,8 +40,8 @@ The original design was solid for a single-LLM, single-agent tool. The v2 requir
 |---|---|---|
 | **Codify Desktop** | Rust + Tauri | UI, Engine HTTP/WS client, exclusive Settings/Agents screen |
 | **Codify Engine** | Python + FastAPI | Workspace/goal registry, planning, execution, file/git/sandbox ops, event streaming |
-| **Codify Orchestrator** | Inside Engine | Decomposes a goal into phases; dispatches each phase to the slot that has the ability for it |
-| **Sub-Agents** | Fixed set of 7 (+ gate) | `librarian`, `design`, `planner`, `fixer`, `verifier`, `critic`, `scribe` |
+| **Codify Orchestrator** | Inside Engine | A conductor loop that picks moves and dispatches each to the slot that has the ability for it |
+| **Sub-Agents** | Fixed set of 7 (+ gate); the order they run in is not fixed | `librarian`, `design`, `planner`, `fixer`, `verifier`, `critic`, `scribe` |
 | **Provider Adapters** | Inside Engine | OpenAI, Anthropic, Google, local/Ollama |
 
 ## 4. High-level flow (updated)
@@ -79,6 +83,13 @@ WS events: goal_status, step_status, log, diff, test_result,
 
 Critic rejection: Desktop click required to retry the step (`04` §4.3). Settings never appears on this path.
 
+**This diagram is the common path, not a guarantee.** It is the order the built-in `ship-a-change`
+skill sequences, drawn out because it is what most goals do — not a schedule the engine keeps. The
+conductor picks moves, so a goal that only needs a plan never reaches the scribe, and one that
+changes a design surface may ask for the design move first. What *is* fixed is the ability each
+slot has: only the fixer writes, only the verifier runs a command, only the critic can stop a
+step. Those are the invariants this diagram is a picture of (`00` §6).
+
 ## 5. Document set
 
 | File | Contents |
@@ -93,6 +104,7 @@ Critic rejection: Desktop click required to retry the step (`04` §4.3). Setting
 | `07-spawn-guard-and-deterministic-tests.md` | The spawn guard, the guarded choke points, the freeze that keeps them honest |
 | `08-benchmarks.md` | The benchmark harness, what a number may claim, and the no-third-party-source policy |
 | `09-workspace-shell.md` | Conversations, tabs, terminal, browser — and §10, what a turn is |
+| `10-agent-memory.md` | The agent-memory model: the Hindsight audit, what was built (`recall`, `recall_threads`, keyword search), what was rejected, and the open `reflect` half |
 
 ## 6. Invariants (non-negotiable)
 

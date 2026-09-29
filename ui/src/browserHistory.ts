@@ -104,8 +104,65 @@ export function goForward(
   return { history: { ...history, index }, url: history.entries[index] };
 }
 
+/** One address the shell is currently loading, per tab, before it lands. */
+export type InFlightNavigations = Record<string, string>;
+
+/**
+ * A page announced an address. Is it a new place the user went?
+ *
+ * The stack was only ever fed by navigations the UI *asked for* — the address
+ * bar, Back, Forward, a restored tab — so a link the user clicked inside a page
+ * was a place they had been and the stack had never heard of it. Back then had
+ * nothing to offer but the last address they typed, which is the shape of the
+ * complaint this function answers: search, click through to a site, press Back,
+ * land on the search rather than where the click came from.
+ *
+ * So every address a page announces is offered here, and the only question is
+ * whether **the shell asked for this exact one**:
+ *
+ * - It did (`commands[tabId] === url`): the load event is the answer to a
+ *   navigation the caller already recorded through [`visit`]. Recording it
+ *   twice would put the same address on the stack twice, and the command is
+ *   forgotten so a later `Started` for the same URL cannot match a spent one.
+ * - It did not: the page went somewhere on its own — a link, a form, a
+ *   `location.assign` — and that is a visit, recorded like any other.
+ *
+ * A **redirect** is the cost, named rather than hidden: its target does not
+ * match the command, so it becomes an entry of its own and Back steps through
+ * it. The alternative — matching on "some command is in flight" — makes Back
+ * walk into the place the command is *leaving*, which is the bug this file
+ * exists to avoid, and the cost here is one extra Back press in a case a user
+ * rarely reaches on purpose. What still is not caught at all is a page that
+ * changes its own address without loading a document (`pushState` on a
+ * single-page app — a video page on a site built that way); the load events
+ * carry no such navigation, and a script in the page would be the only way to
+ * see it.
+ *
+ * A command for the tab is dropped either way. A page-initiated navigation
+ * supersedes whatever the shell was loading, and leaving a spent command in the
+ * map would let the *next* `Started` for that same address look like an answer
+ * to it.
+ */
+export function pageNavigation(
+  commands: InFlightNavigations,
+  tabId: string,
+  url: string,
+  history: BrowserHistory
+): { commands: InFlightNavigations; history: BrowserHistory } {
+  const answered = commands[tabId] === url;
+  const { [tabId]: _spent, ...rest } = commands;
+  const next: InFlightNavigations = rest;
+  return answered
+    ? { commands: next, history }
+    : { commands: next, history: visit(history, url) };
+}
+
 /**
  * `http://` or `https://`, or a prefix that makes the address one.
+ *
+ * Kept for callers that want the raw normalisation; the browser pane now
+ * classifies through `browserDispatch.classifyBrowserAddress`, which owns
+ * this same transformation (and the refusals) so the two cannot disagree.
  *
  * The bare host is the case worth having: `Url::parse` in Rust has no base to
  * resolve against, so `example.com` reaches `browser::parse_navigation` as a

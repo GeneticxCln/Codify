@@ -10,9 +10,16 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from engine.fs import PathEscapeError
-from engine.library import MAX_READ_CHARS, LibraryService, format_read, format_search
+from engine.library import (
+    MAX_READ_CHARS,
+    LibraryService,
+    fts5_available,
+    format_read,
+    format_search,
+)
 from engine.sandbox import CommandNotAllowed, SandboxService, validate_argv
 
 
@@ -109,6 +116,125 @@ class TestLibrarianReads(unittest.TestCase):
         self.assertTrue(res["matches"])
         self.assertNotIn("regex", res)
 
+
+class TestKeywordSearch(unittest.TestCase):
+    """The second retrieval strategy, and the reason it can be trusted.
+
+    FTS5 is a compile-time option of SQLite, not an import, so the strategy
+    degrades rather than refuses: a workspace whose interpreter lacks it gets
+    the literal substring answer, labelled as such. Every fallback here is
+    exercised by *forcing* the condition — a probe patched away, a connection
+    made to raise — never by skipping the test when the box happens to have the
+    feature. A test that only passes where FTS5 exists proves nothing about
+    the machine that needs the fallback.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        (self.root / "providers.py").write_text(
+            "def validate_provider_url(u):\n    '''Providers must be loopback.'''\n",
+            encoding="utf-8",
+        )
+        (self.root / "notes.md").write_text(
+            "we validate the base_url of every provider\n",
+            encoding="utf-8",
+        )
+        (self.root / "unrelated.py").write_text("x = 1\n", encoding="utf-8")
+        self.lib = LibraryService(str(self.root))
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_a_multiword_query_finds_whole_files_substring_misses(self) -> None:
+        """The case the strategy exists for: no single line carries both words."""
+        self.assertEqual(self.lib.search("validate provider")["matches"], [])
+        res = self.lib.search("validate provider", mode="keyword")
+        paths = {m["path"] for m in res["matches"]}
+        self.assertEqual(paths, {"providers.py", "notes.md"})
+        self.assertNotIn("unrelated.py", paths)
+
+    def test_ranking_is_bm25_and_not_the_path_sort(self) -> None:
+        """The file containing *both* terms outranks the file with one, and the
+        names are chosen so alphabetical order would say the opposite."""
+        res = self.lib.search("validate provider", mode="keyword")
+        self.assertEqual(res["matches"][0]["path"], "notes.md")
+
+    def test_the_result_labels_its_strategy_and_shape(self) -> None:
+        res = self.lib.search("validate provider", mode="keyword")
+        self.assertEqual(res["strategy"], "fts5_bm25")
+        self.assertTrue(res["fts5"])
+        self.assertTrue(all(m["line"] == 0 for m in res["matches"]))
+        rendered = format_search(res)
+        self.assertIn("ranked by keyword", rendered)
+        self.assertIn("whole files, not lines", rendered)
+
+    def test_keyword_mode_still_honours_a_glob(self) -> None:
+        res = self.lib.search("validate provider", glob="*.py", mode="keyword")
+        self.assertTrue(all(m["path"].endswith(".py") for m in res["matches"]))
+
+    def test_the_fallback_runs_when_fts5_is_missing(self) -> None:
+        """A probe patched to False is the box without FTS5, answered the way
+        that box must be: the literal answer, labelled as a fallback."""
+        with patch("engine.library.fts5_available", return_value=False):
+            res = self.lib.search("validate provider", mode="keyword")
+        self.assertEqual(res["strategy"], "substring_fallback")
+        self.assertFalse(res["fts5"])
+        self.assertEqual(res["matches"], self.lib.search("validate provider")["matches"])
+        self.assertIn("keyword index unavailable", format_search(res))
+
+    def test_the_fallback_is_forced_through_a_failing_connection_not_a_flag(self) -> None:
+        """The probe says yes and the connection then fails anyway: the same
+        degradation must hold, because a probe proves one moment, not the call."""
+        import sqlite3
+
+        def broken_connect(*args: object, **kwargs: object) -> None:
+            raise sqlite3.OperationalError("unable to open database file")
+
+        with patch("engine.library.fts5_available", return_value=True), patch(
+            "sqlite3.connect", side_effect=broken_connect
+        ):
+            res = self.lib.search("validate provider", mode="keyword")
+        self.assertEqual(res["strategy"], "substring_fallback")
+        self.assertTrue(res["fts5"], "the probe said yes; the label says what failed")
+
+    def test_a_query_fts5_itself_refuses_falls_back_rather_than_raising(self) -> None:
+        """A bare quote is a query-syntax error to FTS5. The caller asked for a
+        keyword search and must not learn sqlite's grammar to get an answer."""
+        self.assertTrue(fts5_available())
+        res = self.lib.search('validate "unclosed', mode="keyword")
+        self.assertEqual(res["strategy"], "substring_fallback")
+        self.assertEqual(res["matches"], [])
+
+    def test_an_unknown_mode_is_a_valueerror_not_a_silent_substring(self) -> None:
+        """A caller asking for "semantic" must be told it does not exist, not
+        quietly handed substring and left to trust the wrong answer."""
+        with self.assertRaises(ValueError):
+            self.lib.search("anything", mode="semantic")
+
+    def test_the_default_search_contract_is_unchanged(self) -> None:
+        """Substring stays the default and its shape is load-bearing: the
+        evidence checker reads matches[].path and files_scanned to decide which
+        cited paths were actually seen."""
+        res = self.lib.search("loopback")
+        self.assertNotIn("strategy", res)
+        self.assertNotIn("fts5", res)
+        self.assertEqual(res["files_scanned"], 3)
+        self.assertEqual(res["matches"][0]["path"], "providers.py")
+        self.assertEqual(res["matches"][0]["line"], 2)
+
+
+class TestLibrarianReadsMore(unittest.TestCase):
+    """The rest of the read surface, on the standard fixture workspace."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        _make_workspace(self.root)
+        self.lib = LibraryService(str(self.root))
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
 
     def test_line_range_reaches_past_the_head_cap(self) -> None:
         """The window is taken where the lines are, not from the first 8K chars:

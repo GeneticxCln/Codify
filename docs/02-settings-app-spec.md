@@ -100,6 +100,26 @@ rather than keeping a list of its own: a copy went stale once, and when it did,
 `openrouter` and `groq` were treated as custom endpoints, so the screen asked for
 a protocol and a base URL the engine already knew.
 
+### 3.0 The engine runtime card
+
+One card, above the gate card, reading `GET /settings/runtime`: which interpreter the engine is
+actually running under, and whether *that interpreter* can import the gate's SDK. It exists
+because a capability installed into the wrong environment is otherwise invisible — the SDK in
+`.venv` makes `make test` fast while a shell-spawned engine silently pays the fallback model's
+latency, with no error anywhere.
+
+It is a separate card from the gate status rather than part of it, because the two answer
+different questions: *which engine is gating goals* versus *what this engine is*. A gate can be
+off because it was told to be or because the package is not there, and the fixes are deleting a
+line of config and running `pip install`.
+
+The wording lives in `ui/src/engineRuntime.ts`, not the component: the suite runs with no DOM, and
+`api.ts` reads `localStorage` at import. The one decision worth a test is which interpreter
+paths get shown — inside a venv `sys.executable` is `…/.venv/bin/python` while the shell's choice
+is `…/.venv/bin/python3`, so the card compares *prefixes* and shows the "checkout's interpreter"
+line only when it is genuinely a different environment. A card that reports a difference which
+is not there trains people to skim past the one that is.
+
 ### 3.1 The Conductor card
 
 One card, above the eight, for the model that decides which sub-agent runs. It
@@ -155,6 +175,8 @@ export function AgentConfigCard({ role }: { role: AgentRole }) {
       protocol: draft.protocol,
       temperature: draft.temperature,
       max_tokens: draft.max_tokens,
+      num_ctx: active.num_ctx ?? null,
+      keep_alive: active.keep_alive?.trim() || null,
       system_prompt_override: draft.systemPromptOverride,
     });
     setDraft(d => d ? { ...d, pendingApiKey: undefined } : d);
@@ -177,6 +199,14 @@ export function AgentConfigCard({ role }: { role: AgentRole }) {
                    onChange={t => setDraft({ ...draft, temperature: t })} />
       <NumberField label="Max tokens" value={draft.max_tokens}
                    onChange={m => setDraft({ ...draft, max_tokens: m })} />
+      {draft.protocol === "ollama" && (
+        <NumberField label="Context window" value={active.num_ctx} placeholder="4096"
+                     onChange={n => setDraft({ ...draft, num_ctx: n })} />
+      )}
+      {draft.protocol === "ollama" && (
+        <TextField label="Keep alive" value={active.keep_alive} placeholder="5m"
+                   onChange={k => setDraft({ ...draft, keep_alive: k })} />
+      )}
       <PromptOverrideEditor value={draft.systemPromptOverride} maxLength={32768}
                              onChange={p => setDraft({ ...draft, systemPromptOverride: p })} />
       <Button onClick={onSave}>Save</Button>

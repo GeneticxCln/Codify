@@ -70,6 +70,29 @@ def looks_binary(sample: bytes) -> bool:
     return b"\x00" in sample
 
 
+def fts5_available() -> bool:
+    """Can this interpreter's sqlite rank a MATCH query at all?
+
+    Asked through a probe, never assumed: FTS5 is a compile-time option of
+    SQLite, and the answer on this box proves nothing about the next one. The
+    index itself is held in memory and discarded, so availability is the only
+    durable fact the module needs.
+    """
+    import sqlite3 as _sqlite3
+
+    try:
+        conn = _sqlite3.connect(":memory:")
+        try:
+            conn.execute("CREATE VIRTUAL TABLE probe USING fts5(body)")
+            return True
+        except _sqlite3.Error:
+            return False
+        finally:
+            conn.close()
+    except _sqlite3.Error:
+        return False
+
+
 def _is_outside_symlink(root: Path, path: Path) -> bool:
     """True when path is a symlink escaping the workspace root.
 
@@ -276,8 +299,14 @@ class LibraryService:
 
     # ── searching ──────────────────────────────────────────────────────────────
 
-    def search(self, query: str, glob: str | None = None, regex: bool = False) -> dict[str, Any]:
-        """Search across the workspace: literal substring, or bounded regex.
+    def search(
+        self,
+        query: str,
+        glob: str | None = None,
+        regex: bool = False,
+        mode: str | None = None,
+    ) -> dict[str, Any]:
+        """Search across the workspace: literal substring, ranked keyword, or bounded regex.
 
         Literal is the default and stays: every real question ("where is this
         symbol called") is a substring question. `regex=True` opens pattern
@@ -285,12 +314,32 @@ class LibraryService:
         caps — see MAX_REGEX_PATTERN / PER_LINE_REGEX_SECONDS — because a
         model-supplied pattern is still untrusted input. An invalid or oversized
         pattern raises ValueError (refusal-information, not a crash).
+
+        `mode="keyword"` is the second strategy: the same walk, indexed in
+        memory and ranked by BM25, for multi-word questions substring answers
+        badly ("how do we validate provider urls") — a line carrying only one of
+        the words never matches a substring, and the ranking tells the model
+        which hits are about the whole question rather than the commonest word.
         """
         needle = (query or "").strip()
         if not needle:
             raise ValueError("empty search query")
         if regex:
             return self._search_regex(needle, glob)
+        if mode == "keyword":
+            return self._search_keyword(needle, glob)
+        if mode is not None:
+            raise ValueError(f"unknown search mode: {mode!r}")
+        return self._search_substring(needle, glob)
+
+    def _search_substring(self, needle: str, glob: str | None) -> dict[str, Any]:
+        """Literal case-insensitive substring: the original search, unchanged.
+
+        Its result shape is load-bearing — the evidence checker reads
+        `matches[].path` and `files_scanned` to decide which cited paths were
+        actually seen — so nothing about it moved when the keyword strategy
+        arrived beside it.
+        """
         lowered = needle.lower()
         matches: list[dict[str, Any]] = []
         files_scanned = 0
@@ -342,6 +391,105 @@ class LibraryService:
             "files_scanned": files_scanned,
             "files_skipped": files_skipped,
             "truncated": truncated,
+        }
+
+    def _search_keyword(self, query: str, glob: str | None) -> dict[str, Any]:
+        """BM25-ranked keyword search over an in-memory FTS5 index.
+
+        One walk under the same caps as the substring strategy, each scanned
+        file's lines indexed as one FTS5 row so ranking happens per file rather
+        than per line. The index lives only for this call and inside this
+        process — there is no second artifact for a workspace watcher to go
+        stale, and no store outside the workspace for stored text to leak into.
+
+        Two honest limits. Multi-line constructs (a function split across ten
+        lines) rank as scattered single-line mentions, so the line-anchored
+        shape both other strategies return is lost to a per-file hit; and the
+        fallback is real, not a flag: when FTS5 is absent the probe fails and
+        the *literal substring* answer is computed and labelled as such, so an
+        uninstallable index degrades the answer rather than refusing it.
+        """
+        import sqlite3 as _sqlite3
+
+        if not fts5_available():
+            result = self._search_substring(query, glob)
+            result["strategy"] = "substring_fallback"
+            result["fts5"] = False
+            return result
+
+        rows: list[tuple[str, str]] = []  # (path, whole file as one document)
+        files_scanned = 0
+        files_skipped = 0
+        truncated = False
+        root = Path(self.root).resolve()
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
+            for name in sorted(filenames):
+                full = Path(dirpath) / name
+                if _is_outside_symlink(root, full):
+                    files_skipped += 1
+                    continue
+                rel = str(full.relative_to(self.root))
+                if glob and not fnmatch.fnmatch(rel, glob):
+                    continue
+                if files_scanned >= MAX_FILES_SCANNED:
+                    truncated = True
+                    break
+                try:
+                    if full.stat().st_size > MAX_INDEX_BYTES:
+                        files_skipped += 1
+                        continue
+                    raw = full.read_bytes()[:MAX_SCAN_BYTES]
+                except OSError:
+                    files_skipped += 1
+                    continue
+                if looks_binary(raw[:2048]):
+                    files_skipped += 1
+                    continue
+                files_scanned += 1
+                rows.append((rel, raw.decode("utf-8", errors="replace")))
+            if truncated:
+                break
+
+        conn: Any = None
+        try:
+            conn = _sqlite3.connect(":memory:")
+            conn.execute("CREATE VIRTUAL TABLE docs USING fts5(path UNINDEXED, body)")
+            conn.executemany("INSERT INTO docs VALUES (?, ?)", rows)
+            # An explicit ORDER BY bm25: FTS5's default order for MATCH is
+            # unspecified, and the ranking *is* this strategy's point.
+            hits = conn.execute(
+                "SELECT path, bm25(docs) FROM docs WHERE docs MATCH ? "
+                "ORDER BY bm25(docs) LIMIT ?",
+                (query, MAX_MATCHES),
+            ).fetchall()
+        except _sqlite3.Error:
+            # A query FTS5 itself refuses (a stray operator in the terms, say)
+            # — or the connection failing to open at all — falls back the same
+            # way a missing module would: the answer is computed the plain way
+            # and labelled. The probe proved availability a moment ago; a
+            # probe is not a guarantee about this call.
+            result = self._search_substring(query, glob)
+            result["strategy"] = "substring_fallback"
+            result["fts5"] = True
+            return result
+        finally:
+            if conn is not None:
+                conn.close()
+
+        return {
+            "query": query,
+            "glob": glob,
+            "matches": [
+                {"path": path, "line": 0, "text": "(file matched; pass to read_file)"}
+                for path, _rank in hits
+            ],
+            "files_scanned": files_scanned,
+            "files_skipped": files_skipped,
+            "truncated": truncated,
+            "strategy": "fts5_bm25",
+            "fts5": True,
         }
 
     def _search_regex(self, pattern: str, glob: str | None) -> dict[str, Any]:
@@ -475,6 +623,13 @@ def format_search(result: dict[str, Any]) -> str:
         f"{glob_note}: "
         f"{len(result['matches'])} matches in {result['files_scanned']} files"
     )
+    # The keyword strategy says what it did, because the shape of its answer is
+    # different and a model that assumes line hits will misread a file hit.
+    strategy = result.get("strategy")
+    if strategy == "fts5_bm25":
+        head += " — ranked by keyword (BM25), whole files, not lines"
+    elif strategy == "substring_fallback":
+        head += " — keyword index unavailable; literal substring results instead"
     if result["truncated"]:
         head += " (TRUNCATED — results are partial)"
     if result["files_skipped"]:
@@ -502,6 +657,7 @@ __all__ = [
     "format_read",
     "format_search",
     "format_command",
+    "fts5_available",
     "MAX_READ_CHARS",
     "MAX_ROUND_CHARS",
 ]

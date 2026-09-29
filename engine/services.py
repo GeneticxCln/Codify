@@ -28,6 +28,8 @@ from engine.models import (
     GoalCreate,
     GoalStatus,
     PlanStep,
+    ShellTab,
+    ShellTabWrite,
     TurnCreate,
     Workspace,
     WorkspaceCreate,
@@ -287,6 +289,12 @@ class AgentRegistryService:
         CLEARABLE = (
             "system_prompt_override", "base_url",
             "fallback_provider", "fallback_protocol", "fallback_base_url",
+            # Sending null must mean "go back to the provider's default window",
+            # not "keep whatever was stored": the UI writes null to clear it.
+            "num_ctx",
+            # Same for the residency window — "unset" is a real setting, and a
+            # user who cleared the field wants Ollama's own five minutes back.
+            "keep_alive",
         )
         data.update({k: v for k, v in updates.items() if v is not None or k in CLEARABLE})
         if not (data.get("fallback_provider") or "").strip():
@@ -333,7 +341,7 @@ class AgentRegistryService:
             """UPDATE agent_configs SET display_name=?, provider=?, protocol=?, model_name=?,
                api_key_ref=?, base_url=?, system_prompt_override=?, temperature=?, max_tokens=?,
                fallback_provider=?, fallback_model_name=?, fallback_protocol=?, fallback_base_url=?,
-               updated_at=?
+               num_ctx=?, keep_alive=?, updated_at=?
                WHERE role=?""",
             (
                 merged.display_name, merged.provider, merged.protocol, merged.model_name,
@@ -341,7 +349,7 @@ class AgentRegistryService:
                 merged.temperature, merged.max_tokens,
                 merged.fallback_provider, merged.fallback_model_name,
                 merged.fallback_protocol, merged.fallback_base_url,
-                merged.updated_at, role,
+                merged.num_ctx, merged.keep_alive, merged.updated_at, role,
             ),
         )
         self._db.commit()
@@ -809,6 +817,100 @@ class ConversationService:
         return out
 
 
+class ShellTabService:
+    """The open tabs, and the order they are in.
+
+    The only view state the engine holds, and it holds the smallest useful part
+    of it: which tabs exist, and in what order. That is the part two windows
+    must agree about, and it is why this is a table of rows rather than a blob
+    — a shared strip has more than one writer, and a writer that could only
+    replace the whole thing would be a writer that closes the other window's
+    tabs every time it saved.
+
+    What a tab is *showing* stays in the window that shows it, as an opaque JSON
+    `payload`. The engine checks that it is JSON and how big it is, and stops
+    there on purpose. It could learn the shape (a `conversation_id`, a `url` and
+    a history stack) and this would still be a worse design: a second version of
+    the app would have to migrate rows it cannot read, and a strip whose tabs are
+    half a shape the engine understands is a strip the engine can corrupt.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._db = conn
+
+    @staticmethod
+    def _row_to_tab(row: sqlite3.Row) -> ShellTab:
+        return ShellTab(
+            key=row["key"],
+            position=row["position"],
+            kind=row["kind"],
+            payload=row["payload"],
+            updated_at=row["updated_at"],
+        )
+
+    def list_tabs(self) -> list[ShellTab]:
+        """The strip, in the order it is read.
+
+        `position` ascending, `key` as the tiebreak so two rows claiming the same
+        slot have a defined order rather than whatever SQLite returned. The
+        client re-sorts and re-pushes on its next change, so this is a stable
+        read, not a claim about uniqueness.
+        """
+        rows = self._db.execute(
+            "SELECT key, position, kind, payload, updated_at "
+            "FROM shell_tabs ORDER BY position ASC, key ASC"
+        ).fetchall()
+        return [self._row_to_tab(row) for row in rows]
+
+    def upsert(self, body: ShellTabWrite) -> list[ShellTab]:
+        """Record one tab and return the whole strip.
+
+        The payload is validated as JSON before it is stored, because the one
+        promise this service makes about a payload is that it *is* a payload: a
+        row holding text that is not JSON would fail in every client that read
+        it, and the failure would surface in a window rather than here, where it
+        can be refused with a sentence. Its shape is not checked, and cannot be:
+        see the class docstring.
+
+        Returning the strip rather than the one tab is the same round trip as a
+        `GET`, and it is what lets a client adopt everything else has done in the
+        same breath as its own write — the two windows in this design do not wait
+        for each other, they meet in this response.
+        """
+        try:
+            json.loads(body.payload)
+        except (TypeError, ValueError) as exc:
+            raise ApiError(
+                422,
+                "invalid_tab_payload",
+                f"a tab's payload must be JSON: {exc}",
+            ) from None
+        self._db.execute(
+            "INSERT INTO shell_tabs (key, position, kind, payload, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET "
+            "position = excluded.position, kind = excluded.kind, "
+            "payload = excluded.payload, updated_at = excluded.updated_at",
+            (body.key, body.position, body.kind, body.payload, time.time()),
+        )
+        self._db.commit()
+        return self.list_tabs()
+
+    def remove(self, key: str) -> list[ShellTab]:
+        """Forget one tab, and return the strip that is left.
+
+        Idempotent, deliberately, and this is the one place where "refuse loudly"
+        would be wrong. With two windows on one strip, a tab can be closed in
+        both — the second close is not a bug in the client, it is the shared
+        strip working — so a 404 here would make the ordinary case an error the
+        user has to see. The response is the truth about what is left, which is
+        what the caller actually needed.
+        """
+        self._db.execute("DELETE FROM shell_tabs WHERE key = ?", (key,))
+        self._db.commit()
+        return self.list_tabs()
+
+
 class GoalService:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._db = conn
@@ -1121,6 +1223,227 @@ class GoalService:
             })
             if len(out) >= max(1, limit):
                 break
+        return out
+
+    def recall_events(
+        self,
+        workspace_id: str,
+        *,
+        window_days: int = 0,
+        limit: int | None = None,
+        now: float | None = None,
+        with_ids: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Recent outcome events for one workspace, newest first.
+
+        The query half of the `recall` tool (`engine/recall.py` holds the
+        projection and the wording). It lives here rather than in a service of
+        its own because this class already owns `events` and already answers
+        questions across them for the statistics screen.
+
+        Two things are load-bearing and neither is a detail:
+
+        **The workspace scope is in the join.** Filtering in Python would have
+        read the other workspace's rows to decide not to return them — and a
+        user with two repositories open must not have one's failures recalled
+        into the other's turns, so the scoping has to be the thing that keeps
+        them out rather than the thing that discards them.
+
+        **The type list is the allow-list.** It is interpolated from
+        `recall.RECALLABLE`'s keys rather than repeated here, so a type added
+        to the allow-list cannot be forgotten in the query — and a type left
+        out of the allow-list is unreachable no matter what is in the table.
+        """
+        from engine.recall import MAX_SCAN_EVENTS, RECALLABLE
+
+        kinds = list(RECALLABLE)
+        placeholders = ",".join("?" for _ in kinds)
+        cutoff: float | None = None
+        if window_days > 0:
+            cutoff = (time.time() if now is None else now) - window_days * 86_400.0
+        scan = max(1, int(limit or MAX_SCAN_EVENTS))
+        rows = self._db.execute(
+            f"""SELECT e.goal_id AS goal_id, e.step_id AS step_id, e.type AS type,
+                       e.payload AS payload, e.timestamp AS timestamp,
+                       e.sequence AS sequence, g.title AS goal_title
+                FROM events e
+                JOIN goals g ON g.id = e.goal_id
+                WHERE g.workspace_id = ?
+                  AND e.type IN ({placeholders})
+                  AND (? IS NULL OR e.timestamp >= ?)
+                ORDER BY e.timestamp DESC, e.sequence DESC
+                LIMIT ?""",  # noqa: S608 — placeholders are `?`; kinds is a fixed allow-list
+            (workspace_id, *kinds, cutoff, cutoff, scan),
+        ).fetchall()
+        rows = [dict(row) for row in rows]
+        if with_ids:
+            ids = self._db.execute(
+                """SELECT goal_id, step_id, type, sequence, id FROM events
+                   WHERE goal_id IN (
+                     SELECT id FROM goals WHERE workspace_id = ?
+                   )""",
+                (workspace_id,),
+            ).fetchall()
+            by_key: dict[tuple[str, str, str, int], str] = {}
+            for r in ids:
+                by_key[(r["goal_id"], r["step_id"] or "", r["type"], r["sequence"])] = r["id"]
+            for row in rows:
+                key = (row["goal_id"], row["step_id"] or "", row["type"], row["sequence"])
+                row["id"] = by_key.get(key, "")
+        return rows
+
+    def observation_rows(
+        self,
+        workspace_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """The durable beliefs about this workspace, most recently refined first.
+
+        The read half of the observations store (docs/10 §6): one row per
+        (workspace, subject), refined by the consolidation pass after each
+        run. `evidence` is the newest supporting event ids, so a claim can be
+        checked against the rows that back it; `recall.search_observations`
+        caps and formats what a model sees.
+        """
+        cap = max(1, min(int(limit or 50), 200))
+        rows = self._db.execute(
+            """SELECT subject, lesson, example, proof, evidence, refined_at
+               FROM observations WHERE workspace_id = ?
+               ORDER BY refined_at DESC, subject LIMIT ?""",
+            (workspace_id, cap),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                evidence = json.loads(row["evidence"] or "[]")
+            except (TypeError, ValueError):
+                evidence = []
+            out.append({
+                "subject": row["subject"],
+                "lesson": row["lesson"],
+                "example": row["example"],
+                "proof": row["proof"],
+                "evidence": evidence if isinstance(evidence, list) else [],
+                "refined_at": row["refined_at"],
+            })
+        return out
+
+    def record_observations(self, workspace_id: str, observations: list[dict[str, Any]]) -> int:
+        """Refine the store with what one consolidation pass distilled.
+
+        The write half of the observations store, and the only path that
+        writes it: the engine's post-run pass calls this with
+        `distill_observations`' output, never a model. Refinement, not
+        appending — the shape docs/10 §6 takes from Hindsight: a subject seen
+        again gets its proof count *added* and its evidence refreshed, not a
+        second row. The lesson and example take the newest scan's wording, so
+        a recovery flipping a lesson positive survives the next scan.
+
+        `step:`-subjects are skipped: they are pairing plumbing, and one retry
+        is not a durable belief about the workspace. Returns how many rows
+        were written or refined.
+        """
+        now = time.time()
+        written = 0
+        for obs in observations:
+            subject = str(obs.get("subject") or "")
+            if not subject or subject.startswith("step:"):
+                continue
+            existing = self._db.execute(
+                "SELECT proof, evidence FROM observations WHERE workspace_id = ? AND subject = ?",
+                (workspace_id, subject),
+            ).fetchone()
+            evidence = [str(e) for e in (obs.get("evidence") or []) if str(e)]
+            if existing is None:
+                self._db.execute(
+                    """INSERT INTO observations
+                       (id, workspace_id, subject, lesson, example, proof, evidence,
+                        created_at, refined_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (str(uuid.uuid4()), workspace_id, subject,
+                     str(obs.get("lesson") or ""), str(obs.get("example") or ""),
+                     max(1, int(obs.get("proof") or 1)),
+                     json.dumps(evidence), now, now),
+                )
+            else:
+                try:
+                    prior = json.loads(existing["evidence"] or "[]")
+                except (TypeError, ValueError):
+                    prior = []
+                merged = list(dict.fromkeys([*evidence, *[str(e) for e in prior]]))
+                self._db.execute(
+                    """UPDATE observations SET lesson = ?, example = ?,
+                       proof = proof + ?, evidence = ?, refined_at = ?
+                       WHERE workspace_id = ? AND subject = ?""",
+                    (str(obs.get("lesson") or ""), str(obs.get("example") or ""),
+                     max(1, int(obs.get("proof") or 1)),
+                     json.dumps(merged[:20]), now, workspace_id, subject),
+                )
+            written += 1
+        self._db.commit()
+        return written
+
+    def thread_recall(
+        self,
+        workspace_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """This workspace's conversation threads, with their run outcomes.
+
+        The query half of the `recall_threads` tool (`engine/recall.py` holds
+        the projection and the wording), and a sibling of `recall_events`:
+        where that reads *events* — what happened inside a run — this reads the
+        other unit of history the database already keeps, the conversation. It
+        lives here for the same reason `recall_events` does: this class owns
+        the goals/conversations schema and already answers cross-goal questions
+        for the statistics screen.
+
+        Deliberately not `turn_history`: that serves a *continuing* thread with
+        its own (prompt, reply) pairs, chat goals only. This serves a *new*
+        thread with its workspace neighbours — every thread, pipeline runs and
+        chat turns both, because "three threads asked about this workspace and
+        two of their runs completed" is history too.
+        """
+        from engine.recall import MAX_ASK_CHARS
+
+        cap = max(1, min(int(limit or 50), 200))
+        rows = self._db.execute(
+            """SELECT c.id AS id, c.title AS title, c.updated_at AS last_touched,
+                      COUNT(g.id) AS runs,
+                      SUM(CASE WHEN g.status = 'COMPLETED' THEN 1 ELSE 0 END) AS completed,
+                      SUM(CASE WHEN g.status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+                      SUM(CASE WHEN g.status = 'CANCELLED' THEN 1 ELSE 0 END) AS cancelled
+                         FROM conversations c
+                LEFT JOIN goals g ON g.conversation_id = c.id
+               WHERE c.workspace_id = ? AND c.archived = 0
+               GROUP BY c.id, c.title, c.updated_at
+               ORDER BY c.updated_at DESC, c.id DESC
+               LIMIT ?""",
+            (workspace_id, cap),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            asks = self._db.execute(
+                """SELECT description FROM goals
+                   WHERE conversation_id = ?
+                   ORDER BY created_at DESC, id DESC LIMIT ?""",
+                (row["id"], 4),
+            ).fetchall()
+            out.append({
+                "id": row["id"],
+                "title": row["title"],
+                "last_touched": row["last_touched"],
+                "runs": row["runs"],
+                "completed": row["completed"],
+                "failed": row["failed"],
+                "cancelled": row["cancelled"],
+                "asks": [
+                    (r["description"] or "")[:MAX_ASK_CHARS]
+                    for r in asks
+                ],
+            })
         return out
 
     def steps(self, goal_id: str) -> list[PlanStep]:
@@ -1489,10 +1812,26 @@ class GoalService:
         self._db.commit()
         return event
 
-    def events_after(self, goal_id: str, after: int) -> list[Event]:
-        rows = self._db.execute(
-            "SELECT * FROM events WHERE goal_id = ? AND sequence > ? ORDER BY sequence", (goal_id, after)
-        )
+    def events_after(self, goal_id: str, after: int, limit: int | None = None) -> list[Event]:
+        """The goal's events with a sequence above `after`, in order.
+
+        `limit` is for the **streaming** readers, and without it the WebSocket
+        tick was quadratic: it re-read and re-validated the goal's entire
+        remaining history every 250 ms and then threw most of it away with a
+        `[:500]` slice in Python — the one caller that wants a page of events
+        paid for the whole log, twice a second, on a goal that only gets longer.
+
+        The guarantee that makes a limit safe here is that `after` advances only
+        to the last event actually **sent**, so a bounded read is still lossless
+        — the next tick starts exactly where this one stopped. A row that cannot
+        be parsed is skipped without advancing the watermark, exactly as before.
+        """
+        sql = "SELECT * FROM events WHERE goal_id = ? AND sequence > ? ORDER BY sequence"
+        params: tuple[Any, ...] = (goal_id, after)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (goal_id, after, limit)
+        rows = self._db.execute(sql, params)
         out = []
         for r in rows:
             d = row_to_dict(r)

@@ -397,6 +397,8 @@ class LayaService:
                 model=cfg.model_name,
                 temperature=cfg.temperature,
                 max_tokens=cfg.max_tokens,
+                num_ctx=getattr(cfg, "ollama_num_ctx", None),
+                keep_alive=getattr(cfg, "ollama_keep_alive", None),
             )
         parsed = _extract_json(raw)
         answers = parsed.get("answers", parsed) if isinstance(parsed, dict) else {}

@@ -67,14 +67,24 @@ its own table beside it (`RUST_GUARDED_SPAWN_SITES`) — see §2.1:
 | `engine/app.py` `_picker_command` | the GTK folder picker behind `POST /workspaces/browse` | same; env inherited because DISPLAY/WAYLAND put the dialog on screen | `tests/test_sandbox.py`, the picker e2e |
 | `engine/spawn_guard.py` `main` | the guard's own `Popen` of the command | is the guard | every one of the above |
 | `benchmarks/runner.py` | a benchmark task's `test_command`, taken from the manifest | same, plus a whole-group kill on timeout | `tests/test_benchmark_runner.py` |
-| `src-tauri/src/lib.rs` | `python3 -m engine`, and a login-shell PATH probe | the shell owns the engine's lifecycle; `RunEvent::Exit` kills it unconditionally | `cargo test` in `src-tauri/`, and the launch itself |
-| `src-tauri/src/terminal.rs` | the user's shell behind a terminal pane | `pin_cwd` pins cwd to a registered workspace root; `$SHELL` supplies argv, never a request; the pane's close and the app's exit both kill and reap | `terminal::tests`, 8 of them |
+| `scripts/check_history.py` | git worktree/rev-list/diff, and the gate's own leg binaries, at each commit in a range | argv lists with `capture_output`, no shell; each commit gets its own detached worktree outside the repository, torn down on every path out including SIGINT | `tests/test_check_history.py` |
+| `src-tauri/src/lib.rs` | `python3 -m engine`, and a login-shell PATH probe | the shell owns the engine's lifecycle; `RunEvent::Exit` kills it unconditionally. The interpreter is the checkout's own `.venv/bin/python3` when there is one, and the PATH-resolved `python3` otherwise, so the app and `make test` run the same environment instead of two that hold different installs | `cargo test` in `src-tauri/`, and the launch itself |
+| `src-tauri/src/terminal.rs` | the user's shell behind a terminal pane | `pin_cwd` pins cwd to a registered workspace root; `$SHELL` supplies argv, never a request; the pane's close and the app's exit both kill, escalate past an ignored SIGHUP, and reap | `terminal::tests`, 9 of them |
 
 The benchmark site is deliberately **not** routed through `SandboxService`. That
 allowlist is a security boundary for model-proposed argv; widening it to let a
 reviewed manifest run would weaken it for every agent in the pipeline. It is guarded
 by the same launcher instead, because the property being bought is the same one — a
 process that cannot outlive whatever started it — not the same boundary.
+
+`scripts/check_history.py` is excluded for the same reason with one addition: it
+is run by a developer, never by an agent, so there is no request to validate. Its
+argv comes from a fixed table plus a git range the developer typed. Routing it
+through `validate_argv` would in fact *break* it — the UI leg's
+`tests/*.test.ts` is a glob, and the allowlist rejects one, which is that check's
+whole point. What it does buy is a process that cannot outlive the run: a worktree
+per commit, created and removed around the legs, with `atexit` and a `SIGINT`
+handler so a Ctrl-C does not leave one behind.
 
 The e2e scenarios in `tests/test_sandbox_orphans_e2e.py` run the same proofs
 through a real `python3 -m engine` subprocess: a fake Ollama provider drives a

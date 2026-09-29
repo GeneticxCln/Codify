@@ -191,7 +191,6 @@ const timeline = (events: Event[], goalOverrides: Partial<Goal> = {}): string =>
       onSetGoalTrace: noop,
       onDeleteGoal: noop,
       onRetryStep: noop,
-      onQuickPrompt: noop,
       onOpenSettings: noop,
       onImportAudit: noop,
       onPinDesignContract: async () => {},

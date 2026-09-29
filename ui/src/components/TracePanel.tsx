@@ -98,8 +98,8 @@ export const TracePanel: React.FC<{
   return (
     <div className="bg-codify-bg border border-codify-border rounded-xl p-3 mt-2">
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
-          <Radio className="w-3.5 h-3.5 text-amber-400" />
+        <div className="flex items-center gap-2 text-xs font-semibold text-codify-muted uppercase tracking-wider">
+          <Radio className="w-3.5 h-3.5 text-codify-warning" />
           {summary ? traceHeadline(summary) : "Recording"}
         </div>
         <div className="flex items-center gap-1">
@@ -108,7 +108,7 @@ export const TracePanel: React.FC<{
               type="button"
               onClick={() => handleToggleRecording(false)}
               disabled={busy}
-              className="p-1 text-gray-500 hover:text-amber-400 rounded-lg transition-colors disabled:opacity-40"
+              className="p-1 text-codify-muted hover:text-codify-warning rounded-lg transition-colors disabled:opacity-40"
               title="Stop recording this run's model calls"
               aria-label="Stop recording"
             >
@@ -119,7 +119,7 @@ export const TracePanel: React.FC<{
               type="button"
               onClick={() => handleToggleRecording(true)}
               disabled={busy}
-              className="p-1 text-gray-500 hover:text-amber-400 rounded-lg transition-colors disabled:opacity-40"
+              className="p-1 text-codify-muted hover:text-codify-warning rounded-lg transition-colors disabled:opacity-40"
               title="Record this run's model calls — it has not started, so every call it makes will be kept"
               aria-label="Start recording"
             >
@@ -131,7 +131,7 @@ export const TracePanel: React.FC<{
               type="button"
               onClick={handleDelete}
               disabled={busy}
-              className="p-1 text-gray-500 hover:text-red-400 rounded-lg transition-colors disabled:opacity-40"
+              className="p-1 text-codify-muted hover:text-codify-danger rounded-lg transition-colors disabled:opacity-40"
               title="Delete this recording (the goal and your files are kept)"
               aria-label="Delete recording"
             >
@@ -141,7 +141,7 @@ export const TracePanel: React.FC<{
           <button
             type="button"
             onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-300 rounded-lg transition-colors"
+            className="p-1 text-codify-muted hover:text-codify-secondary rounded-lg transition-colors"
             title="Close"
             aria-label="Close recording panel"
           >
@@ -150,18 +150,18 @@ export const TracePanel: React.FC<{
         </div>
       </div>
 
-      {error && <div className="mt-2 text-xs text-red-400">{error}</div>}
+      {error && <div className="mt-2 text-xs text-codify-danger">{error}</div>}
 
       {!error && !summary && (
-        <div className="mt-2 flex items-center gap-2 text-xs text-gray-500">
+        <div className="mt-2 flex items-center gap-2 text-xs text-codify-muted">
           <Loader2 className="w-3.5 h-3.5 animate-spin" /> Reading…
         </div>
       )}
 
       {summary && summary.calls === 0 && !error && (
-        <p className="mt-2 text-xs text-gray-500">
+        <p className="mt-2 text-xs text-codify-muted">
           {summary.recording_error ? (
-            <span className="text-amber-300">
+            <span className="text-codify-warning">
               Recording failed: {summary.recording_error}
             </span>
           ) : armed ? (
@@ -181,7 +181,7 @@ export const TracePanel: React.FC<{
             {traceRoles(summary).map(([role, n]) => (
               <span
                 key={role}
-                className="text-2xs font-mono px-1.5 py-0.5 rounded bg-codify-surface border border-codify-border text-gray-300"
+                className="text-2xs font-mono px-1.5 py-0.5 rounded bg-codify-surface border border-codify-border text-codify-secondary"
                 title={`${n} call${n === 1 ? "" : "s"} from the ${role}`}
               >
                 {role} × {n}
@@ -189,13 +189,13 @@ export const TracePanel: React.FC<{
             ))}
           </div>
 
-          <p className="mt-2 text-xs text-gray-500">
+          <p className="mt-2 text-xs text-codify-muted">
             {promptStorageNote(summary.prompts_kept)}
           </p>
 
           <div className="mt-2 max-h-48 overflow-y-auto">
             <table className="w-full text-xs font-mono">
-              <thead className="text-gray-500 text-left">
+              <thead className="text-codify-muted text-left">
                 <tr>
                   <th className="pr-2 py-0.5 font-normal">#</th>
                   <th className="pr-2 py-0.5 font-normal">role</th>
@@ -205,24 +205,24 @@ export const TracePanel: React.FC<{
                   <th className="py-0.5 font-normal text-right">ms</th>
                 </tr>
               </thead>
-              <tbody className="text-gray-300">
+              <tbody className="text-codify-secondary">
                 {summary.recorded.map((call) => (
                   <tr key={call.seq} className="border-t border-codify-surface">
-                    <td className="pr-2 py-0.5 text-gray-500">{call.seq}</td>
+                    <td className="pr-2 py-0.5 text-codify-muted">{call.seq}</td>
                     <td className="pr-2 py-0.5">{call.role}</td>
-                    <td className="pr-2 py-0.5 text-gray-500">{call.model}</td>
+                    <td className="pr-2 py-0.5 text-codify-muted">{call.model}</td>
                     <td
-                      className="pr-2 py-0.5 text-gray-500"
+                      className="pr-2 py-0.5 text-codify-muted"
                       title={`Digest of the prompt this call was sent — the identity a replay matches on.${
                         summary.prompts_kept ? " The text itself is stored." : ""
                       }`}
                     >
                       {call.prompt_hash.slice(0, 8)}…
                     </td>
-                    <td className="pr-2 py-0.5 text-right text-gray-400">
+                    <td className="pr-2 py-0.5 text-right text-codify-muted">
                       {(call.input_tokens ?? 0) + (call.output_tokens ?? 0)}
                     </td>
-                    <td className="py-0.5 text-right text-gray-400">
+                    <td className="py-0.5 text-right text-codify-muted">
                       {call.duration_ms ?? "—"}
                     </td>
                   </tr>

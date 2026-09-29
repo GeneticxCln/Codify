@@ -34,22 +34,29 @@ export default {
           surface: "#161b22",        // panels, the command bar card, drawers
           raised: "#21262d",         // controls at rest, hover targets, inset rows
           border: "#30363d",         // dividers, resting control borders
-          "border-strong": "#484f58", // scrollbar thumbs, borders on hover/focus
+          // The scrollbar thumb, and the border a control takes on hover and
+          // focus. Lifted to clear WCAG 1.4.11's 3:1 against `raised`: a thumb
+          // is the only thing that says where you are in a long list, and it
+          // was 1.84:1 there.
+          "border-strong": "#66707c", // scrollbar thumbs, borders on hover/focus
 
           // Text — three weights. A fourth thing needing emphasis is bigger or
           // bolder, not a new grey.
           primary: "#e6edf3",        // headings, the code you asked to read
           secondary: "#c9d1d9",      // body copy, chat prose
-          muted: "#8b949e",          // metadata, placeholders, disabled
+          muted: "#979fa8",          // metadata, placeholders, disabled
 
           // The one interactive hue. Also the "in flight" status, because
           // "the primary action" and "this is happening" are the same sentence.
-          accent: "#2f81f7",
+          // `#418cf8`, not §2's `#2f81f7`: the send button and a selected row
+          // both rest this hue on `raised`, and the old value was 4.06:1 there,
+          // under AA for the 11px a thread title is set at.
+          accent: "#418cf8",
 
           // Status — five tones, each with exactly one meaning, and never used
           // decoratively. If a control is not reporting a state it is grey, and
           // that is not a lack of colour, it is the default.
-          info: "#2f81f7",
+          info: "#418cf8",
           success: "#3fb950",
           warning: "#d29922",
           danger: "#f85149",

@@ -112,6 +112,36 @@ pub(crate) fn project_root_from(cwd: &Path) -> PathBuf {
     }
 }
 
+/// The interpreter `python3 -m engine` should actually run under: the checkout's own
+/// `.venv` when it has one, and the bare name `python3` otherwise.
+///
+/// The two are not interchangeable, and the difference stays invisible until
+/// something optional is installed in one of them and not the other. `make test` runs
+/// `.venv/bin/python`, but the app spawns whatever `python3` the login shell's PATH
+/// resolves to, which for a window launched from a `.desktop` file is
+/// `/usr/bin/python3`. Install the gate's Laya SDK into the venv — the documented
+/// way, and the only one that leaves a system interpreter alone — and the app cannot
+/// see it, so the gate quietly keeps paying an LLM call per goal for an SDK that is
+/// installed and sitting in the same checkout.
+///
+/// A preference, not a requirement, and the fallback is the whole reason this is
+/// safe: no `.venv`, or one without a `python3` in `bin`, resolves the name on PATH
+/// exactly as before. That case is not hypothetical — the venv is the developer's
+/// machine, not a property of the repository, and a fresh checkout still has to
+/// start.
+///
+/// Only `bin/python3` is looked for, deliberately. `bin/python` is not a synonym
+/// here, and on a checkout where the two disagree the one the venv documents is the
+/// one to run.
+pub(crate) fn engine_interpreter(project_root: &Path) -> PathBuf {
+    let venv = project_root.join(".venv").join("bin").join("python3");
+    if venv.is_file() {
+        venv
+    } else {
+        PathBuf::from("python3")
+    }
+}
+
 /// Parse the engine's boot line: `CODIFY_ENGINE token=<hex> port=<int>`.
 ///
 /// `None` for anything else, including a line carrying the marker but no usable
@@ -324,6 +354,29 @@ mod tests {
             };
             assert_eq!(expected, project_root_from(Path::new(cwd)), "cwd {cwd}");
         }
+    }
+
+    #[test]
+    fn the_projects_own_virtualenv_is_the_interpreter_when_it_has_one() {
+        // The whole point: the SDK is installed here, and a shell-resolved
+        // `python3` cannot see it, so the gate would stay on its LLM fallback.
+        let dir = scratch_dir("venv");
+        let interpreter = dir.join(".venv").join("bin").join("python3");
+        std::fs::create_dir_all(interpreter.parent().unwrap()).expect("venv bin");
+        std::fs::write(&interpreter, "#!/bin/sh\n").expect("interpreter");
+        assert_eq!(interpreter, engine_interpreter(&dir));
+    }
+
+    #[test]
+    fn a_checkout_without_one_still_resolves_the_name_on_path() {
+        // Not a hypothetical: the venv belongs to the developer's machine, not to
+        // the repository, so a fresh clone has to start exactly as it did before.
+        let dir = scratch_dir("no-venv");
+        assert_eq!(PathBuf::from("python3"), engine_interpreter(&dir));
+
+        // And a `.venv` with no interpreter in it is no more usable than none.
+        std::fs::create_dir_all(dir.join(".venv").join("bin")).expect("venv bin");
+        assert_eq!(PathBuf::from("python3"), engine_interpreter(&dir));
     }
 
     #[test]

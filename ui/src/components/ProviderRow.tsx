@@ -138,20 +138,20 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
   const badge = (() => {
     if (hasKey) {
       return (
-        <span className="flex items-center gap-1 text-2xs font-medium text-green-400 bg-green-950/40 border border-green-800/60 px-2 py-0.5 rounded-full flex-shrink-0">
+        <span className="flex items-center gap-1 text-2xs font-medium text-codify-success bg-codify-success/20 border border-codify-success/60 px-2 py-0.5 rounded-full flex-shrink-0">
           <ShieldCheck className="w-3 h-3" /> Configured
         </span>
       );
     }
     if (needsKey) {
       return (
-        <span className="text-2xs text-gray-400 bg-codify-surface px-2 py-0.5 rounded-full border border-codify-border flex-shrink-0">
+        <span className="text-2xs text-codify-muted bg-codify-surface px-2 py-0.5 rounded-full border border-codify-border flex-shrink-0">
           Missing key
         </span>
       );
     }
     return (
-      <span className="text-2xs text-blue-400 bg-blue-950/40 border border-blue-800/60 px-2 py-0.5 rounded-full flex-shrink-0">
+      <span className="text-2xs text-codify-info bg-codify-info/20 border border-codify-info/60 px-2 py-0.5 rounded-full flex-shrink-0">
         Local / no key
       </span>
     );
@@ -161,22 +161,22 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
     <div className="bg-codify-bg border border-codify-border rounded-xl p-3.5 space-y-3">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
-          <Cpu className="w-4 h-4 text-purple-400 flex-shrink-0" />
-          <span className="font-semibold text-sm text-gray-100 capitalize truncate">{provider}</span>
-          <span className="text-2xs text-gray-500 font-mono truncate">{keyStatus.protocol}</span>
+          <Cpu className="w-4 h-4 text-codify-design flex-shrink-0" />
+          <span className="font-semibold text-sm text-codify-primary capitalize truncate">{provider}</span>
+          <span className="text-2xs text-codify-muted font-mono truncate">{keyStatus.protocol}</span>
           {status?.ok && (
-            <span className="text-2xs text-gray-500 flex-shrink-0">{status.count} models</span>
+            <span className="text-2xs text-codify-muted flex-shrink-0">{status.count} models</span>
           )}
           {newHere > 0 && (
             <span
               title={newCountTitle(provider, newHere)}
-              className="text-2xs font-medium text-purple-300 bg-purple-950/40 border border-purple-800/60 px-1.5 py-px rounded-full flex-shrink-0"
+              className="text-2xs font-medium text-codify-design bg-codify-design/20 border border-codify-design/60 px-1.5 py-px rounded-full flex-shrink-0"
             >
               {newCountLabel(newHere)}
             </span>
           )}
           {status?.error && (
-            <span className="text-2xs text-amber-400/90 truncate" title={status.error}>
+            <span className="text-2xs text-codify-warning/90 truncate" title={status.error}>
               — {status.error}
             </span>
           )}
@@ -187,7 +187,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
       {/* The two decisions, side by side and in the order they are made. */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
         <div className="flex flex-col gap-1.5 min-w-0">
-          <label className="text-2xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-1.5">
+          <label className="text-2xs font-semibold text-codify-muted uppercase tracking-wider flex items-center gap-1.5">
             <Key className="w-3 h-3" /> API key
           </label>
           {needsKey ? (
@@ -205,13 +205,13 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
                   }}
                   autoComplete="off"
                   spellCheck={false}
-                  className="w-full bg-codify-surface border border-codify-border rounded-l-lg px-3 py-1.5 pr-8 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
+                  className="w-full bg-codify-surface border border-codify-border rounded-l-lg px-3 py-1.5 pr-8 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono"
                 />
                 <button
                   type="button"
                   onClick={() => setShowKey(!showKey)}
                   aria-label={showKey ? "Hide the key" : "Show the key"}
-                  className="absolute right-2 top-1.5 text-gray-500 hover:text-gray-300"
+                  className="absolute right-2 top-1.5 text-codify-muted hover:text-codify-secondary"
                 >
                   {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
                 </button>
@@ -223,8 +223,8 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
                 className={
                   "flex items-center gap-1 px-3 rounded-r-lg text-xs font-semibold transition-colors flex-shrink-0 border border-l-0 border-codify-border " +
                   (keySaved
-                    ? "bg-green-600/80 text-white"
-                    : "bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40")
+                    ? "bg-codify-success/80 text-codify-bg"
+                    : "bg-codify-accent text-codify-bg hover:brightness-110 disabled:opacity-40")
                 }
               >
                 {savingKey ? (
@@ -236,7 +236,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
               </button>
             </div>
           ) : (
-            <p className="text-2xs text-gray-500 flex items-center gap-1.5">
+            <p className="text-2xs text-codify-muted flex items-center gap-1.5">
               <HardDrive className="w-3 h-3 flex-shrink-0" />
               Runs on your own machine at <span className="font-mono">{keyStatus.base_url}</span> — no
               key to paste.
@@ -245,7 +245,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
         </div>
 
         <div className="flex flex-col gap-1.5 min-w-0">
-          <label className="text-2xs font-semibold text-gray-500 uppercase tracking-wider">
+          <label className="text-2xs font-semibold text-codify-muted uppercase tracking-wider">
             Model
           </label>
           <ModelPicker
@@ -273,10 +273,10 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
             changes: toChange.length,
             onProvider: onThisProvider.length,
           })}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-2xs font-semibold bg-codify-raised hover:bg-codify-border text-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-2xs font-semibold bg-codify-raised hover:bg-codify-border text-codify-secondary disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           {applying && <Loader2 className="w-3 h-3 animate-spin" />}
-          {justApplied && <Check className="w-3 h-3 text-green-400" />}
+          {justApplied && <Check className="w-3 h-3 text-codify-success" />}
           {applyLabel({
             staged,
             changes: toChange.length,
@@ -286,14 +286,14 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
         </button>
 
         {staged.trim() && toChange.length > 0 && (
-          <span className="text-2xs text-gray-500 truncate" title={planSummary(plan)}>
+          <span className="text-2xs text-codify-muted truncate" title={planSummary(plan)}>
             {planSummary(plan)}
           </span>
         )}
       </div>
 
       {error && (
-        <p className="flex items-start gap-1.5 text-2xs text-red-300">
+        <p className="flex items-start gap-1.5 text-2xs text-codify-danger">
           <TriangleAlert className="w-3 h-3 flex-shrink-0 mt-0.5" />
           {error}
         </p>

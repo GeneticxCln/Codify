@@ -2,10 +2,18 @@
 
 Normative for agent slots, providers, registry, and `/settings/agents`. Persistence: `04`. Security: `03`.
 
-## 1. The 7 fixed pipeline slots + the gate slot
+## 1. The 7 role slots + the gate slot
 
-Exactly 7 pipeline slots, plus one pre-flight **gate** slot (`laya`). Users cannot add or remove
+Exactly 7 role slots, plus one pre-flight **gate** slot (`laya`). Users cannot add or remove
 **roles**. Provider/model/key/`base_url` per slot are Settings-only.
+
+The slot count is fixed; the **order is not**. These seven are abilities the conductor chooses
+between through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`) and
+skills it loads — it is a loop, not an eighth kind of agent. The sequence
+librarian → design → planner → fixer → verifier → critic → scribe is the built-in `ship-a-change`
+skill (`engine/builtin_skills/ship-a-change.md`), which a workspace may replace. Calling them a
+fixed pipeline was true of the compiled path this replaced and is not true of the engine now:
+"the scribe never ran" is a statement about a move, not about a stage that was skipped.
 
 A slot is a **different ability**, not a different persona. One role reads the workspace, one locks a
 direction, one writes it, one runs commands, one judges, one records — and the engine enforces that
@@ -56,6 +64,10 @@ paths are checked against the tree and the ones that no longer resolve are repor
 never enters the evidence pack's `files` — the pack's whole value is that a path in it was actually
 seen, and a note somebody wrote months ago cannot make that promise. It is there to aim reads, not
 to be cited.
+
+**What the conductor asked for is in its prompt.** A `recon` move carries a `task`, and it reaches
+the librarian beside the goal, labelled as an addition (§5.1a). A reconnaissance pass that ignored
+what it had been sent to look for was not doing the job it was dispatched for.
 
 ### 1.1a Why the design agent exists
 
@@ -129,6 +141,22 @@ BUILTIN_PROVIDERS: dict[str, dict] = {
 
 Custom slug (e.g. `openrouter`, `groq`): `protocol` MUST be `openai_compat` or `anthropic` or `ollama`. `base_url` REQUIRED. `ollama` / `local_only` → `validate_local_base_url`. Remote custom URLs are allowed (single-user); still no query-token, still Bearer.
 
+Every protocol's `complete` takes the same keyword-only `num_ctx` and `keep_alive` (see
+2.2), and **only Ollama reads either**. `num_ctx` is the one parameter these APIs expose as a
+request option, so it becomes an entry in the `options` dict sent to `/api/generate` and
+`/api/chat`, on the blocking and the streaming path alike. `keep_alive` is *not* — Ollama
+reads it as a **sibling** of `options`, and nesting it there is accepted-but-ignored, which
+would be the worst outcome available: the setting saves, the UI shows it, and the model is
+reloaded exactly as before with nothing reporting a problem. It is sent only when the role
+configured one; omission leaves the server's own five-minute window alone. The other
+providers accept both keywords and ignore them, because they are part of the signature every
+provider in this repo shares and a protocol that did not take them would be a different
+signature to stub at every call site.
+
+`keep_alive` is not a latency setting for a single call. Role calls inside one goal are
+seconds apart and already warm; what it covers is the gap *between* goals, where a role used
+every ten minutes pays a full model reload each time.
+
 `GET /settings/providers` → built-in catalog + any extra slugs already stored on the agent rows.
 
 ### 2.2 `AgentConfig`
@@ -146,6 +174,16 @@ class AgentConfig(BaseModel):
     system_prompt_override: Optional[str] = Field(None, max_length=SYSTEM_PROMPT_OVERRIDE_MAX)
     temperature: float = Field(0.2, ge=0.0, le=2.0)
     max_tokens: int = Field(4096, gt=0, le=200000)
+    # Ollama's context window for this role; None = the server's default.
+    # Only Ollama consumes it (see 2.1); the other protocols accept and
+    # ignore the keyword, because the field is a property of the target.
+    num_ctx: Optional[int] = Field(None, gt=0, le=1000000)
+    # How long Ollama holds the model resident after a request: a duration
+    # ("30m"), bare seconds, "-1" (until the server stops) or "0" (unload
+    # next request). None sends nothing and leaves Ollama's own five minutes.
+    # Validated by KEEP_ALIVE_RE rather than passed through, because the value
+    # goes straight into a request body.
+    keep_alive: Optional[str] = Field(None, max_length=32, pattern=KEEP_ALIVE_RE.pattern)
     # The second target this role may be called on (see 2.2.1).
     fallback_provider: Optional[str] = Field(None, pattern=r"^[a-z][a-z0-9_-]*$")
     fallback_model_name: str = ""
@@ -164,6 +202,10 @@ class AgentConfigUpdate(BaseModel):
     system_prompt_override: Optional[str] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    # Explicit null clears back to the server default; it is one of the few
+    # fields where "absent" and "null" mean different things.
+    num_ctx: Optional[int] = None
+    keep_alive: Optional[str] = Field(None, max_length=32, pattern=KEEP_ALIVE_RE.pattern)
     # "" (or null) clears the fallback; the pattern allows exactly that.
     fallback_provider: Optional[str] = Field(None, max_length=64, pattern=r"^([a-z][a-z0-9_-]*)?$")
     fallback_model_name: Optional[str] = Field(None, max_length=128)
@@ -235,20 +277,43 @@ an endpoint asked to run an empty model id. `PUT /settings/agents/{role}` accept
 configured fallback is the exception: it runs on the fallback, because a rescue that works is a working
 role.
 
-SQL: `04` §2 (`fallback_provider`, `fallback_model_name`, `fallback_protocol`, `fallback_base_url`;
-an existing database gains them by `ALTER TABLE`, keeping every configured role).
-```python
+SQL: `04` §2 (`fallback_provider`, `fallback_model_name`, `fallback_protocol`, `fallback_base_url`,
+`num_ctx`, `keep_alive`; an existing database gains them by `ALTER TABLE`, keeping every configured
+role).```python
 DEFAULT_AGENTS = [
-    _role("laya",       "Laya — System-1 Gate", 0.0,  512),
-    _role("librarian",  "Librarian Agent",     0.1, 8192),
-    _role("design",     "Design Agent",        0.4, 8192),
-    _role("planner",    "Planner Agent",       0.3, 4096),
-    _role("fixer",      "Fixer Agent",         0.1, 8192),
-    _role("verifier",   "Verifier Agent",      0.0, 2048),
-    _role("critic",     "Critic Agent",        0.2, 4096),
-    _role("scribe",     "Scribe Agent",        0.4, 1024),
+    _role("laya",       "Laya — System-1 Gate",  0.0,  512, num_ctx= 8192),
+    _role("librarian",  "Librarian Agent",     0.1, 8192, num_ctx=32768),
+    _role("design",     "Design Agent",        0.4, 8192, num_ctx=32768),
+    _role("planner",    "Planner Agent",       0.3, 4096, num_ctx=32768),
+    _role("fixer",      "Fixer Agent",         0.1, 8192, num_ctx=32768),
+    _role("verifier",   "Verifier Agent",      0.0, 2048, num_ctx=16384),
+    _role("critic",     "Critic Agent",        0.2, 4096, num_ctx=16384),
+    _role("scribe",     "Scribe Agent",        0.4, 1024, num_ctx= 8192),
 ]
 ```
+
+`num_ctx` is **seeded, not left to the server**: Ollama's own default is 4096 and it truncates
+without erroring, so a fresh install that never opened Settings ran its whole pipeline on a
+partial prompt and nothing said so. The allocation follows *what the role is handed* rather than
+how important it is — the four at 32768 (librarian, design, planner, fixer) all receive payloads
+built from the librarian's evidence pack, and the fixer's additionally inlines the current
+contents of every file its step touches. 32768 is qwen2.5-coder's ceiling, so it is as large as
+this is worth asking for. The window costs KV cache whether or not it is needed (~56 KB/token for a
+7B GQA model, so ~1.8 GB against 4096's 230 MB), which is why the gate and the scribe stay at
+8192 — the gate's state is clipped to 4000 characters by `build_state`, and the scribe answers
+with a summary.
+
+Seeding reaches **new installs only**. A migration that backfilled existing rows would silently
+raise memory use under a running user who never chose it, and on an install that already exists
+this value is the user's to set; an older install keeps Ollama's own window until someone raises
+it in Settings, which is the honest state — the field says what is in force. Clearing the field
+still returns a role to the server default.
+
+`seed_agents` derives its INSERT column list from `AgentConfig.model_fields` rather than writing
+one out. It was hand-written, and it went on naming fifteen columns while the model had seventeen,
+so every seeded role came up with `num_ctx` NULL — which is not a null, it is 4096 and a truncated
+pipeline. A new field now reaches a fresh install by being declared on the model, which is the one
+place it has to be added regardless.
 
 SQL: `04` §2 (includes `protocol`).
 
@@ -276,8 +341,8 @@ Adding a **harness** later = one catalog row, not a new class. Adding a new **wi
 
 ## 4. Registry / Orchestrator / API
 
-`AgentRegistryService` only mutator. `list_configs` = 8 rows (gate + 7 pipeline slots), fixed role
-order as in `ROLES`.
+`AgentRegistryService` only mutator. `list_configs` = 8 rows (gate + 7 role slots), fixed role
+order as in `ROLES` — that order is the *display* order, not a schedule; see §1.
 
 `GET /settings/providers` → `{builtins: [...], custom: [slugs on rows not in builtins]}`.
 
@@ -351,8 +416,11 @@ switch credits the turn's answer to a model that never produced it.
 |---|---|---|
 | `read_file` | `LibraryService.read` | `FileSystemService` refuses a path escape |
 | `search_code` | `LibraryService.search` | same |
-| `git_history` | `GitService.read_only` | `READ_ONLY_ARGV`, a name list not a prefix rule |
+| `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` — the librarian's own validator, so the subcommand list and its flag rules have one owner (`04` §5) |
 | `run_command` | `SandboxService.run_command` | `validate_argv` in `test` mode (docs/00 §6.6) |
+| `read_page` | `WebviewBridge.read_page` | read-only; the page is the user's, the model cannot choose or change the URL, and the text returns quoted as untrusted (docs/03 §1.6) |
+| `recall` | `GoalService.recall_events` + `recall.search` | read-only over this workspace's own `events`; the `RECALLABLE` allow-list decides what can be returned and nothing stored can widen it (docs/03 §1.8) |
+| `recall_threads` | `GoalService.thread_recall` + `recall.search_threads` | read-only over this workspace's own conversation threads; scoped by workspace in the query, archived threads excluded (docs/03 §1.8) |
 | `recon` | `ExecutorService._librarian` | read-only, `MAX_LIBRARY_ROUNDS` |
 | `design` | `ExecutorService._design` | no tools at all |
 | `plan` | `_plan_steps` | refuses without evidence; writes steps, never files |
@@ -374,6 +442,37 @@ inside a turn — where no plan has been approved — writes nothing and says so
 for that reason: it asserts the absence of a file writer by name, that `write`
 is refused while the goal is unapproved, and that a refused write changed
 nothing.
+
+### 5.1a What a move can say
+
+A move's *text* is part of its door, not decoration on top of it. Four moves take
+one and all four deliver it:
+
+| Move | Field | Reaches |
+|---|---|---|
+| `recon` | `task` | `_librarian(task=)` — in the prompt, beside the goal |
+| `design` | `task` | `_design(task=)` → `_design_prompt(task=)` |
+| `plan` | `task` | `_plan_steps(task=)` |
+| `write` | `instructions` | `_fixer(guidance=)` |
+
+The rule is the one `_fixer` already states for its `guidance`: the ask goes
+**beside** what the user asked for, labelled as an addition, never in place of
+it. A conductor that could rewrite the goal could send a sub-agent after
+something the user never requested, with the user's own words gone from the
+prompt. For `design` the placement carries one more step: the ask is inserted
+*before* the brand-contract block, so the workspace's own `DESIGN.md` is still
+the last thing in the prompt and still outranks it.
+
+Every parameter defaults to empty, and empty is not a special case — the
+librarian's prompt with no `task` is byte-identical to the one from before the
+conductor existed, so a goal that never involved a conductor is unchanged.
+
+**The two honest gaps.** `verify`, `review` and `summarize` are addressed by
+`step_id` alone: the conductor says *which* step and not *what to check*, which
+costs something most at `review`, where a rejection is a judgement it can
+neither focus nor answer. And the eighth role is out of reach entirely — the
+gate runs at the top of a turn, before the loop is constructed, so a conductor
+can summon seven of the eight roles and never the gate.
 
 **`delegate` is gone, and its absence is the point.** It ran the whole recipe —
 librarian, design, planner — whether or not the request needed them, which made

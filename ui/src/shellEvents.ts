@@ -3,44 +3,69 @@
  *
  * The engine's own event stream is a WebSocket (`goalStream.ts`). This is the
  * other channel — the Tauri IPC one — carrying facts the shell alone knows
- * because they happened to the shell: a terminal's output, a browser webview's
- * window being destroyed.
+ * because they happened to the shell: a terminal's output, a browser page
+ * asking for a popup.
  *
  * Small, and guarded on purpose. Outside Tauri there is no shell to emit from,
  * so [`listenShellEvent`] resolves to a no-op unlisten instead of throwing: the
  * same posture `engineFailureReason` takes in `api.ts`, and the reason a caller
  * never has to ask "am I in the desktop app" itself.
  *
- * The event name and the payload shape here are the other end of
+ * The event names and payload shapes here are the other end of
  * `src-tauri/src/browser.rs` and `src-tauri/src/terminal.rs`. Nothing in either
  * type system spans the two, so a test on the Rust side reads *this file* and
  * fails if they ever drift — the same "parse the committed file, do not assume"
  * move as the browser capability test.
+ *
+ * The browser no longer announces a destroyed window: pages are child
+ * webviews of the main window, a child cannot close itself, and the tab strip
+ * is the only closer — the separate-window build's closed event is gone with
+ * the window it announced. The one thing a page can still ask the shell for —
+ * a popup window — is refused by the shell and *announced* here instead, so
+ * the user can open the target as a real tab.
  */
 
-/** A browser tab's webview window was destroyed. */
-export const BROWSER_WINDOW_CLOSED = "browser-window-closed";
+/** A browser page tried to open a popup window; the shell refused it. */
+export const BROWSER_POPUP_REQUESTED = "browser-popup-requested";
 
-/** The payload `browser-window-closed` carries. */
-export interface BrowserWindowClosed {
+/** The payload `browser-popup-requested` carries. */
+export interface BrowserPopupRequested {
+  /** The tab that tried to open the popup. */
   tab_id: string;
+  /** The address it asked for, already through the shell's URL guard. */
+  url: string;
 }
 
 /**
- * The tab id in a `browser-window-closed` payload, or null when the payload is
- * not one.
+ * A `browser-popup-requested` payload, or null when it is not one.
  *
- * Validated rather than cast. The event crosses a process boundary, and the
- * handler it feeds closes a *tab*: a payload that is null, a string, or missing
- * the field must close nothing at all. `null` is the answer that makes the
- * caller's decision obvious — "no tab named this" — rather than an id that
- * matches nothing by accident.
+ * Validated rather than cast. The event crosses a process boundary and feeds
+ * a handler that *opens a tab* — a payload that is null, a string, or carries
+ * a non-addressable field must open nothing at all rather than a tab pointed
+ * nowhere. `url` is not re-parsed for web-ness here: the shell already ran
+ * the guard before announcing, and a second guard would be a second opinion
+ * on a decision that has one owner.
  */
-export function readBrowserWindowClosed(payload: unknown): string | null {
+export function readBrowserPopupRequested(
+  payload: unknown
+): BrowserPopupRequested | null {
   if (typeof payload !== "object" || payload === null) return null;
-  const tabId = (payload as { tab_id?: unknown }).tab_id;
-  return typeof tabId === "string" && tabId.length > 0 ? tabId : null;
+  const { tab_id, url } = payload as { tab_id?: unknown; url?: unknown };
+  if (typeof tab_id !== "string" || tab_id.length === 0) return null;
+  if (typeof url !== "string" || url.length === 0) return null;
+  return { tab_id, url };
 }
+
+/**
+ * The page-life events a browser page reports about itself.
+ *
+ * The payloads are read by `browserPageState.readBrowserPageState`, which is
+ * where the validation lives — one reader for the three, because they share
+ * a wire shape.
+ */
+export const BROWSER_PAGE_LOADING = "browser-page-loading";
+export const BROWSER_PAGE_LOADED = "browser-page-loaded";
+export const BROWSER_PAGE_TITLED = "browser-page-titled";
 
 /** A terminal's output, as it arrives. */
 export const TERMINAL_OUTPUT = "terminal-output";
@@ -51,7 +76,7 @@ export const TERMINAL_EXIT = "terminal-exit";
 /**
  * The one chunk of `terminal-output`, or null when the payload is not one.
  *
- * Validated for the same reason [`readBrowserWindowClosed`] is, and one step
+ * Validated for the same reason [`readBrowserPopupRequested`] is, and one step
  * further: `data` is written straight into a live terminal rather than closing a
  * tab, so a payload that is the right object with the wrong field types would
  * reach xterm as `"undefined"` on screen. Both halves must be strings, and the

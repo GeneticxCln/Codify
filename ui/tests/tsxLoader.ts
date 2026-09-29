@@ -34,7 +34,9 @@ import { fileURLToPath } from "node:url";
 type Esbuild = {
   transformSync: (
     source: string,
-    options: { loader: "tsx"; jsx: "automatic"; format: "esm" }
+    // Both loaders, because both are transformed here — see `load` below for
+    // why a `.ts` file cannot be left to `--experimental-strip-types`.
+    options: { loader: "tsx" | "ts"; jsx: "automatic"; format: "esm" }
   ) => { code: string };
 };
 
@@ -54,6 +56,27 @@ let registered = false;
 
 /** What a relative specifier may turn out to be, most specific first. */
 const CANDIDATES = [".ts", ".tsx", "/index.ts", "/index.tsx"] as const;
+
+/**
+ * A package whose named exports only exist after a bundler has touched it.
+ *
+ * `TerminalPane` opens its terminal with `const { Terminal } = await
+ * import("@xterm/xterm")`. Vite answers that: it pre-bundles the CJS into ESM
+ * with real named exports, and the app gets a constructor. Node reads the same
+ * package as CJS, and cjs-module-lexer finds **no** `Terminal` in xterm's
+ * bundled output — the namespace is `{ default, "module.exports" }` and the
+ * destructured `Terminal` is `undefined`. The pane then shows
+ * "Terminal is not a constructor" where a shell should be, which is not a fact
+ * about the app at all; it is the difference between a test runtime and a
+ * bundler.
+ *
+ * So the hook marks the module on the way in (a query on the URL, which
+ * `resolve` may add and `load` sees) and answers it with the namespace the
+ * bundler would have produced. Nothing about the app is altered, and the
+ * end-to-end terminal test gets the same constructor the desktop build does.
+ */
+const XTERM_SPECIFIER = "@xterm/xterm";
+const XTERM_MARK = "xterm-interop";
 
 /** A relative specifier that already names a file (or a package) is left alone. */
 const HAS_EXTENSION = /\.[cm]?[jt]sx?$|\.json$/i;
@@ -133,6 +156,10 @@ export function registerTsx(): void {
     // for a relative specifier that has none — a bare package name is not this
     // hook's business.
     resolve(specifier, context, nextResolve) {
+      if (specifier === XTERM_SPECIFIER) {
+        const resolved = nextResolve(specifier, context);
+        return { ...resolved, url: `${resolved.url}?${XTERM_MARK}`, shortCircuit: true };
+      }
       if (!specifier.startsWith(".") || HAS_EXTENSION.test(specifier)) {
         return nextResolve(specifier, context);
       }
@@ -146,10 +173,38 @@ export function registerTsx(): void {
       return nextResolve(specifier, context);
     },
     load(url, context, nextLoad) {
-      if (!url.endsWith(".tsx")) return nextLoad(url, context);
+      if (url.includes(`?${XTERM_MARK}`)) {
+        // The marked URL *is* the real module, so the shim can import it by
+        // name — and must, because `require()` of it is refused: node classifies
+        // the file as an ES module, and the "in a cycle" in the error is this
+        // shim asking for the very file it stands in for.
+        const real = url.slice(0, url.indexOf(`?${XTERM_MARK}`));
+        return {
+          format: "module",
+          shortCircuit: true,
+          source:
+            `const ns = await import(${JSON.stringify(real)});\n` +
+            `const pkg = ns.default ?? ns["module.exports"] ?? ns;\n` +
+            `export const Terminal = pkg.Terminal;\n` +
+            `export default pkg;\n`,
+        };
+      }
+      // `.ts` goes through esbuild too, not only `.tsx`. The reason is not
+      // style: node's `--experimental-strip-types` erases type *syntax* but
+      // cannot erase a **value-shaped import of a type-only name** —
+      // `import { AgentConfig } from "../types"`, where `AgentConfig` is an
+      // interface, survives as a runtime binding and ESM linking fails with
+      // "does not provide an export named". That shape is all over `src/`
+      // (vite never notices, because esbuild — which is what vite uses —
+      // drops imports whose bindings end up in no value position), and it is
+      // what kept every test from ever mounting `App` itself: App's graph
+      // reaches `hooks/useAgentConfigs.ts`, and the graph died there. So the
+      // harness now does for `.ts` what the production bundler does, which
+      // makes the runtime loader *more* faithful to the build, not less.
+      if (!url.endsWith(".tsx") && !url.endsWith(".ts")) return nextLoad(url, context);
       const source = readFileSync(fileURLToPath(url), "utf8");
       const { code } = esbuild.transformSync(source, {
-        loader: "tsx",
+        loader: url.endsWith(".tsx") ? "tsx" : "ts",
         jsx: "automatic",
         format: "esm",
       });

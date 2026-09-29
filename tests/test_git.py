@@ -7,7 +7,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from engine.fs import FileSystemService
 from engine.git import GitService
+from engine.sandbox import READ_ONLY_GIT_SUBCOMMANDS, CommandNotAllowed, validate_argv
 from tests.process_probe import file_text, pids_matching, sigkill_matching, wait_for_text, wait_until
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -271,6 +273,114 @@ class TestGuardedGitCommands(unittest.TestCase):
             engine.kill()
             for pattern in (GIT_ORPHAN_PROBE, HOOK_BODY, COMMIT_MARKER, str(self.root)):
                 sigkill_matching(pattern)
+
+
+# Read-only git, as a *table*, checked through **both** doors that offer it.
+#
+# This is the shape the finding asked for rather than two suites of assertions.
+# The conductor's `git_history` (through `GitService.read_only`) and the
+# librarian's `run_command(mode="read_only")` (through `sandbox.validate_argv`)
+# are two doors onto one decision, and they had already drifted: seventeen
+# subcommands against eight, one of them checking no flag or argument past
+# `args[0]` at all. A per-door test would let them drift again silently, because
+# each door would keep passing its own half. One table, both doors, and every
+# entry names what it would have done.
+HOSTILE_READ_ONLY_ARGV: tuple[tuple[list[str], str], ...] = (
+    (["log", "--output=OUTSIDE", "--format=OWNED"], "writes a file outside the workspace"),
+    (["diff", "--output=OUTSIDE"], "writes a file outside the workspace"),
+    (["diff", "--no-index", "/etc/hostname", "/dev/null"], "reads a file outside it"),
+    (["branch", "created-by-readonly"], "creates a branch"),
+    (["tag", "created-by-readonly"], "creates a tag"),
+    (["branch", "-u", "origin/master"], "writes .git/config"),
+    (["branch", "--set-upstream-to=origin/master"], "writes .git/config"),
+    (["branch", "-c", "created-by-readonly"], "copies a branch"),
+    (["branch", "--edit-description"], "opens an editor and blocks"),
+    (["tag", "-a", "created-by-readonly"], "opens an editor and blocks"),
+    (["commit", "-m", "x"], "writes history"),
+    (["reset", "--hard"], "rewrites the branch"),
+    (["push"], "leaves the machine"),
+)
+
+# …and the forms the librarian and the conductor actually need, which the same
+# rule must not have cost. A refusal that catches the tool's real use is a
+# feature switched off, not a hole closed.
+ALLOWED_READ_ONLY_ARGV: tuple[list[str], ...] = (
+    ["status", "--porcelain"],
+    ["log", "-5", "--oneline"],
+    ["log", "--stat", "-3"],
+    ["show", "HEAD"],
+    ["diff", "--stat"],
+    ["branch"],
+    ["branch", "-a"],
+    ["tag"],
+    ["tag", "-l", "v*"],
+    ["rev-parse", "HEAD"],
+    ["ls-files"],
+    ["blame", "README.md"],
+)
+
+
+class TestReadOnlyGitIsReadOnly(GitTestBase):
+    """Every hostile argv, refused by both doors, with nothing changed behind it."""
+
+    def test_the_conductor_door_refuses_all_of_it(self) -> None:
+        for argv, what in HOSTILE_READ_ONLY_ARGV:
+            with self.subTest(argv=argv):
+                outside = self.root.parent / "outside-the-workspace.txt"
+                if outside.exists():
+                    outside.unlink()
+                # `OUTSIDE` is substituted so `--output` names a path a test can
+                # look at: the claim is not "git said no", it is "nothing was
+                # written", and only the file can say that.
+                real = [a.replace("OUTSIDE", str(outside)) for a in argv]
+                sentence = self.git.read_only(str(self.root), real)
+                self.assertIn("refused", sentence, f"'{' '.join(argv)}' {what}")
+                self.assertFalse(
+                    outside.exists(),
+                    f"'{' '.join(argv)}' {what} — the file exists after all",
+                )
+                refs = self.git_out("branch", "--list", "created-by-readonly")
+                self.assertEqual(refs.strip(), "", f"'{' '.join(argv)}' {what}")
+                tags = self.git_out("tag", "--list", "created-by-readonly")
+                self.assertEqual(tags.strip(), "", f"'{' '.join(argv)}' {what}")
+
+    def test_the_librarian_door_refuses_all_of_it(self) -> None:
+        fs = FileSystemService(str(self.root))
+        for argv, what in HOSTILE_READ_ONLY_ARGV:
+            with self.subTest(argv=argv):
+                with self.assertRaises(CommandNotAllowed, msg=f"'{' '.join(argv)}' {what}"):
+                    validate_argv(["git", *argv], fs, mode="read_only")
+
+    def test_both_doors_allow_what_the_tools_actually_do(self) -> None:
+        fs = FileSystemService(str(self.root))
+        self.write("README.md", "hello\n")
+        for argv in ALLOWED_READ_ONLY_ARGV:
+            with self.subTest(argv=argv):
+                validate_argv(["git", *argv], fs, mode="read_only")
+                sentence = self.git.read_only(str(self.root), list(argv))
+                self.assertNotIn(
+                    "refused",
+                    sentence,
+                    f"'git {' '.join(argv)}' is a read the tools need",
+                )
+
+    def test_the_two_doors_cannot_drift_again(self) -> None:
+        # The table above is the *behaviour*; this is the structure. Two lists for
+        # one concept is how this started, and a freeze on the literal is what
+        # stops the second one growing back.
+        self.assertEqual(
+            GitService.READ_ONLY_ARGV,
+            tuple(sorted(READ_ONLY_GIT_SUBCOMMANDS)),
+            "the conductor's read-only subcommands are a second list again — they \
+             are supposed to be `sandbox.READ_ONLY_GIT_SUBCOMMANDS`, which is the \
+             copy that also knows which flags are refused",
+        )
+        self.assertEqual(
+            self.git.read_only(str(self.root), ["branch", "x"]).startswith("git branch x is refused"),
+            True,
+            "a bare name is a write: `git branch NAME` creates a ref, and the \
+             conductor offers this to a model",
+        )
 
 
 if __name__ == "__main__":

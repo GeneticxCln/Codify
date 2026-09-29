@@ -91,13 +91,13 @@ export function looksLikeAudit(doc: unknown): doc is AuditDoc {
 }
 
 const STATUS_STYLES: Record<string, string> = {
-  COMPLETED: "text-green-400 border-green-500/30 bg-green-500/10",
-  FAILED: "text-red-400 border-red-500/30 bg-red-500/10",
-  CANCELLED: "text-gray-300 border-gray-500/30 bg-gray-500/10",
-  RUNNING: "text-blue-400 border-blue-500/30 bg-blue-500/10",
-  IN_PROGRESS: "text-blue-400 border-blue-500/30 bg-blue-500/10",
-  PENDING: "text-gray-400 border-gray-500/30 bg-gray-500/10",
-  PAUSED: "text-amber-400 border-amber-500/30 bg-amber-500/10",
+  COMPLETED: "text-codify-success border-codify-success/30 bg-codify-success/10",
+  FAILED: "text-codify-danger border-codify-danger/30 bg-codify-danger/10",
+  CANCELLED: "text-codify-secondary border-codify-border bg-codify-neutral/10",
+  RUNNING: "text-codify-info border-codify-info/30 bg-codify-info/10",
+  IN_PROGRESS: "text-codify-info border-codify-info/30 bg-codify-info/10",
+  PENDING: "text-codify-muted border-codify-border bg-codify-neutral/10",
+  PAUSED: "text-codify-warning border-codify-warning/30 bg-codify-warning/10",
 };
 
 function StatusPill({ status }: { status?: string }) {
@@ -105,7 +105,7 @@ function StatusPill({ status }: { status?: string }) {
   return (
     <span
       className={`px-2 py-0.5 rounded-full border text-2xs font-semibold uppercase tracking-wide ${
-        STATUS_STYLES[status] ?? "text-gray-400 border-gray-500/30 bg-gray-500/10"
+        STATUS_STYLES[status] ?? "text-codify-muted border-codify-border bg-codify-neutral/10"
       }`}
     >
       {status}
@@ -146,7 +146,7 @@ function Section({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-gray-300 hover:bg-codify-surface transition-colors"
+        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-codify-secondary hover:bg-codify-surface transition-colors"
       >
         {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
         {icon}
@@ -187,128 +187,128 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
           {doc.mode?.dry_run && <StatusPill status="DRY RUN" />}
           {doc.mode?.parallel && <StatusPill status="PARALLEL" />}
           {parallelVisible && (
-            <span className="text-2xs text-blue-300 font-medium">
+            <span className="text-2xs text-codify-info font-medium">
               peak {doc.parallel_peak} in parallel · {doc.parallel_waves} wave(s)
             </span>
           )}
           {doc.created_at && (
-            <span className="ml-auto text-2xs text-gray-500">{fmtTime(doc.created_at)}</span>
+            <span className="ml-auto text-2xs text-codify-muted">{fmtTime(doc.created_at)}</span>
           )}
         </div>
         {doc.prompt && (
-          <div className="text-xs text-gray-200 font-medium">“{doc.prompt}”</div>
+          <div className="text-xs text-codify-secondary font-medium">“{doc.prompt}”</div>
         )}
         {doc.goal_id && (
-          <div className="font-mono text-2xs text-gray-500 break-all">{doc.goal_id}</div>
+          <div className="font-mono text-2xs text-codify-muted break-all">{doc.goal_id}</div>
         )}
       </div>
 
       {/* Plan edits: the drift lane — what was planned vs what ran */}
       <Section
-        icon={<Pencil className="w-3.5 h-3.5 text-violet-400" />}
+        icon={<Pencil className="w-3.5 h-3.5 text-codify-design" />}
         title="Plan edits"
         count={planEdits.length}
-        tone="bg-violet-500/15 text-violet-300"
+        tone="bg-codify-design/15 text-codify-design"
         defaultOpen
       >
         {planEdits.map((edit, i) => (
           <div key={i} className="rounded-lg border border-codify-border p-2.5 space-y-1.5">
-            <div className="text-xs font-semibold text-violet-300">
+            <div className="text-xs font-semibold text-codify-design">
               {stepName(edit.step, "step")}
             </div>
             {Object.entries(edit.changes ?? {}).map(([field, ch]) => (
-              <div key={field} className="font-mono text-xs text-gray-400">
+              <div key={field} className="font-mono text-xs text-codify-muted">
                 {field}:{" "}
-                <span className="text-red-400/80 line-through">{fmtValue(ch.from)}</span>
+                <span className="text-codify-danger/80 line-through">{fmtValue(ch.from)}</span>
                 {" → "}
-                <span className="text-green-400">{fmtValue(ch.to)}</span>
+                <span className="text-codify-success">{fmtValue(ch.to)}</span>
               </div>
             ))}
-            <div className="text-2xs text-gray-500">{fmtTime(edit.at)}</div>
+            <div className="text-2xs text-codify-muted">{fmtTime(edit.at)}</div>
           </div>
         ))}
       </Section>
 
       {/* Fallbacks: who was skipped, why, who answered */}
       <Section
-        icon={<Route className="w-3.5 h-3.5 text-teal-400" />}
+        icon={<Route className="w-3.5 h-3.5 text-codify-knowledge" />}
         title="Provider fallbacks"
         count={fallbacks.length}
-        tone="bg-teal-500/15 text-teal-300"
+        tone="bg-codify-knowledge/15 text-codify-knowledge"
       >
         {fallbacks.map((fb, i) => (
           <div key={i} className="rounded-lg border border-codify-border p-2.5 space-y-1">
             <div className="text-xs">
-              <span className="font-semibold text-teal-300">{fb.role}</span>
+              <span className="font-semibold text-codify-knowledge">{fb.role}</span>
               {fb.step && (
-                <span className="text-gray-400"> · {stepName(fb.step)}</span>
+                <span className="text-codify-muted"> · {stepName(fb.step)}</span>
               )}
             </div>
-            <div className="font-mono text-xs text-gray-400">
-              <span className="text-red-400/80 line-through">
+            <div className="font-mono text-xs text-codify-muted">
+              <span className="text-codify-danger/80 line-through">
                 {fb.from?.provider}/{fb.from?.model}
               </span>
               {" → "}
-              <span className="text-green-400">
+              <span className="text-codify-success">
                 {fb.to?.provider}/{fb.to?.model}
               </span>
             </div>
-            {fb.code && <div className="font-mono text-2xs text-amber-400/80">{fb.code}</div>}
-            {fb.detail && <div className="text-xs text-gray-500">{fb.detail}</div>}
-            <div className="text-2xs text-gray-500">{fmtTime(fb.at)}</div>
+            {fb.code && <div className="font-mono text-2xs text-codify-warning/80">{fb.code}</div>}
+            {fb.detail && <div className="text-xs text-codify-muted">{fb.detail}</div>}
+            <div className="text-2xs text-codify-muted">{fmtTime(fb.at)}</div>
           </div>
         ))}
       </Section>
 
       {/* Errors: what failed and which role owned it */}
       <Section
-        icon={<AlertCircle className="w-3.5 h-3.5 text-red-400" />}
+        icon={<AlertCircle className="w-3.5 h-3.5 text-codify-danger" />}
         title="Errors"
         count={errors.length}
-        tone="bg-red-500/15 text-red-300"
+        tone="bg-codify-danger/15 text-codify-danger"
         defaultOpen
       >
         {errors.map((err, i) => (
-          <div key={i} className="rounded-lg border border-red-500/20 bg-red-500/5 p-2.5 space-y-1">
+          <div key={i} className="rounded-lg border border-codify-danger/20 bg-codify-danger/5 p-2.5 space-y-1">
             <div className="text-xs">
-              {err.role && <span className="font-semibold text-red-300">{err.role}</span>}
-              {err.step && <span className="text-gray-400"> · {stepName(err.step)}</span>}
+              {err.role && <span className="font-semibold text-codify-danger">{err.role}</span>}
+              {err.step && <span className="text-codify-muted"> · {stepName(err.step)}</span>}
               {err.code && (
-                <span className="ml-2 font-mono text-2xs text-amber-400/80">{err.code}</span>
+                <span className="ml-2 font-mono text-2xs text-codify-warning/80">{err.code}</span>
               )}
             </div>
-            {err.message && <div className="text-xs text-gray-300">{err.message}</div>}
-            <div className="text-2xs text-gray-500">{fmtTime(err.at)}</div>
+            {err.message && <div className="text-xs text-codify-secondary">{err.message}</div>}
+            <div className="text-2xs text-codify-muted">{fmtTime(err.at)}</div>
           </div>
         ))}
       </Section>
 
       {/* Fix retries: the bounded repair loop */}
       <Section
-        icon={<RotateCcw className="w-3.5 h-3.5 text-amber-400" />}
+        icon={<RotateCcw className="w-3.5 h-3.5 text-codify-warning" />}
         title="Fix retries"
         count={fixRetries.length}
-        tone="bg-amber-500/15 text-amber-300"
+        tone="bg-codify-warning/15 text-codify-warning"
       >
         {fixRetries.map((retry, i) => (
           <div key={i} className="rounded-lg border border-codify-border p-2.5 space-y-1">
-            <div className="text-xs text-amber-300">
+            <div className="text-xs text-codify-warning">
               attempt {retry.attempt}
               {retry.max_attempts ? ` of ${retry.max_attempts}` : ""}
-              {retry.step && <span className="text-gray-400"> · {stepName(retry.step)}</span>}
+              {retry.step && <span className="text-codify-muted"> · {stepName(retry.step)}</span>}
             </div>
-            {retry.reason && <div className="text-xs text-gray-400">{retry.reason}</div>}
-            <div className="text-2xs text-gray-500">{fmtTime(retry.at)}</div>
+            {retry.reason && <div className="text-xs text-codify-muted">{retry.reason}</div>}
+            <div className="text-2xs text-codify-muted">{fmtTime(retry.at)}</div>
           </div>
         ))}
       </Section>
 
       {/* Step outcomes: what each step actually did */}
       <Section
-        icon={<Workflow className="w-3.5 h-3.5 text-blue-400" />}
+        icon={<Workflow className="w-3.5 h-3.5 text-codify-info" />}
         title="Step outcomes"
         count={steps.length}
-        tone="bg-blue-500/15 text-blue-300"
+        tone="bg-codify-info/15 text-codify-info"
         defaultOpen
       >
         {steps.map((s, i) => (
@@ -317,15 +317,15 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
             className="flex items-center gap-2 rounded-lg border border-codify-border p-2.5"
           >
             {s.status === "COMPLETED" ? (
-              <CheckCircle2 className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
+              <CheckCircle2 className="w-3.5 h-3.5 text-codify-success flex-shrink-0" />
             ) : s.status === "FAILED" ? (
-              <XCircle className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />
+              <XCircle className="w-3.5 h-3.5 text-codify-danger flex-shrink-0" />
             ) : (
-              <Clock className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
+              <Clock className="w-3.5 h-3.5 text-codify-info flex-shrink-0" />
             )}
-            <span className="text-xs text-gray-200 truncate">{stepName(s.step)}</span>
+            <span className="text-xs text-codify-secondary truncate">{stepName(s.step)}</span>
             {typeof s.attempts === "number" && s.attempts > 1 && (
-              <span className="text-2xs text-amber-400/80">×{s.attempts} attempts</span>
+              <span className="text-2xs text-codify-warning/80">×{s.attempts} attempts</span>
             )}
             <span className="ml-auto flex-shrink-0">
               <StatusPill status={s.status} />
@@ -339,25 +339,25 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
           not just the primary's bill. */}
       {doc.usage && (doc.usage.calls ?? 0) > 0 && (
         <div className="rounded-xl border border-codify-border bg-codify-bg overflow-hidden">
-          <div className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-gray-300">
-            <Coins className="w-3.5 h-3.5 text-amber-400" />
+          <div className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-codify-secondary">
+            <Coins className="w-3.5 h-3.5 text-codify-warning" />
             <span>Token usage</span>
-            <span className="ml-auto font-normal text-2xs text-gray-500 font-mono">
+            <span className="ml-auto font-normal text-2xs text-codify-muted font-mono">
               {(doc.usage.totals?.total_tokens ?? 0).toLocaleString()} tokens · {doc.usage.calls} call{(doc.usage.calls ?? 0) === 1 ? "" : "s"}
             </span>
           </div>
           <div className="px-3 pb-3 space-y-1">
             {Object.entries(doc.usage.by_role ?? {}).map(([role, b]) => (
               <div key={role} className="flex items-center gap-2 text-xs">
-                <span className="font-semibold text-gray-300 w-20 flex-shrink-0">{role}</span>
-                <span className="font-mono text-gray-400">
+                <span className="font-semibold text-codify-secondary w-20 flex-shrink-0">{role}</span>
+                <span className="font-mono text-codify-muted">
                   {((b.total_tokens ?? 0)).toLocaleString()} tokens
                 </span>
-                <span className="text-gray-500">
+                <span className="text-codify-muted">
                   ({(b.input_tokens ?? 0).toLocaleString()} in / {(b.output_tokens ?? 0).toLocaleString()} out)
                 </span>
                 {typeof b.calls === "number" && (
-                  <span className="ml-auto text-gray-500">{b.calls} call{b.calls === 1 ? "" : "s"}</span>
+                  <span className="ml-auto text-codify-muted">{b.calls} call{b.calls === 1 ? "" : "s"}</span>
                 )}
               </div>
             ))}
@@ -365,9 +365,9 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
               <div className="pt-1 mt-1 border-t border-codify-border/60 space-y-1">
                 {Object.entries(doc.usage.by_model ?? {}).map(([model, b]) => (
                   <div key={model} className="flex items-center gap-2 text-2xs">
-                    <span className="font-mono text-gray-500 flex-1 truncate">{model}</span>
-                    <span className="font-mono text-gray-400">{(b.total_tokens ?? 0).toLocaleString()}</span>
-                    <span className="text-gray-600 w-10 text-right">{b.calls}×</span>
+                    <span className="font-mono text-codify-muted flex-1 truncate">{model}</span>
+                    <span className="font-mono text-codify-muted">{(b.total_tokens ?? 0).toLocaleString()}</span>
+                    <span className="text-codify-muted w-10 text-right">{b.calls}×</span>
                   </div>
                 ))}
               </div>
@@ -381,8 +381,8 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
           role absorbing the work. Deliberate skips (never assigned) don't
           appear, so an empty run shows nothing here. */}
       {(doc.silent_roles?.length ?? 0) > 0 && (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 space-y-1.5">
-          <div className="flex items-center gap-2 text-xs font-semibold text-amber-300">
+        <div className="rounded-xl border border-codify-warning/30 bg-codify-warning/5 p-3 space-y-1.5">
+          <div className="flex items-center gap-2 text-xs font-semibold text-codify-warning">
             <BellOff className="w-3.5 h-3.5" />
             <span>
               Silent role{(doc.silent_roles ?? []).length === 1 ? "" : "s"} — assigned but never ran
@@ -390,11 +390,11 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
           </div>
           {(doc.silent_roles ?? []).map((s, i) => (
             <div key={i} className="flex items-center gap-2 text-xs">
-              <span className="font-semibold text-amber-200/90">{s.role}</span>
+              <span className="font-semibold text-codify-warning/90">{s.role}</span>
               {s.assigned_model && (
-                <span className="font-mono text-gray-500">{s.assigned_model}</span>
+                <span className="font-mono text-codify-muted">{s.assigned_model}</span>
               )}
-              <span className="text-gray-500">no completed model call</span>
+              <span className="text-codify-muted">no completed model call</span>
             </div>
           ))}
         </div>
@@ -402,10 +402,10 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
 
       {/* Status timeline: the goal's life in order */}
       {timeline.length > 1 && (
-        <div className="flex items-center gap-1.5 px-1 py-0.5 text-2xs text-gray-500 flex-wrap">
+        <div className="flex items-center gap-1.5 px-1 py-0.5 text-2xs text-codify-muted flex-wrap">
           {timeline.map((t, i) => (
             <React.Fragment key={i}>
-              {i > 0 && <span className="text-gray-600">→</span>}
+              {i > 0 && <span className="text-codify-muted">→</span>}
               <span className="font-mono">{t.status}</span>
             </React.Fragment>
           ))}

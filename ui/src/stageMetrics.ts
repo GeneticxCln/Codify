@@ -90,10 +90,10 @@ export function roleRateLabel(role: RoleOutcome | undefined): string {
 /** Tone for a rate: a low one is worth a person's attention, a high one is
  * not, and "no data" is neither. */
 export function roleRateTone(role: RoleOutcome | undefined): string {
-  if (!role || role.runs === 0 || role.success_rate == null) return "text-gray-500";
-  if (role.success_rate >= 90) return "text-green-400";
-  if (role.success_rate >= 60) return "text-amber-300";
-  return "text-red-300";
+  if (!role || role.runs === 0 || role.success_rate == null) return "text-codify-muted";
+  if (role.success_rate >= 90) return "text-codify-success";
+  if (role.success_rate >= 60) return "text-codify-warning";
+  return "text-codify-danger";
 }
 
 /** A role with runs but no finished ones (all cancelled) is called out

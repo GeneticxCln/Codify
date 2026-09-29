@@ -26,7 +26,9 @@ import {
   CODIFY_DARK,
   DEFAULT_THEME_ID,
   MANAGED_VARS,
+  STATUS_TONE_VARS,
   THEMES,
+  THEME_TONES,
   applyTheme,
   hexChannels,
   readStoredThemeId,
@@ -92,24 +94,123 @@ test("the default theme restates index.css's :root values, byte for byte", () =>
   }
 });
 
-test("no theme touches the status hues — they are load-bearing, not decor", () => {
-  // Five tones, five meanings (§2): a theme that repainted danger repainted
-  // what "failed" means.
+/** Hue in degrees, 0–360, for a `#rrggbb`. Returns NaN for anything else, which
+ * makes a malformed value fail every assertion below rather than pass one. */
+function hueOf(hex: string): number {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
+  if (!m) return NaN;
+  const [r, g, b] = [1, 2, 3].map((i) => parseInt(m[i], 16) / 255);
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  if (d === 0) return 0;
+  let h: number;
+  if (max === r) h = ((g - b) / d) % 6;
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  h *= 60;
+  return h < 0 ? h + 360 : h;
+}
+
+/** True for red → orange → gold, the arc `danger` and `warning` must stay on. */
+function isWarm(hex: string): boolean {
+  const h = hueOf(hex);
+  // `h >= 345 || h <= 70` is the warm arc across the 0° seam: a red at 350 and
+  // a gold at 65 are both "warm", and a green at 140 is neither.
+  return Number.isFinite(h) && (h >= 345 || h <= 70);
+}
+
+test("every theme states all six tones or none", () => {
+  // All six, or the theme has said nothing. A half-stated theme is the worst of
+  // the three options: `applyTheme` clears every managed variable before it
+  // applies the next theme, so the three it did not set would show the
+  // *previous* theme's values — which is the exact failure clearing exists to
+  // prevent, arriving through the door clearing was built to keep shut.
   for (const theme of THEMES) {
-    for (const name of Object.keys(theme.tokens)) {
+    const stated = STATUS_TONE_VARS.filter((v) => theme.tokens[v] !== undefined);
+    assert.equal(
+      stated.length,
+      STATUS_TONE_VARS.length,
+      `${theme.id} states ${stated.length} of ${STATUS_TONE_VARS.length} tones: ` +
+        `${stated.join(", ") || "(none)"}`,
+    );
+  }
+});
+
+test("a theme may restate failure, and may not make failure cyan", () => {
+  // The rule that replaced "a theme may not touch the status hues". That rule
+  // protected a meaning; this protects the same meaning and lets the hue move.
+  // `danger` and `warning` have to stay on the warm arc, because a user who has
+  // learned that orange means "needs attention" was owed that much — and a
+  // cyberpunk theme with a pink `danger` is the failure this stops.
+  for (const theme of THEMES) {
+    for (const name of ["--codify-danger", "--codify-warning"] as const) {
+      const value = theme.tokens[name];
+      assert.ok(value, `${theme.id} does not state ${name}`);
       assert.ok(
-        !name.startsWith("--codify-info") &&
-          !name.startsWith("--codify-success") &&
-          !name.startsWith("--codify-warning") &&
-          !name.startsWith("--codify-danger") &&
-          !name.startsWith("--codify-accent") &&
-          !name.startsWith("--codify-neutral") &&
-          !name.startsWith("--codify-design") &&
-          !name.startsWith("--codify-knowledge"),
-        `${theme.id} sets ${name}; a theme may set surfaces and text only`,
+        isWarm(value as string),
+        `${theme.id} puts ${name} at ${value}, which is hue ` +
+          `${Math.round(hueOf(value as string))}° — off the warm arc`,
       );
     }
   }
+});
+
+test("a monochrome theme still tells success from failure", () => {
+  // ASCII rain publishes no hue, so severity has to be brightness. If its
+  // `danger` and `success` were the same grey, the theme would be claiming
+  // that "failed" and "passed" are the same sentence — which is the one thing
+  // the five tones exist to prevent, in a theme that cannot use colour to say it.
+  const ascii = themeById("ascii-rain");
+  assert.notEqual(
+    ascii.tokens["--codify-danger"],
+    ascii.tokens["--codify-success"],
+    "a monochrome theme expresses severity as brightness, so danger and " +
+      "success cannot be the same value",
+  );
+});
+
+test("no theme states a tone inline, where it would silently beat the table", () => {
+  // `withTones` folds `THEME_TONES` in *underneath* a theme's own tokens, so an
+  // inline tone would win. That is a real escape hatch rather than a
+  // hypothetical one, and it is also a place where the two halves of this file
+  // could disagree without anything noticing.
+  for (const theme of THEMES) {
+    const tones = THEME_TONES[theme.id];
+    for (const name of STATUS_TONE_VARS) {
+      assert.equal(
+        theme.tokens[name],
+        tones?.[name],
+        `${theme.id} publishes ${name} outside THEME_TONES, so the table and ` +
+          "the theme disagree",
+      );
+    }
+  }
+});
+
+test("the badge layer names theme variables, not Tailwind hues", () => {
+  // The other half of the change. Four of `Badge.tsx`'s five tones were
+  // `bg-green-950/40 text-green-400 border-green-800` — literals, so a success
+  // pill in the OLED app was Tailwind green. Read the file and assert the four
+  // saturated tones name a variable, because a re-introduced literal is exactly
+  // the regression and it is invisible at runtime until someone picks a theme.
+  const source = readFileSync(
+    path.join(HERE, "..", "src", "components", "ui", "Badge.tsx"),
+    "utf8",
+  );
+  // Comments are stripped first, and not as a nicety: this file's own docstring
+  // quotes the literals it replaced, so a match on raw text would report a
+  // regression that is only a paragraph explaining one.
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+  const hues = code.match(/\b(?:bg|text|border)-(?:blue|green|amber|red|emerald|teal|rose|orange)-\d+/g);
+  assert.deepEqual(
+    hues,
+    null,
+    `Badge.tsx names Tailwind hues: ${(hues ?? []).join(", ")} — those compile ` +
+      "to one colour forever, which is why a theme could not reach a badge",
+  );
 });
 
 test("applyTheme clears what the last theme set before applying the new one", () => {
@@ -143,11 +244,14 @@ test("an unknown stored id falls back to the default, not to a broken state", ()
   assert.equal(readStoredThemeId(storage), CMATRIX_OLED.id);
 });
 
-test("initAppearance reads, applies, and returns the id it applied", () => {
-  // `initAppearance` is `readStoredThemeId` + `applyTheme` with the document
-  // default filled in — the boot path `main.tsx` runs. Its target defaults
-  // from `document`, which this process does not own, so the two halves are
-  // asserted through the same injectable seam the function itself uses.
+test("the boot path reads, applies, and lands on the id it was given", () => {
+  // Boot is `readStoredThemeId` + the apply, composed by the caller: `main.tsx`
+  // hands the id to `tint.ts`'s `applyTintedTheme`, which merges the stored
+  // tints and then calls `applyTheme` under this hood. There is no single
+  // `initAppearance` in `appearance.ts` to call, and that is the point — a boot
+  // helper living here could not see the tints without a circular import, and
+  // would have been a second path that applied the palette without them. Both
+  // halves are asserted through the injectable seam the real calls use.
   const storage = fakeStorage();
   storeThemeId(CMATRIX_OLED.id, storage);
   const style = fakeStyle();
@@ -244,4 +348,44 @@ test("RainBackdrop mounts only for a theme that publishes a rain variable", () =
   localStorage.setItem("codify.theme", CODIFY_DARK.id);
   const none = markup(React.createElement(RainBackdrop));
   assert.equal(none, "", "the default theme gets no backdrop — not even an empty div");
+});
+
+test("the two snow themes differ by what they publish, not by a second canvas", () => {
+  // Two themes sharing one painter is the design — `SnowFall.tsx` is one file for
+  // both — and it is also the thing most likely to rot into "the same theme listed
+  // twice": someone adds a second snow entry, copies the tokens, and the picker now
+  // offers Winter Snow and Festive Night as two names for one picture. What stops
+  // that is the mechanism, so the test is on the mechanism — one shared trigger,
+  // and the glow published by exactly one of the two.
+  const winter = themeById("winter-snow");
+  const festive = themeById("festive-night");
+
+  // Both mount the same canvas, so both must publish the trigger.
+  assert.ok(winter.tokens["--snow-flake"], "winter publishes no snow trigger");
+  assert.ok(festive.tokens["--snow-flake"], "festive publishes no snow trigger");
+
+  // Exactly one has lights. This single asymmetry is the whole difference between
+  // the two themes, and it is why the painter never asks which theme it is
+  // running: absence is the signal, so it has to actually be absent.
+  assert.equal(
+    winter.tokens["--snow-glow"],
+    undefined,
+    "winter publishes a glow, so it has lights — and then it is festive",
+  );
+  assert.ok(
+    festive.tokens["--snow-glow"],
+    "festive has no lights, so the two themes are the same picture",
+  );
+
+  // And the palettes are their own, not a copy with the label changed.
+  assert.notEqual(
+    winter.tokens["--codify-bg"],
+    festive.tokens["--codify-bg"],
+    "both snow themes share a background",
+  );
+  assert.notEqual(
+    winter.tokens["--snow-flake"],
+    festive.tokens["--snow-flake"],
+    "both snow themes share a flake colour",
+  );
 });

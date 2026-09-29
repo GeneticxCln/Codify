@@ -352,5 +352,177 @@ class TestGoogleKeyHeader(unittest.TestCase):
 
 
 
+class TestOllamaNumCtx(unittest.TestCase):
+    """`num_ctx` reaches the wire, and nothing else invents it.
+
+    Ollama sizes its context window from its own default (4096) unless a
+    request says otherwise, and *silently truncates* longer prompts — the
+    librarian's evidence pack and the design contract simply do not fit, and
+    the failure is a degraded plan rather than an error. The fix is a per-role
+    `num_ctx` that has to survive the whole trip: config → call site → request
+    body. Each test below is one leg of that trip.
+    """
+
+    def _make(self) -> tuple[OllamaProvider, Any]:
+        import threading
+
+        from engine.providers import OllamaProvider
+
+        class _Server(ThreadingHTTPServer):
+            post_bodies: list[dict[str, Any]] = []
+            daemon_threads = True
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 — http.server's spelling
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                _Server.post_bodies.append(body)
+                reply = json.dumps({"response": "{}", "done": True}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        server = _Server(("127.0.0.1", 0), Handler)
+        # The Handler closes over the class attribute; reset it here rather
+        # than shadowing with an instance attribute the reader would miss.
+        _Server.post_bodies = []
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return OllamaProvider(f"http://127.0.0.1:{server.server_address[1]}"), server
+
+    def test_num_ctx_reaches_the_generate_options_when_set(self) -> None:
+        import asyncio
+
+        provider, server = self._make()
+        asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64, num_ctx=32768))
+        options = server.post_bodies[0]["options"]
+        self.assertEqual(options.get("num_ctx"), 32768)
+
+    def test_num_ctx_absent_keeps_ollamas_default(self) -> None:
+        # None must *omit* the field, not send a guessed value: choosing a
+        # window on the user's behalf is how a role with a small prompt
+        # suddenly pays 32k of KV cache for nothing.
+        import asyncio
+
+        provider, server = self._make()
+        asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64))
+        self.assertNotIn("num_ctx", server.post_bodies[0]["options"])
+
+    def test_num_ctx_reaches_the_streaming_generate_too(self) -> None:
+        import asyncio
+
+        provider, server = self._make()
+        provider.on_delta = lambda _text: None
+        asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64, num_ctx=8192))
+        self.assertEqual(server.post_bodies[0]["options"].get("num_ctx"), 8192)
+
+    def test_num_ctx_reaches_the_chat_options_for_tool_calls(self) -> None:
+        import asyncio
+
+        provider, server = self._make()
+        asyncio.run(
+            provider.complete_with_tools(
+                "sys", [{"role": "user", "content": "hi"}], [], "m1", 0.0, 64, num_ctx=16384,
+            )
+        )
+        self.assertEqual(server.post_bodies[0]["options"].get("num_ctx"), 16384)
+
+    def test_other_providers_accept_and_ignore_num_ctx(self) -> None:
+        # The keyword is on the base signature so callers can pass it
+        # uniformly; a provider with no equivalent field must accept it and
+        # say nothing on the wire.
+        from engine.providers import OpenAICompatProvider
+
+        provider = OpenAICompatProvider("k", "http://127.0.0.1:1")  # never contacted
+        # Not awaited to completion — the point is the signature accepts it.
+        coroutine = provider.complete("s", "u", "m", 0.0, 8, num_ctx=4096)
+        coroutine.close()
+
+
+class TestOllamaKeepAlive(TestOllamaNumCtx):
+    """`keep_alive` reaches the wire as a *sibling* of `options`, not inside it.
+
+    Inherits the local Ollama server from the `num_ctx` class rather than
+    repeating it: the two fields travel the same trip and the server is the
+    fixture, not the subject.
+
+    The placement is the whole test. `keep_alive` is a top-level member of an
+    Ollama request, not an entry in its `options` dict — and nesting it there is
+    *accepted but ignored*, which is the worst possible failure: the setting
+    saves, the UI shows it, and the model is reloaded exactly as before, with
+    nothing anywhere reporting a problem.
+    """
+
+    def test_keep_alive_is_a_top_level_field_not_an_option(self) -> None:
+        import asyncio
+
+        provider, server = self._make()
+        asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64, keep_alive="30m"))
+        body = server.post_bodies[0]
+        self.assertEqual(body.get("keep_alive"), "30m")
+        self.assertNotIn(
+            "keep_alive", body["options"],
+            "nested under options it is silently ignored, so this would look set",
+        )
+
+    def test_keep_alive_absent_means_the_field_is_omitted_entirely(self) -> None:
+        # Omission, not a default. Sending "5m" on the user's behalf would make
+        # a role they configured to unload promptly hold its model in memory,
+        # and nothing in the UI would say the engine had overridden them.
+        import asyncio
+
+        provider, server = self._make()
+        asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64))
+        self.assertNotIn("keep_alive", server.post_bodies[0])
+
+    def test_keep_alive_reaches_the_streaming_generate_too(self) -> None:
+        import asyncio
+
+        provider, server = self._make()
+        provider.on_delta = lambda _text: None
+        asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64, keep_alive="1h"))
+        self.assertEqual(server.post_bodies[0].get("keep_alive"), "1h")
+
+    def test_keep_alive_reaches_the_chat_path_for_tool_calls(self) -> None:
+        import asyncio
+
+        provider, server = self._make()
+        asyncio.run(
+            provider.complete_with_tools(
+                "sys", [{"role": "user", "content": "hi"}], [], "m1", 0.0, 64,
+                keep_alive="10m",
+            )
+        )
+        self.assertEqual(server.post_bodies[0].get("keep_alive"), "10m")
+
+    def test_both_fields_travel_together_and_keep_their_own_places(self) -> None:
+        # The two are configured side by side in the UI, so a save that sets
+        # both has to produce a body where neither has been flattened into the
+        # other's slot.
+        import asyncio
+
+        provider, server = self._make()
+        asyncio.run(
+            provider.complete("sys", "user", "m1", 0.0, 64, num_ctx=32768, keep_alive="30m")
+        )
+        body = server.post_bodies[0]
+        self.assertEqual(body["options"]["num_ctx"], 32768)
+        self.assertEqual(body["keep_alive"], "30m")
+
+    def test_other_providers_accept_and_ignore_keep_alive(self) -> None:
+        from engine.providers import OpenAICompatProvider
+
+        provider = OpenAICompatProvider("k", "http://127.0.0.1:1")  # never contacted
+        coroutine = provider.complete("s", "u", "m", 0.0, 8, keep_alive="30m")
+        coroutine.close()
+
+
 if __name__ == "__main__":
     unittest.main()

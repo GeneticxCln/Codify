@@ -382,6 +382,103 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["display_name"], "API Planner")
 
+    async def test_num_ctx_round_trips_through_the_settings_route(self) -> None:
+        """The context window survives config → DB → config, and null clears it.
+
+        Ollama silently truncates at its default window, so this field is the
+        difference between a librarian that reads its whole evidence pack and
+        one that reads the first 4096 tokens of it. That makes the persistence
+        round-trip load-bearing, not a CRUD detail: a field the settings PUT
+        drops on the floor would leave the truncation bug the UI claims to
+        have fixed, with every green test in the world saying otherwise.
+        """
+        r = await self.client.put(
+            "/settings/agents/librarian",
+            headers=self.headers,
+            json={"num_ctx": 32768},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["num_ctx"], 32768)
+        # Read back through a fresh GET — the DB write is the thing under test.
+        r = await self.client.get("/settings/agents", headers=self.headers)
+        librarian = next(c for c in r.json() if c["role"] == "librarian")
+        self.assertEqual(librarian["num_ctx"], 32768)
+        # And an explicit null returns the role to Ollama's default: a clear,
+        # not a "no change", because "back to default" is the common intent.
+        r = await self.client.put(
+            "/settings/agents/librarian",
+            headers=self.headers,
+            json={"num_ctx": None},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.json()["num_ctx"])
+
+    async def test_keep_alive_round_trips_and_null_returns_the_default(self) -> None:
+        """The same round trip, for the residency window.
+
+        Persistence is the load-bearing part here for the same reason it is for
+        `num_ctx`: a PUT that silently dropped this field would leave a role
+        reloading its model between every goal, with the UI showing a value
+        that was never stored.
+        """
+        r = await self.client.put(
+            "/settings/agents/fixer",
+            headers=self.headers,
+            json={"keep_alive": "45m"},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["keep_alive"], "45m")
+        r = await self.client.get("/settings/agents", headers=self.headers)
+        fixer = next(c for c in r.json() if c["role"] == "fixer")
+        self.assertEqual(fixer["keep_alive"], "45m")
+        # Null means "back to Ollama's own five minutes", not "leave it at 45m".
+        r = await self.client.put(
+            "/settings/agents/fixer",
+            headers=self.headers,
+            json={"keep_alive": None},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.json()["keep_alive"])
+        r = await self.client.get("/settings/agents", headers=self.headers)
+        fixer = next(c for c in r.json() if c["role"] == "fixer")
+        self.assertIsNone(fixer["keep_alive"], "the clear has to survive the DB too")
+
+    async def test_keep_alive_accepts_ollamas_own_duration_grammar(self) -> None:
+        """The values Ollama documents, and only those.
+
+        This field goes straight into a request body, so the boundary matters
+        in both directions: a compound duration copied out of Ollama's own docs
+        ("1h30m") has to be accepted, and anything that is not a duration has to
+        be refused rather than forwarded for the server to choke on later.
+        """
+        for value in ("-1", "0", "300", "30s", "5m", "1h30m", "100ms"):
+            r = await self.client.put(
+                "/settings/agents/planner",
+                headers=self.headers,
+                json={"keep_alive": value},
+            )
+            self.assertEqual(r.status_code, 200, f"engine rejected {value!r}")
+            self.assertEqual(r.json()["keep_alive"], value)
+
+        for value in ("5x", "-2", "forever", "30 m", ""):
+            r = await self.client.put(
+                "/settings/agents/planner",
+                headers=self.headers,
+                json={"keep_alive": value},
+            )
+            self.assertEqual(r.status_code, 422, f"engine accepted {value!r}")
+
+    async def test_an_unknown_field_is_still_refused_alongside_the_new_one(self) -> None:
+        # Invariant 2: the update model is closed. Adding a field must not have
+        # relaxed that, and a typo'd `keepalive` has to be a 422 rather than a
+        # silently ignored no-op that looks like a saved setting.
+        r = await self.client.put(
+            "/settings/agents/planner",
+            headers=self.headers,
+            json={"keepalive": "30m"},
+        )
+        self.assertEqual(r.status_code, 422)
+
     async def test_workspace_refuses_the_filesystem_root(self) -> None:
         """A workspace at `/` makes every containment check vacuous — refused."""
         r = await self.client.post(

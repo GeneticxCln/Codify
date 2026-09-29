@@ -120,6 +120,19 @@ export interface AgentConfig {
   temperature: number;
   max_tokens: number;
   /**
+   * Ollama's context window for this role, in tokens; null/absent = the
+   * server's default (4096, silently truncating longer prompts). Only the
+   * Ollama provider reads it — OpenAI-style APIs size the window server-side.
+   */
+  num_ctx?: number | null;
+  /**
+   * How long Ollama holds the model loaded after a request finishes — a duration
+   * ("30m"), bare seconds, or "-1" for until the server stops. Undefined/null
+   * leaves the server's own five-minute window. It is not a speed setting for a
+   * single call: it covers the gap *between* calls. Only Ollama reads it.
+   */
+  keep_alive?: string | null;
+  /**
    * The second target this role may be called on when the primary cannot be used
    * — no credential, endpoint down, model retired, or a reply the contract cannot
    * parse. A fallback needs both a provider and a model to count as one; the
@@ -142,6 +155,10 @@ export interface AgentConfigPatch {
   system_prompt_override?: string | null;
   temperature?: number;
   max_tokens?: number;
+  /** null clears an explicit window and returns the role to Ollama's default. */
+  num_ctx?: number | null;
+  /** null returns the role to Ollama's own residency window. */
+  keep_alive?: string | null;
   /** null clears the fallback, which also clears its protocol and endpoint. */
   fallback_provider?: string | null;
   fallback_model_name?: string;
@@ -232,6 +249,22 @@ export interface ConversationTurn {
   prompt: string;
   status: GoalStatus;
   created_at: number;
+}
+
+/**
+ * One open tab, as the engine holds it (docs/09 §2.1).
+ *
+ * `payload` is a JSON string on purpose: it is the tab's own facts — a thread,
+ * an address, a back/forward stack — and the engine bounds and parses it without
+ * understanding it. Typing its innards here would be a second, drifting
+ * definition of a tab's shape in a file the engine does not read.
+ */
+export interface ShellTabRow {
+  key: string;
+  position: number;
+  kind: "chat" | "browser";
+  payload: string;
+  updated_at: number;
 }
 
 export interface Goal {
@@ -470,6 +503,38 @@ export interface Event {
   payload: Record<string, any>;
   timestamp: number;
   sequence: number;
+}
+
+/**
+ * The engine's self-check: what process this is, and what that interpreter can
+ * import. Separate from `LayaStatus` because the two answer different questions —
+ * that one is "which engine gates goals", this one is "which interpreter is this,
+ * and could it use the SDK at all". A gate can be off because it was told to be
+ * (`disabled_by_env`) or because the package is not there (`importable`), and
+ * those need different fixes.
+ */
+export interface EngineRuntime {
+  interpreter: {
+    /** The interpreter actually running, which is what an install has to match. */
+    executable: string;
+    version: string;
+    version_info: [number, number];
+    implementation: string;
+    in_virtualenv: boolean;
+    prefix: string;
+    base_prefix: string;
+  };
+  project_root: string;
+  /** Where the checkout's own interpreter would be, whether or not it exists. */
+  checkout_interpreter: string;
+  laya_sdk: {
+    importable: boolean;
+    import_error?: string | null;
+    version?: string | null;
+    disabled_by_env: boolean;
+  };
+  /** Empty on a healthy install. A warning that is always present is not read. */
+  warnings: string[];
 }
 
 export interface LayaStatus {

@@ -22,6 +22,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { THEMES } from "../src/appearance.ts";
+import { contrastRatio } from "../src/contrast.ts";
 
 const timeline = readFileSync(
   new URL("../src/components/ChatTimeline.tsx", import.meta.url),
@@ -63,26 +64,13 @@ const code = exchange
   .replace(/(^|[({])[ \t]*\/\*[\s\S]*?\*\//gm, "$1")
   .replace(/^[ \t]*\/\/.*$/gm, "");
 
-function channels(hex: string): [number, number, number] {
-  const m = /^#([0-9a-f]{6})$/i.exec(hex.trim());
-  assert.ok(m, `not a 6-digit hex: ${hex}`);
-  const n = parseInt(m![1], 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-
-/** WCAG 2.1 relative luminance, on sRGB values as they are actually stored. */
-function luminance(hex: string): number {
-  const [r, g, b] = channels(hex).map((c) => {
-    const s = c / 255;
-    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-function contrast(a: string, b: string): number {
-  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (hi + 0.05) / (lo + 0.05);
-}
+// The luminance and ratio arithmetic used to live here. It moved to
+// `ui/src/contrast.ts` when `contrast.test.ts` needed the same numbers for all
+// nineteen themes: two copies of `relativeLuminance` is two answers to "what is
+// the ratio", and the one that gets a gamma threshold wrong fails quietly in the
+// direction that looks like a passing suite. `hexToRgb` is imported there too
+// and still throws on a value that is not a colour, which is the behaviour this
+// file relied on.
 
 test("the transcript's own surfaces carry no colour of their own", () => {
   // A `blue`/`purple`/`red` class in this slice is the bug back, whatever it is
@@ -119,7 +107,7 @@ test("every theme's bubble text reads on its bubble", () => {
     const raised = theme.tokens["--codify-raised"];
     const primary = theme.tokens["--codify-primary"];
     assert.ok(raised && primary, `${theme.id} is missing the pair the bubble needs`);
-    const ratio = contrast(primary!, raised!);
+    const ratio = contrastRatio(primary!, raised!);
     // AA for body text. Every shipped theme clears 4.5 with room to spare, so
     // this is not a bar any of them are near — it is the floor that stops the
     // *next* theme from shipping unreadable, which is the actual risk.

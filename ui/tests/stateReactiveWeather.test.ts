@@ -143,9 +143,15 @@ test("active changes how fast, never what is rendered", () => {
     /}, \[animated, fps, maxDimension, active\]\);/,
     "active is a dependency, so every state change tears down and re-arms the loop",
   );
-  assert.match(clock, /}, \[animated, fps, maxDimension\]\);/);
+  // `storeReduced` IS a dependency, deliberately: it is the motion decision
+  // (user choice, shell verdict, system preference), and a verdict that arrives
+  // mid-run must re-arm the loop or the page keeps animating on exactly the
+  // machine the verdict was about. `active` changes every turn; the motion
+  // decision changes about never.
+  assert.match(clock, /}, \[animated, storeReduced, fps, maxDimension\]\);/);
   // Same shape on the rain's own loop, which has its own effect body.
   assert.doesNotMatch(rain, /}, \[animated, fps, maxDimension, active\]\);/);
+  assert.match(rain, /}, \[animated, storeReduced, fps, maxDimension\]\);/);
   assert.match(rain, /const activeRef = useRef\(active\);\s*\n\s*activeRef\.current = active;/);
 });
 

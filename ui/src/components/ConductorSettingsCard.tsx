@@ -5,7 +5,7 @@ import { getEngineSettings, saveEngineSettings } from "../api";
 import { canSaveChoice, ConductorChoice, conductorFallback, conductorStatus, needsClear } from "../conductorSettings";
 import { readRejection } from "../rejection.ts";
 import { staleTarget } from "../staleModel";
-import { ModelOption, ProviderModelStatus } from "../types";
+import type { ModelOption, ProviderModelStatus } from "../types.ts";
 import { ModelSelect } from "./ModelSelect";
 import { ProviderSelect } from "./ProviderSelect";
 
@@ -76,7 +76,7 @@ const NumberSetting: React.FC<{
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex flex-wrap items-center gap-2">
-        <label htmlFor={id} className="text-xs text-gray-300 font-medium" title={hint}>
+        <label htmlFor={id} className="text-xs text-codify-secondary font-medium" title={hint}>
           {label}
         </label>
         <input
@@ -90,21 +90,21 @@ const NumberSetting: React.FC<{
             setMsg(null);
           }}
           disabled={value === null || saving}
-          className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
+          className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono disabled:opacity-40"
         />
         <button
           type="button"
           onClick={save}
           disabled={value === null || saving || draft === String(value)}
-          className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+          className="px-3 py-1.5 bg-codify-accent text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
         >
           {saving ? "Saving..." : "Save"}
         </button>
         {msg && (
-          <span className={`text-xs ${msg.ok ? "text-green-400" : "text-red-400"}`}>{msg.text}</span>
+          <span className={`text-xs ${msg.ok ? "text-codify-success" : "text-codify-danger"}`}>{msg.text}</span>
         )}
       </div>
-      <p className="text-xs text-gray-400 leading-relaxed">{hint}</p>
+      <p className="text-xs text-codify-muted leading-relaxed">{hint}</p>
     </div>
   );
 };
@@ -252,7 +252,7 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
 
   if (stored === null) {
     return loadError ? (
-      <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg p-3">
+      <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
         <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
         <span className="leading-relaxed">Conductor settings unavailable — {loadError}</span>
       </div>
@@ -357,11 +357,11 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
 
   return (
     <div className="flex flex-col gap-2.5 bg-codify-bg border border-codify-border rounded-xl p-3.5">
-      <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
-        <Brain className="w-3.5 h-3.5 text-purple-400" />
+      <div className="flex items-center gap-2 text-xs font-semibold text-codify-secondary">
+        <Brain className="w-3.5 h-3.5 text-codify-design" />
         Conductor
       </div>
-      <p className="text-xs text-gray-400 leading-relaxed">
+      <p className="text-xs text-codify-muted leading-relaxed">
         The one model that decides which sub-agent runs and in what order. It is a loop rather than a
         ninth role, so it is configured here instead of on a role card; the sub-agents keep the
         models chosen on the cards below, and nothing on this card changes those.
@@ -396,7 +396,7 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
           onClick={saveChoice}
           disabled={saving || !verdict.ok || !dirty}
           title={verdict.ok ? undefined : verdict.text}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-accent text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
         >
           <Save className="w-3.5 h-3.5" />
           {saving ? "Saving..." : "Save"}
@@ -406,26 +406,26 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
             type="button"
             onClick={clearChoice}
             disabled={saving}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-surface hover:bg-codify-border border border-codify-border text-gray-200 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-surface hover:bg-codify-border border border-codify-border text-codify-secondary text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
           >
             <RotateCcw className="w-3.5 h-3.5" />
             Use the scribe&apos;s model
           </button>
         )}
         {msg && (
-          <span className={`text-xs ${msg.ok ? "text-green-400" : "text-red-400"}`}>{msg.text}</span>
+          <span className={`text-xs ${msg.ok ? "text-codify-success" : "text-codify-danger"}`}>{msg.text}</span>
         )}
       </div>
 
       <p
         className={`text-xs leading-relaxed ${
-          status.kind === "incomplete" ? "text-amber-300" : "text-gray-400"
+          status.kind === "incomplete" ? "text-codify-warning" : "text-codify-muted"
         }`}
       >
         {status.text}
       </p>
       {stale && (
-        <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg p-3">
+        <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             {stale.provider} no longer reports <span className="font-mono">{stale.model}</span> (
@@ -436,8 +436,8 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
       )}
 
       <div className="flex flex-col gap-2.5 border-t border-codify-border pt-2.5">
-        <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
-          <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+        <div className="flex items-center gap-2 text-xs font-semibold text-codify-secondary">
+          <ShieldCheck className="w-3.5 h-3.5 text-codify-warning" />
           Fallback
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -468,7 +468,7 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
             onClick={saveFallback}
             disabled={saving || !fallbackVerdict.ok || !dirtyFallback}
             title={fallbackVerdict.ok ? undefined : fallbackVerdict.text}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-surface hover:bg-codify-border border border-codify-border text-gray-200 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-surface hover:bg-codify-border border border-codify-border text-codify-secondary text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
           >
             <Save className="w-3.5 h-3.5" />
             {saving ? "Saving..." : "Save fallback"}
@@ -478,7 +478,7 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
               type="button"
               onClick={clearFallback}
               disabled={saving}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-surface hover:bg-codify-border border border-codify-border text-gray-200 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-surface hover:bg-codify-border border border-codify-border text-codify-secondary text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
             >
               <RotateCcw className="w-3.5 h-3.5" />
               No fallback
@@ -487,13 +487,13 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
         </div>
         <p
           className={`text-xs leading-relaxed ${
-            fallbackStatus.source === "none" ? "text-amber-300" : "text-gray-400"
+            fallbackStatus.source === "none" ? "text-codify-warning" : "text-codify-muted"
           }`}
         >
           {fallbackStatus.text}
         </p>
         {staleFallback && (
-          <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg p-3">
+          <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
             <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
             <span className="leading-relaxed">
               {staleFallback.provider} no longer reports{" "}
@@ -535,17 +535,17 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
             }}
           />
           <div className="flex flex-col gap-1.5">
-            <label className="flex items-center gap-2 text-xs text-gray-300 font-medium">
+            <label className="flex items-center gap-2 text-xs text-codify-secondary font-medium">
               <input
                 type="checkbox"
                 checked={drives === 1}
                 disabled={drives === null || drivesSaving}
                 onChange={(e) => saveDrives(e.target.checked)}
-                className="accent-blue-500"
+                className="accent-codify-accent"
               />
               The conductor drives an approved plan
             </label>
-            <p className="text-xs text-gray-400 leading-relaxed">
+            <p className="text-xs text-codify-muted leading-relaxed">
               Off, the engine walks the steps in its own fixed order and the conductor only plans.
               The escape hatch for a model not yet trusted with the order, and it needs no rebuild.
             </p>

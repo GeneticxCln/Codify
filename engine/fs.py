@@ -18,6 +18,30 @@ class PathEscapeError(Exception):
         self.path = path
 
 
+# The repository's own metadata. It is inside the workspace path-wise and
+# outside it in every sense that matters: `.git/config` can carry a credential
+# in a remote URL, and writing it is worse than reading it — `core.fsmonitor`
+# names a command git then runs on **every later status**, including the
+# librarian's, and the setting outlives the goal that wrote it. Nothing in the
+# engine reads or writes through here: git's own subprocesses own this
+# directory, so refusing all of it costs no capability.
+GIT_DIRNAME = ".git"
+
+
+class GitMetadataError(PathEscapeError):
+    """Same handling as an escape, different reason: the path is git's own.
+
+    A subclass on purpose. Every existing `except PathEscapeError` site is
+    already the right answer — `read_text_or_none` reports "nothing to read
+    here" rather than handing `.git/config` to a model, and `apply` propagates
+    so the fixer's step fails loudly instead of writing a hook.
+    """
+
+    def __init__(self, path: str):
+        Exception.__init__(self, f"path is inside the repository's git metadata: {path}")
+        self.path = path
+
+
 def looks_binary(raw: bytes) -> bool:
     """A NUL byte in the first few KB means "not text".
 
@@ -35,9 +59,17 @@ class FileSystemService:
     def resolve(self, rel: str) -> Path:
         if not rel or rel.startswith("/") or ".." in Path(rel).parts:
             raise PathEscapeError(rel)
+        # Anywhere in the path, not just at the root: a submodule or a linked
+        # worktree keeps its own `.git` a level or two down.
+        if GIT_DIRNAME in Path(rel).parts:
+            raise GitMetadataError(rel)
         target = (self.root / rel).resolve()
         if target != self.root and self.root not in target.parents:
             raise PathEscapeError(rel)
+        # A symlink inside the workspace points at git's metadata without ever
+        # spelling `.git`, so ask where the path *lands*, not only how it reads.
+        if GIT_DIRNAME in target.relative_to(self.root).parts:
+            raise GitMetadataError(rel)
         return target
 
     def read_text(self, rel: str) -> str:
@@ -104,8 +136,20 @@ class FileSystemService:
             raise PathEscapeError(str(target))
         real_parent.mkdir(parents=True, exist_ok=True)
         tmp = real_parent / (target.name + ".codify-tmp")
+        # `write_text` mints the temp file with the process default (0644 before
+        # umask), and `os.replace` carries *that* mode onto the target. An edit
+        # to a script that was executable came back non-executable — and since
+        # the fixer then commits the file, git recorded a mode change nobody
+        # asked for. Copy the mode the target already had; a file being created
+        # keeps the default, since there is no earlier mode to honour.
+        try:
+            mode: int | None = target.stat().st_mode if target.is_file() else None
+        except OSError:
+            mode = None
         try:
             tmp.write_text(text, encoding="utf-8")
+            if mode is not None:
+                os.chmod(tmp, mode)
             os.replace(tmp, real_parent / target.name)
         finally:
             if tmp.exists():

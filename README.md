@@ -6,7 +6,7 @@
   <img src="docs/demo.gif" alt="The Codify desktop window wearing the OLED CMatrix theme: green rain falling behind the whole app, the engine connected and Live, and a model discovered from the local provider in the composer" width="720">
 </p>
 
-<sub>The app connected to a local engine, wearing the <b>OLED CMatrix</b> theme — one of eight, each with its own animated backdrop. Click through to <a href="docs/demo.webm">docs/demo.webm</a> for the full-quality video.</sub>
+<sub>The app connected to a local engine, wearing the <b>OLED CMatrix</b> theme — one of nineteen, seventeen of them with an animated backdrop of their own and two deliberately flat. Click through to <a href="docs/demo.webm">docs/demo.webm</a> for the full-quality video.</sub>
 
 ---
 
@@ -35,11 +35,9 @@ Codify follows a strict two-tier architecture:
 │  │  intent · risk · prompt-injection → block before LLMs │  │
 │  └──────────────────────────┬────────────────────────────┘  │
 │  ┌──────────────────────────┴────────────────────────────┐  │
-│  │       Subagent Orchestrator (7 pipeline stages)       │  │
-│  │  Librarian ─► Design ─► Planner ─► [ Fixer ─►         │  │
-│  │   read only    direction  no tools    writer          │  │
-│  │                       Verifier ─► Critic ─► Scribe ]  │  │
-│  │                        runs         judge     record  │  │
+│  │     Conductor loop — picks from 7 role slots          │  │
+│  │  Librarian · Design · Planner · Fixer · Verifier ·   │  │
+│  │  Critic · Scribe  — via moves + a loaded skill       │  │
 │  └──────┬──────────────────────┬─────────────────────────┘  │
 │         ▼                      ▼                            │
 │  ┌──────────────┐       ┌──────────────┐     ┌───────────┐  │
@@ -52,6 +50,10 @@ Codify follows a strict two-tier architecture:
 │  SQLite (WAL Mode)       Local OS Keyring                   │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+The component list behind that diagram, the invariants the engine holds to, and the document set that
+indexes every specification in this repository are in
+[`docs/00`](docs/00-codify-architecture-overview.md). It is the one to read before changing either tier.
 
 ### Model discovery — no catalog in the build
 
@@ -91,6 +93,55 @@ It reports the reason for each role it changed *and* for each it skipped, so a g
 narrow result are distinguishable. A provider that failed to answer is treated as unknown rather than
 broken, so a network hiccup can never be reported as *"your model was retired"*.
 
+Settings is the **only** place a role's provider and model can change, and that is enforced at three
+layers rather than by convention: the API exposes exactly one mutator, the Tauri layer exactly one
+command, and every other surface — a timeline badge, a goal detail panel — renders a role's config as
+text it can deep-link from but not edit. See
+[`docs/02`](docs/02-settings-app-spec.md).
+
+### A browser in the app, that the AI can read
+
+Pages open **inside Codify** — a real embedded webview beside the transcript, never a separate OS
+window and never handed to the system browser. Loopback stays blocked (`localhost`, all of 127/8,
+`::1`, and the integer/hex/octal spellings of them), and every navigation is checked again by the
+webview itself, redirects included.
+
+The same tab is readable by the model. `read_page` returns the address, the title, the text and the
+page's links, so a turn can depend on a documentation page, an issue thread or an error screen instead
+of guessing — and follow a link off one. `navigate_page` can put a tab on an address the model picked,
+through **the same function your click goes through**, so a model-proposed URL meets the loopback guard
+rather than a copy of it. What comes back is quoted to the model as website text rather than as
+instructions — the reply channel carries strings and nothing else, and a page can only ever answer a
+question the shell actually asked it.
+
+The browser is one pane of the shell rather than a feature of it: conversations, tabs, the terminal and
+the browser pane are specified together in [`docs/09`](docs/09-workspace-shell.md), whose §10 is where a
+**turn** — as distinct from a goal — is defined, and why asking a question must never start a planner.
+
+### The AI remembers what happened here
+
+Every stage outcome, failure classification, retry and recovery this workspace has ever recorded is kept
+in the engine's own database — and until now it fed only the statistics screen. The memory model behind
+it — an audit against [vectorize-io/hindsight](https://github.com/vectorize-io/hindsight), what was
+adopted, what was rejected, and what is still open — is written up in
+[`docs/10-agent-memory.md`](docs/10-agent-memory.md). `recall` lets the
+conductor ask that history a question: *has this happened here before, and did we ever get past it?* It
+returns the specific past events — the failure, the retry, whether a later pass recovered — newest
+first, so a turn starts from what this repository has already taught the pipeline rather than from
+scratch every time.
+
+It is bounded and allow-listed, deliberately. Only named fields from named event types can be returned —
+stored diffs and librarian evidence never can, so third-party text cannot reach a model labelled as its
+own memory — the scan and the answer are capped, and the result arrives labelled *recorded outcomes, not
+evidence about the current code* with an empty result stated as an absence, not a proof it never
+happened. Recovery is the statistics screen's own definition, not a second opinion.
+
+`recall_threads` is the same memory one grain up: what the workspace's **earlier conversations** were
+about and how their runs ended. A new thread starts knowing which questions this workspace has already
+asked — thread names, the asks themselves, and how many runs completed, failed or were cancelled —
+instead of starting from nothing. Asks are labelled as what was asked for, never as proof it was done,
+and a query narrows to the threads that mention it while no query lists the most recent ones.
+
 ### "Why did this fail?" — diagnosis instead of guesswork
 
 When a goal fails, the chat's error block names the responsible role and offers a **Why did this fail?**
@@ -101,7 +152,7 @@ is never dressed up as *"your model was retired"*. Every finding that has a fix 
 screen that holds it: **Add a key for openai** opens Provider Keys, **Choose a current model** opens
 that role's card in Agent Roles.
 
-### The System-1 Gate + 7 Pipeline Roles
+### The System-1 Gate + 7 Agent Roles
 
 Before any LLM is called, every goal passes a **pre-flight gate**: [Laya](https://github.com/NandhaKishorM/laya),
 a non-generative decision engine that answers typed questions (`choice` / `score` / `noul`) about the
@@ -109,9 +160,15 @@ request in a single forward pass — intent, risk, and a **calibrated** prompt-i
 Injection at `≥ 0.85` fails the goal before the planner runs; softer signals only warn. See
 [`docs/05-laya-system-1-gate.md`](docs/05-laya-system-1-gate.md).
 
-Then Codify runs a sequential subagent pipeline over 7 stages. Together with the gate that is
-**8 roles** (`laya`, `librarian`, `design`, `planner`, `fixer`, `verifier`, `critic`, `scribe` — see
-`engine/models.py` `ROLES`). Independent steps of a `parallel` goal run concurrently, bounded by the
+Then a **conductor** decides which of the 7 remaining roles run, and in what order. It is a loop,
+not an eighth kind of agent: it works through *moves* (`recon`, `design`, `plan`, `write`, `verify`,
+`review`, `summarize`) and can load a *skill* that sequences them. The familiar
+librarian → design → planner → fixer → verifier → critic → scribe order is the built-in
+`ship-a-change` skill (`engine/builtin_skills/ship-a-change.md`), not a compiled path — a request
+that needs three of those seven gets three. Together with the gate that is **8 roles**
+(`laya`, `librarian`, `design`, `planner`, `fixer`, `verifier`, `critic`, `scribe` — see
+`engine/models.py` `ROLES`), and the slot count is fixed even though the order is not.
+Independent steps of a `parallel` goal run concurrently, bounded by the
 configurable parallel width (default 4, `parallel_width` setting, 1–16 — see `engine/executor.py`
 `DEFAULT_PARALLEL_WIDTH`), not by a slot count. Each role is a **different ability**, enforced by the
 engine rather than requested of the prompt:
@@ -161,7 +218,49 @@ output. See [`docs/04`](docs/04-engine-data-and-runtime.md) §4.0a.2.
 
 ## 🎨 Appearance
 
-Eight themes ship in the box, and choosing one is a **runtime swap, not a rebuild**: a theme is a map of CSS custom properties that `ui/src/appearance.ts` writes onto the document root, so the whole app repaints with no component changes and no restart.
+Nineteen themes ship in the box, and choosing one is a **runtime swap, not a rebuild**: a theme is a map of CSS custom properties that `ui/src/appearance.ts` writes onto the document root, so the whole app repaints with no component changes and no restart.
+
+One surface is not reachable that way, and it is the honest exception to *the whole app*. xterm.js paints its own canvas and takes concrete colour strings, so the terminal **reads the theme out of the document** and hands it over: `ui/src/terminalTheme.ts` maps all twenty of xterm's colours onto variables a theme publishes, and the pane re-reads them on every switch, so a terminal opened before you changed theme is not left behind. Before that, the terminal was the one grey-blue box in an OLED app that was otherwise black and phosphor.
+
+### Custom colours, on all nineteen
+
+Any theme can be recoloured without being forked. The picker in the Appearance
+pane offers each theme's **accent plus the two or three weather variables that
+theme's own backdrop actually reads** — labelled with what they draw, so
+Toxic Lab says *Bubble body* and *Bubble skin* rather than naming two custom
+properties. The physics are untouched: no backdrop's arithmetic changes, and a
+running canvas repaints within one frame because every painter resolves its
+colours through the document on the frame it draws. Liquid Mercury's waves climb
+the margins in deep crimson, Electric Arc's forks in ice blue, at the same 30
+FPS and the same one static frame under `prefers-reduced-motion`.
+
+A proposal is **clamped, not accepted blindly**: it keeps its hue and saturation
+and has its lightness moved until it clears 4.5:1 on all three surfaces for the
+accent, or 3:1 for a weather colour that paints a line rather than a letter. The
+swatch shows the colour that actually shipped, what you picked, and the ratio it
+scored — and a colour that cannot be made readable on a theme's surfaces is
+refused outright, because the alternative is an unreadable app. The surfaces
+themselves are not on offer. A request for this feature asked for every
+background pinned to `#000000`; seven of the nineteen are not black and their
+backgrounds are the theme, so the clamp does that work instead — and the
+terminal follows, because it already re-reads the document on every change.
+
+They also **leave as one file**, and mis-drags are **undoable**. Copy scheme puts
+every theme you have tinted into the clipboard, Download writes the same thing
+to `codify-colours-2026-09-28.json`, and Import takes either back — a file or a
+paste. The file names its themes and their labels, not just their ids, so it is
+readable by the person you send it to; a scheme that mentions a theme this build
+does not have is reported by name rather than quietly dropped; and the colours
+are stored as you chose them and guarded by **your** machine's contrast rule when
+they arrive, not pre-clamped against the surfaces of whoever sent the file.
+Re-importing your own export changes nothing.
+
+Undo sits beside the colour wells and names what it would take back, so a drag
+across a colour picker is **one** step rather than one per pixel of slider, and
+resets and imports are steps too. It is not persisted: it answers "I
+mis-dragged", which is a thing that happened in the last few seconds.
+
+
 
 | Theme | What it is |
 |---|---|
@@ -173,12 +272,23 @@ Eight themes ship in the box, and choosing one is a **runtime swap, not a rebuil
 | **Bioluminescent Abyss** | Spores rising in the left and right gutters, fading out before the middle. |
 | **Solar Flare** | A starfield and slow indigo-to-ultraviolet streams along the window's edges. |
 | **Monochrome ASCII Rain** | The same rain in hex bytes and grey — no component of its own, just different tokens. |
+| **Still** | No canvas at all. For long sessions, and for anyone who would rather have no weather than quiet weather. |
+| **Winter Snow** | A clear cold night, and snow falling through the whole window. No lights — just weather. |
+| **Festive Night** | Evergreen dark, gold and berry, and warm lights drifting up through the snow. |
+| **Solarized Flare** | A monochrome amber CRT. Solar wind runs the gutters, and a heat pulse crosses them while a run is in flight. |
+| **Cyber Organism** | Electric blue and cyan. Glowing nodes and branching tendrils in the margins, firing while a run is in flight. |
+| **Event Horizon** | Obsidian and violet. Orbital streams curve away at the margins, and beams ignite while a run is in flight. |
+| **Vector Wireframe** | Green or hot pink 1px line art. Rotating wireframe solids in the gutters, with a target reticle while a run is in flight. |
+| **Liquid Mercury** | Platinum, steel and titanium. Viscous metallic waves climb the margins and go turbulent under load. |
+| **Electric Arc** | Ink-blue and a lightning-white core. Arcs strike down both gutters, fork, and go out as fast as they came. |
+| **Toxic Lab** | A fume hood at 3am. Reagent-green bubbles climb the gutters, wobble, and burst; failure is the amber the hazard tape is. |
+| **Anon Fluid** | Green on black and no name on it. Data runs sideways through the gutters as a liquid column, and a run in flight shears it into blocks. |
 
 <p align="center">
-  <img src="docs/themes.gif" alt="All eight themes side by side, each running its own animated backdrop at the same time" width="1000">
+  <img src="docs/themes.gif" alt="All nineteen themes side by side, each running its own animated backdrop at the same time, except the two that ship none: Codify Dark and Still" width="1000">
 </p>
 
-<sub>All eight at once, each drawing its own backdrop. Every cell is a screenshot of the running app in that theme — the backdrops read their colours from the document root, so they cannot share one document, and this is eight captures stitched rather than one page with eight iframes.</sub>
+<sub>All nineteen at once, each drawing its own backdrop — except <b>Codify Dark</b> and <b>Still</b>, the two that ship no canvas at all and are the flat ones. Every cell is a screenshot of the running app in that theme: the backdrops read their colours from the document root, so they cannot share one document, and this is nineteen captures stitched rather than one page with nineteen iframes.</sub>
 
 Four constraints hold every one of them, and they are the reason this is a feature rather than a pile of canvas demos:
 
@@ -187,12 +297,28 @@ Four constraints hold every one of them, and they are the reason this is a featu
   A theme publishes a variable; a backdrop asks whether the active theme published it.
 - **One clock, one budget.** Every effect runs through `useAtmosphereCanvas`, which owns the canvas size
   cap, a 30 FPS accumulator (so a 144 Hz display still gets 30), and exactly **one static frame** when
-  the user has `prefers-reduced-motion` set. Opting out removes the animation, not its speed.
+  the user has `prefers-reduced-motion` set. Opting out removes the animation, not its speed. The same
+  live read is what makes recolouring free: a tint is a hex in a custom property, and the next frame
+  picks it up.
 - **Decoration is never under the words being read.** Backdrops are mounted once, by the shell, beneath
-  the chrome; the content surfaces stay opaque and each effect fades out before it reaches the
-  transcript. The Neon theme's sun sits low in the frame for exactly this reason.
-- **The status hues are not themed.** Five tones, five meanings, is a contract about what "failed" looks
-  like, and a theme does not get to renegotiate it.
+  the chrome; the content surfaces stay opaque, and the canvas itself is masked to fade out at its
+  edges (`.codify-atmosphere-canvas` in `ui/src/index.css`) so an effect dissolves before it reaches
+  the header or the sidebar rather than stopping against them on a hard line. Each painter also draws
+  its own internal fades — that is what makes an effect look like an effect — but neither of those can
+  fade the element, and an element that ends abruptly ends abruptly. The Neon theme's sun sits low in
+  the frame for the same reason.
+- **A theme may restate the status tones; it may not renegotiate them.** This is the one constraint that
+  has changed. The five tones used to be *unreachable* from a theme — Tailwind compiled their hexes at
+  build time — so a success pill in the OLED app was Tailwind green: the one saturated thing on a
+  black-and-phosphor screen, belonging to no palette the user had chosen. `THEME_TONES` in
+  `ui/src/appearance.ts` now lets each theme state all six tone variables — `accent`, `info`,
+  `success`, `warning`, `danger`, `neutral` — and two rules replace the old ban. **All six or none:**
+  `applyTheme` clears every managed name before applying the next theme, so a theme that stated three
+  would show the *previous* theme's other three, which is the exact failure clearing exists to
+  prevent. And **`danger` and `warning` stay on the warm arc**: a theme may restate failure in its own
+  palette, but it may not make it cyan, because a user who has learned that orange means "needs
+  attention" was owed that much. Both rules are tests, not comments — a grey gets no hue to be cold,
+  which is how Monochrome ASCII Rain expresses severity as brightness instead.
 
 ---
 
@@ -206,6 +332,11 @@ Four constraints hold every one of them, and they are the reason this is a featu
 6. **Key Storage**: API keys are never written to SQLite and never echoed back by the API. They go to the platform's OS keychain (`keyring` / Linux Secret Service / macOS Keychain / Windows Credential Manager) when one is usable, and otherwise to an owner-only `~/.codify/secrets.json` (`0600`, atomic writes) — because a machine without a keyring must still be able to store a key. The settings screen states which store is in force (`GET /settings/keys` → `storage`).
 7. **Commit Scope**: A step commits *only* the paths it wrote (`git commit -- <paths>`). The engine never runs a bare `git add -A`, so work you had staged or half-finished in the same tree is neither committed under Codify's message nor staged by it. A step that changed nothing (the proposal matched the file already) commits nothing and says so in the chat rather than claiming a change.
 8. **Pre-Flight Gate**: Every goal is triaged by Laya before the planner runs. A calibrated prompt-injection / sandbox-escape probability at or above `0.85` fails the goal with code `laya_blocked` — no plan steps, no provider calls, no file operations. The gate reports which engine decided (`sdk`, `llm-fallback`, or `skipped`) and is never allowed to be a silent failure: an unavailable gate logs that it was skipped and the pipeline proceeds.
+
+Each of these is specified with the reasoning behind it — the keyring and the owner-only fallback for a
+machine that has none, SSRF and the loopback guard, the boot token and why it outlives a single boot, the
+persistence layer, and the roadmap the settled defaults came out of — in
+[`docs/03`](docs/03-security-and-roadmap.md).
 
 ---
 
@@ -314,7 +445,9 @@ runs; a plain `python3 -m engine` is the only thing that ever opens `~/.codify`.
 Codify/
 ├── engine/                # FastAPI backend & orchestration engine
 │   ├── app.py             # FastAPI routes, WebSocket handler & lifespan
-│   ├── executor.py        # Gate + 6-stage pipeline execution & state transitions
+│   ├── executor.py        # Gate, step execution & state transitions
+│   ├── conductor.py       # the loop that picks the moves; loads skills
+│   ├── skills.py          # built-in + workspace recipes, loaded as data
 │   ├── laya.py            # Laya System-1 pre-flight gate (SDK + LLM fallback)
 │   ├── models.py          # Pydantic domain models & schemas
 │   ├── providers.py       # LLM provider implementations (Anthropic, OpenAI, Gemini, Ollama)
@@ -378,6 +511,16 @@ The suite is **hermetic by construction**: `tests/hermetic.py` points every test
 directory and disables the OS keychain for the process, so no test — including the ones that build a
 `Keychain()` exactly as the engine does — can read or write your real `~/.codify`. Two tests assert
 that guarantee, so removing the bootstrap fails the suite rather than silently rewriting a real store.
+
+Determinism is structural, not a matter of discipline: every process the engine, the benchmark harness
+or a script starts goes through one spawn guard that makes it die with the process that started it, and a
+test freezes that list, so a new spawn cannot appear unannounced. See
+[`docs/07`](docs/07-spawn-guard-and-deterministic-tests.md).
+
+Numbers live in a separate harness with an explicit rule about what one may claim — it answers *does this
+pipeline still do its job*, never *is the model good* — and it fails rather than scoring a repository it
+was not given, so no third-party source is committed here. See
+[`docs/08`](docs/08-benchmarks.md).
 
 ---
 

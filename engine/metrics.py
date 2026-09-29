@@ -360,7 +360,32 @@ def failure_breakdown(
     }
 
 
+def recovered_steps(events: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    """The ``(goal_id, step_id)`` pairs a retry got past.
+
+    The public half of [`_recovery`], so that a caller asking "was this ever
+    fixed?" gets the *same* answer the statistics screen shows. Pairing
+    events is not a thing to do twice: the whole argument for `_recovery` is
+    about order, and a second implementation that got the order subtly wrong
+    would not be obviously wrong — it would just disagree with a dashboard,
+    which is the least-argued-with kind of disagreement.
+
+    Added for the `recall` tool (`engine/recall.py`), which needs to mark
+    *which* of the steps it found were recovered rather than how many were —
+    the counts were never enough to answer that question.
+    """
+    _, recovered = _recovery_pairs(events)
+    return recovered
+
+
 def _recovery(events: list[dict[str, Any]]) -> tuple[int, int]:
+    counts = _recovery_pairs(events)
+    return len(counts[0]), len(counts[1])
+
+
+def _recovery_pairs(
+    events: list[dict[str, Any]],
+) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
     """(retries, retries the step then got past) — per (goal, step).
 
     A retry counts as recovered when a *later* `test_result` on the same step
@@ -393,4 +418,4 @@ def _recovery(events: list[dict[str, Any]]) -> tuple[int, int]:
                 recovered.add(key)
             elif kind == "step_status" and payload.get("status") == "COMPLETED":
                 recovered.add(key)
-    return len(retried), len(recovered)
+    return retried, recovered

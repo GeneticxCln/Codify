@@ -31,7 +31,13 @@ registerTsx();
 const {
   openBrowserWebview,
   navigateBrowserWebview,
+  focusBrowserWebview,
+  resizeBrowserWebviews,
   closeBrowserWebview,
+  openBrowserDevtools,
+  closeBrowserDevtools,
+  browserDevtoolsState,
+  browserDevtoolsAvailable,
   openTerminal,
   writeTerminal,
   resizeTerminal,
@@ -41,7 +47,25 @@ const { readRejection } = await import("../src/rejection.ts");
 
 /** Every command a pane can send, with arguments shaped like the real call. */
 const PANE_COMMANDS: Array<[string, () => Promise<unknown>]> = [
-  ["openBrowserWebview", () => openBrowserWebview("browser-1", "https://a.example")],
+  [
+    "openBrowserWebview",
+    () =>
+      openBrowserWebview("browser-1", "https://a.example", {
+        x: 0,
+        y: 0,
+        width: 800,
+        height: 600,
+      }),
+  ],
+  ["focusBrowserWebview", () => focusBrowserWebview("browser-1")],
+  [
+    "resizeBrowserWebviews",
+    () => resizeBrowserWebviews({ x: 0, y: 0, width: 800, height: 600 }),
+  ],
+  ["openBrowserDevtools", () => openBrowserDevtools("browser-1")],
+  ["closeBrowserDevtools", () => closeBrowserDevtools("browser-1")],
+  ["browserDevtoolsState", () => browserDevtoolsState("browser-1")],
+  ["browserDevtoolsAvailable", () => browserDevtoolsAvailable()],
   ["navigateBrowserWebview", () => navigateBrowserWebview("browser-1", "https://b.example")],
   ["closeBrowserWebview", () => closeBrowserWebview("browser-1")],
   ["openTerminal", () => openTerminal("w1", 80, 24)],

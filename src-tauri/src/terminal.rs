@@ -24,7 +24,7 @@
 //! [`crate::workspace_root_for`] — and is refused unless it exists and is
 //! absolute. The client supplies a workspace id, never a path.
 
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -33,11 +33,12 @@ use std::sync::{Arc, Mutex};
 
 /// What one open terminal holds. The three things a session needs and no two of
 /// which can substitute for each other: somewhere to write, somewhere to read
-/// from, and the child to kill.
+/// from, and the child itself — kept whole rather than as a bare signaller, so
+/// close can reap it and escalate past a SIGHUP the shell chose to ignore.
 pub struct Session {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
+    child: Box<dyn Child + Send + Sync>,
 }
 
 /// The terminal backend the shell hands around.
@@ -169,7 +170,7 @@ pub fn open(
                     .take_writer()
                     .map_err(|e| format!("no pty writer: {e}"))?,
                 master: pair.master,
-                killer: child.clone_killer(),
+                child,
             },
         );
 
@@ -254,25 +255,70 @@ pub fn resize(
 /// The kill is not optional. A terminal left running after its pane closes is a
 /// stray process holding the workspace directory — the same defect the engine's
 /// exit handler exists to prevent (`python3 -m engine` leaking a port and the
-/// DB). The session is removed first so a second close is a clean no-op, and the
-/// wait reaps the child rather than leaving a zombie.
+/// DB). The session is removed first so a second close is a clean no-op, and
+/// [`kill_and_reap`] collects the exit status rather than leaving a zombie.
 pub fn close(sessions: &Arc<Mutex<Terminals>>, id: &str) -> Result<(), String> {
-    let mut guard = sessions.lock().map_err(|_| "terminal state poisoned")?;
-    let Some(mut session) = guard.sessions.remove(id) else {
-        return Ok(());
+    // The reap happens outside the lock: kill_and_reap can block for up to a
+    // second against an unkillable shell, and a write or resize that arrived
+    // meanwhile should wait on that only if it really has to.
+    let session = {
+        let mut guard = sessions.lock().map_err(|_| "terminal state poisoned")?;
+        guard.sessions.remove(id)
     };
-    let _ = session.killer.kill();
+    if let Some(session) = session {
+        kill_and_reap(session.child);
+    }
     Ok(())
+}
+
+/// Kill the shell behind a session and collect its exit status.
+///
+/// [`portable_pty::ChildKiller::kill`] on the child stored in a [`Session`] is portable-pty's
+/// escalating kill for a `std::process::Child`: SIGHUP first, then a grace
+/// period whose polls reap a shell that honoured the signal, then a hard kill.
+/// A shell that *ignores* SIGHUP therefore still dies. The escalation is the
+/// whole reason the [`Session`] keeps the child instead of a signaller: a bare
+/// `clone_killer()` sends SIGHUP and nothing else, so a shell with SIGHUP set
+/// to SIG_IGN — a deliberately detached process, the exact disposition docs/09
+/// §5.4 keeps the engine from overriding — used to outlive its pane, and
+/// nothing ever waited on it.
+///
+/// The reap is bounded. Normally the kill's own grace poll has already
+/// collected the status and the first `try_wait` below sees it. A process that
+/// survives even the hard kill plus this window — stopped under a debugger,
+/// stuck in uninterruptible IO — is handed to a detached thread that waits for
+/// as long as it takes, so the entry is reaped eventually and close never
+/// hangs the window that asked for it.
+fn kill_and_reap(mut child: Box<dyn Child + Send + Sync>) {
+    // An error here is ESRCH — the shell is already gone — which is success,
+    // the same reading `SandboxService._signal_alone` gives a vanished pid.
+    let _ = child.kill();
+    for _ in 0..20 {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => return,
+        }
+    }
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 /// Close every terminal. Called when the app exits, so a quit does not leave a
 /// shell holding the workspace.
 pub fn close_all(sessions: &Arc<Mutex<Terminals>>) {
-    if let Ok(mut guard) = sessions.lock() {
-        for (_, session) in guard.sessions.drain() {
-            let mut s = session;
-            let _ = s.killer.kill();
-        }
+    let children: Vec<Box<dyn Child + Send + Sync>> = if let Ok(mut guard) = sessions.lock() {
+        guard
+            .sessions
+            .drain()
+            .map(|(_, session)| session.child)
+            .collect()
+    } else {
+        return;
+    };
+    for child in children {
+        kill_and_reap(child);
     }
 }
 
@@ -341,6 +387,81 @@ mod tests {
         assert_eq!(open_count(&sessions), 0);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn close_kills_a_shell_that_ignores_sighup_and_leaves_no_zombie() {
+        // The regression this pins: close used to keep only a bare signaller,
+        // whose kill is SIGHUP alone, so a shell with SIGHUP at SIG_IGN outlived
+        // its pane and nothing waited on it. Both halves are asserted: the
+        // process is gone (the escalation worked) and its /proc entry is gone
+        // (something reaped it — a zombie would still have one). Linux only,
+        // because the zombie check reads /proc.
+        use std::path::Path;
+        use std::time::{Duration, Instant};
+
+        let pair = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("python3");
+        cmd.arg("-c");
+        cmd.arg(
+            "import signal, time; signal.signal(signal.SIGHUP, signal.SIG_IGN); \
+             print('ready', flush=True); time.sleep(60)",
+        );
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        let pid = child.process_id().expect("a unix child has a pid");
+        drop(pair.slave);
+
+        // The handshake is what makes the test honest: `ready` is printed only
+        // once SIG_IGN is installed, so the SIGHUP that close sends is genuinely
+        // ignored rather than racing the shell's default disposition.
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = String::new();
+        let mut buf = [0u8; 64];
+        while !seen.contains("ready") {
+            assert!(Instant::now() < deadline, "the shell never signalled ready");
+            let n = reader.read(&mut buf).expect("pty read failed");
+            assert!(n > 0, "the pty closed before the shell signalled ready");
+            seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        let proc_entry = Path::new("/proc").join(pid.to_string());
+        assert!(
+            proc_entry.exists(),
+            "the shell should be alive before close"
+        );
+
+        let sessions: Arc<Mutex<Terminals>> = Arc::new(Mutex::new(Terminals::default()));
+        {
+            let mut guard = sessions.lock().unwrap();
+            guard.seq += 1;
+            let id = format!("term-{}", guard.seq);
+            guard.sessions.insert(
+                id.clone(),
+                Session {
+                    writer: pair.master.take_writer().unwrap(),
+                    master: pair.master,
+                    child,
+                },
+            );
+        }
+        close(&sessions, "term-1").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while proc_entry.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the SIGHUP-ignoring shell survived close, or was left a zombie"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn writing_to_a_terminal_that_is_not_open_is_an_error_not_a_no_op() {
         // A pane that silently accepted typing into a closed terminal would look
@@ -365,7 +486,7 @@ mod tests {
                     pixel_height: 0,
                 })
                 .unwrap();
-            let mut child = pair
+            let child = pair
                 .slave
                 .spawn_command(CommandBuilder::new(if cfg!(windows) {
                     "cmd.exe"
@@ -378,11 +499,14 @@ mod tests {
                 Session {
                     writer: pair.master.take_writer().unwrap(),
                     master: pair.master,
-                    killer: child.clone_killer(),
+                    child,
                 },
             );
-            let _ = child.kill();
         }
+        // `true` has exited on its own by now, so this close exercises the path
+        // where the shell is already gone: the kill reads ESRCH as success and
+        // the reap still collects the status it left behind.
+        std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(open_count(&sessions), 1);
         close(&sessions, "term-1").unwrap();
         assert_eq!(open_count(&sessions), 0);

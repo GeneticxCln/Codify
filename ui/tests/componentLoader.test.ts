@@ -26,7 +26,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import React from "react";
@@ -35,11 +35,26 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { registerTsx } from "./tsxLoader.ts";
 registerTsx();
 
+// The id the empty state's skip link and the composer both name. Imported rather
+// than written out, so a test that checks the link cannot pass by agreeing with a
+// second copy of the same typo.
+const { COMPOSER_ANCHOR_ID } = await import("../src/composerAnchor.ts");
+
 const { Badge } = await import("../src/components/ui/Badge.tsx");
 const { Button } = await import("../src/components/ui/Button.tsx");
 const { Field } = await import("../src/components/ui/Field.tsx");
 const { IconButton } = await import("../src/components/ui/IconButton.tsx");
 const { Logo } = await import("../src/components/ui/Logo.tsx");
+const { Wordmark } = await import("../src/components/ui/Wordmark.tsx");
+const { SnowFall } = await import("../src/components/ui/SnowFall.tsx");
+const { SolarWind } = await import("../src/components/ui/SolarWind.tsx");
+const { CyberOrganism } = await import("../src/components/ui/CyberOrganism.tsx");
+const { EventHorizon } = await import("../src/components/ui/EventHorizon.tsx");
+const { VectorWire } = await import("../src/components/ui/VectorWire.tsx");
+const { Nanofluid } = await import("../src/components/ui/Nanofluid.tsx");
+const { ElectricArc } = await import("../src/components/ui/ElectricArc.tsx");
+const { ToxicLab } = await import("../src/components/ui/ToxicLab.tsx");
+const { AnonFluid } = await import("../src/components/ui/AnonFluid.tsx");
 const { Panel } = await import("../src/components/ui/Panel.tsx");
 const { Toggle } = await import("../src/components/ui/Toggle.tsx");
 const { ChatTimeline } = await import("../src/components/ChatTimeline.tsx");
@@ -191,7 +206,12 @@ const PRIMITIVES: Record<
         React.createElement(Badge, { tone: "warning", children: "1 contract" })
       ),
     expect: /1 contract/,
-    markup: /class="[^"]*bg-amber-950\/40/,
+    // The tone names a theme variable, not a Tailwind hue. It used to be
+    // `bg-amber-950/40`, which is the whole defect: that class compiles to one
+    // amber forever, so a warning pill in the OLED app was the same orange it
+    // had always been. `ui/src/index.css` carries the class name and the
+    // variable, so the name here is what a theme gets to change.
+    markup: /class="[^"]*bg-codify-warning\/40[^"]*text-codify-warning/,
   },
   "Button.tsx": {
     render: () =>
@@ -250,15 +270,103 @@ const PRIMITIVES: Record<
         })
       ),
     expect: /Knowledge/,
-    markup: /aria-pressed="true"[^>]*class="[^"]*bg-cyan-600\/20/,
+    markup: /aria-pressed="true"[^>]*class="[^"]*bg-codify-knowledge\/20/,
   },
   "Logo.tsx": {
     render: () =>
       renderToStaticMarkup(React.createElement(Logo, { size: 24 })),
-    // An `<img alt="">` has no text content, so the tag-strip gives nothing —
-    // the a11y contract *is* the empty alt, asserted on markup below.
+    // The badge is an inline `<svg>` now, so the two halves of the old contract
+    // moved with it. Decorative: an `<img alt="">` said that with an empty alt,
+    // an SVG says it with `aria-hidden`. Rounded: the old mark carried
+    // `rounded-lg` on the `<img>`, which rounds the *element* — and the tile is
+    // a `<rect>` drawn to the full 24×24 box, so the rounding is the rect's own
+    // `rx`. A class on the `<svg>` would round nothing that is visible.
     expect: /^\s*$/,
-    markup: /alt=""[^>]*class="[^"]*rounded-lg/,
+    markup: /aria-hidden="true"[^>]*>[\s\S]*<rect[^>]*rx="6"/,
+  },
+  "SolarWind.tsx": {
+    render: () =>
+      renderToStaticMarkup(React.createElement(SolarWind, { animated: false })),
+    // aria-hidden for the same reason every other canvas here is: a decorative
+    // effect announced as a graphic tells a screen reader nothing it can use.
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[^>]*class="[^"]*pointer-events-none/,
+  },
+  "CyberOrganism.tsx": {
+    render: () =>
+      renderToStaticMarkup(React.createElement(CyberOrganism, { animated: false })),
+    // aria-hidden for the same reason every other canvas here is: a decorative
+    // effect announced as a graphic tells a screen reader nothing it can use.
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[^>]*class="[^"]*pointer-events-none/,
+  },
+  "EventHorizon.tsx": {
+    render: () =>
+      renderToStaticMarkup(React.createElement(EventHorizon, { animated: false })),
+    // aria-hidden for the same reason every other canvas here is: a decorative
+    // effect announced as a graphic tells a screen reader nothing it can use.
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[^>]*class="[^"]*pointer-events-none/,
+  },
+  "VectorWire.tsx": {
+    render: () =>
+      renderToStaticMarkup(React.createElement(VectorWire, { animated: false })),
+    // aria-hidden for the same reason every other canvas here is: a decorative
+    // effect announced as a graphic tells a screen reader nothing it can use.
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[^>]*class="[^"]*pointer-events-none/,
+  },
+  "Nanofluid.tsx": {
+    render: () =>
+      renderToStaticMarkup(React.createElement(Nanofluid, { animated: false })),
+    // aria-hidden for the same reason every other canvas here is: a decorative
+    // effect announced as a graphic tells a screen reader nothing it can use.
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[^>]*class="[^"]*pointer-events-none/,
+  },
+  "ElectricArc.tsx": {
+    render: () =>
+      renderToStaticMarkup(React.createElement(ElectricArc, { animated: false })),
+    // aria-hidden for the same reason every other canvas here is: a decorative
+    // effect announced as a graphic tells a screen reader nothing it can use.
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[^>]*class="[^"]*pointer-events-none/,
+  },
+  "ToxicLab.tsx": {
+    render: () =>
+      renderToStaticMarkup(React.createElement(ToxicLab, { animated: false })),
+    // aria-hidden for the same reason every other canvas here is: a decorative
+    // effect announced as a graphic tells a screen reader nothing it can use.
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[^>]*class="[^"]*pointer-events-none/,
+  },
+  "AnonFluid.tsx": {
+    render: () =>
+      renderToStaticMarkup(React.createElement(AnonFluid, { animated: false })),
+    // aria-hidden for the same reason every other canvas here is: a decorative
+    // effect announced as a graphic tells a screen reader nothing it can use.
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[^>]*class="[^"]*pointer-events-none/,
+  },
+  "SnowFall.tsx": {
+    render: () =>
+      renderToStaticMarkup(React.createElement(SnowFall, { animated: false })),
+    // aria-hidden for the same reason the rain is: a canvas of falling snow
+    // announced as a graphic, and a screen reader reading nothing useful off a
+    // canvas's pixels.
+    expect: /^\s*$/,
+    markup: /aria-hidden="true"[^>]*class="[^"]*pointer-events-none/,
+  },
+  "Wordmark.tsx": {
+    render: () => renderToStaticMarkup(React.createElement(Wordmark)),
+    // The name, once. The glyphs are painted twice — the fill and the sweep —
+    // so both copies carry `aria-hidden` and the container carries the label.
+    // Stripping the tags leaves the two text nodes behind, which is exactly why
+    // the two `aria-hidden` spans are the thing being asserted: without them a
+    // screen reader says "Codify" twice and the second one is a div.
+    expect: /Codify/,
+    markup:
+      /role="img"[^>]*aria-label="Codify"[\s\S]*aria-hidden="true"[^>]*codify-wordmark-fill[\s\S]*aria-hidden="true"[^>]*codify-wordmark-sweep/,
   },
   "MatrixRain.tsx": {
     render: () =>
@@ -360,7 +468,6 @@ const timeline = (messages: any[], pinned: Record<string, string> = {}): string 
       onSetGoalTrace: noop,
       onDeleteGoal: noop,
       onRetryStep: noop,
-      onQuickPrompt: noop,
       onOpenSettings: noop,
       onImportAudit: noop,
       onPinDesignContract: async () => {},
@@ -456,23 +563,116 @@ test("a workspace that already obeys the file is reported inside the transcript"
   assert.doesNotMatch(text(markup), /Pin as brand contract/);
 });
 
-test("an empty transcript invites a goal rather than rendering a void", () => {
+test("an empty transcript is the name, and one real action", () => {
   // The composer is not this component's — it lives above the timeline — so what
-  // the transcript owes an empty state is the question and something to click.
+  // the transcript owes an empty state is the app's name, and nothing that could
+  // have been the conversation instead.
+  //
+  // It used to owe a *question* and a paragraph: "What would you like to build
+  // or fix?", then "Select a project folder and your preferred model below.
+  // Codify will inspect your codebase, plan atomic steps, propose file diffs,
+  // and verify tests automatically." That described a pipeline to someone who
+  // had not typed anything yet, and an empty window that explains itself is a
+  // window asking to be read before it has been used. The negative assertion
+  // below is the point: the instruction is not allowed back.
+  //
+  // Four starter-prompt pills went next, and the reasoning is the same one a
+  // layer deeper. They were four sentences about work this codebase might
+  // plausibly be asked to do, offered to someone who had not yet asked for any of
+  // it; they turned the empty state into a menu, so the one thing worth reading
+  // had to compete with four rows of small type. The negative assertion is what
+  // keeps them out, because a suggestion list is exactly the kind of thing that
+  // comes back as a "little helpful nudge".
   const markup = timeline([]);
   assertClean(markup, "an empty transcript");
   const shown = text(markup);
-  assert.match(shown, /What would you like to build or fix\?/);
-  assert.match(markup, /<button/);
-  // Three starter prompts, each a real button.
-  assert.ok(
-    shown.includes("Find failing tests"),
-    `expected the starter prompts, got: ${shown.slice(0, 200)}`
+  assert.match(shown, /Codify/);
+  assert.doesNotMatch(
+    shown,
+    /What would you like to build or fix|inspect your codebase|plan atomic steps/,
+    "the empty transcript is explaining the pipeline again"
   );
+  assert.doesNotMatch(
+    shown,
+    /Add JWT authentication|Find failing tests|Refactor API error|Generate unit tests/,
+    "the starter prompts are back; the empty state is a menu again"
+  );
+  // Exactly one control, and it is the one real thing an empty transcript can
+  // do: open an audit report exported earlier. Counted rather than matched,
+  // because a new button is the failure this is watching for.
   const buttons = [...markup.matchAll(/<button\b/g)].length;
+  assert.equal(
+    buttons,
+    1,
+    `expected only the audit-import button, found ${buttons} buttons: ` +
+      [...markup.matchAll(/<button[\s\S]{0,200}?<\/button>/g)]
+        .map((m) => text(m[0]).slice(0, 60))
+        .join(" | ")
+  );
+  assert.match(shown, /Import audit report/);
+});
+
+test("the empty state offers a way back to the composer", () => {
+  // The empty transcript's one control is a file picker, which is a dead end for
+  // a keyboard user who tabbed into the middle of the window. The composer is
+  // auto-focused on mount, so they land on it the first time — but that is a
+  // one-shot, and nothing brings focus back after it. This is the control that
+  // does.
+  //
+  // A skip link is two halves that have to agree: the link's `href` and the
+  // element it names. Renaming one without the other produces a link that
+  // silently does nothing, which is why both ends read the same constant rather
+  // than a literal — and why this test checks the constant, not the string.
+  const markup = timeline([]);
+
+  const link = /<a[^>]*href="#([^"]+)"[^>]*>([^<]*)<\/a>/.exec(markup);
   assert.ok(
-    buttons >= 3,
-    `expected at least the three starter prompts, found ${buttons} buttons`
+    link,
+    "the empty transcript renders no skip link, so a keyboard user has one " +
+      "control and it opens a file dialog. Expected an <a href> naming the composer.",
+  );
+  assert.equal(
+    link[1],
+    COMPOSER_ANCHOR_ID,
+    `the skip link points at #${link[1]} but the composer is ` +
+      `#${COMPOSER_ANCHOR_ID}; a fragment link to an id nothing carries moves ` +
+      "focus nowhere and the control is a lie",
+  );
+  // Named, not "click here": a screen reader reads the text, not the target.
+  assert.match(
+    link[2],
+    /prompt/i,
+    `the skip link's text is ${JSON.stringify(link[2])}, which does not name ` +
+      "where it goes",
+  );
+  // Invisible until asked for. `sr-only` with `focus:not-sr-only` is the
+  // canonical form, and the empty state's whole argument is that the wordmark is
+  // the only thing on it.
+  const linkTag = link[0];
+  assert.match(linkTag, /sr-only/, "the skip link is visible when it should not be");
+  assert.match(
+    linkTag,
+    /focus:not-sr-only/,
+    "the skip link never becomes visible, so a sighted keyboard user cannot " +
+      "see where focus is",
+  );
+
+  // And the other end exists, in the component that owns the composer.
+  const bar = readFileSync(
+    new URL("../src/components/BottomCommandBar.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    bar,
+    /id=\{COMPOSER_ANCHOR_ID\}/,
+    "nothing in BottomCommandBar puts the composer's anchor id on anything, so " +
+      "the skip link has no target",
+  );
+  assert.match(
+    bar,
+    /import \{ COMPOSER_ANCHOR_ID \} from "\.\.\/composerAnchor"/,
+    "BottomCommandBar must read the id from the shared constant rather than " +
+      "writing it out, or the two ends can be renamed apart",
   );
 });
 

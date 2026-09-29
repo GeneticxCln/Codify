@@ -63,19 +63,49 @@
     },
     {
       "identifier": "allow-codify-browser-navigate",
-      "description": "Navigates an existing browser webview, through the same loopback guard as `open`.",
+      "description": "Navigates an existing browser page, through the same loopback guard as `open`.",
       "commands": { "allow": ["codify_browser_navigate"] }
+    },
+    {
+      "identifier": "allow-codify-browser-focus",
+      "description": "Shows one browser page and hides the others. Visibility is the stacking order for embedded pages; this grants the *main window* the switch, and grants a browser page nothing — it cannot even show itself.",
+      "commands": { "allow": ["codify_browser_focus"] }
+    },
+    {
+      "identifier": "allow-codify-browser-resize",
+      "description": "Resizes every browser page to the rectangle the UI measured. Geometry comes from the UI's own layout, never from a page.",
+      "commands": { "allow": ["codify_browser_resize"] }
     },
     {
       "identifier": "allow-codify-browser-close",
       "description": "Closes a browser webview by tab id.",
       "commands": { "allow": ["codify_browser_close"] }
+    },
+    {
+      "identifier": "allow-codify-browser-devtools-open",
+      "description": "Opens a browser page's DevTools inspector. A shell-side surface over the webview — it grants the page nothing; a browser page cannot even open its own inspector. Built with the devtools feature; the command is compiled out without it.",
+      "commands": { "allow": ["codify_browser_devtools_open"] }
+    },
+    {
+      "identifier": "allow-codify-browser-devtools-close",
+      "description": "Closes a browser page's DevTools inspector.",
+      "commands": { "allow": ["codify_browser_devtools_close"] }
+    },
+    {
+      "identifier": "allow-codify-browser-devtools-available",
+      "description": "Reports whether this build has a DevTools inspector at all. Compile-time metadata, so the UI asks the shell instead of hardcoding the build shape.",
+      "commands": { "allow": ["codify_browser_devtools_available"] }
+    },
+    {
+      "identifier": "allow-codify-browser-devtools-state",
+      "description": "Reports whether a browser page's DevTools inspector is open. Read-only, and the reason the pane's control can show the real state instead of guessing.",
+      "commands": { "allow": ["codify_browser_devtools_state"] }
     }
   ],
   "set": [
     {
       "identifier": "shell",
-      "description": "Every command this app defines, as fourteen named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser.rs fails the build's test leg if the two lists ever differ. Permissions are not where a window/webview is decided: this set is referenced only by capabilities/default.json, whose `windows` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.",
+      "description": "Every command this app defines, as twenty named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser.rs fails the build's test leg if the two lists ever differ. Permissions are not where a webview is decided: this set is referenced only by capabilities/default.json, whose `webviews` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.",
       "permissions": [
         "allow-codify-get-engine-info",
         "allow-codify-engine-status",
@@ -90,7 +120,13 @@
         "allow-codify-terminal-close",
         "allow-codify-browser-open",
         "allow-codify-browser-navigate",
-        "allow-codify-browser-close"
+        "allow-codify-browser-focus",
+        "allow-codify-browser-resize",
+        "allow-codify-browser-close",
+        "allow-codify-browser-devtools-open",
+        "allow-codify-browser-devtools-close",
+        "allow-codify-browser-devtools-available",
+        "allow-codify-browser-devtools-state"
       ]
     }
   ]

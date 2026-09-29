@@ -28,12 +28,12 @@ export const TestConnectionButton: React.FC<TestConnectionButtonProps> = ({ onTe
         type="button"
         onClick={handleClick}
         disabled={testing}
-        className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-raised hover:bg-codify-border text-gray-200 text-xs font-semibold rounded border border-codify-border transition-colors disabled:opacity-50"
+        className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-raised hover:bg-codify-border text-codify-secondary text-xs font-semibold rounded border border-codify-border transition-colors disabled:opacity-50"
       >
         {testing ? (
           <Loader2 className="w-3.5 h-3.5 animate-spin" />
         ) : (
-          <Play className="w-3.5 h-3.5 text-blue-400" />
+          <Play className="w-3.5 h-3.5 text-codify-info" />
         )}
         Test Connection
       </button>
@@ -41,7 +41,7 @@ export const TestConnectionButton: React.FC<TestConnectionButtonProps> = ({ onTe
       {result && (
         <div
           className={`flex items-center gap-1.5 text-xs font-medium ${
-            result.ok ? "text-green-400" : "text-red-400"
+            result.ok ? "text-codify-success" : "text-codify-danger"
           }`}
         >
           {result.ok ? (

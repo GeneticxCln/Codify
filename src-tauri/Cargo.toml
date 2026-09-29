@@ -16,12 +16,27 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `unstable` is the multi-webview feature: it is what lets the main window
+# host the browser's child webviews beside the UI's own (Window::add_child).
+# Everything the feature name warns about is the browser's point — the child
+# webviews are untrusted content, seated behind an empty capability set
+# (capabilities/browser.json) and the ACL manifest in permissions/shell.json.
+#
+# `devtools` keeps the inspector available in release builds; without it,
+# open_devtools compiles away and the UI hides its control (browser.rs's
+# devtools_available). Debug builds have it regardless.
+tauri = { version = "2", features = ["unstable", "devtools"] }
+
 # Single instance: the guard is claimed against the session bus on Linux, and the
 # second launch has to exit before this shell's `setup` spawns a rival engine.
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# There is no `open` crate here, and there is not meant to be one: it exists to
+# hand a URL to the OS's own browser, and every website Codify can open is a
+# tab in Codify. `browser.rs::the_only_escape_is_the_inspector_and_the_module_spawns_nothing`
+# fails the build if the crate or the hand-off comes back, and it says why in
+# the failure rather than in a comment nobody reads before `cargo add`.
 # Only what lib.rs names: `process` for the engine subprocess, `io-util` for the
 # stdout reader, `sync` for the state mutex, `time` to bound the login-shell PATH
 # lookup, and `signal` so a SIGTERM can end the app deliberately instead of by its
@@ -42,5 +57,40 @@ url = "2"
 # also reaped nowhere by hand: this is `kill`, and the liveness check is `kill 0`.
 libc = "0.2"
 
+# GTK, named directly, for one reason and it is worth stating: **on Linux,
+# Tauri builds every webview into the window's default `gtk::Box`**
+# (`tauri-runtime-wry`'s `WebviewKind::WindowChild => build_gtk(default_vbox())`),
+# and wry's box branch packs a child with `pack_start(webview, true, true, 0)`
+# — expand and fill — without ever reading the bounds it was handed. A `GtkBox`
+# lays its children out in a line, so a page in one cannot be *placed* inside a
+# pane: it takes a share of the window instead. That is what a user saw — the
+# page opening over half the app and then over all of it — and it is why the
+# browser pane's geometry was reported correctly by the UI and ignored by the
+# toolkit for as long as the pane has existed.
+#
+# The fix needs the one container that can overlap: the app's own webview into
+# a `gtk::Overlay` this crate owns, and each page into a `gtk::Fixed` inside
+# it. Tauri exposes no way to *create* a webview into a container of our
+# choosing (its builder has no `build_gtk`, its `Webview` no `gtk_widget`), so
+# the container work happens here, from `Window::default_vbox()`.
+#
+# Version and feature set are the runtime's own — `0.18` with `v3_24` — because
+# a second `gtk` node in the graph is a second set of types, and none of this
+# would typecheck against tauri's. Gated to exactly the platforms the code is:
+# every other target gets real child-webview bounds from wry and compiles none
+# of this.
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
+gtk = { version = "0.18", features = ["v3_24"] }
+
 [dev-dependencies]
 glob = "0.3"
+
+[features]
+default = ["devtools"]
+# Forwarding feature: `devtools` here means tauri's `devtools`. The crate's
+# own cfg gates and the test that pins the build's shape read THIS feature,
+# which silences the unexpected-cfg warning a foreign feature name provokes,
+# and keeps the two spellings from drifting. In `default` so every build —
+# test, debug, release — carries it; the pane's control is unconditional
+# because the feature is.
+devtools = ["tauri/devtools"]

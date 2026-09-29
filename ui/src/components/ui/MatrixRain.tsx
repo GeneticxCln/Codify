@@ -1,6 +1,13 @@
 import React, { useEffect, useRef } from "react";
 
 import { nextRate } from "../../hooks/useAtmosphereCanvas";
+import {
+  bindContextRecovery,
+  makeFrameBudget,
+  makeFrameGuard,
+  FRAMES_BEFORE_GIVING_UP,
+} from "../../canvasRecovery.ts";
+import { useMotionAllowed } from "../../motionPreference.ts";
 
 /**
  * The CMatrix rain: a lightweight 2D-canvas glyph shower for the OLED theme.
@@ -83,6 +90,11 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
   // every state change, and re-arming this one visibly restarts the shower.
   const activeRef = useRef(active);
   activeRef.current = active;
+  // The motion decision, subscribed at the component's top level (a hook call
+  // belongs here, not inside the effect below): user choice, shell verdict, or
+  // system preference. As a dependency it re-arms the loop when it flips —
+  // which is the point: a re-render alone would leave the loop running.
+  const storeReduced = useMotionAllowed();
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -90,11 +102,9 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const reduced =
-      animated ??
-      (typeof window !== "undefined" &&
-        typeof window.matchMedia === "function" &&
-        window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    // As in the shared hook: an explicit `animated` wins (a preview must
+    // animate to be a preview), otherwise `storeReduced`, computed above.
+    const reduced = animated ?? storeReduced;
 
     // The theme's own colours, read live so a settings change restyles an
     // already-running canvas on its next tick without a remount.
@@ -209,24 +219,89 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     // As in the shared hook: the frame count is untouched, only how much
     // simulated time each frame is worth.
     let rate = 1;
+
+    // A frame that throws throws again on the next one, thirty times a second,
+    // for as long as the window is open: the loop re-arms its own rAF on the
+    // first line, so nothing else here would ever stop it.
+    const guard = makeFrameGuard({
+      onGiveUp: (error) => {
+        console.error(
+          `[rain] the glyph shower failed on ${FRAMES_BEFORE_GIVING_UP} consecutive ` +
+            "frames; leaving it still. The window stays usable.",
+          error,
+        );
+        if (raf) cancelAnimationFrame(raf);
+        raf = 0;
+      },
+    });
+
+    // Whether this machine can afford the animation, judged by the frames the
+    // compositor actually delivers — the same rule and the same numbers as the
+    // shared hook, because a rule that lives in only one of the two loops is a
+    // rule the other one silently does not have (see `canvasRecovery.ts`).
+    const budget = makeFrameBudget({
+      targetMs: frameMs,
+      onTooSlow: (measuredMs) => {
+        console.warn(
+          `[rain] the compositor is delivering a frame every ${measuredMs.toFixed(0)}ms ` +
+            `against a ${frameMs.toFixed(0)}ms request, so the glyph shower is left still ` +
+            "rather than spending the window's frame budget on decoration. The window " +
+            "stays responsive and the rest of the UI is unaffected.",
+        );
+        if (raf) cancelAnimationFrame(raf);
+        raf = 0;
+      },
+    });
+
     const loop = (t: number): void => {
       raf = requestAnimationFrame(loop);
+      if (budget.observe(t) === "too-slow") return;
+      // A lost context turns every draw into a silent no-op, so the frame budget
+      // would be spent painting into a void. The rAF stays armed so the clock is
+      // where it was when the context returns.
+      if (recovery.isLost()) return;
       if (t - last < frameMs) return;
       const dt = last === 0 ? 0 : Math.min((t - last) / 1000, frameMs / 1000);
       last = t;
       rate = nextRate(rate, activeRef.current, dt);
-      step(rate);
-      drawFrame();
+      guard.run(() => {
+        step(rate);
+        drawFrame();
+      });
     };
+
+    // A driver reset, a lid closing, a monitor changing mode. Without this the
+    // rain is simply gone after one, with no error and no way back but a reload.
+    const recovery = bindContextRecovery(canvas, {
+      onRestored: () => {
+        // Back blank, possibly a different size, and the clock's last frame may
+        // be minutes old. Re-measure, repaint, and reset the accumulator so the
+        // first frame is a whole one rather than a leap.
+        layout();
+        last = 0;
+        drawFrame();
+      },
+    });
 
     let observer: ResizeObserver | undefined;
     layout();
     drawFrame(); // the static frame reduced motion gets
     if (!reduced) raf = requestAnimationFrame(loop);
 
+    // Suspended frames are not slow frames: a window nobody is looking at gets
+    // about one a second by design, and that must not be the measurement that
+    // decides the rain is unaffordable.
+    const onVisibility = (): void => {
+      budget.reset();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     if (typeof ResizeObserver !== "undefined") {
       observer = new ResizeObserver(() => {
         layout();
+        // Same reason the loop checks: a lost context makes the draw a no-op, and
+        // the restore handler is what will repaint when it comes back.
+        if (recovery.isLost()) return;
         drawFrame();
       });
       observer.observe(canvas);
@@ -235,8 +310,10 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     return () => {
       if (raf) cancelAnimationFrame(raf);
       observer?.disconnect();
+      recovery.detach();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [animated, fps, maxDimension]);
+  }, [animated, storeReduced, fps, maxDimension]);
 
   // aria-hidden: the effect is decoration beside real content, and a screen
   // reader reading half-width katakana is not a service to anyone.

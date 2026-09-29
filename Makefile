@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri run-engine run-engine-scratch check ci ci-python-floor hooks clean bench bench-smoke
+.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri run-engine run-engine-preview run-engine-scratch check ci ci-python-floor check-history hooks clean bench bench-smoke
 
 # mypy is a dev tool, installed like ruff (`pip install mypy` or `pip install -e ".[dev]"`);
 # when it is only in the project venv, fall back to that so `make check` works unactivated.
@@ -19,6 +19,8 @@ help:
 	@echo "Codify Development Commands:"
 	@echo "  make test         - Run full Python test suite (includes the concurrency/stream tests)"
 	@echo "  make test-streams - Run the concurrency/stream-isolation tests explicitly, by name"
+	@echo "  make smoke-embed  - Run the embedded-browser first-paint smoke test (needs a display)"
+	@echo "  make smoke-tabs   - Run the tab-restoration smoke test (needs a display; never touches ~/.codify)"
 	@echo "  make test-ui      - Run the React/TypeScript unit tests (node --test, needs Node 22.6+)"
 	@echo "  make typecheck-ui-tests - Type-check the React/TypeScript test suite (tsc over src+tests)"
 	@echo "  make lint         - Lint engine, tests and scripts with ruff (rules pinned in pyproject.toml)"
@@ -28,11 +30,13 @@ help:
 	@echo "  make check-tauri  - Cargo check Tauri Rust backend"
 	@echo "  make build-tauri  - Build Tauri desktop application"
 	@echo "  make run-engine   - Start Codify Python engine standalone"
+	@echo "  make run-engine-preview - Start the engine and print the token/port for the browser preview"
 	@echo "  make run-engine-scratch - Start an engine isolated under $(SCRATCH_HOME) (real ~/.codify untouched)"
 	@echo "  make bench-smoke  - Run the hermetic benchmark tier (no network, no models, no spend)"
 	@echo "  make bench        - Run the repo_scale tier against your configured models (spends tokens)"
 	@echo "  make check        - Run all verifications (ruff + UI tests + Python tests + stream tests + UI build + Tauri check)"
 	@echo "  make ci           - Run the whole CI gate locally: make check plus the declared $(PY_MIN) leg"
+	@echo "  make check-history - Check that every commit in HISTORY_RANGE builds, not just the tip (default: origin/\$$branch..HEAD)"
 	@echo "  make ci-python-floor - Run only the $(PY_MIN) leg (uv or a system python$(PY_MIN) covers it)"
 	@echo "  make hooks        - Install the git hooks (pre-commit: lint+typecheck, pre-push: 'make ci')"
 	@echo "  make clean        - Remove caches and build artifacts"
@@ -44,8 +48,15 @@ help:
 
 test: test-engine
 
+# Through `scripts/run_tests.py`, not `python3 -m unittest` directly, and the
+# wrapper is the point rather than the ceremony: it fails the leg when the test
+# process exits 0 without printing unittest's summary. A suite cut short by
+# `os._exit` — which is what `engine.app.main` used to do to its own test runner,
+# silently, halfway through — exits 0, so the exit code alone called it a pass
+# and half the engine suite went unrun while the gate stayed green. See the
+# module's docstring.
 test-engine:
-	python3 -m unittest discover -s tests -p "test_*.py" -v
+	python3 scripts/run_tests.py discover -s tests -p "test_*.py" -v
 
 # The discovery pattern above already collects these two modules (and the
 # stream_isolation.py helper they import). Running them again by name is
@@ -54,7 +65,32 @@ test-engine:
 # dropped from the import graph — exactly the slow drifts a pattern-based
 # inclusion cannot catch.
 test-streams:
-	python3 -m unittest tests.test_concurrent_streams tests.test_concurrent_streams_ws -v
+	python3 scripts/run_tests.py tests.test_concurrent_streams tests.test_concurrent_streams_ws -v
+
+# The embedded browser's smoke test, and the one claim no unit test can make:
+# that a real page paints a real first frame on a real Linux session. It seats
+# a page via CODEIFY_EMBED_SMOKE (the shell's own mode — it never starts an
+# engine), relays the boot diagnostics that say which first-paint fact holds
+# (session bus, WebKit sandbox, DMABUF, display backend), and passes only on
+# the paint line the page emits after two composited animation frames.
+# Deliberately a local target, not part of `check`: it needs a display, and
+# GitHub Actions is unavailable to this repository anyway (see check.yml).
+# SMOKE_EMBED_ARGS passes the script's own flags through, because a target
+# that cannot take `--rebuild` or `--url` is a target people work around:
+#   make smoke-embed SMOKE_EMBED_ARGS=--rebuild
+#   make smoke-embed SMOKE_EMBED_ARGS="--url https://example.org/ --timeout 60"
+smoke-embed:
+	python3 scripts/embed_smoke.py $(SMOKE_EMBED_ARGS)
+
+# The tab-restoration smoke: builds the shell, boots it with the engine, seeds
+# the strip, and proves the window rehydrated it. Needs a display and is
+# therefore not part of check/ci — same reasoning as smoke-embed. Never touches
+# the developer's ~/.codify: the whole run is under a throwaway CODIFY_HOME.
+#
+#   make smoke-tabs SMOKE_TABS_ARGS=--rebuild
+#   make smoke-tabs SMOKE_TABS_ARGS="--timeout 150"
+smoke-tabs:
+	python3 scripts/tabs_smoke.py $(SMOKE_TABS_ARGS)
 
 # `npm run build` typechecks and bundles; it does not *execute* the tests in
 # ui/tests/, which assert the client-side rules the chat depends on (goal stream
@@ -117,6 +153,16 @@ build-tauri:
 run-engine:
 	python3 -m engine
 
+# The browser preview's chore, done once: start the engine, wait for the boot
+# handshake, print the port and token as paste-ready localStorage assignments
+# (also written to /tmp/codify-engine-preview.env, 0600). Stays in the
+# foreground — the engine's parent watchdog makes this process its lease on
+# life — and Ctrl-C stops the engine. The logic and its tests live in
+# scripts/preview_engine.py and tests/test_preview_engine.py; this target is
+# the one-line wiring, like run-engine.
+run-engine-preview:
+	python3 scripts/preview_engine.py
+
 # Smoke tests, screenshots and verification runs: one home override moves both the
 # database and the secrets file, and disables the OS keychain for this process, so
 # this run cannot read or write the developer's real credentials.
@@ -155,6 +201,23 @@ ci-python-floor:
 ci: ci-python-floor check
 	@echo ""
 	@echo "CI gate passed locally: python $(PY_MIN) (provisioned) + host + ui + rust."
+
+# A different question, so a separate target and deliberately NOT part of `check` or
+# `ci`: does every commit in this range build, or only the one at the tip? `make ci`
+# cannot answer that, and the gap is not academic — this repository's UI tests read
+# source text as contract, so a commit that adds a component and a test asserting the
+# shell mounts it is red until the commit that mounts it. Split one change into "the
+# parts" and "the wiring" and you get a history that reads well and cannot be bisected.
+#
+# The range defaults to what a push would carry. A one-commit range is reported and
+# skipped rather than checked: it has no middle, and `make ci` already gates the tip.
+# That skip is what makes this affordable enough to run at pre-push at all — the case
+# where a red middle is actually possible is the case where the check is worth minutes.
+HISTORY_RANGE ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's|^|origin/|')..HEAD
+HISTORY_FLAGS ?=
+
+check-history:
+	python3 scripts/check_history.py --range '$(HISTORY_RANGE)' $(HISTORY_FLAGS)
 
 # Install the versioned hooks: pre-commit runs the cheap legs (lint, typecheck) so the
 # obvious failure lands in your hands rather than two minutes into a push, and pre-push

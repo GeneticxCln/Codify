@@ -15,10 +15,56 @@
   --codify-surface: #161b22;
   --codify-raised: #21262d;
   --codify-border: #30363d;
-  --codify-border-strong: #484f58;
+  /* The scrollbar thumb, and the border a control takes on hover and focus.
+     Lifted to clear WCAG 1.4.11's 3:1 against `raised` (the lightest surface a
+     control is ever filled with) — it was `#484f58`, which is 1.84:1 there and
+     1.28:1 in the themes whose `raised` is the light end. A thumb is the only
+     thing that says where you are in a long list, so it is one of the few
+     places in this app where a 1px bar has to be legible on its own. */
+  --codify-border-strong: #66707c;
   --codify-primary: #e6edf3;
   --codify-secondary: #c9d1d9;
-  --codify-muted: #8b949e;
+  --codify-muted: #979fa8;
+  /* The five status tones and the one interactive hue, declared here so a
+     theme has something to override. They were deliberately absent until a
+     badge in the OLED app turned out to be Tailwind green — a saturated hue
+     from no palette on screen, which is the thing §2 reserves saturation for
+     and then spends on a colour that belonged to another theme. `THEME_TONES`
+     in `ui/src/appearance.ts` says what each theme makes of them. */
+  /* The default theme's blue, one step lighter than §2's `#2f81f7`. It is the
+     *accent's* resting job that forced it: the send button and the selected row
+     of a list both put this hue on a `raised` fill, and `#2f81f7` reads 4.06:1
+     there — under AA for body text, which is what an 11px thread title is. The
+     lift is the smallest step that clears 4.5 (4.59:1 on `raised`, 5.71:1 on
+     `bg`), and it is the same hue, so `accent` and `info` still share a value
+     and still cannot drift apart. `info` moves with it on purpose: on this
+     theme they are one sentence, and holding `info` back would invert the
+     hierarchy — a "running" marker darker than the thing you press. */
+  --codify-accent: #418cf8;
+  --codify-info: #418cf8;
+  --codify-success: #3fb950;
+  --codify-warning: #d29922;
+  --codify-danger: #f85149;
+  --codify-neutral: #8b949e;
+  /* The two deliverable-mode accents, and the only colours here that are
+     **not** theme-managed.
+
+     A mode accent answers "which kind of deliverable is this?", and that is a
+     fact about the feature, not a mood: a Design card is the Design colour in
+     the amber CRT theme and in the obsidian one, and a theme that could restate
+     it would only be able to get it wrong. So these two live in `:root` and are
+     absent from `MANAGED_VARS`, which means `applyTheme` does not clear them —
+     adding them to the managed set would leave every theme that declines to
+     restate them with an *unset* variable, and an unset custom property makes
+     the declaration invalid at computed-value time, so the label would silently
+     inherit its parent's colour instead of falling back to the baked one.
+
+     They were `text-teal-300` and `text-violet-300` / `text-purple-400`: the two
+     documented hues, written as approximations of themselves. */
+  --codify-design: #db61a2;
+  --codify-knowledge: #39c5cf;
+  --codify-design-rgb: 219 97 162;
+  --codify-knowledge-rgb: 57 197 207;
 }
 
 body {
@@ -37,20 +83,83 @@ body {
   background: var(--codify-bg);
 }
 
+/* `border-strong`, not `border`. It was `border`, which meant the one part of
+   the scrollbar that carries information — the thumb — was painted with the
+   token DESIGN.md §2 reserves for dividers, and sat at 1.21:1 to 1.86:1 on the
+   track in all nineteen themes. `ui/tests/nonTextContrast.test.ts` reads this
+   rule rather than trusting its own table, because the table and this file
+   disagreed for exactly as long as both existed. */
 ::-webkit-scrollbar-thumb {
-  background: var(--codify-border);
+  background: var(--codify-border-strong);
   border-radius: 4px;
 }
 
+/* A filter, not a second colour, for the reason `TONES` gives in
+   `components/ui/Button.tsx`: hover and rest stay one palette, and a theme that
+   changes its own answer needs no rule here. `border-strong` cannot brighten
+   into a `border` that is *above* it — it is the top of that arc. */
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--codify-border-strong);
+  filter: brightness(1.3);
 }
 
 /* Firefox doesn't support the -webkit-* pseudo-elements; these standard
    properties give it the same thin, dark scrollbar. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--codify-border) var(--codify-bg);
+  scrollbar-color: var(--codify-border-strong) var(--codify-bg);
+}
+
+/* ── the mark ──────────────────────────────────────────────────────────────
+   The logo badge, drawn inline in `Logo.tsx` so it can read a theme variable at
+   all — the GIF it replaced could not, which is why the badge was the one thing
+   on screen that never matched its palette.
+
+   `--codify-success` is the mark's colour and the reason is not sentiment: it is
+   the one tone every theme publishes, and `ui/tests/contrast.test.ts` holds it
+   to 4.5:1 on every surface below, so a theme cannot tint the badge into
+   something unreadable. The tile is the app's own background so the badge reads
+   as a cut-out of the surface rather than a sticker on it.
+
+   The blink is a CSS keyframe rather than a GIF frame timing, which is what
+   brings `prefers-reduced-motion` to it for the first time: the GIF could not
+   read the query, so this component picked the static asset on its behalf. Now
+   the query reaches the animation directly and the caret simply stops. */
+.codify-logo-tile {
+  fill: var(--codify-surface);
+  stroke: var(--codify-border);
+  stroke-width: 1;
+}
+
+.codify-logo-mark {
+  stroke: var(--codify-success);
+}
+
+@keyframes codify-caret {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  50%,
+  95% {
+    opacity: 0.15;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.codify-logo-caret-live {
+  animation: codify-caret 1.6s steps(1, end) infinite;
+}
+
+/* The same answer the rest of the app gives: opt out and the motion is removed
+   rather than slowed. The component also refuses to add the class at all, so
+   this is the second line of defence rather than the only one. */
+@media (prefers-reduced-motion: reduce) {
+  .codify-logo-caret-live {
+    animation: none;
+    opacity: 1;
+  }
 }
 
 /* Clicking an audit badge on a goal card scrolls to the matching transcript
@@ -119,9 +228,13 @@ body {
    uses at the live variables — same specificity, later in source order, so
    they win without `!important` and the class names stay untouched everywhere.
 
-   Status and accent hues are deliberately absent: five tones with one meaning
-   is a contract (DESIGN.md §2), not a palette to re-skin. A theme paints
-   surfaces and text; it does not renegotiate what "failed" looks like.
+   Status and accent hues were deliberately absent from this layer, on the
+   grounds that five tones with one meaning is a contract (DESIGN.md §2) rather
+   than a palette to re-skin. They are here now because the badge layer did not
+   follow the theme and a success pill in the OLED app was Tailwind green: the
+   meanings are unchanged, but the *hue* is a theme's to choose, and
+   `ui/tests/appearance.test.ts` is what holds the line that matters — a theme
+   may restate failure, and it may not make failure cyan.
    The `/60`, `/50`, `/20` alphas recombine from the `-rgb` triplets
    `applyTheme` derives from each theme's own hexes. */
 .bg-codify-bg { background-color: rgb(var(--codify-bg-rgb) / 1); }
@@ -147,5 +260,367 @@ body {
 .border-codify-surface { border-color: rgb(var(--codify-surface-rgb) / 1); }
 .text-codify-primary { color: rgb(var(--codify-primary-rgb) / 1); }
 .text-codify-secondary { color: rgb(var(--codify-secondary-rgb) / 1); }
+.text-codify-bg { color: rgb(var(--codify-bg-rgb) / 1); }
+/* The one thing a placeholder needs: it is the app's own muted text at lower
+   weight, and it was `placeholder-gray-500` — a fixed hex in a themed app. */
+.placeholder-codify-muted::placeholder { color: rgb(var(--codify-muted-rgb) / 1); }
+.border-codify-bg\/30 { border-color: rgb(var(--codify-bg-rgb) / 0.3); }
 .text-codify-muted { color: rgb(var(--codify-muted-rgb) / 1); }
 .bg-codify-raised\/60 { background-color: rgb(var(--codify-raised-rgb) / 0.6); }
+
+/* The atmosphere canvas fades out at its edges instead of stopping at them.
+ *
+ * The canvas is `absolute inset-0` and the chrome is painted over it, so the
+ * effect is only ever seen through the gaps the panels leave — and at those
+ * boundaries it used to end on a hard line: a bright arc or a grid that ran
+ * under the header and stopped dead against it, with no alpha falloff at all.
+ * Each painter draws its own internal fades because that is what makes an
+ * effect look like an effect, but none of them can fade the *element*, and an
+ * element that ends abruptly ends abruptly no matter how soft its last frame
+ * was.
+ *
+ * One radial image rather than two linear ones with `mask-composite: intersect`,
+ * which is the other way to do this and the worse one here: the default
+ * composite is `add`, so an engine that did not understand the intersect would
+ * take the *union* of the two masks and hide the canvas almost entirely. A
+ * single image has no such failure mode, and the degradation when `mask-image`
+ * is unsupported at all is "no mask" — the old look, not an invisible backdrop.
+ *
+ * `-webkit-mask-image` is not redundancy. Tauri renders through the platform
+ * webview, so on macOS this is WebKit, which only took the unprefixed property
+ * in Safari 15.4; the desktop app supports older systems than that.
+ *
+ * `farthest-corner` rather than a fixed pixel radius, so the fade covers the
+ * short axis of a tall window and the long axis of a wide one without the value
+ * having to know the window. The centre stays fully opaque, so the visible
+ * middle — where the transcript actually is — is untouched. */
+.codify-atmosphere-canvas {
+  -webkit-mask-image: radial-gradient(
+    ellipse farthest-corner at 50% 50%,
+    #000 55%,
+    transparent 100%
+  );
+  mask-image: radial-gradient(
+    ellipse farthest-corner at 50% 50%,
+    #000 55%,
+    transparent 100%
+  );
+}
+
+/* The five status tones and the interactive hue, in the three shapes the badge
+   primitive asks for: the resting pill (`bg-…/40` on `text-…` and
+   `border-…`), and a bare `text-…` for a status icon shown without a pill. One
+   rule per shape per tone rather than per component, because a hand-written
+   `text-green-400` at a call site is exactly how a sixth shade of "success"
+   appears — the argument `components/ui/Badge.tsx` already makes. */
+.text-codify-accent { color: rgb(var(--codify-accent-rgb) / 1); }
+.text-codify-info { color: rgb(var(--codify-info-rgb) / 1); }
+.text-codify-success { color: rgb(var(--codify-success-rgb) / 1); }
+.text-codify-warning { color: rgb(var(--codify-warning-rgb) / 1); }
+.text-codify-danger { color: rgb(var(--codify-danger-rgb) / 1); }
+.text-codify-neutral { color: rgb(var(--codify-neutral-rgb) / 1); }
+.bg-codify-accent { background-color: rgb(var(--codify-accent-rgb) / 1); }
+.bg-codify-info { background-color: rgb(var(--codify-info-rgb) / 1); }
+.bg-codify-success { background-color: rgb(var(--codify-success-rgb) / 1); }
+.bg-codify-warning { background-color: rgb(var(--codify-warning-rgb) / 1); }
+.bg-codify-danger { background-color: rgb(var(--codify-danger-rgb) / 1); }
+.bg-codify-neutral { background-color: rgb(var(--codify-neutral-rgb) / 1); }
+.bg-codify-accent\/20 { background-color: rgb(var(--codify-accent-rgb) / 0.2); }
+.bg-codify-info\/60 { background-color: rgb(var(--codify-info-rgb) / 0.6); }
+.border-codify-accent\/30 { border-color: rgb(var(--codify-accent-rgb) / 0.3); }
+.bg-codify-accent\/40 { background-color: rgb(var(--codify-accent-rgb) / 0.4); }
+.bg-codify-info\/40 { background-color: rgb(var(--codify-info-rgb) / 0.4); }
+.bg-codify-success\/40 { background-color: rgb(var(--codify-success-rgb) / 0.4); }
+.bg-codify-warning\/40 { background-color: rgb(var(--codify-warning-rgb) / 0.4); }
+.bg-codify-danger\/40 { background-color: rgb(var(--codify-danger-rgb) / 0.4); }
+.bg-codify-neutral\/40 { background-color: rgb(var(--codify-neutral-rgb) / 0.4); }
+.border-codify-accent { border-color: rgb(var(--codify-accent-rgb) / 1); }
+.border-codify-info { border-color: rgb(var(--codify-info-rgb) / 1); }
+.border-codify-success { border-color: rgb(var(--codify-success-rgb) / 1); }
+.border-codify-warning { border-color: rgb(var(--codify-warning-rgb) / 1); }
+.border-codify-danger { border-color: rgb(var(--codify-danger-rgb) / 1); }
+.border-codify-neutral { border-color: rgb(var(--codify-neutral-rgb) / 1); }
+
+/* ── variant utilities ───────────────────────────────────────────────────────
+   **The layer above could not reach a single hover, focus or active colour,
+   and it took someone clicking into the prompt to find out.** The composer's
+   focus ring is `focus-within:border-codify-accent`, and it drew Tailwind's
+   baked `#2f81f7` — the *default theme's* accent at the time, since lifted for
+   the reason the token's own comment gives — in all nine themes, on an
+   app that had been carefully themed everywhere else. The ring was measured at
+   `rgb(47, 129, 247)` while the theme's accent was `rgb(0, 230, 118)`.
+
+   Two things had to be dealt with, and both were checked rather than assumed:
+
+   1. **Specificity.** Tailwind compiles the variant to
+      `.focus-within\:border-codify-accent:focus-within` — one class and one
+      pseudo-class. The rule in the layer above is `.border-codify-accent`: one
+      class, no pseudo-class. A base rule cannot out-specify a variant, so
+      `border-codify-accent` being correct proved nothing about
+      `focus-within:border-codify-accent`.
+
+   2. **Source order does not favour this file.** The layer's own argument is
+      "same specificity, later in source order", and it is not true here: in the
+      dev server *and* in `make build-ui`'s output, Tailwind's baked rule for
+      `focus-within:border-codify-accent` lands *after* these. (Checked in the
+      built stylesheet: the baked rule is at a higher offset than the layer's.
+      There are no cascade layers in the output, so "unlayered beats layered" is
+      not the explanation either.) The layer above wins its base classes
+      regardless, but a rule that depends on winning a tie it does not win is not
+      a rule worth keeping.
+
+   Hence the class repeated once below: one class of specificity more than
+   Tailwind gives itself, which wins by being more specific rather than by being
+   later, and so holds in the dev server and the build alike. It reads as a typo,
+   which is why this paragraph exists.
+
+   `ui/tests/toneUtilities.test.ts` fails if the source asks for a variant the
+   layer does not carry — the check the plain layer never had.
+
+   A variant that only *filters* needs nothing here. `hover:brightness-110` on
+   the send button derives from whatever the theme published, so it is correct
+   in every theme with no rule at all; that is why the button tones use it
+   rather than naming a second colour. */
+.focus-within\:border-codify-accent.focus-within\:border-codify-accent:focus-within { border-color: rgb(var(--codify-accent-rgb) / 1); }
+.focus\:border-codify-accent.focus\:border-codify-accent:focus { border-color: rgb(var(--codify-accent-rgb) / 1); }
+.group:hover .group-hover\:text-codify-accent.group-hover\:text-codify-accent { color: rgb(var(--codify-accent-rgb) / 1); }
+.hover\:bg-codify-border.hover\:bg-codify-border:hover { background-color: rgb(var(--codify-border-rgb) / 1); }
+.hover\:bg-codify-info\/60.hover\:bg-codify-info\/60:hover { background-color: rgb(var(--codify-info-rgb) / 0.60); }
+.hover\:bg-codify-raised.hover\:bg-codify-raised:hover { background-color: rgb(var(--codify-raised-rgb) / 1); }
+.hover\:bg-codify-raised\/60.hover\:bg-codify-raised\/60:hover { background-color: rgb(var(--codify-raised-rgb) / 0.60); }
+.hover\:bg-codify-surface.hover\:bg-codify-surface:hover { background-color: rgb(var(--codify-surface-rgb) / 1); }
+.hover\:border-codify-accent.hover\:border-codify-accent:hover { border-color: rgb(var(--codify-accent-rgb) / 1); }
+.hover\:border-codify-border-strong.hover\:border-codify-border-strong:hover { border-color: rgb(var(--codify-border-strong-rgb) / 1); }
+.hover\:text-codify-accent.hover\:text-codify-accent:hover { color: rgb(var(--codify-accent-rgb) / 1); }
+.hover\:text-codify-primary.hover\:text-codify-primary:hover { color: rgb(var(--codify-primary-rgb) / 1); }
+.hover\:text-codify-secondary.hover\:text-codify-secondary:hover { color: rgb(var(--codify-secondary-rgb) / 1); }
+
+/* ── the settings, stats and audit panels ───────────────────────────────────
+   Everything below arrived with the migration that took those panels off
+   Tailwind's default palette. They were the last large surface in the app where
+   a colour was chosen by typing `gray-400` or `bg-blue-600`, which is a colour
+   that looks right in Codify Dark and in the other fifteen themes is a saturated
+   blue from a palette the app does not use — §2 reserves saturation for status,
+   and then spends it on a button that was simply the primary action.
+
+   The collapse is visible in the greys: six steps of `gray-100…600` became the
+   three weights DESIGN.md §2 allows, because a fourth thing needing emphasis is
+   bigger or bolder rather than a new grey. That is a deliberate small
+   *brightening* of the metadata text (`gray-500` was #6b7280, `--codify-muted` is
+   #8b949e) and it is the cost of not having six greys.
+
+   Generated rather than written, because 47 hand-typed `rgb(var(…))` rules is
+   47 chances to typo a variable name into a rule that silently paints nothing.
+   `ui/tests/toneUtilities.test.ts` is the check that keeps this block honest: it
+   reads the class names out of the source and fails on any of them that is
+   missing from here, which is the failure mode this table has had twice. */
+.border-codify-warning\/70 { border-color: rgb(var(--codify-warning-rgb) / 0.70); }
+.text-codify-success\/90 { color: rgb(var(--codify-success-rgb) / 0.90); }
+.text-codify-warning\/90 { color: rgb(var(--codify-warning-rgb) / 0.90); }
+.text-codify-danger\/90 { color: rgb(var(--codify-danger-rgb) / 0.90); }
+.bg-codify-warning\/20 { background-color: rgb(var(--codify-warning-rgb) / 0.20); }
+.border-codify-warning\/60 { border-color: rgb(var(--codify-warning-rgb) / 0.60); }
+.bg-codify-info\/15 { background-color: rgb(var(--codify-info-rgb) / 0.15); }
+.border-codify-info\/60 { border-color: rgb(var(--codify-info-rgb) / 0.60); }
+.hover\:bg-codify-info\/20.hover\:bg-codify-info\/20:hover { background-color: rgb(var(--codify-info-rgb) / 0.20); }
+.text-codify-knowledge { color: rgb(var(--codify-knowledge-rgb) / 1); }
+.border-codify-success\/30 { border-color: rgb(var(--codify-success-rgb) / 0.30); }
+.bg-codify-success\/10 { background-color: rgb(var(--codify-success-rgb) / 0.10); }
+.border-codify-danger\/30 { border-color: rgb(var(--codify-danger-rgb) / 0.30); }
+.bg-codify-danger\/10 { background-color: rgb(var(--codify-danger-rgb) / 0.10); }
+.bg-codify-neutral\/10 { background-color: rgb(var(--codify-neutral-rgb) / 0.10); }
+.border-codify-info\/30 { border-color: rgb(var(--codify-info-rgb) / 0.30); }
+.bg-codify-info\/10 { background-color: rgb(var(--codify-info-rgb) / 0.10); }
+.border-codify-warning\/30 { border-color: rgb(var(--codify-warning-rgb) / 0.30); }
+.bg-codify-warning\/10 { background-color: rgb(var(--codify-warning-rgb) / 0.10); }
+.text-codify-design { color: rgb(var(--codify-design-rgb) / 1); }
+.bg-codify-design\/15 { background-color: rgb(var(--codify-design-rgb) / 0.15); }
+.text-codify-danger\/80 { color: rgb(var(--codify-danger-rgb) / 0.80); }
+.bg-codify-knowledge\/15 { background-color: rgb(var(--codify-knowledge-rgb) / 0.15); }
+.text-codify-warning\/80 { color: rgb(var(--codify-warning-rgb) / 0.80); }
+.bg-codify-danger\/15 { background-color: rgb(var(--codify-danger-rgb) / 0.15); }
+.border-codify-danger\/20 { border-color: rgb(var(--codify-danger-rgb) / 0.20); }
+.bg-codify-danger\/5 { background-color: rgb(var(--codify-danger-rgb) / 0.05); }
+.bg-codify-warning\/15 { background-color: rgb(var(--codify-warning-rgb) / 0.15); }
+.bg-codify-warning\/5 { background-color: rgb(var(--codify-warning-rgb) / 0.05); }
+.bg-codify-info\/20 { background-color: rgb(var(--codify-info-rgb) / 0.20); }
+.bg-codify-design\/20 { background-color: rgb(var(--codify-design-rgb) / 0.20); }
+.border-codify-design\/60 { border-color: rgb(var(--codify-design-rgb) / 0.60); }
+.text-codify-knowledge\/90 { color: rgb(var(--codify-knowledge-rgb) / 0.90); }
+.text-codify-info\/90 { color: rgb(var(--codify-info-rgb) / 0.90); }
+.bg-codify-success\/20 { background-color: rgb(var(--codify-success-rgb) / 0.20); }
+.border-codify-success\/60 { border-color: rgb(var(--codify-success-rgb) / 0.60); }
+.bg-codify-success\/80 { background-color: rgb(var(--codify-success-rgb) / 0.80); }
+.bg-codify-danger\/20 { background-color: rgb(var(--codify-danger-rgb) / 0.20); }
+.border-codify-danger\/60 { border-color: rgb(var(--codify-danger-rgb) / 0.60); }
+.bg-codify-neutral\/60 { background-color: rgb(var(--codify-neutral-rgb) / 0.60); }
+.bg-codify-warning\/80 { background-color: rgb(var(--codify-warning-rgb) / 0.80); }
+.bg-codify-success\/70 { background-color: rgb(var(--codify-success-rgb) / 0.70); }
+.hover\:text-codify-info.hover\:text-codify-info:hover { color: rgb(var(--codify-info-rgb) / 1); }
+.hover\:border-codify-info\/40.hover\:border-codify-info\/40:hover { border-color: rgb(var(--codify-info-rgb) / 0.40); }
+.hover\:text-codify-danger.hover\:text-codify-danger:hover { color: rgb(var(--codify-danger-rgb) / 1); }
+.hover\:border-codify-danger\/40.hover\:border-codify-danger\/40:hover { border-color: rgb(var(--codify-danger-rgb) / 0.40); }
+.text-codify-info\/80 { color: rgb(var(--codify-info-rgb) / 0.80); }
+
+/* ── the wordmark ────────────────────────────────────────────────────────────
+   The centre of the empty transcript: the app's name, in its own letters, big
+   enough to be the thing you look at rather than a paragraph telling you what
+   the app will do. It replaced a heading and a sentence of instructions, and
+   the instruction is the part that was wrong — an empty window that explains
+   itself is a window asking to be read before it has been used.
+
+   **Two layers, not one.** The fill is a static gradient from the theme's
+   muted through its primary to its accent; the sweep is the same glyphs filled
+   with a narrow bright band and `background-clip: text`, so only the band
+   paints. Composing them this way keeps the resting state *still* — a single
+   animated gradient would have the letters' own colour drifting on a loop,
+   which reads as "the theme is cycling", not as "something passed over the
+   word".
+
+   **It matches a theme by reading it, not by branching on it.** Every colour
+   is an `rgb(var(--codify-*-rgb) / …)`, so the same rules render phosphor green
+   under the OLED CMatrix theme, magenta under Cyberpunk Neon and flat white on
+   the ASCII one, with no `switch` on the theme id anywhere. The per-theme
+   *weather* is already behind it: the rain, grid, neural web, HUD sweep,
+   spores and flare are mounted once in the shell, and this sits in front of
+   them.
+
+   DESIGN.md §7 exempts this as brand, on the same grounds as `logo.gif` — it
+   is neither state nor feedback, it is the name. It honours
+   `prefers-reduced-motion` by removing the animation rather than slowing it:
+   the band is parked off the glyphs, so a user who opted out gets the gradient
+   wordmark and nothing else. */
+.codify-wordmark {
+  position: relative;
+  display: inline-block;
+  /* 200, not 800. The component's own docstring calls this "thin by design"
+     and the weight was 800, so the sentence and the stylesheet disagreed for as
+     long as both existed. Thin is also the right answer to what the mark sits
+     behind: it fills the middle of an empty window, over whatever weather the
+     active theme is drawing, and an extrabold logotype at 7.5rem reads as a
+     slab laid over the rain rather than as type set in it. `ui/tests/
+     wordmark.test.ts` holds the weight, so raising it is a decision with a
+     test to argue with rather than an edit that happens. */
+  font-weight: 200;
+  letter-spacing: 0.16em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+/* The gradient lives on the FILL, not the container: `background-clip: text`
+   paints the element that owns the background, so a gradient on a wrapper would
+   fill the wrapper's box and the glyphs would come out solid. */
+.codify-wordmark-fill {
+  /* 100%, not the sweep's 220%: the fill is the *resting* state and it is
+     spread across the whole word. Oversizing this layer parks the visible
+     window on the gradient's tail, which is how the first version of this
+     rendered a blue "COD" and a grey "IFY" — the word looked half-disabled
+     because only the end of the ramp was being shown. The oversize belongs to
+     the band, which needs somewhere off-glyph to travel to.
+     The ramp has no faded ends for the same reason: a wordmark at half opacity
+     in one corner is a rendering bug wearing a gradient's clothes. */
+  background-image: linear-gradient(
+    100deg,
+    rgb(var(--codify-primary-rgb) / 0.72) 0%,
+    rgb(var(--codify-primary-rgb) / 1) 34%,
+    rgb(var(--codify-accent-rgb) / 1) 50%,
+    rgb(var(--codify-primary-rgb) / 1) 66%,
+    rgb(var(--codify-primary-rgb) / 0.72) 100%
+  );
+  background-size: 100% 100%;
+  background-position: 0 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.codify-wordmark-fill,
+.codify-wordmark-sweep {
+  display: block;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.codify-wordmark-sweep {
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(
+    100deg,
+    transparent 0%,
+    transparent 42%,
+    rgb(var(--codify-primary-rgb) / 0.95) 50%,
+    transparent 58%,
+    transparent 100%
+  );
+  /* 220% so the band has empty gradient to sit in on both sides of the glyphs:
+     at 100% it is off the right edge, and at -40% off the left, so the loop
+     never shows a band half-applied. */
+  background-size: 220% 100%;
+  background-position: 100% 0;
+  animation: codify-wordmark-sweep 9s linear infinite;
+  pointer-events: none;
+}
+@keyframes codify-wordmark-sweep {
+  0% { background-position: 100% 0; }
+  55% { background-position: -40% 0; }
+  100% { background-position: 100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .codify-wordmark-sweep {
+    animation: none;
+    background-position: 100% 0;
+  }
+}
+
+/* ── the chat surfaces and the remaining panels ─────────────────────────────
+   The second half of the migration that took every hardcoded colour out of the
+   UI: the transcript, the command bar, the failure, trace and deliverable
+   panels, the diff viewer, the sidebar and the tab bar. Same mapping, same three
+   exceptions, and `ui/tests/hardcodedPalette.test.ts` now holds the whole of
+   `ui/src` at zero rather than a chosen subset.
+
+   The compound variant below is the one this block adds that the block above it
+   could not express. `disabled:hover:bg-codify-design/20` compiles to *two*
+   pseudo-classes, so a `.hover\:…` rule cannot reach it and a rule carrying only
+   the class would lose to Tailwind's baked value on specificity. The selector
+   therefore repeats the class once per pseudo-class — three classes deep, which
+   is what it takes.
+
+   The two `focus:` rules below are the empty state's skip link. It is a link that
+   is invisible until a keyboard lands on it, and everything that makes it
+   legible once it is — the raised background, the primary text — is a focus
+   variant of a themed colour, so the same doubling is what keeps it themed
+   rather than painting the first colour the default theme happened to bake.
+
+   Generated, for the reason the block above gives. */
+.bg-codify-accent\/70.bg-codify-accent\/70 { background-color: rgb(var(--codify-accent-rgb) / 0.70); }
+.bg-codify-design\/10.bg-codify-design\/10 { background-color: rgb(var(--codify-design-rgb) / 0.10); }
+.bg-codify-info\/25.bg-codify-info\/25 { background-color: rgb(var(--codify-info-rgb) / 0.25); }
+.bg-codify-knowledge\/20.bg-codify-knowledge\/20 { background-color: rgb(var(--codify-knowledge-rgb) / 0.20); }
+.bg-codify-success\/15.bg-codify-success\/15 { background-color: rgb(var(--codify-success-rgb) / 0.15); }
+.bg-codify-warning\/30.bg-codify-warning\/30 { background-color: rgb(var(--codify-warning-rgb) / 0.30); }
+.border-codify-accent\/50.border-codify-accent\/50 { border-color: rgb(var(--codify-accent-rgb) / 0.50); }
+.border-codify-design\/30.border-codify-design\/30 { border-color: rgb(var(--codify-design-rgb) / 0.30); }
+.border-codify-design\/50.border-codify-design\/50 { border-color: rgb(var(--codify-design-rgb) / 0.50); }
+.border-codify-info\/50.border-codify-info\/50 { border-color: rgb(var(--codify-info-rgb) / 0.50); }
+.border-codify-knowledge\/50.border-codify-knowledge\/50 { border-color: rgb(var(--codify-knowledge-rgb) / 0.50); }
+.border-codify-knowledge\/60.border-codify-knowledge\/60 { border-color: rgb(var(--codify-knowledge-rgb) / 0.60); }
+.border-codify-warning\/40.border-codify-warning\/40 { border-color: rgb(var(--codify-warning-rgb) / 0.40); }
+.border-codify-warning\/50.border-codify-warning\/50 { border-color: rgb(var(--codify-warning-rgb) / 0.50); }
+.disabled\:hover\:bg-codify-design\/20.disabled\:hover\:bg-codify-design\/20:disabled:hover { background-color: rgb(var(--codify-design-rgb) / 0.20); }
+.focus\:bg-codify-raised.focus\:bg-codify-raised:focus { background-color: rgb(var(--codify-raised-rgb) / 1); }
+.focus\:border-codify-design.focus\:border-codify-design:focus { border-color: rgb(var(--codify-design-rgb) / 1); }
+.focus\:border-codify-info.focus\:border-codify-info:focus { border-color: rgb(var(--codify-info-rgb) / 1); }
+.focus\:border-codify-info\/60.focus\:border-codify-info\/60:focus { border-color: rgb(var(--codify-info-rgb) / 0.60); }
+.focus\:text-codify-primary.focus\:text-codify-primary:focus { color: rgb(var(--codify-primary-rgb) / 1); }
+.hover\:bg-codify-accent\/30.hover\:bg-codify-accent\/30:hover { background-color: rgb(var(--codify-accent-rgb) / 0.30); }
+.hover\:bg-codify-danger\/30.hover\:bg-codify-danger\/30:hover { background-color: rgb(var(--codify-danger-rgb) / 0.30); }
+.hover\:bg-codify-design\/30.hover\:bg-codify-design\/30:hover { background-color: rgb(var(--codify-design-rgb) / 0.30); }
+.hover\:bg-codify-info\/40.hover\:bg-codify-info\/40:hover { background-color: rgb(var(--codify-info-rgb) / 0.40); }
+.hover\:bg-codify-knowledge\/30.hover\:bg-codify-knowledge\/30:hover { background-color: rgb(var(--codify-knowledge-rgb) / 0.30); }
+.hover\:bg-codify-warning\/30.hover\:bg-codify-warning\/30:hover { background-color: rgb(var(--codify-warning-rgb) / 0.30); }
+.hover\:bg-codify-warning\/50.hover\:bg-codify-warning\/50:hover { background-color: rgb(var(--codify-warning-rgb) / 0.50); }
+.hover\:text-codify-design.hover\:text-codify-design:hover { color: rgb(var(--codify-design-rgb) / 1); }
+.hover\:text-codify-warning.hover\:text-codify-warning:hover { color: rgb(var(--codify-warning-rgb) / 1); }
+.text-codify-design\/80.text-codify-design\/80 { color: rgb(var(--codify-design-rgb) / 0.80); }
+.text-codify-design\/90.text-codify-design\/90 { color: rgb(var(--codify-design-rgb) / 0.90); }
+.text-codify-knowledge\/80.text-codify-knowledge\/80 { color: rgb(var(--codify-knowledge-rgb) / 0.80); }
+.text-codify-warning\/70.text-codify-warning\/70 { color: rgb(var(--codify-warning-rgb) / 0.70); }

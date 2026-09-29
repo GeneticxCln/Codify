@@ -1,6 +1,8 @@
 import { readRejection } from "../rejection.ts";
 import React, { useEffect, useRef, useState } from "react";
 import { writeTerminal } from "../api";
+import { THEME_CHANGE_EVENT } from "../appearance";
+import { xtermThemeFromDocument } from "../terminalTheme";
 import {
   listenShellEvent,
   readTerminalExit,
@@ -23,6 +25,7 @@ import {
   readTerminalHistory,
   replayFor,
 } from "../terminalHistory";
+import { claimTerminal, releaseTerminal, RESUME_SEAM } from "../terminalBuffer";
 
 /**
  * A terminal, rendered by xterm.js and driven by a PTY the shell owns.
@@ -141,12 +144,27 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     // Owned outside the async body so the chunk handler and the flush both see
     // one buffer: the listener is up before xterm is, and what it catches in the
     // meantime has to survive until xterm exists.
-    const buffer: OutputBuffer = emptyOutputBuffer();
+    const outputBuffer: OutputBuffer = emptyOutputBuffer();
     let current: Grid = DEFAULT_GRID;
+
+    /**
+     * Claim this terminal: what it said while this pane was not mounted is
+     * the pane's first write, ahead of any live chunk.
+     *
+     * Claiming also stops the app-level recorder from filing further chunks —
+     * from here the pane is the display *and* the recorder, which is the
+     * one-copy bargain: bytes the pane shows are bytes the pane files. The
+     * backlog is replayed even for an already-exited shell, whose tail is
+     * exactly what a user reopening a finished tab is trying to read; the
+     * workspace replay below applies only where this shell has nothing of its
+     * own to show.
+     */
+    const backlogged = claimTerminal(terminalIdRef.current);
 
     const publish = (grid: Grid): void => {
       if (!gridChanged(current, grid)) return;
-      current = grid;        onResizeRef.current?.(terminalIdRef.current, grid);
+      current = grid;
+      onResizeRef.current?.(terminalIdRef.current, grid);
     };
 
     /**
@@ -173,20 +191,28 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           // right pane knows which of them are its own, and a chunk that
           // arrives before this pane has even been told its id is the one that
           // must not be dropped.
-          bufferOutput(buffer, chunk.id, chunk.data);
-          // Into the workspace's scrollback *before* the pane check, because
-          // every chunk a terminal says is part of what the next pane in this
-          // workspace will restore — including the ones belonging to a tab the
-          // user has since closed.
+          bufferOutput(outputBuffer, chunk.id, chunk.data);
+          if (chunk.id !== terminalIdRef.current) return;
+          // File **this** terminal's bytes, and only its own — the one owner per
+          // chunk that `terminalBuffer`'s rules are built on. It used to file
+          // every chunk that arrived, before this check, on the theory that
+          // anything this workspace's terminals said belongs to the workspace.
+          // That was right when this was the only listener and is a duplicate
+          // now that the app-level recorder holds what no pane is displaying:
+          // the *other* terminal's mounted pane files this terminal's background
+          // build into the same workspace record the backlog will replay from,
+          // so a returning pane prints every line of that build twice. The pane
+          // files what it displays, the store files the rest (and merges it on
+          // `retireTerminal`, so a tab closed in the background is still part
+          // of what the next pane in this workspace restores).
           if (workspaceIdRef.current) {
             appendTerminalHistory(workspaceIdRef.current, chunk.data);
           }
-          if (chunk.id !== terminalIdRef.current) return;
           // No xterm yet means the text waits: it is written in one go the
           // moment the renderer exists, just below. Draining it into nothing
           // would be losing it with extra steps.
           if (!term) return;
-          const held = drainOutput(buffer, chunk.id);
+          const held = drainOutput(outputBuffer, chunk.id);
           if (held) term.write(held);
         }),
       );
@@ -202,6 +228,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
             term.write("\r\n\x1b[2m— process exited —\x1b[0m\r\n");
             term.options.disableStdin = true;
           }
+          // The marker is display-only, as it always was: the workspace tail
+          // keeps the byte stream, and a background shell whose exit the store
+          // recorded gets its marker merged at retirement instead. Two filers
+          // for one marker is how it ends up in a restore twice.
           onExitRef.current?.(id);
         }),
       );
@@ -222,26 +252,61 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
         fontSize: 12,
         scrollback: 5000,
-        theme: {
-          background: "#0d1117",
-          foreground: "#c9d1d9",
-          cursor: "#e6edf3",
-        },
+        // Read out of the document rather than written here. These three hexes
+        // used to be literals, and they were the *default theme's* — so the
+        // terminal was the one grey-blue box in all nine themes, including the
+        // two that draw rain behind it. See `ui/src/terminalTheme.ts`.
+        theme: xtermThemeFromDocument(),
       });
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(hostRef.current);
 
-      // What this workspace said last time, then what this shell has said since
-      // it started. The order is the whole of it: the restored session is older,
-      // and a live prompt written *above* the old output would read as if the
-      // new shell were quoting it.
-      const restored = replayFor(
-        workspaceIdRef.current ? readTerminalHistory(workspaceIdRef.current) : ""
+      // …and re-read on every change, because a terminal that was themed on
+      // open and stale after a switch is the same defect one moment later.
+      // Reassigning `options.theme` is xterm's supported way to recolour a live
+      // instance: it repaints the buffer, and nothing is re-run and no scroll
+      // position moves.
+      const onThemeChange = (): void => {
+        if (disposed || !term) return;
+        term.options.theme = xtermThemeFromDocument();
+      };
+      window.addEventListener(THEME_CHANGE_EVENT, onThemeChange);
+      unsubscribes.push(() =>
+        window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange),
       );
+
+      // Chronological order, which is also display order: everything this
+      // workspace said up to the last unmount (earlier sessions under the
+      // seam, then whatever of this shell was on screen when its pane went
+      // away — the tail already holds it, because a mounted pane files as it
+      // displays), then the seam marking the gap, then what the shell said
+      // while nobody was displaying it. The backlog continues the tail; it is
+      // never older than it. A shell with no backlog gets the workspace
+      // replay alone, exactly as before the recorder existed.
+      const tail = workspaceIdRef.current
+        ? readTerminalHistory(workspaceIdRef.current)
+        : "";
+      const restored = replayFor(tail);
       if (restored) term.write(restored);
+      if (backlogged) {
+        term.write((restored ? RESUME_SEAM : "") + backlogged);
+        // …and filed, because from here this pane is both the display and the
+        // recorder: the backlog is bytes it is about to show, and a shell's
+        // first prompt is nearly always backlog (the PTY is printing before the
+        // tab exists, so the recorder caught it while no pane owned it). Filing
+        // only the chunks that arrive *after* this point left that prompt on
+        // screen but absent from the workspace scrollback, so the next pane in
+        // this workspace restored everything except the start of the session.
+        // The store deleted these bytes at claim, so the copy here is the only
+        // one — the same merge `retireTerminal` does for a tab closed in the
+        // background, and for the same reason.
+        if (workspaceIdRef.current) {
+          appendTerminalHistory(workspaceIdRef.current, backlogged);
+        }
+      }
       // Everything the shell said between `open` and now, in one write.
-      const held = drainOutput(buffer, terminalIdRef.current);
+      const held = drainOutput(outputBuffer, terminalIdRef.current);
       if (held) term.write(held);
 
       term.onData((data) => {
@@ -290,6 +355,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       unsubscribes.length = 0;
       observer?.disconnect();
       term?.dispose();
+      // Hand the terminal back to the recorder. What the shell says from here
+      // is a background terminal's output again: held by the store, replayed
+      // by the next pane to claim it. (A closed tab is already retired by
+      // `handleCloseTab` before this runs; retiring twice is idempotent, and
+      // a release after a retire simply has nothing to release.)
+      releaseTerminal(terminalIdRef.current);
     };
   }, []);
 
@@ -302,7 +373,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       {failed && (
         <div
           role="alert"
-          className="mx-3 mt-2 p-2 rounded-lg text-xs bg-red-950/40 border border-red-800 text-red-300"
+          className="mx-3 mt-2 p-2 rounded-lg text-xs bg-codify-danger/40 border border-codify-danger text-codify-danger"
         >
           {failed}
         </div>

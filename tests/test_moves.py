@@ -21,6 +21,7 @@ from typing import Any
 
 from engine.conductor import BASE_TOOLS, STEP_TOOLS, TOOLS, Conductor
 from engine.laya import LayaDecision, LayaService
+from engine.models import TurnCreate
 from engine.providers import ProviderError
 from engine.toolcall import ToolReply
 from tests.test_conductor import ConductorTestCase, _call, _PlainProvider, _ToolProvider
@@ -47,6 +48,7 @@ class _FailingConductor(_ToolProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]],
         tools: list[Any], model: str, temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> ToolReply:
         raise ProviderError("upstream_error", "the endpoint refused the tool call")
 
@@ -62,9 +64,22 @@ class TestTheMenuIsTheDispatchTable(ConductorTestCase):
     def test_the_read_tools_are_in_every_configuration(self) -> None:
         # A conductor with its move budget spent can still answer from what it
         # reads. Cutting these too would leave it mute rather than merely idle.
+        # `read_page` is here for the same reason as the rest: it reads, it
+        # cannot write, and it is not one of the moves a step unlocks.
+        # `recall` too, and the case is the sharpest of the set — it is the
+        # only tool that reads this machine's own record of previous runs, so
+        # removing it would leave a conductor that can see the current code and
+        # nothing of what it has already learned about it. `recall_threads` is
+        # the same claim one grain up: without it a new conversation can learn
+        # what happened inside earlier runs but not that the conversations
+        # themselves happened.
         base = {t.name for t in BASE_TOOLS}
         self.assertLessEqual(
-            {"read_file", "search_code", "git_history", "run_command", "use_skill"},
+            {
+                "read_file", "search_code", "git_history", "run_command",
+                "read_page", "navigate_page", "recall", "recall_threads",
+                "use_skill",
+            },
             base,
         )
         self.assertEqual(
@@ -143,6 +158,107 @@ class TestATurnCanPlanThroughTheConductor(ConductorTestCase):
         self.assertTrue(provider.seen_tools)
         for offered in provider.seen_tools:
             self.assertNotIn("write", offered)
+
+
+class TestTheConductorCanDirectWhatItSummons(ConductorTestCase):
+    """What the conductor writes on a move has to reach the sub-agent.
+
+    `recon` and `design` both *require* a `task`, and both handlers logged it
+    as delivered — "conductor sent the librarian: find the parser" — and then
+    called `_librarian(goal_id, goal, ws)`, which had no parameter to receive
+    it. The tool schema told the model it was directing a sub-agent, the log
+    agreed, and the prompt was built from the goal alone. Three surfaces
+    promised a control the engine did not have, which is a worse shape than
+    having none: a model that reads a log and a schema has no reason to doubt
+    the direction arrived.
+
+    So these assert the prompt itself, not that the call happened. `write` and
+    `plan` already carried their text through and are the convention being
+    copied here.
+    """
+
+    ASK = "find where the config file is parsed"
+    DIRECTION = "keep the existing public function names"
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        # A goal whose text is a substring of half this file proves nothing.
+        # "hi" is three characters and the harness's own default.
+        self.asked = self.goals.create_turn(
+            self.thread.id,
+            TurnCreate(prompt="Widen the config parser to accept nested keys"),
+        )
+
+    def _prompt_for(self, provider: _ToolProvider, role: str) -> str:
+        for system, user in provider.seen_prompts:
+            if f"you are codify {role}" in system.lower():
+                return user
+        self.fail(f"the {role} role was never called, so there is no prompt to read")
+
+    async def test_the_librarian_reads_what_the_conductor_asked_it_to_find(self) -> None:
+        provider = _ToolProvider([
+            ToolReply(text="", tool_calls=[_call("recon", task=self.ASK)]),
+            ToolReply(text="I found the parser and stopped there."),
+        ])
+        executor = self._executor(provider, laya=_ChangeGate())
+        await executor.run_chat(self.asked.id)
+        self.assertIn(self.ASK, self._prompt_for(provider, "librarian"))
+
+    async def test_the_designer_reads_what_the_conductor_asked_it_to_decide(self) -> None:
+        provider = _ToolProvider([
+            ToolReply(text="", tool_calls=[_call("recon", task="look around")]),
+            ToolReply(text="", tool_calls=[_call("design", task=self.DIRECTION)]),
+            ToolReply(text="I would keep the public names and add a nested read."),
+        ])
+        executor = self._executor(provider, laya=_ChangeGate())
+        await executor.run_chat(self.asked.id)
+        self.assertIn(self.DIRECTION, self._prompt_for(provider, "design"))
+
+    async def test_the_goal_is_still_what_the_user_asked_for(self) -> None:
+        # Beside the goal, never instead of it. A conductor that could rewrite
+        # the goal could send a sub-agent after something the user never asked
+        # for, and the user's own words would be gone from the prompt.
+        provider = _ToolProvider([
+            ToolReply(text="", tool_calls=[_call("recon", task=self.ASK)]),
+            ToolReply(text="I found the parser."),
+        ])
+        executor = self._executor(provider, laya=_ChangeGate())
+        await executor.run_chat(self.asked.id)
+        prompt = self._prompt_for(provider, "librarian")
+        self.assertIn("Widen the config parser to accept nested keys", prompt)
+        # Labelled, so the sub-agent can tell whose ask it is reading.
+        self.assertIn("in addition to the goal above", prompt)
+
+    async def test_the_designer_still_hears_the_workspace_contract_last(self) -> None:
+        # The ask narrows what is decided; the workspace's own DESIGN.md still
+        # outranks it. Order is the whole mechanism, so it is asserted.
+        (self.repo / "DESIGN.md").write_text("# Brand\nOne font. No purple.\n")
+        provider = _ToolProvider([
+            ToolReply(text="", tool_calls=[_call("recon", task="look around")]),
+            ToolReply(text="", tool_calls=[_call("design", task=self.DIRECTION)]),
+            ToolReply(text="The workspace brand already answers that."),
+        ])
+        executor = self._executor(provider, laya=_ChangeGate())
+        await executor.run_chat(self.asked.id)
+        prompt = self._prompt_for(provider, "design")
+        self.assertIn(self.DIRECTION, prompt)
+        self.assertIn("BINDING", prompt)
+        self.assertLess(
+            prompt.index(self.DIRECTION), prompt.index("BINDING"),
+            "the conductor's ask must not come after the binding contract",
+        )
+
+    async def test_an_engine_run_asks_for_nothing(self) -> None:
+        # The engine's own path has no conductor and no ask, and the default
+        # has to be a prompt byte-identical to the one before this change —
+        # otherwise a goal that never involved a conductor would have started
+        # carrying a line about one.
+        provider = _ToolProvider()
+        executor = self._executor(provider)
+        await executor._librarian(self.asked.id, self.goals.get(self.asked.id), self.ws)
+        prompt = self._prompt_for(provider, "librarian")
+        self.assertNotIn("The conductor asked", prompt)
+        self.assertIn("Widen the config parser", prompt)
 
 
 class TestDecliningIsObeyedAndFailingIsCaught(ConductorTestCase):

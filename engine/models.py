@@ -65,6 +65,16 @@ EventType = Literal[
 
 SYSTEM_PROMPT_OVERRIDE_MAX = 32768
 PROVIDER_SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+# Ollama's `keep_alive`, as its own duration grammar rather than a bare number.
+# Ollama accepts a bare count of seconds ("300"), a suffixed duration ("30s",
+# "5m"), a compound one ("1h30m", so the number-with-unit pair repeats), and two
+# sentinels: "-1" keeps the model resident until the server stops, "0" unloads
+# it on the next request. Validated here rather than passed through because this
+# value goes straight into a request body, and a field that cannot say anything
+# but a duration is a field that cannot be used to inject one.
+_NUM = r"\d{1,6}(?:\.\d{1,3})?"
+_UNIT = r"(?:ns|us|ms|s|m|h)"
+KEEP_ALIVE_RE = re.compile(rf"^(-1|0|{_NUM}(?:{_UNIT}{_NUM})*{_UNIT}?)$")
 ROLES: tuple[AgentRole, ...] = (
     "laya",
     "librarian",
@@ -184,6 +194,26 @@ class AgentConfig(BaseModel):
     system_prompt_override: str | None = Field(None, max_length=SYSTEM_PROMPT_OVERRIDE_MAX)
     temperature: float = Field(0.2, ge=0.0, le=2.0)
     max_tokens: int = Field(4096, gt=0, le=200000)
+    # Ollama's context window for this role, in tokens. Ollama defaults to a
+    # small window (4096) and *silently truncates* anything longer — the
+    # librarian's evidence pack and the design role's contract simply do not
+    # fit, and the model degrades a plan rather than erroring. Every seeded role
+    # therefore ships a value (see `DEFAULT_AGENTS`); None is what a role is
+    # left at once someone clears it, which is a real setting and the one the
+    # server's own default is honestly described by. Only the Ollama provider
+    # reads it; OpenAI-style APIs size the window server-side.
+    num_ctx: int | None = Field(None, gt=0, le=1_000_000)
+    # How long Ollama holds this model resident after a request finishes, as its
+    # own duration string ("30m"), a bare number of seconds, "-1" for until the
+    # server stops, or "0" to unload immediately. None sends nothing and leaves
+    # Ollama's own default window — five minutes — in force, which is the honest
+    # setting: role calls inside one goal are seconds apart and already warm, so
+    # this is not a fix for a cold first call (that is the checkpoint load, and
+    # raising `num_ctx` is what shrinks it). What it is for is the gap *between*
+    # goals: a role called every few minutes pays a full reload each time, and on
+    # a 7b model that is tens of seconds of nothing happening. Only Ollama reads
+    # it — a hosted API has no process to keep alive.
+    keep_alive: str | None = Field(None, max_length=32, pattern=KEEP_ALIVE_RE.pattern)
     # A second target this role may be called on when its primary is unusable —
     # no credential stored, the endpoint down, the model retired, or a reply the
     # contract cannot parse. Configured per role because the honest fallback
@@ -197,6 +227,29 @@ class AgentConfig(BaseModel):
     fallback_protocol: ProviderProtocol | None = None
     fallback_base_url: str | None = None
     updated_at: float = 0
+
+    @property
+    def ollama_num_ctx(self) -> int | None:
+        """The context window to request from Ollama, or None for its default.
+
+        One indirection so a call site reads as intent (`num_ctx=cfg.ollama_num_ctx`)
+        rather than as a field dump, and so a future policy — a floor for roles
+        with big packs, say — has one home instead of five.
+        """
+        return self.num_ctx
+
+    @property
+    def ollama_keep_alive(self) -> str | None:
+        """The residency window to ask Ollama for, or None to leave its default.
+
+        The normalisation is a guard rather than the main path — `keep_alive` is
+        validated on the way in, so a blank normally cannot reach here. It exists
+        because the value goes straight into a request body, and an empty
+        `keep_alive` is not "unset" to Ollama: it is a value the server has to
+        reject, which would turn a cleared field into a failed goal.
+        """
+        value = (self.keep_alive or "").strip()
+        return value or None
 
     @property
     def has_fallback(self) -> bool:
@@ -220,7 +273,9 @@ class AgentConfigUpdate(BaseModel):
     system_prompt_override: str | None = Field(None, max_length=SYSTEM_PROMPT_OVERRIDE_MAX)
     temperature: float | None = Field(None, ge=0.0, le=2.0)
     max_tokens: int | None = Field(None, gt=0, le=200000)
-    # An empty slug is how a client removes a fallback. The desktop shell sends
+    num_ctx: int | None = Field(None, gt=0, le=1_000_000)
+    # Explicit null clears back to Ollama's default window, like `num_ctx`.
+    keep_alive: str | None = Field(None, max_length=32, pattern=KEEP_ALIVE_RE.pattern)
     # the patch through a typed struct where an explicit `null` and an absent
     # field are the same value, so "no fallback" needs a value of its own — and
     # the pattern allows exactly that one exception.
@@ -335,6 +390,45 @@ class ConversationTurn(BaseModel):
     prompt: str
     status: GoalStatus
     created_at: float
+
+
+class ShellTab(BaseModel):
+    """One open tab, as the engine holds it: an identity, a place, and a payload.
+
+    What the engine stores and what the window shows are deliberately different
+    amounts of the same thing. `key` and `position` are the shared part — which
+    tabs exist, and in what order — because that is the part two windows must
+    agree about. `payload` is the rest (a chat tab's thread, a browser tab's
+    address and history stack) and is a string of JSON the engine does not
+    interpret: it is bounded and parsed for validity, and nothing more. A tab's
+    shape belongs to the window showing it, and a store that learns a view's
+    shape is how the two drift apart.
+    """
+
+    key: str = Field(..., min_length=1, max_length=64)
+    position: int = Field(..., ge=0, le=10_000)
+    kind: Literal["chat", "browser"]
+    # Bounded because this is client-authored text the engine stores on its
+    # behalf: 32k is far past any real tab (a 100-entry history is a few
+    # kilobytes) and small enough that a client cannot use a tab row to fill the
+    # database.
+    payload: str = Field(..., max_length=32_000)
+    updated_at: float
+
+
+class ShellTabWrite(BaseModel):
+    """One tab's arrival, as a client sends it.
+
+    `extra: "forbid"` for the reason `ConversationUpdate` carries it: a body
+    that tried to set `updated_at` here would be a client inventing the one
+    fact the engine owns.
+    """
+
+    model_config = {"extra": "forbid"}
+    key: str = Field(..., min_length=1, max_length=64)
+    position: int = Field(..., ge=0, le=10_000)
+    kind: Literal["chat", "browser"]
+    payload: str = Field(..., max_length=32_000)
 
 
 class Goal(BaseModel):
@@ -554,6 +648,7 @@ def _role(
     display_name: str,
     temperature: float,
     max_tokens: int,
+    num_ctx: int,
 ) -> AgentConfig:
     """A seeded role: a local provider and **no model name**.
 
@@ -577,31 +672,66 @@ def _role(
         model_name="",
         temperature=temperature,
         max_tokens=max_tokens,
+        num_ctx=num_ctx,
         updated_at=0,
     )
 
 
 DEFAULT_AGENTS: list[AgentConfig] = [
+    # **Context windows are seeded, not left to the server.** Ollama's own
+    # default is 4096 and it *silently truncates* anything longer — the model
+    # answers from a partial prompt and returns a degraded result rather than an
+    # error, so nothing anywhere points at the cause. A fresh install that never
+    # opened Settings therefore ran its whole pipeline truncated, which is the
+    # worst possible way for this to be fixed: the field existed, was
+    # documented, and was empty.
+    #
+    # The allocation is by *what the role is handed*, not by how important it
+    # is, and that is not the same ranking. Four roles receive payloads built out
+    # of the librarian's evidence pack — the librarian quoting what it read, the
+    # designer reasoning over it, the planner planning against it, and the fixer
+    # receiving it **plus the current contents of every file the step touches**,
+    # inlined (`engine/executor.py`, `_write`). Those four get 32768, which is
+    # qwen2.5-coder's ceiling, so raising it further would be asking for a
+    # window the model cannot use.
+    #
+    # The two that read *results* rather than material get half: the verifier's
+    # test output and the critic's diff are unbounded in principle but are
+    # summaries in practice. The gate and the scribe are genuinely small — the
+    # gate's state is clipped to 4000 characters by `build_state`, and the
+    # scribe answers with a summary and a commit message.
+    #
+    # Seeding only reaches *new* installs, deliberately. A migration that
+    # backfilled existing rows would silently raise memory use under a running
+    # user who never chose it, and this value is the user's to set on an install
+    # that already exists. An older install keeps Ollama's 4096 until someone
+    # opens Settings → Agent Roles and raises it, which is the honest state: the
+    # field is there, it says what is in force, and the choice is visible.
+    #
+    # These are seeds, not policy. Every one of them is a normal stored value the
+    # user can change, and clearing the field returns the role to the server's
+    # default — which is why `None` still means what it means in the model.
+    #
     # Laya is a non-generative System-1 decision engine, not a chat model. When
     # `pip install laya` + local weights are present it runs in-process (~33 ms,
     # no tokens); otherwise this role's LLM answers the same typed contract as a
     # documented fallback. See engine/laya.py.
-    _role("laya", "Laya — System-1 Gate", temperature=0.0, max_tokens=512),
-    # The seven pipeline roles, in execution order. Token budgets follow the job:
-    # the librarian answers with evidence packs rather than prose but needs room
-    # for what it quotes, the fixer emits whole files (largest), and the verifier
-    # and scribe answer with a few lines.
-    _role("librarian", "Librarian Agent", temperature=0.1, max_tokens=8192),
+    _role("laya", "Laya — System-1 Gate", temperature=0.0, max_tokens=512, num_ctx=8192),
+    # The seven role slots. Output budgets follow the job: the librarian answers
+    # with evidence packs rather than prose but needs room for what it quotes,
+    # the fixer emits whole files (largest), and the verifier and scribe answer
+    # with a few lines.
+    _role("librarian", "Librarian Agent", temperature=0.1, max_tokens=8192, num_ctx=32768),
     # Direction-setting is the most open-ended reasoning job in the pipeline, so
     # it runs warmer than the planner; and it can hand back a whole DESIGN.md
     # body for the fixer to write, which is why its budget is the librarian's
     # rather than the critic's.
-    _role("design", "Design Agent", temperature=0.4, max_tokens=8192),
-    _role("planner", "Planner Agent", temperature=0.3, max_tokens=4096),
-    _role("fixer", "Fixer Agent", temperature=0.1, max_tokens=8192),
-    _role("verifier", "Verifier Agent", temperature=0.0, max_tokens=2048),
-    _role("critic", "Critic Agent", temperature=0.2, max_tokens=4096),
-    _role("scribe", "Scribe Agent", temperature=0.4, max_tokens=1024),
+    _role("design", "Design Agent", temperature=0.4, max_tokens=8192, num_ctx=32768),
+    _role("planner", "Planner Agent", temperature=0.3, max_tokens=4096, num_ctx=32768),
+    _role("fixer", "Fixer Agent", temperature=0.1, max_tokens=8192, num_ctx=32768),
+    _role("verifier", "Verifier Agent", temperature=0.0, max_tokens=2048, num_ctx=16384),
+    _role("critic", "Critic Agent", temperature=0.2, max_tokens=4096, num_ctx=16384),
+    _role("scribe", "Scribe Agent", temperature=0.4, max_tokens=1024, num_ctx=8192),
 ]
 
 # Role ids that earlier builds shipped, and the slot that inherited their job.

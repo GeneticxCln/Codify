@@ -40,7 +40,7 @@ const DesignDeliverablePin: React.FC<{
 }> = ({ goal, path, readiness, outcome, onPin }) => (
   <div className="flex items-center gap-2 flex-wrap">
     {readiness.pinned ? (
-      <span className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-pink-500/10 border border-pink-500/30 text-pink-200/90 text-xs">
+      <span className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-codify-design/10 border border-codify-design/30 text-codify-design/90 text-xs">
         <Check className="w-3 h-3" />
         {path} is this workspace’s brand contract
       </span>
@@ -49,18 +49,18 @@ const DesignDeliverablePin: React.FC<{
         type="button"
         disabled={!readiness.ready}
         onClick={() => void onPin(goal.id, goal.workspace_id, path)}
-        className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-pink-600/20 border border-pink-500/50 text-pink-300 hover:bg-pink-600/30 text-xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-pink-600/20"
+        className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-codify-design/20 border border-codify-design/50 text-codify-design hover:bg-codify-design/30 text-xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-codify-design/20"
       >
         <Pin className="w-3 h-3" />
         Pin as brand contract
       </button>
     )}
     {!readiness.ready && readiness.reason && (
-      <span className="text-2xs text-gray-500">{readiness.reason}</span>
+      <span className="text-2xs text-codify-muted">{readiness.reason}</span>
     )}
     {readiness.ready && outcome !== null && outcome.goalId === goal.id && (
       <span
-        className={`text-2xs ${outcome.ok ? "text-green-400" : "text-red-400"}`}
+        className={`text-2xs ${outcome.ok ? "text-codify-success" : "text-codify-danger"}`}
       >
         {outcome.message}
       </span>
@@ -88,11 +88,11 @@ const DeliverableBody: React.FC<{
   body: string;
   label: string;
 }> = ({ path, body, label }) => (
-  <details className="text-xs text-gray-400">
-    <summary className="cursor-pointer text-gray-500">
+  <details className="text-xs text-codify-muted">
+    <summary className="cursor-pointer text-codify-muted">
       {path} ({body.length} chars) — {label}
     </summary>
-    <pre className="mt-1.5 p-2 rounded bg-codify-surface border border-codify-raised text-2xs text-gray-300 whitespace-pre-wrap max-h-64 overflow-auto">
+    <pre className="mt-1.5 p-2 rounded bg-codify-surface border border-codify-raised text-2xs text-codify-secondary whitespace-pre-wrap max-h-64 overflow-auto">
       {body}
     </pre>
   </details>
@@ -133,45 +133,45 @@ export const DesignDeliverableCard: React.FC<{
   return (
     <div className="p-2.5 rounded-lg bg-codify-bg border border-codify-border flex flex-col gap-1.5">
       <div className="flex items-center gap-1.5">
-        <Palette className="w-3.5 h-3.5 text-pink-400" />
-        <span className="font-semibold text-xs uppercase tracking-wider text-gray-400">
+        <Palette className="w-3.5 h-3.5 text-codify-design" />
+        <span className="font-semibold text-xs uppercase tracking-wider text-codify-muted">
           {deliverableHeading(payload.mode)}
         </span>
-        <span className="text-2xs font-mono text-gray-500">
+        <span className="text-2xs font-mono text-codify-muted">
           {payload.artifact}
         </span>
       </div>
       {payload.direction && (
-        <p className="text-xs text-gray-300 leading-relaxed">
+        <p className="text-xs text-codify-secondary leading-relaxed">
           {payload.direction}
         </p>
       )}
       {payload.design_system?.name && (
-        <div className="text-xs text-gray-400">
+        <div className="text-xs text-codify-muted">
           design system:{" "}
-          <span className="font-mono text-gray-300">
+          <span className="font-mono text-codify-secondary">
             {payload.design_system.name}
           </span>
           {/* Three states, said differently on purpose: a pin is the user's
           instruction, a discovery is a convention the engine noticed, and a
           proposal exists because there was nothing to obey. */}
           {payload.design_system.origin === "pinned" ? (
-            <span className="text-pink-300/90">
+            <span className="text-codify-design/90">
               {" "}
               — pinned at {payload.design_system.source}
             </span>
           ) : payload.design_system.origin === "discovered" ? (
-            <span className="text-gray-500">
+            <span className="text-codify-muted">
               {" "}
               — found at {payload.design_system.source}
             </span>
           ) : payload.design_system.source ? (
-            <span className="text-gray-500">
+            <span className="text-codify-muted">
               {" "}
               — from {payload.design_system.source}
             </span>
           ) : (
-            <span className="text-gray-500">
+            <span className="text-codify-muted">
               {" "}
               — proposed, no existing contract
             </span>
@@ -187,15 +187,15 @@ export const DesignDeliverableCard: React.FC<{
                   className="w-2.5 h-2.5 rounded-sm border border-codify-border"
                   style={{ background: c.value }}
                 />
-                <span className="font-mono text-gray-400">{c.name}</span>
-                <span className="font-mono text-gray-500">{c.value}</span>
+                <span className="font-mono text-codify-muted">{c.name}</span>
+                <span className="font-mono text-codify-muted">{c.value}</span>
               </span>
             )
           )}
         </div>
       )}
       {(payload.tokens?.typography?.length ?? 0) > 0 && (
-        <div className="text-xs text-gray-400">
+        <div className="text-xs text-codify-muted">
           type:{" "}
           {payload.tokens.typography
             .map(
@@ -209,20 +209,20 @@ export const DesignDeliverableCard: React.FC<{
           {payload.components.map(
             (c: { name: string; purpose?: string }, i: number) => (
               <div key={i} className="text-xs flex items-start gap-1.5">
-                <span className="font-mono text-pink-300/90">{c.name}</span>
-                {c.purpose && <span className="text-gray-400">— {c.purpose}</span>}
+                <span className="font-mono text-codify-design/90">{c.name}</span>
+                {c.purpose && <span className="text-codify-muted">— {c.purpose}</span>}
               </div>
             )
           )}
         </div>
       )}
       {(payload.acceptance?.length ?? 0) > 0 && (
-        <div className="text-xs text-gray-400">
+        <div className="text-xs text-codify-muted">
           acceptance: {payload.acceptance.join("; ")}
         </div>
       )}
       {(payload.constraints?.length ?? 0) > 0 && (
-        <div className="text-xs text-amber-400/90">
+        <div className="text-xs text-codify-warning/90">
           constraints: {payload.constraints.join("; ")}
         </div>
       )}

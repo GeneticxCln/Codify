@@ -71,10 +71,10 @@ test("a role that never ran reads as no data, not as zero percent", () => {
     "—",
     "every run cancelled means the rate is unknown, and 0% is a claim",
   );
-  assert.equal(roleRateTone(role()), "text-gray-500");
-  assert.equal(roleRateTone(role({ runs: 1, success_rate: 95 })), "text-green-400");
-  assert.equal(roleRateTone(role({ runs: 1, success_rate: 70 })), "text-amber-300");
-  assert.equal(roleRateTone(role({ runs: 1, success_rate: 10 })), "text-red-300");
+  assert.equal(roleRateTone(role()), "text-codify-muted");
+  assert.equal(roleRateTone(role({ runs: 1, success_rate: 95 })), "text-codify-success");
+  assert.equal(roleRateTone(role({ runs: 1, success_rate: 70 })), "text-codify-warning");
+  assert.equal(roleRateTone(role({ runs: 1, success_rate: 10 })), "text-codify-danger");
 });
 
 test("a run summary names what the rate was computed from", () => {

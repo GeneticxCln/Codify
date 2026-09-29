@@ -43,6 +43,7 @@ class TargetProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         self.calls.append({
             "role": self.role,

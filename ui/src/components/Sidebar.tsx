@@ -1,8 +1,8 @@
 import React from "react";
 import {
   Archive,
+  FolderPlus,
   Globe,
-  MessageSquarePlus,
   MessageSquareText,
   Pencil,
   Settings,
@@ -13,25 +13,32 @@ import { IconButton } from "./ui/IconButton";
 import { ThreadMenu } from "./ThreadMenu";
 import { newThreadParentId } from "../threadMenu";
 import { UNTITLED_THREAD_TITLE, threadLabel } from "../threadTitle";
-import type { Conversation, Workspace } from "../types";
-
-/**
- * The side panel: what threads exist, which one is showing, and the one action
- * that starts a new one.
- *
- * This is the component that gives the app more than one conversation. Before
- * it, the transcript was one array of React state and "history" was a drawer
- * that re-added goals one at a time. A sidebar is the shape that fixes that:
- * the threads are *visible*, so a second line of inquiry is something you can
- * see rather than something you have to remember.
- *
- * Its own file rather than a section of the shell, for the reason the deliverable
- * cards have one: a component that renders alone is a component that can be
- * tested alone.
- */
+import type { Conversation, Workspace } from "../types";  /**
+   * The side panel: which project is selected, which threads belong to it, and
+   * the action to add a project.
+   *
+   * This is the component that gives the app more than one conversation. Before
+   * it, the transcript was one array of React state and "history" was a drawer
+   * that re-added goals one at a time. A sidebar is the shape that fixes that:
+   * the threads are *visible*, so a second line of inquiry is something you can
+   * see rather than something you have to remember.
+   *
+   * **It opens threads; it does not open tabs.** Choosing a row shows that
+   * thread in the tab for its project — a tab is a project, and the project's
+   * threads are what that tab shows in turn. So the panel needs no New Tab
+   * control of its own, and the one it used to have is gone: a button that
+   * created a thread *and* opened a tab for it was the same act as the header's
+   * New Tab, in a second place, doing more than it said.
+   *
+   * Its own file rather than a section of the shell, for the reason the deliverable
+   * cards have one: a component that renders alone is a component that can be
+   * tested alone.
+   */
 export interface SidebarProps {
-  /** Threads for the selected workspace, most recently touched first. */
+  /** Threads available to the panel, most recently touched first. */
   conversations: Conversation[];
+  /** The project whose threads the panel may show; absent means none is selected. */
+  selectedWorkspaceId?: string;
   /**
    * Every workspace, so an unnamed thread can be called by its folder.
    *
@@ -42,38 +49,22 @@ export interface SidebarProps {
   workspaces?: Workspace[];
   /** The thread the visible tab is showing, if any. */
   activeConversationId?: string;
-  /** Start a new thread and open it. */
-  onNewChat: () => void;
   /**
-   * Start a thread *on* `parentConversationId` and open it.
-   *
-   * Separate from `onNewChat` because they are different things and the panel
-   * has to be able to say which is which. `onNewChat` is the button: a new line
-   * of inquiry with no parent. This is the menu: a thread on the chat you are
-   * looking at. Wiring both to one function is what made a menu item labelled
-   * "New thread" produce a brand-new empty chat.
+   * Start a thread *on* another thread — the right-click menu's "New thread",
+   * and a parent_id, which is a different act from starting a blank one. The
+   * panel's own buttons do not offer it: a blank thread comes from typing in a
+   * clean slate.
    */
   onNewThread: (parentConversationId?: string) => void;
+  /** Add or select a project using the existing folder picker. */
+  onNewProject: () => void;
   /** Show a thread. Reuses its tab if one is already open. */
   onSelect: (conversationId: string) => void;
   /** Rename a thread in place. */
   onRename: (conversationId: string, title: string) => void;
   /** Hide a thread from the panel. Archived, never deleted. */
   onArchive: (conversationId: string) => void;
-  /**
-   * The three shell surfaces that are not threads.
-   *
-   * They used to sit in the header as labelled buttons, which made the header a
-   * second toolbar for things that have nothing to do with each other and pushed
-   * the workspace pill and the connection pill out of the room they needed. They
-   * are here instead because the panel is already "the things you can open", and
-   * a browser tab, a shell and the settings screen are exactly that.
-   *
-   * Optional because a caller that does not offer one should render one fewer
-   * badge rather than a dead control. A disabled button still advertises
-   * something that cannot be used, which is the thing this whole change is
-   * trying to stop.
-   */
+  /** These shell actions remain available at the foot of the panel. */
   onOpenBrowser?: () => void;
   onOpenTerminal?: () => void;
   onOpenSettings?: () => void;
@@ -148,7 +139,7 @@ const SidebarRow: React.FC<{
     <MessageSquareText
       className={
         "w-3 h-3 flex-shrink-0 mt-0.5 " +
-        (active ? "text-blue-400" : "text-gray-500")
+        (active ? "text-codify-accent" : "text-codify-muted")
       }
     />
     <div className="flex-1 min-w-0">
@@ -159,7 +150,28 @@ const SidebarRow: React.FC<{
         identical rows. The folder name is short and it is the only real fact
         about a thread that has said nothing.
       */}
-      <div className="text-xs text-gray-200 truncate">
+      {/*
+        The title is the accent when the row is the selected one.
+
+        It used to be `text-codify-secondary` in both states, which made the
+        selection say itself only through a fill and a 12px icon — the one line
+        a user is actually reading stayed identical whether or not they were
+        looking at the thread they were in. The interactive hue is the right
+        token here and not merely a prettier one: `--codify-accent` and
+        `--codify-info` are the same sentence today, and the row was using
+        `info`, which means *in flight*. A paused thread is not in flight, and
+        one that is both selected and running is in flight for a second reason.
+
+        `ui/tests/contrast.test.ts` holds this pair at 4.5:1 against `raised` in
+        every theme, which is what forced the accents up rather than making this
+        a change that reads well in one palette and fails in nine.
+      */}
+      <div
+        className={
+          "text-xs truncate " +
+          (active ? "text-codify-accent" : "text-codify-secondary")
+        }
+      >
         {threadLabel(conversation.title, folderName)}
       </div>
       {/*
@@ -173,12 +185,12 @@ const SidebarRow: React.FC<{
         name this panel cannot see.
       */}
       {conversation.parent_id && (
-        <div className="text-2xs text-gray-500 truncate">
+        <div className="text-2xs text-codify-muted truncate">
           {parentTitle ? `on “${parentTitle}”` : "thread"}
         </div>
       )}
       {conversation.archived && (
-        <div className="text-2xs text-gray-500">archived</div>
+        <div className="text-2xs text-codify-muted">archived</div>
       )}
     </div>
     <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
@@ -204,10 +216,11 @@ const SidebarRow: React.FC<{
 
 export const Sidebar: React.FC<SidebarProps> = ({
   conversations,
+  selectedWorkspaceId,
   workspaces = [],
   activeConversationId,
-  onNewChat,
   onNewThread,
+  onNewProject,
   onSelect,
   onRename,
   onArchive,
@@ -216,6 +229,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenSettings,
   loading = false,
 }) => {
+  const selectedWorkspace = workspaces.find(
+    (workspace) => workspace.id === selectedWorkspaceId,
+  );
+  // Enforce the project boundary here as well as at the API/state layer: even a
+  // stale or malformed caller list must never expose another project's threads.
+  const projectConversations = selectedWorkspaceId
+    ? conversations.filter(
+        (conversation) => conversation.workspace_id === selectedWorkspaceId,
+      )
+    : [];
   /**
    * A right-click in the thread panel starts a new thread *on the thread the
    * gesture was made in*.
@@ -239,10 +262,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
    * something new" should not need a second click to get there.
    *
    * It is on the `nav` rather than on each row, so a right-click lands on the
-   * same thing whether it hit a row, the New chat button, or the gap between
-   * them. A row must not stop the event on its way up: that is the version
-   * where right-clicking *on a thread* does nothing while right-clicking beside
-   * it works, which is worse than not having it at all.
+   * same thing whether it hit a row or the gap between them. A row must not stop
+   * the event on its way up: that is the version where right-clicking *on a
+   * thread* does nothing while right-clicking beside it works, which is worse
+   * than not having it at all.
    *
    * `preventDefault` is the half that makes it visible. Without it the webview
    * puts its own menu on screen — Reload, Inspect — and the right-click looks
@@ -250,6 +273,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
    */
   const onPanelContextMenu = (event: React.MouseEvent<HTMLElement>) => {
     event.preventDefault();
+    if (!selectedWorkspaceId) return;
     const row = (event.target as HTMLElement).closest("[data-thread-row]");
     if (!row) {
       setMenu({ x: event.clientX, y: event.clientY });
@@ -279,41 +303,66 @@ export const Sidebar: React.FC<SidebarProps> = ({
       className="flex flex-col gap-1.5 w-60 flex-shrink-0 border-r border-codify-border bg-codify-chrome p-1.5"
       onContextMenu={onPanelContextMenu}
     >
-      {/*
-        The panel's one creation action, at the menu's density.
+      {/* One button, and it adds a *project*.
+          
+          The New Thread button that used to sit beside it is gone, and its
+          absence is the point rather than a gap. It created a thread and opened
+          a tab for it, which made the panel a second way to open a tab — and
+          under a model where a tab is a project, that is the same act as the
+          header's New Tab with a different name, a different place, and a
+          conversation created before anything was typed into it.
 
-        `size="sm"` rather than `md` so the button is the same height and the
-        same 11px type as the rows beneath it and the menu's items — a toolbar
-        primitive at dialog size in a list of compact rows reads as a headline
-        the panel did not intend. `align`/`weight` are the props rather than
-        classes for the reason `Button.tsx` gives: a `justify-start` class and a
-        `font-normal` class both lose to the primitive's own base on stylesheet
-        order, which is how the label ended up centred and bold.
-      */}
-      <Button
-        tone="subtle"
-        size="sm"
-        align="start"
-        weight="normal"
-        onClick={onNewChat}
-        className="rounded-md"
+          A new thread is now made by typing in the clean slate that New Tab
+          opens, and a thread *on another thread* — which is a different thing,
+          with a different parent — is still one right-click away. What the panel
+          does is open threads, and the only button it needs for that is the one
+          that changes which project you are looking at. */}
+      <div className="flex items-center gap-1">
+        <Button
+          tone="subtle"
+          size="sm"
+          align="start"
+          weight="normal"
+          onClick={onNewProject}
+          title="Add a project folder"
+          className="flex-1 min-w-0 rounded-md"
+        >
+          <FolderPlus className="w-3 h-3 flex-shrink-0" />
+          <span className="truncate">New Project</span>
+        </Button>
+      </div>
+
+      <div
+        role="heading"
+        aria-level={2}
+        className="flex items-center justify-between gap-2 px-2 py-1 border-b border-codify-border"
+        title={selectedWorkspace?.root_path}
       >
-        <MessageSquarePlus className="w-3 h-3" />
-        New chat
-      </Button>
+        <span className="text-2xs text-codify-muted uppercase tracking-wide">
+          Threads
+        </span>
+        <span className="text-2xs text-codify-secondary truncate">
+          {selectedWorkspace?.name ??
+            (selectedWorkspaceId ? "Project" : "No project selected")}
+        </span>
+      </div>
 
       <div className="flex-1 overflow-y-auto flex flex-col gap-0.5">
-        {loading ? (
-          <div className="text-2xs text-gray-500 px-2 py-1">Loading threads…</div>
-        ) : conversations.length === 0 ? (
-          // An empty panel is a state worth naming. Without this the sidebar is
-          // a blank column and "New chat" is a button with no explanation of
-          // what it will make.
-          <div className="text-2xs text-gray-500 px-2 py-1 leading-relaxed">
-            No conversations yet. Start one and it stays here between sessions.
+        {!selectedWorkspaceId ? (
+          <div className="text-2xs text-codify-muted px-2 py-1 leading-relaxed">
+            Select a project to see its threads, or choose New Project to add one.
+          </div>
+        ) : loading ? (
+          <div className="text-2xs text-codify-muted px-2 py-1">Loading threads…</div>
+        ) : projectConversations.length === 0 ? (
+          // Empty is normal for a new project: say which project is empty rather
+          // than letting it look as if project selection hid another list.
+          <div className="text-2xs text-codify-muted px-2 py-1 leading-relaxed">
+            No threads in {selectedWorkspace?.name ?? "this project"} yet. Press
+            New Tab and type.
           </div>
         ) : (
-          conversations.map((c) => {
+          projectConversations.map((c) => {
             // The parent's name comes from the row, not from a lookup in this
             // list. The list is this workspace's *live* threads, so looking the
             // parent up here failed the moment it was archived — and the label
@@ -337,15 +386,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
-      {/* The three shell surfaces, at the foot of the panel, named and spread
-          across its width.
-
-          They came out of the header, where three labelled buttons sat in a row
-          of things that have nothing to do with each other. They are at the
-          bottom rather than beside "New chat" because the top of the panel is
-          for starting a thread and the middle is the threads themselves; the
-          foot is the one part of the column that is not either, which is what a
-          browser tab, a shell and the settings screen are.
+      {/* Browser, Terminal and Settings remain separated from the project and
+          thread creation actions; these utility actions stay at the panel foot.
 
           ## Why the icon is above the name
 
@@ -424,13 +466,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
-      {menu &&
+      {menu && selectedWorkspaceId &&
         (() => {
           // Looked up from the list rather than stored in the menu state, so the
           // header shows the thread's *current* name. A menu carrying a copy of
           // the title would go stale the moment a turn named the thread.
           const target = menu.conversationId
-            ? conversations.find((c) => c.id === menu.conversationId)
+            ? projectConversations.find((c) => c.id === menu.conversationId)
             : undefined;
           // The thread this gesture is about: the row under the pointer if the
           // right-click hit one, otherwise whatever is on screen. Resolved once,
@@ -446,10 +488,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
           const parentId = newThreadParentId(
             menu.conversationId,
             activeConversationId,
-            conversations.map((c) => c.id),
+            projectConversations.map((c) => c.id),
           );
           const parent = parentId
-            ? conversations.find((c) => c.id === parentId)
+            ? projectConversations.find((c) => c.id === parentId)
             : undefined;
           // A thread that has gone (archived by another window) leaves a menu
           // with no thread: still "New thread", no longer acting on a row that

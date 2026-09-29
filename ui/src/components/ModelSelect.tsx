@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Check, ChevronDown, RefreshCw } from "lucide-react";
-import { ModelOption, ProviderModelStatus } from "../types";
+import type { ModelOption, ProviderModelStatus } from "../types.ts";
 import { EMPTY_SIGNALS, ModelSignals, modelBadges, orderProviderModels } from "../modelSignals";
 import { MENU_EDGE, MenuPlacement, menuPlacement } from "../modelMenu";
 
@@ -161,20 +161,20 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
       className="z-[60] bg-codify-surface border border-codify-border rounded-xl shadow-2xl p-1.5 overflow-y-auto"
     >
       {options.length === 0 ? (
-        <div className="px-2 py-2 text-xs text-gray-400 leading-relaxed">
+        <div className="px-2 py-2 text-xs text-codify-muted leading-relaxed">
           {discovery && !discovery.ok
             ? `Nothing to pick from: ${discovery.error}`
             : "This provider reports no models. Type the id and press Enter if you know it."}
         </div>
       ) : matches.length === 0 ? (
-        <div className="px-2 py-2 text-xs text-gray-400 leading-relaxed">
+        <div className="px-2 py-2 text-xs text-codify-muted leading-relaxed">
           Nothing matches “{value.trim()}”. Every discovered model is listed — clear the field to
           see them, or press Enter to use this id as written.
         </div>
       ) : (
         <>
           <div className="flex items-center justify-between px-2 py-1">
-            <span className="text-2xs font-semibold uppercase tracking-wider text-gray-500">
+            <span className="text-2xs font-semibold uppercase tracking-wider text-codify-muted">
               {matches.length === options.length
                 ? `${options.length} discovered`
                 : `${matches.length} of ${options.length}`}
@@ -185,7 +185,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 onClick={onRefresh}
                 disabled={refreshing}
                 title="Ask this provider what it serves right now"
-                className="flex items-center gap-1 text-2xs text-gray-400 hover:text-gray-200 disabled:opacity-50 cursor-pointer"
+                className="flex items-center gap-1 text-2xs text-codify-muted hover:text-codify-secondary disabled:opacity-50 cursor-pointer"
               >
                 <RefreshCw className={refreshing ? "w-2.5 h-2.5 animate-spin" : "w-2.5 h-2.5"} />
                 Refresh
@@ -208,33 +208,33 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 className={
                   "w-full text-left px-2 py-1 rounded-lg flex items-center gap-2 text-xs transition-colors cursor-pointer " +
                   (m.id === value
-                    ? "bg-blue-600/20 text-blue-200 font-medium"
-                    : "text-gray-300 hover:bg-codify-raised")
+                    ? "bg-codify-info/20 text-codify-info font-medium"
+                    : "text-codify-secondary hover:bg-codify-raised")
                 }
               >
                 <span className="font-mono truncate flex-1 min-w-0">{m.id}</span>
                 {badges.roles && (
                   <span
-                    className="text-2xs text-teal-300/90 flex-shrink-0 max-w-[9rem] truncate"
+                    className="text-2xs text-codify-knowledge/90 flex-shrink-0 max-w-[9rem] truncate"
                     title={badges.rolesTitle}
                   >
                     {badges.roles}
                   </span>
                 )}
                 {badges.lastRun && (
-                  <span className="text-2xs text-blue-300/90 flex-shrink-0">last run</span>
+                  <span className="text-2xs text-codify-info/90 flex-shrink-0">last run</span>
                 )}
                 {badges.notChat ? (
-                  <span className="text-2xs text-amber-400/80 flex-shrink-0">not a chat model</span>
+                  <span className="text-2xs text-codify-warning/80 flex-shrink-0">not a chat model</span>
                 ) : (
                   !badges.roles &&
                   m.description && (
-                    <span className="text-2xs text-gray-500 truncate max-w-[110px] flex-shrink-0">
+                    <span className="text-2xs text-codify-muted truncate max-w-[110px] flex-shrink-0">
                       {m.description}
                     </span>
                   )
                 )}
-                {m.id === value && <Check className="w-3 h-3 text-blue-400 flex-shrink-0" />}
+                {m.id === value && <Check className="w-3 h-3 text-codify-info flex-shrink-0" />}
               </button>
             );
           })}
@@ -245,7 +245,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
 
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+      <label className="text-xs font-semibold text-codify-muted uppercase tracking-wider">
         Model Identifier
       </label>
       <div ref={wrapRef} className="relative">
@@ -271,7 +271,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 close();
               }
             }}
-            className="flex-1 bg-codify-bg border border-codify-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
+            className="flex-1 bg-codify-bg border border-codify-border rounded px-3 py-2 text-sm text-codify-secondary focus:outline-none focus:border-codify-accent font-mono"
           />
           <button
             type="button"
@@ -289,7 +289,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 ? "This provider reported no models"
                 : `Browse ${options.length} discovered models`
             }
-            className="flex items-center gap-1 px-2 py-2 bg-codify-raised border border-codify-border rounded text-gray-300 hover:bg-codify-border transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
+            className="flex items-center gap-1 px-2 py-2 bg-codify-raised border border-codify-border rounded text-codify-secondary hover:bg-codify-border transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
           >
             <ChevronDown className={open ? "w-3.5 h-3.5 rotate-180" : "w-3.5 h-3.5"} />
           </button>
@@ -297,7 +297,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
         {menu}
       </div>
       <span
-        className={`text-2xs ${discovery && !discovery.ok ? "text-amber-400/90" : "text-gray-500"}`}
+        className={`text-2xs ${discovery && !discovery.ok ? "text-codify-warning/90" : "text-codify-muted"}`}
       >
         {note}
       </span>

@@ -61,3 +61,35 @@ Fix what failed above, then push again. If this push has to go out anyway:
 EOF
   exit 1
 fi
+
+# The tip being green says nothing about the commits on the way to it, and this
+# repository's UI tests read source text as contract — so a commit that adds a
+# component and a test asserting the shell mounts it is red until the commit
+# that mounts it. `make ci` cannot see that, and a range of red middles is a
+# history `git bisect` cannot walk.
+#
+# It runs second, and only because the first passed: a red tip is the cheaper
+# thing to be told about, and a per-commit sweep is minutes. The target decides
+# for itself whether the range is worth walking — a one-commit push has no
+# middle, prints that, and costs nothing.
+echo
+echo "pre-push: checking that every commit in this push builds, not just the tip."
+
+if ! make check-history; then
+  cat >&2 <<'EOF'
+
+pre-push: BLOCKED — a commit in this push does not build, so nothing was pushed.
+
+The tip is green; the middle is not, and that is the part `make ci` cannot see.
+`git bisect` would land on one of the broken commits and fail there.
+
+Reorder the range (the shell, and the engine's app.py, have to arrive before
+whatever asserts on them) or squash it back to one commit. To see the same
+report without pushing:  make check-history
+
+If this push has to go out anyway:
+
+  git push --no-verify
+EOF
+  exit 1
+fi

@@ -15,6 +15,7 @@ import { buildModelSignals } from "../modelSignals";
 import { findStaleFallback, findStaleModel, StaleModel } from "../staleModel";
 import { AgentConfigCard } from "./AgentConfigCard";
 import { ConductorSettingsCard } from "./ConductorSettingsCard";
+import { EngineRuntimeCard } from "./EngineRuntimeCard";
 import { Sliders, ShieldCheck, Zap, AlertTriangle, Cpu, Wand2, Wrench, Workflow } from "lucide-react";
 import { readRejection } from "../rejection.ts";
 
@@ -69,8 +70,8 @@ const LayaGateStatus: React.FC = () => {
 
   if (!status) {
     return (
-      <div className="flex items-start gap-2 text-xs text-gray-400 bg-codify-surface border border-codify-border rounded-lg p-3">
-        <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+      <div className="flex items-start gap-2 text-xs text-codify-muted bg-codify-surface border border-codify-border rounded-lg p-3">
+        <AlertTriangle className="w-4 h-4 text-codify-warning flex-shrink-0 mt-0.5" />
         <span>Gate status unavailable — the engine did not answer /settings/laya.</span>
       </div>
     );
@@ -78,10 +79,10 @@ const LayaGateStatus: React.FC = () => {
 
   const sdk = status.sdk_installed && !status.sdk_disabled;
   const tone = sdk
-    ? "text-emerald-300"
+    ? "text-codify-success"
     : status.sdk_disabled
-    ? "text-amber-300"
-    : "text-gray-300";
+    ? "text-codify-warning"
+    : "text-codify-secondary";
 
   return (
     <div className="flex flex-col gap-1.5 bg-codify-surface border border-codify-border rounded-lg p-3">
@@ -90,7 +91,7 @@ const LayaGateStatus: React.FC = () => {
         Pre-flight gate:{" "}
         {sdk ? "Laya SDK (in-process, no tokens)" : "fallback model below, or skipped if it is unreachable"}
       </div>
-      <p className="text-xs text-gray-400 flex items-start gap-1.5">
+      <p className="text-xs text-codify-muted flex items-start gap-1.5">
         <Cpu className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
         <span>
           Runs before the planner: typed intent / risk / prompt-injection decisions. Injection at or
@@ -100,12 +101,12 @@ const LayaGateStatus: React.FC = () => {
         </span>
       </p>
       {status.sdk_disabled && (
-        <p className="text-xs text-amber-400">
+        <p className="text-xs text-codify-warning">
           SDK disabled by CODIFY_LAYA_SDK=0 — the gate will use this role's provider below.
         </p>
       )}
       {!status.sdk_installed && !status.sdk_disabled && (
-        <p className="text-xs text-gray-500">
+        <p className="text-xs text-codify-muted">
           Install the SDK (`pip install laya` + weights) to run the gate in-process;{" "}
           {status.sdk_error ? `last error: ${status.sdk_error}` : "no local weights installed yet."}
         </p>
@@ -484,12 +485,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     >
       {!embedded && (
         <div className="flex flex-col gap-1 border-b border-codify-border pb-4">
-          <h2 className="text-xl font-bold text-gray-100 flex items-center gap-2">
-            <Sliders className="w-5 h-5 text-blue-400" />
+          <h2 className="text-xl font-bold text-codify-primary flex items-center gap-2">
+            <Sliders className="w-5 h-5 text-codify-info" />
             Sub-Agent Configuration
           </h2>
-          <p className="text-sm text-gray-400 flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 text-green-400" />
+          <p className="text-sm text-codify-muted flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-codify-success" />
             Settings is the exclusive mutator for sub-agent models and credentials. Keys go to your
             OS keychain when one is available, otherwise to an owner-only file — the Provider Keys
             tab states which is in force.
@@ -498,37 +499,38 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       )}
 
       <LayaGateStatus />
+      <EngineRuntimeCard />
 
       {rolesError && (
-        <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg p-3">
+        <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">Role descriptions unavailable — {rolesError}</span>
         </div>
       )}
 
       {callStatsError && (
-        <div className="flex items-start gap-2 text-xs text-gray-400 bg-codify-surface border border-codify-border rounded-lg p-3">
-          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5 text-gray-500" />
+        <div className="flex items-start gap-2 text-xs text-codify-muted bg-codify-surface border border-codify-border rounded-lg p-3">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5 text-codify-muted" />
           <span className="leading-relaxed">Per-role call stats unavailable — {callStatsError}</span>
         </div>
       )}
 
       {engineSettingsError && (
-        <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg p-3">
+        <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">Engine settings unavailable — {engineSettingsError}</span>
         </div>
       )}
 
       <div className="flex flex-col gap-2.5 bg-codify-bg border border-codify-border rounded-xl p-3.5">
-        <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
-          <Workflow className="w-3.5 h-3.5 text-purple-400" />
+        <div className="flex items-center gap-2 text-xs font-semibold text-codify-secondary">
+          <Workflow className="w-3.5 h-3.5 text-codify-design" />
           Engine
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <label
             htmlFor="parallel-width"
-            className="text-xs text-gray-300 font-medium"
+            className="text-xs text-codify-secondary font-medium"
             title="How many steps of a parallel goal may run at once"
           >
             Parallel step width
@@ -544,7 +546,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               setWidthMsg(null);
             }}
             disabled={parallelWidth === null || widthSaving}
-            className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
+            className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono disabled:opacity-40"
           />
           <button
             type="button"
@@ -554,17 +556,17 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               widthSaving ||
               widthDraft === String(parallelWidth)
             }
-            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+            className="px-3 py-1.5 bg-codify-accent text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
           >
             {widthSaving ? "Saving..." : "Save"}
           </button>
           {widthMsg && (
-            <span className={`text-xs ${widthMsg.ok ? "text-green-400" : "text-red-400"}`}>
+            <span className={`text-xs ${widthMsg.ok ? "text-codify-success" : "text-codify-danger"}`}>
               {widthMsg.text}
             </span>
           )}
         </div>
-        <p className="text-xs text-gray-400 leading-relaxed">
+        <p className="text-xs text-codify-muted leading-relaxed">
           How many steps of a parallel goal may run at once; a wider plan runs in waves of this size
           instead of opening every model session simultaneously. Stored with the engine's settings
           (the <span className="font-mono">CODIFY_PARALLEL_WIDTH</span> env var, if set, overrides
@@ -574,7 +576,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <div className="flex flex-wrap items-center gap-2 border-t border-codify-border pt-2.5">
           <label
             htmlFor="stats-retention"
-            className="text-xs text-gray-300 font-medium"
+            className="text-xs text-codify-secondary font-medium"
             title="How many daily statistics snapshots to keep"
           >
             Stats history to keep (days)
@@ -590,7 +592,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               setRetentionMsg(null);
             }}
             disabled={retention === null || retentionSaving}
-            className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
+            className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono disabled:opacity-40"
           />
           <button
             type="button"
@@ -600,19 +602,19 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               retentionSaving ||
               retentionDraft === String(retention)
             }
-            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+            className="px-3 py-1.5 bg-codify-accent text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
           >
             {retentionSaving ? "Saving..." : "Save"}
           </button>
           {retentionMsg && (
-            <span className={`text-xs ${retentionMsg.ok ? "text-green-400" : "text-red-400"}`}>
+            <span className={`text-xs ${retentionMsg.ok ? "text-codify-success" : "text-codify-danger"}`}>
               {retentionMsg.text}
             </span>
           )}
         </div>
-        <p className="text-xs text-gray-400 leading-relaxed">
+        <p className="text-xs text-codify-muted leading-relaxed">
           How many of the daily statistics snapshots (the “Day by day” chart in Stats) to keep.
-          <span className="text-gray-300"> 0 keeps everything.</span> Lowering the number prunes the
+          <span className="text-codify-secondary"> 0 keeps everything.</span> Lowering the number prunes the
           oldest days on the next stats view; the newest days always survive.
         </p>
 
@@ -621,7 +623,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <div className="flex flex-wrap items-center gap-2 border-t border-codify-border pt-2.5">
               <label
                 htmlFor="trace-retention"
-                className="text-xs text-gray-300 font-medium"
+                className="text-xs text-codify-secondary font-medium"
                 title="How long a run's recording is kept"
               >
                 Recordings to keep (days)
@@ -637,7 +639,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   setTraceRetentionMsg(null);
                 }}
                 disabled={traceRetentionSaving}
-                className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-40"
+                className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono disabled:opacity-40"
               />
               <button
                 type="button"
@@ -646,19 +648,19 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   traceRetentionSaving ||
                   traceRetentionDraft === String(traceRetention)
                 }
-                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+                className="px-3 py-1.5 bg-codify-accent text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
               >
                 {traceRetentionSaving ? "Saving..." : "Save"}
               </button>
               {traceRetentionMsg && (
-                <span className={`text-xs ${traceRetentionMsg.ok ? "text-green-400" : "text-red-400"}`}>
+                <span className={`text-xs ${traceRetentionMsg.ok ? "text-codify-success" : "text-codify-danger"}`}>
                   {traceRetentionMsg.text}
                 </span>
               )}
             </div>
-            <p className="text-xs text-gray-400 leading-relaxed">
+            <p className="text-xs text-codify-muted leading-relaxed">
               How long a run’s recording (the model calls of a goal armed with Record) is kept.
-              <span className="text-gray-300"> 0 keeps every recording.</span> Older ones are
+              <span className="text-codify-secondary"> 0 keeps every recording.</span> Older ones are
               forgotten on the next Stats view. Deleting a recording early is always allowed from
               the run’s own card.
             </p>
@@ -682,14 +684,14 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       )}
 
       <div className="flex flex-col gap-2.5 bg-codify-bg border border-codify-border rounded-xl p-3.5">
-        <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
-          <Wrench className="w-3.5 h-3.5 text-emerald-400" />
+        <div className="flex items-center gap-2 text-xs font-semibold text-codify-secondary">
+          <Wrench className="w-3.5 h-3.5 text-codify-success" />
           Fix the roles that can't run
         </div>
-        <p className="text-xs text-gray-400 leading-relaxed">
+        <p className="text-xs text-codify-muted leading-relaxed">
           Points a role at a model this engine has discovered when it has no model chosen, when its
           provider needs a credential none is stored for, or when its provider no longer serves the
-          model it is set to. <span className="text-gray-300">Roles that already work are not
+          model it is set to. <span className="text-codify-secondary">Roles that already work are not
           touched</span> — unlike the override below, which deliberately applies to all of them.
         </p>
         <div className="flex flex-wrap items-center gap-2">
@@ -697,7 +699,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             type="button"
             onClick={repairRoles}
             disabled={repairBusy}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-success text-codify-bg hover:brightness-110 disabled:opacity-50 text-xs font-semibold rounded-lg transition-colors"
           >
             <Wrench className={repairBusy ? "w-3.5 h-3.5 animate-pulse" : "w-3.5 h-3.5"} />
             {repairBusy ? "Checking every role..." : "Fix roles that can't run"}
@@ -706,7 +708,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <button
               type="button"
               onClick={() => setRepairReport(null)}
-              className="text-xs text-gray-400 hover:text-gray-200"
+              className="text-xs text-codify-muted hover:text-codify-secondary"
             >
               Dismiss
             </button>
@@ -714,25 +716,25 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
 
         {repairError && (
-          <span className="text-xs text-red-400 font-medium">{repairError}</span>
+          <span className="text-xs text-codify-danger font-medium">{repairError}</span>
         )}
 
         {repairReport && (
           <div className="flex flex-col gap-1.5 border-t border-codify-border pt-2">
             {repairReport.changed ? (
               <>
-                <span className="text-xs text-gray-300">
+                <span className="text-xs text-codify-secondary">
                   Pointed {repairReport.repaired.length} role
                   {repairReport.repaired.length === 1 ? "" : "s"} at{" "}
-                  <span className="font-mono text-emerald-300">
+                  <span className="font-mono text-codify-success">
                     {repairReport.target?.provider}/{repairReport.target?.model}
                   </span>{" "}
                   — {repairReport.target_reason}.
                 </span>
                 <div className="flex flex-col gap-0.5">
                   {repairReport.repaired.map((row) => (
-                    <span key={row.role} className="text-xs text-gray-400">
-                      <span className="font-mono text-gray-200">{row.role}</span> — {row.reason}
+                    <span key={row.role} className="text-xs text-codify-muted">
+                      <span className="font-mono text-codify-secondary">{row.role}</span> — {row.reason}
                     </span>
                   ))}
                 </div>
@@ -741,21 +743,21 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               /* A broken install and a broken install nobody could fix are not the
                  same result, and this one must not read as a pass. */
               <>
-                <span className="text-xs text-amber-300">
+                <span className="text-xs text-codify-warning">
                   Nothing was changed: {repairReport.unfixable.length} role
                   {repairReport.unfixable.length === 1 ? "" : "s"} need a model and none could be
                   pointed at{repairReport.target_reason ? ` — ${repairReport.target_reason}` : ""}.
                 </span>
                 <div className="flex flex-col gap-0.5">
                   {repairReport.unfixable.map((row) => (
-                    <span key={row.role} className="text-xs text-amber-300/80">
+                    <span key={row.role} className="text-xs text-codify-warning/80">
                       <span className="font-mono">{row.role}</span> — {row.reason}
                     </span>
                   ))}
                 </div>
               </>
             ) : (
-              <span className="text-xs text-gray-300">
+              <span className="text-xs text-codify-secondary">
                 Nothing needed fixing
                 {repairReport.target_reason ? ` — ${repairReport.target_reason}` : ""}.
               </span>
@@ -763,19 +765,19 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
             {repairReport.left_alone.length > 0 && (
               <div className="flex flex-col gap-0.5">
-                <span className="text-2xs uppercase tracking-wider text-gray-500">
+                <span className="text-2xs uppercase tracking-wider text-codify-muted">
                   Left alone ({repairReport.left_alone.length})
                 </span>
                 {repairReport.left_alone.map((row) => (
-                  <span key={row.role} className="text-xs text-gray-500">
-                    <span className="font-mono text-gray-400">{row.role}</span> — {row.reason}
+                  <span key={row.role} className="text-xs text-codify-muted">
+                    <span className="font-mono text-codify-muted">{row.role}</span> — {row.reason}
                   </span>
                 ))}
               </div>
             )}
 
             {repairReport.notes.map((note, i) => (
-              <span key={i} className="text-xs text-amber-400/90 flex items-start gap-1.5">
+              <span key={i} className="text-xs text-codify-warning/90 flex items-start gap-1.5">
                 <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
                 {note}
               </span>
@@ -785,22 +787,22 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       </div>
 
       <div className="flex flex-col gap-2.5 bg-codify-bg border border-codify-border rounded-xl p-3.5">
-        <div className="flex items-center gap-2 text-xs font-semibold text-gray-200">
-          <Wand2 className="w-3.5 h-3.5 text-blue-400" />
+        <div className="flex items-center gap-2 text-xs font-semibold text-codify-secondary">
+          <Wand2 className="w-3.5 h-3.5 text-codify-info" />
           Use one model for every role
         </div>
-        <p className="text-xs text-gray-400 leading-relaxed">
+        <p className="text-xs text-codify-muted leading-relaxed">
           No model list ships with Codify — every id below was discovered from a provider you
           configured. Roles start with none chosen, so a fresh install has to say which model it
           runs.
           {unconfigured.length > 0 && (
-            <span className="text-amber-300">
+            <span className="text-codify-warning">
               {" "}
               {unconfigured.length} of {orderedRoles.length} still need one: {unconfigured.join(", ")}.
             </span>
           )}
           {fallbackOnly.length > 0 && (
-            <span className="text-teal-300">
+            <span className="text-codify-knowledge">
               {" "}
               {fallbackOnly.join(", ")} {fallbackOnly.length === 1 ? "has" : "have"} no primary model
               and will run on the configured fallback{fallbackOnly.length === 1 ? "" : "s"} instead.
@@ -811,7 +813,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           <select
             value={bulkChoice}
             onChange={(e) => setBulkChoice(e.target.value)}
-            className="flex-1 min-w-[16rem] bg-codify-surface border border-codify-border rounded-lg px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
+            className="flex-1 min-w-[16rem] bg-codify-surface border border-codify-border rounded-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono"
           >
             <option value="">
               {models.length > 0 ? "Choose a discovered model..." : "No models discovered yet"}
@@ -826,18 +828,18 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             type="button"
             onClick={applyToEveryRole}
             disabled={!bulkChoice || bulkBusy}
-            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+            className="px-3 py-1.5 bg-codify-accent text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
           >
             {bulkBusy ? "Applying..." : `Apply to all ${orderedRoles.length} roles`}
           </button>
-          {bulkError && <span className="text-xs text-red-400">{bulkError}</span>}
+          {bulkError && <span className="text-xs text-codify-danger">{bulkError}</span>}
         </div>
       </div>
 
       {/* Summary first: the role cards live in a scroll container, so a warning
           on the fifth of eight cards is invisible without knowing to look. */}
       {staleRoles.length > 0 && (
-        <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg p-3">
+        <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             {staleRoles.length} of {orderedRoles.length} roles point at a model their provider no
@@ -849,11 +851,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       )}
 
       {builtinProviders === null && !providerListError && (
-        <p className="text-xs text-gray-500">Asking the engine which providers it ships…</p>
+        <p className="text-xs text-codify-muted">Asking the engine which providers it ships…</p>
       )}
 
       {providerListError && (
-        <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/60 rounded-lg p-3">
+        <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             Could not read the engine&apos;s provider list ({providerListError}), so the role

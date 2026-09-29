@@ -19,6 +19,7 @@ answer rather than failing the question.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import tempfile
@@ -83,6 +84,11 @@ class _ToolProvider(BaseProvider):
         }
         self.seen_tools: list[list[str]] = []
         self.seen_messages: list[list[dict[str, Any]]] = []
+        # (system, user) per role call. Recorded because a sub-agent's *prompt*
+        # is where a caller's instructions either arrive or do not, and a
+        # scripted double that only returns canned JSON cannot show the
+        # difference — see `TestTheConductorCanDirectWhatItSummons`.
+        self.seen_prompts: list[tuple[str, str]] = []
 
     @property
     def supports_tools(self) -> bool:
@@ -91,11 +97,13 @@ class _ToolProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         # Keyed on the role's own self-description rather than a loose
         # substring: the planner's prompt *mentions* a design contract, so a
         # `"design" in prompt` test returns the design role's reply to the
         # planner and the run dies with "planner must return 1..20 steps".
+        self.seen_prompts.append((system_prompt, user_prompt))
         lowered = system_prompt.lower()
         if "you are codify librarian" in lowered:
             return json.dumps({"summary": "an empty repo", "enough": True})
@@ -108,6 +116,7 @@ class _ToolProvider(BaseProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]],
         tools: list[ToolSpec], model: str, temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> ToolReply:
         self.seen_tools.append([t.name for t in tools])
         self.seen_messages.append([dict(m) for m in messages])
@@ -122,6 +131,7 @@ class _PlainProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
         return "a plain answer"
 
@@ -144,6 +154,7 @@ class _DyingProvider(_ToolProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]],
         tools: list[ToolSpec], model: str, temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> ToolReply:
         self.attempts.append(model)
         self.served += 1
@@ -383,8 +394,9 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
             names,
             {
                 "read_file", "search_code", "git_history", "run_command",
-                "use_skill", "recon", "design", "plan",
-                "write", "verify", "review", "summarize",
+                "read_page", "navigate_page", "click_page", "type_page",
+                "recall", "recall_threads", "use_skill", "recon", "design",
+                "plan", "write", "verify", "review", "summarize",
             },
         )
 
@@ -438,6 +450,39 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
             await table["run_command"](
                 {"argv": ["definitely-not-a-real-binary"], "reason": "x"}
             )
+
+    async def test_a_slow_command_does_not_hold_the_event_loop(self) -> None:
+        """The command runs in a thread, so the loop keeps turning while it does.
+
+        `run_command` starts a real process for up to 120 seconds, and it used to
+        start it *inside* the event loop: every WebSocket tick, `/health` probe
+        and cancel request queued behind the command, so the app reported itself
+        offline for exactly as long as the command ran. The ticker here is those
+        requests — a task that only needs the loop to come back to it. It is the
+        difference between ~12 ticks and none.
+        """
+        (self.repo / "slow.py").write_text(
+            "import time\ntime.sleep(0.6)\n", encoding="utf-8"
+        )
+        table = self._dispatch(self.goal.id)
+        ticks = 0
+
+        async def tick() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.05)
+                ticks += 1
+
+        ticker = asyncio.create_task(tick())
+        try:
+            out = await table["run_command"]({"argv": ["python3", "slow.py"], "reason": "t"})
+        finally:
+            ticker.cancel()
+
+        self.assertIn("(exit 0)", out)
+        self.assertGreaterEqual(
+            ticks, 5, "the event loop was blocked for the whole command"
+        )
 
     async def test_git_history_refuses_a_subcommand_that_writes(self) -> None:
         # The caller is a model. "The model asked for it" is not a reason to

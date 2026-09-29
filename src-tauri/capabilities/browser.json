@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "browser",
-  "description": "Browser webviews (label browser-*) hold an empty capability set: no invoke, no event listeners, no filesystem, no shell. This file exists to declare that deny-by-default posture in the open — a label no capability mentions would be equally safe and much easier to widen by accident. src-tauri/src/browser.rs parses this file and fails the build's test leg if any permission is ever added here, or if any other capability's window/webview globs start reaching browser labels.",
-  "windows": ["browser-*"],
+  "description": "Browser webviews (label browser-*) hold an empty capability set: no invoke, no event listeners, no filesystem, no shell. This file exists to declare that deny-by-default posture in the open — a label no capability mentions would be equally safe and much easier to widen by accident. src-tauri/src/browser.rs parses this file and fails the build's test leg if any permission is ever added here, or if any other capability's window/webview globs start reaching browser labels. Matched on `webviews`, not `windows`: a browser page is a child webview of the main window, and a window-matched grant would be inherited by every child seated in it.",
+  "webviews": ["browser-*"],
   "permissions": []
 }

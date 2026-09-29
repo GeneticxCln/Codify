@@ -21,17 +21,22 @@ import React from "react";
 export type ToggleTone = "accent" | "warning" | "design" | "knowledge";
 
 /*
- * The armed shape is `tone/-20` over `tone/-50` with `-300` text, for every tone.
- * Same shape each time: the hue says which feature, the shape says "you turned this
- * on", so the two are readable independently.
+ * The armed shape is `tone/-20` over `tone/-50` with the tone's own text, for
+ * every tone. Same shape each time: the hue says which feature, the shape says
+ * "you turned this on", so the two are readable independently.
+ *
+ * One token per row, all four slots. The `accent` row briefly mixed `info` for
+ * its resting fill with `accent` for its hover, which is the kind of drift this
+ * table exists to prevent: the two hues are the same blue in the default theme
+ * and different colours in five others, so it looked finished and was not.
  */
 const ARMED: Record<ToggleTone, string> = {
-  accent: "bg-blue-600/20 border-blue-500/50 text-blue-300 hover:bg-blue-600/30",
+  accent: "bg-codify-accent/20 border-codify-accent/50 text-codify-accent hover:bg-codify-accent/30",
   // "This records every model call" is genuinely a caution, so amber is right here.
-  warning: "bg-amber-600/20 border-amber-500/50 text-amber-300 hover:bg-amber-600/30",
-  design: "bg-pink-600/20 border-pink-500/50 text-pink-300 hover:bg-pink-600/30",
+  warning: "bg-codify-warning/20 border-codify-warning/50 text-codify-warning hover:bg-codify-warning/30",
+  design: "bg-codify-design/20 border-codify-design/50 text-codify-design hover:bg-codify-design/30",
   knowledge:
-    "bg-cyan-600/20 border-cyan-500/50 text-cyan-300 hover:bg-cyan-600/30",
+    "bg-codify-knowledge/20 border-codify-knowledge/50 text-codify-knowledge hover:bg-codify-knowledge/30",
 };
 
 const REST =

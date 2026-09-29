@@ -76,6 +76,19 @@ warn_unreachable = true
 # and ships no stubs, so a missing import here is the documented normal case.
 module = ["laya", "laya.*"]
 ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# The ML stack laya pulls in (torch, numpy, transformers), when a developer has
+# installed the SDK. Two problems, one answer: their stubs use PEP 695 syntax
+# (numpy's `type` statements), which the 3.10 target mypy checks with cannot
+# parse at all — an error that would stop the whole run — and none of it is
+# code this repo ships or reviews. `follow_imports = skip` tells mypy to treat
+# anything reached from laya as opaque rather than reading it; with the SDK
+# absent, `ignore_missing_imports` above is the only half that does anything.
+module = ["torch", "torch.*", "numpy", "numpy.*", "transformers", "transformers.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # Pillow, for the logo generator, is the same shape as Laya above: a `dev` extra,
@@ -94,8 +107,20 @@ ignore_missing_imports = true
 # the `dev` extra *has* the stubs, so the same ignore is then reported as unused —
 # and an unused ignore is an error here (CLAUDE.md, working rules). One config
 # entry is correct in both environments; an ignore cannot be.
-module = ["PIL"]
+#
+# `follow_imports = "skip"` is the half that matters when the library *is*
+# installed. `ignore_missing_imports` alone says nothing about a module mypy did
+# resolve, so it walked into Pillow's own stubs — and from there into numpy's,
+# whose PEP 695 `type` statements the 3.10 target cannot parse. That stopped the
+# whole run on a syntax error in a dependency's stub, raised by a script whose
+# only job is drawing a logo. Neither library is code this repo ships or reviews.
+#
+# `PIL.*` is not optional: the import is `from PIL import Image`, and a bare `PIL`
+# matches the package and nothing under it, so mypy read `PIL/Image.pyi` anyway —
+# which is where the numpy import actually lives.
+module = ["PIL", "PIL.*"]
 ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.ruff]
 # The oldest interpreter this project promises (`requires-python` above). Pinned
@@ -140,23 +165,50 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 #       as bound parameters.
 # S108  /tmp literals — the sandbox tests assert refusal of /tmp paths, and
 #       the laya/library tests need a path *shape*, not a usable directory.
+# S310  urlopen — the preview-engine test probes the engine's /health on
+#       127.0.0.1 with a URL built from an f-string over a port the test
+#       itself chose; the scheme is a literal https-less loopback http, which
+#       is the whole point of the probe.
 # S110 (conductor.py)  the `on_tool` progress callback. It is a notification
 #       that a tool was called, published so the transcript can show the
 #       dispatch; a renderer that throws while rendering must not end the turn,
 #       and there is nowhere to log it — the failure is in the viewer's event
 #       handler, not in the run. Same shape as providers.py's usage sink, which
 #       is exempted for the same reason.
-"tests/*" = ["S101", "S603", "S607", "S608", "S108"]
+"tests/*" = ["S101", "S603", "S607", "S608", "S108", "S310"]
 "engine/app.py" = ["S110", "S603", "S607", "S608"]
 "engine/conductor.py" = ["S110"]
 "engine/db.py" = ["S110"]
 "engine/executor.py" = ["S101", "S110", "S608"]
 "engine/git.py" = ["S603"]
+# E402 (engine/__main__.py)  the import below the watchdog call is not an
+#       oversight to be tidied away — it is the whole file. `serve()` arms the
+#       parent watchdog only after it has pulled in engine.app and everything it
+#       drags along, and a shell that dies inside that window leaves an engine
+#       that will never arm. So the watch is started first and `engine.app` is
+#       imported afterwards, on purpose, to close the window. Moving the import
+#       back to the top reopens the hole this module exists to prevent.
+"engine/__main__.py" = ["E402"]
 "engine/providers.py" = ["S110"]
 "engine/sandbox.py" = ["S603"]
 "engine/spawn_guard.py" = ["S603"]
 "engine/services.py" = ["S608", "S112"]
 "engine/stats_history.py" = ["S608"]
+# S603 (scripts/run_tests.py)  the suite runner. `sys.executable -m unittest` is
+#       a fixed argv prefix with the caller's own unittest arguments appended,
+#       no shell, and the arguments come from a developer or CI rather than from
+#       anything a model produced. The same reasoning as scripts/check_history.py:
+#       this is a gate tool, and `validate_argv` would reject the discovery
+#       pattern's `-p "test_*.py"` glob, which is the check's whole point. It is
+#       allowlisted in tests/test_no_unguarded_spawns.py for the same reason and
+#       pinned by tests/test_run_tests_guard.py.
+"scripts/run_tests.py" = ["S603"]
+# S108 (scripts/preview_engine.py)  the default env-file path is a /tmp literal
+#       because the file's whole job is to be a short-lived paste-adjacent
+#       helper for a preview session, like the log files beside it; it is
+#       written 0600 (pinned by tests/test_preview_engine.py) and the path is
+#       overridable via CODIFY_PREVIEW_ENV_FILE.
+"scripts/preview_engine.py" = ["S108", "S101"]
 
 [tool.setuptools.packages.find]
 include = ["engine*"]

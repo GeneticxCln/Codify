@@ -216,17 +216,14 @@ class ConfiguredTierTests(unittest.TestCase):
             finally:
                 before.close()
 
-            scratch = sqlite3.connect(":memory:")
-            scratch.execute(
-                "CREATE TABLE agent_configs (role TEXT PRIMARY KEY,"
-                " display_name TEXT NOT NULL, provider TEXT NOT NULL,"
-                " protocol TEXT NOT NULL, model_name TEXT NOT NULL,"
-                " api_key_ref TEXT, base_url TEXT, system_prompt_override TEXT,"
-                " temperature REAL NOT NULL, max_tokens INTEGER NOT NULL,"
-                " fallback_provider TEXT, fallback_model_name TEXT NOT NULL DEFAULT '',"
-                " fallback_protocol TEXT, fallback_base_url TEXT,"
-                " updated_at REAL NOT NULL)"
-            )
+            # The scratch store is created by the engine's own schema, the way
+            # `run_task` creates it — not by a hand-written CREATE TABLE. A copy
+            # of the schema in a test is a second thing to forget: `num_ctx` was
+            # added to `agent_configs` and this fixture alone had never heard of
+            # it, so the seeded run died on a column the production path already
+            # had. The test is about the copy leaving the engine store alone, not
+            # about the shape of the table.
+            scratch = connect(Path(tmp) / "scratch.db")
             ready = seed_agent_configs(db, scratch)
             scratch.close()
 

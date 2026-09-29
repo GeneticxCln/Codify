@@ -39,16 +39,29 @@ const convo = (over: Partial<Conversation> = {}): Conversation => ({
 
 const noop = (): void => {};
 
+const ws = (over: Partial<Workspace> = {}): Workspace => ({
+  id: "w1",
+  name: "Codify",
+  root_path: "/home/quinton/Projects/Codify",
+  design_contract_path: "",
+  created_at: 0,
+  ...over,
+});
+
 const sidebar = (
   conversations: Conversation[],
-  activeConversationId?: string
+  activeConversationId?: string,
+  selectedWorkspaceId: string | null = "w1",
+  workspaces: Workspace[] = [],
 ): string =>
   renderToStaticMarkup(
     React.createElement(Sidebar, {
       conversations,
+      selectedWorkspaceId: selectedWorkspaceId ?? undefined,
+      workspaces,
       activeConversationId,
-      onNewChat: noop,
       onNewThread: noop,
+      onNewProject: noop,
       onSelect: noop,
       onRename: noop,
       onArchive: noop,
@@ -77,17 +90,63 @@ const assertClean = (markup: string, what: string): void => {
 
 // ── the sidebar ─────────────────────────────────────────────────────────
 
-test("the sidebar always offers a new chat", () => {
+test("the sidebar offers New Project, and points at the header for a new thread", () => {
+  // One button. The New Thread button that used to sit beside it created a
+  // thread *and* opened a tab for it, which is the same act as the header's New
+  // Tab with a different name, in a different place, and a conversation created
+  // before anything was typed into it. So the panel's job is opening threads, and
+  // the only way to start a new one is the control the header now owns.
   const markup = sidebar([]);
   assertClean(markup, "an empty sidebar");
-  assert.match(text(markup), /New chat/);
+  const shown = text(markup);
+  assert.match(shown, /New Project/);
+  assert.doesNotMatch(markup, /New Thread|onNewChat|Start a new top-level chat/);
 });
 
-test("an empty sidebar says what it is for", () => {
-  // A blank column next to a New chat button is a control with no explanation.
-  const shown = text(sidebar([]));
-  assert.match(shown, /No conversations yet/);
-  assert.match(shown, /stays here between sessions/);
+test("an empty selected project says it has no threads and says how to start one", () => {
+  // The sentence names the control that exists. It used to name New Thread, and
+  // a panel whose empty state points at a button it no longer has is a dead end
+  // written in the one place an empty project is first seen.
+  const markup = sidebar([], undefined, "w1", [ws()]);
+  const shown = text(markup);
+  assert.match(shown, /No threads in Codify yet/);
+  assert.match(shown, /Press New Tab and type/);
+  assert.match(shown, /New Project/);
+});
+
+test("the sidebar shows threads only for the selected project", () => {
+  const markup = sidebar(
+    [
+      convo(),
+      convo({
+        id: "other-project",
+        workspace_id: "w2",
+        title: "Private to another project",
+      }),
+    ],
+    undefined,
+    "w1",
+    [ws()],
+  );
+  const shown = text(markup);
+  assert.match(shown, /Refactor the parser/);
+  assert.match(shown, /Codify/);
+  assert.doesNotMatch(shown, /Private to another project/);
+});
+
+test("without a selected project, the sidebar lists no threads and offers to add one", () => {
+  const markup = sidebar([convo()], undefined, null);
+  const shown = text(markup);
+  assert.match(shown, /No project selected/);
+  assert.match(shown, /Select a project to see its threads/);
+  assert.match(shown, /New Project/);
+  assert.doesNotMatch(shown, /Refactor the parser/);
+  // New Project is the panel's only button now, and it is never disabled: there
+  // is nothing to be disabled *for*, since selecting a project is what this
+  // button does. The `disabled` that used to be here belonged to New Thread,
+  // which opened a tab and so needed a project — and the header's New Tab now
+  // carries that condition.
+  assert.doesNotMatch(markup, /disabled=""/, "a button is disabled with no project, and why?");
 });
 
 test("a thread list is legible and names the active one", () => {
@@ -140,6 +199,7 @@ const tabbar = (
   activeId: string | null,
   busy: string[] = [],
   workspaces: Workspace[] = [],
+  loading: string[] = [],
 ): string =>
   renderToStaticMarkup(
     React.createElement(TabBar, {
@@ -148,18 +208,10 @@ const tabbar = (
       onFocus: noop,
       onClose: noop,
       busyTabIds: busy,
+      loadingTabIds: loading,
       workspaces,
     }),
   );
-
-const ws = (over: Partial<Workspace> = {}): Workspace => ({
-  id: "w1",
-  name: "Codify",
-  root_path: "/home/quinton/Projects/Codify",
-  design_contract_path: "",
-  created_at: 0,
-  ...over,
-});
 
 test("a new tab is called by its folder, not by the placeholder", () => {
   // "New chat" names nothing — not the thread, not where it is, not which of
@@ -180,6 +232,26 @@ test("a new tab is called by its folder, not by the placeholder", () => {
     1,
     `the folder is printed more than once: ${shownText}`,
   );
+});
+
+test("a loading page marks its tab with motion, not a percentage", () => {
+  // The runtime has no load-fraction event; a progress bar would be a lie
+  // with a keyframe. The marker is a pulse — motion that claims only "on the
+  // wire" — and it is a fact the page reported, not one the strip invented.
+  const s = tabbar([tab({ title: "example.com" })], "t1", [], [], ["t1"]);
+  assert.match(s, /data-loading="true"/);
+  assert.match(s, /animate-pulse/);
+  // Not loading: no marker at all, rather than an idle spinner.
+  assert.doesNotMatch(tabbar([tab({ title: "example.com" })], "t1"), /data-loading/);
+});
+
+test("a busy run outranks a loading page — one marker per tab", () => {
+  // Two markers on one tab would be two facts competing for the same pixel.
+  // The run is the louder fact and wins; the page's loading state is still
+  // visible in the pane itself.
+  const s = tabbar([tab({ title: "Codify" })], "t1", ["t1"], [], ["t1"]);
+  assert.match(s, /bg-codify-accent/);
+  assert.doesNotMatch(s, /data-loading/);
 });
 
 test("a named thread keeps its own name, and the folder stays out of the tab", () => {
@@ -263,8 +335,8 @@ test("only a tab with a live run shows the busy dot", () => {
     "c1"
   );
   // Exactly one hidden dot in the busy strip, none in the calm one.
-  assert.equal((busy.match(/bg-blue-400 flex-shrink-0/g) ?? []).length, 1);
-  assert.equal((calm.match(/bg-blue-400 flex-shrink-0/g) ?? []).length, 0);
+  assert.equal((busy.match(/bg-codify-accent flex-shrink-0/g) ?? []).length, 1);
+  assert.equal((calm.match(/bg-codify-accent flex-shrink-0/g) ?? []).length, 0);
 });
 
 test("every tab can be closed, and the button names the one it closes", () => {
@@ -278,12 +350,15 @@ test("every tab can be closed, and the button names the one it closes", () => {
   assert.match(markup, /aria-label="Close conversation: two"/);
 });
 
-test("an empty strip renders as an empty strip, not as nothing", () => {
-  // The shell is open on nothing, which is a state the user can act on. A
-  // missing tablist here would leave no landmark at all.
+test("an empty strip is still a tablist, and nothing else", () => {
+  // New Tab is not here any more: it sits beside the CODIFY badge in the
+  // header, where a growing strip cannot push it away (see "New Tab sits beside
+  // the CODIFY badge" below). What an empty strip must still be is a tablist, so
+  // the strip's own role does not disappear with its contents.
   const markup = tabbar([], null);
   assertClean(markup, "an empty strip");
   assert.match(markup, /role="tablist"/);
+  assert.doesNotMatch(markup, /aria-label="New tab"/, "the strip grew a new-tab control again");
 });
 
 // ── the three shell badges ───────────────────────────────────────────────
@@ -295,9 +370,8 @@ test("an empty strip renders as an empty strip, not as nothing", () => {
 // Three claims, three tests, because each has failed in a different way:
 // *that they are named* — an icon with no name is a control nobody using a
 // screen reader can find;
-// *that they are at the foot* — a badge in the top row beside "New chat" is a
-// different layout that passes every "is it rendered?" test there is, which is
-// exactly what I shipped first;
+// *that they are at the foot* — these utility badges must stay separate from
+// the project and thread creation actions at the top of the side panel;
 // *that they are spread* — three glyphs huddled in one corner of a 240px
 // column read as a toolbar someone dropped there.
 
@@ -305,8 +379,9 @@ const sidebarWithBadges = (over: Record<string, unknown> = {}): string =>
   renderToStaticMarkup(
     React.createElement(Sidebar, {
       conversations: [],
-      onNewChat: noop,
+      selectedWorkspaceId: "w1",
       onNewThread: noop,
+      onNewProject: noop,
       onSelect: noop,
       onRename: noop,
       onArchive: noop,
@@ -399,11 +474,11 @@ test("the badges are below the threads, not above them", () => {
   // anchored the thread on the title "one" and matched
   // `focus-visible:outline-none` in a class attribute 750 characters earlier —
   // a bare word in a class list is not an anchor.
-  const newChat = markup.indexOf("New chat");
+  const newProject = markup.indexOf("New Project");
   const thread = markup.indexOf('aria-label="Archive conversation"');
   const badge = markup.indexOf('title="Browser — the page opens in its own window"');
-  assert.ok(newChat >= 0 && thread >= 0 && badge >= 0, "a landmark went missing");
-  assert.ok(newChat < thread, "New chat is no longer at the top of the panel");
+  assert.ok(newProject >= 0 && thread >= 0 && badge >= 0, "a landmark went missing");
+  assert.ok(newProject < thread, "New Project is no longer at the top of the panel");
   assert.ok(
     thread < badge,
     "the badges are above the thread list; they belong at the foot of the panel",
@@ -421,17 +496,24 @@ test("the badges are below the threads, not above them", () => {
   );
 });
 
-test("New chat is on its own full-width row", () => {
-  // It was narrowed to make room for the badges in a first attempt. Sharing a
-  // row with them is the thing being undone, so the row goes back to being the
-  // panel's one primary action on its own line.
+test("the panel opens threads, and does not open tabs", () => {
+  // One button, and it adds a *project*. The New Thread button that used to sit
+  // beside it created a thread and opened a tab for it — the same act as the
+  // header's New Tab, in a second place, creating a conversation before anything
+  // was typed into it. A thread is now made by typing in a clean slate, and a
+  // thread *on another thread* is one right-click away, which is a different act
+  // with a different parent.
   const markup = sidebarWithBadges();
-  assert.match(text(markup), /New chat/);
-  const row = markup.slice(
-    markup.indexOf("New chat"),
-    markup.indexOf('title="Browser'),
+  assert.doesNotMatch(markup, /New Thread/, "the panel is offering a second way to open a tab");
+  assert.ok(markup.indexOf("New Project") >= 0, "and the button that adds a project went missing");
+  assert.match(markup, /class="flex items-center gap-1"/);
+  // The menu keeps its "New thread": branching is not starting from nothing.
+  const menu = readFileSync(
+    new URL("../src/components/ThreadMenu.tsx", import.meta.url),
+    "utf8",
   );
-  assert.doesNotMatch(row, /title="Browser|title="Terminal|title="Keys/);
+  assert.match(menu, /threadMenuItems\(title !== undefined\)/);
+  assert.match(menu, /item\.id === "new" \? onNewThread/);
 });
 
 test("a surface the shell does not offer is absent, not disabled", () => {
@@ -450,6 +532,78 @@ test("a surface the shell does not offer is absent, not disabled", () => {
   });
   assert.doesNotMatch(bare, /title="Browser|title="Terminal|title="Keys/);
   assertClean(bare, "the panel with no badges");
+});
+
+test("New Tab creates nothing, so it cannot disturb the project's threads", () => {
+  // The claim has inverted, and the inversion is the feature. This handler used
+  // to call the engine before it opened anything, so a tab *was* a conversation
+  // from the moment it appeared: pressing the button to look around left an
+  // empty conversation behind, named from a prompt nobody wrote, and a new row
+  // in the side panel. Now the tab is a project's window and the first prompt
+  // makes the thread — in the send path, which has the prompt to name it with.
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const code = app
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  const start = code.indexOf("const handleNewTab");
+  const end = code.indexOf("const handleNewThread", start);
+  const handler = code.slice(start, end);
+  assert.ok(start >= 0 && end > start, "the New Tab handler is missing");
+  assert.doesNotMatch(
+    handler,
+    /createConversation|updateWorkspaceConversations/,
+    "New Tab is creating a thread again, so a tab opened and abandoned is a row in the panel",
+  );
+  assert.match(handler, /openBlankTab\(prev, workspaceId\)/);
+  // And the send path is the one that makes a thread, from the prompt.
+  assert.match(
+    code,
+    /let conversationId = activeConversationId;[\s\S]{0,400}createConversation\(/,
+    "nothing creates a thread from a first prompt any more",
+  );
+});
+
+test("New Tab sits beside the CODIFY badge, and the strip no longer owns it", () => {
+  // The placement is the claim, and the strip is the reason. A control at the end
+  // of a list of open tabs is a control whose distance grows with the number of
+  // open tabs — for the one control whose job is to make that number smaller. So
+  // it lives at the left edge, between the name of the app and the strip, and
+  // `TabBar` is given no way to open one.
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const code = app
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  const headerStart = code.indexOf("<header");
+  const headerEnd = code.indexOf("</header>", headerStart);
+  const brand = code.indexOf("<span>CODIFY</span>", headerStart);
+  const newTab = code.indexOf("<NewTabButton", headerStart);
+  const tabStrip = code.indexOf("<TabBar", headerStart);
+  const main = code.indexOf("<main", headerEnd);
+  const sidebar = code.indexOf("<Sidebar", main);
+  assert.ok(headerStart >= 0 && headerEnd > headerStart);
+  assert.ok(brand > headerStart && brand < newTab, "New Tab is not after the CODIFY badge");
+  assert.ok(newTab < tabStrip, "New Tab is not before the strip, so the strip pushes it away");
+  assert.ok(tabStrip < headerEnd, "the tab strip is not beside CODIFY in the header");
+  assert.ok(main > headerEnd, "the tabs are not above the main split");
+  assert.ok(sidebar > main, "the project thread panel is not in the main split");
+  const tabBarProps = code.slice(tabStrip, code.indexOf("/>", tabStrip));
+  assert.doesNotMatch(
+    tabBarProps,
+    /onNewTab|canCreateNewTab/,
+    "the strip is offering a second way to open a tab",
+  );
+  assert.match(
+    code.slice(newTab, newTab + 120),
+    /workspaceId=\{selectedWs\?\.id\}/,
+    "the header's New Tab does not know which project a tab would be in",
+  );
+  const sidebarProps = code.slice(sidebar, code.indexOf("/>", sidebar));
+  assert.match(sidebarProps, /selectedWorkspaceId=\{selectedWs\?\.id\}/);
+  assert.match(
+    code,
+    /Record<string, Conversation\[\]>[\s\S]*?conversationsByWorkspace\[selectedWs\.id\]/,
+    "the conversation cache is not partitioned by project",
+  );
 });
 
 test("the header no longer owns the three, and the panel is given them", () => {
@@ -498,6 +652,9 @@ test("the header no longer owns the three, and the panel is given them", () => {
   );
   const sidebar = app.split("<Sidebar")[1]?.split("/>")[0];
   assert.ok(sidebar, "App.tsx no longer renders <Sidebar> in the expected shape");
+  assert.match(sidebar, /selectedWorkspaceId=\{selectedWs\?\.id\}/);
+  assert.match(sidebar, /onNewThread=\{\(parentId\) => void handleNewThread\(parentId\)\}/);
+  assert.match(sidebar, /onNewProject=\{\(\) => void handleBrowseWorkspace\(\)\}/);
   assert.match(sidebar, /onOpenBrowser=\{handleNewBrowserTab\}/);
   assert.match(sidebar, /onOpenTerminal=\{\(\) => void handleOpenTerminal\(\)\}/);
   assert.match(sidebar, /onOpenSettings=\{\(\) => setIsSettingsOpen\(true\)\}/);
@@ -722,7 +879,7 @@ test("a right-click on a row opens the menu with that row's thread", () => {
   // the list would archive it while the user is looking at another.
   assert.match(
     src,
-    /conversations\.find\(\(c\) => c\.id === menu\.conversationId\)/,
+    /projectConversations\.find\(\(c\) => c\.id === menu\.conversationId\)/,
     "the menu no longer resolves the thread it was opened on"
   );
   for (const action of ["onRename", "onArchive"]) {
@@ -748,7 +905,7 @@ test("the menu's New thread makes a thread ON the chat, not a new chat", () => {
   // the id the thread is created with, so the menu cannot say one and do another.
   assert.match(
     sidebar,
-    /newThreadParentId\(\s*menu\.conversationId,\s*activeConversationId,\s*conversations\.map\(\(c\) => c\.id\),?\s*\)/,
+    /newThreadParentId\(\s*menu\.conversationId,\s*activeConversationId,\s*projectConversations\.map\(\(c\) => c\.id\),?\s*\)/,
     "the menu no longer decides which thread a new thread hangs off, or has " +
       "stopped passing the panel so a tab from another workspace can be " +
       "offered as a parent (the engine refuses that with a 422)",
@@ -768,7 +925,7 @@ test("the menu's New thread makes a thread ON the chat, not a new chat", () => {
   );
   assert.match(
     app,
-    /createConversation\(\s*selectedWs\.id,\s*"",\s*parentConversationId,?\s*\)/,
+    /createConversation\(\s*workspaceId,\s*"",\s*parentConversationId,?\s*\)/,
     "the new thread is not created with the parent the menu resolved",
   );
 });
@@ -832,8 +989,8 @@ test("a turn names the thread it is starting, and only an unnamed one", () => {
   );
   assert.match(
     src,
-    /setConversations\(\(prev\) =>\s*prev\.map\(\(c\) => \(c\.id === updated\.id \? updated : c\)\),\s*\);/,
-    "naming a thread does not update the panel"
+    /updateWorkspaceConversations\(updated\.workspace_id, \(previous\) =>\s*previous\.map\(\(conversation\) =>\s*conversation\.id === updated\.id \? updated : conversation,\s*\),\s*\);/,
+    "naming a thread does not update its project's panel list"
   );
 });
 

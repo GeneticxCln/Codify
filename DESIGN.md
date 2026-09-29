@@ -43,7 +43,7 @@ coloured, it means something.
 | `surface` | `#161b22` | panels, the command bar card, drawers |
 | `raised` | `#21262d` | controls at rest, hover targets, inset rows |
 | `border` | `#30363d` | all dividers and resting control borders |
-| `border-strong` | `#484f58` | scrollbar thumbs, borders on hover/focus |
+| `border-strong` | `#66707c` | scrollbar thumbs, borders on hover/focus |
 
 Three surfaces, not more. A fourth would mean a component could not say what it sits
 on. `raised` exists because hover and "a control" are the same visual weight here.
@@ -54,17 +54,28 @@ on. `raised` exists because hover and "a control" are the same visual weight her
 |---|---|---|
 | `primary` | `#e6edf3` | headings, the code you asked to read |
 | `secondary` | `#c9d1d9` | body copy, chat prose |
-| `muted` | `#8b949e` | metadata, timestamps, placeholders, disabled |
+| `muted` | `#979fa8` | metadata, timestamps, placeholders, disabled |
 
 Never more than three weights of text colour in one component. If a fourth thing needs
 emphasis, it is bigger or bolder, not a new grey.
+
+**`muted` is the dimmest the app is allowed to go, and the floor is a measurement
+rather than a taste.** It was `#8b949e` and every theme had its own equivalent dimmer,
+and `ui/tests/contrast.test.ts` found the pair under 4.5:1 in sixteen of the nineteen
+themes — most sharply on `border`, because a resting toolbar toggle hovers into a
+`border` fill with this text on it, and a line colour is lighter than any surface a
+line is drawn on. So `muted` is now the smallest value that clears **WCAG AA 4.5:1 on
+`bg`, `surface`, `raised` and `border`**, in every theme, and a theme that wants a
+dimmer grey wants a darker surface rather than a quieter label. The token's job is to
+step back from `secondary`, not to step out of reading; where the two now crowd each
+other, the honest fix is size or weight, which is the sentence above arriving on time.
 
 ### Status — five tones, five meanings
 
 | Token | Value | Means exactly |
 |---|---|---|
-| `accent` | `#2f81f7` | the one interactive hue: primary action, and the current selection in any list |
-| `info` | `#2f81f7` | in flight: planning or running |
+| `accent` | `#418cf8` | the one interactive hue: primary action, and the current selection in any list |
+| `info` | `#418cf8` | in flight: planning or running |
 | `success` | `#3fb950` | completed, passed, healthy |
 | `warning` | `#d29922` | needs attention but is not wrong: paused, recording |
 | `danger` | `#f85149` | failed, refused, destructive, or Stop |
@@ -76,8 +87,38 @@ a component should say which one it means. Sharing a value means the two can nev
 drift apart, while sharing a *name* would have made a control that reports state
 indistinguishable from one you are meant to press.
 
+**The blue was lifted from `#2f81f7`, once, deliberately.** Giving `accent` a
+*resting* role — the send button, and the title of a selected row in a list — put
+this hue on a `raised` fill, and the old value reads 4.06:1 there, under the 4.5:1
+an 11px thread title is owed. `#418cf8` is the smallest step that clears it (4.59:1
+on `raised`, 5.71:1 on `bg`), it is the same hue, and `info` moved with it rather
+than staying behind: a "running" marker darker than the button you press is a
+hierarchy nobody chose. `ui/tests/contrast.test.ts` is what makes this true — it
+measures the pair the source cannot see, because the row's fill is on the container
+and the title's colour is on a child of it.
+
 **A status tone is never used decoratively.** If a control is not reporting a state, it
 is grey, and that is not a lack of colour — it is the default.
+
+**A theme may restate these six; a theme may not change what they mean.** The values
+above are the *default theme's*, and the hexes are the ones
+`ui/tailwind.config.js` compiles. They were also, until now, the only ones any theme
+could ever have: a success pill in the OLED CMatrix app was `text-green-400`, a
+saturated hue belonging to no palette the user had picked, and the badge layer did not
+follow the theme at all. So a theme now publishes all six (`THEME_TONES` in
+`ui/src/appearance.ts`) and the runtime layer re-points the classes.
+
+Two rules hold that line, both pinned in `ui/tests/appearance.test.ts` rather than
+left to good intentions:
+
+- **All six or none.** `applyTheme` clears every managed variable before applying the
+  next theme, so a theme that stated three would show the *previous* theme's other
+  three — the failure clearing exists to prevent, arriving through its own door.
+- **`danger` and `warning` stay on the warm arc.** A theme may restate failure in its
+  own palette; it may not make failure cyan. The old rule said no theme could touch
+  these at all, which protected a *meaning* by freezing a *habit* — and the habit was
+  the part that was wrong. Monochrome themes say severity as brightness instead of hue,
+  which the same test checks by requiring `danger ≠ success` there.
 
 ### Mode accents — reserved, and each one means one thing
 
@@ -103,8 +144,9 @@ at runtime by writing CSS custom properties on the document root. Those hexes ar
 **deliberately absent from the tables above and from `tailwind.config.js`**: this
 file's tables are compile-time and frozen to this config by
 `ui/tests/designTokens.test.ts`, while a theme must vary per user choice. The status
-hues are not themed — five tones each with exactly one meaning is a contract about
-what "failed" looks like, and a theme does not get to renegotiate it.
+tones *are* themed, and the rule about what they mean moved down into the status
+table above, where a test holds it: a theme may restate failure, and it may not
+make failure cyan.
 
 **The transcript's own surfaces take no hue of their own.** Anything in the
 conversation that carries words composes from the active theme's `raised` and
@@ -182,6 +224,151 @@ own namespace so a theme can never set another's by accident:
 | Solar Flare | `--flare-indigo` | `#6366f1` | the inner end of every stream and the dimmer stars |
 | | `--flare-ultraviolet` | `#a855f7` | the outer end of every stream and the brighter stars |
 
+**Five more themes, all of them margin effects.** Each publishes its own
+namespace and its own canvas; the surfaces are here for the reason the snow
+pair's are — `ui/tests/atmosphere.test.ts` reads every theme's swatch and fails
+if this file has not published the value.
+
+| Token | Solarized Flare | Cyber Organism | Event Horizon | Vector Wireframe | Liquid Mercury |
+|---|---|---|---|---|---|
+| `bg` | `#000000` | `#000000` | `#000000` | `#000000` | `#000000` |
+| `surface` | `#0a0700` | `#0a192f` | `#09090b` | `#031008` | `#0b0d10` |
+| `raised` | `#161000` | `#0f2540` | `#131318` | `#062012` | `#131720` |
+| `border` | `#4a3800` | `#16385c` | `#1f1f26` | `#0d3b1f` | `#1e293b` |
+| `border-strong` | `#785c00` | `#2c71b2` | `#606075` | `#1d763e` | `#4f6584` |
+| `primary` | `#ffd700` | `#e0f7ff` | `#e4e4e7` | `#d6ffe6` | `#f1f5f9` |
+| `secondary` | `#ffb000` | `#9fe8ff` | `#c084fc` | `#00ff66` | `#e2e8f0` |
+| `muted` | `#c99f2d` | `#7aa5c3` | `#79899f` | `#5bab7d` | `#8291a5` |
+
+All five are on pure black, and that is a shared decision rather than a
+coincidence: four of the five confine themselves to the window's margins, and a
+near-black surface is what lets a line of light at the edge read as *the edge*
+rather than as a panel that happens to be dark.
+
+Their weather variables, one namespace each, named for what the canvas draws
+rather than for the theme — a theme's name changes and a canvas's job does not:
+
+| Theme | Variable | Value | Used for |
+|---|---|---|---|
+| Solarized Flare | `--sun-core` | `#ffb000` | the flare's wide faint stroke, and the trigger |
+| | `--sun-edge` | `#ffd700` | the thin bright core, and the heat pulse |
+| Cyber Organism | `--organ-node` | `#00e5ff` | node cores, and the signals that travel the tendrils |
+| | `--organ-tendril` | `#0077ff` | the branching tendrils and each node's halo |
+| Event Horizon | `--void-arc` | `#c084fc` | the near side of the disc |
+| | `--void-dust` | `#64748b` | the wide, faint outer orbits |
+| | `--void-beam` | `#a855f7` | the radial jets while a run is in flight |
+| Vector Wireframe | `--vector-line` | `#00ff66` | every edge of every solid, and the trigger |
+| | `--vector-lock` | `#ff007f` | the locked vertices and the target reticle |
+| Liquid Mercury | `--fluid-crest` | `#e2e8f0` | the thin highlight on each wave, and the trigger |
+| | `--fluid-trough` | `#334155` | the thick body of the fluid under the highlight |
+
+**One brief met deliberately against another.** Vector Wireframe asks for "green
+*or* hot pink" vector lines, and it has both — the pink is `--vector-lock`, drawn
+on the reticle and the vertices a run locks onto, which is what a vector arcade's
+second colour is for. It is deliberately *not* that theme's `danger` tone: the
+status rule above says failure stays on the warm arc so a user who learned one
+theme's red recognises it in the next, and `#ff007f` is 325°, magenta. The danger
+is `#ff3b5c`, a hot red that reads at a glance beside a mint "passed" on the same
+screen. A brief and a contract disagreed here, and the contract won on the token
+that means a state while the brief won on the token that means a colour.
+
+**Three more margins, and the last table is the reason to read it twice.**
+`Electric Arc`, `Toxic Lab` and `Anon Fluid` publish their surfaces here for
+the reason every other theme's are: `ui/tests/atmosphere.test.ts` reads a
+theme's swatch and fails if this file has not carried the value.
+
+| Token | Electric Arc | Toxic Lab | Anon Fluid | Used for |
+|---|---|---|---|---|
+| `bg` | `#030310` | `#050a06` | `#000000` | app background, behind everything |
+| `surface` | `#0a0a20` | `#0b1a0f` | `#03110a` | panels, the command bar card, drawers |
+| `raised` | `#111132` | `#12271a` | `#061a10` | controls at rest, hover targets, inset rows |
+| `border` | `#1e1e4a` | `#1d3d26` | `#0c3320` | dividers and resting control borders |
+| `border-strong` | `#5757b9` | `#3b7947` | `#1e714c` | scrollbar thumbs, borders on hover/focus |
+| `primary` | `#e8e8ff` | `#e2f5d9` | `#c8ffe0` | headings, the code you asked to read |
+| `secondary` | `#8a7dff` | `#9dff3c` | `#00ff9c` | body copy, chat prose |
+| `muted` | `#8787b2` | `#87aa72` | `#54a37d` | metadata, timestamps, placeholders |
+
+Their weather variables, named for what the canvas draws rather than for the
+theme — the fifth table above sets the rule and this one follows it:
+
+| Theme | Variable | Value | Used for |
+|---|---|---|---|
+| Electric Arc | `--arc-core` | `#dfe4ff` | the discharge channel, and the trigger |
+| | `--arc-fork` | `#8a7dff` | the spurs, and the wide faint halo under the channel |
+| Toxic Lab | `--reagent` | `#9dff3c` | the body of each bubble, and the trigger |
+| | `--reagent-skin` | `#d4ff7a` | the bright upper third of a bubble, and the burst ring |
+| Anon Fluid | `--fluid-bit` | `#00ff9c` | the dashes, and the trigger |
+| | `--fluid-cursor` | `#a8ffd8` | the one dash in eleven that marks a boundary |
+
+**Each one is a different axis, because a second column of falling glyphs is
+not a new theme.** The OLED rain falls, so `Anon Fluid` runs *sideways* along
+the gutters and leaves the vertical axis to the transcript — which is also the
+truer picture of a terminal reading a stream rather than printing a file.
+`Toxic Lab` rises, and grows as it rises, because a bubble that keeps its size
+to the ceiling reads as a particle emitter rather than as gas. `Electric Arc`
+does not travel at all: it is an event with an afterimage, a hard decay rather
+than a pulse, because a gentle fade reads as a glowing worm in the window.
+
+**Two of the three are about what a colour is *for*, and that is why their
+tones are the interesting part of the table.** The lab's green is a *substance*
+— the reagent in the glass — so it cannot also be the interface's `success`,
+and it certainly cannot be `danger`. `success` is therefore a mint (`#6ef0b0`),
+`danger` is the orange-red of a hazard label (`#ff5630`) and `warning` is the
+tape's amber (`#ffd23f`): three colours the eye has to separate at a glance in
+a window that is otherwise one colour, and all three on the warm arc the status
+rule requires. Its `accent` is `#b6ff2e`, the same reagent pushed one step
+further, which is what the wordmark's gradient is for — a theme whose
+signature colour is a *substance* wants the app's own interactive hue to be
+more of it. `Anon Fluid` has the same problem in a different shape: a
+phosphor green terminal that says "passed" in the same green as its data has
+stopped using colour to say anything, so its `success` is a spring green
+(`#39ff88`) held off the stream's own `#00ff9c`. `Electric Arc`'s accent is
+`#8f7bff`, the violet of the arc's spurs, and its `danger` is a red rather than
+that violet — a user who has learned that this window means "broken" by its
+red should not have to relearn it in the one theme here that is mostly blue.
+
+**The two snow themes' surfaces**, published here for the same reason the
+other themes' are: `ui/tests/atmosphere.test.ts` reads a theme's swatch and
+fails if this file does not carry the value, so a surface a reader cannot look
+up is a surface this document has not finished describing.
+
+| Token | Winter Snow | Festive Night | Used for |
+|---|---|---|---|
+| `bg` | `#050a14` | `#080d09` | app background, behind everything |
+| `surface` | `#0a1220` | `#0e1a11` | panels, the command bar card, drawers |
+| `raised` | `#0f1a2e` | `#15271a` | controls at rest, hover targets, inset rows |
+| `border` | `#16263f` | `#1d3a25` | dividers and resting control borders |
+| `border-strong` | `#3a689a` | `#3e794c` | scrollbar thumbs, borders on hover/focus |
+| `primary` | `#eaf4ff` | `#f6f2e6` | headings, the code you asked to read |
+| `secondary` | `#c3d9f0` | `#d9d3bf` | body copy, chat prose |
+| `muted` | `#758fae` | `#989f8d` | metadata, timestamps, placeholders |
+
+Both are dark for the reason §2 opens with: the app is a full-screen window
+beside an editor. Winter Snow is blue-black and Festive Night green-black, and
+their text is cold white against warm cream — which is the difference you
+notice with snow in the window, not the snow.
+
+**Two themes, one snowfall.** `winter-snow` and `festive-night` publish
+`--snow-flake` and are drawn by a single `components/ui/SnowFall.tsx`, the way
+`cmatrix-oled` and `ascii-rain` share `RainBackdrop` and `MatrixRain`. The
+difference between the two is entirely in what they publish:
+
+| Theme | Variable | Value | Used for |
+|---|---|---|---|
+| Winter Snow | `--snow-flake` | `#e8f4ff` | the near flakes, and the trigger that mounts the canvas |
+| | `--snow-flake-2` | `#a9c8ea` | the paler, bluer flakes the field mixes in for depth |
+| Festive Night | `--snow-flake` | `#f2f6f0` | the near flakes, and the trigger |
+| | `--snow-flake-2` | `#cddcce` | the faintly green flakes under the lights |
+| | `--snow-glow` | `#ffc85c` | the warm lights rising through the snow, and the gold accent |
+| | `--snow-glow-2` | `#e2564d` | the second light colour, and the berry danger |
+
+So the two are one component and four variables rather than two components. A
+theme that publishes **no** `--snow-glow` gets no lights, and that absence is
+what makes Winter Snow quiet and Festive Night lit — the painter never asks
+which theme it is running, and a tenth snowfall would be a data entry. The
+alternative, a second canvas that shares most of its drawing, is the sixth place
+in this file where the same weather would be written twice.
+
 The HUD's "15% opacity" is `ELEMENT_ALPHA` in `HudSweep.tsx` rather than a
 baked-in alpha, because the brief's elements are not all the same brightness —
 a sweep's leading edge and a long tick both need more than the brackets do, and
@@ -217,12 +404,15 @@ between "I do not want weather" and "I want weather, quietly", which are two
 different requests and until now only the second had an answer.
 
 The palette is a warm near-monochrome, at `#131311` background, `#1c1c19`
-surface, `#26261f` raised, `#3a3a33` border, `#55554a` strong border,
-`#f7f6f2` primary, `#d6d5cc` secondary, `#8e8d84` muted — the highest
+surface, `#26261f` raised, `#3a3a33` border, `#707064` strong border,
+`#f7f6f2` primary, `#d6d5cc` secondary, `#a4a49c` muted — the highest
 `primary`-on-`raised` contrast of any theme here, and no saturated hue anywhere
 in it. With nothing to look at, contrast is the whole design, and a colour
 carrying no meaning is a colour competing for the attention the theme exists to
-give back.
+give back. The strong border is the dimmest warm grey that clears SC 1.4.11's
+3:1 against all three surfaces — `ui/tests/nonTextContrast.test.ts` gates it,
+and `stillTheme.test.ts` holds every token to a channel spread of 12, which is
+why the lift stops at `#707064` rather than going brighter.
 
 **Which themes have no motion is declared, not implied.** `MOTIONLESS_THEME_IDS`
 in `appearance.ts` names them: `codify-dark`, which never had an effect, and
@@ -260,6 +450,120 @@ the one surface in the app that must pick **no** colour of its own: it is where
 a user looks to see what everything else looks like. The status green is the sole
 exemption, because the dark theme's preview shows it on purpose as the only
 saturated thing in that palette, and it is pinned to that one spot.
+
+### Custom colours — the accent and the weather, never the ground
+
+Nineteen themes, and a user who wants Liquid Mercury's fluid dynamics in deep
+crimson should have them. The picker (`ui/src/tint.ts`, surfaced in the
+Appearance pane) is the smallest thing that does that: it offers each theme's
+`accent` plus **the two or three weather variables that theme's own painter
+reads**, labelled with what they draw ("Bubble body", "Discharge channel",
+"Wave highlight"), and a proposal is a hex in a custom property.
+
+Three rules make it safe, and each of them exists because the alternative is a
+bug report.
+
+**Nothing here changes the physics.** No painter's arithmetic is touched. Every
+painter resolves its variables through the hook's live `getComputedStyle` read on
+the frame it draws, so a tint is on screen within one frame and a running canvas
+costs nothing extra to recolour — which is the whole performance claim, and it
+is only true because the painters moved their reads out of their constructors.
+It was not true before, and `ui/tests/tint.test.ts` now paints a real painter
+across two frames with the variable changing in between, because a docstring
+saying so is not a test.
+
+**The surfaces are not offered, and the backgrounds were deliberately not
+flattened.** An earlier request for this feature asked for every background
+pinned to `#000000`. Seven of the nineteen themes are not black, and their
+backgrounds are load-bearing — Liquid Mercury's chrome *is* the chrome, Abyss
+is a deep field the spores are meant to float in — so pinning would have deleted
+seven palettes rather than customised nineteen. What is left is the guard: a
+proposal keeps its **hue and saturation** and has its **lightness moved** until
+it clears 4.5:1 on all three surfaces (`--codify-accent` ends up on a label, so
+it is held to the text floor) or 3:1 on the two for a weather variable, which
+paints a line or a particle and is held to the 1.4.11 graphic floor instead. The
+swatch shows the *resolved* colour and says what it was and what it scored,
+because a well showing a colour the screen does not have is worse than a
+clamp the user did not ask for.
+
+**A proposal that cannot be made readable is refused, not approximated.** There
+is no lightness of any hue that is 4.5:1 from a near-black and a near-white panel
+at once, and the answer is the theme's own value with an explanation. The clamp
+compares against the *brightest* surface, not the mean: against a mean on a dark
+theme every colour sits above it, so a deep crimson was told to get darker,
+walked the whole sweep without passing, and handed back the last candidate it
+had tried — a near-white, returned from the function whose entire job is to not
+do that. `ui/tests/tint.test.ts` pins that case by name.
+
+What stays untouchable is the list that would make the guard a suggestion:
+`primary`, `secondary` and `muted` are the surfaces everything else is measured
+against; the five status tones carry meanings learned in one theme and
+recognised in the next; and `bg`, `surface` and `raised` are the ground. A theme
+with no atmosphere offers its accent alone, which is the honest answer rather
+than a picker offering colours that theme does not publish.
+
+#### Undo, and why a drag is one step
+
+A colour well is a native picker, and dragging its saturation slider fires a
+change event per step — a single gesture is dozens of commits. `ui/src/
+tintHistory.ts` collapses consecutive changes to the *same* variable inside
+700 ms into one entry, and the entry it keeps is the state from **before the
+gesture**, not before its last frame. The tempting implementation overwrites the
+whole entry on each frame, which satisfies every other test and makes Undo move
+the colour by one frame: the user presses it sixty times and gives up first.
+
+Everything that changes a tint goes through the pane's one `commit`, so a fourth
+path added later is undoable without anyone remembering — a per-row reset, a
+whole-theme reset, and an imported scheme all are. The stack holds whole-store
+snapshots rather than diffs, twenty-five deep, dropping the *oldest*: dropping
+the newest would make editing silently stop being undoable with nothing on
+screen to say so. An entry that has no burst key — a reset, an import — never
+coalesces, because neither is a gesture that produces a stream of itself.
+
+It is deliberately **not** in `localStorage`. Undo answers "I mis-dragged", which
+is a thing that happened in the last few seconds; the store persists, the way
+back to it does not, and a restart is a fine time to forget. For the same reason
+an external write — another window, devtools — **clears** the stack rather than
+keeping it: every entry holds a store from before something, and once the
+something has been replaced from outside, undoing would silently discard a
+change the user did not make.
+
+The button names the change it would take back rather than reading "Undo", which
+is also the only way to discover that the thing you are about to reverse was on
+*another* theme — the stack is global, so pressing it while looking at an
+untinted theme would otherwise appear to do nothing at all.
+
+#### The scheme file, and what a format is for
+
+Custom colours can leave the app as one file (`ui/src/scheme.ts`), and the
+interesting part is not the JSON. The store is keyed by **theme id** —
+`toxic-lab` — because that is the only key the app can resolve without asking a
+human, and that is exactly what makes it unreadable to a person deciding whether
+to trust a file someone sent them. So a scheme carries a **label** beside every
+id, a **version**, and a name derived from its own contents. The id is the exact
+match; the label is what a human reads and what they would retype.
+
+Three rules make it survive two different installs, each because the obvious
+alternative is a file that only works between identical ones:
+
+- **Match on id, then label.** A scheme from a build that renamed a theme, or
+  whose id later changed, is still about Toxic Lab and still applies.
+- **Report the entries that could not.** A scheme that half-applied and said
+  nothing looks exactly like one that fully applied, and the skipped half is
+  named — "This build has no Holo Deck 2099" — because the person who needs to
+  know is the one holding both installs.
+- **Refuse, rather than half-read.** Not-a-scheme, from-a-newer-version, and
+  valid-but-empty are three different sentences, and the last is refused because
+  the most confusing outcome of an import is the app looking exactly as it did
+  before.
+
+The import **replaces within a theme and merges across themes**, and stores
+values **raw**: the local contrast guard runs on arrival, not the sender's, so a
+colour that is fine on their near-black theme is judged against *this* machine's
+surfaces rather than arriving pre-clamped against a ground it will never be
+painted on. Re-importing an export changes nothing, which is what makes sharing
+safe to do twice.
+
 
 ### Armed, selected, and at rest
 
@@ -399,6 +703,83 @@ to survive it deliberately:
   rule this entry exists to keep. The assets are generated by `scripts/make_logo.py`
   (run it by hand when the mark changes); the palette in that script quotes this
   file's hexes and must not diverge from them.
+- **The eight margin effects** — `SolarWind.tsx` (amber flares down the gutters),
+  `CyberOrganism.tsx` (nodes and branching tendrils in the margins),
+  `EventHorizon.tsx` (tapered streaks tracing orbits of a disc centred on the
+  window), `VectorWire.tsx`
+  (rotating 1px wireframe solids), `Nanofluid.tsx` (viscous metallic waves
+  climbing the margins), `ElectricArc.tsx` (forked discharges striking down
+  both gutters), `ToxicLab.tsx` (reagent bubbles rising, growing, and popping
+  at the ceiling) and `AnonFluid.tsx` (data running *sideways* along the
+  gutters) — one bullet because they share a shape, and the shape is
+  the thing worth a contract. Each is an animated theme and each survives §7 the
+  way the rain does: the user asked for it by choosing it, and each is bounded
+  identically by `hooks/useAtmosphereCanvas.ts` — 1024 device pixels, 30 frames
+  a second, and **one** static frame under `prefers-reduced-motion`.
+
+  Two shared rules, both of them about the middle of the window. **None of the
+  eight paints anything across the middle**, because that is where the conversation
+  is and a bright moving line across somebody's code is the worst legibility
+  failure in the app. What differs is how the disc gets there: the other seven
+  never compute anything past their gutter, while `EventHorizon` orbits a centre
+  in the middle of the window, so its *geometry* spans the full window and reaches
+  past every edge even though its output does not — which is what gives it a limb
+  to flare jets from, and why it carries the faintest vignette of the set. And
+  **every one of them fades out as it approaches the middle** rather than being
+  clipped at an edge, because a hard cutoff reads as a bar across the screen
+  where a fade reads as distance.
+
+  What each does while a turn is in flight is deliberately *different*, because
+  eight identical pulses would be one effect with eight palettes: a heat band
+  crosses the gutters, signals run along the tendrils, the disc doubles its
+  orbital rate and fires jets, extra chords appear and a reticle locks onto one
+  solid, the fluid gains a second higher-frequency term so it breaks up
+  rather than merely speeding up, the arcs strike more often and hold their
+  charge twice as long, the bubbles pop more often, and the data stream
+  *shears* — a band of rows displaced sideways and drawn in blocks, which is
+  the one state report here that changes the picture's shape rather than its
+  rate. All eight are information — a run is in flight —
+  which is the side of §7's line that motion has to be on to be allowed.
+- **The snowfall** (`components/ui/SnowFall.tsx`, behind the whole window, and in
+  the settings preview tile) — Winter Snow and Festive Night, and the reason
+  they are one bullet rather than two. It is an animated *theme* and it survives
+  §7 the way the rain does: the user asked for it by choosing it, and it is
+  bounded like every other one here — the hook in `hooks/useAtmosphereCanvas.ts`
+  caps the canvas at 1024 device pixels, releases at most 30 frames a second, and
+  renders **exactly one** static frame under `prefers-reduced-motion`, because a
+  1 FPS snowfall is still a snowfall.
+
+  Three things it is careful about, each of which is a way this could have been
+  decoration without meaning to be. The drift is a *shared* wind, so the field
+  leans together rather than being 96 flakes each going their own way — a
+  hailstorm is not weather, it is a particle emitter. The flakes are three
+  depth tiers, so the field has depth rather than being one disc repeated at
+  three sizes; a random radius per flake is what produces a few so large they
+  read as bugs. And the lights in the Festive Night variant *twinkle* — they are
+  the only thing here with a rhythm a person could learn, which is the standard
+  §7 sets for motion that is not reporting state, and they earn it by being the
+  thing that makes that theme different from its own sibling.
+- **The wordmark** (`components/ui/Wordmark.tsx`, filling the empty transcript) — the
+  app's name, in its own letters, with a band of light travelling across it on a 9s
+  loop. It is neither state nor feedback: it is the brand, and it is the same sentence
+  `logo.gif` spells at 24px, which is why the two exemptions are the same one. It
+  earns this by being a *logotype* — an animated gradient clipped to glyphs is how
+  type is set, and the alternative at the centre of an empty window was a paragraph
+  explaining the pipeline to someone who had not asked for a pipeline. It is set
+  **thin** — `font-weight: 200` — because it sits over whatever weather the active
+  theme is drawing, and an extrabold logotype at that size reads as a slab laid over
+  the rain rather than as type set in it. The component's own docstring had been
+  calling itself "thin by design" while the stylesheet said 800, so the two disagreed
+  for as long as both existed and the stylesheet was the one rendering.
+  The `prefers-reduced-motion` answer is the logo's: the band is parked off the glyphs
+  rather than slowed, so the gradient wordmark is what remains. It matches every
+  theme by *reading* one — every colour is `rgb(var(--codify-*-rgb) / …)` and there is
+  no `switch` on the theme id — so the same rules give phosphor green, magenta, or flat
+  white depending on what is active, and no new rule is needed for the seventeenth theme.
+  `ui/tests/wordmark.test.ts` holds both halves, because neither was true by
+  accident: the weight because a docstring is not a stylesheet, and the theme-reading
+  because a hex literal in one gradient stop renders the wrong colour in all sixteen
+  themes and nothing else in the suite would have said so.
 - **The Appearance rain** (`components/ui/RainBackdrop.tsx` over
   `components/ui/MatrixRain.tsx`, the OLED CMatrix theme's canvas effect — behind
   the whole window, and in the settings preview tile) — one of the animated
@@ -486,7 +867,7 @@ to survive it deliberately:
   Its mount point is the rain's, and for the same reason: once, by the shell,
   as the first children of the app's `relative` root, as siblings rather than
   alternatives, each gated on its own variable. The two can never both be true.
-- **The other four atmospheres** (`components/ui/WeatherBackdrop.tsx` over
+- **The other four full-window atmospheres** (`components/ui/WeatherBackdrop.tsx` over
   `NeuralWeb`, `HudSweep`, `AbyssSpores`, `NebulaFlow`) — four more themes'
   weather, and the reason the rules above are written as a *family* rather than
   repeated per effect. Three decisions carry all of them:
@@ -508,6 +889,31 @@ to survive it deliberately:
      its own to seem alive. It is a *ref*, not a prop on the hook's dependency
      list, because re-running the effect to pick up a boolean would restart a
      simulation that has drift.
+- **Affordability is measured, never assumed.** A 30 FPS full-window effect is a budget
+  the machine has to be able to meet, and on some machines it cannot: WebKitGTK composites
+  in software when it has no dma-buf path (an Nvidia/Wayland session, a VM), and there a
+  full-surface repaint per frame costs about a whole core *in the UI process*, which stops
+  the main loop dispatching input — a window that has not crashed and will not answer, which
+  from a chair is the same thing. Nothing inside the page sees that cost: the painter is
+  cheap, and `rAF` keeps delivering frames because the web process has already committed
+  them. What a loop *can* see is the interval the compositor actually delivers, so both
+  loops hand every frame to `makeFrameBudget` and stop animating when the mean over a window
+  is `SLOW_FRAME_FACTOR` (4×) the requested interval — once, with the measurement in the
+  log, leaving the last frame drawn. The numbers are contract, not tuning: 24 frames is
+  0.8 s of evidence at 30 FPS, a 2 s warm-up keeps the app's own startup from being read as
+  a verdict, and an interval over `SUSPENDED_FRAME_MS` is treated as a suspended window
+  rather than a slow one, because every user who ever switched away would otherwise keep a
+  still backdrop for the rest of the session.
+
+  **The half this does not cover, and how it showed up.** On the checkout where this was
+  measured, the frame budget never fires: `rAF` is delivered quickly while the UI process
+  rasterises, so the page cannot tell that its own decoration is what is starving the
+  window. Measured there, the app burned ~97% of a core at idle, and **~33% with the
+  effects stopped** (`gtk-enable-animations=false`, which the page reads as
+  `prefers-reduced-motion`) — so the relief valve works and the automatic verdict does not
+  reach that machine. A compositor-aware verdict has to come from the side that pays the
+  cost, which is the shell; until then, the budget above covers the machines whose frames
+  are throttled and the motion preference covers the rest.
 - **Nothing else.** In particular the engine-health dot is steady: its colour already
   reports the connection, so a loop over it carried no information a reduced-motion user
   could receive. If you add a sixth, the burden is on you to say which of the two

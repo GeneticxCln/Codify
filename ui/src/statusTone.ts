@@ -98,9 +98,47 @@ export const ENGINE_STATE_COPY: Record<EngineState, { label: string; hint: strin
   checking: { label: "Checking", hint: "Asking the engine whether it is there" },
   "auth-stale": {
     label: "Auth stale",
-    hint: "Engine is up but the auth token is not accepted — click to check settings",
+    hint: "Engine is up but the auth token is not accepted — the banner below has the fix",
   },
   offline: { label: "Offline", hint: "Engine is not responding — click to check settings" },
+};
+
+/**
+ * What the auth-stale state tells the user to *do*, and how it says it.
+ *
+ * **Why this is here and not in the component.** `statusTone.ts` is a plain module
+ * because the UI suite runs through `node --test` with no renderer; the copy for
+ * the one state that has a fix attached is exactly the kind of decision that used
+ * to live in JSX and become untestable. `ui/tests/statusTone.test.ts` holds these
+ * strings, and it does so *loosely on purpose*: a test that pins the whole sentence
+ * forces every wording tweak through the test first, which is the wrong direction
+ * for prose — but a test that pins the *shape* (which keys exist, that the token
+ * reaches the browser console, that the make target is named) fails the day someone
+ * deletes the fix without replacing it.
+ *
+ * **Why the fix is a paste and not a button.** The token is held by the engine's
+ * spawner — the Tauri shell, which self-heals via IPC, or `make run-engine-preview`,
+ * which prints it. A browser tab cannot read either; only the developer standing in
+ * front of the console can bridge that gap. So the banner shows the two statements
+ * that bridge it, already filled in, and a copy button — it does not pretend to
+ * apply anything itself, because it cannot reach the value it would need.
+ */
+export const STALE_AUTH_FIX: {
+  heading: string;
+  body: string;
+  /** The make target that prints a fresh handshake, named so a rename shows up here. */
+  command: string;
+  /** How the printed values reach the app, as one sentence. */
+  pasteHint: string;
+} = {
+  heading: "The engine is up, but this tab's token is not accepted",
+  body:
+    "The engine rotates its boot token on every restart, and this browser tab is still " +
+    "holding the previous one. The desktop app fixes itself; a browser tab has no way to " +
+    "read the new token, so it has to be pasted once.",
+  command: "make run-engine-preview",
+  pasteHint:
+    "Run it and paste the two localStorage lines it prints into this console, then reload.",
 };
 
 /**
@@ -108,13 +146,25 @@ export const ENGINE_STATE_COPY: Record<EngineState, { label: string; hint: strin
  *
  * Full class names, never assembled from a tone: Tailwind finds these by scanning
  * source text, and a `bg-${tone}-500` would compile to nothing.
+ *
+ * They name the theme's status tokens rather than `bg-codify-success/20` / `bg-codify-danger/20`,
+ * which is the same change `components/ui/Badge.tsx` made: these were literals, so
+ * the Offline dot was Tailwind red in every theme — including the two that draw
+ * rain behind it. The class names are still written out, because that is what
+ * makes them findable; `ui/src/index.css` is what paints them.
  */
 export const ENGINE_STATE_CLASSES: Record<EngineState, { pill: string; dot: string }> = {
-  live: { pill: "bg-codify-bg text-gray-400 border-codify-border", dot: "bg-green-500" },
-  checking: { pill: "bg-codify-bg text-gray-400 border-codify-border", dot: "bg-gray-500" },
-  "auth-stale": {
-    pill: "bg-amber-950/40 text-amber-400 border-amber-800",
-    dot: "bg-amber-500",
+  live: { pill: "bg-codify-bg text-codify-muted border-codify-border", dot: "bg-codify-success" },
+  checking: {
+    pill: "bg-codify-bg text-codify-muted border-codify-border",
+    dot: "bg-codify-neutral",
   },
-  offline: { pill: "bg-red-950/40 text-red-400 border-red-800", dot: "bg-red-500" },
+  "auth-stale": {
+    pill: "bg-codify-warning/40 text-codify-warning border-codify-warning",
+    dot: "bg-codify-warning",
+  },
+  offline: {
+    pill: "bg-codify-danger/40 text-codify-danger border-codify-danger",
+    dot: "bg-codify-danger",
+  },
 };

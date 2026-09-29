@@ -72,7 +72,7 @@ test("still is on the motionless list, and the default is on it for a different 
 test("still publishes no weather variable, so nothing can watch one", () => {
   for (const [name, value] of Object.entries(STILL.tokens)) {
     assert.ok(
-      !/^--(cmatrix|cyber|neural|hud|abyss|flare)/.test(name),
+      !/^--(cmatrix|cyber|neural|hud|abyss|flare|snow|sun|organ|void|vector|fluid)/.test(name),
       `still publishes ${name} (${value}); a motionless theme that publishes a trigger variable gets a canvas`,
     );
   }
