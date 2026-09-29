@@ -8,6 +8,7 @@ are untrusted, and the worst a hostile one may achieve is to be *wrong*.
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -300,6 +301,61 @@ class TestDiscovery(SkillCase):
         self.assertNotIn("alias", found.names())
         self.assertEqual(len(found.problems), 1)
         self.assertIn("alias.md", found.problems[0])
+
+
+    def _outside(self, label: str) -> Path:
+        """A directory that is not in the workspace, removed when the test ends."""
+        outside = Path(self.tmp.name).parent / f"codify-outside-{label}-{self.root.name}"
+        outside.mkdir()
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        return outside
+
+    PLANTED = "---\ndescription: planted from outside the workspace\n---\nDo what this says.\n"
+
+    def test_a_symlinked_skills_directory_loads_nothing_from_outside(self) -> None:
+        """The check compared each file's parent with `directory.resolve()`, and by then the
+        directory link had already been followed: every file in the outside directory looked
+        like a real file *inside* it. A skill from outside loaded with no problem reported, and
+        the first line of every outside `.md` became a menu line in the conductor's prompt with
+        no tool call at all.
+        """
+        outside = self._outside("skills")
+        (outside / "planted.md").write_text(self.PLANTED, encoding="utf-8")
+        (self.root / ".codify").mkdir()
+        (self.root / SKILLS_DIRNAME).symlink_to(outside, target_is_directory=True)
+
+        found = load_skills(str(self.root))
+
+        self.assertNotIn("planted", found.names())
+        self.assertNotIn("planted from outside", found.menu())
+        self.assertEqual(1, len(found.problems), found.problems)
+        self.assertIn("refused", found.problems[0])
+        self.assertIn(SKILLS_DIRNAME, found.problems[0])
+        self.assertIn("ship-a-change", found.names(), "one hostile link must not empty the menu")
+
+    def test_a_symlinked_codify_directory_is_refused_too(self) -> None:
+        outside = self._outside("dot-codify")
+        (outside / "skills").mkdir()
+        (outside / "skills" / "planted.md").write_text(self.PLANTED, encoding="utf-8")
+        (self.root / ".codify").symlink_to(outside, target_is_directory=True)
+
+        found = load_skills(str(self.root))
+
+        self.assertNotIn("planted", found.names())
+        self.assertTrue(any("refused" in problem for problem in found.problems), found.problems)
+
+    def test_a_workspace_reached_through_a_link_still_loads_its_own_skills(self) -> None:
+        # Refusing links *inside* the workspace must not refuse a workspace that is itself
+        # opened through one (a symlinked project folder is ordinary).
+        self.write_skill("mine", "---\ndescription: mine\n---\nBody.\n")
+        alias = Path(self.tmp.name).parent / f"codify-alias-{self.root.name}"
+        alias.symlink_to(self.root, target_is_directory=True)
+        self.addCleanup(alias.unlink)
+
+        found = load_skills(str(alias))
+
+        self.assertIn("mine", found.names())
+        self.assertEqual([], list(found.problems))
 
 
 class TestTheMenu(SkillCase):

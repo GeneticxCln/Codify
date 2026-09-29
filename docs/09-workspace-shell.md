@@ -2402,6 +2402,13 @@ reach the write gate — that gate reads the goal's *stored status*, not anythin
 the model was told. The worst a hostile skill can do is argue, and an argument
 cannot open a door. `tests/test_skills.py::TestASkillCannotEmpower` holds it.
 
+**Links are not followed, at either level.** A skill *file* that is a symlink is refused, and so is a
+skills *directory* that does not resolve to exactly `<workspace>/.codify/skills` — a link at `.codify`
+or at `skills` would otherwise load a far directory's files as instructions and put the first line of
+each in the conductor's menu with no tool call. Each refusal is reported as a problem, never skipped in
+silence, and the built-ins still load. A workspace that is itself opened through a link is fine: the
+comparison is against the workspace's own resolved path.
+
 **A second built-in, for handing the thread over.**
 `engine/builtin_skills/context-transfer.md` is the other one: when a
 conversation is long enough that the model has started losing track, load it and
