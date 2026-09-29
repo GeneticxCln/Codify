@@ -44,6 +44,7 @@ from httpx import ASGITransport
 from pydantic import BaseModel
 
 import engine.models
+from engine.models import GoalCreate
 from engine.app import ERROR_RESPONSES, app, lifespan
 from engine.providers import Keychain, ProviderError
 
@@ -249,7 +250,15 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
         is the one that names the code the UI actually branches on
         (`ui/src/goalActions.ts`).
         """
-        _, goal_id = await self._a_workspace_and_goal()
+        # The goal is made through the service, not `POST /goals`: that route starts real
+        # planning, which with no models configured fails the goal within milliseconds, and a
+        # FAILED goal cannot legitimately become PENDING (docs/04, terminal statuses). A startable
+        # goal is one that planned successfully, and PLANNING -> PENDING is exactly that move.
+        ws_id = (await self.client.post(
+            "/workspaces", json={"name": "WS", "root_path": str(self.project)}, headers=self.headers,
+        )).json()["id"]
+        goal = app.state.goals.create(GoalCreate(workspace_id=ws_id, title="t"))
+        goal_id = goal.id
         current = (await self.client.get(f"/goals/{goal_id}", headers=self.headers)).json()
         app.state.goals.update_status(goal_id, current["version"], "PENDING")
 

@@ -429,6 +429,22 @@ class AgentRegistryService:
         }
 
 
+# A goal that reaches one of these stays there — except by the moves in `REOPENED_BY`, which are
+# `POST /goals/{id}/apply` (a completed dry run, or a failed one) and the step retry, both of which
+# re-open a finished goal as RUNNING. Nothing re-opens CANCELLED: retry, apply and start all refuse it.
+TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+REOPENED_BY: dict[str, frozenset[str]] = {
+    "COMPLETED": frozenset({"RUNNING"}),
+    "FAILED": frozenset({"RUNNING"}),
+}
+
+
+def may_change_status(current: str, target: str) -> bool:
+    if current not in TERMINAL_STATUSES or target == current:
+        return True
+    return target in REOPENED_BY.get(current, frozenset())
+
+
 class WorkspaceService:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._db = conn
@@ -1699,7 +1715,20 @@ class GoalService:
         The event is published here rather than by callers so *every* status
         change reaches live streams — pause and cancel used to write the DB and
         stay silent, leaving open chats to discover the change by polling.
+
+        A goal that has reached a terminal status stays there, except by the two
+        documented moves that re-open it (`may_change_status`): `CANCELLED` is a
+        person's decision, and `run_chat` used to end with an unconditional
+        `COMPLETED` that overwrote it. Repeating the status a goal already has is
+        not a move and is allowed.
         """
+        row = self._db.execute("SELECT status FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        if row is None:
+            raise ApiError(404, "unknown_goal", "goal not found")
+        if not may_change_status(row["status"], status):
+            raise ApiError(
+                409, "illegal_status", f"a {row['status']} goal cannot become {status}",
+            )
         now = time.time()
         cur = self._db.execute(
             "UPDATE goals SET status=?, version=version+1, updated_at=? WHERE id=? AND version=?",

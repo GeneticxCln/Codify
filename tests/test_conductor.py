@@ -38,6 +38,7 @@ from engine.models import (
     ROLES,
     AgentConfigUpdate,
     ConversationCreate,
+    Event,
     TurnCreate,
     WorkspaceCreate,
 )
@@ -661,6 +662,113 @@ class TestGracefulDegradation(ConductorTestCase):
         errors = [e for e in self.goals.events_after(goal.id, 0) if e.type == "error"]
         self.assertTrue(errors, "a failed turn must say why on the event log")
         self.assertIn("scribe", str(errors[0].payload))
+
+
+class TestCancelStopsAConductorRun(ConductorTestCase):
+    """M1: cancel did nothing for a chat turn (audit of 2026-09-29).
+
+    The conductor had no cancellation check anywhere, so it kept calling the model and the tools
+    up to `conductor_max_turns`, and `run_chat` then ended with an unconditional `COMPLETED` that
+    overwrote `CANCELLED` and published the reply anyway. `run_planning` had guards for exactly
+    this; `run_chat`, added later, did not.
+    """
+
+    async def test_a_cancel_is_noticed_before_the_next_tool_and_the_next_model_call(self) -> None:
+        cancelled = {"now": False}
+        ran: list[str] = []
+
+        async def read_file(args: dict[str, Any]) -> str:
+            ran.append(str(args["path"]))
+            cancelled["now"] = True  # the user pressed Cancel while this tool ran
+            return "body"
+
+        provider = _ToolProvider([
+            ToolReply(tool_calls=[_call("read_file", path="a.py"), _call("read_file", path="b.py")]),
+            ToolReply(text="an answer nobody asked for any more"),
+        ])
+        conductor = Conductor(
+            provider, "m", str(self.repo), list(TOOLS), {"read_file": read_file},
+            system_prompt="s", max_turns=8, cancelled=lambda: cancelled["now"],
+        )
+
+        answer = await conductor.run("go")
+
+        self.assertEqual(["a.py"], ran, "a second tool ran after the cancel")
+        self.assertEqual(1, len(provider.seen_messages), "the model was called again after the cancel")
+        self.assertTrue(conductor.was_cancelled)
+        self.assertEqual("", answer)
+
+    async def test_a_conductor_cancelled_before_it_starts_makes_no_call_at_all(self) -> None:
+        provider = _ToolProvider([ToolReply(text="hello")])
+        conductor = Conductor(
+            provider, "m", str(self.repo), list(TOOLS), {}, system_prompt="s",
+            max_turns=8, cancelled=lambda: True,
+        )
+
+        await conductor.run("go")
+
+        self.assertEqual([], provider.seen_messages)
+
+    async def test_without_a_predicate_nothing_changes(self) -> None:
+        provider = _ToolProvider([ToolReply(text="hello")])
+        conductor = Conductor(provider, "m", str(self.repo), list(TOOLS), {}, system_prompt="s", max_turns=8)
+
+        self.assertEqual("hello", await conductor.run("go"))
+        self.assertFalse(conductor.was_cancelled)
+
+    async def test_a_runner_setting_a_status_on_a_cancelled_goal_is_a_quiet_no_op(self) -> None:
+        # `_set_status` is what every runner goes through. Refusing the move is the service's job;
+        # not crashing a background task over it, and not consolidating memory for a run that
+        # never finished, is this one's.
+        executor = self._executor(_ToolProvider())
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(g.id, g.version, "CANCELLED")
+        before = len(self.goals.events_after(self.goal.id, 0))
+
+        executor._set_status(self.goal.id, "COMPLETED", None)
+
+        self.assertEqual("CANCELLED", self.goals.get(self.goal.id).status)
+        statuses = [
+            e for e in self.goals.events_after(self.goal.id, 0) if e.type == "goal_status"
+        ]
+        self.assertEqual("CANCELLED", statuses[-1].payload["status"])
+        self.assertEqual(before, len(self.goals.events_after(self.goal.id, 0)), "a refused status was announced")
+
+    async def test_a_chat_turn_cancelled_mid_run_stays_cancelled_and_publishes_no_reply(self) -> None:
+        provider = _ToolProvider([
+            ToolReply(tool_calls=[_call("read_file", path="app.py")]),
+            ToolReply(text="the final answer"),
+        ])
+        executor = self._executor(provider)
+        original_publish = self.goals.publish
+
+        def publish_and_cancel(event: Event) -> Event:
+            result = original_publish(event)
+            # The engine logs "conductor called read_file(...)" as the tool starts: that is
+            # the moment a person, watching the transcript, presses Cancel.
+            if event.type == "log" and "conductor called read_file" in str(event.payload.get("message")):
+                g = self.goals.get(self.goal.id)
+                self.goals.update_status(g.id, g.version, "CANCELLED")
+            return result
+
+        self.goals.publish = publish_and_cancel  # type: ignore[method-assign]
+        await executor.run_chat(self.goal.id)
+
+        self.assertEqual("CANCELLED", self.goals.get(self.goal.id).status, "the goal was revived")
+        replies = [
+            e for e in self.goals.events_after(self.goal.id, 0)
+            if e.type == "log" and e.payload.get("turn")
+        ]
+        self.assertEqual([], replies, "a reply was published for a turn the user had cancelled")
+        self.assertEqual(1, len(provider.seen_messages), "the conductor kept calling the model after the cancel")
+        # And it did not treat the cancel as a conductor that "could not finish", which would
+        # run Codify's own sequence — a planner call — for a goal nobody wants any more.
+        events = self.goals.events_after(self.goal.id, 0)
+        self.assertFalse(
+            [e for e in events if "did not finish" in str(e.payload) or "standard sequence" in str(e.payload)],
+            "a cancelled turn fell through to the engine's own sequence",
+        )
+        self.assertEqual([], [p for p in provider.seen_prompts if "planner" in p[0].lower()])
 
 
 class TestToolDialects(unittest.TestCase):

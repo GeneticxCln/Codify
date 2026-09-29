@@ -546,10 +546,12 @@ class TraceToggleCase(unittest.TestCase):
         """Stopping is not a state change, so no status may refuse it. A user
         who realises mid-run that they did not mean to record anything must not
         have to cancel the goal to stop it."""
-        goals, goal_id = self._goal("PLANNING")
-        self.assertTrue(goals.set_trace(goal_id, True).trace)
         for status in ("RUNNING", "COMPLETED", "FAILED", "CANCELLED"):
             with self.subTest(status=status):
+                # A goal of its own per status: one goal cannot legitimately walk from
+                # COMPLETED to FAILED to CANCELLED, and the point is the toggle, not the walk.
+                goals, goal_id = self._goal("PLANNING")
+                self.assertTrue(goals.set_trace(goal_id, True).trace)
                 goals.update_status(goal_id, goals.get(goal_id).version, status)
                 self.assertFalse(
                     goals.set_trace(goal_id, False).trace,

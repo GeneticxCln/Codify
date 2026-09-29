@@ -99,6 +99,17 @@ Transitions:
 
 Illegal transition → `409` `illegal_status`.
 
+**A terminal status is final, with two documented exceptions.** `GoalService.update_status` refuses to move a
+goal out of `COMPLETED`, `FAILED` or `CANCELLED` — except `COMPLETED → RUNNING` and `FAILED → RUNNING`, which
+are how `POST /goals/{id}/apply` and the step retry re-open a finished goal. Nothing re-opens `CANCELLED`:
+retry, apply and start all refuse it. Repeating the status a goal already has is not a move. This is the
+rule that keeps a runner that finishes after a Cancel from undoing it: `run_chat` used to end with an
+unconditional `COMPLETED` that overwrote `CANCELLED` and published the reply anyway (audit of 2026-09-29,
+M1). Alongside it, `ExecutorService._set_status` is a quiet no-op on a cancelled goal (so a runner that lost
+the race does not crash a background task), the conductor asks "cancelled?" before every model call and every
+tool call (`Conductor(cancelled=...)`, so a Cancel takes effect within one call), and the step driver only
+drives a `RUNNING` goal (M2: a cancel during a retried step used to be followed by a full conductor run).
+
 ### 1.3 PlanStep
 
 ```python

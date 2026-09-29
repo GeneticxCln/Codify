@@ -157,6 +157,10 @@ class Conductor:
         needs_action: Callable[[], bool] | None = None,
         fallback: tuple[Any, str] | None = None,
         on_fallback: Callable[[ProviderError, Any, str], None] | None = None,
+        # "Has the person cancelled this turn?" Asked before every model call and every tool
+        # call, so a Cancel takes effect within one call rather than after the loop has spent
+        # its whole budget. The loop has no view of goals or status; whoever built it says.
+        cancelled: Callable[[], bool] | None = None,
         # Ollama's context window for this loop's calls, from the conductor
         # role's own config. The move arguments and the librarian's pack are
         # exactly the payloads Ollama's 4096 default has been silently cutting.
@@ -178,6 +182,10 @@ class Conductor:
         # asking a model to try again.
         self.nudge = nudge
         self.needs_action = needs_action
+        self._cancelled = cancelled
+        # True once the loop stopped because it was cancelled. Its return value is then
+        # empty and must not be published as an answer.
+        self.was_cancelled = False
         self.provider = provider
         self.model = model
         self.num_ctx = num_ctx
@@ -273,6 +281,11 @@ class Conductor:
             offered = [t for t in offered if t.name not in STAGE_MOVES]
         self.tools = offered
 
+    def _is_cancelled(self) -> bool:
+        if self._cancelled is not None and self._cancelled():
+            self.was_cancelled = True
+        return self.was_cancelled
+
     @property
     def exhausted(self) -> bool:
         """True when the loop stopped because it hit the cap, not because the
@@ -300,6 +313,8 @@ class Conductor:
         messages.append({"role": "user", "content": user_prompt})
 
         while True:
+            if self._is_cancelled():
+                return ""
             # `exhausted` is read *before* the call, and the answer below is
             # returned whether or not the model cooperates. An earlier version
             # appended a "you are out of calls" nudge and then went on to honour
@@ -358,6 +373,10 @@ class Conductor:
                 )
 
             for call in reply.tool_calls:
+                # Between the calls of one reply too: a model that asked for three tools and
+                # was cancelled during the first must not get to run the other two.
+                if self._is_cancelled():
+                    return ""
                 content = await self._run_tool(call, messages)
                 if call.name in STAGE_MOVES and not content.startswith(
                     "There is no tool called"

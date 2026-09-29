@@ -2199,6 +2199,11 @@ async def _run_steps(app: FastAPI, goal_id: str) -> None:
 
 async def _run_steps_locked(app: FastAPI, goal_id: str) -> None:
     executor = app.state.executor
+    # Only a RUNNING goal is driven. The retry route spawns this after the retried step has
+    # finished, and a Cancel that landed during that step used to be followed by a full
+    # conductor run — model spend on a goal the user had stopped.
+    if app.state.goals.get(goal_id).status != "RUNNING":
+        return
     # An approved plan is driven by the conductor when this install has one, and
     # by the engine's own sequence when it does not. The choice lives here rather
     # than in the route because the executor is the only side that can see

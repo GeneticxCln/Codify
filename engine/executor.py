@@ -1018,9 +1018,14 @@ class _Conducted:
     answer: str | None
     exhausted: bool
     planned: bool
+    # The person cancelled while it ran. Neither an answer nor a failure: the turn is over,
+    # and nothing this run produced may be published or allowed to move the goal's status.
+    cancelled: bool = False
 
     @property
     def finished(self) -> bool:
+        if self.cancelled:
+            return False
         if self.answer is None:
             return False
         if self.exhausted and not self.planned:
@@ -2259,6 +2264,12 @@ class ExecutorService:
 
         if root:
             conducted = await self._conduct(goal_id, goal, root, intent=intent)
+            if conducted.cancelled:
+                # The user stopped this turn. `run_planning` guards its writes for exactly this;
+                # `run_chat` did not, and ended with an unconditional COMPLETED that overwrote
+                # CANCELLED and published the reply anyway.
+                self._log(goal_id, None, "info", "cancelled while the conductor was running — nothing more was done")
+                return
             if conducted.finished:
                 reply = _as_prose(conducted.answer or "") or "(no answer)"
                 self.goals.publish(self._event(
@@ -2339,6 +2350,8 @@ class ExecutorService:
             reply = _as_prose(await self._turn_reply(goal_id, goal)) or "(no answer)"
         except (ProviderError, AgentNotConfigured) as exc:
             self._fail(goal_id, None, getattr(exc, "code", "provider_error"), str(exc))
+            return
+        if self._is_cancelled(goal_id):
             return
         self.goals.publish(self._event(
             goal_id, None, "log", {"level": "info", "message": reply, "turn": True},
@@ -2526,6 +2539,8 @@ class ExecutorService:
             goal_id, goal, ws.root_path or "",
             prompt_override=prompt, intent="code_change",
         )
+        if result.cancelled:
+            return
         if result.answer:
             self.goals.publish(self._event(
                 goal_id, None, "log",
@@ -2708,6 +2723,7 @@ class ExecutorService:
             ),
             fallback=(fallback[0], fallback[1]) if fallback is not None else None,
             on_fallback=self._conductor_fallback_notice(goal_id, role, targets),
+            cancelled=lambda: self._is_cancelled(goal_id),
             num_ctx=cfg.ollama_num_ctx,
             keep_alive=cfg.ollama_keep_alive,
         )
@@ -2732,6 +2748,7 @@ class ExecutorService:
             answer=answer,
             exhausted=conductor.exhausted,
             planned=bool(self.goals.steps(goal_id)),
+            cancelled=conductor.was_cancelled or self._is_cancelled(goal_id),
         )
 
     def _conductor_fallback_notice(
@@ -5239,10 +5256,29 @@ class ExecutorService:
             {"status": status, **{k: v for k, v in fields.items() if k in ("review_notes", "commit_message")}},
         ))
 
+    def _is_cancelled(self, goal_id: str) -> bool:
+        """Has a person cancelled this goal? Read from the stored status, every time."""
+        try:
+            return self.goals.get(goal_id).status == "CANCELLED"
+        except ApiError:
+            # A goal that no longer exists is not one anything should keep running for.
+            return True
+
     def _set_status(self, goal_id: str, status: str, step_id: str | None) -> None:
         # update_status publishes the goal_status event itself.
         current = self.goals.get(goal_id)
-        self.goals.update_status(goal_id, current.version, status, step_id)
+        if current.status == "CANCELLED" and status != "CANCELLED":
+            # Cancel is a person's decision and nothing a runner finishes afterwards may undo
+            # it. The service refuses the move too; this is what keeps a runner that lost the
+            # race from surfacing that refusal as a crash in a background task.
+            return
+        try:
+            self.goals.update_status(goal_id, current.version, status, step_id)
+        except ApiError as exc:
+            if exc.code in ("illegal_status", "version_conflict") and self._is_cancelled(goal_id):
+                # The cancel landed between the read above and the write.
+                return
+            raise
         if status in ("COMPLETED", "FAILED", "CANCELLED"):
             # Terminal, whichever way it went: this run just taught the
             # workspace something, and the store is refined now rather than
