@@ -2615,6 +2615,15 @@ def serve() -> None:
     import uvicorn
 
     port = pick_port()
+    # The state store is opened — and closed — *before* anything announces readiness. It used to be opened
+    # by uvicorn's startup, after the handshake: a corrupt database meant the engine said "ready" and then
+    # failed its own startup and exited, and a shell that read the handshake connected to a socket nobody
+    # was going to serve. Opened with the keychain's callback, so a role migration still carries its key.
+    try:
+        connect(on_role_migrated=Keychain().rename_role_key).close()
+    except sqlite3.Error as exc:
+        print(f"engine: cannot open the state store at {home.db_path()}: {exc}", file=sys.stderr, flush=True)
+        raise
     # Where this run's state actually lands, before anything can write. An isolated
     # run says so out loud, and the half-redirected case is called out instead of
     # being discovered later by finding a smoke-test key in a real keychain.
