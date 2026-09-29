@@ -436,7 +436,7 @@ Alembic revision `0001_init` creates these. Startup seeder inserts missing `DEFA
 
 ## 3. HTTP (Engine)
 
-Bind `127.0.0.1`. Port: first free in `7430-7440`, printed on stdout (`04` §6).
+Bind `127.0.0.1`. Port: first free in `7430-7440`, printed on stdout (`04` §6). Binding is retried on the next free port of that range if another process takes the chosen one between the probe and the bind; a port asked for with `CODIFY_PORT` is never swapped for another — the engine fails to start instead.
 
 All routes: `Authorization: Bearer <boot_token>` or `401` `unauthorized`.
 
@@ -468,7 +468,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `POST` | `/goals/{id}/pause` | `{expected_version}` | `Goal` |
 | `POST` | `/goals/{id}/cancel` | `{expected_version}` | `Goal` |
 | `PATCH` | `/goals/{id}/steps/{step_id}` | `{expected_version, title?, description?, suggested_paths?}` extra=forbid | `PlanStep` (PENDING goals only) |
-| `POST` | `/goals/{id}/steps/{step_id}/retry` | `{expected_version}` | `PlanStep` |
+| `POST` | `/goals/{id}/steps/{step_id}/retry` | `{expected_version}` | the re-opened `PlanStep`, returned **at once**: everything refusable (409 `illegal_status`, `step_not_retryable`, `driver_busy`, `retry_collides_with_running`, `version_conflict`) is decided in the request, the goal's driver is claimed there (`is_driving` is true from the response until the run ends), and the step runs in the background — progress is on the goal stream, not in this response |
 | `GET` | `/goals/{id}/events?after={seq}` | — | `Event[]` where `sequence > after` |
 | `GET` | `/goals/{id}/usage` | — | token totals + `parallel_peak`/`parallel_waves` (from `usage` events) |
 | `GET` | `/goals/{id}/audit` | — | the goal's audit document (plan edits, fallbacks, fix retries, errors, outcomes, usage, silent roles) |

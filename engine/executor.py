@@ -4451,6 +4451,27 @@ class ExecutorService:
         return summaries
 
     async def retry_step(self, goal_id: str, step_id: str, expected_version: int) -> PlanStep:
+        """Retry a step and wait for it. The retry route does not use this — see `begin_retry`."""
+        self._prepare_retry(goal_id, step_id, expected_version)
+        await self.run_step(goal_id, step_id)
+        return self._step(goal_id, step_id)
+
+    def begin_retry(self, goal_id: str, step_id: str, expected_version: int) -> PlanStep:
+        """Validate a retry, claim the goal's driver, re-open the step, and return at once.
+
+        The retry route used to await the whole step inside the request — minutes of fixer,
+        verifier and critic with the connection held open — and never claimed the driver, so
+        `is_driving()` was false for exactly the time the goal was busiest. Everything that can be
+        refused is decided here, synchronously, so a request that cannot succeed still answers
+        409; the run itself is the caller's to start in the background, and the driver claimed
+        here is theirs to release when it ends.
+        """
+        step = self._prepare_retry(goal_id, step_id, expected_version, claim=True)
+        return step
+
+    def _prepare_retry(
+        self, goal_id: str, step_id: str, expected_version: int, *, claim: bool = False,
+    ) -> PlanStep:
         step = self._step(goal_id, step_id)
         if not (step.status == "FAILED" or (step.status == "IN_PROGRESS" and bool(step.review_notes))):
             raise ApiError(409, "step_not_retryable", f"step {step_id} is not in a retryable state (status={step.status})")
@@ -4477,9 +4498,16 @@ class ExecutorService:
                     f"step {step.title!r} now shares paths with a step that has not finished "
                     "— edit the plan (or finish the other step) before retrying",
                 )
-        self.goals.update_status(goal_id, expected_version, "RUNNING")
-        self._reset_step(goal_id, step)
-        await self.run_step(goal_id, step_id)
+        if claim and not self.claim_driver(goal_id):
+            raise ApiError(409, "driver_busy", "another driver is already running this goal")
+        try:
+            self.goals.update_status(goal_id, expected_version, "RUNNING")
+            self._reset_step(goal_id, step)
+        except BaseException:
+            # A refused or failed retry must not leave the goal claimed by nobody.
+            if claim:
+                self.release_driver(goal_id)
+            raise
         return self._step(goal_id, step_id)
 
     # --- stages -------------------------------------------------------

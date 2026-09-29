@@ -1846,6 +1846,116 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json()["code"], "unknown_step")
 
+    async def _a_failed_goal_with_a_failed_step(self, name: str) -> tuple[str, str]:
+        ws_dir = self.root / name
+        ws_dir.mkdir()
+        ws_id = (await self.client.post(
+            "/workspaces", headers=self.headers, json={"name": name, "root_path": str(ws_dir)},
+        )).json()["id"]
+        goal_id = (await self.client.post(
+            "/goals", headers=self.headers, json={"workspace_id": ws_id, "title": "Retry me"},
+        )).json()["id"]
+        app.state.executor._insert_steps(
+            goal_id, [{"title": "Step 1", "description": "d", "suggested_paths": []}],
+        )
+        step = app.state.goals.steps(goal_id)[0]
+        app.state.executor._set_step(goal_id, step, "FAILED")
+        g = app.state.goals.get(goal_id)
+        app.state.goals.update_status(goal_id, g.version, "FAILED")
+        return goal_id, step.id
+
+    async def _until(self, condition: Any, seconds: float = 5.0) -> bool:
+        deadline = asyncio.get_running_loop().time() + seconds
+        while asyncio.get_running_loop().time() < deadline:
+            if condition():
+                return True
+            await asyncio.sleep(0.02)
+        return bool(condition())
+
+    async def test_a_retry_returns_at_once_and_holds_the_driver_while_the_step_runs(self) -> None:
+        """L2: the retry route ran the whole step inside the request.
+
+        It awaited `retry_step`, which awaited `run_step` — minutes of fixer, verifier and critic
+        — with the connection held open, and it never claimed the driver, so `is_driving()` was
+        false for exactly the time the goal was busiest.
+        """
+        goal_id, step_id = await self._a_failed_goal_with_a_failed_step("ws-retry-bg")
+        executor = app.state.executor
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_run_step(gid: str, sid: str, stored_files: Any = None) -> None:
+            started.set()
+            await release.wait()
+            executor._set_step(gid, executor._step(gid, sid), "COMPLETED")
+
+        executor.run_step = slow_run_step
+        try:
+            version = app.state.goals.get(goal_id).version
+            began = asyncio.get_running_loop().time()
+            r = await asyncio.wait_for(
+                self.client.post(
+                    f"/goals/{goal_id}/steps/{step_id}/retry", headers=self.headers,
+                    json={"expected_version": version},
+                ),
+                timeout=3,
+            )
+            took = asyncio.get_running_loop().time() - began
+            self.assertEqual(200, r.status_code, r.text)
+            self.assertLess(took, 1.0, "the request waited for the step")
+            self.assertEqual(step_id, r.json()["id"])
+
+            await asyncio.wait_for(started.wait(), 5)
+            self.assertTrue(executor.is_driving(goal_id), "nothing claimed the driver while the step ran")
+            self.assertEqual("RUNNING", app.state.goals.get(goal_id).status)
+            again = await self.client.post(
+                f"/goals/{goal_id}/steps/{step_id}/retry", headers=self.headers,
+                json={"expected_version": app.state.goals.get(goal_id).version},
+            )
+            self.assertEqual(409, again.status_code, "a second retry was accepted mid-step")
+        finally:
+            release.set()
+
+        self.assertTrue(await self._until(lambda: not executor.is_driving(goal_id)), "the driver was never released")
+        self.assertEqual("COMPLETED", app.state.goals.get(goal_id).status)
+
+    async def test_a_refused_retry_leaves_no_driver_claimed(self) -> None:
+        goal_id, step_id = await self._a_failed_goal_with_a_failed_step("ws-retry-refused")
+        stale = app.state.goals.get(goal_id).version - 1
+
+        r = await self.client.post(
+            f"/goals/{goal_id}/steps/{step_id}/retry", headers=self.headers, json={"expected_version": stale},
+        )
+
+        self.assertEqual(409, r.status_code)
+        self.assertFalse(app.state.executor.is_driving(goal_id), "a refused retry left the goal claimed")
+
+    async def test_a_cancel_during_the_retried_step_starts_no_conductor(self) -> None:
+        """M2 through the route: the driver spawned after the step used to run regardless."""
+        goal_id, step_id = await self._a_failed_goal_with_a_failed_step("ws-retry-cancel")
+        executor = app.state.executor
+        conducted: list[str] = []
+
+        async def cancelling_run_step(gid: str, sid: str, stored_files: Any = None) -> None:
+            g = app.state.goals.get(gid)
+            app.state.goals.update_status(gid, g.version, "CANCELLED")
+
+        async def resume(gid: str) -> None:
+            conducted.append(gid)
+
+        executor.run_step = cancelling_run_step
+        executor.conductor_can_drive = lambda gid: True
+        executor.run_conductor_resume = resume
+
+        r = await self.client.post(
+            f"/goals/{goal_id}/steps/{step_id}/retry", headers=self.headers,
+            json={"expected_version": app.state.goals.get(goal_id).version},
+        )
+
+        self.assertEqual(200, r.status_code, r.text)
+        self.assertTrue(await self._until(lambda: not executor.is_driving(goal_id)))
+        self.assertEqual([], conducted, "a conductor ran for a goal the user cancelled")
+        self.assertEqual("CANCELLED", app.state.goals.get(goal_id).status)
+
     async def test_recent_models_endpoint_feeds_the_pickers(self) -> None:
         """`/models/recent` is what orders and badges the two model menus.
 

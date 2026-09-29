@@ -101,7 +101,7 @@ def pick_port() -> int:
         if not 1024 <= port <= 65535:
             raise RuntimeError(f"invalid CODIFY_PORT={port}: must be 1024-65535")
         return port
-    for port in range(7430, 7441):
+    for port in ENGINE_PORTS:
         with socket.socket() as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
@@ -110,6 +110,35 @@ def pick_port() -> int:
             except OSError:
                 continue
     raise RuntimeError("no free port in 7430-7440")
+
+
+ENGINE_PORTS = range(7430, 7441)
+
+
+def _bind_listening(port: int) -> tuple[socket.socket, int]:
+    """Bind and listen on `port`, or — when the port was ours to choose — on the next free one.
+
+    `pick_port` binds and releases, so anything that takes the port before this runs (a second
+    engine starting in the same instant, an unrelated program) used to crash the boot with
+    "Address already in use" while the next of the eleven ports the engine may use was free. A
+    port the caller *asked for* (`CODIFY_PORT`) is a request and is never swapped: an engine
+    quietly serving somewhere nobody expects it is worse than one that says it could not start.
+    """
+    requested = bool(os.environ.get("CODIFY_PORT"))
+    candidates = [port] if requested else [port, *(p for p in ENGINE_PORTS if p != port)]
+    failure = OSError("no port was tried")  # replaced by the first real failure; candidates is never empty
+    for candidate in candidates:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", candidate))
+            sock.listen(128)
+        except OSError as exc:
+            sock.close()
+            failure = exc
+            continue
+        return sock, candidate
+    raise failure
 
 
 # Shutdown's WAL checkpoint is a tidy-up — it truncates the log file — and SQLite
@@ -1967,8 +1996,11 @@ async def retry_step(goal_id: str, step_id: str, body: VersionedAction, request:
     if g.status not in ("RUNNING", "PAUSED", "FAILED"):
         raise ApiError(409, "illegal_status", f"cannot retry from {g.status}")
     executor: ExecutorService = request.app.state.executor
-    updated_step = await executor.retry_step(goal_id, step_id, body.expected_version)
-    _spawn(request.app, _run_steps(request.app, goal_id), goal_id)
+    # Everything that can be refused is decided here, and the driver is claimed here; the step
+    # itself runs in the background and the stream reports how it went. The request used to
+    # await the whole step, holding the connection for minutes with no driver claimed.
+    updated_step = executor.begin_retry(goal_id, step_id, body.expected_version)
+    _spawn(request.app, _retry_and_drive(request.app, goal_id, step_id), goal_id)
     return updated_step
 
 
@@ -2169,7 +2201,27 @@ def _spawn(
             except Exception:
                 pass
 
-    asyncio.create_task(runner())
+    task = asyncio.create_task(runner())
+    # The event loop keeps only a weak reference to a task, so one that nothing else holds can
+    # be collected while it is still running (a documented CPython hazard) — a goal's driver
+    # vanishing mid-step with no error at all. Held here until it is done.
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+
+
+async def _retry_and_drive(app: FastAPI, goal_id: str, step_id: str) -> None:
+    """Run the retried step, then drive whatever is left, holding the driver `begin_retry` claimed."""
+    executor = app.state.executor
+    try:
+        await executor.run_step(goal_id, step_id)
+        # Only a goal still RUNNING is driven further: a retried step that failed, or a Cancel that
+        # landed during it, ends here (`_run_steps_locked` checks).
+        await _run_steps_locked(app, goal_id)
+    finally:
+        executor.release_driver(goal_id)
 
 
 async def _run_steps(app: FastAPI, goal_id: str) -> None:
@@ -2428,8 +2480,6 @@ def serve() -> None:
     boot the real server without ending the world, and `tests/test_home.py` says
     so where it calls it.
     """
-    import socket
-
     import uvicorn
 
     port = pick_port()
@@ -2457,14 +2507,7 @@ def serve() -> None:
     # hit connection-refused (also the source of a 1-in-5 flake in the
     # wire-level stream tests). uvicorn serves the pre-bound socket, so the
     # port is owned by this process end to end.
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("127.0.0.1", port))
-        sock.listen(128)
-    except OSError:
-        sock.close()
-        raise
+    sock, port = _bind_listening(port)
     # `hard_exit_s` is announced rather than left for the shell to know: this is
     # the engine's own bound on how long a stop request can take, and the shell
     # waits exactly that long before escalating to SIGKILL (src-tauri/src/lib.rs).

@@ -128,5 +128,51 @@ class TestTheStepDriverDoesNotStartAConductorForACancelledGoal(unittest.Isolated
         await asyncio.sleep(0)
 
 
+class TestSpawnedWorkIsNotLeftToTheGarbageCollector(unittest.IsolatedAsyncioTestCase):
+    """L4: `_spawn` discarded its `create_task` result, and the event loop keeps only a weak reference
+    to a task — a documented CPython hazard. A goal's driver that nothing else holds can be collected
+    while it is still running, and the goal simply stops, with no error and no event."""
+
+    async def test_a_spawned_task_is_held_until_it_finishes_and_then_released(self) -> None:
+        from engine.app import _BACKGROUND_TASKS, _spawn
+
+        gate = asyncio.Event()
+        before = set(_BACKGROUND_TASKS)
+
+        async def work() -> None:
+            await gate.wait()
+
+        _spawn(types.SimpleNamespace(), work())  # type: ignore[arg-type]
+        held = set(_BACKGROUND_TASKS) - before
+        self.assertEqual(1, len(held), "nothing holds the task that was just started")
+
+        gate.set()
+        for _ in range(50):
+            if not set(_BACKGROUND_TASKS) - before:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(set(), set(_BACKGROUND_TASKS) - before, "a finished task is never released")
+
+    async def test_a_spawned_failure_still_fails_the_goal_rather_than_vanishing(self) -> None:
+        from engine.app import _spawn
+
+        failed: list[tuple[str, str]] = []
+
+        class Executor:
+            def _fail(self, goal_id: str, step_id: Any, code: str, message: str) -> None:
+                failed.append((goal_id, code))
+
+        async def boom() -> None:
+            raise RuntimeError("the driver crashed")
+
+        _spawn(types.SimpleNamespace(state=types.SimpleNamespace(executor=Executor())), boom(), "g1")  # type: ignore[arg-type]
+        for _ in range(50):
+            if failed:
+                break
+            await asyncio.sleep(0.01)
+
+        self.assertEqual([("g1", "internal_error")], failed)
+
+
 if __name__ == "__main__":
     unittest.main()
