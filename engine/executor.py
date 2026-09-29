@@ -2624,6 +2624,12 @@ class ExecutorService:
             model = (cfg.model_name or "").strip()
             if not model:
                 continue
+            if not cfg.base_url and cfg.provider not in BUILTIN_PROVIDERS:
+                # A custom slug is only a label: its address lives on the row that
+                # defines it, and the conductor's own pair carries none. Building
+                # it would give a provider posting to nowhere, which reads as a
+                # dead endpoint instead of the misconfiguration it is.
+                continue
             try:
                 provider = self.orchestrator.registry.build_provider(cfg)
             except ProviderError:

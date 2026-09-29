@@ -382,6 +382,15 @@ ninth `AgentRole`, and that is a structural decision rather than a naming one:
   returns a key by reference without asking which provider it is for.
   `AgentRegistryService.fallback_config_for` drops the same field for the same
   reason.
+- A provider slug that is neither built in nor the borrowed row's own is **not a
+  target**. A custom provider's address lives on the row that defines it, and the
+  conductor's pair has no `base_url` to carry one, so `_conductor_targets` skips
+  it rather than building a provider that posts to an empty address (which read
+  as a dead endpoint, wearing the scribe's protocol as a primary and
+  `openai_compat` as a fallback). A conductor pointed at one gets no target from
+  it and the chain keeps whatever else is reachable — `test_turns.py`,
+  `TestTheConductorsTargets`. A custom provider is reachable by naming the row's
+  own slug, which keeps its address.
 - It is measured through the ordinary `agent_assigned` / `usage` events, so
   stats and the Settings screen need no new case.
 

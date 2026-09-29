@@ -831,6 +831,46 @@ class TestTheConductorsTargets(TurnTestCase):
         cfg = self._targets()[0][2]
         self.assertEqual(cfg.base_url, "http://127.0.0.1:8000")
 
+    async def test_a_slug_with_no_address_is_not_a_target(self) -> None:
+        # The conductor's pair has no `base_url` to give, and a slug that is neither
+        # built in nor the row's own provider is only a label — its address lived on
+        # a row this conductor does not borrow. Such a pair used to be accepted as a
+        # target, wearing the scribe's protocol (primary) or `openai_compat`
+        # (fallback) and an empty address, so the first call posted a wire format
+        # to nowhere and read as "the provider is down". A target that cannot be
+        # reached is not a conductor: the chain keeps the ones that can.
+        self.registry.set_config("scribe", AgentConfigUpdate(
+            provider="anthropic", model_name="scribe-model",
+        ))
+        self.settings.set_str("conductor_provider", "acme")
+        self.settings.set_str("conductor_model", "conductor-model")
+        self.settings.set_str("conductor_fallback_provider", "acme-backup")
+        self.settings.set_str("conductor_fallback_model", "conductor-backup")
+        self.assertEqual(self._targets(), [])
+
+    async def test_an_unreachable_primary_leaves_the_reachable_fallback(self) -> None:
+        self.settings.set_str("conductor_provider", "acme")
+        self.settings.set_str("conductor_model", "conductor-model")
+        self.settings.set_str("conductor_fallback_provider", "ollama")
+        self.settings.set_str("conductor_fallback_model", "llama3")
+        self.assertEqual(
+            [(t[2].provider, t[1]) for t in self._targets()], [("ollama", "llama3")]
+        )
+
+    async def test_a_custom_provider_the_row_already_points_at_is_still_a_target(self) -> None:
+        # The one way a custom slug *is* reachable: it is the borrowed row's own,
+        # so the row's address is kept (see the endpoint test above).
+        self.registry.set_config("scribe", AgentConfigUpdate(
+            provider="acme", protocol="openai_compat", model_name="scribe-model",
+            base_url="https://llm.example.test/v1",
+        ))
+        self.settings.set_str("conductor_provider", "acme")
+        self.settings.set_str("conductor_model", "conductor-model")
+        self.assertEqual(
+            [(t[2].provider, t[1], t[2].base_url) for t in self._targets()],
+            [("acme", "conductor-model", "https://llm.example.test/v1")],
+        )
+
     async def test_a_single_target_has_no_fallback_notice_to_build(self) -> None:
         # Most installs have one target, and the notice reads the *second* one
         # out of the list. Built unconditionally, that raised IndexError while

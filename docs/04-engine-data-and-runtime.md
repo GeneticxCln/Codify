@@ -1398,6 +1398,8 @@ Engine stdout, first line, exactly:
 CODIFY_ENGINE token=<hex> port=<int>
 ```
 
+The line is printed **only once the engine can serve**: `serve()` opens the SQLite file — running its migrations — *before* it announces, so an unopenable or corrupt database ends the process with a message on stderr naming the file (and the `sqlite3` error, re-raised) instead of a `CODIFY_ENGINE` line the shell would then trust for the rest of a boot that could never finish (`tests/test_boot_announces_ready_late.py`). `lifespan` closes that connection on every road out — shutdown, a failed startup, and a migration that raises inside `db.connect` — so a boot that fails leaves no descriptor behind (`tests/test_connections_are_closed.py`).
+
 `token` = 32 bytes CSPRNG hex (64 chars), created once and kept at `<state dir>/boot_token` (`0600`). Desktop reads this line, then attaches `Authorization: Bearer <token>` to HTTP and `?token=` is **forbidden** (query leakage). WS: first text frame from client `{"type":"auth","token":"<hex>"}` or HTTP header on the Upgrade.
 
 WS URL: `ws://127.0.0.1:<port>/ws/goals/{id}`. After auth, server sends events with `sequence > 0` live; client SHOULD `GET /goals/{id}/events?after=` for gap fill.
