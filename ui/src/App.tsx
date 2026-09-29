@@ -1135,7 +1135,12 @@ export const App: React.FC = () => {
           setError(readRejection(err, "Could not close that terminal")),
         );
       }
-      if (tab?.kind === "browser" && tab.url) {
+      // A page exists only for a tab the shell was asked to open (`attemptedSeats`
+      // holds exactly those ids). A restored tab in the background has an
+      // address and no page yet, and telling the shell to close it produced the
+      // shell's own "no browser tab is open" as an error the user caused by
+      // closing a tab.
+      if (tab?.kind === "browser" && tab.url && attemptedSeats.current.delete(id)) {
         void closeBrowserWebview(id).catch((err: any) =>
           setError(
             readRejection(err, "Could not close that tab's browser page"),
