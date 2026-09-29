@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 from abc import ABC, abstractmethod
@@ -142,18 +143,14 @@ def _mk_usage(inp: Any, out: Any) -> dict[str, Any] | None:
 def validate_local_base_url(url: str) -> None:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower().strip("[]")
-    # All of 127/8 is loopback, plus IPv6 ::1 and the name forms.
-    is_loopback = (
-        host in ("localhost", "::1")
-        or host.startswith("127.")
-    )
+    # Loopback is decided by parsing the address, never by its spelling: a prefix
+    # test on "127." also accepts the hostname `127.evil.example`, which resolves
+    # wherever its owner points it. `ip_address` accepts only a literal, so a name
+    # that merely starts with digits falls through to the refusal below.
+    is_loopback = host == "localhost"
     if not is_loopback:
-        # Plain IP without brackets already handled; dotted check above covers
-        # 127.0.0.1 through 127.255.255.255.
         try:
-            import ipaddress
-            if ipaddress.ip_address(host).is_loopback:
-                is_loopback = True
+            is_loopback = ipaddress.ip_address(host).is_loopback
         except ValueError:
             pass
     if not is_loopback:
