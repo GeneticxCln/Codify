@@ -188,6 +188,70 @@ class TestNothingChangesForWhatAlreadyWorked(unittest.TestCase):
                 self.assertTrue(keys and all(isinstance(k, str) for k in keys))
 
 
+class TestWhatARealSmallModelActuallyWrote(unittest.TestCase):
+    """Two failure classes found by running Qwen2.5-1.5B against the benchmark (audit of 2026-09-29, 3.3).
+
+    Neither was in the corpus the audit predicted. Both are recoverable without guessing, because the
+    model's intent is unambiguous and no character of its text has to be invented:
+
+    * a **raw newline or tab inside a string** — the model wrote a file's content as it looks, not as JSON
+      spells it. `json` refuses that by default; it is `strict=False` away from reading it.
+    * a **Python triple-quoted string as a value** (`"content": \"\"\"...\"\"\"`), which the fixer and the
+      design role both produced. The content is Python source that often holds triple-quoted docstrings of its
+      own, so the closing delimiter is the first one that ends a *value* (`,`, `}` or `]` follows), never merely
+      the first one.
+    """
+
+    def test_a_raw_newline_and_a_tab_inside_a_string_are_read_as_the_text_they_are(self) -> None:
+        raw = '{"files": [{"path": "a.py", "content": "line one\n\tindented\nline three"}]}'
+
+        parsed = extract_json(raw, REPLY_KEYS["fixer"])
+
+        self.assertEqual("line one\n\tindented\nline three", parsed["files"][0]["content"])
+
+    def test_a_triple_quoted_value_is_read_as_the_text_between_its_quotes(self) -> None:
+        raw = '{"files": [{"path": "a.py", "content": """print("hi")\n""", "action": "create"}]}'
+
+        parsed = extract_json(raw, REPLY_KEYS["fixer"])
+
+        self.assertEqual({"path": "a.py", "content": 'print("hi")\n', "action": "create"}, parsed["files"][0])
+
+    def test_docstrings_inside_the_triple_quoted_content_do_not_end_it(self) -> None:
+        source = 'def f():\n    """Say hello."""\n    return 1\n'
+        raw = '{"files": [{"path": "a.py", "content": """' + source + '"""}]}'
+
+        parsed = extract_json(raw, REPLY_KEYS["fixer"])
+
+        self.assertEqual(source, parsed["files"][0]["content"])
+
+    def test_braces_and_brackets_inside_the_content_are_content(self) -> None:
+        source = 'x = {"a": [1, 2]}\nprint(f"{x}")\n'
+        raw = '{"files": [{"path": "a.py", "content": """' + source + '""", "edits": null}]}'
+
+        parsed = extract_json(raw, REPLY_KEYS["fixer"])
+
+        self.assertEqual(source, parsed["files"][0]["content"])
+        self.assertIsNone(parsed["files"][0]["edits"])
+
+    def test_a_triple_quoted_value_that_never_ends_a_value_is_refused_not_guessed_at(self) -> None:
+        raw = '{"files": [{"path": "a.py", "content": """def f():\n    return 1\n'
+
+        with self.assertRaises(ValueError):
+            extract_json(raw, REPLY_KEYS["fixer"])
+
+    def test_a_document_with_no_triple_quotes_is_not_touched_by_any_of_this(self) -> None:
+        raw = '{"a": "", "b": "x", "c": ["", ""], "d": "say \\"hi\\""}'
+
+        self.assertEqual({"a": "", "b": "x", "c": ["", ""], "d": 'say "hi"'}, extract_json(raw))
+
+    def test_the_fixer_may_have_this_read_because_nothing_was_cut_off(self) -> None:
+        # Reading a delimiter the model chose is not the truncation repair the fixer is excluded from.
+        self.assertNotIn("fixer", REPLY_TOLERATES_TRUNCATION)
+        raw = '{"files": [{"path": "a.py", "content": """ok\n"""}]}'
+
+        self.assertEqual("ok\n", extract_json(raw, REPLY_KEYS["fixer"], repair_truncation=False)["files"][0]["content"])
+
+
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "model_replies"
 
 

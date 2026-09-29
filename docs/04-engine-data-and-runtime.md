@@ -646,7 +646,7 @@ Extra keys ignored. Missing required keys → `agent_output_invalid`.
 none of the eight cut-off replies: a `<think>` block that mentions braces, an example object before the real
 one, a trailing comma, single quotes and Python literals, comments. Every top-level object or array in the
 reply is now read — after stripping reasoning blocks and applying the repairs a near-miss needs (comments and
-trailing commas; then Python's spelling of the same document via `ast.literal_eval`, which executes nothing) —
+trailing commas; Python triple-quoted `"""…"""` values, whose closing delimiter is the first one that ends a value, since the text inside is often Python with docstrings of its own; raw newlines and tabs inside strings; then Python's spelling of the same document via `ast.literal_eval`, which executes nothing) —
 and the one the role asked for is chosen: the **last dict carrying any of the role's contract keys**
 (`executor.REPLY_KEYS`), else the last dict, else the last list. A reply that stops before its document does is
 refused, unless the role tolerates dropping an unfinished tail (`REPLY_TOLERATES_TRUNCATION`, **not the
@@ -661,6 +661,15 @@ a model that needs this is something to see — and the second call has books of
 re-asked; prose (`raw_output`) never is; a provider error on the re-ask is a provider failure like any other;
 after a second bad reply the failure reads "…after one repair attempt" and the fallback rule is exactly what
 it was. The bound is structural: no target is asked more than twice for one call.
+
+The same re-ask covers a reply that **parsed but could not be used** (`run_agent(..., accept=)`): the
+fixer's edit that matches the wrong number of times or not at all (`old_text appears 2 time(s), expected 1`),
+an entry the contract refuses. The caller knows exactly what is wrong, so the model is told — the same
+prompt, with that reason and the reply it refers to — instead of a person being. The first failure is a
+failed call with `retrying: true` (`agent_call_failed`, "returned a reply that could not be used"); the second
+reads "…after one repair attempt"; and because `fs.apply` resolves every edit before it writes anything, a
+refused reply has written nothing and asking again is safe. A fixer with a fallback target now reaches it for
+these failures too, as it does for any other `agent_output_invalid`.
 
 ### 4.0 Librarian
 

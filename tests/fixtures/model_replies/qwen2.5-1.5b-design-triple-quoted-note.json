@@ -1,0 +1,45 @@
+{
+  "role": "design",
+  "model": "Qwen2.5-1.5B-Instruct Q4_K_M (GGUF) via llama-cpp-python 0.3.35 llama_cpp.server, temperature 0.2",
+  "expect": {
+    "applies": false,
+    "artifact": "component",
+    "direction": "Rename greet to welcome everywhere in src/app.py and tests/test_app.py.",
+    "design_system": {
+      "name": "Codify Design System"
+    },
+    "tokens": {
+      "colors": [
+        {
+          "name": "primary-color",
+          "value": "#007BFF"
+        }
+      ],
+      "typography": [
+        {
+          "name": "body-font-family",
+          "value": "Arial, sans-serif"
+        }
+      ],
+      "spacing": "16px",
+      "radii": "24px"
+    },
+    "components": [
+      {
+        "name": "greet-component",
+        "purpose": "Displays a welcome message to the user."
+      }
+    ],
+    "conventions": {
+      "README.md": "This is a README file for the repository.",
+      "src/app.py": "The source code of the app module, where we need to rename 'greet' function to 'welcome'.",
+      "tests/test_app.py": "Contains tests for the app module. We need to update both call sites and import statements."
+    },
+    "constraints": {
+      "tokens_to_reuse": true,
+      "accessibility_floor": true
+    },
+    "acceptance": "The function greet should be renamed to welcome in src/app.py and tests/test_app.py, and the updated code must still pass all unit tests.",
+    "design_md": "\nRename 'greet' to 'welcome' everywhere:\n- src/app.py: Rename 'greet' function to 'welcome'.\n- tests/test_app.py: Update both call sites and import statements.\n- README.md: This is a README file for the repository.\n\nDesign conventions:\n- README.md: This is a README file for the repository.\n- src/app.py: The source code of the app module, where we need to rename 'greet' function to 'welcome'.\n- tests/test_app.py: Contains tests for the app module. We need to update both call sites and import statements.\n\nConstraints:\n- Tokens must be reused.\n- Accessibility should not be compromised.\n\nAcceptance criteria:\nThe function greet should be renamed to welcome in src/app.py and tests/test_app.py, and the updated code must still pass all unit tests.\n"
+  }
+}

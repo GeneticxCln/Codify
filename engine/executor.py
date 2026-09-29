@@ -574,9 +574,33 @@ _THINK_OPEN = re.compile(r"<(think|thinking|reasoning)\b[^>]*>", re.IGNORECASE)
 _MAX_REPAIR_CHARS = 1_000_000
 
 
+# What follows the closing delimiter of a value: the next element, or the end of the container.
+_VALUE_END = re.compile(r"\s*[,}\]]")
+
+
+def _triple_end(text: str, i: int) -> int:
+    """`text[i:i+3]` is `\"\"\"`: the index just past the delimiter that closes it (or the end).
+
+    Python's triple-quoted string is what a small model reaches for when it writes a file's content as a
+    JSON value, and the content is often Python with triple-quoted docstrings of its own. So the closing
+    delimiter is the first one that *ends a value* — `,`, `}` or `]` follows it — not merely the first one.
+    Valid JSON never holds `\"\"\"` outside a string, so nothing that already parsed is affected.
+    """
+    j = i + 3
+    while True:
+        j = text.find('"""', j)
+        if j == -1:
+            return len(text)
+        if _VALUE_END.match(text, j + 3):
+            return j + 3
+        j += 1
+
+
 def _skip_string(text: str, i: int) -> int:
     """`text[i]` opens a string with `"` or `'`: the index just past its closing quote (or the end)."""
     quote = text[i]
+    if text.startswith('"""', i):
+        return _triple_end(text, i)
     i += 1
     while i < len(text):
         ch = text[i]
@@ -639,6 +663,30 @@ def _strip_comments_and_trailing_commas(text: str) -> str:
     return "".join(out)
 
 
+def _triple_quoted_to_json(text: str) -> str:
+    """Each `\"\"\"...\"\"\"` value as the JSON string with the same characters, outside ordinary strings.
+
+    The text between the delimiters is taken as written — no escape is interpreted — because the model wrote
+    the content as it should appear in the file. A triple-quoted string that never ends a value is left as
+    it is, and the parse that follows refuses it.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in "\"'":
+            end = _skip_string(text, i)
+            if text.startswith('"""', i) and end - i >= 6 and text[end - 3:end] == '"""':
+                out.append(json.dumps(text[i + 3:end - 3]))
+            else:
+                out.append(text[i:end])
+            i = end
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def _pythonish(text: str) -> str:
     """JSON's `true`/`false`/`null` as Python's, outside strings, so `ast.literal_eval` can read them."""
     out: list[str] = []
@@ -668,13 +716,16 @@ def _load_repaired(span: str) -> Any:
 
     In order of how little they change: comments and trailing commas, then Python's spelling of the
     same document (single quotes, `None`, `True`) via `ast.literal_eval`, which reads literals and
-    executes nothing.
+    executes nothing. Also read: raw control characters in strings, and Python triple-quoted values
+    (both found in what a 1.5B local model really wrote, docs/08).
     """
     if len(span) > _MAX_REPAIR_CHARS:
         raise ValueError("the reply is too large to repair")
-    cleaned = _strip_comments_and_trailing_commas(span)
+    cleaned = _triple_quoted_to_json(_strip_comments_and_trailing_commas(span))
     try:
-        return json.loads(cleaned)
+        # `strict=False`: a raw newline or tab inside a string is how a model writes a file's content, and
+        # the only reading of it is the character it is.
+        return json.loads(cleaned, strict=False)
     except ValueError:
         pass
     try:
@@ -1151,6 +1202,7 @@ class AgentOrchestrator:
     async def run_agent(
         self, role: AgentRole, goal_id: str, step_id: str | None, user_prompt: str,
         system: str | None = None, raw_output: bool = False,
+        accept: Callable[[Any], None] | None = None,
     ) -> Any:
         """Run one sub-agent call, on its primary target or its fallback.
 
@@ -1181,6 +1233,13 @@ class AgentOrchestrator:
         which then tripped the *fallback* chain, so a perfectly good answer was
         discarded and retried against a second provider before the turn failed.
         The parse is the roles' contract, not `run_agent`'s.
+
+        `accept` is the caller's own test of a reply that parsed: it is given the parsed value and raises
+        `ValueError` or `AgentOutputInvalid` when the reply cannot be *used* — the fixer's edit that matches
+        the wrong number of times, an entry the contract refuses. It gets the same one same-model re-ask a
+        reply that would not parse gets, with its reason quoted to the model, because the caller knows
+        exactly what is wrong and the model can act on it (audit of 2026-09-29, 3.3). Whatever `accept`
+        does on success it must be able to do again after a failure: a refused reply writes nothing.
         """
         goal = self.goals.get(goal_id)
         _ = goal  # kept for interface symmetry; config comes from the registry
@@ -1263,10 +1322,19 @@ class AgentOrchestrator:
                 return raw
             expect = REPLY_KEYS.get(role, ())
             tolerate_cut = role in REPLY_TOLERATES_TRUNCATION
+            what = "non-JSON output"
             try:
-                return extract_json(raw, expect, repair_truncation=tolerate_cut)
+                parsed = extract_json(raw, expect, repair_truncation=tolerate_cut)
             except (ValueError, TypeError) as exc:
                 problem = str(exc)
+            else:
+                try:
+                    if accept is not None:
+                        accept(parsed)
+                    return parsed
+                except (ValueError, TypeError, AgentOutputInvalid) as exc:
+                    problem = getattr(exc, "message", None) or str(exc)
+                    what = "a reply that could not be used"
 
             # One re-ask, of the *same* target, before anything else is tried: a small model's single
             # formatting slip is the commonest way a step used to fail, and the remedy costs one short
@@ -1281,7 +1349,7 @@ class AgentOrchestrator:
                     "model": model_name,
                     "target": label,
                     "code": "agent_output_invalid",
-                    "message": f"{role} returned non-JSON output: {problem}; asking the same model once more",
+                    "message": f"{role} returned {what}: {problem}; asking the same model once more",
                     "retrying": True,
                     "duration_ms": books.duration_ms(),
                 },
@@ -1323,12 +1391,28 @@ class AgentOrchestrator:
                 goal_id, step_id, role, target, model_name, system, repair_prompt, repaired, repair_books,
             )
             try:
-                return extract_json(repaired, expect, repair_truncation=tolerate_cut)
+                parsed = extract_json(repaired, expect, repair_truncation=tolerate_cut)
             except (ValueError, TypeError) as exc:
                 failures.append((
                     label, target.provider,
                     AgentOutputInvalid(
                         f"{role} returned non-JSON output after one repair attempt: {exc}", role=role,
+                    ),
+                ))
+                if "agent_output_invalid" not in FALLBACK_TRIGGER_CODES:
+                    break
+                continue
+            try:
+                if accept is not None:
+                    accept(parsed)
+                return parsed
+            except (ValueError, TypeError, AgentOutputInvalid) as exc:
+                failures.append((
+                    label, target.provider,
+                    AgentOutputInvalid(
+                        f"{role} returned a reply that could not be used after one repair attempt: "
+                        f"{getattr(exc, 'message', None) or exc}",
+                        role=role,
                     ),
                 ))
                 if "agent_output_invalid" not in FALLBACK_TRIGGER_CODES:
@@ -4951,7 +5035,40 @@ class ExecutorService:
                 "The conductor asked for this specifically, in addition to the "
                 f"step above:\n{guidance.strip()}\n\n"
             )
-        out = await self.orchestrator.run_agent(
+        applied: dict[str, Any] = {}
+
+        def accept(reply: Any) -> None:
+            """Turn a parsed reply into the files it describes, or say why it cannot be.
+
+            Run inside `run_agent`, so a reply the engine cannot apply gets the same one re-ask a reply
+            that would not parse gets, with this reason quoted to the model. `fs.apply` resolves every
+            edit before it writes anything, so a refused reply has written nothing and asking again is safe.
+            """
+            files = self._parse_files(reply)
+            # The fixer may declare itself unfinished: multi-stage changes (a config
+            # file in one pass, the code that reads it in the next) do not fit one
+            # reply. It asks by returning needs_another_pass=true WITH a plan note;
+            # an empty files list is still just a no-op, so the two can't be confused.
+            wants_pass = bool(isinstance(reply, dict) and reply.get("needs_another_pass"))
+            if not files and wants_pass:
+                raise AgentOutputInvalid(
+                    "needs_another_pass requires files in the same reply — ask for "
+                    "another pass alongside the changes you just made",
+                    role="fixer",
+                )
+            try:
+                # Apply runs BEFORE storage now: an `edit` op is only a description
+                # ("replace this exact text") until the engine resolves it against
+                # the file as it exists, and only the resolved full content is a
+                # proposal "Apply" can replay deterministically later.
+                summaries = fs.apply(files, dry_run=dry_run)
+            except ValueError as exc:
+                # An edit whose old_text does not match the file is the fixer's
+                # mistake — a contract failure, not an internal error.
+                raise AgentOutputInvalid(str(exc), role="fixer") from exc
+            applied.update(files=files, summaries=summaries, wants_pass=wants_pass)
+
+        await self.orchestrator.run_agent(
             "fixer", goal_id, step.id,
             f"Step: {step.title}\n{step.description}\n\n"
             f"{feedback_text}"
@@ -4959,31 +5076,13 @@ class ExecutorService:
             f"What the librarian found:\n{self._evidence_text(evidence or {})}\n"
             f"Suggested paths (current contents):\n{ctx}{unreadable}"
             f"{design_section}",
+            accept=accept,
         )
-        files = self._parse_files(out)
-        # The fixer may declare itself unfinished: multi-stage changes (a config
-        # file in one pass, the code that reads it in the next) do not fit one
-        # reply. It asks by returning needs_another_pass=true WITH a plan note;
-        # an empty files list is still just a no-op, so the two can't be confused.
-        wants_pass = bool(isinstance(out, dict) and out.get("needs_another_pass"))
-        if not files and wants_pass:
-            raise AgentOutputInvalid(
-                "needs_another_pass requires files in the same reply — ask for "
-                "another pass alongside the changes you just made",
-                role="fixer",
-            )
+        files = applied["files"]
+        summaries = applied["summaries"]
+        wants_pass = bool(applied["wants_pass"])
         if not files:
             self._log(goal_id, step.id, "warn", "fixer returned an empty files list — no changes will be written")
-        try:
-            # Apply runs BEFORE storage now: an `edit` op is only a description
-            # ("replace this exact text") until the engine resolves it against
-            # the file as it exists, and only the resolved full content is a
-            # proposal "Apply" can replay deterministically later.
-            summaries = fs.apply(files, dry_run=dry_run)
-        except ValueError as exc:
-            # An edit whose old_text does not match the file is the fixer's
-            # mistake — a contract failure, not an internal error.
-            raise AgentOutputInvalid(str(exc), role="fixer") from exc
         if dry_run:
             # Persist the proposal so "Apply" can write these exact contents
             # later. An empty list clears the step's previous proposal — a retry

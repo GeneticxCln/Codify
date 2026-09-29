@@ -349,14 +349,20 @@ async def run_task(
     *,
     canned: bool,
     engine_db: Path | None = None,
+    attempt: int = 1,
 ) -> dict[str, Any]:
-    """Run one task end to end: measurements, harness checks, quality checks."""
+    """Run one task end to end: measurements, harness checks, quality checks.
+
+    `attempt` numbers repeats of the same task, so each gets a workspace and a store of its own: two
+    runs sharing either would measure the first run's leftovers.
+    """
     started = time.monotonic()
-    workspace = work_root / str(task["id"])
+    slug = str(task["id"]) if attempt == 1 else f"{task['id']}-attempt{attempt}"
+    workspace = work_root / slug
     materialize(str(task["repo"]), workspace)
     before = _files(workspace)
 
-    conn = connect(work_root / f"{task['id']}.db")
+    conn = connect(work_root / f"{slug}.db")
     try:
         goals = GoalService(conn)
         workspaces = WorkspaceService(conn)
@@ -459,6 +465,7 @@ async def run_task(
 
     return {
         "id": task["id"],
+        "attempt": attempt,
         "tier": task.get("tier"),
         "status": status,
         "wall_ms": wall_ms,
@@ -469,9 +476,34 @@ async def run_task(
         "tokens_are_synthetic": canned,
         "checks": checks,
         "quality_checks": quality_results,
+        "call_health": call_health(events),
         "passed": all(c["status"] == "passed" for c in checks)
         and all(q["status"] != "failed" for q in quality_results),
     }
+
+
+def call_health(events: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """How the model's calls went, per role, counted from the run's own events.
+
+    `ran` is the number of times the role's stage reported; `failed_calls` counts every call the
+    executor recorded as failed; `reasks` counts the ones it answered by asking the same model again
+    (`agent_call_failed` with `retrying`) — the measure of how often a reply was not usable the first
+    time, which a task's pass/fail cannot show. Roles with nothing to count are absent, not zero.
+    """
+    ran: dict[str, int] = {}
+    reasks: dict[str, int] = {}
+    failed: dict[str, int] = {}
+    for event in events:
+        payload = event.get("payload") or {}
+        if event.get("type") == "stage_result":
+            role = str(payload.get("role") or payload.get("stage"))
+            ran[role] = ran.get(role, 0) + 1
+        elif event.get("type") == "agent_call_failed":
+            role = str(payload.get("role"))
+            failed[role] = failed.get(role, 0) + 1
+            if payload.get("retrying"):
+                reasks[role] = reasks.get(role, 0) + 1
+    return {"ran": ran, "reasks": reasks, "failed_calls": failed}
 
 
 def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -483,6 +515,12 @@ def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
         for stage, ms in result["stage_ms"].items():
             stage_totals[stage] = stage_totals.get(stage, 0) + ms
     quality = [q for r in results for q in r["quality_checks"]]
+    health: dict[str, dict[str, int]] = {}
+    for result in results:
+        counted = result.get("call_health") or {}
+        for field in ("ran", "reasks", "failed_calls"):
+            for role, n in (counted.get(field) or {}).items():
+                health.setdefault(role, {"ran": 0, "reasks": 0, "failed_calls": 0})[field] += int(n)
     return {
         "tasks": total,
         "passed": passed,
@@ -495,7 +533,28 @@ def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
         "tokens_are_synthetic": any(r["tokens_are_synthetic"] for r in results),
         "wall_ms": sum(int(r["wall_ms"]) for r in results),
         "stage_ms": dict(sorted(stage_totals.items(), key=lambda kv: -kv[1])),
+        "call_health": health,
     }
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return value
+
+
+def _percentage(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not 0 <= value <= 100:
+        raise argparse.ArgumentTypeError("must be between 0 and 100")
+    return value
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -509,6 +568,20 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="engine database to read agent configs from (configured tiers only)",
+    )
+    parser.add_argument(
+        "--repeat",
+        type=_positive_int,
+        default=1,
+        metavar="N",
+        help="run every task N times, each in its own workspace: one run of a model is an anecdote",
+    )
+    parser.add_argument(
+        "--min-pass-rate",
+        type=_percentage,
+        default=None,
+        metavar="PCT",
+        help="exit 1 when fewer than PCT%% of the runs pass — the regression floor for a recorded baseline",
     )
     args = parser.parse_args(argv)
 
@@ -551,8 +624,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         results = [
             asyncio.run(run_task(
-                task, work_root, canned=canned, engine_db=args.engine_db,
+                task, work_root, canned=canned, engine_db=args.engine_db, attempt=attempt,
             ))
+            for attempt in range(1, args.repeat + 1)
             for task in tasks
         ]
     finally:
@@ -586,12 +660,24 @@ def main(argv: list[str] | None = None) -> int:
     if summary["stage_ms"]:
         slowest = next(iter(summary["stage_ms"]))
         print(f"slowest   {slowest} at {summary['stage_ms'][slowest]} ms")
+    for role, counts in summary["call_health"].items():
+        if counts["reasks"] or counts["failed_calls"]:
+            print(f"health    {role}: {counts['reasks']} re-ask(s) and {counts['failed_calls']} failed call(s) "
+                  f"over {counts['ran']} run(s)")
     for result in results:
-        print(f"  {'ok  ' if result['passed'] else 'FAIL'} {result['id']}")
+        label = result["id"] if args.repeat == 1 else f"{result['id']} (run {result['attempt']})"
+        print(f"  {'ok  ' if result['passed'] else 'FAIL'} {label}")
         for check in result["checks"]:
             if check["status"] != "passed":
                 print(f"         {check['type']}: {check['detail']}")
 
+    if args.min_pass_rate is not None:
+        actual = 100 * summary["passed"] / summary["tasks"]
+        if actual < args.min_pass_rate:
+            print(f"floor     {actual:.0f}% of runs passed, below the floor of {args.min_pass_rate:g}%")
+            return 1
+        print(f"floor     {actual:.0f}% of runs passed, at or above the floor of {args.min_pass_rate:g}%")
+        return 0
     return 0 if summary["failed"] == 0 else 1
 
 
