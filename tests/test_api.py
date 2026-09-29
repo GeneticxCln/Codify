@@ -2411,10 +2411,9 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         The old endpoint accepted every socket and only ever closed 4401, so a
         bad goal id surfaced as a mystery stream that sends nothing.
         """
-        try:
-            from starlette.testclient import TestClient
-        except ImportError:
-            self.skipTest("starlette testclient's websocket support unavailable")
+        # Imported plainly: a missing dependency is a failure to see, not a reason
+        # to skip the guarantee (CLAUDE.md: no test may skip itself out of one).
+        from starlette.testclient import TestClient
         from starlette.websockets import WebSocketDisconnect
         # TestClient enters lifespan, which would rebuild app.state on the real
         # home store — so reuse the isolated state ASGI app is not possible; but

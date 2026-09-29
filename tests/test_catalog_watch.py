@@ -276,10 +276,9 @@ class TestCatalogWatch(unittest.IsolatedAsyncioTestCase):
 
 class TestEngineSocket(unittest.TestCase):
     def _app(self) -> Any:
-        try:
-            from starlette.testclient import TestClient  # noqa: F401
-        except ImportError:
-            self.skipTest("starlette testclient's websocket support unavailable")
+        # Imported plainly so a missing dependency fails loudly instead of
+        # skipping the guarantee (CLAUDE.md: no test may skip itself out of one).
+        from starlette.testclient import TestClient  # noqa: F401
         from engine.app import app
 
         return app
