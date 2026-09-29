@@ -704,6 +704,11 @@ def main(argv: list[str] | None = None) -> int:
                     trace=args.record is not None,
                 )
                 results.append(result)
+                if args.record is not None:
+                    # Kept as each task finishes, not only at the end: a run killed part-way (a container
+                    # restart, an OOM, a closed terminal) never reaches the `finally` below, and a baseline
+                    # that takes an hour on a CPU was lost with it.
+                    shutil.copytree(work_root, args.record, dirs_exist_ok=True)
                 # As each one finishes, not only in the summary: a slow real model makes a run long, and
                 # a run that dies late should leave a record of the tasks that were done.
                 label = task["id"] if args.repeat == 1 else f"{task['id']} (run {attempt})"
@@ -752,8 +757,15 @@ def main(argv: list[str] | None = None) -> int:
     for result in results:
         label = result["id"] if args.repeat == 1 else f"{result['id']} (run {result['attempt']})"
         print(f"  {'ok  ' if result['passed'] else 'FAIL'} {label}")
+        # Quality checks too: a task that completes and does the wrong thing fails no harness check, and
+        # without these the console said FAIL and nothing beneath it (the reason was in the JSON alone).
+        # Only a *failed* quality check: a skipped one (a canned run cannot claim quality) is already
+        # counted on the `quality N skipped` line, and listing it under every passing task is noise.
         for check in result["checks"]:
             if check["status"] != "passed":
+                print(f"         {check['type']}: {check['detail']}")
+        for check in result.get("quality_checks", []):
+            if check["status"] == "failed":
                 print(f"         {check['type']}: {check['detail']}")
 
     if args.min_pass_rate is not None:

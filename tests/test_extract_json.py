@@ -305,6 +305,58 @@ class TestABareListOfTheRightThings(unittest.TestCase):
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "model_replies"
 
 
+class TestAReplyThatIsNotCutOffIsNotCalledCutOff(unittest.TestCase):
+    """A string with no closing quote is a syntax error, and the message must say where — not "truncated".
+
+    Captured from `Qwen2.5-1.5B-Instruct` on `repo-default-name` (`qwen2.5-1.5b-fixer-unclosed-string.reply`):
+    the reply is complete, and ends with its closing braces and fence, but one `new_text` string has no
+    closing quote. Every quote after it pairs the wrong way round, the document "never closes", and the
+    error read "the reply ends before the document does (... line 7 column 20 (char 100))" — a claim of
+    truncation about a whole reply, pointing at a spot (the start of a triple-quoted value that the
+    repairs read without trouble) that was not the problem. That sentence is what the re-ask quotes back to
+    the model, so it is the model's only clue to what to fix (second audit pass, 2026-09-29).
+    """
+
+    def setUp(self) -> None:
+        self.reply = (FIXTURES / "qwen2.5-1.5b-fixer-unclosed-string.reply").read_text(encoding="utf-8")
+
+    def _message(self) -> str:
+        with self.assertRaises(ValueError) as caught:
+            extract_json(self.reply, REPLY_KEYS["fixer"])
+        return str(caught.exception)
+
+    def test_a_complete_reply_is_not_said_to_end_early(self) -> None:
+        self.assertNotIn("ends before the document does", self._message())
+
+    def test_the_location_is_the_real_fault_not_the_repaired_triple_quote(self) -> None:
+        message = self._message()
+        # The plain parser tripped at char 100, the `"""` that the repair reads; the trouble is the
+        # closing quote missing further down, so the position must be past the whole `content` value.
+        self.assertNotIn("(char 100)", message)
+        self.assertRegex(message, r"line 1[0-9] column")
+        # And it quotes the neighbourhood, because the line number counts the repaired text.
+        self.assertIn("hello world", message)
+
+    def test_the_same_reply_parses_once_the_missing_quote_is_supplied(self) -> None:
+        # The proof that the triple-quote repair was never the problem: only the model's own slip is.
+        mended = self.reply.replace("'hello world',\n          \"count\"", "'hello world'\",\n          \"count\"")
+        self.assertNotEqual(self.reply, mended, "the fixture no longer has the slip this test mends")
+        parsed = extract_json(mended, REPLY_KEYS["fixer"])
+        self.assertEqual("src/app.py", parsed["files"][0]["path"])
+
+    def test_a_reply_that_really_stops_mid_string_is_still_called_cut_off(self) -> None:
+        raw = '{"files": [{"path": "a.py", "action": "create", "content": "def f():\\n    retu'
+        with self.assertRaises(ValueError) as caught:
+            extract_json(raw, REPLY_KEYS["fixer"])
+        self.assertIn("ends before the document does", str(caught.exception))
+
+    def test_a_reply_that_stops_between_values_is_still_called_cut_off(self) -> None:
+        raw = '{"files": [{"path": "a.py", "action": "create", "content": "x"}, {"path": '
+        with self.assertRaises(ValueError) as caught:
+            extract_json(raw, REPLY_KEYS["fixer"])
+        self.assertIn("ends before the document does", str(caught.exception))
+
+
 class TestCapturedReplies(unittest.TestCase):
     """Replies captured from real models, each next to the object it must parse to.
 

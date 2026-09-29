@@ -1,0 +1,21 @@
+```json
+{
+  "files": [
+    {
+      "path": "src/app.py",
+      "action": "edit",
+      "content": """def greet(name: str) -> str:
+    """Say hello. The benchmark's tasks are measured against this file."""
+    return f"hello {name}" if name else 'hello world'
+""",
+      "edits": [
+        {
+          "old_text": "return f'hello {name}'",
+          "new_text": "return f'hello {name}' if name else 'hello world',
+          "count": 1
+        }
+      ]
+    }
+  ]
+}
+```

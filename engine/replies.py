@@ -208,6 +208,30 @@ def _load_repaired(span: str) -> Any:
     return value
 
 
+def _repaired_problem(span: str) -> tuple[str, bool] | None:
+    """Why `span` is still not JSON *after* the repairs that do work, and whether the text simply ran out.
+
+    The plain parser's complaint is about the reply as the model wrote it, and that is often about
+    something the repairs read without trouble (a Python `\"\"\"` value): reporting it sends the reader to a
+    spot that was never the problem. This reads the repaired text instead, so the position is where the
+    document actually breaks — for a string missing its closing quote, the next key, where every quote
+    starts pairing the wrong way round. The flag is True when the parser ran out of text (or stopped in a
+    string that never ends), which is what a genuinely cut-off reply looks like; None means it parses.
+    """
+    cleaned = _triple_quoted_to_json(_strip_comments_and_trailing_commas(span))
+    try:
+        json.loads(cleaned, strict=False)
+    except json.JSONDecodeError as exc:
+        ran_out = exc.pos >= len(cleaned.rstrip()) - 1 or exc.msg.startswith("Unterminated string")
+        # Line numbers count the *repaired* text, where a multi-line `\"\"\"` value has become one line,
+        # so they will not match what the model wrote. A short quote of the neighbourhood does.
+        near = " ".join(cleaned[max(0, exc.pos - 40):exc.pos + 20].split())
+        return f"{exc} — near \u201c{near}\u201d", ran_out
+    except ValueError as exc:
+        return str(exc), False
+    return None
+
+
 def _close_truncated(text: str) -> Any:
     """A reply cut off by `max_tokens`: keep what was finished, and drop the element that was not.
 
@@ -333,8 +357,15 @@ def extract_json(raw: str, expect: Sequence[str] = (), *, repair_truncation: boo
                 except ValueError:
                     pass
             else:
-                # More specific than the parser's own complaint, and what the re-ask should quote.
-                first_problem = f"invalid JSON: the reply ends before the document does ({problem})"
+                # What the re-ask quotes, so it says where the document breaks *after* the repairs, and
+                # calls a reply cut off only when the parser really ran out of text: a string missing its
+                # closing quote also "never closes", and is a syntax error in a complete reply.
+                repaired = _repaired_problem(stripped[i:])
+                where, ran_out = repaired if repaired is not None else (problem, True)
+                if ran_out:
+                    first_problem = f"invalid JSON: the reply ends before the document does ({where})"
+                else:
+                    first_problem = f"invalid JSON: {where}"
             break
         try:
             found.append(_load_repaired(stripped[i:end_at]))

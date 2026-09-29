@@ -565,6 +565,16 @@ A role needs repair when **any** of these holds:
 | its provider requires a credential and none is stored | `<provider> needs a credential and none is stored` |
 | its provider answered **and** does not list the stored model | `<provider> no longer reports "<model>"` |
 
+**"A credential is stored" means the role's own key *or* the provider's.** A custom provider's key is stored
+*for the role* (`api_key_ref` — what the role card's key field writes, and what the factory reads first), not
+under the provider's name, and the key table (`AgentRegistryService.provider_key_status`) lists the built-in
+providers plus any custom slug a role points at. Judging from the provider table alone called every role on a
+custom provider uncallable — on every goal (the "8 of 8 agent roles cannot be called" line, while all eight
+were being called) and in this endpoint, which then repointed working roles. The preflight and this endpoint
+now read the same rows and the same table (`configs_with_key_state`, `provider_key_status`), and the role's
+own key counts for its **primary** target only: a fallback is a different provider and never inherits it
+(`tests/test_role_preflight.py`, `tests/test_api.py::test_repair_leaves_a_custom_provider_role_that_holds_its_own_key_alone`).
+
 **A fallback is only forgiven for what discovery could answer.** A role whose primary cannot run is left alone when its fallback may still serve it — but "may" is decided by whether the fallback's own problem is *provable without the network*. No model, or a credential that is not stored, is already true of the store we hold, so a fallback with either is not treated as a possible save; a model the provider may no longer list is, because only asking settles that. Without the distinction, a role whose primary and fallback both need a key reported as "may run on its fallback", and neither this screen nor the preflight below named the one thing the user could act on.
 
 A role is left alone when it is usable — a model the provider still lists, or any model on a provider that needs no credential. **A provider that failed discovery proves nothing**: an unanswered provider is an unknown, not a fault, so its roles are neither repaired nor reported as retired (`<provider> did not answer, so nothing here is proven`). Repair is idempotent: a second call changes nothing and reports all roles as `left alone`.
@@ -689,6 +699,17 @@ a model that needs this is something to see — and the second call has books of
 re-asked; prose (`raw_output`) never is; a provider error on the re-ask is a provider failure like any other;
 after a second bad reply the failure reads "…after one repair attempt" and the fallback rule is exactly what
 it was. The bound is structural: no target is asked more than twice for one call.
+
+**The reason it quotes is where the document breaks *after* the repairs.** A string with no closing quote
+also "never closes" — every quote after it pairs the wrong way round — and in a *complete* reply that is a
+syntax error, not a truncation. The parser's own complaint pointed at the start of a `"""` value the repairs
+read without trouble (char 100 of a 467-character reply), and the sentence said the reply "ends before the
+document does", which is the wrong clue to hand a model that is asked to fix it. The reason is now taken from
+the repaired text, with a short quote of the neighbourhood (line numbers count the repaired text, where a
+multi-line `"""` value is one line): `Expecting ',' delimiter … near “if name else 'hello world', "count": 1 }”`.
+"Ends before the document does" is kept for a reply whose parser really ran out of text, or stopped inside a
+string that never ends (`tests/test_extract_json.py::TestAReplyThatIsNotCutOffIsNotCalledCutOff`, from a real
+`Qwen2.5-1.5B` capture).
 
 The same re-ask covers a reply that **parsed but could not be used** (`run_agent(..., accept=)`): the
 fixer's edit that matches the wrong number of times or not at all (`old_text appears 2 time(s), expected 1`),

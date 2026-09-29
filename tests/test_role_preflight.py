@@ -127,6 +127,49 @@ class ConfigProblemsTests(unittest.TestCase):
         self.assertEqual(preflight, repair)
 
 
+class ACustomProviderThatHoldsItsOwnKeyTests(unittest.TestCase):
+    """A role's own stored credential counts (second audit pass, 2026-09-29).
+
+    A custom provider's key is stored *for the role* (`api_key_ref`): that is what the role card's key field
+    does, and what the factory reads first. The preflight and the repair plan only asked the provider table,
+    which lists the built-in slugs, so every role on a custom provider was reported "needs a credential and
+    none is stored" while it was being called successfully — on every goal, and by the Repair button, which
+    then treated a working role as one to repoint. Found because a real-model baseline printed "8 of 8 agent
+    roles cannot be called" on every run that then called all eight.
+    """
+
+    def _custom(self, **extra: Any) -> dict[str, Any]:
+        row = _config("fixer", "my-proxy", "m", **extra)
+        row["protocol"] = "openai_compat"
+        return row
+
+    def test_a_role_holding_its_own_key_is_not_reported(self) -> None:
+        self.assertEqual([], config_problems([self._custom(has_role_key=True)], KEYS))
+
+    def test_the_repair_plan_leaves_such_a_role_alone(self) -> None:
+        plan = plan_role_repair([self._custom(has_role_key=True)], KEY_STATUS, [], [])
+        self.assertEqual([], plan.to_repair)
+        self.assertEqual(["fixer"], [role for role, _ in plan.left_alone])
+
+    def test_a_custom_role_with_no_key_anywhere_is_still_reported(self) -> None:
+        found = dict(config_problems([self._custom(has_role_key=False)], KEYS))
+        self.assertIn("credential", found["fixer"])
+
+    def test_a_provider_key_in_the_table_counts_for_a_custom_slug(self) -> None:
+        keys = {**KEYS, "my-proxy": {"needs_key": True, "has_key": True}}
+        self.assertEqual([], config_problems([self._custom()], keys))
+
+    def test_the_role_key_belongs_to_the_primary_and_not_to_its_fallback(self) -> None:
+        # The fallback is a different provider and never inherits the role's credential
+        # (`fallback_config_for` drops it for the same reason). Here the primary has no model at all, so the
+        # role runs only if its fallback can: and the fallback is a custom provider with no key of its own.
+        row = _config("fixer", "ollama", "", fallback_provider="my-proxy", fallback_model_name="m",
+                      has_role_key=True)
+        row["fallback_protocol"] = "openai_compat"
+        found = dict(config_problems([row], KEYS))
+        self.assertIn("fixer", found, "the role's key was lent to a different provider")
+
+
 class PreflightInAGoalTests(_Harness):
     """The line itself, in a real goal's transcript."""
 
@@ -165,6 +208,24 @@ class PreflightInAGoalTests(_Harness):
         line = next(w for w in self._warnings() if "cannot be called" in w)
         for role in ("fixer", "critic", "scribe", "verifier", "design", "laya"):
             self.assertNotIn(f"{role}:", line)
+
+    def _custom_roles(self, with_key: bool) -> None:
+        for role in ROLES:
+            self.registry.set_config(role, AgentConfigUpdate(
+                provider="my-proxy", protocol="openai_compat", model_name="m",
+                base_url="http://127.0.0.1:9/v1", api_key="a-key" if with_key else None,
+            ))
+
+    async def test_a_custom_provider_with_its_own_key_says_nothing(self) -> None:
+        self._custom_roles(with_key=True)
+        await self.executor.run_planning(self.goal.id)
+        self.assertEqual([w for w in self._warnings() if "cannot be called" in w], [])
+
+    async def test_a_custom_provider_with_no_key_is_still_named(self) -> None:
+        self._custom_roles(with_key=False)
+        await self.executor.run_planning(self.goal.id)
+        line = next((w for w in self._warnings() if "cannot be called" in w), "")
+        self.assertIn("my-proxy needs a credential", line)
 
     async def test_a_fully_configured_workspace_says_nothing(self) -> None:
         """Silence is the point. A preflight that always speaks is noise."""

@@ -28,3 +28,12 @@ The `expect` objects were built from the replies' text by a separate script that
 delimiters — not by `extract_json`, so the expectation does not agree with the parser by construction.
 Before this change the fixer capture failed the run twice in a row (`agent_output_invalid`, with the
 re-ask); nothing in the audit's list of fifteen shapes had predicted it.
+
+## A reply that must *not* parse
+
+`qwen2.5-1.5b-fixer-unclosed-string.reply` is a capture of the other kind: a complete reply (it ends with its
+closing braces and fence) in which one `new_text` string has no closing quote. It has the extension `.reply`,
+not `.txt`, so the loop above — which holds every `.txt` to "parses to what was recorded" — does not pick it
+up; `TestAReplyThatIsNotCutOffIsNotCalledCutOff` reads it and holds the *refusal* to a standard: it must say
+where the document breaks, and must not call a whole reply cut off. It came from `repo-default-name` on the
+same `Qwen2.5-1.5B-Instruct` Q4_K_M setup, in the final-code baseline run.

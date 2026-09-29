@@ -20,6 +20,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from tests import hermetic  # noqa: F401
@@ -463,6 +464,40 @@ class RecordTests(unittest.TestCase):
             self.assertTrue({"planner", "fixer"} <= roles, roles)
             self.assertTrue((keep / "smoke-add-banner" / "banner.txt").is_file(), "the workspace was not kept")
 
+    def test_each_task_is_kept_as_it_finishes_not_only_at_the_end(self) -> None:
+        # The copy used to happen once, in a `finally` after the last task, so a run that was killed —
+        # a container restart, an OOM, a closed terminal — kept nothing, and a baseline that takes an
+        # hour on a CPU was lost with it. Looked at from the second task's start: the first is already there.
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = Path(tmp) / "kept"
+            manifest = Path(tmp) / "manifest.json"
+            manifest.write_text(json.dumps({
+                "version": 1,
+                "tiers": {"smoke": {"description": "d", "provider": "canned"}},
+                "repos": [],
+                "tasks": [{
+                    "id": name, "tier": "smoke", "repo": SYNTHETIC, "title": name, "description": "d",
+                    "canned_write": [{"path": "banner.txt", "content": "X\n"}],
+                    "checks": [{"type": "goal_completed"}],
+                } for name in ("first", "second")],
+            }), encoding="utf-8")
+            kept_when_each_started: dict[str, list[str] | None] = {}
+            real = runner._run_one
+
+            def spy(task: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
+                kept_when_each_started[str(task["id"])] = (
+                    sorted(p.name for p in keep.glob("*.db")) if keep.exists() else None
+                )
+                return real(task, *args, **kwargs)
+
+            with mock.patch("benchmarks.runner._run_one", spy):
+                code, _ = _run_main(["--tier", "smoke", "--manifest", str(manifest), "--record", str(keep)])
+
+            self.assertEqual(0, code)
+            self.assertEqual(["first.db"], kept_when_each_started["second"],
+                             "the first task's store was not kept until the whole run ended")
+            self.assertEqual(["first.db", "second.db"], sorted(p.name for p in keep.glob("*.db")))
+
     def test_without_the_flag_nothing_is_kept_and_nothing_is_traced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch("benchmarks.runner.tempfile.mkdtemp", return_value=str(Path(tmp) / "w")) as made:
             (Path(tmp) / "w").mkdir()
@@ -472,6 +507,53 @@ class RecordTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(made.called)
             self.assertFalse((Path(tmp) / "w").exists(), "the scratch directory was left behind")
+
+
+class TheReasonATaskFailedIsPrintedTests(unittest.TestCase):
+    """A task that completes and then fails its *quality* check says why, in the console summary.
+
+    The summary listed only the harness checks under a failed task, and a task that completes but does the
+    wrong thing fails no harness check: `repo-remove-shout` and `repo-word-count` printed `FAIL` and nothing
+    beneath it, and the reason (the module had been deleted; the repo's own tests errored) was in the JSON
+    report alone (second audit pass, 2026-09-29). For a benchmark, why a task failed is the line that matters.
+    """
+
+    def _summary(self, quality: list[dict[str, str]]) -> str:
+        real = runner._run_one
+
+        def wrapper(task: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
+            result = real(task, *args, **kwargs)
+            result["quality_checks"] = quality
+            result["passed"] = all(q["status"] == "passed" for q in quality)
+            return result
+
+        out = io.StringIO()
+        with mock.patch.object(runner, "_run_one", wrapper), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            main(["--tier", "smoke", "--only", "smoke-add-banner"])
+        return out.getvalue()
+
+    def test_a_failed_quality_check_is_named_with_its_detail(self) -> None:
+        text = self._summary([
+            {"type": "test_command", "kind": "quality", "status": "failed",
+             "detail": "exit 1: ModuleNotFoundError: No module named 'app'"},
+        ])
+        self.assertIn("FAIL smoke-add-banner", text)
+        self.assertIn("test_command: exit 1: ModuleNotFoundError: No module named 'app'", text)
+
+    def test_a_skipped_quality_check_is_not_listed_under_a_passing_task(self) -> None:
+        # A canned run skips every quality check, and the summary already counts them on one line.
+        text = self._summary([
+            {"type": "file_exists", "kind": "quality", "status": "skipped",
+             "detail": "needs a real provider — a canned run cannot claim task quality"},
+        ])
+        self.assertNotIn("needs a real provider", text.split("smoke-add-banner", 2)[-1])
+
+    def test_a_passing_quality_check_is_not_listed(self) -> None:
+        text = self._summary([
+            {"type": "file_exists", "kind": "quality", "status": "passed", "detail": "src/util.py exists"},
+        ])
+        self.assertNotIn("src/util.py exists", text)
 
 
 class RepeatAndThresholdTests(unittest.TestCase):

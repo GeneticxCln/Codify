@@ -788,18 +788,13 @@ async def repair_agents(request: Request) -> dict[str, Any]:
     so the screen can show what happened instead of asserting success.
     """
     registry: AgentRegistryService = request.app.state.registry
-    keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
     catalog_service: ModelCatalogService | None = getattr(request.app.state, "models", None)
 
-    configs = [cfg.model_dump() for cfg in registry.list_configs()]
-    key_status = [
-        {
-            "provider": slug,
-            "has_key": keychain.has_provider_key(slug),
-            "needs_key": meta["needs_key"],
-        }
-        for slug, meta in BUILTIN_PROVIDERS.items()
-    ]
+    # The same rows and the same key table the goal preflight reads (`AgentRegistryService`): built-in
+    # providers, custom ones a role points at, and each role's own credential. Two hand-built copies of
+    # "does this role have a key" is how this endpoint came to repoint working custom-provider roles.
+    configs = registry.configs_with_key_state()
+    key_status = [{"provider": slug, **status} for slug, status in registry.provider_key_status().items()]
     catalog = await catalog_service.get(refresh=True) if catalog_service else {
         "models": [], "providers": []
     }

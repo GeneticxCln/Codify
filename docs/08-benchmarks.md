@@ -79,7 +79,9 @@ real model, three more matter:
 * `--record DIR` traces every model call and keeps each task's store and
   workspace in DIR instead of deleting them, so a model's raw replies can be read
   (`trace_calls.response`) and committed as fixtures
-  (`tests/fixtures/model_replies/`).
+  (`tests/fixtures/model_replies/`). They are copied **as each task finishes**, not
+  once at the end: a real-model run takes an hour on a CPU, and one killed
+  part-way (a container restart, an OOM) used to keep nothing.
 
 A task that crashes is recorded as `ERRORED` with its cause and the run goes on;
 each task prints as it finishes. A failed task carries the error that ended it, and

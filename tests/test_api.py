@@ -205,6 +205,37 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(report["left_alone"]), len(ROLES))
         self.assertTrue(all("not verified" in row["reason"] for row in report["left_alone"]))
 
+    async def test_repair_leaves_a_custom_provider_role_that_holds_its_own_key_alone(self) -> None:
+        """A working role on a custom provider is not repointed (second audit pass, 2026-09-29).
+
+        A custom provider's key is stored for the role, and the repair rule only asked the provider table,
+        which lists the built-in slugs — so it called such a role uncallable and repointed it at whatever the
+        catalogue listed first. The keyless custom role next to it is the control: it really cannot run.
+        """
+        base = {"provider": "my-proxy", "protocol": "openai_compat", "model_name": "m",
+                "base_url": "http://127.0.0.1:9/v1"}
+        keyed = await self.client.put(
+            "/settings/agents/fixer", headers=self.headers, json={**base, "api_key": "sk-test-not-a-real-key"},
+        )
+        self.assertEqual(keyed.status_code, 200, keyed.text)
+        keyless = await self.client.put("/settings/agents/scribe", headers=self.headers, json=base)
+        self.assertEqual(keyless.status_code, 200, keyless.text)
+        app.state.models = _StubCatalog({
+            "models": [{"id": "local-1", "name": "local-1", "provider": "ollama", "protocol": "ollama",
+                        "description": "local", "supports_chat": None}],
+            "providers": [{"provider": "ollama", "protocol": "ollama", "ok": True, "count": 1, "error": None}],
+            "fetched_at": 0, "cached": False,
+        })
+
+        report = (await self.client.post("/settings/agents/repair", headers=self.headers)).json()
+
+        repaired = {row["role"] for row in report["repaired"]}
+        self.assertNotIn("fixer", repaired, "a working custom-provider role was repointed")
+        self.assertIn("scribe", repaired, "the keyless custom role really cannot run")
+        configs = {c["role"]: c for c in (await self.client.get("/settings/agents", headers=self.headers)).json()}
+        self.assertEqual("my-proxy", configs["fixer"]["provider"])
+        self.assertEqual("m", configs["fixer"]["model_name"])
+
     async def test_roles_endpoint_describes_every_slot_and_its_abilities(self) -> None:
         """The settings screen reads the ability list from here, so it cannot
         describe a grant the engine does not make."""
