@@ -37,8 +37,28 @@ which runs everything above and then the same Python targets again on the declar
 minimum, bringing that interpreter up on demand (it downloads one with `uv`, or uses a
 `python3.10` you already have). The floor leg never skips: if it cannot be provisioned,
 `make ci` fails and says what to install. `.github/workflows/check.yml` describes the
-same targets split by toolchain, but GitHub Actions is not available to this
-repository — **`make ci` is the gate.**
+same targets split by toolchain, but GitHub Actions does not run for this
+repository (its workflow is manual-only, and says why in its header) — **`make ci` is
+the gate.**
+
+### Getting the verdict onto a pull request, without Actions
+
+Two commands, both free. Run `make hooks` once per clone, so `git push` runs `make ci`
+first and refuses to send a red tree. Then, with a commit pushed and a clean working
+tree:
+
+```
+make ci-report
+```
+
+runs `make ci` and publishes the result on the commit as a GitHub status named
+local/make-ci, which a pull request shows like any other check. It uses the GitHub
+CLI (`gh auth login` once; the token needs permission to write commit statuses) and is
+an API call, not a workflow run, so it needs no runner and no billing. It refuses a
+dirty working tree and a gate that changes the tree, because a status is a claim about
+a *commit* and would otherwise describe files that are not in it. The status is
+self-attested — it says what this machine saw — which is the same trust the pre-push
+hook already places in the developer.
 
 ### The gate is about the tip; the history is a separate question
 

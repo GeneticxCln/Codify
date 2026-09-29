@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri run-app dev-app run-engine run-engine-preview run-engine-scratch check ci ci-python-floor check-history hooks clean bench bench-smoke
+.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri run-app dev-app run-engine run-engine-preview run-engine-scratch check ci ci-report ci-python-floor check-history hooks clean bench bench-smoke
 
 # mypy is a dev tool, installed like ruff (`pip install mypy` or `pip install -e ".[dev]"`);
 # when it is only in the project venv, fall back to that so `make check` works unactivated.
@@ -40,6 +40,7 @@ help:
 	@echo "  make ci           - Run the whole CI gate locally: make check plus the declared $(PY_MIN) leg"
 	@echo "  make check-history - Check that every commit in HISTORY_RANGE builds, not just the tip (default: origin/\$$branch..HEAD)"
 	@echo "  make ci-python-floor - Run only the $(PY_MIN) leg (uv or a system python$(PY_MIN) covers it)"
+	@echo "  make ci-report    - make ci, then publish the verdict on the commit as a GitHub status (needs gh; clean tree; pushed commit)"
 	@echo "  make hooks        - Install the git hooks (pre-commit: lint+typecheck, pre-push: 'make ci')"
 	@echo "  make clean        - Remove caches and build artifacts"
 	@echo ""
@@ -230,6 +231,14 @@ ci-python-floor:
 ci: ci-python-floor check
 	@echo ""
 	@echo "CI gate passed locally: python $(PY_MIN) (provisioned) + host + ui + rust."
+
+# `make ci`, then say so on the commit. With Actions not running there is no check on a
+# pull request at all; this publishes the local verdict as a commit status (context
+# local/make-ci) using the GitHub CLI, which is free because a status is an API call and
+# not a workflow run. It refuses a dirty tree and needs the commit pushed — see the
+# header of scripts/ci-report.sh for why each is a rule and not a courtesy.
+ci-report:
+	scripts/ci-report.sh
 
 # A different question, so a separate target and deliberately NOT part of `check` or
 # `ci`: does every commit in this range build, or only the one at the tip? `make ci`
