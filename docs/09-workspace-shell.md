@@ -824,9 +824,19 @@ the module's own docs:
 
 Commands: `codify_terminal_open`, `codify_terminal_write`,
 `codify_terminal_resize`, `codify_terminal_close`. Events: `terminal-output`,
-`terminal-exit`. Nine Rust tests pin the refusals and the reaping; the freeze is
-mutation-tested — a rogue `Command::new(...).spawn()` in `src-tauri/src/` fails
-`tests/test_no_unguarded_spawns.py`.
+`terminal-exit`. Thirteen Rust tests pin the refusals, the reaping and the read
+path; the freeze is mutation-tested — a rogue `Command::new(...).spawn()` in
+`src-tauri/src/` fails `tests/test_no_unguarded_spawns.py`.
+
+The reader thread is `pump_output`, taken out of `open` so it needs no
+`AppHandle`: two of those tests drive a **real PTY** through it (a shell printing
+non-ASCII text, and `cat` echoing back a line that was written), which is the
+whole path from a shell's first byte to the text the `terminal-output` event
+carries. It decodes with `Utf8Chunker`, not per-read `from_utf8_lossy`: a read
+ends wherever it ends, and a character whose bytes straddle two reads used to
+arrive as two replacement characters. The unfinished tail is held for the next
+read; bytes that are actually invalid are replaced at once so garbage cannot
+stall the stream.
 
 #### The pane
 

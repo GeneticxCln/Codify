@@ -118,6 +118,91 @@ fn shell_command(cwd: PathBuf) -> CommandBuilder {
     cmd
 }
 
+/// Turns a stream of byte chunks into text without cutting a character in half.
+///
+/// A PTY is read in fixed-size chunks and a chunk ends wherever the read did, so
+/// a three-byte `€` or a four-byte emoji can arrive as two reads. Decoding each
+/// chunk on its own turns both halves into U+FFFD, which is what a box-drawing
+/// TUI or `cat` of a large UTF-8 file looked like. The trailing bytes of an
+/// *incomplete* sequence are held back and prefixed to the next chunk; bytes
+/// that are genuinely invalid are replaced at once, so bad input can never stall
+/// the stream waiting for a completion that will not come.
+#[derive(Default)]
+pub(crate) struct Utf8Chunker {
+    pending: Vec<u8>,
+}
+
+impl Utf8Chunker {
+    /// The text this chunk completes. May be empty when the chunk ends mid-character.
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+        let mut out = String::new();
+        let mut start = 0;
+        while start < self.pending.len() {
+            match std::str::from_utf8(&self.pending[start..]) {
+                Ok(valid) => {
+                    out.push_str(valid);
+                    start = self.pending.len();
+                }
+                Err(err) => {
+                    let end = start + err.valid_up_to();
+                    // The prefix is valid by construction, so this is lossless.
+                    out.push_str(&String::from_utf8_lossy(&self.pending[start..end]));
+                    start = end;
+                    match err.error_len() {
+                        Some(bad) => {
+                            out.push('\u{FFFD}');
+                            start += bad;
+                        }
+                        // An unfinished sequence at the very end: wait for the rest.
+                        None => break,
+                    }
+                }
+            }
+        }
+        self.pending.drain(..start);
+        out
+    }
+
+    /// What is left when the stream ends: an unfinished character can never be
+    /// completed now, so it is reported as the replacement it has become.
+    pub(crate) fn finish(&mut self) -> String {
+        if self.pending.is_empty() {
+            String::new()
+        } else {
+            self.pending.clear();
+            "\u{FFFD}".to_string()
+        }
+    }
+}
+
+/// Read a PTY to its end, handing each piece of decoded text to `on_text`.
+///
+/// This is the whole of what the reader thread does, taken out of [`open`] so a
+/// test can drive it with a real PTY and a closure instead of an `AppHandle`:
+/// before, the path from a shell's first byte to the `terminal-output` event
+/// could only be exercised by launching the app. It returns when the child's end
+/// closes (EOF, or the EIO a Linux PTY reports once the shell has gone).
+pub(crate) fn pump_output<R: Read>(mut reader: R, mut on_text: impl FnMut(String)) {
+    let mut chunker = Utf8Chunker::default();
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let text = chunker.push(&buf[..n]);
+                if !text.is_empty() {
+                    on_text(text);
+                }
+            }
+        }
+    }
+    let tail = chunker.finish();
+    if !tail.is_empty() {
+        on_text(tail);
+    }
+}
+
 /// Open a terminal in `root_path`, and start feeding its output to the app.
 ///
 /// Returns the session id. The reading half runs on its own thread: a shell that
@@ -158,7 +243,7 @@ pub fn open(
         let mut guard = sessions.lock().map_err(|_| "terminal state poisoned")?;
         guard.seq += 1;
         let id = format!("term-{}", guard.seq);
-        let mut reader = pair
+        let reader = pair
             .master
             .try_clone_reader()
             .map_err(|e| format!("failed to read the pty: {e}"))?;
@@ -180,24 +265,16 @@ pub fn open(
         let sink = app.clone();
         let for_thread = id.clone();
         std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                        use tauri::Emitter;
-                        let _ = sink.emit(
-                            "terminal-output",
-                            TerminalOutput {
-                                id: for_thread.clone(),
-                                data: text,
-                            },
-                        );
-                    }
-                }
-            }
             use tauri::Emitter;
+            pump_output(reader, |text| {
+                let _ = sink.emit(
+                    "terminal-output",
+                    TerminalOutput {
+                        id: for_thread.clone(),
+                        data: text,
+                    },
+                );
+            });
             let _ = sink.emit("terminal-exit", TerminalExit { id: for_thread });
         });
 
@@ -508,6 +585,145 @@ mod tests {
         // the reap still collects the status it left behind.
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(open_count(&sessions), 1);
+        close(&sessions, "term-1").unwrap();
+        assert_eq!(open_count(&sessions), 0);
+    }
+
+    #[test]
+    fn a_character_split_across_reads_is_not_cut_in_half() {
+        // The defect this pins: each 4096-byte read was decoded on its own with
+        // `from_utf8_lossy`, so a multi-byte character whose bytes straddled two
+        // reads came out as two U+FFFD. Every split point of a string with 1-,
+        // 2-, 3- and 4-byte characters is tried, because the boundary can land
+        // anywhere.
+        let text = "a€é😀b";
+        let bytes = text.as_bytes();
+        for cut in 0..=bytes.len() {
+            let mut chunker = Utf8Chunker::default();
+            let mut got = chunker.push(&bytes[..cut]);
+            got.push_str(&chunker.push(&bytes[cut..]));
+            got.push_str(&chunker.finish());
+            assert_eq!(got, text, "split at byte {cut}");
+        }
+    }
+
+    #[test]
+    fn invalid_bytes_are_replaced_at_once_and_an_unfinished_tail_at_the_end() {
+        // Garbage must never stall the stream waiting for a completion that will
+        // not come; and a stream that ends mid-character reports what it lost.
+        let mut chunker = Utf8Chunker::default();
+        assert_eq!(chunker.push(b"a\xffb"), "a\u{FFFD}b");
+        assert_eq!(chunker.push(&[b'c', 0xe2, 0x82]), "c");
+        assert_eq!(chunker.finish(), "\u{FFFD}");
+        assert_eq!(chunker.finish(), "", "finish is once-only");
+
+        let mut seen = Vec::new();
+        pump_output(std::io::Cursor::new(vec![b'x', 0xe2, 0x82]), |t| {
+            seen.push(t)
+        });
+        assert_eq!(seen.concat(), "x\u{FFFD}");
+    }
+
+    /// Open a real PTY running `program args`, and return what a session holds.
+    #[cfg(unix)]
+    fn real_pty(
+        program: &str,
+        args: &[&str],
+    ) -> (Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>) {
+        let pair = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new(program);
+        for a in args {
+            cmd.arg(a);
+        }
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        (pair.master, child)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_real_shell_prints_non_ascii_text_through_the_reader() {
+        // The path from a shell's first byte to the text the app is handed, with
+        // nothing stubbed but the app itself: a real PTY, a real child, the same
+        // `pump_output` the reader thread runs. Ends when the shell exits, which
+        // is also what the `terminal-exit` event is sent on.
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (master, mut child) =
+            real_pty("sh", &["-c", "printf 'h\\303\\251llo \\342\\202\\254\\n'"]);
+        let reader = master.try_clone_reader().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut all = String::new();
+            pump_output(reader, |t| all.push_str(&t));
+            let _ = tx.send(all);
+        });
+        let all = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the reader never saw the shell finish");
+        assert!(all.contains("h\u{e9}llo \u{20ac}"), "got {all:?}");
+        assert!(
+            !all.contains('\u{FFFD}'),
+            "a character was corrupted: {all:?}"
+        );
+        let _ = child.wait();
+        drop(master);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_line_written_to_a_real_pty_is_echoed_back_and_the_shell_is_reaped() {
+        // The other half of the round trip: what `write` sends reaches the child,
+        // and what the child prints comes back through the reader. `cat` on a
+        // terminal echoes the line twice (the tty's echo, then cat's own), and
+        // both are non-ASCII here so the write path is UTF-8 clean as well.
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let (master, child) = real_pty("cat", &[]);
+        let mut writer = master.take_writer().unwrap();
+        let reader = master.try_clone_reader().unwrap();
+        let (tx, rx) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            pump_output(reader, |t| {
+                let _ = tx.send(t);
+            })
+        });
+
+        writer
+            .write_all("h\u{e9}llo \u{20ac}\n".as_bytes())
+            .unwrap();
+        writer.flush().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut all = String::new();
+        while !all.contains("h\u{e9}llo \u{20ac}") {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .expect("the line was never echoed back");
+            all.push_str(
+                &rx.recv_timeout(left)
+                    .expect("the line was never echoed back"),
+            );
+        }
+
+        let sessions: Arc<Mutex<Terminals>> = Arc::new(Mutex::new(Terminals::default()));
+        sessions.lock().unwrap().sessions.insert(
+            "term-1".to_string(),
+            Session {
+                writer,
+                master,
+                child,
+            },
+        );
         close(&sessions, "term-1").unwrap();
         assert_eq!(open_count(&sessions), 0);
     }
