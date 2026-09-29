@@ -2190,7 +2190,7 @@ why.
 The two are not in tension. The pipeline is a superset of answering, so with no
 conductor, guessing wrong costs a slower answer while the reverse guess costs a
 code change the user believed was acted on. And when a conductor is configured
-but *fails* — its model errors, or it spends its whole call budget without
+but *fails* — its model errors, says nothing, or spends its whole call budget without
 producing an answer or a plan — that same pipeline runs as the floor, and the
 transcript says so.
 
@@ -2448,8 +2448,9 @@ approved plan back to the same conductor to execute. That run is re-derived from
 rows — the goal, its steps, the conversation — rather than a persisted
 transcript, which is the same choice §10.5 already makes for turn history.
 
-**The recipe is the floor.** If the conductor's model errors, or it spends its
-whole call budget without producing an answer or a plan, `run_chat` runs the
+**The recipe is the floor.** If the conductor's model errors, returns empty
+content, or spends its whole call budget without producing an answer or a plan,
+`run_chat` runs the
 sequence it would have run before the conductor existed and says that it did. If
 the conductor drives an approved plan but leaves steps open, the engine finishes
 them. A model that is bad at this therefore costs a plan some time and nothing
@@ -2462,6 +2463,16 @@ fails is caught.** Judging that no change is needed is a decision, and running
 the recipe over the top of it would make the brain a suggestion. Producing
 neither an answer nor a plan is not a decision, and falling back beats failing
 the turn. `TestDecliningIsObeyedAndFailingIsCaught` holds both.
+
+*Empty is silence, not an answer.* A reply of no text and no tool call used to
+count as finished — the turn completed with the literal words "(no answer)" and
+the floor never ran, which a small model that spends its budget thinking, or a
+server that answers `{}`, produces on demand. An empty answer with no plan now
+falls back exactly as an error does (a plain streamed reply for a question, the
+full pipeline for a change); an empty final word *after* a plan stands, because
+the plan is the turn's result. "(no answer)" is still what a person sees if the
+fallback is silent too, since there is nothing left to try
+(`tests/test_empty_conductor_reply.py`).
 
 ### 10.14a What the live runs actually showed
 

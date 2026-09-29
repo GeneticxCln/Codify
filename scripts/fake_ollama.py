@@ -257,6 +257,36 @@ def fixer_files(prompt: str) -> str:
     return json.dumps({"files": [{"path": target, "action": "create", "content": content}]})
 
 
+def chat_reply(payload: dict[str, Any]) -> dict[str, Any]:
+    """`/api/chat`, the endpoint the conductor's tool loop calls — the reply is `message.content`.
+
+    Ollama's chat endpoint answers `{"message": {"role", "content"}, ...}`; `/api/generate` answers
+    `{"response": ...}`. This fake used to send the generate shape to both, so a turn driven against it
+    read an empty message and finished with nothing said, which looked like an engine fault. Prose only,
+    never a tool call: the fake has no model to decide anything, and a scripted call here would be a
+    conductor that always does the same thing.
+    """
+    import re
+
+    said = ""
+    for message in reversed(payload.get("messages") or []):
+        if isinstance(message, dict) and message.get("role") == "user":
+            said = str(message.get("content") or "")
+            break
+    asked = re.search(r"^The user says: (.*)$", said, re.M)
+    what = (asked.group(1) if asked else said).strip()[:160]
+    return {
+        "model": payload.get("model", "fake-model"),
+        "message": {
+            "role": "assistant",
+            "content": f"Fake Ollama here: with a real model I would answer \u201c{what}\u201d.",
+        },
+        "done": True,
+        "prompt_eval_count": 128,
+        "eval_count": 64,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:  # quiet
         pass
@@ -321,6 +351,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length) or b"{}")
+        if self.path.startswith("/api/chat"):
+            self._send(chat_reply(payload))
+            return
         prompt = payload.get("prompt", "")
 
         # /api/generate routing. The engine prepends the role's system prompt,

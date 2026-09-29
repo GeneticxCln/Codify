@@ -1155,6 +1155,12 @@ class _Conducted:
             return False
         if self.answer is None:
             return False
+        if not self.answer.strip() and not self.planned:
+            # A model that said nothing has not declined anything. An empty reply (a model that spent its
+            # budget thinking, a context overflow, a server that answered `{}`) is not a decision to
+            # honour, and publishing it as "(no answer)" made the turn look finished when nothing had
+            # been said or done.
+            return False
         if self.exhausted and not self.planned:
             return False
         return True
@@ -1162,6 +1168,8 @@ class _Conducted:
     def explanation(self) -> str:
         if self.answer is None:
             return "its model failed, so there is no answer and no plan"
+        if not self.answer.strip():
+            return "its model said nothing, so there is no answer and no plan"
         return "it used every call it was given without producing a plan"
 
 
