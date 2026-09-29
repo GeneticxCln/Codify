@@ -49,14 +49,16 @@ const {
   encodeTab,
   ensureKeys,
   layoutFrom,
+  markPending,
   newMirror,
   planChanges,
+  queueRemoval,
   readLayoutMirror,
   reconcile,
   tabKey,
   writeLayoutMirror,
 } = await import("../src/layoutSync.ts");
-const { focusTab, openBrowserTab, openTab } = await import("../src/tabs.ts");
+const { closeTab, focusTab, openBrowserTab, openTab } = await import("../src/tabs.ts");
 
 /** A store in memory, so the mirror is testable without a `localStorage`. */
 function memoryStore(seed: Record<string, string> = {}): TabStorage & {
@@ -637,6 +639,9 @@ test("the sync is wired to the three engine calls, and to nothing else", () => {
   // other window never sees.
   assert.match(code, /writeLayoutMirror\(layoutStorage\(\),/);
   assert.match(code, /readLayoutMirror\(layoutStorage\(\)\)/);
+  // A close reaches the queue from the handler the tab's × calls; the tests
+  // below prove what the queue does, this only proves the app feeds it.
+  assert.match(code, /queueRemoval\(layoutMirror\.current, tab\.key\)/);
   // And the engine is asked for the strip when the window is next looked at,
   // which is the difference between shared and shared-on-write.
   assert.match(code, /addEventListener\("visibilitychange", onVisible\)/);
@@ -645,7 +650,7 @@ test("the sync is wired to the three engine calls, and to nothing else", () => {
   // what the engine is known to hold.
   assert.match(
     code,
-    /planChanges\(tabState, layoutMirror\.current, engineKnown\.current\)/,
+    /planChanges\(\s*tabState,\s*layoutMirror\.current,\s*engineKnown\.current,\s*engineRows\.current,?\s*\)/,
     "the plan is not computed against the keys the engine has confirmed, so an \
      unchanged strip is re-sent in full",
   );
@@ -675,4 +680,76 @@ test("the three calls exist in api.ts, each with the boot token", () => {
   // The path is escaped: a key is client-minted, and an unescaped one is a path
   // that can be rewritten by whatever is in it.
   assert.match(api, /encodeURIComponent\(key\)/, "the key is not escaped into the path");
+});
+
+// ── the queues are filled by the code that closes and navigates ────────────
+//
+// Every test above builds `pendingRemovals` / `pendingWrites` by hand, which is
+// how a strip could pass all of them while nothing in the app ever put a key in
+// either list. These go through `queueRemoval` and `markPending`, the calls the
+// app makes, and ask what the *next boot and the next pull* would see.
+
+test("a tab the user closes stays closed through the next pull, once queued", () => {
+  const before = strip(A, B);
+  const closing = before.tabs[1];
+  const after = closeTab(before, closing.id);
+  const known = new Set(before.tabs.map((t) => t.key!));
+
+  const mirror = queueRemoval(newMirror(), closing.key);
+  assert.deepEqual(mirror.pendingRemovals, [closing.key]);
+
+  // The engine still holds both rows: the DELETE has not been sent yet.
+  const pulled = reconcile(after, rowsFor(before), activeKeyOf(after), mirror.pendingRemovals, known);
+  assert.deepEqual(pulled.tabs.map((t) => t.url), [A], "the closed tab is not adopted back");
+
+  const plan = planChanges(after, mirror, known);
+  assert.deepEqual(plan.removals, [closing.key], "and the engine is told to delete it");
+});
+
+test("without queueing the close, the engine's copy brings the tab back", () => {
+  // The bug, pinned: a close that never reaches the queue is only an absence, and
+  // an absence is what `reconcile` fills from the engine's row.
+  const before = strip(A, B);
+  const after = closeTab(before, before.tabs[1].id);
+  const known = new Set(before.tabs.map((t) => t.key!));
+  const pulled = reconcile(after, rowsFor(before), activeKeyOf(after), [], known);
+  assert.deepEqual(pulled.tabs.map((t) => t.url), [A, B]);
+});
+
+test("queueing a close is idempotent and ignores what is not a remembered tab", () => {
+  const key = strip(A).tabs[0].key!;
+  const once = queueRemoval(newMirror(), key);
+  assert.deepEqual(queueRemoval(once, key).pendingRemovals, [key]);
+  assert.equal(queueRemoval(once, undefined), once, "an unkeyed tab owes the engine nothing");
+  assert.equal(queueRemoval(once, "pty-1"), once, "a terminal was never the engine's");
+});
+
+test("a tab that navigates after its first push is sent again", () => {
+  const first = strip(A);
+  const key = first.tabs[0].key!;
+  const known = new Set([key]);
+  const navigated = { tabs: [{ ...first.tabs[0], url: B, history: undefined }], activeId: first.activeId };
+
+  const unchanged = planChanges(first, newMirror(), known, rowsFor(first));
+  assert.equal(unchanged.upserts.length, 0, "an unchanged strip still costs nothing");
+
+  const changed = planChanges(navigated, newMirror(), known, rowsFor(first));
+  assert.deepEqual(changed.upserts.map((u) => u.key), [key], "a changed address is a write");
+});
+
+test("an upsert that was planned but never answered is owed on the next run", () => {
+  const state = strip(A);
+  const key = state.tabs[0].key!;
+  const known = new Set([key]);
+  const navigated = { tabs: [{ ...state.tabs[0], url: B, history: undefined }], activeId: state.activeId };
+
+  const plan = planChanges(navigated, newMirror(), known, rowsFor(state));
+  const owed = markPending(newMirror(), plan);
+  assert.deepEqual(owed.pendingWrites, [key]);
+
+  // The request died. The engine still holds the old payload, but nothing tells
+  // the next run *that*, except the pending mark.
+  const retry = planChanges(navigated, owed, known);
+  assert.deepEqual(retry.upserts.map((u) => u.key), [key]);
+  assert.deepEqual(acknowledge(owed, plan, known).pendingWrites, [], "answered, it is settled");
 });

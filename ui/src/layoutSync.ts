@@ -402,21 +402,65 @@ export function planChanges(
   state: TabState,
   mirror: Mirror,
   known: ReadonlySet<string>,
+  engineRows: readonly EngineTab[] = [],
 ): SyncPlan {
   const upserts: EngineTab[] = [];
   const removals = mirror.pendingRemovals.filter((key) => known.has(key));
   const pendingWrites = new Set(mirror.pendingWrites);
+  // What the engine last said each row holds. Without it "known" could only mean
+  // "the key exists", and a tab that navigated after its first push was never
+  // sent again: its address changed here and stayed what it was there.
+  const held = new Map(engineRows.map((row) => [row.key, row.payload]));
   state.tabs.forEach((tab, index) => {
     if (tab.kind === "terminal" || !isTabKey(tab.key)) return;
-    if (known.has(tab.key) && !pendingWrites.has(tab.key)) return;
+    const payload = encodeTab(tab);
+    if (
+      known.has(tab.key) &&
+      !pendingWrites.has(tab.key) &&
+      (!held.has(tab.key) || held.get(tab.key) === payload)
+    ) {
+      return;
+    }
     upserts.push({
       key: tab.key,
       position: index,
       kind: tab.kind,
-      payload: encodeTab(tab),
+      payload,
     });
   });
   return { upserts, removals };
+}
+
+/**
+ * Owe the engine a delete for a tab the user closed.
+ *
+ * The only place a close becomes a statement rather than an absence. `reconcile`
+ * adopts any row that only the engine holds, so a closed tab whose key was never
+ * queued here comes back on the next pull or the next boot. A key that is not a
+ * tab key (a terminal, or a tab not yet keyed) owes nothing: the engine has never
+ * held it.
+ */
+export function queueRemoval(mirror: Mirror, key: string | undefined): Mirror {
+  if (!isTabKey(key) || mirror.pendingRemovals.includes(key)) return mirror;
+  return {
+    ...mirror,
+    pendingRemovals: [...mirror.pendingRemovals, key],
+    pendingWrites: mirror.pendingWrites.filter((k) => k !== key),
+  };
+}
+
+/**
+ * Record that these upserts are in flight, before they are sent.
+ *
+ * `acknowledge` retires them once the engine has answered. A push that dies
+ * between the two leaves them here, so the next run re-sends them even for a key
+ * the engine already knows — a changed row is not lost because a request was.
+ */
+export function markPending(mirror: Mirror, plan: SyncPlan): Mirror {
+  const pending = new Set(mirror.pendingWrites);
+  for (const tab of plan.upserts) pending.add(tab.key);
+  if (pending.size === mirror.pendingWrites.length) return mirror;
+  return { ...mirror, pendingWrites: [...pending] };
 }
 
 /**

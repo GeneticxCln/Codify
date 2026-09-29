@@ -101,7 +101,9 @@ import {
   ensureKeys,
   layoutFrom,
   layoutStorage,
+  markPending,
   planChanges,
+  queueRemoval,
   readLayoutMirror,
   reconcile,
   writeLayoutMirror,
@@ -290,6 +292,9 @@ export const App: React.FC = () => {
   // on a poll. Seeded from the mirror's pending writes: a tab this window pushed
   // but never had acknowledged is still "not known" until the engine says so.
   const engineKnown = useRef<Set<string>>(new Set());
+  // What the engine last said each row holds, so a tab that navigated after its
+  // first push is seen as changed and sent again (`planChanges`).
+  const engineRows = useRef<readonly ShellTabRow[]>([]);
   // Terminal tabs whose shell spoke while no pane was displaying: the tab
   // strip badges them, the way a mail client badges a background folder. The
   // facts arrive one chunk at a time from the recorder below — `recordOutput`
@@ -1095,6 +1100,15 @@ export const App: React.FC = () => {
     (id: string) => {
       setTabState((prev) => closeTab(prev, id));
       const tab = tabState.tabs.find((t) => t.id === id);
+      // A close is owed to the engine until it confirms the delete. Without this
+      // the row outlives the tab and the next pull, or the next boot, adopts it
+      // back. Written through at once: the sync effect stands down while the
+      // engine is down, and an offline close is exactly the one that has to
+      // survive a restart.
+      if (tab) {
+        layoutMirror.current = queueRemoval(layoutMirror.current, tab.key);
+        writeLayoutMirror(layoutStorage(), layoutMirror.current);
+      }
       if (tab?.kind === "terminal") {
         // A pane that is not mounted never claimed its terminal, so the store
         // still holds what the shell said while this tab sat in the
@@ -1509,8 +1523,16 @@ export const App: React.FC = () => {
     // mirror is written from the *keyed* strip, so what a crash leaves behind is
     // a layout whose tabs all have keys — a mirror that could not be pushed is
     // still a mirror the next boot can read.
-    const plan = planChanges(tabState, layoutMirror.current, engineKnown.current);
-    layoutMirror.current = { ...layoutMirror.current, layout: layoutFrom(tabState) };
+    const plan = planChanges(
+      tabState,
+      layoutMirror.current,
+      engineKnown.current,
+      engineRows.current,
+    );
+    layoutMirror.current = markPending(
+      { ...layoutMirror.current, layout: layoutFrom(tabState) },
+      plan,
+    );
     writeLayoutMirror(layoutStorage(), layoutMirror.current);
 
     const active = activeKeyOf(tabState);
@@ -1542,6 +1564,7 @@ export const App: React.FC = () => {
         const confirmedBefore = engineKnown.current;
         const known = new Set(rows.map((row) => row.key));
         engineKnown.current = known;
+        engineRows.current = rows;
         layoutMirror.current = acknowledge(
           { ...layoutMirror.current, layout: layoutFrom(tabState) },
           plan,
@@ -1604,6 +1627,7 @@ export const App: React.FC = () => {
         // be retired by its absence.
         const confirmedBefore = engineKnown.current;
         engineKnown.current = new Set(rows.map((row) => row.key));
+        engineRows.current = rows;
         const mirror = layoutMirror.current;
         setTabState((prev) => {
           const next = reconcile(
