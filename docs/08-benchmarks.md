@@ -278,6 +278,21 @@ wrong than the task needed.
   ignoring the "no command needed" path the verifier prompt offers, and worth a prompt change tested against a real
   model before anyone trusts it.
 
+### The conductor, end to end
+
+`scripts/drive_a_turn.py` drove three turns through the real engine (a question about a file, a listing, a change
+request) against `Qwen2.5-Coder-3B` behind `llama_cpp.server --chat_format chatml-function-calling`, with
+`--provider openai --base-url … --api-key-env …`. **Before the fix in `9100b14` all three turns failed
+`internal_error`**: `complete_with_tools() got an unexpected keyword argument 'num_ctx'` — the conductor passed
+`num_ctx` and `keep_alive` on every call and every provider but Ollama's rejected them, so it had only ever worked
+on Ollama. **After it, all three turns ran without an error, and none executed a tool**: each answer was a bare
+tool-call stub (`functions.read_file:`, `functions.recon:`), and the engine reported it honestly — the change
+request finished with "the gate read this as 'code_change' and the conductor finished without planning anything: no
+file was changed". A direct request to the same server with a one-tool list returned a proper structured call, so
+the stub appears inside the conductor's much larger prompt and tool menu; whether that is the model or the server's
+function-calling parser is not established here. One model, one server, three turns: it shows that the loop now runs
+on an OpenAI-compatible endpoint, not how the conductor behaves with a capable model.
+
 ### What reading the traces found in Codify itself
 
 A baseline is only useful if someone reads the failures. These were fixed as a result (`tests/` names each one):
@@ -288,10 +303,12 @@ A baseline is only useful if someone reads the failures. These were fixed as a r
   sentence is what the re-ask shows the model;
 * `--record` copied only at the end, so a killed run kept nothing;
 * the console summary printed `FAIL` with no reason for a task that completed and did the wrong thing;
-* the workspaces were not repositories (see above).
+* the workspaces were not repositories (see above);
+* (from the conductor run, above) every provider but Ollama rejected the keywords the conductor passes, so the
+  conductor worked on Ollama only.
 
 ### Not measured
 
-Repeats (one run each, so no spread), the conductor end to end against a tool-calling local server, any hosted
+Repeats (one run each, so no spread), the conductor with a model that actually calls tools, any hosted
 model, and any hardware but one CPU. `--min-pass-rate` exists to enforce a floor, but a floor is only worth setting
 against a baseline recorded with the model *you* use: 18% is a fact about a 1.5B model, not a target.
