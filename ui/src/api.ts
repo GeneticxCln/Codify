@@ -31,15 +31,59 @@ import type {
   Workspace,
 } from "./types.ts";
 
-let currentEngine: EngineInfo = {
-  port: parseInt(localStorage.getItem("CODIFY_PORT") || "7430", 10),
-  token: localStorage.getItem("CODIFY_TOKEN") || "",
-};
+/**
+ * Whether the desktop shell is hosting this page.
+ *
+ * The shell is the party that watched the engine's handshake, and it answers
+ * `codify_get_engine_info` on every health probe, so under it the boot token
+ * never needs to be written anywhere: it is fetched, held in memory, and
+ * fetched again after an engine restart. Only the standalone browser preview
+ * has no such party, which is what the paste-into-the-console flow is for.
+ */
+function underShell(): boolean {
+  return typeof window !== "undefined" && Boolean((window as any).__TAURI_INTERNALS__);
+}
+
+/**
+ * The connection this page starts with.
+ *
+ * The port is not a secret and is remembered either way. The token is read back
+ * from `localStorage` only outside the shell; inside it, a copy left by an older
+ * build is removed rather than trusted, since a token at rest in the webview's
+ * profile is readable by anything that can read that directory.
+ */
+export function storedEngineInfo(shell: boolean = underShell()): EngineInfo {
+  const port = parseInt(localStorage.getItem("CODIFY_PORT") || "7430", 10);
+  if (shell) {
+    localStorage.removeItem("CODIFY_TOKEN");
+    return { port, token: "" };
+  }
+  return { port, token: localStorage.getItem("CODIFY_TOKEN") || "" };
+}
+
+/** Remember a connection: the port always, the token only where nothing else can supply it. */
+export function rememberEngineInfo(info: EngineInfo, shell: boolean = underShell()): void {
+  localStorage.setItem("CODIFY_PORT", info.port.toString());
+  if (shell) localStorage.removeItem("CODIFY_TOKEN");
+  else localStorage.setItem("CODIFY_TOKEN", info.token);
+}
+
+let currentEngine: EngineInfo = storedEngineInfo();
 
 export function setEngineInfo(info: EngineInfo) {
   currentEngine = info;
-  localStorage.setItem("CODIFY_PORT", info.port.toString());
-  localStorage.setItem("CODIFY_TOKEN", info.token);
+  rememberEngineInfo(info);
+}
+
+/**
+ * Re-read the connection from storage, for the standalone preview's
+ * paste-and-retry flow (`StaleAuthBanner`). Under the shell there is nothing
+ * pasted to read, and the in-memory token is the only copy, so this leaves it
+ * alone rather than replacing it with a blank.
+ */
+export function resyncEngineInfoFromStorage(): EngineInfo {
+  if (!underShell()) currentEngine = storedEngineInfo(false);
+  return currentEngine;
 }
 
 export function getEngineInfo(): EngineInfo {

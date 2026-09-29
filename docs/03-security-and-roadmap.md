@@ -30,6 +30,8 @@ On boot, the Engine generates a random token, writes it to stdout, and requires 
 
 The token is created once per state directory and persisted at `<state dir>/boot_token` (`0600`), not rotated per spawn: a client holding it then survives an engine restart, which per-spawn rotation broke for every client that could not re-read the handshake itself. `CODIFY_BOOT_TOKEN` overrides the value for a caller that wants a per-process token. Lifetime, and what a longer-lived credential costs, are in `04` §6.
 
+The UI holds the token **in memory** when it runs under the desktop shell: it asks the shell for the engine's port and token on every health probe (`codify_get_engine_info`), so nothing needs it at rest, and a copy in the webview's `localStorage` would be a second, less protected home for a credential whose file is `0600`. An older build's stored copy is deleted on load. Only the standalone browser preview, which has no shell to ask, still keeps a pasted token in `localStorage` (`ui/src/api.ts`, `StaleAuthBanner`).
+
 ### 1.4 Retained from v1
 
 - Command allowlist in `SandboxService` — additionally per-agent-scoped: only the Tester Agent's proposed commands ever reach `SandboxService.run_command`, never Coder or Planner raw output.

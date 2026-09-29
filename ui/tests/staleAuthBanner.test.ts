@@ -174,7 +174,7 @@ test("the retry button re-reads localStorage before it probes", () => {
   // what it said. The first live verification of this banner hit that loop.
   assert.match(
     APP_SRC,
-    /onRetry=\{\(\) => \{[\s\S]*?setEngineInfo\(\{[\s\S]*?localStorage\.getItem\("CODIFY_TOKEN"\)[\s\S]*?\}\);[\s\S]*?forceHealthProbeRef\.current\?\.\(\);[\s\S]*?\}\}/,
+    /onRetry=\{\(\) => \{[\s\S]*?resyncEngineInfoFromStorage\(\);[\s\S]*?forceHealthProbeRef\.current\?\.\(\);[\s\S]*?\}\}/,
     "the retry does not re-read localStorage before probing, so a pasted token would not be seen until a reload",
   );
 });

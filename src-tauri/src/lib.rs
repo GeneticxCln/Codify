@@ -1548,10 +1548,12 @@ fn tabs_smoke_mode(app: tauri::AppHandle, state: SharedEngineState) -> Result<()
         //    stale-auth recovery the UI already has needs the answer to change
         //    first; answering with this boot's real pair up front removes the
         //    stale half of that loop.
-        let (fresh_token, fresh_port) = (token.clone(), port);
+        //    Only the port: the token is not written to the webview's storage at
+        //    all any more (the page gets it from the shell over IPC and keeps it
+        //    in memory), so there is no stale token to overwrite.
+        let fresh_port = port;
         if let Err(e) = window.eval(&format!(
-            "localStorage.setItem('CODIFY_PORT', '{fresh_port}'); \
-             localStorage.setItem('CODIFY_TOKEN', '{fresh_token}');",
+            "localStorage.setItem('CODIFY_PORT', '{fresh_port}');",
         )) {
             println!("{TABS_SMOKE_LINE}FAILED could not reach the window's webview: {e}");
             smoke_exit(1);
@@ -1738,8 +1740,7 @@ fn tabs_smoke_mode(app: tauri::AppHandle, state: SharedEngineState) -> Result<()
                         "JSON.stringify({vis: document.visibilityState, \
                          tabs: document.querySelectorAll('[role=\"tab\"]').length, \
                          seed: location.href.includes('tabs-smoke'), \
-                         port: localStorage.getItem('CODIFY_PORT'), \
-                         token: (localStorage.getItem('CODIFY_TOKEN') || '').slice(0, 8)})",
+                         port: localStorage.getItem('CODIFY_PORT')})",
                         move |answer| {
                             if let Ok(mut slot) = tx.lock() {
                                 if let Some(sender) = slot.take() {

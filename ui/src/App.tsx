@@ -41,6 +41,7 @@ import {
   patchStep,
   getEngineInfo,
   setEngineInfo,
+  resyncEngineInfoFromStorage,
   tauriInvoke,
   browseWorkspace,
   fetchModelCatalog,
@@ -3140,15 +3141,13 @@ export const App: React.FC = () => {
             <StaleAuthBanner
               port={getEngineInfo().port}
               onRetry={() => {
-                // Re-sync the API client from localStorage first. The paste
-                // lands in localStorage; `currentEngine` is a module-level
+                // Re-sync the API client from what was pasted first (standalone
+                // preview only; under the desktop shell the token lives in memory
+                // and this leaves it alone). `currentEngine` is a module-level
                 // copy made at page load, so a retry that skipped this would
                 // re-probe with the stale token, fail, and call the banner a
                 // liar — the exact loop the first live verification hit.
-                setEngineInfo({
-                  port: Number(localStorage.getItem("CODIFY_PORT") || "7430"),
-                  token: localStorage.getItem("CODIFY_TOKEN") || "",
-                });
+                resyncEngineInfoFromStorage();
                 forceHealthProbeRef.current?.();
               }}
               onDismiss={() => setAuthOk(true)}

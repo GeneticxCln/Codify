@@ -245,7 +245,17 @@ test("a dead port makes the probe ask the shell, apply the moved pair, and go li
         "the moved port was never applied — the shell answered but the " +
           "answer did not reach the client",
       );
-      assert.equal(dom.window.localStorage.getItem("CODIFY_TOKEN"), FRESH_TOKEN);
+      // The token is held in memory and is *not* written to storage under the
+      // shell: it is fetched from the shell on every probe, and a copy at rest
+      // in the webview's profile is only a stale credential waiting to be read.
+      // The seed above planted one, so this also proves the old copy was purged.
+      assert.equal(
+        dom.window.localStorage.getItem("CODIFY_TOKEN"),
+        null,
+        "the boot token is still at rest in localStorage",
+      );
+      const { getEngineInfo } = await import("../src/api.ts");
+      assert.equal(getEngineInfo().token, FRESH_TOKEN, "the fresh token is not the one in use");
 
       // 3. The probe ran again, at the moved port — the immediate re-probe
       //    that turns "the shell said so" into "the engine says so".
