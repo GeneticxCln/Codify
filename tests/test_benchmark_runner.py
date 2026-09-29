@@ -16,6 +16,7 @@ import contextlib
 import io
 import json
 import sqlite3
+import subprocess
 import tempfile
 import time
 import unittest
@@ -507,6 +508,46 @@ class RecordTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(made.called)
             self.assertFalse((Path(tmp) / "w").exists(), "the scratch directory was left behind")
+
+
+class TheWorkspaceIsARealRepositoryTests(unittest.TestCase):
+    """A task's scratch workspace is a git repository with the fixture committed, like a user's checkout.
+
+    It was a plain directory. In one, the scribe's commit is skipped (`not_a_repo`) and a verifier that
+    proposes `git diff` — small models reach for it constantly — is told "not a git repository", which reads
+    as the change failing. A real-model baseline should measure what a person would get, and a person's
+    workspace is nearly always a repository (second audit pass, 2026-09-29).
+    """
+
+    def test_the_fixture_is_committed_and_the_work_is_committed_on_top(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = Path(tmp) / "kept"
+
+            code, _ = _run_main(["--tier", "smoke", "--only", "smoke-add-banner", "--record", str(keep)])
+
+            self.assertEqual(0, code)
+            work = keep / "smoke-add-banner"
+            self.assertTrue((work / ".git").is_dir(), "the workspace is not a git repository")
+            subjects = subprocess.run(
+                ["git", "log", "--format=%s"], cwd=work, capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+            self.assertEqual("chore: benchmark fixture", subjects[-1], "the fixture was not the first commit")
+            self.assertGreater(len(subjects), 1, "the run's own work was not committed on top of it")
+            status = subprocess.run(
+                ["git", "status", "--porcelain"], cwd=work, capture_output=True, text=True, check=True,
+            ).stdout
+            self.assertEqual("", status, "the tree was left dirty")
+
+    def test_git_internals_are_not_files_the_run_wrote(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".git" / "objects" / "aa").mkdir(parents=True)
+            (root / ".git" / "objects" / "aa" / "bb").write_text("x", encoding="utf-8")
+            (root / "a.txt").write_text("x", encoding="utf-8")
+            (root / "sub").mkdir()
+            (root / "sub" / "b.txt").write_text("x", encoding="utf-8")
+
+            self.assertEqual({"a.txt", str(Path("sub") / "b.txt")}, runner._files(root))
 
 
 class TheReasonATaskFailedIsPrintedTests(unittest.TestCase):

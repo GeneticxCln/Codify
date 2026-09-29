@@ -87,6 +87,16 @@ A task that crashes is recorded as `ERRORED` with its cause and the run goes on;
 each task prints as it finishes. A failed task carries the error that ended it, and
 the summary counts failures by code.
 
+### A task's workspace is a git repository
+
+Each run gets a scratch copy of its fixture, and that copy is `git init`-ed with the fixture committed
+(`chore: benchmark fixture`), so it starts as a clean checkout the way a person's does. It used to be a plain
+directory, which changes what a model sees: the scribe's commit is skipped (`not_a_repo`), and a verifier that
+proposes `git diff` — small models reach for it constantly — is told "not a git repository", which reads as the
+change failing. Git's own files are not counted as files the run wrote (`_files` skips `.git`), and the init
+goes through `GitService`, so it is a guarded spawn like every other. **Numbers recorded before this change came
+from plain directories** and are not comparable with numbers after it.
+
 ### The configured tier never writes into your history
 
 A configured run uses **your** models but does not run in **your** database. It

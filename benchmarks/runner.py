@@ -40,6 +40,7 @@ from typing import Any
 from benchmarks.provider import CannedFactory, CannedProvider
 from engine.db import connect, default_db_path
 from engine.executor import ExecutorService
+from engine.git import GitService
 from engine.laya import GateCall, LayaDecision, LayaService
 from engine.models import ROLES, AgentConfigUpdate, GoalCreate, WorkspaceCreate
 from engine.providers import Keychain, ProviderFactory
@@ -338,9 +339,29 @@ def seed_agent_configs(engine_db: Path, conn: sqlite3.Connection) -> list[str]:
 
 
 def _files(root: Path) -> set[str]:
+    """Every file a run could have written, as workspace-relative paths — git's own bookkeeping excluded.
+
+    The workspace is a repository (`_start_repository`), and every commit the run makes adds objects under
+    `.git`; counted, they would read as files the model wrote.
+    """
     if not root.is_dir():
         return set()
-    return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
+    return {
+        str(p.relative_to(root)) for p in root.rglob("*")
+        if p.is_file() and ".git" not in p.relative_to(root).parts
+    }
+
+
+def _start_repository(workspace: Path) -> None:
+    """Make the scratch workspace a git repository with the fixture committed, as a user's checkout is.
+
+    A plain directory changes what a model sees: the scribe's commit is skipped (`not_a_repo`) and a
+    verifier that proposes `git diff` is told "not a git repository", which reads as the change failing.
+    Through `GitService`, so the spawn goes through the guard like every other one.
+    """
+    git = GitService()
+    if git.init_repo(str(workspace)):
+        git.commit(str(workspace), "chore: benchmark fixture", sorted(_files(workspace)))
 
 
 async def run_task(
@@ -364,6 +385,7 @@ async def run_task(
     slug = str(task["id"]) if attempt == 1 else f"{task['id']}-attempt{attempt}"
     workspace = work_root / slug
     materialize(str(task["repo"]), workspace)
+    _start_repository(workspace)
     before = _files(workspace)
 
     conn = connect(work_root / f"{slug}.db")
