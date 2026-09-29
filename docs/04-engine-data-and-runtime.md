@@ -633,9 +633,14 @@ Requests are executed by `engine/library.py`:
 - `searches` → literal case-insensitive substring search by default, skipping VCS internals and
   package caches, capped at `MAX_MATCHES` / `MAX_FILES_SCANNED` and reporting both. A request may
   opt into regex with `{"query": …, "regex": true}` (and may narrow it with `glob`): a
-  model-supplied pattern is untrusted input, so it is bounded at `MAX_REGEX_PATTERN` (200 chars)
-  with a `PER_LINE_REGEX_SECONDS` (0.5s) per-file-line deadline against catastrophic backtracking,
-  and an invalid or oversized pattern comes back as a refusal, not a crash. A conductor `search_code`
+  model-supplied pattern is untrusted input, so it is bounded at `MAX_REGEX_PATTERN` (200 chars),
+  and an invalid or oversized pattern comes back as a refusal, not a crash. The *match* runs in a
+  worker process (`engine/regex_worker.py`, under the spawn guard) with two clocks: a soft budget
+  of `REGEX_BUDGET_S` (2s) checked between files inside the worker, and a hard limit of
+  `REGEX_HARD_LIMIT_S` (2.5s) after which the worker's whole group is `SIGKILL`ed and the model gets
+  "pattern too expensive". It is a process because CPython's `re` cannot be interrupted and holds
+  the GIL: on a thread, `(a+)+$` over one 28-character line stalled the event loop — HTTP, WebSockets,
+  `/health`, Cancel — for 14 seconds, and each extra character doubles it. A conductor `search_code`
   call may also opt into the second strategy with `mode: "keyword"`: the same walk under the same
   caps, indexed into an **in-memory** FTS5 table (one row per file) and ranked by BM25 — for
   multi-word questions no single line answers, so matches are whole files (`line: 0`, the result says

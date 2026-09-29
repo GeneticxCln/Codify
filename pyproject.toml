@@ -192,6 +192,13 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 "engine/db.py" = ["S110"]
 "engine/executor.py" = ["S101", "S110", "S608"]
 "engine/git.py" = ["S603"]
+# S603 (engine/library.py)  the regex worker. The argv is `sys.executable` and a script path
+#       this package computes from `__file__` — nothing a model or a request supplies. The
+#       model's pattern, the one untrusted input, travels as JSON on the child's stdin and is
+#       never part of an argv, so there is no argument to inject through. There is no shell.
+#       The process is started under `guarded_argv`/`guarded_env` in a session of its own and
+#       is killed at a hard limit; that is what the exemption buys (see `tests/test_library_regex_bound.py`).
+"engine/library.py" = ["S603"]
 # E402 (engine/__main__.py)  the import below the watchdog call is not an
 #       oversight to be tidied away — it is the whole file. `serve()` arms the
 #       parent watchdog only after it has pulled in engine.app and everything it

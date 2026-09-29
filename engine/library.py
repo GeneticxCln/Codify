@@ -20,12 +20,18 @@ Two rules hold everywhere in here:
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import re
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 from engine.fs import FileSystemService, PathEscapeError
 from engine.sandbox import CommandNotAllowed, SandboxService
+from engine.spawn_guard import guarded_argv, guarded_env
 from typing import Any
 
 # Per-read cap. Big enough for a real source file, small enough that one read
@@ -41,6 +47,15 @@ MAX_READ_LINES = 400
 # match deadline, and the existing file/byte/match caps.
 MAX_REGEX_PATTERN = 200
 PER_LINE_REGEX_SECONDS = 0.5
+# The regex search's two clocks. The soft one is checked between files, inside the worker, and
+# ends a search that is merely large. The hard one is the only thing that can end a search whose
+# *single match* never returns: CPython's `re` cannot be interrupted and holds the GIL, so no
+# thread and no deadline in the same process bounds it — the worker is killed instead. The
+# difference is the worker's start-up and the time to ship the answer back.
+REGEX_BUDGET_S = PER_LINE_REGEX_SECONDS * 4
+REGEX_HARD_LIMIT_S = REGEX_BUDGET_S + 0.5
+# By absolute path, never `-m engine.regex_worker`: same reason as the spawn guard's own.
+REGEX_WORKER = str(Path(__file__).resolve().parent / "regex_worker.py")
 MAX_ROUND_CHARS = 60_000
 MAX_MATCHES = 40
 # How far a line-range read will scan a file to place its window (and to count
@@ -111,6 +126,110 @@ def _is_outside_symlink(root: Path, path: Path) -> bool:
 
 class ReadResult(dict[str, Any]):
     """A dict, but named, so callers cannot pass the wrong shape by accident."""
+
+
+_TOO_EXPENSIVE = "regex took over {seconds:.1f}s — pattern too expensive"
+
+
+def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) -> dict[str, Any]:
+    """The regex walk itself: every file under `root_path`, every line, the model's pattern.
+
+    This runs in `engine/regex_worker.py` and nowhere else — see `LibraryService._search_regex`
+    for why it must not run in the engine's own process. Raises `TimeoutError` when the soft
+    budget is spent between files; a single match that never returns is the caller's kill.
+    """
+    rx = re.compile(pattern, re.IGNORECASE)
+    deadline = time.monotonic() + budget_s
+    matches: list[dict[str, Any]] = []
+    files_scanned = 0
+    files_skipped = 0
+    truncated = False
+    root = Path(root_path).resolve()
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
+        for name in sorted(filenames):
+            if time.monotonic() > deadline:
+                raise TimeoutError()
+            full = Path(dirpath) / name
+            if _is_outside_symlink(root, full):
+                files_skipped += 1
+                continue
+            rel = str(full.relative_to(root_path))
+            if glob and not fnmatch.fnmatch(rel, glob):
+                continue
+            if files_scanned >= MAX_FILES_SCANNED:
+                truncated = True
+                break
+            try:
+                if full.stat().st_size > MAX_INDEX_BYTES:
+                    files_skipped += 1
+                    continue
+                raw = full.read_bytes()[:MAX_SCAN_BYTES]
+            except OSError:
+                files_skipped += 1
+                continue
+            if looks_binary(raw[:2048]):
+                files_skipped += 1
+                continue
+            files_scanned += 1
+            for lineno, line in enumerate(raw.decode("utf-8", errors="replace").splitlines(), 1):
+                if rx.search(line):
+                    matches.append({"path": rel, "line": lineno, "text": line.strip()[:240]})
+                    if len(matches) >= MAX_MATCHES:
+                        truncated = True
+                        break
+            if truncated:
+                break
+        if truncated:
+            break
+    return {
+        "query": pattern,
+        "glob": glob,
+        "regex": True,
+        "matches": matches,
+        "files_scanned": files_scanned,
+        "files_skipped": files_skipped,
+        "truncated": truncated,
+    }
+
+
+def _run_regex_worker(request: dict[str, Any]) -> dict[str, Any]:
+    """Run one regex scan in a worker process and return its reply, or raise ValueError.
+
+    Under the spawn guard like every process this engine starts, in a session of its own so
+    the kill takes the whole group, and with a hard clock: `SIGKILL`, not `SIGTERM` — a
+    process stuck inside `re` has nothing to clean up and does not run a handler anyway.
+    """
+    proc = subprocess.Popen(
+        guarded_argv([sys.executable, REGEX_WORKER]),
+        cwd=request["root"],
+        # What a stdlib script needs to start, and nothing of the engine's environment.
+        env=guarded_env({k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL") if k in os.environ}),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(json.dumps(request), timeout=REGEX_HARD_LIMIT_S)
+    except subprocess.TimeoutExpired:
+        SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
+        proc.communicate()
+        raise ValueError(_TOO_EXPENSIVE.format(seconds=request["budget_s"])) from None
+    except BaseException:
+        SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
+        proc.communicate()
+        raise
+    try:
+        reply = json.loads(out)
+    except ValueError:
+        reply = None
+    if not isinstance(reply, dict):
+        detail = (err or out or "").strip()[-300:] or f"exit {proc.returncode}"
+        raise ValueError(f"regex search failed: {detail}")
+    return reply
 
 
 class LibraryService:
@@ -495,83 +614,37 @@ class LibraryService:
     def _search_regex(self, pattern: str, glob: str | None) -> dict[str, Any]:
         """Bounded regex search: the literal walker with pattern guards.
 
-        Same walker shape as `search` — SKIP_DIRS, binary sniff, byte caps — so
-        the two report identically. A pattern that runs over the time budget
-        aborts the whole search with ValueError (reported to the model
-        as a refusal, the same way an invalid pattern is) rather than hanging
-        the engine or silently returning partial results.
-        """
-        import re as _re
-        import time as _time
+        Same walker shape as `search` — SKIP_DIRS, binary sniff, byte caps — so the two
+        report identically. A pattern that runs over the time budget aborts the whole search
+        with ValueError (reported to the model as a refusal, the same way an invalid pattern
+        is) rather than hanging the engine or silently returning partial results.
 
+        The match itself runs in `engine/regex_worker.py`, a process of its own that this
+        method kills at `REGEX_HARD_LIMIT_S`. It cannot run here: a match holds the GIL and
+        cannot be interrupted, so a thread — which is what this used to be called on — freezes
+        the event loop, the health probe and Cancel for as long as the pattern takes.
+        """
         if len(pattern) > MAX_REGEX_PATTERN:
             raise ValueError(f"regex pattern too long (>{MAX_REGEX_PATTERN} chars)")
         try:
-            rx = _re.compile(pattern, _re.IGNORECASE)
-            rx.search("timeout probe line")
-        except _re.error as exc:
+            # Compiling is safe and fast; *matching* is the part that is not. Checking the
+            # syntax here spares a process for the commonest mistake a model makes.
+            re.compile(pattern, re.IGNORECASE)
+        except re.error as exc:
             raise ValueError(f"invalid regex: {exc}") from exc
 
-        budget_s = PER_LINE_REGEX_SECONDS * 4
-        deadline = _time.monotonic() + budget_s
-        try:
-            matches: list[dict[str, Any]] = []
-            files_scanned = 0
-            files_skipped = 0
-            truncated = False
-            root = Path(self.root).resolve()
-            for dirpath, dirnames, filenames in os.walk(self.root):
-                dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
-                dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
-                for name in sorted(filenames):
-                    if _time.monotonic() > deadline:
-                        raise TimeoutError()
-                    full = Path(dirpath) / name
-                    if _is_outside_symlink(root, full):
-                        files_skipped += 1
-                        continue
-                    rel = str(full.relative_to(self.root))
-                    if glob and not fnmatch.fnmatch(rel, glob):
-                        continue
-                    if files_scanned >= MAX_FILES_SCANNED:
-                        truncated = True
-                        break
-                    try:
-                        if (Path(dirpath) / name).stat().st_size > MAX_INDEX_BYTES:
-                            files_skipped += 1
-                            continue
-                        raw = (Path(dirpath) / name).read_bytes()[:MAX_SCAN_BYTES]
-                    except OSError:
-                        files_skipped += 1
-                        continue
-                    if looks_binary(raw[:2048]):
-                        files_skipped += 1
-                        continue
-                    files_scanned += 1
-                    for lineno, line in enumerate(raw.decode("utf-8", errors="replace").splitlines(), 1):
-                        if rx.search(line):
-                            matches.append({"path": rel, "line": lineno, "text": line.strip()[:240]})
-                            if len(matches) >= MAX_MATCHES:
-                                truncated = True
-                                break
-                    if truncated:
-                        break
-                if truncated:
-                    break
-        except TimeoutError:
-            raise ValueError(
-                f"regex took over {PER_LINE_REGEX_SECONDS * 4:.1f}s — pattern too expensive"
-            ) from None
-
-        return {
-            "query": pattern,
+        reply = _run_regex_worker({
+            "root": str(Path(self.root).resolve()),
+            "pattern": pattern,
             "glob": glob,
-            "regex": True,
-            "matches": matches,
-            "files_scanned": files_scanned,
-            "files_skipped": files_skipped,
-            "truncated": truncated,
-        }
+            "budget_s": REGEX_BUDGET_S,
+        })
+        if reply.get("ok"):
+            result: dict[str, Any] = reply["result"]
+            return result
+        if reply.get("error") == "timeout":
+            raise ValueError(_TOO_EXPENSIVE.format(seconds=REGEX_BUDGET_S))
+        raise ValueError(f"invalid regex: {reply.get('error')}")
 
     # ── commands (through the one allowlist) ──────────────────────────────
 
