@@ -5,7 +5,7 @@
 ### 1.1 API key storage
 
 - Raw keys are NEVER persisted by the Engine in plaintext and NEVER echoed back in any API response — only `api_key_ref` (a keychain handle) is returned.
-- Engine: Python `keyring` (macOS Keychain / Windows Credential Manager / Linux Secret Service) under `codify/agents/{role}` and `providers/{slug}`.
+- Engine: Python `keyring` over the Linux Secret Service (libsecret: GNOME Keyring, KWallet) under `codify/agents/{role}` and `providers/{slug}`. Codify is Linux-only; no other platform's keychain is a supported target.
 - Where no usable keyring exists (headless Linux, no Secret Service, `keyring` not installed), keys go to `~/.codify/secrets.json` at mode `0600` instead — still never SQLite, still never returned by the API. `GET /settings/keys` reports `storage` so the UI states which store is in use rather than promising a keychain it does not have. See `04` §7.
 - Desktop: key typed into `ApiKeyField`, held in component state, sent once over the loopback HTTP call, dropped immediately after. NEVER written into `localStorage`, Tauri's store plugin, or logs.
 
@@ -24,6 +24,25 @@ def validate_local_base_url(url: str) -> None:
 
 Without this, a malicious or careless `base_url` could turn Coder/Tester/etc. into an SSRF vector against internal network services.
 
+**The other direction: a stored key follows the URL.** That guard covers the `ollama` protocol only, so
+for a long time `PUT /settings/agents/scribe {"provider": "openai", "base_url": "http://10.0.0.5:8080"}`
+was accepted and a listener there received `Authorization: Bearer <the stored key>` on `/models` and on
+every completion (audit of 2026-09-29, M5). The rule is now about the key, not the protocol
+(`providers.key_destination_problem`): **a stored API key is sent to an `https` endpoint or to a
+loopback one, and nowhere else.** A keyless plain-http server on the LAN is unaffected — there is
+nothing to protect — so refusing is conditional on a key existing. It is enforced at every place a key
+can leave: the save that would point a keyed provider (primary or fallback) at such a URL is refused
+`400 invalid_base_url` *before* the key is stored, the provider constructors refuse to hold a key for
+one (so `ProviderFactory.build` holds it for a row that got into the database some other way), and
+model discovery reports the refusal instead of requesting. The message names the host, never the URL,
+because a base URL can carry userinfo.
+
+*What this does not do.* An `https` endpoint is trusted as much as its owner: pointing a keyed
+provider at `https://attacker.example` is still accepted, because a corporate gateway or OpenRouter
+looks exactly the same. Doing that needs the boot token, and a boot-token holder can already run the
+project's tests as the user and read `secrets.json`, so a re-entry-of-the-key prompt would add a step
+without adding a boundary. This closes the cleartext leak; it does not claim more.
+
 ### 1.3 Engine–Desktop auth token
 
 On boot, the Engine generates a random token, writes it to stdout, and requires `Authorization: Bearer <token>` on every request. Desktop reads it from the child process stdout when it spawns the Engine and attaches it to every `BackendClient` call — including `/settings/agents/*`, the most sensitive routes (attacker-controlled local `base_url`, key-reference overwrite).
@@ -34,10 +53,20 @@ The UI holds the token **in memory** when it runs under the desktop shell: it as
 
 ### 1.4 Retained from v1
 
-- Command allowlist in `SandboxService` — additionally per-agent-scoped: only the Tester Agent's proposed commands ever reach `SandboxService.run_command`, never Coder or Planner raw output.
-- **What the allowlist does not stop (accepted risk).** `validate_argv` decides *which program* runs and with which flags; it cannot decide what the program does. `pytest`, `python <script>.py`, `npm run <script>`, `cargo test` and `go test` all execute code that lives in the workspace, and the fixer is the role that writes into the workspace. So an approved goal can write a file and a verification step can then run it, as the user, with the user's permissions, in a process group that is killed on timeout. That is inherent to running a project's tests, not a hole in the allowlist, and it is why the `write` move refuses while the goal is unapproved (docs/00 §6.9) and why the environment handed to these processes is filtered (`guarded_env`). Treat approving a goal in an untrusted repository as approving that repository's test suite.
+- Command allowlist in `SandboxService` — additionally scoped by who asks and when: the verifier's proposed commands and the conductor's `run_command` / `verify` moves reach it in `test` mode, never the fixer's, planner's or critic's raw output, and the conductor's only once the goal is approved (see the accepted risk below). The librarian's requests reach it in `read_only` mode.
+- **What the allowlist does not stop (accepted risk).** `validate_argv` decides *which program* runs and with which flags; it cannot decide what the program does. `pytest`, `python <script>.py`, `npm run <script>`, `cargo test` and `go test` all execute code that lives in the workspace, and the fixer is the role that writes into the workspace. So an approved goal can write a file and a verification step can then run it, as the user, with the user's permissions, in a process group that is killed on timeout. That is inherent to running a project's tests, not a hole in the allowlist, and it is why the `write` move refuses while the goal is unapproved (docs/00 §6.9) and why the environment handed to these processes is filtered (`guarded_env`). Treat approving a goal in an untrusted repository as approving that repository's test suite. The conductor's `run_command` honours that sentence rather than only quoting it: a *turn* has no approval step, so before the goal is `RUNNING` (and never on a plan-only goal) it runs in `read_only` mode, and asking "what does this project do?" of a hostile clone cannot start its code (`tests/test_conductor.py`, `test_project_code_runs_only_once_the_plan_is_approved`).
 - Per-command argument policies (not `cmd[0]` only): e.g. `python` only with `-m pytest` / script-path-inside-workspace.
 - `FileSystemService` path containment (`root_path` boundary check).
+- **Protected workspace roots** (`fs.protected_root_reason`). A workspace root is refused — `400
+  invalid_root` when it is created, and a `ProtectedRootError` (a `PathEscapeError`, so it fails the step
+  the way an escape does) when anything tries to write into one that predates the rule — if it is `$HOME`
+  or contains it (that is `/` and `/home` too), one of the system directories themselves (`/etc`, `/usr`,
+  `/var`, `/tmp`, and `/bin`/`/lib*` however they resolve), inside `~/.ssh`, `~/.gnupg`, `~/.aws` or
+  `~/.kube`, or Codify's own state directory. The reason is that an approved goal writes through the same
+  `apply` as any source file, so a `$HOME` workspace could rewrite `~/.bashrc` or
+  `~/.ssh/authorized_keys` (audit of 2026-09-29, L3). It is about the root, not about file names: a
+  dotfiles repository *below* `$HOME` owns a `.ssh/config` and a `.bashrc` that are only files in a repo,
+  so those stay writable. There is no override; a subfolder is the answer, and reading is unaffected.
 - Engine binds to `127.0.0.1` only.
 
 ### 1.5 Embedded browser: deny-by-default webviews
@@ -145,10 +174,20 @@ off disk or received over the bridge — so its containment is an allow-list, no
 Single file. **No `agents.db`.**
 
 ```
-~/.codify/codify.db   # workspaces, goals, plan_steps, events, agent_configs
+~/.codify/            # owner-only (0700)
+~/.codify/codify.db   # workspaces, goals, plan_steps, events, agent_configs — owner-only (0600), with its -wal and -shm
 ~/.codify/boot_token  # loopback bearer token, owner-only (0600), created once per state dir
 ~/.codify/secrets.json  # only when no OS keyring is usable (0600)
 ```
+
+The database holds every prompt, every diff the fixer proposed and every recalled event, so it is
+protected as the token is: the state directory is created `0700` and the database file `0600` (created
+with that mode, not chmod-ed afterwards, so there is no moment it is readable by anyone else; SQLite
+gives its `-wal`/`-shm` files the same mode), whatever the process umask. An install an older build
+made — directory `0755`, database `0644` — is tightened on the next start, only when this user owns
+it and only by removing the group/other bits. A database placed elsewhere with `CODIFY_DB` gets the
+same for the *file*; the directory it sits in is the user's and is never chmod-ed. (Audit of
+2026-09-29, M11: this was `0755`/`0644`, hidden on Ubuntu by its `0750` home directories.)
 
 `CODIFY_HOME` (or `CODIFY_DB` / `CODIFY_SECRETS`) redirects these, and a redirected run also stops using
 the OS keychain so it cannot reach the real store — `04` §2.0, `04` §7. The test suite holds itself to

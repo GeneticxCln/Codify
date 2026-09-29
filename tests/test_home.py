@@ -589,6 +589,41 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
         self.assertEqual(bound, [port])
         self.assertEqual(len(started), 1)
 
+    def test_losing_the_race_for_the_port_takes_the_next_one_instead_of_crashing(self) -> None:
+        """L5: `pick_port` binds and releases, then `serve()` binds again.
+
+        Anything that takes the port in between — a second engine starting in the same instant,
+        an unrelated program — used to crash the boot with `Address already in use`, when the
+        next of the eleven ports the engine is allowed to use was free.
+        """
+        taken = _free_port()
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(blocker.close)
+        blocker.bind(("127.0.0.1", taken))
+        blocker.listen(1)
+
+        out, _err, started, bound = self._boot_with_stubbed_uvicorn(taken)
+
+        self.assertEqual(1, len(bound), "the server was never handed a socket")
+        self.assertNotEqual(taken, bound[0])
+        self.assertTrue(7430 <= bound[0] <= 7440, f"bound {bound[0]}, outside the engine's own range")
+        self.assertIn(f"port={bound[0]}", out.getvalue(), "the handshake announced a port that was not the one bound")
+        self.assertNotIn(f"port={taken} ", out.getvalue())
+        self.assertEqual(len(started), 1)
+
+    def test_a_port_the_caller_asked_for_is_never_swapped_for_another(self) -> None:
+        """`CODIFY_PORT` is a request, and the shell reads the port back from the handshake only to
+        confirm it: quietly serving somewhere else would be an engine nobody expects there."""
+        taken = _free_port()
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(blocker.close)
+        blocker.bind(("127.0.0.1", taken))
+        blocker.listen(1)
+
+        with patch.dict(os.environ, {"CODIFY_PORT": str(taken)}):
+            with self.assertRaises(OSError):
+                self._boot_with_stubbed_uvicorn(taken)
+
     def test_main_leaves_the_way_the_deadline_does(self) -> None:
         """`main()` must still `os._exit`, and this is what holds that line.
 

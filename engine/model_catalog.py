@@ -29,6 +29,7 @@ from typing import Any
 import httpx
 
 from engine.models import BUILTIN_PROVIDERS
+from engine.providers import key_destination_problem
 
 DISCOVERY_TIMEOUT_S = 8.0
 MAX_MODELS_PER_PROVIDER = 500
@@ -260,6 +261,12 @@ async def discover_provider(
             ok=False,
             error="no API key configured for this provider",
         )
+    # Discovery attaches the key to `/models` the same way a generation call does, so it is
+    # held to the same rule; the refusal is reported, and nothing is requested.
+    if target.api_key:
+        problem = key_destination_problem(target.base_url)
+        if problem is not None:
+            return DiscoveryResult(target.provider, target.protocol, ok=False, error=problem)
     if not target.base_url:
         return DiscoveryResult(
             target.provider, target.protocol, ok=False, error="no base_url configured"
@@ -361,7 +368,10 @@ def _targets(registry: Any, keychain: Any) -> list[ProviderTarget]:
                 protocol=cfg.protocol,
                 base_url=cfg.base_url or builtin.get("base_url", ""),
                 api_key=keychain.get(cfg.api_key_ref) or keychain.get_provider_key(cfg.provider),
-                needs_key=bool(builtin.get("needs_key", True)),
+                # A built-in answers for itself. A custom slug is judged by its wire format,
+                # the way `role_repair.target_needs_key` judges it: the Ollama protocol never
+                # sends a key (and only accepts a loopback endpoint), anything else does.
+                needs_key=bool(builtin.get("needs_key", cfg.protocol != "ollama")),
                 sources=[f"agent:{cfg.role}"],
             )
         )
@@ -380,7 +390,9 @@ def _targets(registry: Any, keychain: Any) -> list[ProviderTarget]:
                     protocol=cfg.fallback_protocol or fb_builtin.get("protocol", "openai_compat"),
                     base_url=cfg.fallback_base_url or fb_builtin.get("base_url", ""),
                     api_key=keychain.get_provider_key(fb_provider),
-                    needs_key=bool(fb_builtin.get("needs_key", True)),
+                    needs_key=bool(
+                        fb_builtin.get("needs_key", (cfg.fallback_protocol or "openai_compat") != "ollama")
+                    ),
                     sources=[f"fallback:{cfg.role}"],
                 )
             )

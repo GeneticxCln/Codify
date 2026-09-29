@@ -57,8 +57,8 @@ url = "2"
 # also reaped nowhere by hand: this is `kill`, and the liveness check is `kill 0`.
 libc = "0.2"
 
-# GTK, named directly, for one reason and it is worth stating: **on Linux,
-# Tauri builds every webview into the window's default `gtk::Box`**
+# GTK, named directly, for one reason and it is worth stating: **Tauri
+# builds every webview into the window's default `gtk::Box`**
 # (`tauri-runtime-wry`'s `WebviewKind::WindowChild => build_gtk(default_vbox())`),
 # and wry's box branch packs a child with `pack_start(webview, true, true, 0)`
 # — expand and fill — without ever reading the bounds it was handed. A `GtkBox`
@@ -76,10 +76,7 @@ libc = "0.2"
 #
 # Version and feature set are the runtime's own — `0.18` with `v3_24` — because
 # a second `gtk` node in the graph is a second set of types, and none of this
-# would typecheck against tauri's. Gated to exactly the platforms the code is:
-# every other target gets real child-webview bounds from wry and compiles none
-# of this.
-[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
+# would typecheck against tauri's. Unconditional: Codify targets Linux only.
 gtk = { version = "0.18", features = ["v3_24"] }
 
 [dev-dependencies]

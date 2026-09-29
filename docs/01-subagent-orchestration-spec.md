@@ -337,7 +337,7 @@ script. The test doubles route on the role whose `AgentConfig` built the provide
 
 Adding a **harness** later = one catalog row, not a new class. Adding a new **wire format** = one protocol class.
 
-`test_connection`: `max_tokens=8`, prompt `ping`, 15s — enforced with `asyncio.wait_for` around the provider's own `complete` (`TEST_CONNECTION_TIMEOUT_S` in `engine/providers.py`), because a probe that inherits the generation client's 120s+ timeout is the settings screen hanging. Never echo keys.
+`test_connection`: `max_tokens=8`, prompt `ping`, 15s — enforced with `asyncio.wait_for` around the provider's own `complete` (`TEST_CONNECTION_TIMEOUT_S` in `engine/providers.py`), because a probe that inherits the generation client's 120s+ timeout is the settings screen hanging. It makes exactly one HTTP attempt — generation calls retry transient failures (`04` §4.6.1), the probe reports the first answer. Never echo keys.
 
 ## 4. Registry / Orchestrator / API
 
@@ -416,8 +416,8 @@ switch credits the turn's answer to a model that never produced it.
 |---|---|---|
 | `read_file` | `LibraryService.read` | `FileSystemService` refuses a path escape |
 | `search_code` | `LibraryService.search` | same |
-| `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` — the librarian's own validator, so the subcommand list and its flag rules have one owner (`04` §5) |
-| `run_command` | `SandboxService.run_command` | `validate_argv` in `test` mode (docs/00 §6.6) |
+| `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` — the librarian's own validator (`engine/git_readonly.py`'s exact-match table), so the subcommand list and its option rules have one owner (`04` §5) |
+| `run_command` | `SandboxService.run_command` | `validate_argv` in `test` mode (docs/00 §6.6) **once the goal is approved** — the same stored-status gate as `write` (`_write_allowed`). Before that the mode is `read_only` (`ls`, `wc`, git history), because the test allowlist admits the repository's own code and a turn has no approval step; a command that would run once approved is refused with that reason, not deferred |
 | `read_page` | `WebviewBridge.read_page` | read-only; the page is the user's, the model cannot choose or change the URL, and the text returns quoted as untrusted (docs/03 §1.6) |
 | `recall` | `GoalService.recall_events` + `recall.search` | read-only over this workspace's own `events`; the `RECALLABLE` allow-list decides what can be returned and nothing stored can widen it (docs/03 §1.8) |
 | `recall_threads` | `GoalService.thread_recall` + `recall.search_threads` | read-only over this workspace's own conversation threads; scoped by workspace in the query, archived threads excluded (docs/03 §1.8) |

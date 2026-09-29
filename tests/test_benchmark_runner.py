@@ -27,7 +27,9 @@ from tests import hermetic  # noqa: F401
 from benchmarks import runner
 from benchmarks.runner import (
     BenchmarkError,
+    call_health,
     configured_models,
+    failure_of,
     load_manifest,
     main,
     materialize,
@@ -271,6 +273,282 @@ class SummaryTests(unittest.TestCase):
     def test_stage_totals_rank_the_slowest_stage_first(self) -> None:
         summary = summarise([self._result(True), self._result(True)])
         self.assertEqual(next(iter(summary["stage_ms"])), "fixer")
+
+
+class CallHealthTests(unittest.TestCase):
+    """How often a role needed its reply asked for again (audit of 2026-09-29, 3.4).
+
+    A pass/fail per task hides the thing a small model's reliability is made of: how many of its
+    replies were usable the first time. The executor already records every failed call and whether a
+    same-model re-ask followed (`agent_call_failed`, `retrying`), so the harness only has to count.
+    """
+
+    @staticmethod
+    def _stage(role: str) -> dict[str, object]:
+        return {"type": "stage_result", "payload": {"stage": role, "role": role}}
+
+    @staticmethod
+    def _failed(role: str, *, retrying: bool = False, code: str = "agent_output_invalid") -> dict[str, object]:
+        payload: dict[str, object] = {"role": role, "code": code}
+        if retrying:
+            payload["retrying"] = True
+        return {"type": "agent_call_failed", "payload": payload}
+
+    def test_a_reask_is_counted_against_the_role_that_needed_it(self) -> None:
+        health = call_health([
+            self._stage("planner"), self._stage("fixer"),
+            self._failed("fixer", retrying=True),
+        ])
+
+        self.assertEqual({"planner": 1, "fixer": 1}, health["ran"])
+        self.assertEqual({"fixer": 1}, health["reasks"])
+        self.assertEqual({"fixer": 1}, health["failed_calls"])
+
+    def test_a_failure_that_was_not_a_reask_is_a_failed_call_and_nothing_more(self) -> None:
+        health = call_health([self._failed("critic", code="provider_http")])
+
+        self.assertEqual({}, health["reasks"])
+        self.assertEqual({"critic": 1}, health["failed_calls"])
+
+    def test_a_run_with_no_failures_has_empty_counts_not_missing_keys(self) -> None:
+        self.assertEqual({"ran": {}, "reasks": {}, "failed_calls": {}}, call_health([]))
+
+    def test_the_summary_rates_re_asks_per_role_over_every_task(self) -> None:
+        def result(reasks: dict[str, int]) -> dict[str, object]:
+            row = SummaryTests._result(True)
+            row["call_health"] = {"ran": {"fixer": 1, "planner": 1}, "reasks": reasks, "failed_calls": reasks}
+            return row
+
+        summary = summarise([result({"fixer": 1}), result({}), result({"fixer": 1, "planner": 1}), result({})])
+
+        self.assertEqual(
+            {"fixer": {"ran": 4, "reasks": 2, "failed_calls": 2}, "planner": {"ran": 4, "reasks": 1, "failed_calls": 1}},
+            summary["call_health"],
+        )
+
+    def test_results_from_before_this_field_existed_still_summarise(self) -> None:
+        self.assertEqual({}, summarise([SummaryTests._result(True)])["call_health"])
+
+
+class ACrashedTaskIsAResultTests(unittest.TestCase):
+    """A task that blows up is a failed task, not the end of the run (audit of 2026-09-29, 3.3).
+
+    The first real-model baseline died eleven tasks in on an `AttributeError` from one model reply, and the
+    report is written at the end, so every finished task's result went with it: minutes of a slow local
+    model, gone, and no record of *which* task crashed. A benchmark's whole job is to say what happened, so
+    a crash is recorded as one — with its cause — and the rest of the run goes on.
+    """
+
+    @staticmethod
+    def _manifest(tmp: str) -> Path:
+        path = Path(tmp) / "manifest.json"
+        base = {
+            "tier": "smoke", "repo": SYNTHETIC, "title": "t", "description": "d",
+            "canned_write": [{"path": "banner.txt", "content": "X\n"}],
+            "checks": [{"type": "goal_completed"}, {"type": "files_written", "min": 1}],
+        }
+        path.write_text(json.dumps({
+            "version": 1, "tiers": {"smoke": {"description": "d", "provider": "canned"}}, "repos": [],
+            "tasks": [{**base, "id": "first"}, {**base, "id": "second"}],
+        }), encoding="utf-8")
+        return path
+
+    def _run_with_first_task_crashing(self) -> tuple[int, str, dict[str, object]]:
+        real = runner.run_task
+        calls: list[str] = []
+
+        async def flaky(task: dict[str, object], *args: object, **kwargs: object) -> dict[str, object]:
+            calls.append(str(task["id"]))
+            if task["id"] == "first":
+                raise RuntimeError("boom")
+            return await real(task, *args, **kwargs)  # type: ignore[arg-type]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            out = io.StringIO()
+            with mock.patch.object(runner, "run_task", flaky), contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = main(["--tier", "smoke", "--manifest", str(self._manifest(tmp)), "--report", str(report)])
+            data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(["first", "second"], calls, "the run stopped at the crash")
+        return code, out.getvalue(), data
+
+    def test_the_crash_is_recorded_with_its_cause_and_the_run_goes_on(self) -> None:
+        code, _, data = self._run_with_first_task_crashing()
+
+        tasks = {t["id"]: t for t in data["tasks"]}  # type: ignore[attr-defined]
+        self.assertEqual("ERRORED", tasks["first"]["status"])
+        self.assertFalse(tasks["first"]["passed"])
+        self.assertIn("RuntimeError: boom", tasks["first"]["error"])
+        self.assertTrue(tasks["second"]["passed"], "the task after the crash did not run to completion")
+        self.assertEqual(1, code)
+
+    def test_a_crash_counts_against_the_pass_rate(self) -> None:
+        _, _, data = self._run_with_first_task_crashing()
+
+        summary = data["summary"]
+        self.assertEqual(2, summary["tasks"])  # type: ignore[index]
+        self.assertEqual(1, summary["passed"])  # type: ignore[index]
+        self.assertEqual(50, summary["pass_rate"])  # type: ignore[index]
+
+    def test_each_task_reports_as_it_finishes_not_only_at_the_end(self) -> None:
+        _, out, _ = self._run_with_first_task_crashing()
+
+        lines = out.splitlines()
+        first = next(i for i, line in enumerate(lines) if line.startswith("finished first"))
+        second = next(i for i, line in enumerate(lines) if line.startswith("finished second"))
+        summary = next(i for i, line in enumerate(lines) if line.startswith("tier "))
+        self.assertLess(first, second)
+        self.assertLess(second, summary)
+        self.assertIn("ERRORED", lines[first])
+
+
+class FailureOfTests(unittest.TestCase):
+    """Why a task failed, from the run's own events — a pass rate with no causes cannot be acted on."""
+
+    def test_the_last_error_event_is_the_cause(self) -> None:
+        events = [
+            {"type": "error", "payload": {"code": "provider_http", "message": "first", "role": "critic"}},
+            {"type": "error", "payload": {"code": "agent_output_invalid", "message": "last", "role": "fixer"}},
+        ]
+
+        self.assertEqual({"code": "agent_output_invalid", "role": "fixer", "message": "last"}, failure_of(events))
+
+    def test_a_run_with_no_error_has_no_failure(self) -> None:
+        self.assertIsNone(failure_of([{"type": "log", "payload": {"message": "hi"}}]))
+
+    def test_a_long_message_is_cut_so_a_report_stays_readable(self) -> None:
+        events = [{"type": "error", "payload": {"code": "x", "message": "y" * 5000, "role": None}}]
+
+        failure = failure_of(events)
+
+        assert failure is not None
+        self.assertLessEqual(len(failure["message"]), 400)
+
+    def test_the_summary_counts_failures_by_code(self) -> None:
+        def result(code: str | None) -> dict[str, object]:
+            row = SummaryTests._result(code is None)
+            if code:
+                row["failure"] = {"code": code, "role": "fixer", "message": "m"}
+            return row
+
+        summary = summarise([result("agent_output_invalid"), result(None), result("agent_output_invalid"), result("provider_http")])
+
+        self.assertEqual({"agent_output_invalid": 2, "provider_http": 1}, summary["failure_codes"])
+
+
+class RecordTests(unittest.TestCase):
+    """`--record DIR` keeps what a run did, so a real model's failures can be read and committed as fixtures.
+
+    The two failure classes that mattered most in the first real-model baseline were found only because a
+    debugging wrapper turned tracing on and kept the scratch stores; the runner deletes both. Recording is
+    that wrapper, as a flag: every goal's model calls are traced (`docs/04` §8) and the per-task stores
+    and workspaces are moved to DIR instead of removed.
+    """
+
+    def test_the_stores_survive_and_hold_every_model_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = Path(tmp) / "kept"
+
+            code, _ = _run_main(["--tier", "smoke", "--only", "smoke-add-banner", "--record", str(keep)])
+
+            self.assertEqual(0, code)
+            stores = sorted(keep.glob("*.db"))
+            self.assertEqual(["smoke-add-banner.db"], [p.name for p in stores])
+            conn = sqlite3.connect(stores[0])
+            try:
+                roles = {r[0] for r in conn.execute("SELECT role FROM trace_calls")}
+            finally:
+                conn.close()
+            self.assertTrue({"planner", "fixer"} <= roles, roles)
+            self.assertTrue((keep / "smoke-add-banner" / "banner.txt").is_file(), "the workspace was not kept")
+
+    def test_without_the_flag_nothing_is_kept_and_nothing_is_traced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("benchmarks.runner.tempfile.mkdtemp", return_value=str(Path(tmp) / "w")) as made:
+            (Path(tmp) / "w").mkdir()
+
+            code, _ = _run_main(["--tier", "smoke", "--only", "smoke-add-banner"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(made.called)
+            self.assertFalse((Path(tmp) / "w").exists(), "the scratch directory was left behind")
+
+
+class RepeatAndThresholdTests(unittest.TestCase):
+    """One run of a model proves little; a number is only worth having with its spread."""
+
+    @staticmethod
+    def _manifest(tmp: str, *, passing: bool) -> Path:
+        """A one-task canned manifest whose harness checks pass, or cannot."""
+        path = Path(tmp) / "manifest.json"
+        path.write_text(json.dumps({
+            "version": 1,
+            "tiers": {"smoke": {"description": "d", "provider": "canned"}},
+            "repos": [],
+            "tasks": [{
+                "id": "t", "tier": "smoke", "repo": SYNTHETIC, "title": "t", "description": "d",
+                "canned_write": [{"path": "banner.txt", "content": "X\n"}],
+                "checks": [
+                    {"type": "goal_completed"},
+                    # A harness check, so a canned run can really fail it: one file is written, and
+                    # asking for five is a task the run cannot pass.
+                    {"type": "files_written", "min": 1 if passing else 5},
+                ],
+            }],
+        }), encoding="utf-8")
+        return path
+
+    def _report(self, tmp: str, argv: list[str]) -> tuple[int, str, dict[str, object]]:
+        report = Path(tmp) / "report.json"
+        code, err = _run_main([*argv, "--report", str(report)])
+        return code, err, json.loads(report.read_text(encoding="utf-8")) if report.exists() else {}
+
+    def test_repeat_runs_every_task_that_many_times_with_its_own_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _, data = self._report(tmp, ["--tier", "smoke", "--manifest", str(self._manifest(tmp, passing=True)), "--repeat", "3"])
+
+        self.assertEqual(0, code)
+        tasks = data["tasks"]
+        assert isinstance(tasks, list)
+        self.assertEqual([1, 2, 3], [t["attempt"] for t in tasks])
+        self.assertEqual({"t"}, {t["id"] for t in tasks})
+        self.assertEqual(3, data["summary"]["tasks"])  # type: ignore[index]
+
+    def test_a_pass_rate_below_the_floor_fails_the_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = self._manifest(tmp, passing=False)
+            code, err, _ = self._report(tmp, ["--tier", "smoke", "--manifest", str(manifest), "--min-pass-rate", "50"])
+
+        self.assertEqual(1, code)
+
+    def test_a_pass_rate_at_or_above_the_floor_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _, _ = self._report(tmp, ["--tier", "smoke", "--manifest", str(self._manifest(tmp, passing=True)), "--min-pass-rate", "100"])
+
+        self.assertEqual(0, code)
+
+    def test_the_floor_is_reported_in_words_when_it_is_breached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            manifest = self._manifest(tmp, passing=False)
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                main(["--tier", "smoke", "--manifest", str(manifest), "--min-pass-rate", "50"])
+
+        self.assertIn("below the floor", out.getvalue())
+
+    def test_a_floor_outside_zero_to_one_hundred_is_a_usage_error(self) -> None:
+        for value in ("-1", "101", "lots"):
+            with self.subTest(value=value):
+                with self.assertRaises(SystemExit) as caught, contextlib.redirect_stderr(io.StringIO()):
+                    main(["--tier", "smoke", "--min-pass-rate", value])
+                self.assertEqual(2, caught.exception.code)
+
+    def test_repeat_must_be_a_positive_number(self) -> None:
+        for value in ("0", "-2", "many"):
+            with self.subTest(value=value):
+                with self.assertRaises(SystemExit) as caught, contextlib.redirect_stderr(io.StringIO()):
+                    main(["--tier", "smoke", "--repeat", value])
+                self.assertEqual(2, caught.exception.code)
 
 
 if __name__ == "__main__":  # pragma: no cover

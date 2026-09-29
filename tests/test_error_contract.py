@@ -28,6 +28,8 @@ handler the app actually ships.
 """
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import inspect
+import json
 import os
 import re
 import tempfile
@@ -39,6 +41,10 @@ from unittest.mock import patch
 import httpx
 from httpx import ASGITransport
 
+from pydantic import BaseModel
+
+import engine.models
+from engine.models import GoalCreate
 from engine.app import ERROR_RESPONSES, app, lifespan
 from engine.providers import Keychain, ProviderError
 
@@ -166,6 +172,10 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name).resolve()
         self.root = root
+        # The workspace is a folder *inside* the scratch state directory, as a real project
+        # is never the state directory itself (that root is refused: docs/03, protected roots).
+        self.project = root / "project"
+        self.project.mkdir()
         self.env = {
             "CODIFY_HOME": str(root),
             "CODIFY_DB": str(root / "codify.db"),
@@ -201,7 +211,7 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
     async def _a_workspace_and_goal(self) -> tuple[str, str]:
         ws = (await self.client.post(
             "/workspaces",
-            json={"name": "WS", "root_path": str(self.root)},
+            json={"name": "WS", "root_path": str(self.project)},
             headers=self.headers,
         )).json()
         goal = (await self.client.post(
@@ -240,7 +250,15 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
         is the one that names the code the UI actually branches on
         (`ui/src/goalActions.ts`).
         """
-        _, goal_id = await self._a_workspace_and_goal()
+        # The goal is made through the service, not `POST /goals`: that route starts real
+        # planning, which with no models configured fails the goal within milliseconds, and a
+        # FAILED goal cannot legitimately become PENDING (docs/04, terminal statuses). A startable
+        # goal is one that planned successfully, and PLANNING -> PENDING is exactly that move.
+        ws_id = (await self.client.post(
+            "/workspaces", json={"name": "WS", "root_path": str(self.project)}, headers=self.headers,
+        )).json()["id"]
+        goal = app.state.goals.create(GoalCreate(workspace_id=ws_id, title="t"))
+        goal_id = goal.id
         current = (await self.client.get(f"/goals/{goal_id}", headers=self.headers)).json()
         app.state.goals.update_status(goal_id, current["version"], "PENDING")
 
@@ -344,6 +362,87 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
         self._assert_declared_shape(422, body, "PUT /settings/agents/fixer")
         self.assertIn("more)", body["message"], "a capped message must say it was capped")
         self.assertGreaterEqual(len(body["detail"]), 5, "every field error is kept")
+
+
+    # Every custom validator in `engine/models.py`, with a request that trips it. Keyed
+    # `Model.validator`; the body is built from a real workspace id. See the sweep below: a
+    # validator that is not in this table fails the suite, because a validator's only failure
+    # mode that a model-level test cannot see is the one in the *handler* — it enforced
+    # invariant 8 for as long as it was a 500.
+    VALIDATOR_REJECTIONS: dict[str, tuple[str, str, Any]] = {
+        "GoalCreate._refuse_chat": (
+            "POST", "/goals",
+            lambda ws: {"workspace_id": ws, "title": "t", "description": "d", "mode": "chat"},
+        ),
+    }
+
+    async def _a_workspace(self) -> str:
+        ws = (await self.client.post(
+            "/workspaces", json={"name": "WS", "root_path": str(self.project)}, headers=self.headers,
+        )).json()
+        return str(ws["id"])
+
+    async def test_a_goal_that_asks_for_chat_mode_is_a_422_not_a_500(self) -> None:
+        """Invariant 8 through the route, which is the only place it can be seen to hold.
+
+        The validator raised `ValueError`; pydantic keeps that live exception in
+        `errors()[i]["ctx"]["error"]`; FastAPI's own handler runs the errors through
+        `jsonable_encoder` and this override did not, so the refusal that enforces
+        "a turn is created only by the turns route" answered HTTP 500. The test that
+        stood guard built `GoalCreate(...)` directly and never touched the route.
+        """
+        ws = await self._a_workspace()
+
+        r = await self.client.post(
+            "/goals", json={"workspace_id": ws, "title": "t", "description": "d", "mode": "chat"},
+            headers=self.headers,
+        )
+
+        self.assertEqual(422, r.status_code)
+        body = r.json()
+        self._assert_declared_shape(422, body, "POST /goals mode=chat")
+        self.assertEqual("invalid_request", body["code"])
+        self.assertIn("mode", body["message"])
+        # The validator's own sentence, the one that says where a turn *is* created, reaches
+        # the caller instead of being dropped on the way to the response.
+        self.assertIn("/conversations/{id}/turns", json.dumps(body["detail"]))
+
+    async def test_a_protected_workspace_root_is_a_coded_400_over_the_route(self) -> None:
+        """L3 through HTTP: the refusal a user sees is `invalid_root`, with the reason in words."""
+        for root in ("/", "/etc", str(Path.home())):
+            with self.subTest(root=root):
+                r = await self.client.post(
+                    "/workspaces", json={"name": "bad", "root_path": root}, headers=self.headers,
+                )
+                self.assertEqual(400, r.status_code, r.text)
+                body = r.json()
+                self._assert_declared_shape(400, body, f"POST /workspaces {root}")
+                self.assertEqual("invalid_root", body["code"])
+        listed = (await self.client.get("/workspaces", headers=self.headers)).json()
+        self.assertEqual([], listed, "a refused root was stored anyway")
+
+    async def test_every_validator_has_a_route_level_rejection_and_answers_422(self) -> None:
+        validators = sorted(
+            f"{name}.{v}"
+            for name, cls in inspect.getmembers(engine.models, inspect.isclass)
+            if issubclass(cls, BaseModel) and cls.__module__ == engine.models.__name__
+            for v in (
+                *cls.__pydantic_decorators__.field_validators,
+                *cls.__pydantic_decorators__.model_validators,
+            )
+        )
+        self.assertTrue(validators, "the sweep found no validators: it is looking in the wrong place")
+        self.assertEqual(
+            sorted(self.VALIDATOR_REJECTIONS), validators,
+            "a validator has no route-level rejection registered (or one names a validator that "
+            "is gone). Add a request that trips it to VALIDATOR_REJECTIONS.",
+        )
+        ws = await self._a_workspace()
+        for name, (method, path, body) in self.VALIDATOR_REJECTIONS.items():
+            with self.subTest(validator=name):
+                r = await self.client.request(method, path, json=body(ws), headers=self.headers)
+                self.assertEqual(422, r.status_code, f"{name} did not answer 422 over {method} {path}")
+                self._assert_declared_shape(422, r.json(), f"{method} {path} ({name})")
 
 
 class ClientReadsWhatTheServerSends(unittest.TestCase):

@@ -1710,7 +1710,10 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.goals.steps(self.goal.id)[0].status, "COMPLETED")
 
     async def test_needs_another_pass_without_files_is_a_contract_error(self) -> None:
-        self._script_fixer([{"files": [], "needs_another_pass": True}])
+        # The mistake is made twice: a reply the engine cannot use is now asked for once more (audit of
+        # 2026-09-29, 3.3), so a script with one reply would have its second call answered with nothing.
+        reply = {"files": [], "needs_another_pass": True}
+        self._script_fixer([dict(reply), dict(reply)])
 
         await self._plan_and_run()
 

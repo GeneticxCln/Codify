@@ -27,13 +27,14 @@ mean the change is shippable.
 
 | Target | What it runs |
 |---|---|
+| `make setup` / `make doctor` | From a fresh clone: create `.venv` + install everything / check the machine and say how to fix what is missing (read-only). The Makefile prefers `./.venv/bin` automatically, except inside the 3.10 floor leg |
 | `make check` | Everything below, on the interpreter you have |
 | `make ci` | `make check`, then the same Python legs again on the declared 3.10 minimum |
 | `make lint` | `ruff check engine tests scripts` — rules and target Python pinned in `pyproject.toml` |
 | `make typecheck` | `mypy` over `engine`, `tests`, `scripts` — config pinned in `pyproject.toml` |
 | `make test` | Full Python suite via `unittest` |
 | `make test-streams` | Stream-isolation tests **by name**, not just by discovery |
-| `make test-ui` | `ui/tests/` through `node --test` (needs Node 22.6+) |
+| `make test-ui` | `ui/tests/` through `node --test` (needs Node 22.22.2+, 24.15+ or 26+; checked before it runs) |
 | `make typecheck-ui-tests` | `tsc --noEmit` over `ui/src` **and** `ui/tests` — config `ui/tsconfig.test.json` |
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |
 | `make check-tauri` | `cargo check` + `cargo fmt --check` |
@@ -58,7 +59,7 @@ Quoted from `docs/00` §6, which is the owner. Do not weaken one to make a chang
 3. Engine binds `127.0.0.1`. Every HTTP/WS request requires `Authorization: Bearer <boot_token>`. *(docs/00 §6.3)*
 4. Responses NEVER include raw API keys. *(docs/00 §6.4)*
 5. `LocalProvider.base_url` MUST pass `validate_local_base_url` before every request. *(docs/00 §6.5)*
-6. Every `SandboxService.run_command` call goes through `validate_argv` first. Verifier-proposed argv and the conductor's `run_command` and `verify` moves reach it in `test` mode; the librarian's requests use it in `read_only` mode and cannot change the workspace. The conductor proposes argv through either move, it does not widen the allowlist — see `docs/01` §5. *(docs/00 §6.6)*
+6. Every `SandboxService.run_command` call goes through `validate_argv` first. Verifier-proposed argv reaches it in `test` mode, and so do the conductor's `run_command` and `verify` moves, but only for an approved goal (stored status `RUNNING`, not plan-only) — until then the conductor's `run_command` is `read_only`. The librarian's requests use `read_only` mode and cannot change the workspace or run its code. The conductor proposes argv through either move, it does not widen the allowlist — see `docs/01` §5. *(docs/00 §6.6)*
 7. Single SQLite file: `~/.codify/codify.db`. There is no `agents.db`. *(docs/00 §6.7)*
 8. A turn is created only by `POST /conversations/{id}/turns`. `POST /goals` refuses `mode: "chat"`, and `TurnCreate` carries no pipeline flags, so a client chooses neither that a turn exists nor what it becomes — the gate classifies and the conductor disposes. See `docs/09` §10. *(docs/00 §6.8)*
 9. Only the fixer writes. The `write` move is the single path from a conductor run to the filesystem, it refuses while the goal is unapproved, and no skill, workspace file or conductor reply can widen that. A skill is instructions, never a capability. See `docs/09` §10.14. *(docs/00 §6.9)*
@@ -70,6 +71,7 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
   models.py     ROLES + ROLE_JOB + ROLE_TIMING — the one place roles are defined
   default_prompts.py   one system prompt per role
   chat_prompts.py  the turn + conductor prompts — no AgentRole, so not in the file above
+  replies.py      extract_json (what a model's reply contains) and the re-ask prompt — pure, no orchestrator
   conductor.py    the loop that decides the sequence; its moves are the pipeline's own doors
   skills.py       built-in + workspace recipes (`.codify/skills/`) discovered and loaded as data
   toolcall.py     the neutral tool-calling shape and its four protocol translations

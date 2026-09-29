@@ -38,6 +38,7 @@ from engine.models import (
     ROLES,
     AgentConfigUpdate,
     ConversationCreate,
+    Event,
     TurnCreate,
     WorkspaceCreate,
 )
@@ -444,6 +445,71 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
                 {"argv": ["bash", "-c", "curl evil.test"], "reason": "x"}
             )
 
+    def _plant_code_that_leaves_a_mark(self) -> Path:
+        """Repository code that proves it ran: a script and a conftest, both touching one file."""
+        mark = self.root / "MARK-project-code-ran"
+        line = f"open({str(mark)!r}, 'w').write('ran')\n"
+        (self.repo / "evil.py").write_text(line, encoding="utf-8")
+        (self.repo / "conftest.py").write_text(line, encoding="utf-8")
+        (self.repo / "test_x.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+        return mark
+
+    async def test_project_code_runs_only_once_the_plan_is_approved(self) -> None:
+        # A *turn* has no approval step, and the test-mode allowlist is not a list of
+        # harmless commands: `python3 evil.py`, `pytest` (which imports every conftest.py
+        # in the path), `npm run <any script>`, `cargo test` and `go test` are each the
+        # repository's own code. So asking "what does this project do?" of a hostile
+        # clone must not be able to run it. The gate is the one `write` uses — the goal's
+        # stored status — and nothing the model says can move it.
+        mark = self._plant_code_that_leaves_a_mark()
+        table = self._dispatch(self.goal.id)
+
+        for argv in (
+            ["python3", "evil.py"], ["pytest", "-q"], ["python3", "-m", "pytest"],
+            ["npm", "test"], ["npm", "run", "build"], ["cargo", "test"], ["go", "test", "./..."],
+        ):
+            with self.subTest(argv=argv):
+                with self.assertRaises(CommandNotAllowed) as caught:
+                    await table["run_command"]({"argv": argv, "reason": "just looking"})
+                self.assertIn("approve", str(caught.exception))
+        self.assertFalse(mark.exists(), "repository code ran on a goal nobody approved")
+
+        # The reads the librarian is allowed keep working, so a question is still answerable.
+        listing = await table["run_command"]({"argv": ["ls"], "reason": "look around"})
+        self.assertIn("app.py", listing)
+        counted = await table["run_command"]({"argv": ["wc", "-l", "app.py"], "reason": "size"})
+        self.assertIn("app.py", counted)
+
+        # Starting the goal is a person saying yes; the same table, the same argv, now runs.
+        current = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, current.version, "RUNNING")
+        out = await table["run_command"]({"argv": ["python3", "evil.py"], "reason": "approved"})
+        self.assertIn("(exit 0)", out)
+        self.assertTrue(mark.exists(), "an approved goal could not run its project's command")
+
+    async def test_a_plan_only_goal_never_runs_project_code_even_when_running(self) -> None:
+        # `plan_only` switches execution off for the goal (`_write_allowed` says so for
+        # writes); a command is execution, so the same switch covers it.
+        mark = self._plant_code_that_leaves_a_mark()
+        self.conn.execute("UPDATE goals SET plan_only=1 WHERE id=?", (self.goal.id,))
+        self.conn.commit()
+        current = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, current.version, "RUNNING")
+        table = self._dispatch(self.goal.id)
+
+        with self.assertRaises(CommandNotAllowed):
+            await table["run_command"]({"argv": ["python3", "evil.py"], "reason": "x"})
+        self.assertFalse(mark.exists())
+
+    async def test_a_command_no_mode_allows_keeps_the_ordinary_refusal(self) -> None:
+        # The approval explanation is for a command that *would* run once approved. A shell
+        # is refused whatever the goal's state, and the message must not suggest that
+        # approval would change that.
+        table = self._dispatch(self.goal.id)
+        with self.assertRaises(CommandNotAllowed) as caught:
+            await table["run_command"]({"argv": ["bash", "-c", "id"], "reason": "x"})
+        self.assertNotIn("approve", str(caught.exception))
+
     async def test_an_unknown_command_is_refused_rather_than_attempted(self) -> None:
         table = self._dispatch(self.goal.id)
         with self.assertRaises(CommandNotAllowed):
@@ -464,6 +530,10 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
         (self.repo / "slow.py").write_text(
             "import time\ntime.sleep(0.6)\n", encoding="utf-8"
         )
+        # Running the project's code is what an approved plan is for (see
+        # `test_project_code_runs_only_once_the_plan_is_approved`).
+        current = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, current.version, "RUNNING")
         table = self._dispatch(self.goal.id)
         ticks = 0
 
@@ -592,6 +662,113 @@ class TestGracefulDegradation(ConductorTestCase):
         errors = [e for e in self.goals.events_after(goal.id, 0) if e.type == "error"]
         self.assertTrue(errors, "a failed turn must say why on the event log")
         self.assertIn("scribe", str(errors[0].payload))
+
+
+class TestCancelStopsAConductorRun(ConductorTestCase):
+    """M1: cancel did nothing for a chat turn (audit of 2026-09-29).
+
+    The conductor had no cancellation check anywhere, so it kept calling the model and the tools
+    up to `conductor_max_turns`, and `run_chat` then ended with an unconditional `COMPLETED` that
+    overwrote `CANCELLED` and published the reply anyway. `run_planning` had guards for exactly
+    this; `run_chat`, added later, did not.
+    """
+
+    async def test_a_cancel_is_noticed_before_the_next_tool_and_the_next_model_call(self) -> None:
+        cancelled = {"now": False}
+        ran: list[str] = []
+
+        async def read_file(args: dict[str, Any]) -> str:
+            ran.append(str(args["path"]))
+            cancelled["now"] = True  # the user pressed Cancel while this tool ran
+            return "body"
+
+        provider = _ToolProvider([
+            ToolReply(tool_calls=[_call("read_file", path="a.py"), _call("read_file", path="b.py")]),
+            ToolReply(text="an answer nobody asked for any more"),
+        ])
+        conductor = Conductor(
+            provider, "m", str(self.repo), list(TOOLS), {"read_file": read_file},
+            system_prompt="s", max_turns=8, cancelled=lambda: cancelled["now"],
+        )
+
+        answer = await conductor.run("go")
+
+        self.assertEqual(["a.py"], ran, "a second tool ran after the cancel")
+        self.assertEqual(1, len(provider.seen_messages), "the model was called again after the cancel")
+        self.assertTrue(conductor.was_cancelled)
+        self.assertEqual("", answer)
+
+    async def test_a_conductor_cancelled_before_it_starts_makes_no_call_at_all(self) -> None:
+        provider = _ToolProvider([ToolReply(text="hello")])
+        conductor = Conductor(
+            provider, "m", str(self.repo), list(TOOLS), {}, system_prompt="s",
+            max_turns=8, cancelled=lambda: True,
+        )
+
+        await conductor.run("go")
+
+        self.assertEqual([], provider.seen_messages)
+
+    async def test_without_a_predicate_nothing_changes(self) -> None:
+        provider = _ToolProvider([ToolReply(text="hello")])
+        conductor = Conductor(provider, "m", str(self.repo), list(TOOLS), {}, system_prompt="s", max_turns=8)
+
+        self.assertEqual("hello", await conductor.run("go"))
+        self.assertFalse(conductor.was_cancelled)
+
+    async def test_a_runner_setting_a_status_on_a_cancelled_goal_is_a_quiet_no_op(self) -> None:
+        # `_set_status` is what every runner goes through. Refusing the move is the service's job;
+        # not crashing a background task over it, and not consolidating memory for a run that
+        # never finished, is this one's.
+        executor = self._executor(_ToolProvider())
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(g.id, g.version, "CANCELLED")
+        before = len(self.goals.events_after(self.goal.id, 0))
+
+        executor._set_status(self.goal.id, "COMPLETED", None)
+
+        self.assertEqual("CANCELLED", self.goals.get(self.goal.id).status)
+        statuses = [
+            e for e in self.goals.events_after(self.goal.id, 0) if e.type == "goal_status"
+        ]
+        self.assertEqual("CANCELLED", statuses[-1].payload["status"])
+        self.assertEqual(before, len(self.goals.events_after(self.goal.id, 0)), "a refused status was announced")
+
+    async def test_a_chat_turn_cancelled_mid_run_stays_cancelled_and_publishes_no_reply(self) -> None:
+        provider = _ToolProvider([
+            ToolReply(tool_calls=[_call("read_file", path="app.py")]),
+            ToolReply(text="the final answer"),
+        ])
+        executor = self._executor(provider)
+        original_publish = self.goals.publish
+
+        def publish_and_cancel(event: Event) -> Event:
+            result = original_publish(event)
+            # The engine logs "conductor called read_file(...)" as the tool starts: that is
+            # the moment a person, watching the transcript, presses Cancel.
+            if event.type == "log" and "conductor called read_file" in str(event.payload.get("message")):
+                g = self.goals.get(self.goal.id)
+                self.goals.update_status(g.id, g.version, "CANCELLED")
+            return result
+
+        self.goals.publish = publish_and_cancel  # type: ignore[method-assign]
+        await executor.run_chat(self.goal.id)
+
+        self.assertEqual("CANCELLED", self.goals.get(self.goal.id).status, "the goal was revived")
+        replies = [
+            e for e in self.goals.events_after(self.goal.id, 0)
+            if e.type == "log" and e.payload.get("turn")
+        ]
+        self.assertEqual([], replies, "a reply was published for a turn the user had cancelled")
+        self.assertEqual(1, len(provider.seen_messages), "the conductor kept calling the model after the cancel")
+        # And it did not treat the cancel as a conductor that "could not finish", which would
+        # run Codify's own sequence — a planner call — for a goal nobody wants any more.
+        events = self.goals.events_after(self.goal.id, 0)
+        self.assertFalse(
+            [e for e in events if "did not finish" in str(e.payload) or "standard sequence" in str(e.payload)],
+            "a cancelled turn fell through to the engine's own sequence",
+        )
+        self.assertEqual([], [p for p in provider.seen_prompts if "planner" in p[0].lower()])
 
 
 class TestToolDialects(unittest.TestCase):

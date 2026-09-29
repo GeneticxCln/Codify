@@ -99,6 +99,17 @@ Transitions:
 
 Illegal transition → `409` `illegal_status`.
 
+**A terminal status is final, with two documented exceptions.** `GoalService.update_status` refuses to move a
+goal out of `COMPLETED`, `FAILED` or `CANCELLED` — except `COMPLETED → RUNNING` and `FAILED → RUNNING`, which
+are how `POST /goals/{id}/apply` and the step retry re-open a finished goal. Nothing re-opens `CANCELLED`:
+retry, apply and start all refuse it. Repeating the status a goal already has is not a move. This is the
+rule that keeps a runner that finishes after a Cancel from undoing it: `run_chat` used to end with an
+unconditional `COMPLETED` that overwrote `CANCELLED` and published the reply anyway (audit of 2026-09-29,
+M1). Alongside it, `ExecutorService._set_status` is a quiet no-op on a cancelled goal (so a runner that lost
+the race does not crash a background task), the conductor asks "cancelled?" before every model call and every
+tool call (`Conductor(cancelled=...)`, so a Cancel takes effect within one call), and the step driver only
+drives a `RUNNING` goal (M2: a cancel during a retried step used to be followed by a full conductor run).
+
 ### 1.3 PlanStep
 
 ```python
@@ -425,7 +436,7 @@ Alembic revision `0001_init` creates these. Startup seeder inserts missing `DEFA
 
 ## 3. HTTP (Engine)
 
-Bind `127.0.0.1`. Port: first free in `7430-7440`, printed on stdout (`04` §6).
+Bind `127.0.0.1`. Port: first free in `7430-7440`, printed on stdout (`04` §6). Binding is retried on the next free port of that range if another process takes the chosen one between the probe and the bind; a port asked for with `CODIFY_PORT` is never swapped for another — the engine fails to start instead.
 
 All routes: `Authorization: Bearer <boot_token>` or `401` `unauthorized`.
 
@@ -444,7 +455,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 |---|---|---|---|
 | `GET` | `/health` | — | `{ok:true}` (still requires Bearer) |
 | `POST` | `/workspaces` | `{name, root_path}` extra=forbid | `Workspace` |
-| `POST` | `/workspaces/browse` | — | `{cancelled} \| {cancelled:false, workspace}` (native folder picker) |
+| `POST` | `/workspaces/browse` | — | `{cancelled:true}` (the person closed the dialog — the only silent outcome) \| `{cancelled:false, workspace}` \| **503 `picker_unavailable`** with the reason and the way out (no dialog could open, or one did not answer within `PICKER_TIMEOUT_S`, 120 s, and was killed with everything it started). See "Folder dialog" below |
 | `GET` | `/workspaces` | — | `Workspace[]` |
 | `GET` | `/workspaces/{id}` | — | `Workspace` |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
@@ -457,7 +468,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `POST` | `/goals/{id}/pause` | `{expected_version}` | `Goal` |
 | `POST` | `/goals/{id}/cancel` | `{expected_version}` | `Goal` |
 | `PATCH` | `/goals/{id}/steps/{step_id}` | `{expected_version, title?, description?, suggested_paths?}` extra=forbid | `PlanStep` (PENDING goals only) |
-| `POST` | `/goals/{id}/steps/{step_id}/retry` | `{expected_version}` | `PlanStep` |
+| `POST` | `/goals/{id}/steps/{step_id}/retry` | `{expected_version}` | the re-opened `PlanStep`, returned **at once**: everything refusable (409 `illegal_status`, `step_not_retryable`, `driver_busy`, `retry_collides_with_running`, `version_conflict`) is decided in the request, the goal's driver is claimed there (`is_driving` is true from the response until the run ends), and the step runs in the background — progress is on the goal stream, not in this response |
 | `GET` | `/goals/{id}/events?after={seq}` | — | `Event[]` where `sequence > after` |
 | `GET` | `/goals/{id}/usage` | — | token totals + `parallel_peak`/`parallel_waves` (from `usage` events) |
 | `GET` | `/goals/{id}/audit` | — | the goal's audit document (plan edits, fallbacks, fix retries, errors, outcomes, usage, silent roles) |
@@ -564,6 +575,28 @@ The response reports what it did **and** what it skipped, because an action that
 
 A successful repair **invalidates the model catalog cache** (the catalog is keyed by role configs) and bumps `version` on every changed role, so the `409` version guard still protects concurrent updates. Only `provider`, `model_name`, and the protocol the catalog reports are written; `temperature`, `max_tokens`, `base_url`, and any system-prompt override are preserved. The endpoint is deliberately **not** sent, so an unchanged provider keeps the endpoint the user configured (a proxy, say) while a provider switch resets it to that provider's default.
 
+### 3.0.1 Folder dialog
+
+`POST /workspaces/browse` runs a native folder dialog in a subprocess (GTK is never imported into the engine)
+under the spawn guard, and answers with one of three things — only one of which is silent (audit of
+2026-09-29, M8: a dialog that had *crashed* was reported as `{"cancelled": true}`, so a picker that could not
+open looked exactly like one the person closed, in the API and on screen):
+
+| outcome | answer |
+|---|---|
+| a folder chosen | `{cancelled:false, workspace}` — the existing workspace for that path, or a new one |
+| the dialog closed with nothing chosen | `{cancelled:true}` |
+| no dialog could open, it crashed, or it did not answer | **503 `picker_unavailable`**, the reason, and "type the folder's path instead" |
+
+The GTK script (PyGObject, GTK 3) is tried first and speaks in exit codes: `0` with a path is a choice, `0`
+with nothing is a cancel, `3` is "PyGObject is not importable" and `4` is "GTK could not open a display".
+When it cannot run — any venv, conda or pyenv Python, which is most machines with a desktop — `zenity`, then
+`kdialog`, are tried if installed. Both exit `1` for Cancel, and zenity exits `1` for "cannot open display" as
+well, so a `1` whose stderr mentions the display is a failure, not a cancel. A real cancel from any of them
+ends the search. A dialog that has not answered within `PICKER_TIMEOUT_S` is killed with its whole process
+group, so a dialog the engine gave up on does not stay open on the screen. The UI shows the 503's message
+in its error banner; typing a path in the folder menu always works without any dialog.
+
 ### 3.1.1 The same rule at the start of every goal
 
 `POST /settings/agents/repair` is an action, and an action nobody thinks to take
@@ -606,7 +639,53 @@ exactly the arrangement that drifts.
 
 ## 4. Agent JSON contracts
 
-Parse with `json.loads`. Extra keys ignored. Missing required keys → `agent_output_invalid`.
+Extra keys ignored. Missing required keys → `agent_output_invalid`.
+
+**Reading a reply** (`engine/replies.py` `extract_json`, re-exported by `engine.executor`; audit of 2026-09-29, H4). It was "first `{` or `[` to last
+`}` or `]`, then `json.loads`", which right-answered 10 of the 23 shapes in `tests/test_extract_json.py` and
+none of the eight cut-off replies: a `<think>` block that mentions braces, an example object before the real
+one, a trailing comma, single quotes and Python literals, comments. Every top-level object or array in the
+reply is now read — after stripping reasoning blocks and applying the repairs a near-miss needs (comments and
+trailing commas; Python triple-quoted `"""…"""` values, whose closing delimiter is the first one that ends a value, since the text inside is often Python with docstrings of its own; raw newlines and tabs inside strings; then Python's spelling of the same document via `ast.literal_eval`, which executes nothing) —
+and the one the role asked for is chosen: the **last dict carrying any of the role's contract keys**
+(`replies.REPLY_KEYS`), else the last dict, else the last list. A reply that stops before its document does is
+refused, unless the role tolerates dropping an unfinished tail (`REPLY_TOLERATES_TRUNCATION`, **not the
+fixer**, whose reply is file contents and must never become a half-written file): then what was finished is
+kept and the element that was not is dropped — never completed, never a string closed.
+
+**One re-ask, then the fallback.** A reply that still cannot be read is asked for **once more from the same
+target** before the fallback is considered: the original task unchanged, then what was wrong (the parser's
+reason) and what the model said, then "reply again with the corrected JSON document only". The first bad
+reply is recorded as a failed call (`agent_call_failed`, `code: agent_output_invalid`, `retrying: true`) —
+a model that needs this is something to see — and the second call has books of its own. A valid reply is never
+re-asked; prose (`raw_output`) never is; a provider error on the re-ask is a provider failure like any other;
+after a second bad reply the failure reads "…after one repair attempt" and the fallback rule is exactly what
+it was. The bound is structural: no target is asked more than twice for one call.
+
+The same re-ask covers a reply that **parsed but could not be used** (`run_agent(..., accept=)`): the
+fixer's edit that matches the wrong number of times or not at all (`old_text appears 2 time(s), expected 1`),
+an entry the contract refuses. The caller knows exactly what is wrong, so the model is told — the same
+prompt, with that reason and the reply it refers to — instead of a person being. The first failure is a
+failed call with `retrying: true` (`agent_call_failed`, "returned a reply that could not be used"); the second
+reads "…after one repair attempt"; and because `fs.apply` resolves every edit before it writes anything, a
+refused reply has written nothing and asking again is safe. A fixer with a fallback target now reaches it for
+these failures too, as it does for any other `agent_output_invalid`.
+
+Three more slips a real small model made are handled the same way, each found by running it:
+
+- **A reply that is a list, not an object.** Every contract is one object. A list used to escape the parser as
+  `AttributeError` (reaching a user as `internal_error`); it is now refused with "the reply must be a JSON
+  object, not a list" and asked for again. The one exception is the contract's own array with nothing around it —
+  `[{"path": …}]` for the fixer, `[{"title": …}]` for the planner, every entry carrying the field only that
+  array's entries carry — which is read as `{"files": […]}` / `{"steps": […]}` (`replies.coerce_object`):
+  nothing is invented, and Qwen2.5-1.5B repeated the bare list when asked again.
+- **A planner reply that parsed but is not a plan** (`accept=` too: no steps, a step with no title). A *consult*
+  — no steps, a request for the librarian — is still a good reply.
+- **A path the workspace refuses.** An absolute path (`/src/app.py`), one that climbs out (`../`), one inside
+  `.git`: the refusal names exactly what to change, so it goes to the model once. Nothing outside the workspace is
+  ever written, an absolute path is never quietly made relative, and a step that still cannot name a legal path
+  fails with `path_escape`, the code it always had. A protected workspace *root* is not put to the model — asking
+  again cannot change where the workspace is.
 
 ### 4.0 Librarian
 
@@ -633,9 +712,14 @@ Requests are executed by `engine/library.py`:
 - `searches` → literal case-insensitive substring search by default, skipping VCS internals and
   package caches, capped at `MAX_MATCHES` / `MAX_FILES_SCANNED` and reporting both. A request may
   opt into regex with `{"query": …, "regex": true}` (and may narrow it with `glob`): a
-  model-supplied pattern is untrusted input, so it is bounded at `MAX_REGEX_PATTERN` (200 chars)
-  with a `PER_LINE_REGEX_SECONDS` (0.5s) per-file-line deadline against catastrophic backtracking,
-  and an invalid or oversized pattern comes back as a refusal, not a crash. A conductor `search_code`
+  model-supplied pattern is untrusted input, so it is bounded at `MAX_REGEX_PATTERN` (200 chars),
+  and an invalid or oversized pattern comes back as a refusal, not a crash. The *match* runs in a
+  worker process (`engine/regex_worker.py`, under the spawn guard) with two clocks: a soft budget
+  of `REGEX_BUDGET_S` (2s) checked between files inside the worker, and a hard limit of
+  `REGEX_HARD_LIMIT_S` (2.5s) after which the worker's whole group is `SIGKILL`ed and the model gets
+  "pattern too expensive". It is a process because CPython's `re` cannot be interrupted and holds
+  the GIL: on a thread, `(a+)+$` over one 28-character line stalled the event loop — HTTP, WebSockets,
+  `/health`, Cancel — for 14 seconds, and each extra character doubles it. A conductor `search_code`
   call may also opt into the second strategy with `mode: "keyword"`: the same walk under the same
   caps, indexed into an **in-memory** FTS5 table (one row per file) and ranked by BM25 — for
   multi-word questions no single line answers, so matches are whole files (`line: 0`, the result says
@@ -645,9 +729,10 @@ Requests are executed by `engine/library.py`:
   literal substring answer is computed and returned labelled `strategy: "substring_fallback"`. The
   result always says which strategy ran; substring (the default) carries no marker, so the evidence
   checker's read of `matches[].path` / `files_scanned` is unchanged.
-- `git` / `run` → `SandboxService.run_command(mode="read_only")`: `ls`, `wc`, and a read-only git
-  subcommand allowlist, with `-C`, `--git-dir`, `--work-tree`, `--output`, `-o`, `--ext-diff` and
-  `--no-index` refused.
+- `git` / `run` → `SandboxService.run_command(mode="read_only")`: `ls`, `wc`, and read-only git — an
+  **exact-match table** of subcommands and the options each accepts (`engine/git_readonly.py`, §5
+  below), so an option the table does not name is refused whatever git would have made of its
+  spelling.
 
 A refused request is **feedback, not failure**: the refusal is returned to the librarian (so it can
 ask for something else) and logged at `warn`. The goal is unaffected.
@@ -849,6 +934,16 @@ the same way it fails mid-planning: `design_contract_missing`.
 
 `action=delete` ⇒ `content` null. Paths contained by workspace.
 
+**A batch is applied completely or not at all** (`FileSystemService.apply`; audit of 2026-09-29, M4).
+Phase one resolves and validates every operation before anything is written — containment, `.git`, the
+action name, a target that is a directory, each `edit`'s search text — against a virtual view that reflects
+the operations before it in the same batch, so an `edit` of a file the batch just created sees it. Only
+then are the writes made, and a write that fails half-way (a full disk, a permission) puts back what the
+batch had already touched: content, mode, deleted files and any directories it created. So a refused batch,
+or one that failed while writing, leaves the tree byte-identical, which is what makes it safe for the
+step to fail loudly instead of leaving half a change uncommitted and unannounced. A dry run performs phase
+one only. Nothing is written into a protected workspace root at all (`03` §1.4).
+
 ### 4.3 Verifier
 
 ```json
@@ -926,9 +1021,9 @@ raise one error naming every attempt
 | Code | Means |
 |---|---|
 | `missing_api_key` | the provider needs a credential and none is stored |
-| `unknown_protocol`, `invalid_base_url`, `secrets_unwritable` | the target cannot be constructed |
-| `provider_http` | the provider answered with an error status (401, 404, 429, 5xx) |
-| `provider_unreachable` | the connection was refused or timed out |
+| `unknown_protocol`, `invalid_base_url`, `secrets_unwritable` | the target cannot be constructed (`invalid_base_url` also covers a stored key that would be sent over plain http to a non-loopback host — docs/03 §1.2) |
+| `provider_http` | the provider answered with an error status (401, 404, 429, 5xx) — reported *after* the retries below, and carrying the provider's own reason |
+| `provider_unreachable` | the connection was refused, timed out, or dropped mid-stream |
 | `provider_bad_response` | the endpoint answered with something that is not JSON |
 | `agent_output_invalid` | a model answered, but not in the shape the contract requires |
 
@@ -950,8 +1045,33 @@ message included.
 
 `provider_unreachable` and `provider_bad_response` are new codes from the same work: a refused
 connection used to escape as a raw `httpx` exception and reach the goal as `internal_error` — a code
-that blames Codify for a provider that is merely not listening. `providers.post_json` is the single
-transport path that names both.
+that blames Codify for a provider that is merely not listening. `providers.post_json` (and `open_stream`, for
+the two streamed paths) is the single transport path that names both.
+
+#### 4.6.1 Transient failures: retried before they are failures
+
+A fallback is for a target that cannot be used; a provider that said "busy, ask again in two seconds"
+can be, so the transport asks again before anything above it hears about a failure (audit 2026-09-29, H5).
+
+| | |
+|---|---|
+| **Retried** | `408`, `425`, `429`, `500`, `502`, `503`, `504`, `529`, and a connection that was refused, timed out *connecting*, was reset, or hit a protocol error before any answer |
+| **Never retried** | `400`, `401`, `403`, `404`, `422` — the same request gets the same answer, and repeating a rejected key is how an account is locked. Nor a *read* timeout: the server may still be generating, and a second request doubles the work |
+| **Attempts** | `MAX_ATTEMPTS = 3`: the first and two retries |
+| **Wait** | exponential (`1 s`, `2 s`, capped at `20 s`) with a jitter factor in `[0.5, 1)`; a `Retry-After` header — seconds or an HTTP date — replaces it. One longer than `RETRY_AFTER_CAP_S = 30` is **reported, not waited for**: the message says how long the provider asked for |
+| **Streams** | retried until the response opens; **never after the first byte**. Deltas are already on screen, so a reset is `provider_unreachable` reading `<label> stream interrupted after N characters`, and the reply is not run again |
+| **Probe** | `test_connection` makes one attempt. It reports the first answer inside its 15 s deadline; a 429 is an answer |
+
+What the error says changed with it. `provider_http` used to read `anthropic 400` and nothing else,
+because the body — the only place a provider says *why* — was dropped. It now reads
+`<label> <status>: <the provider's message>` (`error.message` for Anthropic, OpenAI and Google, the
+`error` string for Ollama, the text for a proxy), one line, at most 300 characters, and with anything
+credential-shaped (`sk-…`, `AIza…`, `Bearer …`, `api_key=…`) and the exact credential the request
+carried replaced by `[redacted]` — so invariant 4 holds for text a provider wrote as well as text we did.
+An exhausted retry says so (`… (after 3 attempts)`). `ProviderError.status` carries the number for the
+two callers that ask "did the server reject *this request*" — the OpenAI-compatible `response_format` and
+`stream` fallbacks — which now fire only on a 4xx that repeating cannot change (`refused_the_request`),
+not on a 429 or a 5xx that has already had its retries.
 
 ### 4.7 Measuring the stages
 
@@ -1137,10 +1257,20 @@ both cards share one vocabulary of body labels.
 
 Two callers, two modes, one validator:
 
-- `mode="test"` — the verifier path only. Planner / fixer / critic / scribe output NEVER reaches this
-  function with an executable argv.
-- `mode="read_only"` — the librarian's `git` / `run` requests. `ls`, `wc` and a read-only git
-  subcommand allowlist only, so nothing the librarian can do changes the workspace.
+- `mode="test"` — the verifier's argv, and the conductor's `run_command` and `verify` moves **for an
+  approved goal only** (stored status `RUNNING`, not plan-only: `ExecutorService._write_allowed`, the same
+  gate `write` uses). Before approval the conductor's `run_command` runs in `read_only` mode, because this
+  allowlist admits the repository's own code and a turn has no approval step. Planner / fixer / critic /
+  scribe output NEVER reaches this function with an executable argv.
+- `mode="read_only"` — the librarian's `git` / `run` requests. `ls`, `wc` and read-only git
+  only, so nothing the librarian can do changes the workspace. Read-only git is specified in
+  "Read-only git" below.
+
+Every argv is a list of strings with no control character in it (`NUL` cannot be passed to a process
+at all, and the other control characters are newlines and escapes no allowlisted command has a reason
+to receive) — a refusal, not a crash, in both modes. Every command runs with **no stdin** (`/dev/null`):
+inherited, the engine's own stdin would be the command's, and `git shortlog` with no revision, or a
+test that calls `input()`, would wait out its whole timeout.
 
 `argv[0]` basename only (no `/`). Resolved as `shutil.which` then executed with `cwd=workspace.root_path`, `env` stripped to `PATH`,
 `HOME`, `LANG`, `TERM`, `VIRTUAL_ENV`, `PYTHONPATH`, `PYTHONHOME`, and `shell=False`, in a new session so a timeout can kill the
@@ -1154,9 +1284,58 @@ whole process group.
 | `pnpm` | same as npm |
 | `cargo` | `test` + optional `--`, `--lib`, `--bins`, `--quiet` |
 | `go` | `test` + `./...` or paths under root |
-| `git` | `status`, `diff`, `log -1` only (no write) |
+| `git` | `status`, `diff`, `log -1` only (no write); run hardened like read-only git, below |
 
 Anything else → `command_not_allowed`. No shell (`shell=False`).
+
+### Read-only git
+
+`engine/git_readonly.py` is the one owner of what a model may ask git to read. Both doors call it — the
+librarian's `run_command(mode="read_only")` and the conductor's `git_history` (`GitService.read_only`) —
+so the two cannot drift, and `sandbox.READ_ONLY_GIT_SUBCOMMANDS` and `GitService.READ_ONLY_ARGV` are
+both the table's own key set, not literals.
+
+**An option is refused unless the table names it, exactly.** This replaced a denylist of flag spellings,
+which failed four ways when it was run against real git: git accepts any unambiguous prefix of a long
+option (`git grep --open-files-in-pa="touch X"` started `touch`; `git branch -v --del NAME` deleted a
+ref); `git branch -v NAME` and `git tag --sort=x NAME` created refs, because the bare word is not a flag
+a denylist can see; `git diff <file outside the tree> /dev/null` printed a file from outside the
+workspace, because git turns a `diff` with a path outside the tree into `--no-index` on its own; and
+nothing looked at positionals at all. The table lists only history, diff, blame, search and ref
+listing options. It contains no option that writes (`--output`, `-d`, `-m`, `-c`,
+`--set-upstream-to`, `--edit-description`), runs a program (`--ext-diff`, `--textconv`, `-O`,
+`--open-files-in-pager`, `--show-signature`, `tag -v`, and a `--format`/`--pretty` that asks for a
+signature, which makes git run gpg), names a file (`--file`, `-f`, `--exclude-from`, `--orderfile`,
+`--contents`, `--ignore-revs-file`) or points git at another tree (`--no-index`, `--git-dir`,
+`--work-tree`, `-C`, `-c`, global options at all). A refusal names the options the subcommand does accept.
+
+- Value options are attached (`--since=DATE`) unless they are short and git itself consumes the next
+  word (`-n 5`, `-e PATTERN`), so the validator and git never disagree about which word was a value.
+- Every positional must stay inside the workspace (`FileSystemService.resolve`: no absolute path, no
+  `..`, no `.git`, symlinks followed), including the path half of `REV:path`. `HEAD~1..HEAD` is a range
+  and is allowed. The one exception is `git grep`'s own pattern.
+- `branch` and `tag` accept a positional only with `--list`/`-l`, where it is a pattern.
+
+**The child process.** Read-only git — and the verifier's `git status`/`diff`/`log -1` — starts as
+`git --no-pager -c core.fsmonitor=false SUBCOMMAND [--no-ext-diff --no-textconv] ARGS…` with an
+environment of `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE` and `TZ` plus `GIT_CONFIG_GLOBAL=/dev/null`,
+`GIT_CONFIG_NOSYSTEM`, `GIT_OPTIONAL_LOCKS=0` (a `status` otherwise rewrites the index), `GIT_TERMINAL_PROMPT=0`
+and `GIT_CEILING_DIRECTORIES` set to the workspace's parent, so a workspace that is not itself a
+repository cannot read the history of one above it. No provider key or boot token is in that
+environment: `GitService.read_only` used to inherit the engine's whole one. The conductor's door is
+also **bounded**: 60 seconds (`GitService.read_only_timeout_s`), after which the command's whole
+process group is stopped and the model gets a sentence saying so.
+
+**What this does not cover, on purpose.** The repository's *own* config (`.git/config`,
+`.gitattributes`) is trusted, exactly as it is when a developer runs git in that repository. A
+`core.fsmonitor`, `diff.external` or textconv driver there is neutralised above because those are the
+ones plain `status`/`diff`/`log -p` start; a `filter.<name>.clean` command in that config still runs
+when git compares the working tree, and there is no single switch for those. A workspace whose
+`.git/config` came from someone else is not made safe by this table.
+
+Proven by `tests/test_sandbox_read_only_git.py`, which runs real git against a real repository and
+asserts on the repository afterwards; its property tests are the ones that would have caught the class
+(no abbreviation of any listed option is accepted).
 
 **What this is, plainly, because the name oversells it: an argv-shape allowlist and nothing more.** It is
 not a sandbox in the containment sense, and the table above is not a boundary around the code that runs
@@ -1189,6 +1368,16 @@ CODIFY_ENGINE token=<hex> port=<int>
 `token` = 32 bytes CSPRNG hex (64 chars), created once and kept at `<state dir>/boot_token` (`0600`). Desktop reads this line, then attaches `Authorization: Bearer <token>` to HTTP and `?token=` is **forbidden** (query leakage). WS: first text frame from client `{"type":"auth","token":"<hex>"}` or HTTP header on the Upgrade.
 
 WS URL: `ws://127.0.0.1:<port>/ws/goals/{id}`. After auth, server sends events with `sequence > 0` live; client SHOULD `GET /goals/{id}/events?after=` for gap fill.
+
+The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
+once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with
+no new events never attempts — and every finished goal that was ever viewed (the UI closes the socket
+on each terminal status) left a poller re-reading the goal four times a second for nobody: idle engine
+CPU went 0.2 % → 3.6 % → 7.0 % → 13.9 % of a core over 50, 200 and 500 views, until restart (audit of
+2026-09-29, M9; `tests/test_ws_goal_lifecycle.py`). Frames a client sends are ignored. Close codes the
+client may act on: `4401` bad token, `4404` no such goal (checked only *after* auth, so an
+unauthenticated peer cannot probe ids). Neither changes by asking again, so `ui/src/goalStream.ts`
+treats both as final — no reconnect, `onGone(code)` — while any other close reconnects with backoff.
 
 ### 6.0 Engine-level frames
 
@@ -1277,8 +1466,8 @@ shell tails the engine's stderr and shows the tail in the app rather than inheri
 Two backends, one namespace. Names: `codify` service + username `providers/{slug}` for a provider key,
 and `codify/agents/{role}` for a role-scoped key. Keys are never written to SQLite and never echoed back.
 
-1. **OS keychain** (preferred): `keyring` — Linux Secret Service, macOS Keychain, Windows Credential
-   Manager. A `fail.Keyring` backend counts as *unavailable*: it accepts writes and raises on read, so
+1. **OS keychain** (preferred): `keyring` over the Linux Secret Service (GNOME Keyring, KWallet).
+   A `fail.Keyring` backend counts as *unavailable*: it accepts writes and raises on read, so
    the engine probes it once and falls back rather than reporting a key as saved that it cannot read.
 2. **Local file** (fallback): `~/.codify/secrets.json`, mode `0600`, parent directory `0700`, written
    atomically (temp file + `os.replace`) so a crash cannot truncate the store. `CODIFY_SECRETS`

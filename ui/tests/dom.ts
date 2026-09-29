@@ -59,6 +59,7 @@
  *   than a constant.
  */
 import type React from "react";
+import { withoutHooks } from "./tsxLoader.ts";
 
 /** The globals a jsdom window owns that `src/` may read. */
 const GLOBALS = [
@@ -380,7 +381,9 @@ function installCanvas(win: Window & typeof globalThis): void {
  * so React's effects do not outlive the document they were attached to.
  */
 export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T> {
-  const { JSDOM: Ctor } = await import("jsdom");
+  // With the loader's hooks off: on Node 22 a `load` hook breaks jsdom's require of
+  // an ES module. See `withoutHooks` for the measurement.
+  const { JSDOM: Ctor } = await withoutHooks(() => import("jsdom"));
   const instance = new Ctor("<!doctype html><html><body></body></html>", {
     url: "http://localhost/",
     pretendToBeVisual: true,

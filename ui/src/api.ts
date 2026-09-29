@@ -607,7 +607,13 @@ export async function browseWorkspace(): Promise<Workspace | null> {
     method: "POST",
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
-  if (!res.ok) return null;
+  // A refusal is not a cancel. The engine answers `{"cancelled": true}` when the person closed the
+  // dialog, and 503 `picker_unavailable` (with the reason) when no dialog could open; returning null
+  // for both made a picker that could not open indistinguishable from one that was dismissed.
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `HTTP ${res.status}`);
+  }
   const data = await res.json();
   if (data.cancelled || !data.workspace) return null;
   return data.workspace;

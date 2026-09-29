@@ -538,8 +538,11 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
             [], pids_matching(GUARDED_PICKER),
             "the engine opened the picker with no guard in front of it",
         )
-        self.assertNotEqual(
-            [], pids_matching(ORPHAN_PROBE),
+        # Waited for, not sampled: the shim is visible a moment before it has started its
+        # grandchild, and under a loaded suite that gap is wide enough to lose this race.
+        # The bound is unchanged in spirit — it still fails if the grandchild never appears.
+        self.assertTrue(
+            wait_until(ORPHAN_PROBE, matches=True, timeout=15),
             "the picker never spawned its grandchild",
         )
         before = wait_for_text(heartbeat)

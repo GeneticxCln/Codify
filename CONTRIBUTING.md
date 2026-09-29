@@ -2,6 +2,17 @@
 
 Thanks for helping. The bar for a change here is simple: **`make check` must pass.**
 
+From a fresh clone, get to a machine that can run it in two commands:
+
+```
+make setup     # .venv, the engine, the dev tools, npm ci
+make doctor    # what is still missing (system libraries, Node, a display), and how to install it
+```
+
+`make setup` uses a virtualenv because a modern distribution refuses `pip install` into the system
+Python (PEP 668). Once `./.venv` exists the Makefile puts it first on `PATH`, so nothing has to be
+activated; the desktop shell looks for the same interpreter. `make doctor` is read-only.
+
 ```
 make check
 ```
@@ -12,7 +23,7 @@ runs everything in one pass:
 |---|---|
 | `make lint` | `ruff check engine tests scripts benchmarks` — rules and target Python pinned in `pyproject.toml` |
 | `make typecheck` | `mypy` over the same files — config (3.10 floor, pydantic plugin) pinned in `pyproject.toml` |
-| `make test-ui` | the React/TypeScript unit tests in `ui/tests/` (needs Node 22.6+) |
+| `make test-ui` | the React/TypeScript unit tests in `ui/tests/` (needs Node 22.22.2+, 24.15+ or 26+; `npm test` says so itself when it is older) |
 | `make typecheck-ui-tests` | `tsc` over `ui/src` **and** `ui/tests` — the check `npm test` cannot do |
 | `make test` | full Python suite (411 tests today — the number moves, so trust the run) |
 | `make test-streams` | the concurrency/stream-isolation tests, **by name** (not just via discovery) |

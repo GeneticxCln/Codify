@@ -1,0 +1,60 @@
+```json
+{
+  "applies": false,
+  "artifact": "component",
+  "direction": "Rename greet to welcome everywhere in src/app.py and tests/test_app.py.",
+  "design_system": {
+    "name": "Codify Design System"
+  },
+  "tokens": {
+    "colors": [
+      {
+        "name": "primary-color",
+        "value": "#007BFF"
+      }
+    ],
+    "typography": [
+      {
+        "name": "body-font-family",
+        "value": "Arial, sans-serif"
+      }
+    ],
+    "spacing": "16px",
+    "radii": "24px"
+  },
+  "components": [
+    {
+      "name": "greet-component",
+      "purpose": "Displays a welcome message to the user."
+    }
+  ],
+  "conventions": {
+    "README.md": "This is a README file for the repository.",
+    "src/app.py": "The source code of the app module, where we need to rename 'greet' function to 'welcome'.",
+    "tests/test_app.py": "Contains tests for the app module. We need to update both call sites and import statements."
+  },
+  "constraints": {
+    "tokens_to_reuse": true,
+    "accessibility_floor": true
+  },
+  "acceptance": "The function greet should be renamed to welcome in src/app.py and tests/test_app.py, and the updated code must still pass all unit tests.",
+  "design_md": """
+Rename 'greet' to 'welcome' everywhere:
+- src/app.py: Rename 'greet' function to 'welcome'.
+- tests/test_app.py: Update both call sites and import statements.
+- README.md: This is a README file for the repository.
+
+Design conventions:
+- README.md: This is a README file for the repository.
+- src/app.py: The source code of the app module, where we need to rename 'greet' function to 'welcome'.
+- tests/test_app.py: Contains tests for the app module. We need to update both call sites and import statements.
+
+Constraints:
+- Tokens must be reused.
+- Accessibility should not be compromised.
+
+Acceptance criteria:
+The function greet should be renamed to welcome in src/app.py and tests/test_app.py, and the updated code must still pass all unit tests.
+"""
+}
+```

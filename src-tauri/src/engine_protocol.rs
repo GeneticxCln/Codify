@@ -67,7 +67,7 @@ pub(crate) fn parse_login_path(output: &str) -> Option<String> {
 
 /// The PATH the engine should run under: what this process already has, then every
 /// entry the login shell adds that it does not have yet — plus how many that was.
-/// POSIX-separated; the only caller is gated on `unix`.
+/// Colon-separated, as PATH is on every platform Codify runs on.
 ///
 /// A union, not a replacement, and the inherited half keeps precedence. Replacing the
 /// PATH would make the app resolve, say, `/usr/bin/python3` over the virtualenv
@@ -110,6 +110,49 @@ pub(crate) fn project_root_from(cwd: &Path) -> PathBuf {
     } else {
         cwd.to_path_buf()
     }
+}
+
+/// Whether `dir` is a checkout `python3 -m engine` can run in.
+fn holds_engine(dir: &Path) -> bool {
+    dir.join("engine").join("__main__.py").is_file()
+}
+
+/// The checkout the engine runs from, decided in the order a person would expect.
+///
+/// A window opened from the applications menu (a `.desktop` file, the Linux way to
+/// "install" a build that has no installer) starts in `$HOME`, and "the working
+/// directory is the checkout" — the only rule there was — turned every such launch into
+/// the "No engine to run" message. So, in order:
+///
+/// 1. **`CODIFY_ROOT`**, when set. It is taken *as given even when it is wrong*: a
+///    mistyped variable must come out as `launch_problem` naming that path, never be
+///    quietly replaced by a guess that happens to work on this machine and not the next.
+/// 2. **The working directory** (with `src-tauri` stripped), when it holds the engine.
+///    This is the dev flow, and it wins over the binary's location so that running a
+///    second checkout from inside it runs that checkout.
+/// 3. **An ancestor of the executable** that holds the engine. A binary built in place
+///    lives at `<checkout>/src-tauri/target/{debug,release}/codify`, so the checkout is
+///    a few parents up, and this is what makes a launcher work from any directory.
+/// 4. **The working directory anyway**, so the failure message names where the shell
+///    actually looked first.
+pub(crate) fn resolve_project_root(
+    explicit: Option<&str>,
+    exe: Option<&Path>,
+    cwd: &Path,
+) -> PathBuf {
+    if let Some(root) = explicit.map(str::trim).filter(|root| !root.is_empty()) {
+        return PathBuf::from(root);
+    }
+    let from_cwd = project_root_from(cwd);
+    if holds_engine(&from_cwd) {
+        return from_cwd;
+    }
+    if let Some(exe) = exe {
+        if let Some(found) = exe.ancestors().skip(1).find(|dir| holds_engine(dir)) {
+            return found.to_path_buf();
+        }
+    }
+    from_cwd
 }
 
 /// The interpreter `python3 -m engine` should actually run under: the checkout's own
@@ -194,8 +237,9 @@ pub(crate) fn launch_problem(root: &Path) -> Option<String> {
     }
     Some(format!(
         "No engine to run at {} — this shell starts `python3 -m engine` from the project \
-         checkout, so the app has to be launched from the Codify repository (with the \
-         engine's dependencies installed).",
+         checkout, so the app has to be launched from the Codify repository, from a binary \
+         built inside it, or with CODIFY_ROOT pointing at it (and with the engine's \
+         dependencies installed).",
         root.display()
     ))
 }
@@ -354,6 +398,73 @@ mod tests {
             };
             assert_eq!(expected, project_root_from(Path::new(cwd)), "cwd {cwd}");
         }
+    }
+
+    fn checkout(name: &str) -> PathBuf {
+        let dir = scratch_dir(name);
+        let engine = dir.join("engine");
+        std::fs::create_dir_all(&engine).expect("engine directory");
+        std::fs::write(engine.join("__main__.py"), "").expect("engine entry point");
+        dir
+    }
+
+    #[test]
+    fn a_launch_from_the_home_directory_finds_the_checkout_the_binary_was_built_in() {
+        let root = checkout("exe-ancestor");
+        let exe = root.join("src-tauri/target/release/codify");
+        let home = scratch_dir("exe-ancestor-home");
+
+        assert_eq!(root, resolve_project_root(None, Some(&exe), &home));
+    }
+
+    #[test]
+    fn the_working_directory_wins_when_it_holds_the_engine() {
+        // Running a second checkout from inside it must run that checkout, not the one the
+        // binary happens to sit in.
+        let here = checkout("cwd-wins-here");
+        let other = checkout("cwd-wins-other");
+        let exe = other.join("src-tauri/target/debug/codify");
+
+        assert_eq!(here, resolve_project_root(None, Some(&exe), &here));
+        assert_eq!(
+            here,
+            resolve_project_root(None, Some(&exe), &here.join("src-tauri"))
+        );
+    }
+
+    #[test]
+    fn codify_root_is_taken_as_given_even_when_it_is_wrong() {
+        let real = checkout("explicit-real");
+        let exe = real.join("src-tauri/target/debug/codify");
+        let mistyped = "/definitely/not/a/checkout";
+
+        let chosen = resolve_project_root(Some(mistyped), Some(&exe), &real);
+
+        assert_eq!(
+            PathBuf::from(mistyped),
+            chosen,
+            "a wrong CODIFY_ROOT was silently replaced"
+        );
+        assert!(launch_problem(&chosen).is_some());
+    }
+
+    #[test]
+    fn an_empty_codify_root_is_not_a_choice() {
+        let root = checkout("explicit-empty");
+        assert_eq!(root, resolve_project_root(Some("  "), None, &root));
+    }
+
+    #[test]
+    fn with_no_checkout_anywhere_the_working_directory_is_named_in_the_failure() {
+        let nowhere = scratch_dir("nowhere");
+        let exe = nowhere.join("bin/codify");
+
+        let chosen = resolve_project_root(None, Some(&exe), &nowhere);
+
+        assert_eq!(nowhere, chosen);
+        assert!(launch_problem(&chosen)
+            .expect("no engine here")
+            .contains("CODIFY_ROOT"));
     }
 
     #[test]

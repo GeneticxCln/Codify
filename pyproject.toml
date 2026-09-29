@@ -30,6 +30,10 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
     "mypy>=1.11",
+    # Starlette's TestClient prefers this over httpx and falls back to httpx with a
+    # deprecation warning; a later Starlette will require it. Tests only — the engine's
+    # own outbound calls stay on `httpx` above.
+    "httpx2>=2.13,<3",
     # Regenerates the checked-in logo/desktop icons on demand
     # (scripts/make_logo.py); nothing in the gate invokes it.
     "pillow>=10.0",
@@ -175,12 +179,36 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 #       and there is nowhere to log it — the failure is in the viewer's event
 #       handler, not in the run. Same shape as providers.py's usage sink, which
 #       is exempted for the same reason.
+# S103 (tests/test_conversations.py)  the read-only-migration test makes its temp
+#       directory traversable (0o755) so that an unprivileged user can reach a file it
+#       cannot write, which is how the test produces a real read-only failure when the
+#       suite runs as root (root ignores file modes). The directory holds one throwaway
+#       SQLite file the test created itself under the system temp root, and it is
+#       removed with it; nothing of the developer's is exposed. Scoped to that one file.
 "tests/*" = ["S101", "S603", "S607", "S608", "S108", "S310"]
+"tests/test_conversations.py" = ["S103"]
+# S103 (tests/test_state_permissions.py)  the test *creates* wide modes (0o755, 0o644) on
+#       directories and files under its own temp directory, to stand in for what an older build
+#       left on a real install and to prove the engine tightens them. Nothing it makes is
+#       ever a real state directory, and each is removed with the temp directory. Scoped to
+#       that one file.
+"tests/test_state_permissions.py" = ["S103"]
 "engine/app.py" = ["S110", "S603", "S607", "S608"]
 "engine/conductor.py" = ["S110"]
 "engine/db.py" = ["S110"]
 "engine/executor.py" = ["S101", "S110", "S608"]
 "engine/git.py" = ["S603"]
+# S108 (engine/fs.py)  `SYSTEM_ROOTS` names `/tmp` and `/var/tmp` as directories a workspace must
+#       never be. They are paths to *refuse*: nothing here creates, opens or writes a file at
+#       either, which is the risk the rule exists for. Scoped to that one file.
+"engine/fs.py" = ["S108"]
+# S603 (engine/library.py)  the regex worker. The argv is `sys.executable` and a script path
+#       this package computes from `__file__` — nothing a model or a request supplies. The
+#       model's pattern, the one untrusted input, travels as JSON on the child's stdin and is
+#       never part of an argv, so there is no argument to inject through. There is no shell.
+#       The process is started under `guarded_argv`/`guarded_env` in a session of its own and
+#       is killed at a hard limit; that is what the exemption buys (see `tests/test_library_regex_bound.py`).
+"engine/library.py" = ["S603"]
 # E402 (engine/__main__.py)  the import below the watchdog call is not an
 #       oversight to be tidied away — it is the whole file. `serve()` arms the
 #       parent watchdog only after it has pulled in engine.app and everything it

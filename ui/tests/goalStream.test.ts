@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 
 // api.ts reads localStorage at module load — stub it before the dynamic import.
@@ -13,7 +13,7 @@ interface SentSocket {
   sent: string[];
   onopen: (() => void) | null;
   onmessage: ((e: { data: string }) => void) | null;
-  onclose: (() => void) | null;
+  onclose: ((e: { code?: number }) => void) | null;
   onerror: (() => void) | null;
   closed: boolean;
 }
@@ -23,7 +23,7 @@ const sockets: SentSocket[] = [];
 class MockWebSocket {
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((e: { code?: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   closed = false;
   sent: string[] = [];
@@ -135,4 +135,89 @@ test("unparseable frames do not reach onEvent", () => {
   } finally {
     console.error = orig;
   }
+});
+
+// ── M9: a close the engine meant is not a dropped connection ─────────────────────────────────
+//
+// The engine closes with 4404 when the goal is gone and 4401 when the token was refused. Neither
+// changes on its own, and reconnecting forever at a 16 s cadence just re-asks a question that has
+// been answered. An ordinary drop (1006, a restarted engine) must still reconnect.
+
+test("a close for 'no such goal' (4404) is final: no reconnect, and the caller is told", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    sockets.length = 0;
+    const gone: number[] = [];
+    const reconnecting: number[] = [];
+    const handle = openGoalStream({
+      goalId: "goal-1",
+      onEvent: () => {},
+      onGone: (code) => gone.push(code),
+      onReconnecting: (n) => reconnecting.push(n),
+    });
+    lastSocket().onclose?.({ code: 4404 });
+
+    mock.timers.tick(120_000);
+
+    assert.equal(sockets.length, 1, "a socket was reopened for a goal that does not exist");
+    assert.deepEqual(gone, [4404]);
+    assert.deepEqual(reconnecting, []);
+    handle.close();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a close for a refused token (4401) is final too", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    sockets.length = 0;
+    const gone: number[] = [];
+    const handle = openGoalStream({ goalId: "goal-1", onEvent: () => {}, onGone: (code) => gone.push(code) });
+    lastSocket().onclose?.({ code: 4401 });
+
+    mock.timers.tick(120_000);
+
+    assert.equal(sockets.length, 1);
+    assert.deepEqual(gone, [4401]);
+    handle.close();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("an ordinary drop still reconnects, with backoff", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    sockets.length = 0;
+    const reconnecting: number[] = [];
+    const gone: number[] = [];
+    const handle = openGoalStream({
+      goalId: "goal-1",
+      onEvent: () => {},
+      onReconnecting: (n) => reconnecting.push(n),
+      onGone: (code) => gone.push(code),
+    });
+    lastSocket().onclose?.({ code: 1006 });
+    assert.deepEqual(reconnecting, [1]);
+    assert.equal(sockets.length, 1, "reconnects wait for their delay");
+
+    mock.timers.tick(1000);
+    assert.equal(sockets.length, 2, "an ordinary drop did not reconnect");
+
+    lastSocket().onclose?.({ code: 1006 });
+    mock.timers.tick(2000);
+    assert.equal(sockets.length, 3, "the second reconnect is on the backed-off delay");
+    assert.deepEqual(gone, []);
+    handle.close();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("closing the handle after a final close is harmless", () => {
+  sockets.length = 0;
+  const handle = openGoalStream({ goalId: "goal-1", onEvent: () => {} });
+  lastSocket().onclose?.({ code: 4404 });
+  assert.doesNotThrow(() => handle.close());
 });

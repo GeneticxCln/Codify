@@ -222,11 +222,12 @@ class TestDbAndServices(unittest.TestCase):
         self.assertEqual(self.goals.get(paused.id).status, "PAUSED")
         self.assertEqual(self.goals.get(done.id).status, "COMPLETED")
 
-        # A rescued goal is startable again: the failed status is a real exit,
-        # not another wedge.
+        # A rescued goal is not a wedge: FAILED is a real exit. It re-opens the way every finished
+        # goal does — as RUNNING, which is what a step retry and an apply both do (docs/04,
+        # terminal statuses). It does not go back to PENDING: no route moves a FAILED goal there.
         g = self.goals.get(planning.id)
-        updated = self.goals.update_status(g.id, g.version, "PENDING")
-        self.assertEqual(updated.status, "PENDING")
+        updated = self.goals.update_status(g.id, g.version, "RUNNING")
+        self.assertEqual(updated.status, "RUNNING")
 
     def test_the_rescue_names_which_of_the_two_deaths_it_was(self) -> None:
         """The same repair, two causes, and the message has to tell them apart.

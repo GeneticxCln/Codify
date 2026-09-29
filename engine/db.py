@@ -296,13 +296,23 @@ def connect(
     in that callback must not stop the engine from starting, so it is swallowed.
     """
     db_path = path or default_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if db_path.parent == home.codify_home():
+        # The state directory is ours: private. Anywhere else the *file* is ours and the
+        # directory is whoever's it was (see `home.ensure_private_dir`).
+        home.ensure_private_dir(db_path.parent)
+    else:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
     if db_path.is_dir():
         raise RuntimeError(f"database path is a directory: {db_path}")
+    home.ensure_private_file(db_path)
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.executescript(SCHEMA)
+    # SQLite gives the `-wal` and `-shm` files it creates the main file's mode, so a fresh
+    # database needs nothing here. An older build's did not, and they exist by now.
+    for suffix in ("-wal", "-shm"):
+        home.tighten_to_owner(Path(f"{db_path}{suffix}"))
     # ── migrations: an existing database gains this build's columns ──────
     # Every one of these goes through `_add_column`, whose only quiet outcome is
     # "the column is already there" — see its docstring for what the hand-rolled

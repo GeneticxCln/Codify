@@ -149,7 +149,44 @@ export function registerTsx(): void {
   if (registered) return;
   registered = true;
   installStorage();
-  module.registerHooks({
+  hooks = module.registerHooks(HOOKS);
+}
+
+/** The live registration, kept so `withoutHooks` can take it off and put it back. */
+let hooks: { deregister(): void } | null = null;
+
+/**
+ * Run `fn` with this loader's hooks taken off, then put them back.
+ *
+ * **Why this exists: a Node 22 bug, measured.** On Node 22.22.2 a `load` hook of
+ * *any* kind — including one that only calls `nextLoad` — breaks `require()` of a
+ * nested ES module: linking dies with `request for './fallback/encoding.js' is from
+ * a module not been linked`. jsdom 30 reaches exactly that (its CJS
+ * `html-encoding-sniffer` requires the ES module `@exodus/bytes`), so with the hooks
+ * registered `import("jsdom")` threw and 161 of the suite's tests failed. A
+ * `resolve`-only hook is fine, and so is no hook, and Node 24 has no such bug —
+ * which is why the suite passed for whoever wrote it.
+ *
+ * The hooks are only *needed* for `src/` and `tests/`, and jsdom is neither, so it is
+ * loaded with them off. Nothing else is imported meanwhile: this is awaited by the
+ * one caller that wants a DOM, at a point where no test module is loading.
+ *
+ * A no-op when the hooks were never registered, so a test that does not use the
+ * loader can still call it.
+ */
+export async function withoutHooks<T>(fn: () => Promise<T>): Promise<T> {
+  const live = hooks;
+  if (live === null) return fn();
+  live.deregister();
+  hooks = null;
+  try {
+    return await fn();
+  } finally {
+    hooks = module.registerHooks(HOOKS);
+  }
+}
+
+const HOOKS: Parameters<typeof module.registerHooks>[0] = {
     // Every import in `src/` is extensionless, because vite and tsc both resolve
     // it that way and rewriting the source to suit a test runner would be the
     // tail wagging the dog. So the extension is supplied here instead, and only
@@ -210,5 +247,4 @@ export function registerTsx(): void {
       });
       return { format: "module", source: code, shortCircuit: true };
     },
-  });
-}
+};

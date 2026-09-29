@@ -1,6 +1,3 @@
-// Prevents additional console window on Windows in release.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 mod browser;
 mod engine_log;
 mod engine_protocol;
@@ -968,14 +965,6 @@ const LOGIN_SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 async fn login_shell_path() -> Option<(String, String)> {
     use std::process::Stdio;
 
-    // POSIX-only: there is no login-shell convention to ask on Windows, and its PATH
-    // separator is `;`, which neither the probe nor `merge_path` speaks. Compiled
-    // rather than `cfg`-ed out so the two halves of this feature stay checked on
-    // every platform.
-    if cfg!(not(unix)) {
-        return None;
-    }
-
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|s| !s.trim().is_empty())?;
@@ -1082,9 +1071,11 @@ async fn launch_engine_once(shared: SharedEngineState) -> LaunchOutcome {
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-    let project_root = std::env::current_dir()
-        .map(|cwd| engine_protocol::project_root_from(&cwd))
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let project_root = engine_protocol::resolve_project_root(
+        std::env::var("CODIFY_ROOT").ok().as_deref(),
+        std::env::current_exe().ok().as_deref(),
+        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    );
 
     // Started outside the checkout, `python3 -m engine` cannot import anything: it
     // would come up only to print a traceback on a stderr no window user sees and

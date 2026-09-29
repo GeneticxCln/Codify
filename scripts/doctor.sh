@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Say what this machine is missing before the gate says it in a worse way.
+#
+# The README's prerequisites had drifted from what `make ci` actually needs: it listed
+# a Node floor that was wrong, no system libraries at all for the desktop shell (the
+# first `cargo check` on a fresh machine fails on a missing `webkit2gtk-4.1`), no
+# display for the one Rust test that builds real GTK widgets, and installed Python
+# dependencies with a command that modern distributions refuse (PEP 668). A list in
+# prose is where that drift lives, so this asks the machine instead.
+#
+# Read-only. It installs nothing and changes nothing; every line is a fact about this
+# machine plus, when something is missing, the command that fixes it.
+#
+# Usage: scripts/doctor.sh        (or: make doctor)
+# Exit:  0 everything `make ci` needs is present, 1 something is missing.
+#
+# Only Debian/Ubuntu package names were verified (they are what a real `cargo check`
+# was run against). The dnf and pacman lines follow Tauri's published prerequisites and
+# are best effort; the script says so rather than presenting them as tested.
+#
+# DOCTOR_TOOL_PATH replaces PATH for *finding tools only* — the script's own grep and sed
+# keep the real one. That is what lets the tests give it a machine with things missing.
+
+set -uo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tool_path="${DOCTOR_TOOL_PATH:-$PATH}"
+
+missing=0
+hints=()
+
+find_tool() { PATH="$tool_path" command -v "$1" 2>/dev/null; }
+have() { find_tool "$1" >/dev/null; }
+# Run a discovered tool by its resolved path, so the same PATH decides both the
+# question "is it there" and the answer to "what does it say".
+run() { local bin; bin="$(find_tool "$1")" || return 127; shift; "$bin" "$@"; }
+
+ok() { printf '  ok       %s\n' "$1"; }
+bad() {
+  printf '  MISSING  %s\n' "$1"
+  missing=1
+  [ -n "${2:-}" ] && hints+=("$2")
+}
+
+echo "Codify doctor — what 'make ci' needs, checked on this machine"
+echo
+
+echo "Python (the engine and the gate)"
+if have python3; then
+  if run python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+    ok "python3 $(run python3 -c 'import platform; print(platform.python_version())') (needs 3.10 or newer)"
+  else
+    bad "python3 is older than 3.10" "Install Python 3.10 or newer; the engine is booted as 'python3 -m engine'."
+  fi
+  # Debian and Ubuntu ship venv separately, and a bare `python3 -m venv` then fails with
+  # a message about ensurepip that does not say which package to install.
+  if run python3 -c 'import ensurepip, venv' 2>/dev/null; then
+    ok "python3 can create a virtual environment (venv + ensurepip)"
+  else
+    bad "python3 cannot create a virtual environment" "On Debian/Ubuntu: sudo apt install python3-venv"
+  fi
+else
+  bad "python3 is not installed" "Install Python 3.10 or newer."
+fi
+if have uv || have python3.10; then
+  ok "a Python 3.10 for the declared-minimum leg ($(have uv && echo uv || echo python3.10))"
+else
+  bad "neither uv nor python3.10 — 'make ci' cannot provision its 3.10 leg" \
+    "Install uv (https://docs.astral.sh/uv/) or python3.10; the floor leg never skips."
+fi
+echo
+
+echo "Node (the UI)"
+if have node && have npm; then
+  if run node "$root/ui/scripts/check-node.mjs" >/dev/null 2>&1; then
+    ok "node $(run node --version) and npm $(run npm --version)"
+  else
+    bad "node $(run node --version) is outside the range the UI tests support" \
+      "Use Node 22.22.2 or newer 22, 24.15 or newer 24, or 26+ (jsdom 30's own range)."
+  fi
+else
+  bad "node and/or npm not installed" "Install Node 22.22.2+, 24.15+ or 26+ (which brings npm)."
+fi
+echo
+
+echo "Rust and the desktop shell's system libraries"
+if have cargo && have rustc; then
+  ok "$(run rustc --version)"
+else
+  bad "cargo/rustc not installed" "Install Rust with rustup: https://rustup.rs"
+fi
+if have pkg-config; then
+  ok "pkg-config"
+  libs_missing=()
+  for lib in webkit2gtk-4.1 gtk+-3.0 libsoup-3.0 librsvg-2.0 openssl; do
+    if run pkg-config --exists "$lib"; then ok "$lib"; else libs_missing+=("$lib"); fi
+  done
+  if [ "${#libs_missing[@]}" -gt 0 ]; then
+    bad "system libraries not found by pkg-config: ${libs_missing[*]}" \
+"Debian/Ubuntu (verified): sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev libssl-dev
+  Fedora (per Tauri's docs, not verified here): sudo dnf install gcc pkgconf-pkg-config webkit2gtk4.1-devel gtk3-devel libsoup3-devel librsvg2-devel openssl-devel
+  Arch (per Tauri's docs, not verified here): sudo pacman -S base-devel webkit2gtk-4.1 gtk3 libsoup3 librsvg openssl"
+  fi
+else
+  bad "pkg-config is not installed" "Debian/Ubuntu: sudo apt install build-essential pkg-config"
+fi
+echo
+
+echo "A display (one Rust test builds real GTK widgets and says so loudly without one)"
+if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+  ok "a display is available (${DISPLAY:-$WAYLAND_DISPLAY})"
+elif have xvfb-run; then
+  ok "no display, but xvfb-run is installed — 'make check-tauri' will use it"
+else
+  bad "no display and no xvfb-run" "Debian/Ubuntu: sudo apt install xvfb   (Fedora: xorg-x11-server-Xvfb, Arch: xorg-server-xvfb)"
+fi
+echo
+
+echo "Git"
+if have git; then ok "$(run git --version)"; else bad "git is not installed" "Install git."; fi
+echo
+
+if [ "$missing" -eq 0 ]; then
+  echo "Everything 'make ci' needs is here. Next: make setup && make ci"
+  exit 0
+fi
+
+echo "Something is missing. How to fix it:"
+for hint in "${hints[@]}"; do
+  printf '  - %s\n' "$hint"
+done
+exit 1

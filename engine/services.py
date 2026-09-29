@@ -10,7 +10,13 @@ from collections.abc import Callable
 import sqlite3
 
 from engine.db import dumps, row_to_dict
-from engine.fs import BINARY_SNIFF_BYTES, FileSystemService, PathEscapeError, looks_binary
+from engine.fs import (
+    BINARY_SNIFF_BYTES,
+    FileSystemService,
+    PathEscapeError,
+    looks_binary,
+    protected_root_reason,
+)
 from engine.models import (
     BUILTIN_PROVIDERS,
     PROVIDER_SLUG_RE,
@@ -39,6 +45,7 @@ from engine.providers import (
     Keychain,
     ProviderError,
     ProviderFactory,
+    key_destination_problem,
     validate_local_base_url,
 )
 
@@ -318,6 +325,29 @@ class AgentRegistryService:
                 base_url_field="fallback_base_url",
                 previous_provider=cfg.fallback_provider,
             )
+        # A key is never saved toward, or pointed at, a destination that would send it in the
+        # clear — and this runs *before* the key is stored, so a refused save leaves no secret
+        # behind. Only refused when there is a key: a keyless server on the LAN is a real setup
+        # and has nothing to protect. `ProviderFactory.build` holds the same rule when a
+        # request is made, so this is the early, readable half of it.
+        switched = data.get("provider") != cfg.provider
+        for label, protocol, base_url, key in (
+            (
+                "base_url", data.get("protocol"), data.get("base_url"),
+                raw_key
+                # A role key does not follow a provider switch (see below), so it is not in play.
+                or ("" if switched else self._keychain.get(data.get("api_key_ref")))
+                or self._keychain.get_provider_key(data["provider"]),
+            ),
+            (
+                "fallback_base_url", data.get("fallback_protocol"), data.get("fallback_base_url"),
+                self._keychain.get_provider_key(data["fallback_provider"]) if data.get("fallback_provider") else "",
+            ),
+        ):
+            if key and protocol != "ollama" and base_url:
+                problem = key_destination_problem(base_url)
+                if problem is not None:
+                    raise ApiError(400, "invalid_base_url", f"{label}: {problem}")
         if raw_key:
             try:
                 data["api_key_ref"] = self._keychain.set(role, raw_key)
@@ -399,6 +429,22 @@ class AgentRegistryService:
         }
 
 
+# A goal that reaches one of these stays there — except by the moves in `REOPENED_BY`, which are
+# `POST /goals/{id}/apply` (a completed dry run, or a failed one) and the step retry, both of which
+# re-open a finished goal as RUNNING. Nothing re-opens CANCELLED: retry, apply and start all refuse it.
+TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+REOPENED_BY: dict[str, frozenset[str]] = {
+    "COMPLETED": frozenset({"RUNNING"}),
+    "FAILED": frozenset({"RUNNING"}),
+}
+
+
+def may_change_status(current: str, target: str) -> bool:
+    if current not in TERMINAL_STATUSES or target == current:
+        return True
+    return target in REOPENED_BY.get(current, frozenset())
+
+
 class WorkspaceService:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._db = conn
@@ -417,6 +463,9 @@ class WorkspaceService:
                 "root_path refuses to be the filesystem root — a workspace that "
                 "contains every path makes containment checks meaningless",
             )
+        protected = protected_root_reason(Path(root))
+        if protected is not None:
+            raise ApiError(400, "invalid_root", f"root_path {root} is not accepted: {protected}")
         ws = Workspace(id=str(uuid.uuid4()), name=body.name, root_path=root, created_at=time.time())
         try:
             self._db.execute(
@@ -1666,7 +1715,20 @@ class GoalService:
         The event is published here rather than by callers so *every* status
         change reaches live streams — pause and cancel used to write the DB and
         stay silent, leaving open chats to discover the change by polling.
+
+        A goal that has reached a terminal status stays there, except by the two
+        documented moves that re-open it (`may_change_status`): `CANCELLED` is a
+        person's decision, and `run_chat` used to end with an unconditional
+        `COMPLETED` that overwrote it. Repeating the status a goal already has is
+        not a move and is allowed.
         """
+        row = self._db.execute("SELECT status FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        if row is None:
+            raise ApiError(404, "unknown_goal", "goal not found")
+        if not may_change_status(row["status"], status):
+            raise ApiError(
+                409, "illegal_status", f"a {row['status']} goal cannot become {status}",
+            )
         now = time.time()
         cur = self._db.execute(
             "UPDATE goals SET status=?, version=version+1, updated_at=? WHERE id=? AND version=?",

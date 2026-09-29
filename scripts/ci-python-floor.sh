@@ -48,7 +48,7 @@ requirements="$root/engine/requirements.txt"
 # What `make lint` and `make typecheck` need on PATH. Not engine runtime dependencies:
 # the CI job installed them separately, and pyproject.toml's `dev` extra pins the same
 # floors.
-tools=( "ruff>=0.6" "mypy>=1.11" )
+tools=( "ruff>=0.6" "mypy>=1.11" "httpx2>=2.13,<3" )
 
 python="$venv/bin/python"
 stamp_file="$venv/.ci-python-floor-stamp"

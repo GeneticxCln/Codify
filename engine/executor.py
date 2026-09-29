@@ -48,6 +48,14 @@ from engine.conductor import (
     STEP_TOOLS,
     Conductor,
 )
+# Re-exported (the `as` form is what tells mypy so): `from engine.executor import extract_json` still resolves.
+from engine.replies import (
+    REPLY_KEYS as REPLY_KEYS,
+    REPLY_TOLERATES_TRUNCATION as REPLY_TOLERATES_TRUNCATION,
+    _repair_prompt,
+    coerce_object,
+    extract_json as extract_json,
+)
 from engine.default_prompts import (
     DEFAULT_PROMPTS,
     DESIGN_BRIEF_PROMPT,
@@ -69,7 +77,7 @@ from engine.webview_bridge import (
     format_navigation,
     format_page,
 )
-from engine.fs import FileSystemService, PathEscapeError
+from engine.fs import FileSystemService, PathEscapeError, ProtectedRootError
 from engine.git import GitService
 from engine.library import (
     MAX_ROUND_CHARS,
@@ -99,7 +107,7 @@ from engine.providers import (
     ProviderError,
 )
 from engine.role_repair import config_problems
-from engine.sandbox import CommandNotAllowed, SandboxService
+from engine.sandbox import CommandNotAllowed, SandboxService, validate_argv
 from engine.services import AgentRegistryService, ApiError, GoalService, WorkspaceService
 from engine.skills import SkillSet, load_skills
 from engine.toolcall import ToolSpec
@@ -131,6 +139,19 @@ class AgentOutputInvalid(Exception):
         # that role's config, credential, and discovered models instead of
         # making the user work out from the message which agent to go and check.
         self.role = role
+
+
+class PathRefused(AgentOutputInvalid):
+    """A fixer path the workspace refused, carried through the re-ask with its own code.
+
+    An `AgentOutputInvalid` in every way that matters to `run_agent` (one re-ask, then the fallback rule),
+    but its `code` is `path_escape`, so a step that still cannot name a legal path fails with the code the UI
+    and the stats already know that failure by.
+    """
+
+    def __init__(self, message: str, role: str | None = None):
+        super().__init__(message, role=role)
+        self.code = "path_escape"
 
 
 class TestsFailed(AgentOutputInvalid):
@@ -553,27 +574,6 @@ def _as_read_int(value: Any, default: int | None) -> int | None:
     return n if n >= 1 else default
 
 
-def extract_json(raw: str) -> Any:
-    raw = (raw or "").strip()
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        raw = "\n".join(lines).strip()
-    start = -1
-    for i, ch in enumerate(raw):
-        if ch in ("{", "["):
-            start = i
-            break
-    if start != -1:
-        end = max(raw.rfind("}"), raw.rfind("]"))
-        if end > start:
-            raw = raw[start : end + 1]
-    return json.loads(raw)
-
-
 class _CallAccounting:
     """One model call's books: the `usage` event it publishes, and the numbers
     the recorder reads back for the same call.
@@ -622,6 +622,17 @@ class _CallAccounting:
 
     def duration_ms(self) -> int:
         return int((time.monotonic() - self._started) * 1000)
+
+
+def _shape(value: Any) -> str:
+    """A value's kind, as a person would name it in an error."""
+    if value is None:
+        return "null"
+    if isinstance(value, list):
+        return "a list"
+    if isinstance(value, str):
+        return "a string"
+    return type(value).__name__
 
 
 class AgentOrchestrator:
@@ -865,6 +876,7 @@ class AgentOrchestrator:
     async def run_agent(
         self, role: AgentRole, goal_id: str, step_id: str | None, user_prompt: str,
         system: str | None = None, raw_output: bool = False,
+        accept: Callable[[Any], None] | None = None,
     ) -> Any:
         """Run one sub-agent call, on its primary target or its fallback.
 
@@ -895,6 +907,13 @@ class AgentOrchestrator:
         which then tripped the *fallback* chain, so a perfectly good answer was
         discarded and retried against a second provider before the turn failed.
         The parse is the roles' contract, not `run_agent`'s.
+
+        `accept` is the caller's own test of a reply that parsed: it is given the parsed value and raises
+        `ValueError` or `AgentOutputInvalid` when the reply cannot be *used* — the fixer's edit that matches
+        the wrong number of times, an entry the contract refuses. It gets the same one same-model re-ask a
+        reply that would not parse gets, with its reason quoted to the model, because the caller knows
+        exactly what is wrong and the model can act on it (audit of 2026-09-29, 3.3). Whatever `accept`
+        does on success it must be able to do again after a failure: a refused reply writes nothing.
         """
         goal = self.goals.get(goal_id)
         _ = goal  # kept for interface symmetry; config comes from the registry
@@ -929,7 +948,6 @@ class AgentOrchestrator:
             books = self._accounting(
                 goal_id, step_id, role, target.provider, model_name, call_started,
             )
-            recorded_usage = books.usage
             provider.usage_sink = books.sink
             on_delta, flush_deltas = self._delta_publisher(goal_id, step_id, role, target.provider, model_name)
             provider.on_delta = on_delta
@@ -970,34 +988,132 @@ class AgentOrchestrator:
             finally:
                 provider.on_delta = None
             flush_deltas(raw)
-            if self.tracer is not None and self.tracer.enabled(goal_id):
-                # After the call, before the parse: a reply the engine could not
-                # use is still what the model said, and a recording that dropped
-                # the malformed ones would replay a run that never failed.
-                # Re-asked here rather than reusing `tracing` because the flag
-                # is a per-call read and the two are the same question; the
-                # narrowing this needs is the point.
-                self.tracer.record(
-                    goal_id, step_id,
-                    role=role, provider=target.provider, model=model_name,
-                    temperature=float(target.temperature),
-                    max_tokens=int(target.max_tokens),
-                    system_prompt=system, user_prompt=user_prompt, response=str(raw),
-                    usage=recorded_usage,
-                    duration_ms=books.duration_ms(),
-                )
+            # After the call, before the parse: a reply the engine could not use is still what
+            # the model said, and a recording that dropped the malformed ones would replay a run
+            # that never failed.
+            self._trace_call(goal_id, step_id, role, target, model_name, system, user_prompt, raw, books)
+            if raw_output:
+                return raw
+            expect = REPLY_KEYS.get(role, ())
+            tolerate_cut = role in REPLY_TOLERATES_TRUNCATION
+            what = "non-JSON output"
             try:
-                return raw if raw_output else extract_json(raw)
+                parsed = coerce_object(role, extract_json(raw, expect, repair_truncation=tolerate_cut))
+            except (ValueError, TypeError) as exc:
+                problem = str(exc)
+            else:
+                try:
+                    if accept is not None:
+                        accept(parsed)
+                    return parsed
+                except (ValueError, TypeError, AgentOutputInvalid) as exc:
+                    problem = getattr(exc, "message", None) or str(exc)
+                    what = "a reply that could not be used"
+
+            # One re-ask, of the *same* target, before anything else is tried: a small model's single
+            # formatting slip is the commonest way a step used to fail, and the remedy costs one short
+            # call against a step's worth of work (audit of 2026-09-29, H4). The slip is recorded as
+            # the failed call it was — the cost of a model that needs this is something to see — and
+            # the second call has books of its own, so its tokens and duration are its own.
+            self.goals.publish(self._event(
+                goal_id, step_id, "agent_call_failed",
+                {
+                    "role": role,
+                    "provider": target.provider,
+                    "model": model_name,
+                    "target": label,
+                    "code": "agent_output_invalid",
+                    "message": f"{role} returned {what}: {problem}; asking the same model once more",
+                    "retrying": True,
+                    "duration_ms": books.duration_ms(),
+                },
+            ))
+            repair_started = time.monotonic()
+            repair_books = self._accounting(
+                goal_id, step_id, role, target.provider, model_name, repair_started,
+            )
+            provider.usage_sink = repair_books.sink
+            repair_prompt = _repair_prompt(user_prompt, problem, str(raw))
+            try:
+                repaired = await provider.complete(
+                    system_prompt=system,
+                    user_prompt=repair_prompt,
+                    model=model_name,
+                    temperature=target.temperature,
+                    max_tokens=target.max_tokens,
+                    num_ctx=target.ollama_num_ctx,
+                    keep_alive=target.ollama_keep_alive,
+                )
+            except ProviderError as exc:
+                self.goals.publish(self._event(
+                    goal_id, step_id, "agent_call_failed",
+                    {
+                        "role": role,
+                        "provider": target.provider,
+                        "model": model_name,
+                        "target": label,
+                        "code": exc.code,
+                        "message": exc.message,
+                        "duration_ms": repair_books.duration_ms(),
+                    },
+                ))
+                failures.append((label, target.provider, self._provider_failure(role, target, label, exc)))
+                if exc.code not in FALLBACK_TRIGGER_CODES:
+                    break
+                continue
+            self._trace_call(
+                goal_id, step_id, role, target, model_name, system, repair_prompt, repaired, repair_books,
+            )
+            try:
+                parsed = coerce_object(role, extract_json(repaired, expect, repair_truncation=tolerate_cut))
             except (ValueError, TypeError) as exc:
                 failures.append((
                     label, target.provider,
-                    AgentOutputInvalid(f"{role} returned non-JSON output: {exc}", role=role),
+                    AgentOutputInvalid(
+                        f"{role} returned non-JSON output after one repair attempt: {exc}", role=role,
+                    ),
                 ))
+                if "agent_output_invalid" not in FALLBACK_TRIGGER_CODES:
+                    break
+                continue
+            try:
+                if accept is not None:
+                    accept(parsed)
+                return parsed
+            except (ValueError, TypeError, AgentOutputInvalid) as exc:
+                refused = AgentOutputInvalid(
+                    f"{role} returned a reply that could not be used after one repair attempt: "
+                    f"{getattr(exc, 'message', None) or exc}",
+                    role=role,
+                )
+                # A refusal with a code of its own (a path the workspace refused) keeps it.
+                refused.code = getattr(exc, "code", refused.code)
+                failures.append((label, target.provider, refused))
                 if "agent_output_invalid" not in FALLBACK_TRIGGER_CODES:
                     break
                 continue
 
         raise self._all_targets_failed(role, failures)
+
+    def _trace_call(
+        self, goal_id: str, step_id: str | None, role: str, target: Any, model_name: str,
+        system: str, user_prompt: str, raw: Any, books: _CallAccounting,
+    ) -> None:
+        """Hand one finished call to the recorder, when this goal asked to be recorded.
+
+        Asked again here rather than remembered because the flag is a per-call read.
+        """
+        if self.tracer is None or not self.tracer.enabled(goal_id):
+            return
+        self.tracer.record(
+            goal_id, step_id,
+            role=role, provider=target.provider, model=model_name,
+            temperature=float(target.temperature),
+            max_tokens=int(target.max_tokens),
+            system_prompt=system, user_prompt=user_prompt, response=str(raw),
+            usage=books.usage,
+            duration_ms=books.duration_ms(),
+        )
 
 
 @dataclass
@@ -1018,9 +1134,14 @@ class _Conducted:
     answer: str | None
     exhausted: bool
     planned: bool
+    # The person cancelled while it ran. Neither an answer nor a failure: the turn is over,
+    # and nothing this run produced may be published or allowed to move the goal's status.
+    cancelled: bool = False
 
     @property
     def finished(self) -> bool:
+        if self.cancelled:
+            return False
         if self.answer is None:
             return False
         if self.exhausted and not self.planned:
@@ -1174,9 +1295,36 @@ class ConductorTools:
         if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
             return "run_command takes a list of strings, e.g. [\"pytest\", \"-q\"]"
         reason = str(args.get("reason") or "").strip()
-        # `mode="test"`, the same mode the verifier's argv runs in. The
-        # conductor is not the librarian, so it gets the test allowlist
-        # rather than the read-only one — but it does not get a *wider* one.
+        argv = [str(a) for a in argv]
+        # What the test allowlist admits is the repository's *own code*: `python3
+        # evil.py`, `pytest` (which imports every conftest.py it finds), `npm run` of any
+        # script, `cargo test`, `go test`. docs/03 §1.4 accepts that for a goal a person
+        # has approved. A turn has no approval step, so until the goal is RUNNING this
+        # tool is the librarian's: `ls`, `wc` and read-only git, which cannot execute
+        # anything in the workspace. The gate is `write`'s own, and it reads the stored
+        # status, so nothing the model says can move it.
+        approved, _ = self.service._write_allowed(self.goal_id)
+        if not approved:
+            fs = FileSystemService(self.root)
+            try:
+                validate_argv(argv, fs, mode="read_only")
+            except CommandNotAllowed as refusal:
+                try:
+                    validate_argv(argv, fs, mode="test")
+                except CommandNotAllowed:
+                    # Not a command any mode allows: the ordinary refusal, and it must
+                    # not suggest that approval would change it.
+                    raise refusal from None
+                raise CommandNotAllowed(
+                    f"`{argv[0]}` runs this project's own code, and this goal has no "
+                    "approved plan: nothing in the repository runs until the user has "
+                    "approved a plan by starting it. Until then only reading commands run "
+                    "(ls, wc, git history). Say what you would run and why, propose the "
+                    "change as a plan, and stop."
+                ) from None
+        # `mode="test"` once approved, the same mode the verifier's argv runs in. The
+        # conductor is not the librarian, so it gets the test allowlist rather than the
+        # read-only one — but it does not get a *wider* one.
         #
         # Off the event loop, and under the lock the verifier already takes.
         # This runs a real process for up to two minutes and it used to run it
@@ -1189,7 +1337,8 @@ class ConductorTools:
         # `CommandNotAllowed` — the behaviour this tool already had.
         async with self.service._sandbox_lock:
             result = await asyncio.to_thread(
-                self.service.sandbox.run_command, self.root, [str(a) for a in argv], mode="test",
+                self.service.sandbox.run_command, self.root, argv,
+                mode="test" if approved else "read_only",
             )
         return format_command(result) + (f"\n(reason given: {reason})" if reason else "")
 
@@ -2010,7 +2159,9 @@ class ExecutorService:
                 round_no += 1
                 cancelled = False
                 async with self._stage(goal_id, "planner", "planner", ordinal=round_no) as plan_stage:
-                    out = await self.orchestrator.run_agent("planner", goal_id, None, prompt)
+                    out = await self.orchestrator.run_agent(
+                        "planner", goal_id, None, prompt, accept=self._accept_plan_reply,
+                    )
                     # A cancel that landed while the planner was thinking must
                     # win: a goal the user cancelled must not reappear as PENDING
                     # with a plan they explicitly stopped. (PLANNING is a legal
@@ -2231,6 +2382,12 @@ class ExecutorService:
 
         if root:
             conducted = await self._conduct(goal_id, goal, root, intent=intent)
+            if conducted.cancelled:
+                # The user stopped this turn. `run_planning` guards its writes for exactly this;
+                # `run_chat` did not, and ended with an unconditional COMPLETED that overwrote
+                # CANCELLED and published the reply anyway.
+                self._log(goal_id, None, "info", "cancelled while the conductor was running — nothing more was done")
+                return
             if conducted.finished:
                 reply = _as_prose(conducted.answer or "") or "(no answer)"
                 self.goals.publish(self._event(
@@ -2311,6 +2468,8 @@ class ExecutorService:
             reply = _as_prose(await self._turn_reply(goal_id, goal)) or "(no answer)"
         except (ProviderError, AgentNotConfigured) as exc:
             self._fail(goal_id, None, getattr(exc, "code", "provider_error"), str(exc))
+            return
+        if self._is_cancelled(goal_id):
             return
         self.goals.publish(self._event(
             goal_id, None, "log", {"level": "info", "message": reply, "turn": True},
@@ -2498,6 +2657,8 @@ class ExecutorService:
             goal_id, goal, ws.root_path or "",
             prompt_override=prompt, intent="code_change",
         )
+        if result.cancelled:
+            return
         if result.answer:
             self.goals.publish(self._event(
                 goal_id, None, "log",
@@ -2680,6 +2841,7 @@ class ExecutorService:
             ),
             fallback=(fallback[0], fallback[1]) if fallback is not None else None,
             on_fallback=self._conductor_fallback_notice(goal_id, role, targets),
+            cancelled=lambda: self._is_cancelled(goal_id),
             num_ctx=cfg.ollama_num_ctx,
             keep_alive=cfg.ollama_keep_alive,
         )
@@ -2704,6 +2866,7 @@ class ExecutorService:
             answer=answer,
             exhausted=conductor.exhausted,
             planned=bool(self.goals.steps(goal_id)),
+            cancelled=conductor.was_cancelled or self._is_cancelled(goal_id),
         )
 
     def _conductor_fallback_notice(
@@ -4406,6 +4569,27 @@ class ExecutorService:
         return summaries
 
     async def retry_step(self, goal_id: str, step_id: str, expected_version: int) -> PlanStep:
+        """Retry a step and wait for it. The retry route does not use this — see `begin_retry`."""
+        self._prepare_retry(goal_id, step_id, expected_version)
+        await self.run_step(goal_id, step_id)
+        return self._step(goal_id, step_id)
+
+    def begin_retry(self, goal_id: str, step_id: str, expected_version: int) -> PlanStep:
+        """Validate a retry, claim the goal's driver, re-open the step, and return at once.
+
+        The retry route used to await the whole step inside the request — minutes of fixer,
+        verifier and critic with the connection held open — and never claimed the driver, so
+        `is_driving()` was false for exactly the time the goal was busiest. Everything that can be
+        refused is decided here, synchronously, so a request that cannot succeed still answers
+        409; the run itself is the caller's to start in the background, and the driver claimed
+        here is theirs to release when it ends.
+        """
+        step = self._prepare_retry(goal_id, step_id, expected_version, claim=True)
+        return step
+
+    def _prepare_retry(
+        self, goal_id: str, step_id: str, expected_version: int, *, claim: bool = False,
+    ) -> PlanStep:
         step = self._step(goal_id, step_id)
         if not (step.status == "FAILED" or (step.status == "IN_PROGRESS" and bool(step.review_notes))):
             raise ApiError(409, "step_not_retryable", f"step {step_id} is not in a retryable state (status={step.status})")
@@ -4432,9 +4616,16 @@ class ExecutorService:
                     f"step {step.title!r} now shares paths with a step that has not finished "
                     "— edit the plan (or finish the other step) before retrying",
                 )
-        self.goals.update_status(goal_id, expected_version, "RUNNING")
-        self._reset_step(goal_id, step)
-        await self.run_step(goal_id, step_id)
+        if claim and not self.claim_driver(goal_id):
+            raise ApiError(409, "driver_busy", "another driver is already running this goal")
+        try:
+            self.goals.update_status(goal_id, expected_version, "RUNNING")
+            self._reset_step(goal_id, step)
+        except BaseException:
+            # A refused or failed retry must not leave the goal claimed by nobody.
+            if claim:
+                self.release_driver(goal_id)
+            raise
         return self._step(goal_id, step_id)
 
     # --- stages -------------------------------------------------------
@@ -4520,7 +4711,53 @@ class ExecutorService:
                 "The conductor asked for this specifically, in addition to the "
                 f"step above:\n{guidance.strip()}\n\n"
             )
-        out = await self.orchestrator.run_agent(
+        applied: dict[str, Any] = {}
+
+        def accept(reply: Any) -> None:
+            """Turn a parsed reply into the files it describes, or say why it cannot be.
+
+            Run inside `run_agent`, so a reply the engine cannot apply gets the same one re-ask a reply
+            that would not parse gets, with this reason quoted to the model. `fs.apply` resolves every
+            edit before it writes anything, so a refused reply has written nothing and asking again is safe.
+            """
+            files = self._parse_files(reply)
+            # The fixer may declare itself unfinished: multi-stage changes (a config
+            # file in one pass, the code that reads it in the next) do not fit one
+            # reply. It asks by returning needs_another_pass=true WITH a plan note;
+            # an empty files list is still just a no-op, so the two can't be confused.
+            wants_pass = bool(isinstance(reply, dict) and reply.get("needs_another_pass"))
+            if not files and wants_pass:
+                raise AgentOutputInvalid(
+                    "needs_another_pass requires files in the same reply — ask for "
+                    "another pass alongside the changes you just made",
+                    role="fixer",
+                )
+            try:
+                # Apply runs BEFORE storage now: an `edit` op is only a description
+                # ("replace this exact text") until the engine resolves it against
+                # the file as it exists, and only the resolved full content is a
+                # proposal "Apply" can replay deterministically later.
+                summaries = fs.apply(files, dry_run=dry_run)
+            except ProtectedRootError:
+                # About where the workspace *is*, not about anything the model wrote: asking again
+                # cannot change it, so it is not put to the model.
+                raise
+            except PathEscapeError as exc:
+                # An absolute path, one that climbs out, one inside `.git`: the model's slip, and the
+                # refusal names exactly what to change. Nothing was written (apply resolves every path
+                # before it writes), and the code stays `path_escape` if it is still wrong the second time.
+                raise PathRefused(
+                    f"{exc}. Every path must be relative to the workspace root, like src/app.py: never "
+                    "absolute, never containing '..', never inside .git.",
+                    role="fixer",
+                ) from exc
+            except ValueError as exc:
+                # An edit whose old_text does not match the file is the fixer's
+                # mistake — a contract failure, not an internal error.
+                raise AgentOutputInvalid(str(exc), role="fixer") from exc
+            applied.update(files=files, summaries=summaries, wants_pass=wants_pass)
+
+        await self.orchestrator.run_agent(
             "fixer", goal_id, step.id,
             f"Step: {step.title}\n{step.description}\n\n"
             f"{feedback_text}"
@@ -4528,31 +4765,13 @@ class ExecutorService:
             f"What the librarian found:\n{self._evidence_text(evidence or {})}\n"
             f"Suggested paths (current contents):\n{ctx}{unreadable}"
             f"{design_section}",
+            accept=accept,
         )
-        files = self._parse_files(out)
-        # The fixer may declare itself unfinished: multi-stage changes (a config
-        # file in one pass, the code that reads it in the next) do not fit one
-        # reply. It asks by returning needs_another_pass=true WITH a plan note;
-        # an empty files list is still just a no-op, so the two can't be confused.
-        wants_pass = bool(isinstance(out, dict) and out.get("needs_another_pass"))
-        if not files and wants_pass:
-            raise AgentOutputInvalid(
-                "needs_another_pass requires files in the same reply — ask for "
-                "another pass alongside the changes you just made",
-                role="fixer",
-            )
+        files = applied["files"]
+        summaries = applied["summaries"]
+        wants_pass = bool(applied["wants_pass"])
         if not files:
             self._log(goal_id, step.id, "warn", "fixer returned an empty files list — no changes will be written")
-        try:
-            # Apply runs BEFORE storage now: an `edit` op is only a description
-            # ("replace this exact text") until the engine resolves it against
-            # the file as it exists, and only the resolved full content is a
-            # proposal "Apply" can replay deterministically later.
-            summaries = fs.apply(files, dry_run=dry_run)
-        except ValueError as exc:
-            # An edit whose old_text does not match the file is the fixer's
-            # mistake — a contract failure, not an internal error.
-            raise AgentOutputInvalid(str(exc), role="fixer") from exc
         if dry_run:
             # Persist the proposal so "Apply" can write these exact contents
             # later. An empty list clears the step's previous proposal — a retry
@@ -4657,6 +4876,11 @@ class ExecutorService:
         while True:
             out = await self.orchestrator.run_agent("verifier", goal_id, step.id, prompt)
             proposed = out.get("argv")
+            # The contract spells "nothing to run" as null. An empty list or an empty string can only mean
+            # the same thing — Qwen2.5-1.5B answered `{"argv": [], "verdict": "skip"}` on three of eleven
+            # tasks — and running nothing is the one reading that cannot do harm.
+            if proposed == [] or proposed == "":
+                proposed = None
 
             # Verdict-only answer: either it never needed a command, or it has
             # just been told what happened to the one it asked for.
@@ -5083,12 +5307,32 @@ class ExecutorService:
 
     # --- parsing ------------------------------------------------------
 
+    def _accept_plan_reply(self, reply: Any) -> None:
+        """The planner's test of its own reply, run inside `run_agent` so a bad plan is asked for again.
+
+        Two replies are good: a plan, and a *consult* — no steps and a request for the librarian, which the
+        planning loop serves and then asks again. Anything else that cannot be turned into steps is refused
+        with the parser's own reason, which the model is shown.
+        """
+        consult = reply.get("consult") if isinstance(reply, dict) else None
+        if (
+            isinstance(reply, dict) and not reply.get("steps") and isinstance(consult, dict)
+            and (consult.get("reads") or consult.get("searches") or consult.get("git") or consult.get("run"))
+        ):
+            return
+        self._parse_steps(reply)
+
     def _parse_steps(self, out: Any) -> list[dict[str, Any]]:
         steps = (out or {}).get("steps")
         if not isinstance(steps, list) or not (1 <= len(steps) <= 20):
             raise AgentOutputInvalid("planner must return 1..20 steps", role="planner")
         parsed = []
         for s in steps:
+            if not isinstance(s, dict):
+                raise AgentOutputInvalid(
+                    f"each planner step must be an object with a title and a description, not {_shape(s)}",
+                    role="planner",
+                )
             title = s.get("title")
             desc = s.get("description")
             paths = s.get("suggested_paths") or []
@@ -5105,6 +5349,11 @@ class ExecutorService:
             raise AgentOutputInvalid("fixer must return files list", role="fixer")
         parsed = []
         for f in files:
+            if not isinstance(f, dict):
+                raise AgentOutputInvalid(
+                    f"each fixer file entry must be an object with a path and an action, not {_shape(f)}",
+                    role="fixer",
+                )
             path = f.get("path")
             action = f.get("action")
             content = f.get("content")
@@ -5211,10 +5460,29 @@ class ExecutorService:
             {"status": status, **{k: v for k, v in fields.items() if k in ("review_notes", "commit_message")}},
         ))
 
+    def _is_cancelled(self, goal_id: str) -> bool:
+        """Has a person cancelled this goal? Read from the stored status, every time."""
+        try:
+            return self.goals.get(goal_id).status == "CANCELLED"
+        except ApiError:
+            # A goal that no longer exists is not one anything should keep running for.
+            return True
+
     def _set_status(self, goal_id: str, status: str, step_id: str | None) -> None:
         # update_status publishes the goal_status event itself.
         current = self.goals.get(goal_id)
-        self.goals.update_status(goal_id, current.version, status, step_id)
+        if current.status == "CANCELLED" and status != "CANCELLED":
+            # Cancel is a person's decision and nothing a runner finishes afterwards may undo
+            # it. The service refuses the move too; this is what keeps a runner that lost the
+            # race from surfacing that refusal as a crash in a background task.
+            return
+        try:
+            self.goals.update_status(goal_id, current.version, status, step_id)
+        except ApiError as exc:
+            if exc.code in ("illegal_status", "version_conflict") and self._is_cancelled(goal_id):
+                # The cancel landed between the read above and the write.
+                return
+            raise
         if status in ("COMPLETED", "FAILED", "CANCELLED"):
             # Terminal, whichever way it went: this run just taught the
             # workspace something, and the store is refined now rather than

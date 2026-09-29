@@ -194,7 +194,7 @@ pub const LABEL_PREFIX: &str = "browser-";
 
 /// Whether a page being seated into the window should be visible.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SeatVisibility {
+pub(crate) enum SeatVisibility {
     Shown,
     Hidden,
 }
@@ -374,11 +374,10 @@ pub fn parse_navigation(raw: &str) -> Result<Url, String> {
 
 /// The container the browser's pages live in.
 ///
-/// **Two definitions, one `cfg`.** `open`, `resize` and `close` say *what* to
-/// do with a page; this module is the only place that knows *how* the local
-/// toolkit wants to hear it, and the call sites are platform-free.
+/// `open`, `resize` and `close` say *what* to do with a page; this module is
+/// the only place that knows *how* the toolkit wants to hear it.
 ///
-/// ## Why the Linux half exists
+/// ## Why it exists
 ///
 /// Tauri builds **every** webview into the window's default `gtk::Box` —
 /// `tauri-runtime-wry`'s `WebviewKind::WindowChild => build_gtk(default_vbox())`
@@ -401,16 +400,6 @@ pub fn parse_navigation(raw: &str) -> Result<Url, String> {
 /// are then exactly what this module sets. Placement is driven here, by hand,
 /// on every `open` and every `resize`; nothing calls wry's `set_bounds`, which
 /// would stay a no-op on this platform however the tree is arranged.
-///
-/// Every other platform gets real child-webview bounds from wry, so its
-/// definition is five decisions that do nothing.
-#[cfg(any(
-    target_os = "linux",
-    target_os = "dragonfly",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd"
-))]
 mod page_layer {
     use super::*;
     use gtk::prelude::*;
@@ -691,60 +680,6 @@ mod page_layer {
                 allocation.height(),
             )))
         })
-    }
-}
-
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "dragonfly",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd"
-)))]
-mod page_layer {
-    use super::*;
-
-    /// Nothing to prepare: wry places a child webview where it is told.
-    pub fn prepare(_window: &tauri::Window) -> Result<(), String> {
-        Ok(())
-    }
-
-    /// Nothing to adopt: `add_child` already placed the page at these bounds.
-    pub fn adopt(
-        _window: &tauri::Window,
-        _page: &tauri::Webview,
-        _bounds: &Bounds,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    /// The platform's own call, one rectangle at a time.
-    ///
-    /// `set_bounds` and not `set_position` plus `set_size`: one rectangle, and
-    /// no window of time where a page has the new size and the old origin.
-    pub fn place(
-        _window: &tauri::Window,
-        page: &tauri::Webview,
-        bounds: &Bounds,
-    ) -> Result<(), String> {
-        page.set_bounds(tauri::Rect {
-            position: LogicalPosition::new(bounds.x, bounds.y).into(),
-            size: LogicalSize::new(bounds.width, bounds.height).into(),
-        })
-        .map_err(|e| format!("could not place browser page: {e}"))
-    }
-
-    /// Nothing to release: closing the page is the whole teardown.
-    pub fn release(_window: &tauri::Window, _label: &str) {}
-
-    /// Not reported, and said so rather than reported as zero: the smoke asks
-    /// this question to prove *this module's* placement, and on a platform
-    /// where the toolkit does the placing there is nothing here to prove.
-    pub fn geometry(
-        _app: &AppHandle,
-        _label: &str,
-    ) -> Result<Option<(i32, i32, i32, i32)>, String> {
-        Ok(None)
     }
 }
 
@@ -2127,6 +2062,18 @@ pub struct BrowserPopupRequested {
 /// local would do — plus a boot-order invariant nothing needed.
 #[cfg(test)]
 mod tests {
+
+    /// The body of the `page_layer` module, from this file's own source.
+    fn page_layer_source() -> &'static str {
+        let rest = include_str!("browser.rs")
+            .split_once("mod page_layer {")
+            .expect("this file defines the page layer")
+            .1;
+        // The module's closing brace is the first one in column 0; everything inside is indented.
+        rest.split_once("\n}\n")
+            .expect("the page layer module ends")
+            .0
+    }
     use super::*;
     use std::path::PathBuf;
 
@@ -3980,6 +3927,7 @@ mod tests {
              too, which is not a website"
         );
     }
+
     /// The page layer is the one container that can hold a page *inside* a
     /// pane, and it exists because of a platform fact rather than a taste.
     ///
@@ -3996,13 +3944,7 @@ mod tests {
     #[test]
     fn the_page_layer_is_the_container_that_can_overlap() {
         let source = include_str!("browser.rs");
-        let layer = source
-            .split_once("mod page_layer {")
-            .expect("this file defines the page layer")
-            .1
-            .split_once("#[cfg(not(any(")
-            .expect("the layer has a second definition")
-            .0;
+        let layer = page_layer_source();
         for needed in [
             "gtk::Overlay::new()",
             "gtk::Fixed::new()",
@@ -4052,13 +3994,6 @@ mod tests {
     /// for was there. This builds the real widgets and asks GDK — the thing that
     /// routes a click — whether the layer's input window lets it through.
     /// Needs a display, and says so rather than passing without one.
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    ))]
     #[test]
     fn the_page_layer_lets_input_through_to_the_app_beneath_it() {
         use gtk::prelude::*;
@@ -4100,66 +4035,65 @@ mod tests {
         );
     }
 
-    /// Every platform that cannot place a page gets the layer, and the list is
-    /// the toolkit's own rather than this crate's opinion.
+    /// The layer is not conditional. Codify targets Linux only, and a `cfg` here would
+    /// bring back the second definition — a stub that places pages with a `set_bounds`
+    /// this toolkit discards — for a platform nothing builds for.
     ///
-    /// A platform missing from it is not a compiler error and not a test
-    /// failure anywhere else: it is a page that silently covers the app, which
-    /// is the failure mode this whole change exists to end.
+    /// `gtk` is a plain dependency for the same reason: gated to a list of targets it
+    /// would be a dependency the code cannot compile without, hidden behind a condition
+    /// no build ever fails.
     #[test]
-    fn the_layer_covers_exactly_the_platforms_that_need_it() {
+    fn the_layer_and_its_gtk_dependency_are_unconditional() {
         let source = include_str!("browser.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("this file has a test module")
+            .0;
+        assert!(
+            !production.contains("target_os"),
+            "browser.rs gates something on the operating system again — Codify is \
+             Linux-only, and a second definition of the page layer is a second \
+             thing to keep right on a platform nothing builds for"
+        );
+        assert!(
+            !production.contains("#[cfg(not(any("),
+            "the page layer has a second definition again"
+        );
         let cargo =
             std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
                 .expect("the crate's Cargo.toml is readable");
-        for os in ["linux", "dragonfly", "freebsd", "openbsd", "netbsd"] {
-            assert!(
-                source.contains(&format!("target_os = \"{os}\"")),
-                "browser.rs no longer names {os} in the layer's gate — every \
-                 toolkit-backed webview puts its children in a GtkBox, and the \
-                 one left out gets the silent no-op that hid this"
-            );
-            assert!(
-                cargo.contains(&format!("target_os = \"{os}\"")),
-                "Cargo.toml no longer gates `gtk` to {os} — either the \
-                 dependency is compiled on a platform with no code for it or \
-                 the code has no dependency to compile against"
-            );
-        }
-    }
-
-    /// Placement is this module's job where the toolkit will not do it, and the
-    /// toolkit's everywhere else. Both at once is a fight; neither is the bug.
-    #[test]
-    fn placement_is_driven_by_this_module_or_by_the_toolkit_but_not_both() {
-        let source = include_str!("browser.rs");
-        let linux_half = source
-            .split_once("mod page_layer {")
-            .expect("the page layer exists")
+        let dependencies = cargo
+            .split_once("\n[dependencies]\n")
+            .expect("Cargo.toml has a [dependencies] table")
             .1
-            .split_once("#[cfg(not(any(")
-            .expect("the layer has a second definition")
+            .split_once("\n[")
+            .expect("another table follows [dependencies]")
             .0;
         assert!(
-            !linux_half.contains("set_bounds"),
-            "the Linux half calls `set_bounds`, which wry honours only for a \
+            dependencies.contains("\ngtk = "),
+            "`gtk` is no longer a plain dependency — the page layer uses it on every build"
+        );
+        assert!(
+            !cargo.contains("target_os"),
+            "Cargo.toml gates something on the operating system again"
+        );
+    }
+
+    /// Placement is this module's job, not the toolkit's. Both at once is a fight.
+    #[test]
+    fn placement_is_driven_by_this_module_and_never_by_the_toolkit() {
+        let layer = page_layer_source();
+        assert!(
+            !layer.contains("set_bounds"),
+            "the layer calls `set_bounds`, which wry honours only for a \
              webview it created in a GtkFixed — ours is created in the window's \
              box, so the call is a silent no-op and the page stays wherever the \
              box put it"
         );
         assert!(
-            linux_half.contains("fixed.move_(&widget") && linux_half.contains("set_size_request"),
-            "the Linux half no longer moves and sizes the page's widget itself \
-             — on this platform nothing else will"
-        );
-        let other_half = source
-            .split_once("#[cfg(not(any(")
-            .expect("the layer has a second definition")
-            .1;
-        assert!(
-            other_half.contains("page.set_bounds(tauri::Rect"),
-            "the other platforms lost their `set_bounds` — they have no page \
-             layer to be placed in, so the page would simply never be positioned"
+            layer.contains("fixed.move_(&widget") && layer.contains("set_size_request"),
+            "the layer no longer moves and sizes the page's widget itself \
+             — nothing else will"
         );
     }
 
@@ -4219,14 +4153,7 @@ mod tests {
     /// the toolkit's own assert asks rather than a guess about thread ids.
     #[test]
     fn the_layer_touches_gtk_only_from_the_thread_gtk_allows() {
-        let source = include_str!("browser.rs");
-        let linux_half = source
-            .split_once("mod page_layer {")
-            .expect("the page layer exists")
-            .1
-            .split_once("#[cfg(not(any(")
-            .expect("the layer has a second definition")
-            .0;
+        let linux_half = page_layer_source();
         assert!(
             linux_half.contains("gtk::glib::MainContext::default().is_owner()"),
             "the layer no longer asks whether this is the thread GTK will answer \
@@ -4254,33 +4181,16 @@ mod tests {
         }
     }
 
-    /// "This platform does not report geometry" and "this page is not in the
-    /// layer" are different answers, and a smoke that failed on both would fail
-    /// on macOS for being macOS.
+    /// A page that is not in the layer is a fault, and a smoke that read it as "nothing to
+    /// check here" would report a placement failure as green.
     #[test]
-    fn a_missing_page_is_a_fault_and_a_missing_platform_is_a_platform() {
-        let source = include_str!("browser.rs");
-        let linux_half = source
-            .split_once("mod page_layer {")
-            .expect("the page layer exists")
-            .1
-            .split_once("#[cfg(not(any(")
-            .expect("the layer has a second definition")
-            .0;
+    fn a_page_missing_from_the_layer_is_a_fault() {
+        let layer = page_layer_source();
         assert!(
-            linux_half.contains("is not in the page layer"),
+            layer.contains("is not in the page layer"),
             "a page missing from the layer is no longer an error — a smoke \
              would report a placement failure as 'nothing to check here', which \
              is the shape of green that hid the original bug"
-        );
-        let other_half = source
-            .split_once("#[cfg(not(any(")
-            .expect("the layer has a second definition")
-            .1;
-        assert!(
-            other_half.contains("Ok(None)"),
-            "the platforms that place pages themselves no longer say so — there \
-             the absence of a layer is not a fault and must not be read as one"
         );
     }
 }

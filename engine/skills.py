@@ -207,7 +207,7 @@ def _read_file(path: Path, source: str) -> tuple[Skill | None, str | None]:
     return parse_skill(text, path.stem.lower(), source)
 
 
-def _skill_files(directory: Path) -> tuple[list[Path], list[str]]:
+def _skill_files(directory: Path, within: Path | None = None) -> tuple[list[Path], list[str]]:
     """The skill files in `directory`, and a sentence for every entry refused.
 
     **A symlink is refused, and that is the whole point of this function.**
@@ -222,10 +222,23 @@ def _skill_files(directory: Path) -> tuple[list[Path], list[str]]:
     A refused entry is reported rather than skipped in silence: a skill a user
     can see in their repository and not in the menu is a mystery, and the
     sentence is what makes it a fact instead.
+
+    **The directory is held to the same rule as the files in it.** Checking each
+    file's parent against `directory.resolve()` cannot notice a linked directory,
+    because by then the link has been followed and every file in the far directory
+    looks like a real file inside it. `within` is the workspace: the skills directory
+    must resolve to exactly `<workspace>/.codify/skills`, which refuses a link at
+    `.codify` or at `skills` alike.
     """
     if not directory.is_dir():
         return [], []
     root = directory.resolve()
+    if within is not None and root != within.resolve() / SKILLS_DIRNAME:
+        return [], [
+            f"{SKILLS_DIRNAME}: refused — it resolves to {root}, outside the workspace's own "
+            f"{SKILLS_DIRNAME}; a link to a directory elsewhere would load someone else's files "
+            "as instructions"
+        ]
     files: list[Path] = []
     problems: list[str] = []
     for path in sorted(directory.iterdir(), key=lambda p: p.name):
@@ -260,7 +273,7 @@ def workspace_skills(root: str | None) -> tuple[list[Skill], list[str]]:
     if not root:
         return [], []
     directory = Path(root) / SKILLS_DIRNAME
-    files, refused = _skill_files(directory)
+    files, refused = _skill_files(directory, within=Path(root))
     skills: list[Skill] = []
     problems: list[str] = [
         f"workspace skill ignored — {problem}" for problem in refused

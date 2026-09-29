@@ -30,6 +30,50 @@ from pathlib import Path
 from typing import Any
 
 
+def turn_tally(events: list[dict[str, Any]], status: str) -> dict[str, Any]:
+    """What one turn's events say a real model did, counted rather than read.
+
+    A transcript tells a person whether a turn went well; a baseline is a rate, and rates come from
+    counting: which tools the conductor called, how many calls failed and why, how many were asked for
+    again, and how the turn ended. `status` is the goal's status once the run stopped — an answer is a
+    turn that completed *and said something*, a plan is a turn that handed over for approval.
+    """
+    tools: dict[str, int] = {}
+    failed: dict[str, int] = {}
+    reasks = fallbacks = 0
+    errors: list[str] = []
+    answered = False
+    for e in events:
+        payload = e.get("payload") or {}
+        kind = e.get("type")
+        if kind == "log":
+            message = str(payload.get("message", ""))
+            if payload.get("turn"):
+                answered = True
+            elif message.startswith("conductor called "):
+                name = message[len("conductor called "):].split("(", 1)[0]
+                tools[name] = tools.get(name, 0) + 1
+        elif kind == "agent_call_failed":
+            code = str(payload.get("code"))
+            failed[code] = failed.get(code, 0) + 1
+            if payload.get("retrying"):
+                reasks += 1
+        elif kind == "provider_fallback":
+            fallbacks += 1
+        elif kind == "error":
+            errors.append(str(payload.get("code")))
+    if status == "PENDING":
+        outcome = "planned"
+    elif status == "COMPLETED":
+        outcome = "answered" if answered else "silent"
+    else:
+        outcome = status.lower()
+    return {
+        "outcome": outcome, "tools": tools, "failed_calls": failed,
+        "reasks": reasks, "fallbacks": fallbacks, "errors": errors,
+    }
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -160,6 +204,7 @@ async def main() -> int:
     print("-" * 68)
 
     failed = False
+    tallies: list[dict[str, Any]] = []
     async with httpx.AsyncClient(
         transport=transport, base_url="http://testserver", headers=headers,
         timeout=60.0,
@@ -224,6 +269,10 @@ async def main() -> int:
                 elif kind == "error":
                     print(f"    [ERROR] {payload.get('code')}: {payload.get('message')}")
 
+            tally = turn_tally(events, goals.get(goal_id).status)
+            tallies.append(tally)
+            print(f"    [tally] {tally}")
+
             # PENDING means the pipeline took over and is waiting for a person
             # to approve the plan — the expected end of a code change, and not
             # something that has "answered" yet.
@@ -233,6 +282,14 @@ async def main() -> int:
                 failed = True
 
     conn.close()
+    outcomes: dict[str, int] = {}
+    for tally in tallies:
+        outcomes[tally["outcome"]] = outcomes.get(tally["outcome"], 0) + 1
+    print("-" * 68)
+    print(f"turns: {len(tallies)}   outcomes: {outcomes}   "
+          f"failed calls: {sum(sum(t['failed_calls'].values()) for t in tallies)}   "
+          f"re-asks: {sum(t['reasks'] for t in tallies)}   "
+          f"fallbacks: {sum(t['fallbacks'] for t in tallies)}")
     return 1 if failed else 0
 
 

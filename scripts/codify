@@ -1,0 +1,27 @@
+#!/bin/sh
+# Start the Codify desktop app from anywhere.
+#
+# The shell runs `python3 -m engine` from the checkout, so it has to know where the checkout
+# is. From an applications-menu launch, or a symlink on PATH, the working directory is $HOME and
+# tells it nothing; this script is the one place that does know — it is inside the checkout — and
+# passes the answer on as CODIFY_ROOT (src-tauri/src/engine_protocol.rs `resolve_project_root`).
+#
+# It runs the release build only. A plain `cargo build` binary is a dev build: its window loads
+# http://localhost:5173 and shows a connection error without a Vite server, which looks exactly
+# like an app that is broken. `make build-app` produces the build this launches.
+set -eu
+
+here=$(dirname -- "$(readlink -f -- "$0")")
+root=${CODIFY_ROOT:-$(dirname -- "$here")}
+app="$root/src-tauri/target/release/codify-desktop"
+
+if [ ! -x "$app" ]; then
+  echo "codify: no release build at $app" >&2
+  echo "codify: run 'make build-app' in $root first (needs Rust and the WebKitGTK development" >&2
+  echo "codify: libraries — 'make doctor' says what is missing)." >&2
+  exit 127
+fi
+
+CODIFY_ROOT=$root
+export CODIFY_ROOT
+exec "$app" "$@"

@@ -7,6 +7,7 @@ import signal
 import subprocess
 from pathlib import Path
 
+from engine import git_readonly
 from engine.fs import FileSystemService, PathEscapeError
 # The guard that makes "this command dies with the engine" true (see
 # engine/spawn_guard.py), including how it is launched: the argv shape and the pid
@@ -31,26 +32,33 @@ def _is_workspace_path(fs: FileSystemService, token: str) -> bool:
     try:
         fs.resolve(token)
         return True
-    except PathEscapeError:
+    except (PathEscapeError, ValueError):
+        # `ValueError` is what `Path.resolve` raises for an embedded NUL. `validate_argv` refuses
+        # control characters before it gets here; this is the second line for any caller that
+        # reaches a path check some other way, so a hostile path is "not a workspace path" and
+        # never a crash.
         return False
 
 
 # ── read-only mode ────────────────────────────────────────────────────────────
 # The librarian inspects the workspace and must never change it. This is the
-# allowlist for that mode: three binaries that cannot write, and a git subcommand
-# allowlist with the flags that would redirect git at another directory or another
-# file removed. Kept here, next to the test-mode allowlist, so there is exactly
-# one place that decides what a sub-agent may execute.
+# allowlist for that mode: three binaries that cannot write, and — for git — the table
+# and parser in `engine/git_readonly.py`, which owns what a model may ask git to read
+# and is also what the conductor's `git_history` door calls. One place decides what a
+# sub-agent may execute.
 READ_ONLY_BINARIES = {"ls", "wc", "git"}
-READ_ONLY_GIT_SUBCOMMANDS = {
-    "status", "diff", "log", "show", "blame", "ls-files", "rev-parse",
-    "describe", "shortlog", "grep", "branch", "tag", "cat-file", "show-ref",
-}
+# Re-exported: this is the name the rest of the engine and its tests know it by, and the
+# value is derived from the table, never a second literal.
+READ_ONLY_GIT_SUBCOMMANDS = git_readonly.READ_ONLY_GIT_SUBCOMMANDS
 LS_FLAGS = {"-l", "-a", "-h", "-1", "-la", "-al", "-lh", "-lah", "-alh", "-s", "-t"}
 WC_FLAGS = {"-l", "-w", "-c", "-m", "-L"}
 MAX_READ_ONLY_ARGS = 8
 # Stored command output is capped so a verbose suite cannot bloat memory/DB.
 MAX_COMMAND_OUTPUT_CHARS = 200_000
+# A NUL cannot be passed to a process at all (`subprocess` raises ValueError, which is a
+# crash where a refusal belongs) and any other control character is a newline or escape
+# no allowlisted command has a reason to receive.
+CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _cap_output(text: str) -> str:
@@ -66,56 +74,6 @@ def _signal_alone(pid: int, sig: int) -> None:
     except ProcessLookupError:
         pass
 
-# `-C` / `--git-dir` point git somewhere else; `--output` writes a file; `-o` is
-# shorthand for it; `--ext-diff` and `--no-index` run external readers.
-# `-d`/`-D`/`--delete` remove refs; `-m`/`-M`/`-f`/`--force` let the other
-# mutating subcommand flags through; `-O`/`--open-files-in-pager` and
-# `--pager` make `git grep` execute an arbitrary pager binary. Every flag here
-# has appeared on a nominally read-only subcommand.
-DANGEROUS_GIT_FLAGS = (
-    "-C", "--git-dir", "--work-tree", "--output", "-o", "--ext-diff", "--no-index",
-    "-d", "-D", "--delete", "-m", "-M", "-f", "--force",
-    "-O", "--open-files-in-pager", "--pager", "--exec", "--exec-path",
-    # Long forms that mutate without a name to give them away: `-u`/`-m`/`-c`
-    # take a *value* the positional rule below would refuse, but the attached
-    # form has no separate token, and `--edit-description` takes no argument at
-    # all and opens an editor instead of returning.
-    "--set-upstream-to", "--unset-upstream", "--edit-description", "--copy", "--move",
-)
-# `branch` and `tag` **read only in their listing forms**. `git branch NAME`
-# creates a ref, `git tag NAME` tags a commit, `git branch -c NAME` copies one,
-# and `git tag -a NAME` opens an editor and hangs for the whole timeout — every
-# one of them arrives as a bare word that no flag denylist can see, because it
-# is not a flag. So for these two, a positional is refused unless a listing flag
-# is what the caller asked with: those flags mean "show me", and their presence
-# is the difference between a pattern and a name.
-# Per subcommand, not shared: `-a` lists for one and *annotates* for the other,
-# so a single set would let `git tag -a NAME` through as a listing (measured —
-# that is how the first version of this rule failed).
-GIT_LISTING_FLAGS: dict[str, frozenset[str]] = {
-    "branch": frozenset({
-        "-l", "--list", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
-        "--contains", "--merged", "--no-merged", "--points-at", "--sort", "--format",
-        "--column",
-    }),
-    "tag": frozenset({
-        "-l", "--list", "-n", "-v", "--verify", "--verbose", "--contains", "--merged",
-        "--no-merged", "--points-at", "--sort", "--format", "--column",
-    }),
-}
-GIT_LISTING_SUBCOMMANDS = frozenset(GIT_LISTING_FLAGS)
-
-
-def _is_listing_token(tok: str) -> bool:
-    """One token, as a possible listing flag (`-n5` counts as `-n`)."""
-    head = tok.split("=", 1)[0]
-    return head in GIT_LISTING_FLAGS["tag"] and head.startswith("-n") and head[2:].isdigit()
-# Letters that are dangerous in any combined short cluster (see the check in
-# `_validate_read_only`). Kept separate from DANGEROUS_GIT_FLAGS because the
-# flag meanings above are subcommand-dependent; these letters are unsafe in
-# every read-only context this allowlist admits.
-DANGEROUS_GIT_SHORT = "dfmMO"
-
 
 def _validate_read_only(argv: list[str], fs: FileSystemService) -> None:
     cmd = argv[0]
@@ -127,34 +85,10 @@ def _validate_read_only(argv: list[str], fs: FileSystemService) -> None:
     if len(rest) > MAX_READ_ONLY_ARGS:
         raise CommandNotAllowed("too many arguments for a read-only command")
     if cmd == "git":
-        if not rest or rest[0].startswith("-"):
-            raise CommandNotAllowed("git requires a read-only subcommand")
-        if rest[0] not in READ_ONLY_GIT_SUBCOMMANDS:
-            raise CommandNotAllowed(f"git {rest[0]} is not a read-only git command")
-        allowed_listing = GIT_LISTING_FLAGS.get(rest[0], frozenset())
-        listing = any(
-            tok.split("=", 1)[0] in allowed_listing or _is_listing_token(tok)
-            for tok in rest[1:]
-        )
-        mutating_form = rest[0] in GIT_LISTING_SUBCOMMANDS and not listing
-        for tok in rest:
-            if any(tok == flag or tok.startswith(flag + "=") for flag in DANGEROUS_GIT_FLAGS):
-                raise CommandNotAllowed(f"git flag not allowed: {tok}")
-            # Short flags combine (`-dO`) and take attached values with no
-            # separator (`-Oless` runs `less` as grep's pager), so bare
-            # equality is not enough: reject any short cluster carrying a
-            # dangerous letter.
-            if tok.startswith("-") and not tok.startswith("--"):
-                if any(ch in DANGEROUS_GIT_SHORT for ch in tok[1:]):
-                    raise CommandNotAllowed(f"git flag not allowed: {tok}")
-            elif not tok.startswith("-") and tok != rest[0] and mutating_form:
-                # The argument is a *name*: `git branch NAME` and `git tag NAME`
-                # are writes, whatever they are called, and the model is the
-                # caller. Listing forms keep their patterns.
-                raise CommandNotAllowed(
-                    f"git {rest[0]} {tok} creates a ref; only the listing forms "
-                    f"of {rest[0]} are read-only"
-                )
+        try:
+            git_readonly.validate(rest, lambda word: _is_workspace_path(fs, word))
+        except git_readonly.GitRefusal as refusal:
+            raise CommandNotAllowed(str(refusal)) from None
         return
     flags = LS_FLAGS if cmd == "ls" else WC_FLAGS
     for tok in rest:
@@ -169,6 +103,10 @@ def _validate_read_only(argv: list[str], fs: FileSystemService) -> None:
 def validate_argv(argv: list[str], fs: FileSystemService, mode: str = "test") -> None:
     if not argv:
         raise CommandNotAllowed("empty argv")
+    if not all(isinstance(token, str) for token in argv):
+        raise CommandNotAllowed("argv must be a list of strings")
+    if any(CONTROL_CHARS.search(token) for token in argv):
+        raise CommandNotAllowed("argv contains a control character")
     if "/" in argv[0] or "\\" in argv[0]:
         raise CommandNotAllowed("argv[0] must be a basename")
     cmd = argv[0]
@@ -246,7 +184,15 @@ class SandboxService:
         resolved = shutil.which(argv[0])
         if not resolved:
             raise CommandNotAllowed(f"{argv[0]} not found on PATH")
-        env = guarded_env({k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME") if k in os.environ})
+        if argv[0] == "git":
+            # Every git the sandbox starts, in either mode, is the hardened one: no pager,
+            # no configured diff driver, no user config, no credentials in its environment,
+            # and repository discovery that stops at the workspace.
+            child_argv = [resolved, *git_readonly.runner_args(argv[1:])]
+            env = guarded_env(git_readonly.runner_env(os.environ, root_path))
+        else:
+            child_argv = [resolved, *argv[1:]]
+            env = guarded_env({k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME") if k in os.environ})
         try:
             proc = subprocess.Popen(
                 # One process deeper than the command itself: the guard leads the new
@@ -254,9 +200,13 @@ class SandboxService:
                 # this engine is gone. A timeout reads exactly as it did before — the
                 # guard is in the group being signalled and reproduces the command's
                 # own exit status.
-                guarded_argv([resolved, *argv[1:]]),
+                guarded_argv(child_argv),
                 cwd=str(Path(root_path).resolve()),
                 env=env,
+                # Nothing an allowlisted command runs has anyone to answer it. Inherited,
+                # the engine's own stdin would be theirs: `git shortlog` with no revision
+                # reads it, and a test that calls `input()` would wait out the timeout.
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

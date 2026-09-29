@@ -108,7 +108,7 @@ def boot_token() -> str:
         return existing
     fresh = secrets.token_hex(32)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(path.parent)
         try:
             # O_EXCL: two engines booting at once have to present one token, so
             # the loser adopts the winner's file rather than replacing it.
@@ -126,6 +126,49 @@ def boot_token() -> str:
     except OSError:
         return fresh
     return fresh
+
+
+def ensure_private_dir(path: Path) -> None:
+    """Create `path` if needed, and leave it readable by its owner only.
+
+    For the *state directory*, which holds every prompt, diff and recalled event the engine
+    has stored. It was `0755` because nothing asked otherwise and the process umask is
+    usually `022`. An existing directory is tightened too — an install made by an older
+    build is most of the installs there are — but only one this user owns, and only the
+    group/other bits are removed, so nothing the owner had is taken away.
+
+    Never called for a directory the user chose (`CODIFY_DB` pointing into a folder that holds
+    other things): the database file is Codify's to protect, that folder is not Codify's to chmod.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tighten_to_owner(path)
+
+
+def ensure_private_file(path: Path) -> None:
+    """Make `path` owner-only, creating it empty if it does not exist.
+
+    Created with the mode rather than chmod-ed afterwards, so there is no moment at which a
+    fresh database is readable by anyone else; SQLite then gives the `-wal` and `-shm` files it
+    creates later the same mode as this one.
+    """
+    try:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
+    except OSError:
+        return
+    tighten_to_owner(path)
+
+
+def tighten_to_owner(path: Path) -> None:
+    """Remove the group and other bits from `path`, if this user owns it. Best effort."""
+    try:
+        info = path.stat()
+        if info.st_uid != os.getuid() or not info.st_mode & 0o077:
+            return
+        os.chmod(path, info.st_mode & ~0o077)
+    except OSError:
+        # Best effort by design: a state directory on a filesystem that cannot chmod (a
+        # mounted share) must not stop the engine booting, and there is nothing else to do.
+        return
 
 
 def is_isolated() -> bool:

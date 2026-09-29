@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -20,6 +21,7 @@ from typing import Any
 from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from engine import capabilities, home, watchdog
@@ -100,7 +102,7 @@ def pick_port() -> int:
         if not 1024 <= port <= 65535:
             raise RuntimeError(f"invalid CODIFY_PORT={port}: must be 1024-65535")
         return port
-    for port in range(7430, 7441):
+    for port in ENGINE_PORTS:
         with socket.socket() as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
@@ -109,6 +111,35 @@ def pick_port() -> int:
             except OSError:
                 continue
     raise RuntimeError("no free port in 7430-7440")
+
+
+ENGINE_PORTS = range(7430, 7441)
+
+
+def _bind_listening(port: int) -> tuple[socket.socket, int]:
+    """Bind and listen on `port`, or — when the port was ours to choose — on the next free one.
+
+    `pick_port` binds and releases, so anything that takes the port before this runs (a second
+    engine starting in the same instant, an unrelated program) used to crash the boot with
+    "Address already in use" while the next of the eleven ports the engine may use was free. A
+    port the caller *asked for* (`CODIFY_PORT`) is a request and is never swapped: an engine
+    quietly serving somewhere nobody expects it is worse than one that says it could not start.
+    """
+    requested = bool(os.environ.get("CODIFY_PORT"))
+    candidates = [port] if requested else [port, *(p for p in ENGINE_PORTS if p != port)]
+    failure = OSError("no port was tried")  # replaced by the first real failure; candidates is never empty
+    for candidate in candidates:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", candidate))
+            sock.listen(128)
+        except OSError as exc:
+            sock.close()
+            failure = exc
+            continue
+        return sock, candidate
+    raise failure
 
 
 # Shutdown's WAL checkpoint is a tidy-up — it truncates the log file — and SQLite
@@ -437,7 +468,11 @@ async def request_validation_error(
     every error this API can return is one documented shape, and a validation
     failure names the fields that were rejected.
     """
-    errors = exc.errors()
+    # `jsonable_encoder`, as FastAPI's own handler does: pydantic keeps the live exception a
+    # validator raised in `ctx["error"]`, and `JSONResponse` cannot serialise it. Without this
+    # the one custom validator the engine has — the refusal that enforces invariant 8 — was
+    # answered with HTTP 500 instead of the 422 it was written to produce.
+    errors = jsonable_encoder(exc.errors())
     fields: list[str] = []
     for err in errors:
         loc = [str(part) for part in err.get("loc", []) if part != "body"]
@@ -904,11 +939,23 @@ def _picker_command() -> tuple[list[str], dict[str, str]]:
     the user's screen. Its own function so tests can spawn the exact command the
     route runs without opening GTK.
     """
+    # Exit codes are the protocol (`PICKER_UNAVAILABLE` / `PICKER_NO_DISPLAY` below): 0 with a path on
+    # stdout is a choice, 0 with nothing is the person closing the dialog, and anything else is a
+    # dialog that could not open. The route used to read every nonzero exit as "cancelled".
     code = f"""
 # {PICKER_MARKER}
-import gi
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk
+import sys
+try:
+    import gi
+    gi.require_version('Gtk', '3.0')
+    from gi.repository import Gtk
+except Exception as exc:
+    sys.stderr.write('codify-picker:unavailable: PyGObject with GTK 3 is not importable (%s)\\n' % exc)
+    sys.exit({PICKER_UNAVAILABLE})
+initialised = Gtk.init_check()
+if not (initialised[0] if isinstance(initialised, tuple) else initialised):
+    sys.stderr.write('codify-picker:no-display: GTK could not open a display\\n')
+    sys.exit({PICKER_NO_DISPLAY})
 dialog = Gtk.FileChooserNative.new('Select Workspace Directory', None, Gtk.FileChooserAction.SELECT_FOLDER, '_Select', '_Cancel')
 res = dialog.run()
 if res == Gtk.ResponseType.ACCEPT:
@@ -923,30 +970,102 @@ while Gtk.events_pending():
     )
 
 
+# What the GTK script exits with when it cannot show a dialog (see `_picker_command`).
+PICKER_UNAVAILABLE = 3
+PICKER_NO_DISPLAY = 4
+# A dialog waits for a person, so this is long — but it is a bound: a dialog nobody answers is killed,
+# and everything it started with it, instead of being left open on a screen.
+PICKER_TIMEOUT_S = 120
+
+
+class _Picked:
+    """One attempt at a folder dialog: what it says, and whether the next one should be tried."""
+
+    def __init__(self, kind: str, detail: str = "") -> None:
+        self.kind = kind  # "chosen" | "cancelled" | "unavailable" | "failed" | "timeout"
+        self.detail = detail
+
+
+def _run_picker(argv: list[str], env: dict[str, str], *, cancel_codes: tuple[int, ...] = ()) -> _Picked:
+    """Run one dialog under the guard, in a session of its own, and classify how it ended."""
+    try:
+        proc = subprocess.Popen(
+            argv,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            # The caller's half of the guard contract (see spawn_guard.py): the guard must lead the
+            # session — and so the group — it kills.
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return _Picked("unavailable", f"the dialog could not be started: {exc.strerror or exc}")
+    try:
+        out, err = proc.communicate(timeout=PICKER_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
+        proc.communicate()
+        return _Picked("timeout", f"the folder dialog did not answer within {PICKER_TIMEOUT_S} s and was closed")
+    chosen = out.strip()
+    if proc.returncode == 0:
+        return _Picked("chosen", chosen) if chosen else _Picked("cancelled")
+    reason = " ".join(err.strip().split())[-300:]
+    if proc.returncode in (PICKER_UNAVAILABLE, PICKER_NO_DISPLAY):
+        return _Picked("unavailable", reason.split(": ", 1)[-1] if reason else "the dialog could not open")
+    if proc.returncode in cancel_codes and "display" not in err.lower():
+        # zenity and kdialog exit 1 for Cancel — and zenity exits 1 for "cannot open display" too,
+        # which only its stderr distinguishes.
+        return _Picked("cancelled")
+    return _Picked("failed", reason or f"the dialog exited with status {proc.returncode}")
+
+
+def _fallback_pickers() -> list[tuple[str, list[str]]]:
+    """Desktop dialogs to try when the GTK script cannot run: `zenity` (GNOME and most others), then `kdialog`.
+
+    A machine with a desktop and a Python that has no PyGObject — every venv, conda or pyenv — is the
+    common case, and these are what it usually does have.
+    """
+    found: list[tuple[str, list[str]]] = []
+    zenity = shutil.which("zenity")
+    if zenity:
+        found.append(("zenity", [zenity, "--file-selection", "--directory", "--title=Select Workspace Directory"]))
+    kdialog = shutil.which("kdialog")
+    if kdialog:
+        found.append(("kdialog", [kdialog, "--getexistingdirectory", str(Path.home()), "--title", "Select Workspace Directory"]))
+    return found
+
+
 @app.post("/workspaces/browse")
 async def browse_workspace(request: Request) -> dict[str, Any]:
-    def _pick() -> str | None:
+    def _pick() -> _Picked:
         argv, env = _picker_command()
-        try:
-            p = subprocess.run(
-                argv,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                # The caller's half of the guard contract (see spawn_guard.py): the
-                # guard must lead the session — and so the group — it kills.
-                start_new_session=True,
-            )
-            if p.returncode == 0 and p.stdout.strip():
-                return p.stdout.strip()
-        except Exception:
-            pass
-        return None
+        first = _run_picker(argv, env)
+        if first.kind in ("chosen", "cancelled", "timeout"):
+            return first
+        # The GTK script could not show a dialog (or died): what else does this machine have?
+        problems = [f"the GTK dialog: {first.detail}"]
+        for name, command in _fallback_pickers():
+            attempt = _run_picker(guarded_argv(command), guarded_env(), cancel_codes=(1,))
+            if attempt.kind in ("chosen", "cancelled", "timeout"):
+                return attempt
+            problems.append(f"{name}: {attempt.detail}")
+        return _Picked("unavailable", "; ".join(problems))
 
-    path = await asyncio.to_thread(_pick)
-    if not path:
+    outcome = await asyncio.to_thread(_pick)
+    if outcome.kind == "cancelled":
         return {"cancelled": True}
+    if outcome.kind != "chosen":
+        if outcome.kind == "timeout":
+            message = outcome.detail
+        else:
+            message = (
+                f"No folder dialog could be opened ({outcome.detail}). Type the folder's path instead, or "
+                "install one of: zenity, kdialog, or PyGObject for the Python that runs the engine."
+            )
+        raise ApiError(503, "picker_unavailable", message)
+    path = outcome.detail
 
     folder_name = Path(path).name or path
     ws_service: WorkspaceService = request.app.state.workspaces
@@ -1962,8 +2081,11 @@ async def retry_step(goal_id: str, step_id: str, body: VersionedAction, request:
     if g.status not in ("RUNNING", "PAUSED", "FAILED"):
         raise ApiError(409, "illegal_status", f"cannot retry from {g.status}")
     executor: ExecutorService = request.app.state.executor
-    updated_step = await executor.retry_step(goal_id, step_id, body.expected_version)
-    _spawn(request.app, _run_steps(request.app, goal_id), goal_id)
+    # Everything that can be refused is decided here, and the driver is claimed here; the step
+    # itself runs in the background and the stream reports how it went. The request used to
+    # await the whole step, holding the connection for minutes with no driver claimed.
+    updated_step = executor.begin_retry(goal_id, step_id, body.expected_version)
+    _spawn(request.app, _retry_and_drive(request.app, goal_id, step_id), goal_id)
     return updated_step
 
 
@@ -2164,7 +2286,27 @@ def _spawn(
             except Exception:
                 pass
 
-    asyncio.create_task(runner())
+    task = asyncio.create_task(runner())
+    # The event loop keeps only a weak reference to a task, so one that nothing else holds can
+    # be collected while it is still running (a documented CPython hazard) — a goal's driver
+    # vanishing mid-step with no error at all. Held here until it is done.
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+
+
+async def _retry_and_drive(app: FastAPI, goal_id: str, step_id: str) -> None:
+    """Run the retried step, then drive whatever is left, holding the driver `begin_retry` claimed."""
+    executor = app.state.executor
+    try:
+        await executor.run_step(goal_id, step_id)
+        # Only a goal still RUNNING is driven further: a retried step that failed, or a Cancel that
+        # landed during it, ends here (`_run_steps_locked` checks).
+        await _run_steps_locked(app, goal_id)
+    finally:
+        executor.release_driver(goal_id)
 
 
 async def _run_steps(app: FastAPI, goal_id: str) -> None:
@@ -2194,6 +2336,11 @@ async def _run_steps(app: FastAPI, goal_id: str) -> None:
 
 async def _run_steps_locked(app: FastAPI, goal_id: str) -> None:
     executor = app.state.executor
+    # Only a RUNNING goal is driven. The retry route spawns this after the retried step has
+    # finished, and a Cancel that landed during that step used to be followed by a full
+    # conductor run — model spend on a goal the user had stopped.
+    if app.state.goals.get(goal_id).status != "RUNNING":
+        return
     # An approved plan is driven by the conductor when this install has one, and
     # by the engine's own sequence when it does not. The choice lives here rather
     # than in the route because the executor is the only side that can see
@@ -2379,6 +2526,13 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
         await websocket.close(code=4404)
         return
 
+    # The socket is read as well as written, and that is what ends this handler. It used to only
+    # write, so a client that had gone was noticed only when a `send` failed — and a goal with no
+    # new events never sends. The UI closes the socket itself on every terminal status, so every
+    # finished goal that was ever viewed left a coroutine waking four times a second to re-read the
+    # goal for nobody (idle engine CPU 0.2 % -> 13.9 % of a core over 500 views, until restart).
+    # `ws_engine` reads its socket for the same reason.
+    receiver = asyncio.create_task(websocket.receive_text())
     after = 0
     try:
         while True:
@@ -2397,9 +2551,26 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
             for event in batch:
                 await websocket.send_text(event.model_dump_json())
                 after = event.sequence
-            await asyncio.sleep(0.25)
+            # The wait for the next tick is a wait on the receiver, so a peer leaving ends the loop
+            # at once instead of at the next failed send.
+            done, _ = await asyncio.wait({receiver}, timeout=0.25)
+            if not done:
+                continue
+            if receiver.cancelled() or receiver.exception() is not None:
+                # The peer went away (a disconnect surfaces as an exception from `receive`; calling
+                # it again on a socket that has already delivered one raises, so do not).
+                return
+            # A frame from the client: this channel is one-directional and has no use for it, but a
+            # client that can send one can still receive, so read on.
+            receiver = asyncio.create_task(websocket.receive_text())
     except WebSocketDisconnect:
         pass
+    finally:
+        # Retrieved either way: an unretrieved exception from a cancelled `receive` is printed by
+        # the event loop, once per connection, for a client that merely left.
+        if not receiver.done():
+            receiver.cancel()
+        await asyncio.gather(receiver, return_exceptions=True)
 
 
 def serve() -> None:
@@ -2418,8 +2589,6 @@ def serve() -> None:
     boot the real server without ending the world, and `tests/test_home.py` says
     so where it calls it.
     """
-    import socket
-
     import uvicorn
 
     port = pick_port()
@@ -2447,14 +2616,7 @@ def serve() -> None:
     # hit connection-refused (also the source of a 1-in-5 flake in the
     # wire-level stream tests). uvicorn serves the pre-bound socket, so the
     # port is owned by this process end to end.
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("127.0.0.1", port))
-        sock.listen(128)
-    except OSError:
-        sock.close()
-        raise
+    sock, port = _bind_listening(port)
     # `hard_exit_s` is announced rather than left for the shell to know: this is
     # the engine's own bound on how long a stop request can take, and the shell
     # waits exactly that long before escalating to SIGKILL (src-tauri/src/lib.rs).

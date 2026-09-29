@@ -85,7 +85,7 @@ jobs:
           python -m pip install -r engine/requirements.txt
           # Dev tools, not engine dependencies; `make lint`/`make typecheck` need
           # them on PATH.
-          python -m pip install "ruff>=0.6" "mypy>=1.11"
+          python -m pip install "ruff>=0.6" "mypy>=1.11" "httpx2>=2.13,<3"
 
       # Rules and target-version are pinned in pyproject.toml, so this checks the
       # same thing on every machine — including the syntax ruff only rejects for

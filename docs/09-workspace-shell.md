@@ -786,7 +786,15 @@ thread does not".
   read replaces its own pair instead of appending beside it. A turn that is still
   running re-subscribes to the very message it was hydrated from, so a thread whose
   last turn was in flight when the window closed goes on updating rather than
-  freezing mid-answer.
+  freezing mid-answer. A rule by goal only holds once the message *has* a goal, and
+  the optimistic message of a send used to learn its goal two awaits after the
+  dispatch — so a read of the thread that landed in that window drew the first
+  message of a brand-new thread twice (server: one goal; screen: two bubbles; after
+  a reload: one — audit of 2026-09-29, M6). Two things close it, each pinned on its
+  own in `ui/tests/newThreadOnce.test.ts`: a thread this very send just created is
+  marked already read before its tab opens (it has no history, and the turn being
+  dispatched is live), and the optimistic message claims its goal the moment the
+  dispatch returns rather than after the follow-up read.
 
 Asserted in `ui/tests/threadHydration.test.ts` — the decisions are pure and the
 React half only fetches and applies them: the pair's shape and its goal-id scheme,
@@ -2221,8 +2229,8 @@ the pipeline already makes, through the same service:
 |---|---|---|
 | `read_file` | `LibraryService.read` | path escape refused by `FileSystemService` |
 | `search_code` | `LibraryService.search` | same |
-| `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")`: subcommand names *and* their flags, one owner |
-| `run_command` | `SandboxService.run_command` | `validate_argv`, `test` mode (docs/00 §6.6) |
+| `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` → `engine/git_readonly.py`: subcommands, their exact options, and every positional, one owner; 60 s bound, no credentials in the child's environment |
+| `run_command` | `SandboxService.run_command` | `validate_argv`, `test` mode (docs/00 §6.6) once the goal is approved; `read_only` before that, so a turn cannot start the repository's code |
 | `recon` | `ExecutorService._librarian` | read-only, bounded rounds |
 | `design` | `ExecutorService._design` | no tools at all; decides from the evidence |
 | `plan` | the planner | refuses without evidence; writes steps, never files |
@@ -2249,7 +2257,9 @@ itself is not one of the seven — it has already run, before the loop existed.
 
 `git_history` is worth calling out, because it is where "the model asked for it"
 was once the whole check. It now runs `sandbox.validate_argv(mode="read_only")` —
-**the librarian's validator, not a copy of it**. Until that call replaced its own
+**the librarian's validator, not a copy of it** (both are `engine/git_readonly.py`'s exact-match
+table since the audit of 2026-09-29, which also bounds it to 60 seconds and gives it a stripped
+environment: it used to inherit the engine's, provider keys included; docs/04 §5 "Read-only git"). Until that call replaced its own
 private list it had two defects at once: a subcommand list eight names long against
 the librarian's seventeen, so the two had already drifted; and no flag or argument
 check at all, so `git log --output=<any path>` wrote a file outside the workspace
@@ -2399,6 +2409,13 @@ already exist; it cannot define a move, cannot widen `validate_argv`, and cannot
 reach the write gate — that gate reads the goal's *stored status*, not anything
 the model was told. The worst a hostile skill can do is argue, and an argument
 cannot open a door. `tests/test_skills.py::TestASkillCannotEmpower` holds it.
+
+**Links are not followed, at either level.** A skill *file* that is a symlink is refused, and so is a
+skills *directory* that does not resolve to exactly `<workspace>/.codify/skills` — a link at `.codify`
+or at `skills` would otherwise load a far directory's files as instructions and put the first line of
+each in the conductor's menu with no tool call. Each refusal is reported as a problem, never skipped in
+silence, and the built-ins still load. A workspace that is itself opened through a link is fine: the
+comparison is against the workspace's own resolved path.
 
 **A second built-in, for handing the thread over.**
 `engine/builtin_skills/context-transfer.md` is the other one: when a

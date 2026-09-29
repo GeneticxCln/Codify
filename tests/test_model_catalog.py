@@ -304,6 +304,31 @@ class TestTargets(unittest.TestCase):
         self.assertFalse(targets["ollama"].needs_key)
         self.assertIn("agent:planner", targets["anthropic"].sources)
 
+    def test_a_custom_slug_speaking_the_ollama_protocol_needs_no_key(self) -> None:
+        """L6: any non-built-in slug was assumed to need a key, so a second local Ollama (a
+        different port, a different machine on loopback) answered "no API key configured" without
+        ever being asked. `role_repair.target_needs_key` already decides this by protocol."""
+        registry = _StubRegistry([
+            _StubConfig("fixer", "my-ollama", "ollama", base_url="http://127.0.0.1:11435"),
+            _StubConfig("planner", "acme", "openai_compat", base_url="https://acme.test/v1"),
+        ])
+        targets = {t.provider: t for t in _targets(registry, _StubKeychain())}
+
+        self.assertFalse(targets["my-ollama"].needs_key)
+        self.assertTrue(targets["acme"].needs_key, "a custom OpenAI-compatible endpoint still needs a key")
+
+    def test_a_fallback_custom_ollama_needs_no_key_either(self) -> None:
+        registry = _StubRegistry([
+            _StubConfig(
+                "fixer", "anthropic", "anthropic",
+                fallback_provider="lab-ollama", fallback_protocol="ollama",
+                fallback_base_url="http://127.0.0.1:11436",
+            ),
+        ])
+        targets = {t.provider: t for t in _targets(registry, _StubKeychain())}
+
+        self.assertFalse(targets["lab-ollama"].needs_key)
+
     def test_ollama_always_present_even_with_no_configs(self) -> None:
         targets = _targets(_StubRegistry([]), _StubKeychain())
         self.assertEqual([t.provider for t in targets], ["ollama"])

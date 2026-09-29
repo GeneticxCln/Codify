@@ -1,0 +1,26 @@
+```json
+[
+    {
+        "path": "/src/app.py",
+        "action": "edit",
+        "content": """def welcome(name: str) -> str:
+    """Say hello. The benchmark's tasks are measured against this file."""
+    return f"hello {name}"
+
+
+def shout(name: str) -> str:
+    """Upper-cases the greeting. Unfinished on purpose: a task tier needs
+    something real to change, and a fixture that is already correct can only
+    prove that nothing broke."""
+    return welcome(name).upper()
+""",
+        "edits": [
+            {
+                "old_text": "greet",
+                "new_text": "welcome",
+                "count": 1
+            }
+        ]
+    }
+]
+```
