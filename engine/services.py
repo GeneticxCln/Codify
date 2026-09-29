@@ -208,13 +208,38 @@ class AgentRegistryService:
         declaration rather than from a guess, because a custom slug with no
         catalog entry would otherwise be assumed to need a key it does not.
         """
-        return {
+        status = {
             slug: {
                 "needs_key": bool(meta["needs_key"]),
                 "has_key": self._keychain.has_provider_key(slug),
             }
             for slug, meta in BUILTIN_PROVIDERS.items()
         }
+        # A custom provider is any slug a role points at (either target) that the catalogue does not list.
+        # It has no declaration of whether it needs a key, so the protocol answers, as everywhere else
+        # (`role_repair.target_needs_key`); whether one is stored is a plain question of the keychain.
+        for cfg in self.list_configs():
+            for slug, protocol in ((cfg.provider, cfg.protocol), (cfg.fallback_provider, cfg.fallback_protocol)):
+                if slug and slug not in status:
+                    status[slug] = {
+                        "needs_key": (protocol or "openai_compat") != "ollama",
+                        "has_key": self._keychain.has_provider_key(slug),
+                    }
+        return status
+
+    def configs_with_key_state(self) -> list[dict[str, Any]]:
+        """The role rows as dicts, each carrying `has_role_key`: whether the role's own credential resolves.
+
+        The one place that answers it, so the goal preflight and the Repair endpoint cannot disagree. A
+        custom provider's key is stored for the role (`api_key_ref`), not under the provider's name, and
+        judging a role from the provider table alone called every such role uncallable.
+        """
+        rows: list[dict[str, Any]] = []
+        for cfg in self.list_configs():
+            row = cfg.model_dump()
+            row["has_role_key"] = bool(cfg.api_key_ref and self._keychain.get(cfg.api_key_ref))
+            rows.append(row)
+        return rows
 
     def get_config(self, role: str) -> AgentConfig:
         if role not in ROLES:

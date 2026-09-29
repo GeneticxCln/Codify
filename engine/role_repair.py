@@ -157,18 +157,28 @@ def target_problem(
     keys: dict[str, dict[str, Any]],
     discovery: dict[str, dict[str, Any]],
     catalog_ids: set[tuple[str, str]],
+    *,
+    has_own_key: bool = False,
 ) -> str | None:
     """Why this (provider, model) target cannot be called, or None if it can.
 
     Used for both of a role's targets: the primary and the fallback are the same
     question asked twice, and a second copy of these three checks is how the two
     answers end up disagreeing.
+
+    `has_own_key` is the role's own stored credential (`api_key_ref`), which is where a custom provider's
+    key lives — the role card's key field writes it, and the factory reads it before the provider-level
+    one. It belongs to the *primary* target only: a fallback is a different provider and never inherits it.
     """
     provider = provider or ""
     model = (model or "").strip()
     if not model:
         return "no model is chosen"
-    if target_needs_key(provider, protocol, keys) and not (keys.get(provider) or {}).get("has_key"):
+    if (
+        target_needs_key(provider, protocol, keys)
+        and not (keys.get(provider) or {}).get("has_key")
+        and not has_own_key
+    ):
         return f"{provider} needs a credential and none is stored"
     found = discovery.get(provider)
     if found and found.get("ok") and (provider, model) not in catalog_ids:
@@ -219,6 +229,7 @@ def config_problems(
             keys,
             {},
             set(),
+            has_own_key=bool(config.get("has_role_key")),
         )
         if problem is None:
             continue
@@ -341,7 +352,8 @@ def plan_role_repair(
         model = (config.get("model_name") or "").strip()
 
         problem = target_problem(
-            provider, model, config.get("protocol"), keys, discovery, catalog_ids
+            provider, model, config.get("protocol"), keys, discovery, catalog_ids,
+            has_own_key=bool(config.get("has_role_key")),
         )
         if problem is not None:
             # The primary cannot run. Before calling the role broken, ask its

@@ -20,6 +20,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from tests import hermetic  # noqa: F401
@@ -462,6 +463,40 @@ class RecordTests(unittest.TestCase):
                 conn.close()
             self.assertTrue({"planner", "fixer"} <= roles, roles)
             self.assertTrue((keep / "smoke-add-banner" / "banner.txt").is_file(), "the workspace was not kept")
+
+    def test_each_task_is_kept_as_it_finishes_not_only_at_the_end(self) -> None:
+        # The copy used to happen once, in a `finally` after the last task, so a run that was killed —
+        # a container restart, an OOM, a closed terminal — kept nothing, and a baseline that takes an
+        # hour on a CPU was lost with it. Looked at from the second task's start: the first is already there.
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = Path(tmp) / "kept"
+            manifest = Path(tmp) / "manifest.json"
+            manifest.write_text(json.dumps({
+                "version": 1,
+                "tiers": {"smoke": {"description": "d", "provider": "canned"}},
+                "repos": [],
+                "tasks": [{
+                    "id": name, "tier": "smoke", "repo": SYNTHETIC, "title": name, "description": "d",
+                    "canned_write": [{"path": "banner.txt", "content": "X\n"}],
+                    "checks": [{"type": "goal_completed"}],
+                } for name in ("first", "second")],
+            }), encoding="utf-8")
+            kept_when_each_started: dict[str, list[str] | None] = {}
+            real = runner._run_one
+
+            def spy(task: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
+                kept_when_each_started[str(task["id"])] = (
+                    sorted(p.name for p in keep.glob("*.db")) if keep.exists() else None
+                )
+                return real(task, *args, **kwargs)
+
+            with mock.patch("benchmarks.runner._run_one", spy):
+                code, _ = _run_main(["--tier", "smoke", "--manifest", str(manifest), "--record", str(keep)])
+
+            self.assertEqual(0, code)
+            self.assertEqual(["first.db"], kept_when_each_started["second"],
+                             "the first task's store was not kept until the whole run ended")
+            self.assertEqual(["first.db", "second.db"], sorted(p.name for p in keep.glob("*.db")))
 
     def test_without_the_flag_nothing_is_kept_and_nothing_is_traced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch("benchmarks.runner.tempfile.mkdtemp", return_value=str(Path(tmp) / "w")) as made:

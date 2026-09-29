@@ -704,6 +704,11 @@ def main(argv: list[str] | None = None) -> int:
                     trace=args.record is not None,
                 )
                 results.append(result)
+                if args.record is not None:
+                    # Kept as each task finishes, not only at the end: a run killed part-way (a container
+                    # restart, an OOM, a closed terminal) never reaches the `finally` below, and a baseline
+                    # that takes an hour on a CPU was lost with it.
+                    shutil.copytree(work_root, args.record, dirs_exist_ok=True)
                 # As each one finishes, not only in the summary: a slow real model makes a run long, and
                 # a run that dies late should leave a record of the tasks that were done.
                 label = task["id"] if args.repeat == 1 else f"{task['id']} (run {attempt})"

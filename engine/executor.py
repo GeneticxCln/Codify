@@ -2034,7 +2034,7 @@ class ExecutorService:
             return
         try:
             broken = config_problems(
-                [c.model_dump() for c in registry.list_configs()],
+                registry.configs_with_key_state(),
                 registry.provider_key_status(),
                 ROLES,
             )
