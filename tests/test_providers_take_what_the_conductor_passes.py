@@ -54,6 +54,23 @@ class TestTheSignatureIsTheSameEverywhere(unittest.TestCase):
                     self.assertEqual(inspect.Parameter.KEYWORD_ONLY, params[name].kind, name)
                     self.assertIsNone(params[name].default, name)
 
+    def test_no_override_drops_a_parameter_the_base_class_declares(self) -> None:
+        # The general form of the mistake: a provider that overrides a method with fewer parameters than the
+        # base declares breaks every caller that passes them, and a test double never notices.
+        for name, member in inspect.getmembers(BaseProvider):
+            if name.startswith("_") or not callable(member):
+                continue
+            base = inspect.signature(member).parameters
+            for cls in _provider_classes():
+                override = vars(cls).get(name)
+                if cls is BaseProvider or override is None:
+                    continue
+                params = inspect.signature(override).parameters
+                if any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in params.values()):
+                    continue
+                with self.subTest(method=f"{cls.__name__}.{name}"):
+                    self.assertEqual([], [p for p in base if p not in params])
+
     def test_complete_takes_them_too(self) -> None:
         for cls in _provider_classes():
             with self.subTest(provider=cls.__name__):
