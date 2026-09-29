@@ -340,5 +340,62 @@ class TestAVerifierThatHasNothingToRun(ReAskCase):
         self.assertIn("sandbox refused", self.events("error")[-1]["message"])
 
 
+class TestAnEditThatIsReallyAWholeFile(ReAskCase):
+    """`"action": "edit"` with a full `content` and no `edits` is a whole-file write in the wrong spelling.
+
+    The commonest fixer reply Qwen2.5-1.5B produced (13 of 43 file entries in the recorded baseline): `edit`, a
+    complete new file in `content`, and no `edits`. The contract says `edit` needs edits, so every one of these
+    failed the step, and asking again did not help — the model does not know what `edit` is for. The content is
+    what it meant to write; `update` is what that is called. Only when there is content to write: an empty one
+    would blank the file, and an `edit` that carries edits keeps its contract meaning.
+    """
+
+    async def test_edit_with_content_and_no_edits_writes_the_content_without_asking_again(self) -> None:
+        provider = self.build({"files": [{"path": "a.py", "action": "edit", "content": "x = 1\n"}]})
+
+        status = await self.run_the_step()
+
+        self.assertEqual(1, len(provider.fixer_prompts), "a usable reply was asked for again")
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertEqual("x = 1\n", self.file)
+
+    async def test_the_reinterpretation_is_said_out_loud(self) -> None:
+        self.build({"files": [{"path": "a.py", "action": "edit", "content": "x = 1\n", "edits": None}]})
+
+        await self.run_the_step()
+
+        notes = [e["message"] for e in self.events("log") if "whole-file" in e["message"]]
+        self.assertEqual(1, len(notes), "the engine changed what the reply meant and did not say so")
+        self.assertIn("a.py", notes[0])
+
+    async def test_edit_with_edits_keeps_its_contract_meaning_and_ignores_content(self) -> None:
+        provider = self.build({"files": [{
+            "path": "a.py", "action": "edit", "content": "THE WRONG FILE\n",
+            "edits": [{"old_text": "greet(name).upper()", "new_text": "greet(name).lower()", "count": 1}],
+        }]})
+
+        await self.run_the_step()
+
+        self.assertEqual(1, len(provider.fixer_prompts))
+        self.assertEqual(SOURCE.replace("greet(name).upper()", "greet(name).lower()"), self.file)
+
+    async def test_an_empty_content_is_never_a_whole_file_write(self) -> None:
+        provider = self.build({"files": [{"path": "a.py", "action": "edit", "content": ""}]})
+
+        status = await self.run_the_step()
+
+        self.assertEqual("FAILED", status)
+        self.assertEqual(2, len(provider.fixer_prompts), "an edit with nothing to do was not asked for again")
+        self.assertEqual(SOURCE, self.file, "the file was blanked")
+
+    async def test_the_reask_names_the_alternative_when_an_edit_will_not_apply(self) -> None:
+        provider = self.build(AMBIGUOUS, CORRECTED)
+
+        await self.run_the_step()
+
+        self.assertIn('action "update"', provider.fixer_prompts[1])
+        self.assertIn("count to 0", provider.fixer_prompts[1])
+
+
 if __name__ == "__main__":
     unittest.main()

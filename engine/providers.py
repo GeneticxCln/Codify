@@ -9,12 +9,13 @@ import math
 import os
 import random
 import re
+import tempfile
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from urllib.parse import urlparse
 
 import httpx
@@ -688,6 +689,11 @@ class OpenAICompatProvider(BaseProvider):
         # is not a call. The conductor's prose is delivered as a `model_delta`
         # event on the turn that carries text, which is enough to show progress
         # without pretending a half-written argument object is usable.
+        if not self._api_key:
+            # The same rule `complete` holds. This path used to send `Authorization: Bearer ` with nothing
+            # after it: a keyless server answered the conductor and refused every role, and a hosted one
+            # returned a 401 that names nothing (review of 2026-09-29).
+            raise ProviderError("missing_api_key", "API key is not set")
         url = f"{self._base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -1260,34 +1266,60 @@ class Keychain:
             # if it were empty is recoverable (the key can be re-entered).
             return {}
 
-    def _write_file(self, data: dict[str, str]) -> None:
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Hold the store's lock across a whole read-modify-write.
+
+        The lock is a file of its own, next to the store and never renamed: a lock taken on the temporary
+        file (as this used to) is taken *after* the file was opened for truncation, and is on an inode that
+        is then renamed over the store — so it serialized nothing, and two saves still lost a key. Advisory
+        and best-effort where `flock` is unavailable, as before: without it, saves are last-writer-wins.
+        """
         path = self._secrets_path
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             path.parent.chmod(0o700)
         except OSError:
             pass
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        # Create the temp file already 0600: write_text creates it with the
-        # process umask (typically 0644), leaving a window where the plaintext
-        # secrets sit world-readable before the chmod below runs.
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            # Best-effort inter-process lock: concurrent saves last-writer-wins
-            # without it, and the loser drops the winner's key.
-            try:
-                import fcntl
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            except (ImportError, OSError):
-                pass
-            with os.fdopen(fd, "w") as fh:
-                fh.write(json.dumps(data, indent=2, sort_keys=True))
-            tmp.replace(path)  # atomic: a crash mid-write cannot truncate the store
+            import fcntl
+        except ImportError:  # pragma: no cover - not a Linux concern, kept for the fallback's sake
+            yield
+            return
+        fd = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # closing releases the lock; this descriptor was never handed to a file object
+
+    def _write_file(self, data: dict[str, str]) -> None:
+        """Replace the store atomically, from a temporary file of its own. Callers hold `_locked()`."""
+        path = self._secrets_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.parent.chmod(0o700)
+        except OSError:
+            pass
+        # `mkstemp` creates the file already 0600 and under a name no other writer shares, so there is no
+        # window where plaintext keys are world-readable and no second writer to truncate this one's file.
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            handle = os.fdopen(fd, "w")
         except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+            os.close(fd)  # the file object never took ownership of it
+            os.unlink(tmp_name)
+            raise
+        try:
+            with handle:  # closes `fd` — after this point nothing closes it again
+                handle.write(json.dumps(data, indent=2, sort_keys=True))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, path)  # atomic: a crash mid-write cannot truncate the store
+        except BaseException:
+            # Plaintext keys must not be left in a temp file by a save that failed.
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
             raise
 
     # ── generic ref access ──────────────────────────────────────────────────
@@ -1324,10 +1356,11 @@ class Keychain:
         # Strict read: saving must not wipe a store it merely failed to read
         # (the empty-dict default here would make the replace drop every other
         # key the file held).
-        data = self._read_file(strict=True)
-        data[ref] = api_key
         try:
-            self._write_file(data)
+            with self._locked():
+                data = self._read_file(strict=True)
+                data[ref] = api_key
+                self._write_file(data)
         except OSError as exc:
             raise ProviderError("secrets_unwritable", str(exc)) from exc
         self._last_write_backend = "file"
@@ -1387,14 +1420,15 @@ class Keychain:
                 keyring_mod.delete_password("codify", ref)
             except Exception:
                 pass
-        data = self._read_file()
-        if ref in data:
-            data.pop(ref)
-            try:
-                self._write_file(data)
-            except OSError:
-                # Nothing else to do: the entry is already unreachable.
-                pass
+        try:
+            with self._locked():
+                data = self._read_file()
+                if ref in data:
+                    data.pop(ref)
+                    self._write_file(data)
+        except OSError:
+            # Nothing else to do: the entry is already unreachable.
+            pass
 
     def set_provider_key(self, provider: str, api_key: str) -> None:
         """Store an API key for a provider (OS keychain, or the local file)."""

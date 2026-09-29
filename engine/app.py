@@ -171,6 +171,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # carry that role's stored credential onto the new id in the same step.
     keychain = Keychain()
     conn = connect(on_role_migrated=keychain.rename_role_key)
+    # Closed on every road out: a service constructor or the orphan rescue raising before the app
+    # starts, or a shutdown step raising after it stopped, used to leave the store's handle open
+    # (review of 2026-09-29, finding 5).
+    try:
+        async with _serve(app, keychain, conn):
+            yield
+    finally:
+        try:
+            _truncate_wal(conn)
+        finally:
+            conn.close()
+
+
+@asynccontextmanager
+async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> AsyncIterator[None]:
+    """Wire the services onto `app.state`, run the engine, and unwire it — with the store already open."""
     factory = ProviderFactory(keychain)
     app.state.conn = conn
     app.state.keychain = keychain
@@ -324,8 +340,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
             except Exception:
                 pass
-    _truncate_wal(conn)
-    conn.close()
 
 
 # The engine's refusals, declared once and applied to every route by
@@ -989,9 +1003,11 @@ class _Picked:
 def _run_picker(argv: list[str], env: dict[str, str], *, cancel_codes: tuple[int, ...] = ()) -> _Picked:
     """Run one dialog under the guard, in a session of its own, and classify how it ended."""
     try:
-        proc = subprocess.Popen(
-            argv,
-            env=env,
+        proc = subprocess.Popen(  # noqa: S603 — argv is a fixed dialog command, wrapped by guarded_argv right here; no shell
+            # Guarded here, at the spawn, whoever built the argv: a caller that already did is not doubled
+            # (`guarded_argv` is idempotent) and one that forgot cannot start an unguarded dialog.
+            guarded_argv(argv),
+            env=guarded_env(env),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
@@ -1047,7 +1063,7 @@ async def browse_workspace(request: Request) -> dict[str, Any]:
         # The GTK script could not show a dialog (or died): what else does this machine have?
         problems = [f"the GTK dialog: {first.detail}"]
         for name, command in _fallback_pickers():
-            attempt = _run_picker(guarded_argv(command), guarded_env(), cancel_codes=(1,))
+            attempt = _run_picker(command, dict(os.environ), cancel_codes=(1,))
             if attempt.kind in ("chosen", "cancelled", "timeout"):
                 return attempt
             problems.append(f"{name}: {attempt.detail}")
@@ -2202,6 +2218,15 @@ async def start_goal(goal_id: str, body: VersionedAction, request: Request) -> G
         raise ApiError(409, "illegal_status", "planning is still in progress")
     if g.status not in ("PENDING", "PAUSED"):
         raise ApiError(409, "illegal_status", f"cannot start from {g.status}")
+    executor = getattr(request.app.state, "executor", None)
+    if executor is not None and executor.is_driving(goal_id):
+        # A turn's `plan` move leaves the goal PENDING while the turn is still running, and a second driver
+        # started now would write the same steps as the first (review of 2026-09-29, finding 2).
+        raise ApiError(
+            409, "driver_busy",
+            "this goal is still being worked on — start it once the turn has finished",
+            {"goal_id": goal_id, "status": g.status},
+        )
     goals: GoalService = request.app.state.goals
     running = goals.update_status(goal_id, body.expected_version, "RUNNING")
     _spawn(request.app, _run_steps(request.app, goal_id), goal_id)
@@ -2434,15 +2459,7 @@ async def ws_engine(websocket: WebSocket) -> None:
             pass
 
     if not authenticated:
-        try:
-            await websocket.close(code=4401)
-        except (WebSocketDisconnect, RuntimeError):
-            # The peer hung up inside the auth window, so there is nobody left to
-            # refuse. Closing a socket that has already gone raises, and an
-            # exception escaping this handler is a traceback in the engine's log
-            # for a client that merely left — which trains people to ignore the
-            # log. The refusal stands either way; there is just no recipient.
-            pass
+        await _close_quietly(websocket, 4401)
         return
 
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
@@ -2454,6 +2471,11 @@ async def ws_engine(websocket: WebSocket) -> None:
     # closing: a client that vanished without a close frame is exactly the case
     # that would otherwise leave the engine polling on.
     watch.subscribe()
+    # Named outside the loop so the `finally` can reach whichever pair is live: a handler cancelled while it
+    # waits (the server stopping, a test client leaving) is not on the path that cleans them, and the two
+    # tasks would run on with nobody to read their result.
+    getter: asyncio.Task[str] | None = None
+    receiver: asyncio.Task[str] | None = None
     try:
         while True:
             getter = asyncio.create_task(queue.get())
@@ -2491,8 +2513,33 @@ async def ws_engine(websocket: WebSocket) -> None:
     except Exception:
         pass
     finally:
-        watch.unsubscribe()
-        conns.discard(queue)
+        try:
+            # Whatever is still running is cancelled, and everything is awaited so its outcome is
+            # retrieved (an unretrieved `WebSocketDisconnect` is printed by the event loop, once per
+            # connection, for a client that merely left).
+            children = [t for t in (getter, receiver) if t is not None]
+            for child in children:
+                if not child.done():
+                    child.cancel()
+            await asyncio.gather(*children, return_exceptions=True)
+        finally:
+            # Last, and unconditionally: this is what the watch loop gates provider traffic on, and it
+            # is also the moment a caller can rely on this handler having nothing left to do.
+            watch.unsubscribe()
+            conns.discard(queue)
+
+
+async def _close_quietly(websocket: WebSocket, code: int) -> None:
+    """Close a socket whose peer may already be gone, without a traceback for a client that merely left.
+
+    Closing a WebSocket the peer has hung up on raises (`RuntimeError` from Starlette's state check, or
+    `WebSocketDisconnect`), and an exception escaping a handler is a traceback in the engine's log for
+    someone who just closed a tab. The refusal stands either way; there is only nobody left to hear it.
+    """
+    try:
+        await websocket.close(code=code)
+    except (WebSocketDisconnect, RuntimeError):
+        pass
 
 
 @app.websocket("/ws/goals/{goal_id}")
@@ -2514,7 +2561,7 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
             pass
 
     if not authenticated:
-        await websocket.close(code=4401)
+        await _close_quietly(websocket, 4401)
         return
 
     # Authenticated, but the goal must exist too — checking only after auth so
@@ -2523,7 +2570,7 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
     try:
         websocket.app.state.goals.get(goal_id)
     except ApiError:
-        await websocket.close(code=4404)
+        await _close_quietly(websocket, 4404)
         return
 
     # The socket is read as well as written, and that is what ends this handler. It used to only
@@ -2539,7 +2586,7 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
             try:
                 websocket.app.state.goals.get(goal_id)
             except ApiError:
-                await websocket.close(code=4404)
+                await _close_quietly(websocket, 4404)
                 return
             # `limit` rather than `[...][:500]`: the slice happened *after* the
             # read, so every tick parsed the goal's whole remaining log to send
@@ -2592,6 +2639,15 @@ def serve() -> None:
     import uvicorn
 
     port = pick_port()
+    # The state store is opened — and closed — *before* anything announces readiness. It used to be opened
+    # by uvicorn's startup, after the handshake: a corrupt database meant the engine said "ready" and then
+    # failed its own startup and exited, and a shell that read the handshake connected to a socket nobody
+    # was going to serve. Opened with the keychain's callback, so a role migration still carries its key.
+    try:
+        connect(on_role_migrated=Keychain().rename_role_key).close()
+    except sqlite3.Error as exc:
+        print(f"engine: cannot open the state store at {home.db_path()}: {exc}", file=sys.stderr, flush=True)
+        raise
     # Where this run's state actually lands, before anything can write. An isolated
     # run says so out loud, and the half-redirected case is called out instead of
     # being discovered later by finding a smoke-test key in a real keychain.

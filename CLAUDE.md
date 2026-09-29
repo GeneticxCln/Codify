@@ -55,7 +55,7 @@ for the same checks.
 Quoted from `docs/00` §6, which is the owner. Do not weaken one to make a change fit.
 
 1. Exactly eight `AgentRole` values (`laya`, `librarian`, `design`, `planner`, `fixer`, `verifier`, `critic`, `scribe`). No create/delete of slots. *(docs/00 §6.1)*
-2. Only `PUT /settings/agents/{role}` mutates agent config. `POST /goals` and `POST /goals/{id}/start` MUST reject unknown fields including `agent_config`. *(docs/00 §6.2)*
+2. Agent configuration is written only by the settings routes, never by a goal or a turn: `PUT /settings/agents/{role}` for one role, `POST /settings/agents/repair` (the one bulk action, through the same `set_config`) and `PUT /settings/engine` (engine-wide settings, including which model the conductor uses). `POST /goals` and `POST /goals/{id}/start` MUST reject unknown fields including `agent_config`. *(docs/00 §6.2)*
 3. Engine binds `127.0.0.1`. Every HTTP/WS request requires `Authorization: Bearer <boot_token>`. *(docs/00 §6.3)*
 4. Responses NEVER include raw API keys. *(docs/00 §6.4)*
 5. `LocalProvider.base_url` MUST pass `validate_local_base_url` before every request. *(docs/00 §6.5)*

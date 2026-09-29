@@ -154,6 +154,16 @@ class PathRefused(AgentOutputInvalid):
         self.code = "path_escape"
 
 
+class WriteWithdrawn(Exception):
+    """The goal stopped being writable while the fixer was answering, so its reply was not applied.
+
+    A person pressed Cancel or Pause during a model call that takes minutes. It is not a failure of the
+    model or the engine and must not be reported as one, and it must not be re-asked or handed to a
+    fallback — hence a class of its own, outside `AgentOutputInvalid`. The message is what the conductor is
+    told: nothing was written.
+    """
+
+
 class TestsFailed(AgentOutputInvalid):
     """The verifier ran and reported a failure.
 
@@ -515,6 +525,7 @@ class CriticRejection(AgentOutputInvalid):
 _STAGE_EXCEPTIONS: tuple[tuple[type[BaseException], str], ...] = (
     (TestsFailed, "fail"),
     (CriticRejection, "request_changes"),
+    (WriteWithdrawn, "cancelled"),
     (AgentOutputInvalid, "invalid"),
 )
 
@@ -1137,12 +1148,22 @@ class _Conducted:
     # The person cancelled while it ran. Neither an answer nor a failure: the turn is over,
     # and nothing this run produced may be published or allowed to move the goal's status.
     cancelled: bool = False
+    # There was no conductor to run: the provider cannot call tools, or no model is chosen. That is the
+    # documented degradation to the engine's own path (docs/09 §10.9), not a failure, and the log must not
+    # say a model failed when none was ever called.
+    unavailable: bool = False
 
     @property
     def finished(self) -> bool:
         if self.cancelled:
             return False
         if self.answer is None:
+            return False
+        if not self.answer.strip() and not self.planned:
+            # A model that said nothing has not declined anything. An empty reply (a model that spent its
+            # budget thinking, a context overflow, a server that answered `{}`) is not a decision to
+            # honour, and publishing it as "(no answer)" made the turn look finished when nothing had
+            # been said or done.
             return False
         if self.exhausted and not self.planned:
             return False
@@ -1151,6 +1172,8 @@ class _Conducted:
     def explanation(self) -> str:
         if self.answer is None:
             return "its model failed, so there is no answer and no plan"
+        if not self.answer.strip():
+            return "its model said nothing, so there is no answer and no plan"
         return "it used every call it was given without producing a plan"
 
 
@@ -1596,6 +1619,13 @@ class ConductorTools:
 
     async def plan(self, args: dict[str, Any]) -> str:
         task = str(args.get("task") or "").strip()
+        existing = self.service.goals.steps(self.goal_id)
+        if existing:
+            return (
+                f"This goal already has a plan ({len(existing)} step"
+                f"{'s' if len(existing) != 1 else ''}: {', '.join(s.title for s in existing)}). "
+                "Do not plan twice: tell the user what the steps are and stop."
+            )
         evidence = self.service._evidence_for(self.goal_id)
         if not evidence:
             # The one guard that has to stay in code rather than in the
@@ -1651,6 +1681,8 @@ class ConductorTools:
                 )
                 changed = [s for s in summaries if s.get("changed", True)]
                 fix_stage.record("wrote" if changed else "no_change")
+        except WriteWithdrawn as exc:
+            return str(exc)
         except (AgentOutputInvalid, ProviderError, PathEscapeError) as exc:
             return (
                 f"The fixer failed on that step ({getattr(exc, 'code', 'error')}: "
@@ -2020,8 +2052,30 @@ class ExecutorService:
         )
 
     async def run_planning(self, goal_id: str) -> None:
+        """Plan a goal — as its one driver, for as long as it takes.
+
+        The claim is what keeps a second writer off the goal (review of 2026-09-29, finding 2): Start,
+        Delete and a retry all consult it, and a goal being planned is not one they may act on.
+        """
+        if not self.claim_driver(goal_id):
+            self._log(goal_id, None, "warn", "another driver is already working on this goal — it is not planned twice")
+            return
+        try:
+            await self._plan_goal(goal_id)
+        finally:
+            self.release_driver(goal_id)
+
+    async def _plan_goal(self, goal_id: str) -> None:
+        """The planning pipeline itself. Callers hold the goal's driver claim (`run_planning`, `run_chat`)."""
         goal = self.goals.get(goal_id)
         ws = self.workspaces.get(goal.workspace_id)
+
+        if self.goals.steps(goal_id):
+            # A goal has one plan. A second one collides with the first on `(goal_id, ordinal)` — a raw
+            # IntegrityError the goal used to die of after the first plan was already written — and would
+            # otherwise run every step twice.
+            self._log(goal_id, None, "info", "this goal already has a plan — it is not planned a second time")
+            return
 
         self._preflight_roles(goal_id)
 
@@ -2256,6 +2310,22 @@ class ExecutorService:
     # ── a turn: the gate's other answer ─────────────────────────────────
 
     async def run_chat(self, goal_id: str) -> None:
+        """Answer a turn — as the goal's one driver, for as long as the turn runs.
+
+        The conductor's `plan` move leaves the goal `PENDING` while the turn goes on to write its answer, and
+        `PENDING` is what Start accepts. Without the claim, pressing Start then began a second driver on a
+        goal whose turn was still running, and Delete was allowed too (review of 2026-09-29, finding 2).
+        Start and Delete both consult `is_driving`; Cancel deliberately does not.
+        """
+        if not self.claim_driver(goal_id):
+            self._log(goal_id, None, "warn", "another driver is already working on this goal — this turn was not run")
+            return
+        try:
+            await self._answer_turn(goal_id)
+        finally:
+            self.release_driver(goal_id)
+
+    async def _answer_turn(self, goal_id: str) -> None:
         """Answer a turn, or hand it to the pipeline.
 
         The sibling of `run_planning`, spawned by the turns route instead of
@@ -2420,21 +2490,31 @@ class ExecutorService:
                 # goal, and marking it COMPLETED would clear the very state the
                 # approval gate reads.
                 return
-            self._log(
-                goal_id, None, "warn",
-                f"the conductor did not finish this turn ({conducted.explanation()}) "
-                "— running Codify's own sequence instead",
-            )
-            self.goals.publish(self._event(
-                goal_id, None, "log",
-                {
-                    "level": "warn",
-                    "message": (
-                        "the conductor could not finish this request, so Codify "
-                        "ran its standard sequence"
-                    ),
-                },
-            ))
+            if conducted.planned:
+                # It got as far as a plan before it stopped. That plan is the goal's plan: running the
+                # standard sequence now would plan the goal a second time, on top of the first.
+                self._log(
+                    goal_id, None, "warn",
+                    f"the conductor stopped early ({conducted.explanation()}), but the plan it made stands — "
+                    "it is waiting for you to approve it, or you can ask again",
+                )
+                return
+            if not conducted.unavailable:
+                self._log(
+                    goal_id, None, "warn",
+                    f"the conductor did not finish this turn ({conducted.explanation()}) "
+                    "— running Codify's own sequence instead",
+                )
+                self.goals.publish(self._event(
+                    goal_id, None, "log",
+                    {
+                        "level": "warn",
+                        "message": (
+                            "the conductor could not finish this request, so Codify "
+                            "ran its standard sequence"
+                        ),
+                    },
+                ))
         else:
             self._log(
                 goal_id, None, "info",
@@ -2460,8 +2540,8 @@ class ExecutorService:
             )
             # Delegated, not reimplemented. `run_planning` sets PENDING when it
             # finishes; returning here without touching the status is what lets
-            # one goal be either shape depending on what was asked.
-            await self.run_planning(goal_id)
+            # one goal be either shape depending on what was asked. The claim is already held.
+            await self._plan_goal(goal_id)
             return
 
         try:
@@ -2536,11 +2616,21 @@ class ExecutorService:
         a conductor at all; keeping it would only move the failure later and make
         it harder to read.
         """
+        return self._resolve_conductor_targets()[0]
+
+    def _resolve_conductor_targets(self) -> tuple[list[tuple[Any, str, Any]], list[str]]:
+        """`_conductor_targets`, plus why each candidate the *settings named* was dropped.
+
+        The reasons are only for a target a person chose (the conductor's own pair, or its own fallback
+        pair). A conductor that borrows the scribe's row and cannot call tools is the documented quiet
+        degradation to a plain answer; a conductor someone pointed at a provider and then silently
+        ignored is a setting that appears to do nothing, so `_conduct` says why in the goal's log.
+        """
         role = self._conductor_role()
         try:
             base = self.orchestrator.registry.get_config(role)
         except Exception:
-            return []
+            return [], []
         primary_cfg = self._conductor_config(base)
         candidates = [primary_cfg]
         borrowed = primary_cfg is base
@@ -2553,18 +2643,71 @@ class ExecutorService:
             candidates.append(fallback_cfg)
 
         targets: list[tuple[Any, str, Any]] = []
+        problems: list[str] = []
         for cfg in candidates:
+            chosen = not borrowed and (cfg is primary_cfg or cfg is fallback_cfg)
             model = (cfg.model_name or "").strip()
             if not model:
                 continue
+            cfg = self._with_address(cfg)
+            if not cfg.base_url and cfg.provider not in BUILTIN_PROVIDERS:
+                # Still a label with no address: no role row defines this slug, and the
+                # conductor's own pair carries none. Building it would give a provider
+                # posting to nowhere, which reads as a dead endpoint instead of the
+                # misconfiguration it is.
+                if chosen:
+                    problems.append(
+                        f"the conductor is set to provider {cfg.provider!r}, but no role defines a provider by "
+                        "that name (a custom provider's address lives on the role that introduces it), so it "
+                        "was skipped"
+                    )
+                continue
             try:
                 provider = self.orchestrator.registry.build_provider(cfg)
-            except ProviderError:
+            except ProviderError as exc:
+                if chosen:
+                    problems.append(
+                        f"the conductor's provider {cfg.provider!r} could not be built "
+                        f"({exc.code}: {exc.message}), so it was skipped"
+                    )
                 continue
             if not getattr(provider, "supports_tools", False):
+                if chosen:
+                    problems.append(
+                        f"the conductor's provider {cfg.provider!r} cannot call tools, so it was skipped"
+                    )
                 continue
             targets.append((provider, model, cfg))
-        return targets
+        return targets, problems
+
+    def _with_address(self, cfg: AgentConfig) -> AgentConfig:
+        """`cfg` with a custom provider's address filled in from the role row that defines it.
+
+        A built-in slug is explained by the catalogue, and a config that already has an address needs
+        nothing. A custom slug is only a label: its endpoint, protocol and credential live on the role
+        row (or fallback columns) that introduced it, and the conductor's own pair has nowhere to hold
+        them — yet the Conductor card offers "Custom Provider…". So the slug means that row's address,
+        whichever role holds it. The credential reference comes along only from a primary row, where it
+        belongs to the provider being named; a fallback column carries none.
+        """
+        if cfg.base_url or cfg.provider in BUILTIN_PROVIDERS:
+            return cfg
+        try:
+            rows = self.orchestrator.registry.list_configs()
+        except Exception:
+            return cfg
+        for row in rows:
+            if row.provider == cfg.provider and row.base_url:
+                return cfg.model_copy(update={
+                    "protocol": row.protocol, "base_url": row.base_url, "api_key_ref": row.api_key_ref,
+                })
+        for row in rows:
+            if row.fallback_provider == cfg.provider and row.fallback_base_url:
+                return cfg.model_copy(update={
+                    "protocol": row.fallback_protocol or "openai_compat",
+                    "base_url": row.fallback_base_url, "api_key_ref": None,
+                })
+        return cfg
 
     def conductor_menu(self, goal_id: str) -> Callable[[], list[ToolSpec]]:
         """The moves offered for a goal, as a callable the loop asks each turn.
@@ -2584,6 +2727,28 @@ class ExecutorService:
             return [*BASE_TOOLS, *(STEP_TOOLS if self.goals.steps(goal_id) else ())]
 
         return menu
+
+    def _approval_withdrawn(self, goal_id: str) -> str | None:
+        """Why a write that was approved when it began may no longer happen — or None if it may.
+
+        Asked again at the write itself (`_fixer`), after a model call that can take minutes. It is narrower
+        than `_write_allowed` on purpose: that asks whether approval *exists*, this asks whether a person has
+        *taken it back*. A goal that is `FAILED` because a parallel sibling failed has not had its approval
+        taken back — the batch is meant to let its healthy steps finish (`docs/04` §3.0) — so only the
+        person's own Cancel and Pause, a deleted goal, and a goal switched back to plan-only stop the write.
+        """
+        try:
+            goal = self.goals.get(goal_id)
+        except ApiError:
+            return "Nothing was written: this goal no longer exists."
+        if goal.plan_only:
+            return "Nothing was written: this goal was switched back to plan-only while the fixer was answering."
+        if goal.status in ("CANCELLED", "PAUSED"):
+            return (
+                f"Nothing was written: the goal was {goal.status.lower()} while the fixer was answering, "
+                "so its reply was not applied."
+            )
+        return None
 
     def _write_allowed(self, goal_id: str) -> tuple[bool, str]:
         """Whether a write may touch the filesystem for this goal (docs/00 §6.9).
@@ -2796,9 +2961,11 @@ class ExecutorService:
         decided, and re-planning over the top of it would make the brain a
         suggestion.
         """
-        targets = self._conductor_targets()
+        targets, problems = self._resolve_conductor_targets()
+        for problem in problems:
+            self._log(goal_id, None, "warn", problem)
         if not targets:
-            return _Conducted(answer=None, exhausted=False, planned=False)
+            return _Conducted(answer=None, exhausted=False, planned=False, unavailable=True)
         provider, model, cfg = targets[0]
         fallback = targets[1] if len(targets) > 1 else None
         role = self._conductor_role()
@@ -2860,7 +3027,10 @@ class ExecutorService:
                 f"the conductor could not run ({exc.code}: {exc.message})",
             )
             return _Conducted(
-                answer=None, exhausted=conductor.exhausted, planned=False,
+                answer=None, exhausted=conductor.exhausted,
+                # It may have planned before the provider failed: whether a plan exists is a fact about the
+                # goal's rows, not something the failure path may assume.
+                planned=bool(self.goals.steps(goal_id)),
             )
         return _Conducted(
             answer=answer,
@@ -4319,6 +4489,11 @@ class ExecutorService:
         except CriticRejection:
             # Step remains IN_PROGRESS with review_notes, goal is PAUSED; human retry required
             return
+        except WriteWithdrawn as exc:
+            # The person stopped the goal while the fixer was answering. Nothing was written, and this is
+            # not a failure to report: the step stays as it was, and a resume runs it again.
+            self._log(goal_id, step_id, "info", f"{exc} The fixer's reply was discarded.")
+            return
         except (AgentOutputInvalid, ProviderError) as exc:
             self._fail(
                 goal_id, step_id, getattr(exc, "code", "agent_output_invalid"), str(exc),
@@ -4720,7 +4895,10 @@ class ExecutorService:
             that would not parse gets, with this reason quoted to the model. `fs.apply` resolves every
             edit before it writes anything, so a refused reply has written nothing and asking again is safe.
             """
-            files = self._parse_files(reply)
+            notes: list[str] = []
+            files = self._parse_files(reply, notes)
+            for note in notes:
+                self._log(goal_id, step.id, "info", note)
             # The fixer may declare itself unfinished: multi-stage changes (a config
             # file in one pass, the code that reads it in the next) do not fit one
             # reply. It asks by returning needs_another_pass=true WITH a plan note;
@@ -4732,6 +4910,13 @@ class ExecutorService:
                     "another pass alongside the changes you just made",
                     role="fixer",
                 )
+            if not dry_run:
+                # Approval is asked about again *here*, at the write. `write` and `run_step` asked before the
+                # model call, and a local model takes minutes to answer — which is when a person presses
+                # Cancel or Pause. A dry run writes nothing, so it is not held to this.
+                withdrawn = self._approval_withdrawn(goal_id)
+                if withdrawn:
+                    raise WriteWithdrawn(withdrawn)
             try:
                 # Apply runs BEFORE storage now: an `edit` op is only a description
                 # ("replace this exact text") until the engine resolves it against
@@ -4754,7 +4939,15 @@ class ExecutorService:
             except ValueError as exc:
                 # An edit whose old_text does not match the file is the fixer's
                 # mistake — a contract failure, not an internal error.
-                raise AgentOutputInvalid(str(exc), role="fixer") from exc
+                message = str(exc)
+                if message.startswith("edit failed for "):
+                    message += (
+                        ". For action \"edit\", old_text must match the file's current text exactly and appear "
+                        "exactly `count` times: include enough surrounding lines to make it unique, set count "
+                        "to 0 to replace every occurrence, or use action \"update\" with the file's complete "
+                        "new content."
+                    )
+                raise AgentOutputInvalid(message, role="fixer") from exc
             applied.update(files=files, summaries=summaries, wants_pass=wants_pass)
 
         await self.orchestrator.run_agent(
@@ -5262,7 +5455,11 @@ class ExecutorService:
         # Both used to be asked for a judgment the executor never gave them the
         # evidence for: a critic could approve failing changes, and a scribe told
         # to describe "the diff you are given" was given nothing but file names.
-        self._set_step(goal_id, step, "IN_PROGRESS", commit_message=commit_message, last_agent_role="scribe")
+        # The message is stored on the step only once a commit has landed (below): the timeline shows a
+        # stored message as "Commit: ...", so writing it here — before anything knew whether a commit would
+        # follow — showed a commit in a plain folder, a dry run and a cancelled step. Until then the message
+        # rides in the log, which loses nothing the model wrote and claims nothing that did not happen.
+        self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="scribe")
         self._log(goal_id, step.id, "info", summary)
 
         if dry_run or not root_path or not self.git.is_git_repo(root_path):
@@ -5271,6 +5468,14 @@ class ExecutorService:
             # job, so neither is reported as a failure — a per-role rate that
             # counted "not a repo" as a broken scribe would punish every user whose
             # workspace is a plain directory.
+            if dry_run:
+                self._log(goal_id, step.id, "info", f"dry run — nothing committed; the message would be: {commit_message}")
+            else:
+                self._log(
+                    goal_id, step.id, "info",
+                    "not a git repository — nothing committed, the change is on disk. "
+                    f"The message would have been: {commit_message}",
+                )
             return "skipped" if dry_run else "not_a_repo"
         # The last guard before the one irreversible act. A cancel that
         # landed during the critic's call must not end in a commit the user
@@ -5291,6 +5496,7 @@ class ExecutorService:
                 self.git.commit, root_path, commit_message, paths,
             )
         if commit_hash:
+            self._set_step(goal_id, step, "IN_PROGRESS", commit_message=commit_message)
             self._log(goal_id, step.id, "info", f"git committed {commit_hash[:7]}: {commit_message}")
             return "committed"
         if paths:
@@ -5343,7 +5549,7 @@ class ExecutorService:
             parsed.append({"title": title, "description": desc, "suggested_paths": [str(p) for p in paths]})
         return parsed
 
-    def _parse_files(self, out: Any) -> list[dict[str, Any]]:
+    def _parse_files(self, out: Any, notes: list[str] | None = None) -> list[dict[str, Any]]:
         files = (out or {}).get("files")
         if not isinstance(files, list):
             raise AgentOutputInvalid("fixer must return files list", role="fixer")
@@ -5361,10 +5567,29 @@ class ExecutorService:
                 raise AgentOutputInvalid("fixer file entry invalid", role="fixer")
             if action == "delete" and content is not None:
                 raise AgentOutputInvalid("fixer delete must have null content", role="fixer")
+            if (
+                action == "edit" and not f.get("edits") and isinstance(content, str) and content.strip()
+            ):
+                # `edit` with a complete file in `content` and no edits: the model wrote the file it wants
+                # and used the wrong name for it. It is the commonest fixer reply a 1.5B model produced,
+                # and asking again did not help — it does not know what `edit` is for. Only with content to
+                # write (an empty one would blank the file), and never when edits are present: those keep
+                # their contract meaning and `content` is ignored, as the prompt says.
+                if notes is not None:
+                    notes.append(
+                        f"fixer sent action=edit with content and no edits for {path}; "
+                        "treated as a whole-file update"
+                    )
+                parsed.append({"path": path, "action": "update", "content": content})
+                continue
             if action == "edit":
                 edits = f.get("edits")
                 if not isinstance(edits, list) or not edits:
-                    raise AgentOutputInvalid("fixer edit requires a non-empty edits list", role="fixer")
+                    raise AgentOutputInvalid(
+                        f"fixer edit for {path} requires a non-empty edits list of {{old_text, new_text}}; "
+                        'to replace the whole file use action "update" with its complete content',
+                        role="fixer",
+                    )
                 for e in edits:
                     if not isinstance(e, dict) or not isinstance(e.get("old_text"), str) or not isinstance(e.get("new_text"), str):
                         raise AgentOutputInvalid(

@@ -26,8 +26,8 @@ provider's model list to anything that can open a socket is not a feature.
 """
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
-import asyncio
 import json
+import time
 import unittest
 from collections.abc import Callable
 from typing import Any
@@ -313,14 +313,9 @@ class TestEngineSocket(unittest.TestCase):
         with TestClient(app) as client:
             with client.websocket_connect(
                 "/ws/engine", headers={"Authorization": f"Bearer {app.state.token}"}
-            ):
+            ) as ws:
                 self.assertEqual(app.state.catalog_watch.subscribers, 1)
-            # The socket is closed by the `with`; the endpoint's `finally` runs as
-            # the connection tears down, so give the loop one turn to notice.
-            for _ in range(20):
-                if app.state.catalog_watch.subscribers == 0:
-                    break
-                _turn()
+                _leave(ws, app)
             self.assertEqual(app.state.catalog_watch.subscribers, 0)
 
     def test_a_change_reaches_a_connected_client(self) -> None:
@@ -347,21 +342,24 @@ class TestEngineSocket(unittest.TestCase):
             ) as ws:
                 app.state.publish_engine_event(frame)
                 received = json.loads(ws.receive_text())
+                _leave(ws, app)
         self.assertEqual(received, frame)
 
 
-def _turn() -> None:
-    """Let the server's teardown coroutine run.
+def _leave(ws: Any, app: Any) -> None:
+    """Close from the client and wait until the endpoint has finished, *before* the `with` exits.
 
-    The TestClient drives the app on its own loop, so the wait is a real
-    `asyncio.sleep` on a throwaway loop rather than a `time.sleep` that would only
-    make the test slower without making it correct.
+    Starlette's test client leaves by sending the disconnect and then cancelling the app's scope
+    straight away. An endpoint that needs a few loop turns to notice the disconnect — this one waits on
+    two tasks — is therefore cancelled mid-teardown whenever the machine is busy, and the `with` ends in
+    `CancelledError` instead of an assertion (it failed 8 times in 25 with the CPUs saturated, and once in
+    `make check-history`). `subscribers` reaching zero is the endpoint's last act, so waiting on it means
+    the cancel lands on a handler that has already returned.
     """
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(asyncio.sleep(0))
-    finally:
-        loop.close()
+    ws.close(1000)
+    deadline = time.monotonic() + 10
+    while app.state.catalog_watch.subscribers and time.monotonic() < deadline:
+        time.sleep(0.005)
 
 
 if __name__ == "__main__":

@@ -162,7 +162,12 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 #       folder-picker probe. Log events live in per-goal streams these paths
 #       cannot always reach.
 # S603/S607  subprocess — every call is an argv list (no shell=True); the
-#       partial-path `git`/`python3` names resolve on PATH by design.
+#       partial-path `git`/`python3` names resolve on PATH by design. Only `tests/*`
+#       is exempt wholesale. In `engine/`, `benchmarks/` and `scripts/` there is no
+#       per-file exemption: each spawn carries its own `# noqa: S603 — <why>` on the
+#       line, so a *second* raw spawn in a file that already has a justified one is a
+#       finding, not a freebie (review of 2026-09-29). `tests/test_no_unguarded_spawns.py`
+#       holds the same line from the other side.
 # S608  SQL interpolation — every site interpolates engine-owned identifiers
 #       only (placeholders generated from a list's length, column names from
 #       code, a WHERE clause built from literal strings); values always travel
@@ -193,22 +198,14 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 #       ever a real state directory, and each is removed with the temp directory. Scoped to
 #       that one file.
 "tests/test_state_permissions.py" = ["S103"]
-"engine/app.py" = ["S110", "S603", "S607", "S608"]
+"engine/app.py" = ["S110", "S608"]
 "engine/conductor.py" = ["S110"]
 "engine/db.py" = ["S110"]
 "engine/executor.py" = ["S101", "S110", "S608"]
-"engine/git.py" = ["S603"]
 # S108 (engine/fs.py)  `SYSTEM_ROOTS` names `/tmp` and `/var/tmp` as directories a workspace must
 #       never be. They are paths to *refuse*: nothing here creates, opens or writes a file at
 #       either, which is the risk the rule exists for. Scoped to that one file.
 "engine/fs.py" = ["S108"]
-# S603 (engine/library.py)  the regex worker. The argv is `sys.executable` and a script path
-#       this package computes from `__file__` — nothing a model or a request supplies. The
-#       model's pattern, the one untrusted input, travels as JSON on the child's stdin and is
-#       never part of an argv, so there is no argument to inject through. There is no shell.
-#       The process is started under `guarded_argv`/`guarded_env` in a session of its own and
-#       is killed at a hard limit; that is what the exemption buys (see `tests/test_library_regex_bound.py`).
-"engine/library.py" = ["S603"]
 # E402 (engine/__main__.py)  the import below the watchdog call is not an
 #       oversight to be tidied away — it is the whole file. `serve()` arms the
 #       parent watchdog only after it has pulled in engine.app and everything it
@@ -218,19 +215,8 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 #       back to the top reopens the hole this module exists to prevent.
 "engine/__main__.py" = ["E402"]
 "engine/providers.py" = ["S110"]
-"engine/sandbox.py" = ["S603"]
-"engine/spawn_guard.py" = ["S603"]
 "engine/services.py" = ["S608", "S112"]
 "engine/stats_history.py" = ["S608"]
-# S603 (scripts/run_tests.py)  the suite runner. `sys.executable -m unittest` is
-#       a fixed argv prefix with the caller's own unittest arguments appended,
-#       no shell, and the arguments come from a developer or CI rather than from
-#       anything a model produced. The same reasoning as scripts/check_history.py:
-#       this is a gate tool, and `validate_argv` would reject the discovery
-#       pattern's `-p "test_*.py"` glob, which is the check's whole point. It is
-#       allowlisted in tests/test_no_unguarded_spawns.py for the same reason and
-#       pinned by tests/test_run_tests_guard.py.
-"scripts/run_tests.py" = ["S603"]
 # S108 (scripts/preview_engine.py)  the default env-file path is a /tmp literal
 #       because the file's whole job is to be a short-lived paste-adjacent
 #       helper for a preview session, like the log files beside it; it is

@@ -22,14 +22,16 @@ Three consequences worth stating plainly:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 
 from engine.models import BUILTIN_PROVIDERS
-from engine.providers import key_destination_problem
+from engine.providers import ProviderError, key_destination_problem, validate_local_base_url
 
 DISCOVERY_TIMEOUT_S = 8.0
 MAX_MODELS_PER_PROVIDER = 500
@@ -68,19 +70,45 @@ class DiscoveryResult:
         }
 
 
+# An ISO 8601 / RFC 3339 timestamp as providers write it: a date, optionally a time with a fraction of any
+# length, optionally a `Z` or an offset with or without its colon. Read by hand rather than with
+# `datetime.fromisoformat`, which on Python 3.10 (the declared floor) accepts only what `isoformat()` itself
+# produces — fractions of exactly three or six digits, offsets as `+HH:MM` — while Ollama's `modified_at` is
+# Go's RFC 3339 with nanoseconds. Every model's date failed to parse there and "newest first" quietly became
+# alphabetical (review of 2026-09-29).
+_ISO_TIMESTAMP = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2})"
+    r"(?:[Tt ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?"
+    r"\s*(?:([Zz])|([+-])(\d{2}):?(\d{2}))?"
+)
+
+
 def _iso_day(value: Any) -> float | None:
     """Parse a provider timestamp into epoch seconds (`created` / `created_at`)."""
+    if isinstance(value, bool):
+        return None
     if isinstance(value, (int, float)):
         return float(value)
-    if isinstance(value, str):
-        text = value.strip().replace("Z", "+00:00")
-        try:
-            from datetime import datetime
-
-            return datetime.fromisoformat(text).timestamp()
-        except ValueError:
-            return None
-    return None
+    if not isinstance(value, str):
+        return None
+    match = _ISO_TIMESTAMP.fullmatch(value.strip())
+    if match is None:
+        return None
+    year, month, day, hour, minute, second, fraction, zulu, sign, off_h, off_m = match.groups()
+    tz: timezone | None = None
+    if zulu:
+        tz = timezone.utc
+    elif sign:
+        delta = timedelta(hours=int(off_h), minutes=int(off_m))
+        tz = timezone(delta if sign == "+" else -delta)
+    try:
+        return datetime(
+            int(year), int(month), int(day), int(hour or 0), int(minute or 0), int(second or 0),
+            # Microseconds are the most a datetime holds: a longer fraction is truncated, never rounded.
+            int((fraction or "").ljust(6, "0")[:6]), tzinfo=tz,
+        ).timestamp()
+    except (ValueError, OverflowError):
+        return None
 
 
 def _entry(
@@ -271,6 +299,13 @@ async def discover_provider(
         return DiscoveryResult(
             target.provider, target.protocol, ok=False, error="no base_url configured"
         )
+    if target.protocol == "ollama":
+        # Invariant 5 (docs/00 §6.5): a local provider's base_url passes `validate_local_base_url` before every
+        # request. The provider's constructor enforces it; discovery builds no provider, so it is asked here.
+        try:
+            validate_local_base_url(target.base_url)
+        except ProviderError as exc:
+            return DiscoveryResult(target.provider, target.protocol, ok=False, error=exc.message)
     discoverer = DISCOVERERS.get(target.protocol)
     if discoverer is None:
         return DiscoveryResult(

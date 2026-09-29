@@ -15,10 +15,14 @@ reply a human is expected to believe is produced by a function in this module.
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import importlib.util
 import json
+import threading
 import unittest
+from http.server import HTTPServer
 from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
+
+from engine.providers import OllamaProvider
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "fake_ollama.py"
 
@@ -120,6 +124,54 @@ class TestFixerFiles(unittest.TestCase):
         written = self.files(prompt)[0]
         self.assertEqual(written["path"], "banner.txt")
         self.assertEqual(written["content"], "hello from codify\n")
+
+
+class TestChatEndpoint(unittest.IsolatedAsyncioTestCase):
+    """`/api/chat` answers in Ollama's chat shape, so a turn against the fake says something.
+
+    The fake served the generate shape (`{"response": ...}`) for every POST. The conductor's provider
+    reads `message.content` from the chat endpoint, found nothing, and the turn finished silent — read on
+    screen as an engine fault (audit of 2026-09-29, second pass).
+    """
+
+    def setUp(self) -> None:
+        self.fake = load_fake()
+
+    def test_the_reply_is_a_message_not_a_response(self) -> None:
+        reply = self.fake.chat_reply({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hello\n\nThe user says: what is here?"}],
+        })
+        self.assertEqual("assistant", reply["message"]["role"])
+        self.assertIn("what is here?", reply["message"]["content"])
+        self.assertNotIn("response", reply)
+        self.assertTrue(reply["done"])
+
+    def test_it_reads_the_last_user_message_not_the_first(self) -> None:
+        reply = self.fake.chat_reply({"messages": [
+            {"role": "user", "content": "The user says: first"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "The user says: second"},
+        ]})
+        self.assertIn("second", reply["message"]["content"])
+        self.assertNotIn("first", reply["message"]["content"])
+
+    async def test_the_engines_own_provider_gets_text_back_over_a_real_socket(self) -> None:
+        server = HTTPServer(("127.0.0.1", 0), self.fake.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            provider = OllamaProvider(f"http://127.0.0.1:{server.server_port}")
+            reply = await provider.complete_with_tools(
+                "system", [{"role": "user", "content": "The user says: ping"}], [], "m",
+                temperature=0.2, max_tokens=64,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        self.assertIn("ping", reply.text)
+        self.assertFalse(reply.wants_tools)
 
 
 if __name__ == "__main__":

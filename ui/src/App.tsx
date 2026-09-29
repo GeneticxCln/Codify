@@ -803,6 +803,11 @@ export const App: React.FC = () => {
     };
   }, [loadModels]);
 
+  // Whether the "enter a folder path" dialog is open. Owned here rather than by the command bar so a
+  // picker that cannot open can open it: on a desktop with no dialog helper the folder button never
+  // works, and a banner that says "type the path instead" is a dead end unless the form is already there.
+  const [manualWorkspaceOpen, setManualWorkspaceOpen] = useState(false);
+
   // Native OS File Manager browser handler (opens Nautilus / portal)
   const handleBrowseWorkspace = async () => {
     try {
@@ -816,6 +821,7 @@ export const App: React.FC = () => {
       }
     } catch (err: any) {
       setError(readRejection(err, "Failed to open the folder browser."));
+      if (err?.code === "picker_unavailable") setManualWorkspaceOpen(true);
     }
   };
 
@@ -3289,6 +3295,8 @@ export const App: React.FC = () => {
               selectedWorkspace={selectedWs}
               onSelectWorkspace={setSelectedWs}
               onBrowseWorkspace={handleBrowseWorkspace}
+              manualWorkspaceOpen={manualWorkspaceOpen}
+              onManualWorkspaceOpenChange={setManualWorkspaceOpen}
               onCreateWorkspace={handleCreateWorkspace}
               onDeleteWorkspace={handleDeleteWorkspace}
               onSetDesignContract={handleSetDesignContract}

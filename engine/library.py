@@ -201,7 +201,7 @@ def _run_regex_worker(request: dict[str, Any]) -> dict[str, Any]:
     the kill takes the whole group, and with a hard clock: `SIGKILL`, not `SIGTERM` — a
     process stuck inside `re` has nothing to clean up and does not run a handler anyway.
     """
-    proc = subprocess.Popen(
+    proc = subprocess.Popen(  # noqa: S603 — argv is sys.executable and a script path computed from __file__; the model's pattern travels as JSON on stdin, never in an argv
         guarded_argv([sys.executable, REGEX_WORKER]),
         cwd=request["root"],
         # What a stdlib script needs to start, and nothing of the engine's environment.

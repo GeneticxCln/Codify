@@ -110,7 +110,7 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
 
 1. Exactly eight `AgentRole` values (`laya`, `librarian`, `design`, `planner`, `fixer`, `verifier`,
    `critic`, `scribe`). No create/delete of slots.
-2. Only `PUT /settings/agents/{role}` mutates agent config. `POST /goals` and `POST /goals/{id}/start` MUST reject unknown fields including `agent_config`.
+2. Agent configuration is written only by the settings routes, never by a goal or a turn: `PUT /settings/agents/{role}` for one role, `POST /settings/agents/repair` (the one bulk action, through the same `set_config`) and `PUT /settings/engine` (engine-wide settings, including which model the conductor uses). `POST /goals` and `POST /goals/{id}/start` MUST reject unknown fields including `agent_config`.
 3. Engine binds `127.0.0.1`. Every HTTP/WS request requires `Authorization: Bearer <boot_token>`.
 4. Responses NEVER include raw API keys.
 5. `LocalProvider.base_url` MUST pass `validate_local_base_url` before every request.

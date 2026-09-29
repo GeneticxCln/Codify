@@ -246,7 +246,7 @@ Commands: `codify_list_agent_configs`, `codify_update_agent_config`, `codify_tes
 
 `AgentConfigPatch` includes `api_key` and `base_url`. `api_key` never written to Tauri store or logs.
 
-`BackendClient` attaches boot Bearer (`04` §6) on every call.
+Every engine call the UI makes (`ui/src/api.ts`) attaches the boot Bearer token (`04` §6).
 
 ## 6. Read-only elsewhere
 

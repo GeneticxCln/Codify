@@ -141,6 +141,8 @@ BUILTIN_PROVIDERS: dict[str, dict] = {
 
 Custom slug (e.g. `openrouter`, `groq`): `protocol` MUST be `openai_compat` or `anthropic` or `ollama`. `base_url` REQUIRED. `ollama` / `local_only` → `validate_local_base_url`. Remote custom URLs are allowed (single-user); still no query-token, still Bearer.
 
+**A key is required on every `openai_compat` call path, local servers included.** `complete` and `complete_with_tools` both refuse an empty key with `missing_api_key` before any request is made (`complete_with_tools` once sent an empty bearer token, so a keyless server answered the conductor and refused every role). A local OpenAI-compatible server — llama.cpp, LM Studio, vLLM — ignores the key, so any placeholder works (`benchmarks/seed_endpoint.py` stores one and says so). Genuinely keyless local servers would be a product change (discovery, repair and the settings screen all read `needs_key`), not made here.
+
 Every protocol's `complete` takes the same keyword-only `num_ctx` and `keep_alive` (see
 2.2), and **only Ollama reads either**. `num_ctx` is the one parameter these APIs expose as a
 request option, so it becomes an entry in the `options` dict sent to `/api/generate` and
@@ -380,6 +382,22 @@ ninth `AgentRole`, and that is a structural decision rather than a naming one:
   returns a key by reference without asking which provider it is for.
   `AgentRegistryService.fallback_config_for` drops the same field for the same
   reason.
+- A **custom** provider slug (one the catalogue does not list) means the address of
+  the role row that defines it. Its endpoint, protocol and credential live on that
+  row — or on a fallback column that introduced it — and the conductor's own pair
+  has no `base_url` to carry them, yet the Conductor card offers "Custom
+  Provider…". So `ExecutorService._with_address` looks the slug up across the
+  eight rows, whichever role holds it, and takes the endpoint, protocol and (from
+  a primary row only, where it belongs to that provider) the credential
+  reference. A built-in slug keeps the catalogue's address. A slug **no row
+  defines** has no address anywhere, so it is not a target — building one would
+  post to an empty URL and read as a dead endpoint — and, because a person chose
+  it, the goal's log says so (`the conductor is set to provider 'x', but no role
+  defines a provider by that name…`). The same sentence form covers a chosen
+  provider that cannot be built or cannot call tools; a conductor that merely
+  *borrows* the scribe's row and has no tool support stays the quiet degradation
+  to a plain answer, with no warning at all (`tests/test_turns.py`,
+  `TestTheConductorsTargets`; `tests/test_conductor_config_is_explained.py`).
 - It is measured through the ordinary `agent_assigned` / `usage` events, so
   stats and the Settings screen need no new case.
 

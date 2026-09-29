@@ -43,6 +43,64 @@ class SkillCase(unittest.TestCase):
         return path
 
 
+class TestAHugeSkillFileIsNotReadWhole(SkillCase):
+    """The size limit applies before the read, not after it (review of 2026-09-29).
+
+    `_read_file` read the whole file with `read_text` and only then compared its length to `MAX_SKILL_CHARS`.
+    A skill file arrives with a cloned repository and is untrusted: a multi-gigabyte `x.md` was read into memory,
+    on the event loop's thread, before being refused for being too big — an out-of-memory stall for the price of a
+    sparse file. The read is now bounded, and a file over the bound is refused without being read at all.
+    """
+
+    def sparse(self, name: str, size: int) -> Path:
+        directory = self.root / SKILLS_DIRNAME
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{name}.md"
+        with path.open("wb") as handle:
+            handle.truncate(size)  # a hole: costs no disk, and reading it costs `size` bytes of memory
+        return path
+
+    def test_a_file_far_over_the_limit_is_refused_without_being_read_into_memory(self) -> None:
+        import tracemalloc
+
+        self.sparse("huge", 200 * 1024 * 1024)
+        tracemalloc.start()
+        try:
+            skills, problems = workspace_skills(str(self.root))
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual([], skills)
+        self.assertTrue(any("huge" in p and "limit" in p for p in problems), problems)
+        self.assertLess(peak, 8 * 1024 * 1024, f"a skill file was read into memory ({peak:,} bytes allocated)")
+
+    def test_a_file_just_over_the_limit_is_still_refused_in_words(self) -> None:
+        self.write_skill("big", "x" * (MAX_SKILL_CHARS + 1))
+
+        _, problems = workspace_skills(str(self.root))
+
+        self.assertTrue(any("big" in p and "limit" in p for p in problems), problems)
+
+    def test_a_file_at_the_limit_still_loads(self) -> None:
+        body = "---\nname: fits\ndescription: d\n---\n" + "y" * (MAX_SKILL_CHARS - 60)
+        self.write_skill("fits", body)
+
+        skills, problems = workspace_skills(str(self.root))
+
+        self.assertEqual([], problems)
+        self.assertEqual(["fits"], [s.name for s in skills])
+
+    def test_multibyte_text_within_the_character_limit_is_not_refused_for_its_bytes(self) -> None:
+        # The bound is in bytes, so it has to allow the four bytes a character can take.
+        body = "---\nname: wide\ndescription: d\n---\n" + "\u00e9" * 1000
+        self.write_skill("wide", body)
+
+        skills, _ = workspace_skills(str(self.root))
+
+        self.assertEqual(["wide"], [s.name for s in skills])
+
+
 class TestWhatShipsWithCodify(unittest.TestCase):
     def test_the_built_in_recipe_loads(self) -> None:
         skills, problems = builtin_skills()

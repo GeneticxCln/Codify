@@ -61,6 +61,10 @@ def guarded_argv(argv: list[str]) -> list[str]:
     `start_new_session=True` (the guard must lead the group it kills) and
     `guarded_env`.
     """
+    if argv[:2] == [sys.executable, SPAWN_GUARD]:
+        # Already guarded (a caller that wrapped it, handing it to a helper that wraps at the spawn):
+        # a guard in front of a guard would put the inner one in a group it does not lead.
+        return list(argv)
     return [sys.executable, SPAWN_GUARD, *argv]
 
 
@@ -247,7 +251,7 @@ def main(argv: list[str]) -> int:
     try:
         # No new session, no new group, no env, no cwd: the command runs exactly where
         # and how the engine asked for it, one process deeper.
-        command = subprocess.Popen(argv)
+        command = subprocess.Popen(argv)  # noqa: S603 — the guard's own child: the argv it was handed, already validated by whoever guarded it
     except OSError as exc:
         # `shutil.which` in the engine resolved this binary, so this is ENOEXEC or a
         # missing loader rather than a typo. 127 is the shell's "cannot execute".

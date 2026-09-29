@@ -110,6 +110,29 @@ the race does not crash a background task), the conductor asks "cancelled?" befo
 tool call (`Conductor(cancelled=...)`, so a Cancel takes effect within one call), and the step driver only
 drives a `RUNNING` goal (M2: a cancel during a retried step used to be followed by a full conductor run).
 
+**One driver per goal, held for the whole run** (review of 2026-09-29, finding 2). `run_chat` and `run_planning`
+claim the goal's driver (`claim_driver`) for as long as they run, as `start`, `retry` and `apply` already did.
+The conductor's `plan` move leaves the goal `PENDING` while the turn goes on to write its answer, and `PENDING` is
+what Start accepts — so without the claim, Start then began a second driver on a goal whose turn was still going
+(two conductors writing the same steps, the turn's own `write` gate opening the moment the status read `RUNNING`),
+and Delete was allowed. Now `POST /goals/{id}/start` answers `409 driver_busy` while a turn or a planning run
+holds the goal, `DELETE` answers `409 goal_in_progress`, and Cancel — deliberately — stays allowed.
+
+**A goal has one plan.** `plan_steps` is unique on `(goal_id, ordinal)`, so a second plan did not append: it
+raised a raw `IntegrityError` after the first plan was written and failed the goal as `internal_error`. It is now
+refused before it starts: the pipeline skips a goal that has steps, the conductor's `plan` move answers "this goal
+already has a plan", and a conductor whose provider fails *after* `plan` (`_Conducted.planned` is read from the
+rows, not assumed) leaves the plan standing — `PENDING`, waiting for approval — instead of running the standard
+sequence over it.
+
+**The write gate is asked at the write.** The conductor's `write` and the step runner check approval before the
+fixer's model call, and a local model takes minutes to answer. `_fixer` asks again immediately before `fs.apply`
+(`_approval_withdrawn`): a goal the person has `CANCELLED` or `PAUSED`, deleted, or switched back to plan-only
+gets no write — the reply is discarded, nothing is written, the step stays as it was, and it is not reported as
+the model's failure (`WriteWithdrawn`, stage outcome `cancelled`). Narrower than the first check on purpose: a goal
+that is `FAILED` because a parallel sibling failed has not had its approval taken back, and the batch still lets
+its healthy steps finish.
+
 ### 1.3 PlanStep
 
 ```python
@@ -162,7 +185,7 @@ the UI's copy a member behind both.
 | type | `step_id` | payload |
 |---|---|---|
 | `goal_status` | — | `{status, version}` |
-| `step_status` | step | `{status, review_notes?, commit_message?}` — republished with `status: "IN_PROGRESS"` at every role transition inside a step (fixer → verifier → critic → scribe); only a start from a not-running state is a real attempt |
+| `step_status` | step | `{status, review_notes?, commit_message?}` — `commit_message` appears **only once a commit has landed** (a plain folder, a dry run, a cancel and a step whose files already match the last commit never carry one; the scribe's message is in the step's `log` instead, with the reason), so a client may show it as "Commit: …" without checking anything else — republished with `status: "IN_PROGRESS"` at every role transition inside a step (fixer → verifier → critic → scribe); only a start from a not-running state is a real attempt |
 | `log` | any | `{level: "info"\|"warn"\|"error", message}` |
 | `diff` | step | `{path, unified_diff, note?}` — `note` says why a real change has an empty diff (binary, or over the 1 MB cap) |
 | `test_result` | step | `{argv, verdict, explanation, exit_code?, refused: [str], ran: bool, brand_drifts: [str]}` — `ran: false` with `argv: null` means nothing executed; `refused` lists every command the sandbox rejected; `brand_drifts` lists the engine's mechanical findings against a binding brand contract (empty unless one governs — see §4.3) |
@@ -196,7 +219,7 @@ catalog, then ranks the findings so the cause is first and its symptoms below it
 See `ui/src/failureDiagnosis.ts` for the rules (a failed discovery proves nothing, so
 it is never reported as "your model was retired").
 
-`EventBus.next_sequence(goal_id)` is atomic (`UPDATE goals SET event_seq = event_seq + 1 ... RETURNING`).
+`GoalService.next_sequence(goal_id)` is atomic (`UPDATE goals SET event_seq = event_seq + 1 ... RETURNING`).
 
 ### 1.4.1 Recall: the events table, read by a model
 
@@ -588,6 +611,11 @@ open looked exactly like one the person closed, in the API and on screen):
 | the dialog closed with nothing chosen | `{cancelled:true}` |
 | no dialog could open, it crashed, or it did not answer | **503 `picker_unavailable`**, the reason, and "type the folder's path instead" |
 
+The UI acts on that code rather than only showing it: on `picker_unavailable` it shows the reason **and opens
+its "Enter workspace path" form**, so a desktop with no dialog helper (a bare window manager, a container) is
+never left holding an instruction and a hunt for the control it names. Any other failure is shown and opens
+nothing; a real cancel is silent (`ui/tests/folderPicker.test.ts`).
+
 The GTK script (PyGObject, GTK 3) is tried first and speaks in exit codes: `0` with a path is a choice, `0`
 with nothing is a cancel, `3` is "PyGObject is not importable" and `4` is "GTK could not open a display".
 When it cannot run — any venv, conda or pyenv Python, which is most machines with a desktop — `zenity`, then
@@ -933,6 +961,16 @@ the same way it fails mid-planning: `design_contract_missing`.
 ```
 
 `action=delete` ⇒ `content` null. Paths contained by workspace.
+
+`action=edit` takes `edits: [{old_text, new_text, count}]` and no `content`. One spelling is read rather than
+refused: **`edit` with a non-empty `content` and no `edits`** is a whole-file `update` — the model wrote the
+file it wants and used the wrong name for it (13 of the 43 file entries Qwen2.5-1.5B produced in the recorded
+baseline, `08` §8; asking again did not help, since it does not know what `edit` is for). The engine logs
+`fixer sent action=edit with content and no edits for <path>; treated as a whole-file update`, never does it for
+an empty `content` (that would blank the file), and never when `edits` is present — those keep their meaning and
+`content` is ignored. A reply the engine cannot apply (an `old_text` that matches the wrong number of times, a
+path outside the workspace) is put to the model once, with the reason and, for an edit, the alternatives
+(`04` §4 "One re-ask").
 
 **A batch is applied completely or not at all** (`FileSystemService.apply`; audit of 2026-09-29, M4).
 Phase one resolves and validates every operation before anything is written — containment, `.git`, the
@@ -1364,6 +1402,8 @@ Engine stdout, first line, exactly:
 ```
 CODIFY_ENGINE token=<hex> port=<int>
 ```
+
+The line is printed **only once the engine can serve**: `serve()` opens the SQLite file — running its migrations — *before* it announces, so an unopenable or corrupt database ends the process with a message on stderr naming the file (and the `sqlite3` error, re-raised) instead of a `CODIFY_ENGINE` line the shell would then trust for the rest of a boot that could never finish (`tests/test_boot_announces_ready_late.py`). `lifespan` closes that connection on every road out — shutdown, a failed startup, and a migration that raises inside `db.connect` — so a boot that fails leaves no descriptor behind (`tests/test_connections_are_closed.py`).
 
 `token` = 32 bytes CSPRNG hex (64 chars), created once and kept at `<state dir>/boot_token` (`0600`). Desktop reads this line, then attaches `Authorization: Bearer <token>` to HTTP and `?token=` is **forbidden** (query leakage). WS: first text frame from client `{"type":"auth","token":"<hex>"}` or HTTP header on the Upgrade.
 

@@ -172,6 +172,11 @@ DIRECT_OS_SPAWN_CALLS = {
 }
 
 
+# How many times an allowlisted (file, call) may appear. Absent means once: a second `Popen` in a file that
+# already has a justified one is a new decision, and it is made by raising a number here.
+SPAWN_SITE_COUNTS: dict[tuple[str, str], int] = {}
+
+
 # Every package whose Python is reviewed alongside the engine. `benchmarks` and
 # `scripts` are here because they start processes, not because they are adjacent
 # to one that does.
@@ -287,6 +292,63 @@ class NoUnguardedSpawns(unittest.TestCase):
             "\nspawn, add its (file, call) site to GUARDED_SPAWN_SITES with a"
             "\njustification and give it a dynamic orphan test.",
         )
+
+    def test_a_second_spawn_in_an_allowlisted_file_is_a_decision_too(self) -> None:
+        """The allowlist is by (file, call), so on its own a *second* `Popen` in `engine/library.py` — a
+        one-line convenience next to the guarded one — would pass it (review of 2026-09-29, finding 4).
+        Each allowlisted call is therefore pinned to the number of times it appears: one, unless
+        `SPAWN_SITE_COUNTS` says otherwise, and raising that number is an edit somebody has to justify here.
+        """
+        wrong: list[str] = []
+        for rel, calls in GUARDED_SPAWN_SITES.items():
+            tree = ast.parse((PROJECT_ROOT / rel).read_text(encoding="utf-8"), filename=rel)
+            found = [dotted for _, dotted in _spawn_findings(tree, rel)]
+            for call in calls:
+                expected = SPAWN_SITE_COUNTS.get((rel, call), 1)
+                actual = found.count(f"subprocess.{call}")
+                if actual != expected:
+                    wrong.append(f"{rel}: `{call}` appears {actual} time(s), the freeze records {expected}")
+        self.assertEqual([], wrong, "\nA spawn site was added to (or removed from) an allowlisted file.")
+
+    def test_every_popen_in_the_engine_and_benchmarks_goes_through_the_guard(self) -> None:
+        """The allowlist says a `Popen` may exist; this says what it must look like.
+
+        A `Popen` in `engine/` or `benchmarks/` — other than the guard's own — takes its argv from
+        `guarded_argv(...)` and starts a session of its own, which is what lets the guard kill everything the
+        command started when the engine dies. Checked on the call, so a second one in an allowlisted file cannot
+        borrow the first one's justification.
+        """
+        unguarded: list[str] = []
+        for path in _iter_source_files():
+            rel = str(path.relative_to(PROJECT_ROOT))
+            if not rel.startswith(("engine/", "benchmarks/")) or rel == "engine/spawn_guard.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+            popens = {
+                node.lineno: node for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and (
+                    (isinstance(node.func, ast.Attribute) and node.func.attr == "Popen")
+                    or (isinstance(node.func, ast.Name) and node.func.id == "Popen")
+                )
+            }
+            for line, call in sorted(popens.items()):
+                first = call.args[0] if call.args else None
+                argv_guarded = (
+                    isinstance(first, ast.Call)
+                    and (
+                        (isinstance(first.func, ast.Name) and first.func.id == "guarded_argv")
+                        or (isinstance(first.func, ast.Attribute) and first.func.attr == "guarded_argv")
+                    )
+                )
+                session = any(
+                    kw.arg == "start_new_session" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                    for kw in call.keywords
+                )
+                if not (argv_guarded and session):
+                    unguarded.append(
+                        f"{rel}:{line} Popen without `guarded_argv(...)` as its argv and `start_new_session=True`"
+                    )
+        self.assertEqual([], unguarded)
 
     def test_the_allowlist_never_outlives_the_spawns_it_names(self) -> None:
         stale: list[str] = []
