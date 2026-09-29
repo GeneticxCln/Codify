@@ -197,9 +197,22 @@ def parse_skill(
     )
 
 
+# The most bytes a skill file is read for. `MAX_SKILL_CHARS` is a limit on characters and a character takes at
+# most four bytes of UTF-8, so a file over four bytes per allowed character is over the limit whatever it holds.
+# The read stops one byte past that, so a hostile file is refused by what was read, not by reading all of it.
+MAX_SKILL_BYTES = MAX_SKILL_CHARS * 4
+
+
 def _read_file(path: Path, source: str) -> tuple[Skill | None, str | None]:
     try:
-        text = path.read_text(encoding="utf-8")
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_SKILL_BYTES + 1)
+        if len(raw) > MAX_SKILL_BYTES:
+            return None, (
+                f"{path.stem.lower()}: over {MAX_SKILL_BYTES:,} bytes, past the "
+                f"{MAX_SKILL_CHARS}-character limit; the rest was not read"
+            )
+        text = raw.decode("utf-8")
     except OSError as exc:
         return None, f"{path.name}: {type(exc).__name__}: {exc}"
     except UnicodeDecodeError:

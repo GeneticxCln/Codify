@@ -2459,15 +2459,7 @@ async def ws_engine(websocket: WebSocket) -> None:
             pass
 
     if not authenticated:
-        try:
-            await websocket.close(code=4401)
-        except (WebSocketDisconnect, RuntimeError):
-            # The peer hung up inside the auth window, so there is nobody left to
-            # refuse. Closing a socket that has already gone raises, and an
-            # exception escaping this handler is a traceback in the engine's log
-            # for a client that merely left — which trains people to ignore the
-            # log. The refusal stands either way; there is just no recipient.
-            pass
+        await _close_quietly(websocket, 4401)
         return
 
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
@@ -2520,6 +2512,19 @@ async def ws_engine(websocket: WebSocket) -> None:
         conns.discard(queue)
 
 
+async def _close_quietly(websocket: WebSocket, code: int) -> None:
+    """Close a socket whose peer may already be gone, without a traceback for a client that merely left.
+
+    Closing a WebSocket the peer has hung up on raises (`RuntimeError` from Starlette's state check, or
+    `WebSocketDisconnect`), and an exception escaping a handler is a traceback in the engine's log for
+    someone who just closed a tab. The refusal stands either way; there is only nobody left to hear it.
+    """
+    try:
+        await websocket.close(code=code)
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+
+
 @app.websocket("/ws/goals/{goal_id}")
 async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
     expected_token = getattr(websocket.app.state, "token", None) or BOOT_TOKEN
@@ -2539,7 +2544,7 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
             pass
 
     if not authenticated:
-        await websocket.close(code=4401)
+        await _close_quietly(websocket, 4401)
         return
 
     # Authenticated, but the goal must exist too — checking only after auth so
@@ -2548,7 +2553,7 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
     try:
         websocket.app.state.goals.get(goal_id)
     except ApiError:
-        await websocket.close(code=4404)
+        await _close_quietly(websocket, 4404)
         return
 
     # The socket is read as well as written, and that is what ends this handler. It used to only
@@ -2564,7 +2569,7 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
             try:
                 websocket.app.state.goals.get(goal_id)
             except ApiError:
-                await websocket.close(code=4404)
+                await _close_quietly(websocket, 4404)
                 return
             # `limit` rather than `[...][:500]`: the slice happened *after* the
             # read, so every tick parsed the goal's whole remaining log to send
