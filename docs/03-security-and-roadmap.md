@@ -164,10 +164,20 @@ off disk or received over the bridge — so its containment is an allow-list, no
 Single file. **No `agents.db`.**
 
 ```
-~/.codify/codify.db   # workspaces, goals, plan_steps, events, agent_configs
+~/.codify/            # owner-only (0700)
+~/.codify/codify.db   # workspaces, goals, plan_steps, events, agent_configs — owner-only (0600), with its -wal and -shm
 ~/.codify/boot_token  # loopback bearer token, owner-only (0600), created once per state dir
 ~/.codify/secrets.json  # only when no OS keyring is usable (0600)
 ```
+
+The database holds every prompt, every diff the fixer proposed and every recalled event, so it is
+protected as the token is: the state directory is created `0700` and the database file `0600` (created
+with that mode, not chmod-ed afterwards, so there is no moment it is readable by anyone else; SQLite
+gives its `-wal`/`-shm` files the same mode), whatever the process umask. An install an older build
+made — directory `0755`, database `0644` — is tightened on the next start, only when this user owns
+it and only by removing the group/other bits. A database placed elsewhere with `CODIFY_DB` gets the
+same for the *file*; the directory it sits in is the user's and is never chmod-ed. (Audit of
+2026-09-29, M11: this was `0755`/`0644`, hidden on Ubuntu by its `0750` home directories.)
 
 `CODIFY_HOME` (or `CODIFY_DB` / `CODIFY_SECRETS`) redirects these, and a redirected run also stops using
 the OS keychain so it cannot reach the real store — `04` §2.0, `04` §7. The test suite holds itself to

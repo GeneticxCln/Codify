@@ -187,6 +187,12 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 #       removed with it; nothing of the developer's is exposed. Scoped to that one file.
 "tests/*" = ["S101", "S603", "S607", "S608", "S108", "S310"]
 "tests/test_conversations.py" = ["S103"]
+# S103 (tests/test_state_permissions.py)  the test *creates* wide modes (0o755, 0o644) on
+#       directories and files under its own temp directory, to stand in for what an older build
+#       left on a real install and to prove the engine tightens them. Nothing it makes is
+#       ever a real state directory, and each is removed with the temp directory. Scoped to
+#       that one file.
+"tests/test_state_permissions.py" = ["S103"]
 "engine/app.py" = ["S110", "S603", "S607", "S608"]
 "engine/conductor.py" = ["S110"]
 "engine/db.py" = ["S110"]
