@@ -45,7 +45,7 @@ without adding a boundary. This closes the cleartext leak; it does not claim mor
 
 ### 1.3 Engine–Desktop auth token
 
-On boot, the Engine generates a random token, writes it to stdout, and requires `Authorization: Bearer <token>` on every request. Desktop reads it from the child process stdout when it spawns the Engine and attaches it to every `BackendClient` call — including `/settings/agents/*`, the most sensitive routes (attacker-controlled local `base_url`, key-reference overwrite).
+On boot, the Engine generates a random token, writes it to stdout, and requires `Authorization: Bearer <token>` on every request. Desktop reads it from the child process stdout when it spawns the Engine and attaches it to every engine call the UI makes (`ui/src/api.ts`) — including `/settings/agents/*`, the most sensitive routes (attacker-controlled local `base_url`, key-reference overwrite).
 
 The token is created once per state directory and persisted at `<state dir>/boot_token` (`0600`), not rotated per spawn: a client holding it then survives an engine restart, which per-spawn rotation broke for every client that could not re-read the handshake itself. `CODIFY_BOOT_TOKEN` overrides the value for a caller that wants a per-process token. Lifetime, and what a longer-lived credential costs, are in `04` §6.
 
@@ -201,7 +201,7 @@ the same rule (`tests/hermetic.py`), and `make run-engine-scratch` does it for a
 
 ### Phase 0 — Skeleton (persisted from day one)
 
-- `WorkspaceService`, `GoalService`, `EventBus` backed by SQLite (not in-memory).
+- `WorkspaceService` and `GoalService` (which also owns each goal's event sequence) backed by SQLite (not in-memory).
 - Basic FastAPI endpoints + Engine boot token auth.
 - `ExecutorService` with hard-coded steps, no agents yet.
 - Desktop: workspace selection, goal creation, log streaming.
@@ -213,7 +213,7 @@ the same rule (`tests/hermetic.py`), and `make run-engine-scratch` does it for a
 - `AgentRegistryService`, `ProviderFactory`, `AgentOrchestrator`.
 - `/settings/agents` API (list, get, update, test-connection).
 - Desktop: Settings → Agents (only editor); `agent_assigned` → read-only badges elsewhere.
-- `PlannerService` and `ExecutorService` refactored to `orchestrator.run_agent(role, ...)` instead of a single `LLMService`.
+- The planner and `ExecutorService` refactored to `orchestrator.run_agent(role, ...)` instead of a single `LLMService` (the planner is a role now, not a service of its own).
 
 ### Phase 2 — Git, diffs, Reviewer Agent
 

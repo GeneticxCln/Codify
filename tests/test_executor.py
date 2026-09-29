@@ -335,7 +335,9 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         # Step should be COMPLETED
         refreshed_step = self.goals.steps(goal.id)[0]
         self.assertEqual(refreshed_step.status, "COMPLETED")
-        self.assertEqual(refreshed_step.commit_message, "feat: add a.py")
+        # This workspace is a plain temp directory, not a repository, so nothing was committed and the
+        # step must not show a commit; `tests/test_commit_message_is_a_commit.py` holds the rest of that rule.
+        self.assertIsNone(refreshed_step.commit_message)
 
         # Check diff and test_result events were published
         events = self.goals.events_after(goal.id, 0)

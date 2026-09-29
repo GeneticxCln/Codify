@@ -185,7 +185,7 @@ the UI's copy a member behind both.
 | type | `step_id` | payload |
 |---|---|---|
 | `goal_status` | — | `{status, version}` |
-| `step_status` | step | `{status, review_notes?, commit_message?}` — republished with `status: "IN_PROGRESS"` at every role transition inside a step (fixer → verifier → critic → scribe); only a start from a not-running state is a real attempt |
+| `step_status` | step | `{status, review_notes?, commit_message?}` — `commit_message` appears **only once a commit has landed** (a plain folder, a dry run, a cancel and a step whose files already match the last commit never carry one; the scribe's message is in the step's `log` instead, with the reason), so a client may show it as "Commit: …" without checking anything else — republished with `status: "IN_PROGRESS"` at every role transition inside a step (fixer → verifier → critic → scribe); only a start from a not-running state is a real attempt |
 | `log` | any | `{level: "info"\|"warn"\|"error", message}` |
 | `diff` | step | `{path, unified_diff, note?}` — `note` says why a real change has an empty diff (binary, or over the 1 MB cap) |
 | `test_result` | step | `{argv, verdict, explanation, exit_code?, refused: [str], ran: bool, brand_drifts: [str]}` — `ran: false` with `argv: null` means nothing executed; `refused` lists every command the sandbox rejected; `brand_drifts` lists the engine's mechanical findings against a binding brand contract (empty unless one governs — see §4.3) |
@@ -219,7 +219,7 @@ catalog, then ranks the findings so the cause is first and its symptoms below it
 See `ui/src/failureDiagnosis.ts` for the rules (a failed discovery proves nothing, so
 it is never reported as "your model was retired").
 
-`EventBus.next_sequence(goal_id)` is atomic (`UPDATE goals SET event_seq = event_seq + 1 ... RETURNING`).
+`GoalService.next_sequence(goal_id)` is atomic (`UPDATE goals SET event_seq = event_seq + 1 ... RETURNING`).
 
 ### 1.4.1 Recall: the events table, read by a model
 

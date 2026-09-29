@@ -5391,7 +5391,11 @@ class ExecutorService:
         # Both used to be asked for a judgment the executor never gave them the
         # evidence for: a critic could approve failing changes, and a scribe told
         # to describe "the diff you are given" was given nothing but file names.
-        self._set_step(goal_id, step, "IN_PROGRESS", commit_message=commit_message, last_agent_role="scribe")
+        # The message is stored on the step only once a commit has landed (below): the timeline shows a
+        # stored message as "Commit: ...", so writing it here — before anything knew whether a commit would
+        # follow — showed a commit in a plain folder, a dry run and a cancelled step. Until then the message
+        # rides in the log, which loses nothing the model wrote and claims nothing that did not happen.
+        self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="scribe")
         self._log(goal_id, step.id, "info", summary)
 
         if dry_run or not root_path or not self.git.is_git_repo(root_path):
@@ -5400,6 +5404,14 @@ class ExecutorService:
             # job, so neither is reported as a failure — a per-role rate that
             # counted "not a repo" as a broken scribe would punish every user whose
             # workspace is a plain directory.
+            if dry_run:
+                self._log(goal_id, step.id, "info", f"dry run — nothing committed; the message would be: {commit_message}")
+            else:
+                self._log(
+                    goal_id, step.id, "info",
+                    "not a git repository — nothing committed, the change is on disk. "
+                    f"The message would have been: {commit_message}",
+                )
             return "skipped" if dry_run else "not_a_repo"
         # The last guard before the one irreversible act. A cancel that
         # landed during the critic's call must not end in a commit the user
@@ -5420,6 +5432,7 @@ class ExecutorService:
                 self.git.commit, root_path, commit_message, paths,
             )
         if commit_hash:
+            self._set_step(goal_id, step, "IN_PROGRESS", commit_message=commit_message)
             self._log(goal_id, step.id, "info", f"git committed {commit_hash[:7]}: {commit_message}")
             return "committed"
         if paths:

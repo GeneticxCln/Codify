@@ -1108,38 +1108,29 @@ the app ACL manifest is what makes that set mean anything. And the manifest
 gates Tauri's `invoke` surface and nothing else: the engine subprocess, the
 PTYs and the webview windows are all created from Rust.
 
-**The close signal.** A browser tab's webview is a real OS window, so it can be
-closed without the tab bar's permission — the user clicking that window's own
-close button — and nothing about that passes through the strip. `open()`
-registers [`reports_closed`] on the window and emits `browser-window-closed`
-carrying the **tab id**, not the webview label: the label is Rust's business,
-the tab id is the UI's, and the other end should not have to know how webviews
-are labelled to close the right tab. The main window turns that into a tab
-close through `closeBrowserTab`, which lands on the same neighbour any close
-does and refuses an id that is not a browser tab.
+**The close signal — there is none, on purpose.** An earlier build opened each
+browser tab as a separate OS window, which the user could close with the
+window's own button without the tab strip's knowledge; that build emitted
+`browser-window-closed` (carrying the tab id) from a `Destroyed` handler so the
+strip could follow. The pane is now a **child webview** of the main window
+(§7.2). A child has no window events of its own — `WebviewEvent` carries
+drag-and-drop and nothing else (checked against tauri 2.11.6) — so the tab strip
+is the only closer, and the event, its handler and its listener are gone with
+the window they announced. Closing goes one way: the strip's button, ⌘W and the
+pane all reach `codify_browser_close` through `handleCloseTab` (§7.3), the one
+seam, so there are not two ways to orphan a running page.
 
-- **Broadcast like the terminal's events, received only by the main window.** A
-  browser webview holds an empty capability set, so it could not have registered
-  a listener for one in the first place.
-- **`Destroyed`, not `CloseRequested`.** A close can be *asked for* and still be
-  prevented; announcing a tab closed for a window that is still open would drop
-  the tab and leave the page running with nothing pointing at it.
-- **Both directions are the same event.** Closing the tab in the strip calls
-  `codify_browser_close` through `handleCloseTab` — the one seam the strip's
-  button, ⌘W and the pane all go through (§7.3) — and the `Destroyed` that
-  follows arrives back as an event the handler ignores, because the tab is
-  already gone. So the two closes are repeatable in any order, and nothing needs
-  to know which side started it. Two seams would be two ways to orphan a
-  running page.
+What can still end a page without the strip asking is a load failure (layer 4 of
+the shell's browser guard) and a WebKit web-process crash, which nothing
+observable reports; the docs say so rather than pretend otherwise.
 
-Pinned by `a_close_is_reported_on_destroyed_and_on_nothing_else` (a tab is
-never dropped for a resize or a focus change), `the_closed_payload_names_the_tab`
-(the wire shape), and `the_ui_listens_for_the_event_this_module_emits` — a test
-that reads `ui/src/shellEvents.ts` and fails if the two ends of the name ever
-drift, since no type system spans a Rust constant and a TypeScript string. On the
-UI side, `ui/tests/shellEvents.test.ts` pins that a malformed payload names no
-tab at all, and that subscribing outside the desktop shell is a no-op rather than
-a throw.
+Pinned by `the_ui_listens_for_the_events_this_module_emits` (`browser.rs`), which
+reads `ui/src/shellEvents.ts` and fails if the two ends of an event name drift —
+no type system spans a Rust constant and a TypeScript string — and which also
+fails if `browser-window-closed` reappears in the UI, since a listener for an
+event nobody emits is code pretending to handle something. On the UI side,
+`ui/tests/shellEvents.test.ts` pins that a malformed payload names no tab at all,
+and that subscribing outside the desktop shell is a no-op rather than a throw.
 
 ### 7.3 The browser pane — built
 
