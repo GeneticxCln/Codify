@@ -1156,8 +1156,8 @@ def default_secrets_path() -> Path:
 class Keychain:
     """Where provider API keys live, with two backends.
 
-    Preferred: the OS keyring (Secret Service, macOS Keychain, Windows
-    Credential Manager) via the `keyring` package.
+    Preferred: the desktop's Secret Service keyring (GNOME Keyring, KWallet) via the
+    `keyring` package.
 
     Fallback: a `0600` JSON file under `~/.codify/secrets.json`.
 

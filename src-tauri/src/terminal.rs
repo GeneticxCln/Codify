@@ -100,21 +100,15 @@ pub fn pin_cwd(root_path: Option<&str>) -> Result<PathBuf, String> {
 ///
 /// `$SHELL` rather than a hardcoded interpreter: this terminal is the user's, and
 /// choosing their shell for them is the one thing a terminal must not do. It
-/// falls back to `/bin/sh` where none is set, and to `cmd.exe` on Windows.
+/// falls back to `/bin/sh` where none is set.
 fn shell_command(cwd: PathBuf) -> CommandBuilder {
-    let program = if cfg!(windows) {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-    };
+    let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut cmd = CommandBuilder::new(program);
     cmd.cwd(cwd);
     // A login-adjacent interactive shell is what a user expects from a terminal
     // pane; `portable-pty`'s default env is the parent's, which is right here —
     // the pane is the user's environment and not a sanitised one.
-    if !cfg!(windows) {
-        cmd.env("TERM", "xterm-256color");
-    }
+    cmd.env("TERM", "xterm-256color");
     cmd
 }
 
@@ -464,15 +458,14 @@ mod tests {
         assert_eq!(open_count(&sessions), 0);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn close_kills_a_shell_that_ignores_sighup_and_leaves_no_zombie() {
         // The regression this pins: close used to keep only a bare signaller,
         // whose kill is SIGHUP alone, so a shell with SIGHUP at SIG_IGN outlived
         // its pane and nothing waited on it. Both halves are asserted: the
         // process is gone (the escalation worked) and its /proc entry is gone
-        // (something reaped it — a zombie would still have one). Linux only,
-        // because the zombie check reads /proc.
+        // (something reaped it — a zombie would still have one). The zombie
+        // check reads /proc.
         use std::path::Path;
         use std::time::{Duration, Instant};
 
@@ -565,11 +558,7 @@ mod tests {
                 .unwrap();
             let child = pair
                 .slave
-                .spawn_command(CommandBuilder::new(if cfg!(windows) {
-                    "cmd.exe"
-                } else {
-                    "true"
-                }))
+                .spawn_command(CommandBuilder::new("true"))
                 .unwrap();
             guard.sessions.insert(
                 id.clone(),
@@ -625,7 +614,6 @@ mod tests {
     }
 
     /// Open a real PTY running `program args`, and return what a session holds.
-    #[cfg(unix)]
     fn real_pty(
         program: &str,
         args: &[&str],
@@ -647,7 +635,6 @@ mod tests {
         (pair.master, child)
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_real_shell_prints_non_ascii_text_through_the_reader() {
         // The path from a shell's first byte to the text the app is handed, with
@@ -678,7 +665,6 @@ mod tests {
         drop(master);
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_line_written_to_a_real_pty_is_echoed_back_and_the_shell_is_reaped() {
         // The other half of the round trip: what `write` sends reaches the child,

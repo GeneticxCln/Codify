@@ -73,9 +73,8 @@ PNG_PATHS = [
     TAURI_ICONS / "128x128.png",
     TAURI_ICONS / "128x128@2x.png",  # 256px
 ]
-ICO_PATH = TAURI_ICONS / "icon.ico"
-ICNS_PATH = TAURI_ICONS / "icon.icns"
-ASSET_PATHS = [GIF_PATH, STATIC_PATH, *PNG_PATHS, ICO_PATH, ICNS_PATH]
+# No `.ico` and no `.icns`: Codify is a Linux desktop app and ships no installer, so the
+# Windows and macOS icon containers had no reader.
 
 # Geometry is a 24×24 unit grid, scaled to the render size. One scale, so the
 # mark at 32px is the mark at 256px — never a re-layout per size.
@@ -190,53 +189,37 @@ def _png_payload(size: int) -> bytes:
     return buf.getvalue()
 
 
-def _ico_payload() -> bytes:
-    # Windows wants the mark at several densities in one file; Pillow scales
-    # from the one base image, so the geometry stays the 24-grid at every size.
-    buf = io.BytesIO()
-    _draw_frame(size=256, phase=STATIC_PHASE).convert("RGBA").save(
-        buf,
-        format="ICO",
-        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
-    )
-    return buf.getvalue()
-
-
-def _icns_payload() -> bytes:
-    # macOS the same way, from a 1024px base down the standard ladder.
-    base = _draw_frame(size=1024, phase=STATIC_PHASE).convert("RGBA")
-    ladder = [
-        _draw_frame(size=s, phase=STATIC_PHASE).convert("RGBA")
-        for s in (16, 32, 64, 128, 256, 512)
-    ]
-    buf = io.BytesIO()
-    base.save(buf, format="ICNS", append_images=ladder)
-    return buf.getvalue()
-
-
 def _sha256(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
-def generate(force: bool) -> list[Path]:
-    """Write every asset whose bytes differ from disk. Returns what it wrote."""
-    payloads: dict[Path, Callable[[], bytes]] = {
+def _payloads() -> dict[Path, Callable[[], bytes]]:
+    return {
         GIF_PATH: _gif_payload,
         STATIC_PATH: _static_gif_payload,
         PNG_PATHS[0]: lambda: _png_payload(32),
         PNG_PATHS[1]: lambda: _png_payload(128),
         PNG_PATHS[2]: lambda: _png_payload(256),
-        ICO_PATH: _ico_payload,
-        ICNS_PATH: _icns_payload,
     }
 
-    before = {p: _sha256(p) for p in ASSET_PATHS}
+
+def stale_assets() -> list[Path]:
+    """The assets whose bytes on disk differ from what this script would write. Writes nothing."""
+    return [
+        path
+        for path, make_payload in _payloads().items()
+        if _sha256(path) != hashlib.sha256(make_payload()).hexdigest()
+    ]
+
+
+def generate(force: bool) -> list[Path]:
+    """Write every asset whose bytes differ from disk. Returns what it wrote."""
+    stale = set(stale_assets()) if not force else set()
     written: list[Path] = []
-    for path, make_payload in payloads.items():
-        data = make_payload()
-        if force or before[path] != hashlib.sha256(data).hexdigest():
+    for path, make_payload in _payloads().items():
+        if force or path in stale:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+            path.write_bytes(make_payload())
             written.append(path)
     return written
 
@@ -251,13 +234,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.check:
-        before = {p: _sha256(p) for p in ASSET_PATHS}
-        generate(force=True)
-        stale = [
-            str(p.relative_to(ROOT))
-            for p in ASSET_PATHS
-            if before[p] != _sha256(p)
-        ]
+        stale = [str(p.relative_to(ROOT)) for p in stale_assets()]
         if stale:
             sys.exit(
                 "logo assets are stale — run `python3 scripts/make_logo.py` and "

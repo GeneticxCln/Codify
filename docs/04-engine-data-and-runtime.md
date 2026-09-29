@@ -1441,8 +1441,8 @@ shell tails the engine's stderr and shows the tail in the app rather than inheri
 Two backends, one namespace. Names: `codify` service + username `providers/{slug}` for a provider key,
 and `codify/agents/{role}` for a role-scoped key. Keys are never written to SQLite and never echoed back.
 
-1. **OS keychain** (preferred): `keyring` — Linux Secret Service, macOS Keychain, Windows Credential
-   Manager. A `fail.Keyring` backend counts as *unavailable*: it accepts writes and raises on read, so
+1. **OS keychain** (preferred): `keyring` over the Linux Secret Service (GNOME Keyring, KWallet).
+   A `fail.Keyring` backend counts as *unavailable*: it accepts writes and raises on read, so
    the engine probes it once and falls back rather than reporting a key as saved that it cannot read.
 2. **Local file** (fallback): `~/.codify/secrets.json`, mode `0600`, parent directory `0700`, written
    atomically (temp file + `os.replace`) so a crash cannot truncate the store. `CODIFY_SECRETS`

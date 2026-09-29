@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history hooks clean bench bench-smoke
+.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history hooks clean bench bench-smoke
 
 # A checkout's own virtualenv (`make setup` makes one) wins over whatever `python3` is on
 # PATH, so `make setup && make check` works with nothing activated. The floor leg sets
@@ -48,7 +48,10 @@ help:
 	@echo "  make dev-ui       - Start Vite dev server"
 	@echo "  make check-tauri  - Cargo check Tauri Rust backend"
 	@echo "  make build-tauri  - Build Tauri desktop application"
-	@echo "  make run-app      - Build the UI and launch the desktop app with it embedded (the way to open Codify)"
+	@echo "  make run-app      - Build the UI and launch the desktop app with it embedded (the way to open Codify from a checkout)"
+	@echo "  make build-app    - Build the release app (UI embedded) that scripts/codify and the menu entry start"
+	@echo "  make install-local - build-app, then add a 'codify' command and an applications-menu entry under ~/.local (no root)"
+	@echo "  make uninstall-local - Remove exactly what install-local wrote"
 	@echo "  make dev-app      - Launch the desktop app against the Vite dev server, with hot reload (needs cargo-tauri)"
 	@echo "  make run-engine   - Start Codify Python engine standalone"
 	@echo "  make run-engine-preview - Start the engine and print the token/port for the browser preview"
@@ -143,7 +146,7 @@ smoke-tabs:
 # once grew to ~25 GB and had systemd-oomd kill the whole desktop session, not just
 # the test run; inside a cgroup limit the kernel kills only this run. Swap is off
 # for the scope so a runaway is stopped at the cap instead of paging the machine
-# to a halt first. Where there is no user systemd (CI, macOS) the guard is empty
+# to a halt first. Where there is no user systemd (a container, a minimal CI image) the guard is empty
 # and the target is exactly `npm test`.
 UI_TEST_GUARD := $(shell systemd-run --user --scope --quiet true >/dev/null 2>&1 && echo 'systemd-run --user --scope --quiet -p MemoryMax=6G -p MemorySwapMax=0 --')
 
@@ -205,12 +208,11 @@ check-tauri:
 	cd src-tauri && $(XVFB) cargo test
 	cd src-tauri && cargo fmt --check
 
-# NOTE: this only compiles the Rust lib (`cargo build`). It does NOT produce a
-# desktop installer — that needs the Tauri CLI, which is not vendored in ui/
-# (`npm i -D @tauri-apps/cli`, then `npx tauri build` from the repo root).
-# A plain `cargo build` is a *dev* build: the window loads http://localhost:5173 and
-# is blank without a Vite server. Fine for the smoke scripts, which bring their own
-# page; not something to open by hand. Use `run-app` for that.
+# NOTE: this only compiles the Rust crate (`cargo build`); Codify ships no installer or
+# package (`bundle.active` is false in tauri.conf.json), and there is nothing here to
+# produce one. A plain `cargo build` is a *dev* build: the window loads
+# http://localhost:5173 and is blank without a Vite server. Fine for the smoke scripts,
+# which bring their own page; not something to open by hand. Use `run-app` for that.
 build-tauri:
 	cd src-tauri && cargo build
 
@@ -228,6 +230,20 @@ run-app: build-ui
 # Hot reload: `cargo tauri dev` starts Vite (beforeDevCommand) and points the window at it.
 dev-app:
 	cd src-tauri && cargo tauri dev
+
+# The build `scripts/codify` starts: release profile, UI embedded (`custom-protocol`),
+# under the same memory cap as `run-app`. `bundle.active` is false, so this is a binary
+# at src-tauri/target/release/codify-desktop and nothing else.
+build-app: build-ui
+	cd src-tauri && $(BUILD_GUARD) cargo build --release --features custom-protocol
+
+# Linux's answer to "no installer": a `codify` command and a menu entry, both under the
+# user's own ~/.local, both pointing back at this checkout. See scripts/install-local.sh.
+install-local: build-app
+	scripts/install-local.sh install
+
+uninstall-local:
+	scripts/install-local.sh uninstall
 
 run-engine:
 	python3 -m engine
@@ -315,8 +331,8 @@ check-history:
 # skips a leg to be convenient — `--no-verify` is the deliberate override.
 #
 # The chmod is not decoration: git ignores a hook it cannot execute, and a fresh
-# clone on a checkout without the mode bit (Windows) is exactly where a gate would
-# go quiet while looking installed.
+# clone on a checkout without the mode bit (an archive, some filesystems) is exactly where
+# a gate would go quiet while looking installed.
 hooks:
 	git config core.hooksPath .githooks
 	chmod +x .githooks/*

@@ -329,7 +329,7 @@ Four constraints hold every one of them, and they are the reason this is a featu
 3. **Workspace Path Containment**: All file operations verify paths with realpath containment (`FileSystemService.resolve`). Path escapes outside workspace roots raise `PathEscapeError`, and a workspace root that is your home directory (or contains it), a system directory, or a credentials directory is refused (`invalid_root`), so an approved goal cannot rewrite `~/.bashrc` or `~/.ssh`.
 4. **Command Sandboxing**: Shell commands pass through `SandboxService`, which strictly enforces an allowlisted binary set (`pytest`, `python`/`python3 -m pytest`, `npm test`, `pnpm test`, `cargo test`, `go test`, and read-only `git status`/`diff`/`log -1`). The librarian's commands use the same validator in `read_only` mode (`ls`, `wc`, and read-only git — an exact-match table of subcommands and options, every path held inside the workspace, run with no pager, no configured diff driver and no credentials in its environment), so a reconnaissance request can never change the workspace.
 5. **Human-in-the-Loop Rejection**: When the Critic requests changes, the step halts in `IN_PROGRESS` with review notes and the goal transitions to `PAUSED`. Execution resumes only when a human user reviews and explicitly triggers a retry.
-6. **Key Storage**: API keys are never written to SQLite and never echoed back by the API. They go to the platform's OS keychain (`keyring` / Linux Secret Service / macOS Keychain / Windows Credential Manager) when one is usable, and otherwise to an owner-only `~/.codify/secrets.json` (`0600`, atomic writes) — because a machine without a keyring must still be able to store a key. The settings screen states which store is in force (`GET /settings/keys` → `storage`).
+6. **Key Storage**: API keys are never written to SQLite and never echoed back by the API. They go to the desktop's Secret Service keyring (`keyring` over libsecret — GNOME Keyring, KWallet) when one is usable, and otherwise to an owner-only `~/.codify/secrets.json` (`0600`, atomic writes) — because a machine without a keyring must still be able to store a key. The settings screen states which store is in force (`GET /settings/keys` → `storage`).
 7. **Commit Scope**: A step commits *only* the paths it wrote (`git commit -- <paths>`). The engine never runs a bare `git add -A`, so work you had staged or half-finished in the same tree is neither committed under Codify's message nor staged by it. A step that changed nothing (the proposal matched the file already) commits nothing and says so in the chat rather than claiming a change.
 8. **Pre-Flight Gate**: Every goal is triaged by Laya before the planner runs. A calibrated prompt-injection / sandbox-escape probability at or above `0.85` fails the goal with code `laya_blocked` — no plan steps, no provider calls, no file operations. The gate reports which engine decided (`sdk`, `llm-fallback`, or `skipped`) and is never allowed to be a silent failure: an unavailable gate logs that it was skipped and the pipeline proceeds.
 
@@ -429,13 +429,51 @@ make dev-app      # or: hot reload against the Vite dev server (needs cargo-taur
 > not wired. `make run-app` turns on the `custom-protocol` feature so the UI is
 > embedded; `cargo tauri dev` starts Vite for you.
 
-> **Bundled app requires Python 3.10+.** The Tauri shell does not embed the
-> engine: at startup it spawns `python3 -m engine` from the project root and
-> reads the `CODIFY_ENGINE token=… port=…` handshake from its stdout
-> (see `src-tauri/src/lib.rs` `launch_engine`). A packaged `.AppImage`/`.dmg`
-> therefore needs a system Python 3.10+ with the engine dependencies installed
-> (`pip install -r engine/requirements.txt`) — otherwise the window opens with
-> no engine behind it.
+#### Running it without a terminal: `make install-local`
+
+Codify targets Linux desktops and ships **no installer, package or AppImage** (`bundle.active` is
+`false`). What it has instead is a launcher that works from any directory, and two small files that
+put it in your applications menu:
+
+```bash
+make install-local     # build-app (release, UI embedded), then a `codify` command + a menu entry
+codify                 # from any directory — or pick "Codify" from the applications menu
+make uninstall-local   # removes exactly those three files (link, .desktop entry, icon)
+```
+
+Everything lands under your own `~/.local` (`$XDG_BIN_HOME`, `$XDG_DATA_HOME`); no root is involved. The
+command is a symlink to `scripts/codify`, which finds the checkout from where it lives and hands it to
+the app as `CODIFY_ROOT` — so a rebuilt app is the app the menu starts, and **moving or deleting the
+checkout breaks the entry** until you run `make uninstall-local` (or install again from the new place).
+`scripts/codify` starts the release build only, on purpose: a dev build opens a window that says
+"connection refused".
+
+> **The app needs the checkout and a Python 3.10+ with the engine's dependencies.** The Tauri shell
+> does not embed the engine: at startup it spawns `python3 -m engine` in the project root and reads the
+> `CODIFY_ENGINE token=… port=…` handshake from its stdout (`src-tauri/src/lib.rs` `launch_engine`). It
+> uses `./.venv` when the checkout has one (`make setup` makes it). The root is found, in order, from
+> `CODIFY_ROOT`, from the working directory when that holds `engine/`, and from the directories above
+> the executable (`engine_protocol.rs` `resolve_project_root`); if none has an engine, the window says
+> so rather than opening empty.
+
+#### WebKitGTK notes
+
+The window is WebKitGTK 4.1, so a few of its known Linux quirks apply. None is needed on a normal
+GNOME or KDE session (X11 or Wayland); they are what to try when the window opens **blank or black**,
+or flickers:
+
+- `WEBKIT_DISABLE_DMABUF_RENDERER=1 codify` — the usual fix on some NVIDIA and Wayland driver
+  combinations, where WebKitGTK's DMABUF renderer cannot allocate a buffer.
+- `GDK_BACKEND=x11 codify` — run through XWayland, or `GDK_BACKEND=wayland` to force native Wayland,
+  when one of the two misbehaves under your compositor.
+- Inside a container without the user namespaces WebKit's own sandbox needs, the process aborts at
+  start. That is a container limitation, not a Codify one; the variable WebKit offers for it
+  (`WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS`) removes a security boundary and belongs only there,
+  never on a desktop.
+
+Neither Codify's tests nor its author's machine have exercised a real GNOME or KDE session end to end
+— the shell is tested against the same GTK widgets under Xvfb — so a problem specific to a compositor is
+worth reporting with the output of `make doctor` and `WEBKIT_DISABLE_DMABUF_RENDERER=1` tried.
 
 #### Option B: Standalone Engine + Vite Dev Server
 ```bash
