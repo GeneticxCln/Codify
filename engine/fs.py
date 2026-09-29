@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import os
 import secrets
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,30 @@ def looks_binary(raw: bytes) -> bool:
     return b"\x00" in raw[:BINARY_SNIFF_BYTES]
 
 
+def _read_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+@dataclass
+class _Original:
+    """What a path held before a batch touched it, kept as bytes so a binary file survives."""
+
+    data: bytes | None  # None: the path did not exist
+    mode: int | None
+
+    @classmethod
+    def of(cls, path: Path) -> _Original:
+        if not path.is_file():
+            return cls(None, None)
+        try:
+            return cls(path.read_bytes(), path.stat().st_mode)
+        except OSError:
+            return cls(None, None)
+
+
 class FileSystemService:
     def __init__(self, root_path: str):
         self.root = Path(root_path).resolve()
@@ -188,14 +213,24 @@ class FileSystemService:
         except UnicodeDecodeError:
             return "", "file is not UTF-8 text"
 
-    def _write_atomic(self, target: Path, text: str) -> None:
-        """Write via a temp file + rename, so a crash cannot truncate the target."""
+    def _write_atomic(self, target: Path, data: bytes) -> list[Path]:
+        """Write via a temp file + rename, so a crash cannot truncate the target.
+
+        Returns the directories this call had to create, outermost first, so a caller that
+        has to undo the write can remove them again.
+        """
         # The target itself was resolved through containment, but its parents
         # were not: a symlinked directory inside the workspace would redirect
         # the write outside it. Resolve the parent and re-check containment.
         real_parent = target.parent.resolve()
         if real_parent != self.root and self.root not in real_parent.parents:
             raise PathEscapeError(str(target))
+        created: list[Path] = []
+        probe = real_parent
+        while not probe.exists():
+            created.append(probe)
+            probe = probe.parent
+        created.reverse()
         real_parent.mkdir(parents=True, exist_ok=True)
         # The temp file is created, never opened: a fixed name (`<file>.codify-tmp`)
         # is one a repository can pre-plant as a symlink, and `write_text` follows
@@ -218,20 +253,44 @@ class FileSystemService:
         except OSError:
             mode = None
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(text)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
             if mode is not None:
                 os.chmod(tmp, mode)
             os.replace(tmp, real_parent / target.name)
+        except BaseException:
+            # A directory made for a write that then failed is not left standing — and it is
+            # empty only once this call's own temp file is gone, so that goes first.
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            for directory in reversed(created):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            raise
         finally:
             if tmp.exists():
                 try:
                     tmp.unlink()
                 except OSError:
                     pass
+        return created
 
     def apply(self, files: list[dict[str, Any]], *, dry_run: bool) -> list[dict[str, Any]]:
         """Write the fixer's file operations, and say what actually changed.
+
+        **All of it or none of it.** Two phases: every operation is resolved and validated
+        first — path containment, `.git`, the action, each edit's search text — against a virtual
+        view that reflects the operations before it in the same batch, so an edit of a file the
+        batch just created sees it; and only then is anything written. A batch that cannot be
+        applied changes nothing. If a *write* then fails half-way (a full disk, a permission),
+        what had already been touched is put back: content, mode, deleted files and created
+        directories. This used to be a single loop that wrote as it validated, so
+        `[create a, create b, edit-with-missing-text]` raised on the third op with the first two
+        left on disk, uncommitted and never announced (audit of 2026-09-29, M4).
 
         `changed` matters: a fixer that proposes a file whose content is already
         exactly what it proposes produces an empty diff, and reporting that as a
@@ -250,16 +309,28 @@ class FileSystemService:
         reason = protected_root_reason(self.root)
         if reason is not None:
             raise ProtectedRootError(str(self.root), reason)
+
+        # ── phase 1: resolve and validate everything, touch nothing ──────────────
         summaries: list[dict[str, Any]] = []
+        # Where each path stands after the operations planned so far: its text, or None once deleted.
+        virtual: dict[Path, str | None] = {}
         for item in files:
             rel = item["path"]
             action = item["action"]
             content = item.get("content")
             target = self.resolve(rel)
-            before, note = self._read_for_diff(target)
+            if target.is_dir():
+                raise ValueError(f"{rel} is a directory, not a file")
+            if target in virtual:
+                planned = virtual[target]
+                before, note = ("" if planned is None else planned), None
+                exists = planned is not None
+            else:
+                before, note = self._read_for_diff(target)
+                exists = target.is_file()
             if action == "edit":
-                # Resolve the ops against what is on disk right now. The result
-                # is the concrete `after` content, so dry-run storage and diff
+                # Resolve the ops against what the file holds right now, batch so far included.
+                # The result is the concrete `after` content, so dry-run storage and diff
                 # generation treat an edit exactly like a whole-file write.
                 after, edit_note = self._resolve_edits(before, target, item.get("edits") or [])
                 if edit_note:
@@ -273,7 +344,7 @@ class FileSystemService:
                 after = "" if action == "delete" else (content or "")
             # A delete changes the tree iff the file is there — an *empty* file
             # still disappears, which `before != after` alone would miss.
-            changed = target.is_file() if action == "delete" else before != after
+            changed = exists if action == "delete" else before != after
             diff = ""
             if before != after and note is None:
                 diff = "".join(
@@ -284,11 +355,7 @@ class FileSystemService:
                         tofile=f"b/{rel}",
                     )
                 )
-            if not dry_run and changed:
-                if action == "delete":
-                    target.unlink(missing_ok=True)
-                else:
-                    self._write_atomic(target, after)
+            virtual[target] = None if action == "delete" else after
             summaries.append(
                 {
                     "path": rel,
@@ -303,7 +370,57 @@ class FileSystemService:
                     "diff_note": note if changed and not diff else None,
                 }
             )
+        if dry_run:
+            return summaries
+
+        # ── phase 2: write, and undo what was written if a write fails ───────────
+        originals: dict[Path, _Original] = {}
+        made: list[Path] = []
+        try:
+            for target, final in virtual.items():
+                on_disk = target.is_file()
+                if final is None:
+                    if not on_disk:
+                        continue
+                elif on_disk and _read_bytes(target) == final.encode("utf-8"):
+                    continue
+                originals[target] = _Original.of(target)
+                if final is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    made.extend(self._write_atomic(target, final.encode("utf-8")))
+        except BaseException as failure:
+            self._restore(originals, made, failure)
+            raise
         return summaries
+
+    def _restore(self, originals: dict[Path, _Original], made: list[Path], failure: BaseException) -> None:
+        """Put back what a failed batch had touched: bytes, mode, deleted files, new directories.
+
+        Best effort per path, so one file that cannot be restored does not stop the rest from
+        being; if any cannot, the failure that surfaces says so, because a tree that is *known*
+        to be half-written is a different thing to tell the user from one that is not.
+        """
+        stuck: list[str] = []
+        for target, original in reversed(list(originals.items())):
+            try:
+                if original.data is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    self._write_atomic(target, original.data)
+                    if original.mode is not None:
+                        os.chmod(target, original.mode)
+            except OSError:
+                stuck.append(str(target.relative_to(self.root)))
+        for directory in reversed(made):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass  # not empty, or already gone: either way there is nothing of ours in it
+        if stuck:
+            raise OSError(
+                f"{failure}; and these files could not be put back as they were: {', '.join(stuck)}"
+            ) from failure
 
     def _resolve_edits(self, before: str, target: Path, edits: list[dict[str, Any]]) -> tuple[str, str | None]:
         """Apply search/replace ops in order; (result, error-reason-or-None).

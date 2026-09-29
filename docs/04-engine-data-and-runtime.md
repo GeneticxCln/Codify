@@ -866,6 +866,16 @@ the same way it fails mid-planning: `design_contract_missing`.
 
 `action=delete` ⇒ `content` null. Paths contained by workspace.
 
+**A batch is applied completely or not at all** (`FileSystemService.apply`; audit of 2026-09-29, M4).
+Phase one resolves and validates every operation before anything is written — containment, `.git`, the
+action name, a target that is a directory, each `edit`'s search text — against a virtual view that reflects
+the operations before it in the same batch, so an `edit` of a file the batch just created sees it. Only
+then are the writes made, and a write that fails half-way (a full disk, a permission) puts back what the
+batch had already touched: content, mode, deleted files and any directories it created. So a refused batch,
+or one that failed while writing, leaves the tree byte-identical, which is what makes it safe for the
+step to fail loudly instead of leaving half a change uncommitted and unannounced. A dry run performs phase
+one only. Nothing is written into a protected workspace root at all (`03` §1.4).
+
 ### 4.3 Verifier
 
 ```json
