@@ -270,6 +270,30 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(steps[0].title, "Step 1")
         self.assertEqual(steps[0].status, "PENDING")
 
+    async def test_a_cancel_that_lands_while_the_plan_is_stored_is_not_undone(self) -> None:
+        """A goal the user cancelled must not come back as PENDING.
+
+        The planner call has its own cancel check; this is the window after it,
+        while the steps are written. `_set_status` reads the goal's current
+        version, so without a check of its own the PENDING write succeeds over
+        the CANCELLED one.
+        """
+        self.mock_responses["planner"] = {
+            "steps": [{"title": "S", "description": "d", "suggested_paths": []}]
+        }
+        goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="T", description=""))
+        real_insert = self.executor._insert_steps
+
+        def cancel_then_insert(goal_id: str, steps: Any) -> None:
+            current = self.goals.get(goal_id)
+            self.goals.update_status(goal_id, current.version, "CANCELLED")
+            real_insert(goal_id, steps)
+
+        with mock.patch.object(self.executor, "_insert_steps", cancel_then_insert):
+            await self.executor.run_planning(goal.id)
+
+        self.assertEqual(self.goals.get(goal.id).status, "CANCELLED")
+
     async def test_step_execution_success(self) -> None:
         self.mock_responses["planner"] = {
             "steps": [

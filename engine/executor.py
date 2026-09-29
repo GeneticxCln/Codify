@@ -2073,6 +2073,13 @@ class ExecutorService:
                 role=getattr(exc, "role", None) or "planner",
             )
             return
+        # The planner-call check above is where a cancel is normally caught, but
+        # it is not the last word: `_set_status` reads the goal's *current*
+        # version, so nothing downstream would stop a PENDING write from landing
+        # on top of a CANCELLED one and reviving a goal the user had stopped.
+        if self.goals.get(goal_id).status == "CANCELLED":
+            self._log(goal_id, None, "info", "cancelled before the plan was accepted — leaving it cancelled")
+            return
         self._set_status(goal_id, "PENDING", None)
 
     # ── a turn: the gate's other answer ─────────────────────────────────
