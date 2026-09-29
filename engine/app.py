@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from engine import capabilities, home, watchdog
@@ -437,7 +438,11 @@ async def request_validation_error(
     every error this API can return is one documented shape, and a validation
     failure names the fields that were rejected.
     """
-    errors = exc.errors()
+    # `jsonable_encoder`, as FastAPI's own handler does: pydantic keeps the live exception a
+    # validator raised in `ctx["error"]`, and `JSONResponse` cannot serialise it. Without this
+    # the one custom validator the engine has — the refusal that enforces invariant 8 — was
+    # answered with HTTP 500 instead of the 422 it was written to produce.
+    errors = jsonable_encoder(exc.errors())
     fields: list[str] = []
     for err in errors:
         loc = [str(part) for part in err.get("loc", []) if part != "body"]
