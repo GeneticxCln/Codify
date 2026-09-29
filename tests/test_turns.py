@@ -871,6 +871,57 @@ class TestTheConductorsTargets(TurnTestCase):
             [("acme", "conductor-model", "https://llm.example.test/v1")],
         )
 
+    async def test_a_custom_provider_takes_its_address_from_the_row_that_defines_it(self) -> None:
+        # The Conductor card offers "Custom Provider…", and a custom provider's address is not a
+        # setting of the conductor's: it lives on the role row that defines it. So naming the slug
+        # means that row's endpoint, protocol and credential — whichever role holds it.
+        self.registry.set_config("librarian", AgentConfigUpdate(
+            provider="acme", protocol="openai_compat", model_name="lib-model",
+            base_url="https://llm.example.test/v1",
+        ))
+        self.settings.set_str("conductor_provider", "acme")
+        self.settings.set_str("conductor_model", "conductor-model")
+        [(_, model, cfg)] = self._targets()
+        self.assertEqual("conductor-model", model)
+        self.assertEqual(("acme", "openai_compat", "https://llm.example.test/v1"),
+                         (cfg.provider, cfg.protocol, cfg.base_url))
+
+    async def test_a_custom_fallback_is_resolved_the_same_way(self) -> None:
+        self.registry.set_config("librarian", AgentConfigUpdate(
+            provider="acme", protocol="openai_compat", model_name="lib-model",
+            base_url="https://llm.example.test/v1",
+        ))
+        self.settings.set_str("conductor_provider", "groq")
+        self.settings.set_str("conductor_model", "conductor-model")
+        self.settings.set_str("conductor_fallback_provider", "acme")
+        self.settings.set_str("conductor_fallback_model", "backup-model")
+        self.assertEqual(
+            [("groq", "conductor-model", None), ("acme", "backup-model", "https://llm.example.test/v1")],
+            [(t[2].provider, t[1], t[2].base_url) for t in self._targets()],
+        )
+
+    async def test_a_provider_defined_only_as_a_fallback_column_is_found_too(self) -> None:
+        self.registry.set_config("fixer", AgentConfigUpdate(
+            provider="openai", model_name="fixer-model",
+            fallback_provider="acme", fallback_protocol="openai_compat",
+            fallback_model_name="fixer-backup", fallback_base_url="https://llm.example.test/v1",
+        ))
+        self.settings.set_str("conductor_provider", "acme")
+        self.settings.set_str("conductor_model", "conductor-model")
+        [(_, _, cfg)] = self._targets()
+        self.assertEqual("https://llm.example.test/v1", cfg.base_url)
+
+    async def test_the_defining_rows_endpoint_is_not_borrowed_by_a_builtin(self) -> None:
+        # Resolution is for slugs nothing else can explain: a built-in keeps the built-in address.
+        self.registry.set_config("librarian", AgentConfigUpdate(
+            provider="acme", protocol="openai_compat", model_name="lib-model",
+            base_url="https://llm.example.test/v1",
+        ))
+        self.settings.set_str("conductor_provider", "openai")
+        self.settings.set_str("conductor_model", "gpt-4o")
+        [(_, _, cfg)] = self._targets()
+        self.assertIsNone(cfg.base_url)
+
     async def test_a_single_target_has_no_fallback_notice_to_build(self) -> None:
         # Most installs have one target, and the notice reads the *second* one
         # out of the list. Built unconditionally, that raised IndexError while

@@ -2471,6 +2471,11 @@ async def ws_engine(websocket: WebSocket) -> None:
     # closing: a client that vanished without a close frame is exactly the case
     # that would otherwise leave the engine polling on.
     watch.subscribe()
+    # Named outside the loop so the `finally` can reach whichever pair is live: a handler cancelled while it
+    # waits (the server stopping, a test client leaving) is not on the path that cleans them, and the two
+    # tasks would run on with nobody to read their result.
+    getter: asyncio.Task[str] | None = None
+    receiver: asyncio.Task[str] | None = None
     try:
         while True:
             getter = asyncio.create_task(queue.get())
@@ -2508,8 +2513,20 @@ async def ws_engine(websocket: WebSocket) -> None:
     except Exception:
         pass
     finally:
-        watch.unsubscribe()
-        conns.discard(queue)
+        try:
+            # Whatever is still running is cancelled, and everything is awaited so its outcome is
+            # retrieved (an unretrieved `WebSocketDisconnect` is printed by the event loop, once per
+            # connection, for a client that merely left).
+            children = [t for t in (getter, receiver) if t is not None]
+            for child in children:
+                if not child.done():
+                    child.cancel()
+            await asyncio.gather(*children, return_exceptions=True)
+        finally:
+            # Last, and unconditionally: this is what the watch loop gates provider traffic on, and it
+            # is also the moment a caller can rely on this handler having nothing left to do.
+            watch.unsubscribe()
+            conns.discard(queue)
 
 
 async def _close_quietly(websocket: WebSocket, code: int) -> None:

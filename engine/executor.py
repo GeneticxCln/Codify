@@ -1148,6 +1148,10 @@ class _Conducted:
     # The person cancelled while it ran. Neither an answer nor a failure: the turn is over,
     # and nothing this run produced may be published or allowed to move the goal's status.
     cancelled: bool = False
+    # There was no conductor to run: the provider cannot call tools, or no model is chosen. That is the
+    # documented degradation to the engine's own path (docs/09 §10.9), not a failure, and the log must not
+    # say a model failed when none was ever called.
+    unavailable: bool = False
 
     @property
     def finished(self) -> bool:
@@ -2495,21 +2499,22 @@ class ExecutorService:
                     "it is waiting for you to approve it, or you can ask again",
                 )
                 return
-            self._log(
-                goal_id, None, "warn",
-                f"the conductor did not finish this turn ({conducted.explanation()}) "
-                "— running Codify's own sequence instead",
-            )
-            self.goals.publish(self._event(
-                goal_id, None, "log",
-                {
-                    "level": "warn",
-                    "message": (
-                        "the conductor could not finish this request, so Codify "
-                        "ran its standard sequence"
-                    ),
-                },
-            ))
+            if not conducted.unavailable:
+                self._log(
+                    goal_id, None, "warn",
+                    f"the conductor did not finish this turn ({conducted.explanation()}) "
+                    "— running Codify's own sequence instead",
+                )
+                self.goals.publish(self._event(
+                    goal_id, None, "log",
+                    {
+                        "level": "warn",
+                        "message": (
+                            "the conductor could not finish this request, so Codify "
+                            "ran its standard sequence"
+                        ),
+                    },
+                ))
         else:
             self._log(
                 goal_id, None, "info",
@@ -2611,11 +2616,21 @@ class ExecutorService:
         a conductor at all; keeping it would only move the failure later and make
         it harder to read.
         """
+        return self._resolve_conductor_targets()[0]
+
+    def _resolve_conductor_targets(self) -> tuple[list[tuple[Any, str, Any]], list[str]]:
+        """`_conductor_targets`, plus why each candidate the *settings named* was dropped.
+
+        The reasons are only for a target a person chose (the conductor's own pair, or its own fallback
+        pair). A conductor that borrows the scribe's row and cannot call tools is the documented quiet
+        degradation to a plain answer; a conductor someone pointed at a provider and then silently
+        ignored is a setting that appears to do nothing, so `_conduct` says why in the goal's log.
+        """
         role = self._conductor_role()
         try:
             base = self.orchestrator.registry.get_config(role)
         except Exception:
-            return []
+            return [], []
         primary_cfg = self._conductor_config(base)
         candidates = [primary_cfg]
         borrowed = primary_cfg is base
@@ -2628,24 +2643,71 @@ class ExecutorService:
             candidates.append(fallback_cfg)
 
         targets: list[tuple[Any, str, Any]] = []
+        problems: list[str] = []
         for cfg in candidates:
+            chosen = not borrowed and (cfg is primary_cfg or cfg is fallback_cfg)
             model = (cfg.model_name or "").strip()
             if not model:
                 continue
+            cfg = self._with_address(cfg)
             if not cfg.base_url and cfg.provider not in BUILTIN_PROVIDERS:
-                # A custom slug is only a label: its address lives on the row that
-                # defines it, and the conductor's own pair carries none. Building
-                # it would give a provider posting to nowhere, which reads as a
-                # dead endpoint instead of the misconfiguration it is.
+                # Still a label with no address: no role row defines this slug, and the
+                # conductor's own pair carries none. Building it would give a provider
+                # posting to nowhere, which reads as a dead endpoint instead of the
+                # misconfiguration it is.
+                if chosen:
+                    problems.append(
+                        f"the conductor is set to provider {cfg.provider!r}, but no role defines a provider by "
+                        "that name (a custom provider's address lives on the role that introduces it), so it "
+                        "was skipped"
+                    )
                 continue
             try:
                 provider = self.orchestrator.registry.build_provider(cfg)
-            except ProviderError:
+            except ProviderError as exc:
+                if chosen:
+                    problems.append(
+                        f"the conductor's provider {cfg.provider!r} could not be built "
+                        f"({exc.code}: {exc.message}), so it was skipped"
+                    )
                 continue
             if not getattr(provider, "supports_tools", False):
+                if chosen:
+                    problems.append(
+                        f"the conductor's provider {cfg.provider!r} cannot call tools, so it was skipped"
+                    )
                 continue
             targets.append((provider, model, cfg))
-        return targets
+        return targets, problems
+
+    def _with_address(self, cfg: AgentConfig) -> AgentConfig:
+        """`cfg` with a custom provider's address filled in from the role row that defines it.
+
+        A built-in slug is explained by the catalogue, and a config that already has an address needs
+        nothing. A custom slug is only a label: its endpoint, protocol and credential live on the role
+        row (or fallback columns) that introduced it, and the conductor's own pair has nowhere to hold
+        them — yet the Conductor card offers "Custom Provider…". So the slug means that row's address,
+        whichever role holds it. The credential reference comes along only from a primary row, where it
+        belongs to the provider being named; a fallback column carries none.
+        """
+        if cfg.base_url or cfg.provider in BUILTIN_PROVIDERS:
+            return cfg
+        try:
+            rows = self.orchestrator.registry.list_configs()
+        except Exception:
+            return cfg
+        for row in rows:
+            if row.provider == cfg.provider and row.base_url:
+                return cfg.model_copy(update={
+                    "protocol": row.protocol, "base_url": row.base_url, "api_key_ref": row.api_key_ref,
+                })
+        for row in rows:
+            if row.fallback_provider == cfg.provider and row.fallback_base_url:
+                return cfg.model_copy(update={
+                    "protocol": row.fallback_protocol or "openai_compat",
+                    "base_url": row.fallback_base_url, "api_key_ref": None,
+                })
+        return cfg
 
     def conductor_menu(self, goal_id: str) -> Callable[[], list[ToolSpec]]:
         """The moves offered for a goal, as a callable the loop asks each turn.
@@ -2899,9 +2961,11 @@ class ExecutorService:
         decided, and re-planning over the top of it would make the brain a
         suggestion.
         """
-        targets = self._conductor_targets()
+        targets, problems = self._resolve_conductor_targets()
+        for problem in problems:
+            self._log(goal_id, None, "warn", problem)
         if not targets:
-            return _Conducted(answer=None, exhausted=False, planned=False)
+            return _Conducted(answer=None, exhausted=False, planned=False, unavailable=True)
         provider, model, cfg = targets[0]
         fallback = targets[1] if len(targets) > 1 else None
         role = self._conductor_role()
