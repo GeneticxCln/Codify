@@ -477,6 +477,7 @@ async def run_task(
         "checks": checks,
         "quality_checks": quality_results,
         "call_health": call_health(events),
+        "failure": failure_of(events),
         "passed": all(c["status"] == "passed" for c in checks)
         and all(q["status"] != "failed" for q in quality_results),
     }
@@ -506,6 +507,23 @@ def call_health(events: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
     return {"ran": ran, "reasks": reasks, "failed_calls": failed}
 
 
+def failure_of(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Why the run failed: its last `error` event, clipped — or None when it recorded none.
+
+    Last, because a role's earlier failures may have been recovered from (a fallback, a re-ask) and the
+    one that ended the goal is the one that came last.
+    """
+    errors = [e for e in events if e.get("type") == "error"]
+    if not errors:
+        return None
+    payload = errors[-1].get("payload") or {}
+    return {
+        "code": payload.get("code"),
+        "role": payload.get("role"),
+        "message": str(payload.get("message") or "")[:400],
+    }
+
+
 def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate a run: harness pass rate, quality outcomes, cost, slow stage."""
     total = len(results)
@@ -521,6 +539,12 @@ def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
         for field in ("ran", "reasks", "failed_calls"):
             for role, n in (counted.get(field) or {}).items():
                 health.setdefault(role, {"ran": 0, "reasks": 0, "failed_calls": 0})[field] += int(n)
+    failure_codes: dict[str, int] = {}
+    for result in results:
+        failure = result.get("failure")
+        if failure:
+            code = str(failure.get("code"))
+            failure_codes[code] = failure_codes.get(code, 0) + 1
     return {
         "tasks": total,
         "passed": passed,
@@ -534,6 +558,7 @@ def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
         "wall_ms": sum(int(r["wall_ms"]) for r in results),
         "stage_ms": dict(sorted(stage_totals.items(), key=lambda kv: -kv[1])),
         "call_health": health,
+        "failure_codes": failure_codes,
     }
 
 
@@ -696,6 +721,8 @@ def main(argv: list[str] | None = None) -> int:
     if summary["stage_ms"]:
         slowest = next(iter(summary["stage_ms"]))
         print(f"slowest   {slowest} at {summary['stage_ms'][slowest]} ms")
+    if summary["failure_codes"]:
+        print(f"failures  {summary['failure_codes']}")
     for role, counts in summary["call_health"].items():
         if counts["reasks"] or counts["failed_calls"]:
             print(f"health    {role}: {counts['reasks']} re-ask(s) and {counts['failed_calls']} failed call(s) "

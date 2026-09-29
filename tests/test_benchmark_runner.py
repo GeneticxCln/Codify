@@ -29,6 +29,7 @@ from benchmarks.runner import (
     BenchmarkError,
     call_health,
     configured_models,
+    failure_of,
     load_manifest,
     main,
     materialize,
@@ -400,6 +401,40 @@ class ACrashedTaskIsAResultTests(unittest.TestCase):
         self.assertLess(first, second)
         self.assertLess(second, summary)
         self.assertIn("ERRORED", lines[first])
+
+
+class FailureOfTests(unittest.TestCase):
+    """Why a task failed, from the run's own events — a pass rate with no causes cannot be acted on."""
+
+    def test_the_last_error_event_is_the_cause(self) -> None:
+        events = [
+            {"type": "error", "payload": {"code": "provider_http", "message": "first", "role": "critic"}},
+            {"type": "error", "payload": {"code": "agent_output_invalid", "message": "last", "role": "fixer"}},
+        ]
+
+        self.assertEqual({"code": "agent_output_invalid", "role": "fixer", "message": "last"}, failure_of(events))
+
+    def test_a_run_with_no_error_has_no_failure(self) -> None:
+        self.assertIsNone(failure_of([{"type": "log", "payload": {"message": "hi"}}]))
+
+    def test_a_long_message_is_cut_so_a_report_stays_readable(self) -> None:
+        events = [{"type": "error", "payload": {"code": "x", "message": "y" * 5000, "role": None}}]
+
+        failure = failure_of(events)
+
+        assert failure is not None
+        self.assertLessEqual(len(failure["message"]), 400)
+
+    def test_the_summary_counts_failures_by_code(self) -> None:
+        def result(code: str | None) -> dict[str, object]:
+            row = SummaryTests._result(code is None)
+            if code:
+                row["failure"] = {"code": code, "role": "fixer", "message": "m"}
+            return row
+
+        summary = summarise([result("agent_output_invalid"), result(None), result("agent_output_invalid"), result("provider_http")])
+
+        self.assertEqual({"agent_output_invalid": 2, "provider_http": 1}, summary["failure_codes"])
 
 
 class RepeatAndThresholdTests(unittest.TestCase):
