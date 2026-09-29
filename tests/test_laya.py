@@ -1,10 +1,15 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import ast
+import asyncio
 import json
+import os
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -332,6 +337,104 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         assert sdk_error is not None, "a fallback off the SDK reports the SDK's error"
         self.assertIn("weights missing", sdk_error)
 
+    async def test_a_slow_sdk_does_not_freeze_the_event_loop(self) -> None:
+        # The defect: `decide` is `async` but ran the SDK's checkpoint load and
+        # `predict` inline, so for as long as they took (90 s measured, on a GPU
+        # Ollama already held) the engine answered nothing at all: not the UI's
+        # Stop, not the health probe, not another goal's stream. A ticker that
+        # only runs when the loop is free is the honest witness.
+        class Router:
+            def __init__(self, preload: bool = False):
+                pass
+
+            def predict(self, state: dict[str, Any], questions: list[Any]) -> dict[str, Any]:
+                time.sleep(0.6)  # blocking, like the real model
+                return {"answers": {"prompt_injection": {"noul": 0.0}}, "routing": {}}
+
+        _install_fake_sdk(Router)
+        ticks = 0
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.02)
+                ticks += 1
+
+        watcher = asyncio.create_task(ticker())
+        try:
+            decision = await LayaService(disabled=False).decide({"request": "hi"})
+        finally:
+            watcher.cancel()
+        self.assertEqual(decision.engine, "sdk")
+        self.assertGreaterEqual(ticks, 10, "the event loop was blocked while the gate ran")
+
+    async def test_a_stalled_sdk_times_out_into_an_unavailable_gate_and_is_not_queued_behind(self) -> None:
+        release = threading.Event()
+        predicts = 0
+
+        class Router:
+            def __init__(self, preload: bool = False):
+                pass
+
+            def predict(self, state: dict[str, Any], questions: list[Any]) -> dict[str, Any]:
+                nonlocal predicts
+                predicts += 1
+                release.wait(10)
+                return {"answers": {"prompt_injection": {"noul": 0.0}}, "routing": {}}
+
+        _install_fake_sdk(Router)
+        service = LayaService(disabled=False, sdk_timeout=0.2)
+        try:
+            started = time.monotonic()
+            first = await service.decide({"request": "hi"})
+            self.assertLess(time.monotonic() - started, 2.0, "the gate outwaited its own timeout")
+            self.assertEqual(first.engine, "skipped")
+            self.assertTrue(first.unavailable, "a gate that started and never answered is unavailable, not unconfigured")
+            self.assertIn("did not answer within", first.skipped_reason or "")
+
+            # The SDK is still busy with the first request: a second one must
+            # neither wait for it nor start a second forward pass on the model.
+            started = time.monotonic()
+            second = await service.decide({"request": "hi again"})
+            self.assertLess(time.monotonic() - started, 1.0, "a request queued behind the stalled one")
+            self.assertEqual(second.engine, "skipped")
+            self.assertEqual(predicts, 1, "a second predict started while the first was still running")
+        finally:
+            release.set()
+
+        # Once the stalled call finishes the SDK is usable again: the timeout is
+        # a verdict on one request, not a permanent switch-off.
+        for _ in range(100):
+            third = await service.decide({"request": "back"})
+            if third.engine == "sdk":
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual(third.engine, "sdk")
+        self.assertIsNone(service.sdk_error(), "a timeout must not leave a stale error in Settings")
+
+    async def test_the_sdk_device_can_be_pinned_by_environment(self) -> None:
+        # A GPU that Ollama already fills makes the gate's checkpoint load crawl
+        # through CUDA out-of-memory retries; the way out is to put the small
+        # gate model somewhere else. Unset, the SDK chooses, as before.
+        seen: list[dict[str, Any]] = []
+
+        class Router:
+            def __init__(self, **kwargs: Any):
+                seen.append(kwargs)
+
+            def predict(self, state: dict[str, Any], questions: list[Any]) -> dict[str, Any]:
+                return {"answers": {}, "routing": {}}
+
+        _install_fake_sdk(Router)
+        with mock.patch.dict(os.environ, {"CODIFY_LAYA_DEVICE": "cpu"}):
+            await LayaService(disabled=False).decide({"request": "x"})
+        self.assertEqual(seen, [{"preload": True, "device": "cpu"}])
+
+        seen.clear()
+        with mock.patch.dict(os.environ, {"CODIFY_LAYA_DEVICE": ""}):
+            await LayaService(disabled=False).decide({"request": "x"})
+        self.assertEqual(seen, [{"preload": True}])
+
     def test_sdk_disable_env_forces_the_fallback(self) -> None:
         _install_fake_sdk(object)
         import os
@@ -361,6 +464,10 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         import os
 
         self.assertEqual(os.environ.get(SDK_DISABLE_ENV), "0")
+        # ...and the two variables that would change *how* it runs are gone, so a
+        # developer's exported `CODIFY_LAYA_DEVICE` cannot reach a fake Router.
+        self.assertNotIn("CODIFY_LAYA_DEVICE", os.environ)
+        self.assertNotIn("CODIFY_LAYA_TIMEOUT_S", os.environ)
         _install_fake_sdk(object)
         self.assertFalse(LayaService().sdk_available())
 

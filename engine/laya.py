@@ -26,9 +26,11 @@ Two engines, and every decision reports which one answered:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -80,11 +82,21 @@ RISK_WARN_LEVEL = 1.5             # score >= this warns (2.0 == destructive)
 CLARIFY_WARN_THRESHOLD = 0.80     # noul >= this warns about ambiguity
 
 SDK_DISABLE_ENV = "CODIFY_LAYA_SDK"  # set to "0" to force the LLM fallback
+SDK_DEVICE_ENV = "CODIFY_LAYA_DEVICE"  # e.g. "cpu": keep the gate off a GPU another model fills
+SDK_TIMEOUT_ENV = "CODIFY_LAYA_TIMEOUT_S"
+# Measured ~10 s for the first decision in a process (checkpoint load) and ~31 ms
+# after (docs/05). 30 s is three cold loads: past it the gate is not slow, it is
+# stuck, and a person is waiting on a reply.
+DEFAULT_SDK_TIMEOUT_S = 30.0
 
 # Laya's checkpoints have 512–1024 token contexts, so an arbitrary user prompt
 # will not fit. Clip to both ends rather than just the head: injection attempts
 # are as likely to be appended at the end of a request as stated up front.
 MAX_REQUEST_CHARS = 4000
+
+
+class LayaSdkBusy(RuntimeError):
+    """The SDK is still working on an earlier request (one it was stopped waiting for)."""
 
 
 class LayaNotConfigured(RuntimeError):
@@ -309,10 +321,25 @@ def _fallback_prompt(state: dict[str, Any]) -> str:
     )
 
 
+def _timeout_from_env() -> float:
+    """`CODIFY_LAYA_TIMEOUT_S`, or the default when unset, unparsable or not positive."""
+    raw = os.environ.get(SDK_TIMEOUT_ENV, "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_SDK_TIMEOUT_S
+    return value if value > 0 else DEFAULT_SDK_TIMEOUT_S
+
+
 class LayaService:
     """Runs the pre-flight gate, preferring the real SDK over the LLM fallback."""
 
-    def __init__(self, disabled: bool | None = None, registry: Any = None):
+    def __init__(
+        self,
+        disabled: bool | None = None,
+        registry: Any = None,
+        sdk_timeout: float | None = None,
+    ):
         # Annotated, not inferred: mypy reads the None initializer as "always
         # None" and then calls the probe branch below unreachable — the SDK
         # loader assigns a real Router to it at runtime.
@@ -321,6 +348,11 @@ class LayaService:
         self._registry = registry
         env = os.environ.get(SDK_DISABLE_ENV, "").strip().lower()
         self._disabled = disabled if disabled is not None else env in ("0", "false", "no", "off")
+        # One SDK call at a time, and never a queue of them: the model is not
+        # something to run two forward passes through, and a call that outlived
+        # its timeout is still holding it. See `_decide_with_sdk`.
+        self._sdk_lock = threading.Lock()
+        self._sdk_timeout = sdk_timeout if sdk_timeout is not None else _timeout_from_env()
 
     # --- capability probing ------------------------------------------------
 
@@ -353,7 +385,16 @@ class LayaService:
             # preload=True keeps every checkpoint resident: without it, traffic
             # that alternates languages rebuilds a model on each request
             # (measured at 7-10 s per switch in the upstream benchmarks).
-            self._router = Router(preload=True)
+            #
+            # `device` is passed only when asked for. A GPU that Ollama already
+            # fills makes the checkpoint load crawl through CUDA out-of-memory
+            # retries (90 s for a "hi", measured), and a small gate model has no
+            # business competing with the agent's own for it.
+            kwargs: dict[str, Any] = {"preload": True}
+            device = os.environ.get(SDK_DEVICE_ENV, "").strip()
+            if device:
+                kwargs["device"] = device
+            self._router = Router(**kwargs)
         except Exception as exc:  # missing weights, no network, unsupported host
             self._sdk_error = f"{type(exc).__name__}: {exc}"
             return None
@@ -362,10 +403,24 @@ class LayaService:
     # --- decision engines --------------------------------------------------
 
     def _decide_with_sdk(self, state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        router = self._sdk_router()
-        if router is None:
-            raise RuntimeError(self._sdk_error or "laya SDK unavailable")
-        result = router.predict(state, dict(LAYA_QUESTIONS))
+        """Blocking: load the router if need be, then one forward pass. Runs on a worker thread.
+
+        Never called on the event loop. `decide` used to run this inline, so the
+        whole engine stood still while a checkpoint loaded or a prediction ran,
+        and a Stop pressed meanwhile could not even be received. The lock is
+        taken without waiting: a caller that gave up on an earlier call leaves
+        that call running, and queueing behind it would stack worker threads on a
+        model that is already stuck.
+        """
+        if not self._sdk_lock.acquire(blocking=False):
+            raise LayaSdkBusy("the laya SDK is still busy with an earlier request")
+        try:
+            router = self._sdk_router()
+            if router is None:
+                raise RuntimeError(self._sdk_error or "laya SDK unavailable")
+            result = router.predict(state, dict(LAYA_QUESTIONS))
+        finally:
+            self._sdk_lock.release()
         answers = result.get("answers", {}) if isinstance(result, dict) else {}
         routing = result.get("routing", {}) if isinstance(result, dict) else {}
         return answers or {}, routing or {}
@@ -412,9 +467,18 @@ class LayaService:
         self, state: dict[str, Any], on_call: GateCall | None = None,
     ) -> LayaDecision:
         """Gate one request. Never raises: an unusable gate is a skipped gate."""
+        # Why the SDK gave no verdict *this time*, when the reason is about this
+        # request and not about the SDK (a timeout, a busy model). Kept out of
+        # `_sdk_error` on purpose: that one is the SDK's standing condition, shown
+        # in Settings, and a stall that later clears must not leave it behind.
+        this_time: str | None = None
+        stalled = False
         if self.sdk_available():
             try:
-                answers, routing = self._decide_with_sdk(state)
+                answers, routing = await asyncio.wait_for(
+                    asyncio.to_thread(self._decide_with_sdk, state),
+                    timeout=self._sdk_timeout,
+                )
                 blocked, reason, warnings = evaluate_policy(answers)
                 return LayaDecision(
                     engine="sdk",
@@ -426,6 +490,19 @@ class LayaService:
                     provider="laya",
                     model=routing.get("model") or routing.get("repo"),
                 )
+            except asyncio.TimeoutError:
+                # The worker keeps running; only the wait ends. The gate is a
+                # pre-flight check, and a check that cannot answer in time is a
+                # gate that is not there — the same policy as any other failure
+                # of it (docs/05) — rather than a reply the user waits minutes for.
+                stalled = True
+                this_time = (
+                    f"the laya SDK did not answer within {self._sdk_timeout:g}s "
+                    "(it is still running in the background)"
+                )
+            except LayaSdkBusy as exc:
+                stalled = True
+                this_time = str(exc)
             except Exception as exc:  # fall through to the LLM contract
                 self._sdk_error = f"{type(exc).__name__}: {exc}"
 
@@ -461,7 +538,10 @@ class LayaService:
 
         return LayaDecision(
             engine="skipped",
-            skipped_reason=self._sdk_error or "laya SDK not installed and no fallback provider configured",
+            unavailable=stalled,
+            skipped_reason=this_time
+            or self._sdk_error
+            or "laya SDK not installed and no fallback provider configured",
         )
 
     def status(self) -> dict[str, Any]:

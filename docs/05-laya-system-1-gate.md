@@ -78,6 +78,24 @@ Measured here, `Router(preload=True)` costs ~9.7 s on the first decision in a pr
 (checkpoint load) and ~31 ms on every one after, against ~20.8 s and ~1.4k tokens for the
 LLM fallback it replaces.
 
+**The SDK never runs on the event loop.** `decide` is `async`, but the checkpoint load and
+`predict` are blocking, so they run on a worker thread (`asyncio.to_thread`). They used to run
+inline, and a slow one froze the *whole engine*: on a machine whose GPU Ollama already filled,
+the first decision for "hi" took 90 s of CUDA out-of-memory retries, and for those 90 s the
+engine could not answer the UI's `POST /turns` (so the composer kept the text and the button had
+no goal id to stop), the health probe, or any other stream. Three rules keep it that way:
+
+- **A timeout.** `CODIFY_LAYA_TIMEOUT_S` (default 30 s, three cold loads). Past it the gate is
+  reported `unavailable` — the same "a gate that cannot run is a skipped gate" policy as any
+  other failure, so the pipeline goes on — and the worker keeps running in the background.
+- **One call at a time, never a queue.** A request that arrives while an earlier one is still
+  inside the model is skipped at once (`the laya SDK is still busy…`) instead of stacking worker
+  threads behind a model that is already stuck. When the stalled call finishes, the next request
+  uses the SDK again; a timeout is a verdict on one request, not a switch-off, and it is kept
+  out of `sdk_error` so Settings does not show a stale failure.
+- **`CODIFY_LAYA_DEVICE`** (e.g. `cpu`) is passed to `Router(device=…)` when set, so the small
+  gate model can stay off a GPU that the agent's own model needs. Unset, the SDK chooses.
+
 **The SDK has to be in the interpreter that runs the engine.** The desktop shell spawns
 the checkout's own `.venv/bin/python3` when it has one and `python3` from the login
 shell's PATH otherwise, so `make test` and the app share one environment. Installing the

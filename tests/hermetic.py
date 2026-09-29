@@ -31,7 +31,7 @@ import shutil
 import tempfile
 
 from engine import home
-from engine.laya import SDK_DISABLE_ENV
+from engine.laya import SDK_DEVICE_ENV, SDK_DISABLE_ENV, SDK_TIMEOUT_ENV
 from engine.spawn_guard import ENV_PARENT_PID as ENV_SANDBOX_PARENT_PID
 from engine.watchdog import ENV_PARENT_PID
 
@@ -104,6 +104,12 @@ def pin_laya_sdk_off() -> None:
     dropped by someone tidying the environment.
     """
     os.environ[SDK_DISABLE_ENV] = "0"
+    # The two knobs that shape how the SDK would run are removed for the same
+    # reason: `CODIFY_LAYA_DEVICE=cpu` in a developer's shell would hand a fake
+    # `Router` a `device` argument it was never written to take, and a short
+    # `CODIFY_LAYA_TIMEOUT_S` would turn a slow test machine into a skipped gate.
+    for name in (SDK_DEVICE_ENV, SDK_TIMEOUT_ENV):
+        os.environ.pop(name, None)
 
 
 HOME = activate()
