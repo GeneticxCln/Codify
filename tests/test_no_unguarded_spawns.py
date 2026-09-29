@@ -62,7 +62,7 @@ GUARDED_SPAWN_SITES: dict[str, dict[str, str]] = {
         "Popen": "the model-driven command: guarded_argv/guarded_env + start_new_session, pinned by tests/test_sandbox.py",
     },
     "engine/git.py": {
-        "run": "the git choke point: every command through _run_bytes, behind guarded_argv/guarded_env, pinned by tests/test_git.py",
+        "Popen": "the git choke point: every command through _run_bytes, behind guarded_argv/guarded_env, a session of its own and a whole-group kill on timeout (the conductor's model-chosen reads are bounded), pinned by tests/test_git.py and tests/test_sandbox_read_only_git.py",
     },
     "engine/app.py": {
         "run": "the folder picker: _picker_command's guarded_argv/guarded_env + start_new_session, pinned by tests/test_sandbox.py and the live-engine e2e",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -13,10 +14,12 @@ from pathlib import Path
 # seventeen subcommands and this module's own list eight, with different flag
 # rules, and the conductor's door checked neither flag nor argument beyond
 # `args[0]`.
+from engine import git_readonly
 from engine.fs import FileSystemService
 from engine.sandbox import (
     READ_ONLY_GIT_SUBCOMMANDS,
     CommandNotAllowed,
+    SandboxService,
     validate_argv,
 )
 from engine.spawn_guard import guarded_argv, guarded_env
@@ -32,6 +35,10 @@ class GitService:
     whose child keeps writing) used to live on after the engine that ran the commit
     was gone, with the repository still mutating under a closed window.
     """
+
+    # How long a model-chosen read may run. A whole-history `git log -p` on a large
+    # repository is finite and still not worth a turn that never returns.
+    read_only_timeout_s: float = 60.0
 
     def __init__(self) -> None:
         self._git_bin = shutil.which("git") or "git"
@@ -57,26 +64,62 @@ class GitService:
     # ── the one way this class starts a process ─────────────────────────
 
     def _run_bytes(
-        self, args: list[str], *, cwd: str, env: Mapping[str, str] | None = None
+        self,
+        args: list[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         """Run one git command under the guard, capturing raw output.
 
-        `env=None` means "inherit this process's environment", which is what the
-        read-only callers have always done; the guard still gets the pid handover.
+        `env=None` means "inherit this process's environment". Only the engine's own
+        fixed commands (`status --porcelain`, `init`) still do; the one caller whose
+        arguments come from a model, `read_only`, passes an explicit environment.
+
+        `timeout=None` waits as long as git takes, which a `commit` running the
+        repository's hooks is entitled to. A model-chosen read is not, so `read_only`
+        passes one: on expiry the command's *whole group* is stopped — the guard alone
+        dying would leave git running, holding the pipes — and `TimeoutExpired` is raised.
         """
-        return subprocess.run(
+        proc = subprocess.Popen(
             guarded_argv([self._git_bin, *args]),
             cwd=cwd,
             env=guarded_env(env),
-            capture_output=True,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            # No one answers a git that asks: inherited, this process's own stdin would be
+            # its, and `git shortlog` with no revision waits on it.
+            stdin=subprocess.DEVNULL,
             # The guard must lead the session it kills (see spawn_guard.py), exactly
             # as SandboxService.run_command does it.
             start_new_session=True,
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # A gentle TERM to the group first, then KILL for whatever is still alive.
+            SandboxService._kill_group(proc.pid)
+            try:
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
+                proc.communicate()
+            raise
+        except BaseException:
+            # Interrupted while waiting: leave nothing running behind us.
+            SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
+            proc.communicate()
+            raise
+        return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
     def _run_text(
-        self, args: list[str], *, cwd: str, env: Mapping[str, str] | None = None
+        self,
+        args: list[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Same, as text — deliberately decoding UTF-8 with replacement.
 
@@ -85,7 +128,7 @@ class GitService:
         `UnicodeDecodeError` out of a read. Git writes paths as UTF-8 bytes (that is
         also why `_tracked_files` reads them itself).
         """
-        res = self._run_bytes(args, cwd=cwd, env=env)
+        res = self._run_bytes(args, cwd=cwd, env=env, timeout=timeout)
         return subprocess.CompletedProcess(
             res.args,
             res.returncode,
@@ -161,7 +204,21 @@ class GitService:
         # history to read — which reads as "try a different subcommand".
         if not self.is_git_repo(root_path):
             return "This workspace is not a git repository, so there is no history to read."
-        res = self._run_text(list(args), cwd=str(Path(root_path).resolve()))
+        # Through the same hardening as the librarian's door: this used to pass
+        # `env=None`, which is "inherit the engine's whole environment" — provider keys
+        # and the boot token included — for a command whose arguments a model chose.
+        try:
+            res = self._run_text(
+                git_readonly.runner_args(args),
+                cwd=str(Path(root_path).resolve()),
+                env=git_readonly.runner_env(os.environ, root_path),
+                timeout=self.read_only_timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            return (
+                f"git {' '.join(args)} did not finish in {self.read_only_timeout_s:g}s and "
+                "was stopped. Ask for less: a path, a smaller range, or -n."
+            )
         out = (res.stdout or "").strip() or (res.stderr or "").strip()
         return f"$ git {' '.join(args)} (exit {res.returncode})\n{out}"
 

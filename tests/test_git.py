@@ -113,22 +113,24 @@ class TestGitService(GitTestBase):
         """The commit subprocess env must not include provider key variables —
         hooks would otherwise run with live credentials in scope."""
         captured: dict[str, Any] = {}
-        real_run = subprocess.run
+        real_popen = subprocess.Popen
 
-        def spy(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        def spy(argv: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
             # Every git command runs one process deeper than it used to —
             # [python, engine/spawn_guard.py, <absolute git>, "commit", …] — so the
             # git binary and its subcommand are found two slots further along.
+            # Watched at `Popen`: that is where `GitService._run_bytes` starts it, so
+            # that a timeout can stop the whole group (`subprocess.run` cannot).
             if len(argv) > 3 and argv[2].endswith("git") and argv[3] == "commit":
                 captured.update(kwargs.get("env") or {})
-            return real_run(argv, **kwargs)
+            return real_popen(argv, **kwargs)
 
         import os as _os
         _os.environ["ANTHROPIC_API_KEY"] = "sk-leak-check"
         _os.environ["OPENAI_API_KEY"] = "sk-leak-check-2"
         try:
             import unittest.mock as mock
-            with mock.patch("engine.git.subprocess.run", side_effect=spy):
+            with mock.patch("engine.git.subprocess.Popen", side_effect=spy):
                 self.write("envcheck.py", "y = 2\n")
                 rev = self.git.commit(str(self.root), "feat: env", ["envcheck.py"])
                 self.assertIsNotNone(rev)

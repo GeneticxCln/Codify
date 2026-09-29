@@ -416,7 +416,7 @@ switch credits the turn's answer to a model that never produced it.
 |---|---|---|
 | `read_file` | `LibraryService.read` | `FileSystemService` refuses a path escape |
 | `search_code` | `LibraryService.search` | same |
-| `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` — the librarian's own validator, so the subcommand list and its flag rules have one owner (`04` §5) |
+| `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` — the librarian's own validator (`engine/git_readonly.py`'s exact-match table), so the subcommand list and its option rules have one owner (`04` §5) |
 | `run_command` | `SandboxService.run_command` | `validate_argv` in `test` mode (docs/00 §6.6) |
 | `read_page` | `WebviewBridge.read_page` | read-only; the page is the user's, the model cannot choose or change the URL, and the text returns quoted as untrusted (docs/03 §1.6) |
 | `recall` | `GoalService.recall_events` + `recall.search` | read-only over this workspace's own `events`; the `RECALLABLE` allow-list decides what can be returned and nothing stored can widen it (docs/03 §1.8) |

@@ -63,7 +63,7 @@ its own table beside it (`RUST_GUARDED_SPAWN_SITES`) — see §2.1:
 | Site | Spawns | Guarded by | Proven by |
 |---|---|---|---|
 | `engine/sandbox.py` `run_command` | model-asked commands | `guarded_argv` + `guarded_env` + `start_new_session=True`; timeout kills the group, reports exit 124 | `tests/test_sandbox.py`, the live-engine e2e |
-| `engine/git.py` `_run_bytes` | every git command the engine runs | same, through the single choke point all callers route through | `tests/test_git.py`, the commit-hook e2e |
+| `engine/git.py` `_run_bytes` | every git command the engine runs | same, through the single choke point all callers route through; a `timeout` (the conductor's `git_history` passes one) stops the whole group, not just the guard | `tests/test_git.py`, `tests/test_sandbox_read_only_git.py`, the commit-hook e2e |
 | `engine/app.py` `_picker_command` | the GTK folder picker behind `POST /workspaces/browse` | same; env inherited because DISPLAY/WAYLAND put the dialog on screen | `tests/test_sandbox.py`, the picker e2e |
 | `engine/spawn_guard.py` `main` | the guard's own `Popen` of the command | is the guard | every one of the above |
 | `benchmarks/runner.py` | a benchmark task's `test_command`, taken from the manifest | same, plus a whole-group kill on timeout | `tests/test_benchmark_runner.py` |

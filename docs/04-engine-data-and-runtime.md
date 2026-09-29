@@ -645,9 +645,10 @@ Requests are executed by `engine/library.py`:
   literal substring answer is computed and returned labelled `strategy: "substring_fallback"`. The
   result always says which strategy ran; substring (the default) carries no marker, so the evidence
   checker's read of `matches[].path` / `files_scanned` is unchanged.
-- `git` / `run` → `SandboxService.run_command(mode="read_only")`: `ls`, `wc`, and a read-only git
-  subcommand allowlist, with `-C`, `--git-dir`, `--work-tree`, `--output`, `-o`, `--ext-diff` and
-  `--no-index` refused.
+- `git` / `run` → `SandboxService.run_command(mode="read_only")`: `ls`, `wc`, and read-only git — an
+  **exact-match table** of subcommands and the options each accepts (`engine/git_readonly.py`, §5
+  below), so an option the table does not name is refused whatever git would have made of its
+  spelling.
 
 A refused request is **feedback, not failure**: the refusal is returned to the librarian (so it can
 ask for something else) and logged at `warn`. The goal is unaffected.
@@ -1139,8 +1140,15 @@ Two callers, two modes, one validator:
 
 - `mode="test"` — the verifier path only. Planner / fixer / critic / scribe output NEVER reaches this
   function with an executable argv.
-- `mode="read_only"` — the librarian's `git` / `run` requests. `ls`, `wc` and a read-only git
-  subcommand allowlist only, so nothing the librarian can do changes the workspace.
+- `mode="read_only"` — the librarian's `git` / `run` requests. `ls`, `wc` and read-only git
+  only, so nothing the librarian can do changes the workspace. Read-only git is specified in
+  "Read-only git" below.
+
+Every argv is a list of strings with no control character in it (`NUL` cannot be passed to a process
+at all, and the other control characters are newlines and escapes no allowlisted command has a reason
+to receive) — a refusal, not a crash, in both modes. Every command runs with **no stdin** (`/dev/null`):
+inherited, the engine's own stdin would be the command's, and `git shortlog` with no revision, or a
+test that calls `input()`, would wait out its whole timeout.
 
 `argv[0]` basename only (no `/`). Resolved as `shutil.which` then executed with `cwd=workspace.root_path`, `env` stripped to `PATH`,
 `HOME`, `LANG`, `TERM`, `VIRTUAL_ENV`, `PYTHONPATH`, `PYTHONHOME`, and `shell=False`, in a new session so a timeout can kill the
@@ -1154,9 +1162,58 @@ whole process group.
 | `pnpm` | same as npm |
 | `cargo` | `test` + optional `--`, `--lib`, `--bins`, `--quiet` |
 | `go` | `test` + `./...` or paths under root |
-| `git` | `status`, `diff`, `log -1` only (no write) |
+| `git` | `status`, `diff`, `log -1` only (no write); run hardened like read-only git, below |
 
 Anything else → `command_not_allowed`. No shell (`shell=False`).
+
+### Read-only git
+
+`engine/git_readonly.py` is the one owner of what a model may ask git to read. Both doors call it — the
+librarian's `run_command(mode="read_only")` and the conductor's `git_history` (`GitService.read_only`) —
+so the two cannot drift, and `sandbox.READ_ONLY_GIT_SUBCOMMANDS` and `GitService.READ_ONLY_ARGV` are
+both the table's own key set, not literals.
+
+**An option is refused unless the table names it, exactly.** This replaced a denylist of flag spellings,
+which failed four ways when it was run against real git: git accepts any unambiguous prefix of a long
+option (`git grep --open-files-in-pa="touch X"` started `touch`; `git branch -v --del NAME` deleted a
+ref); `git branch -v NAME` and `git tag --sort=x NAME` created refs, because the bare word is not a flag
+a denylist can see; `git diff <file outside the tree> /dev/null` printed a file from outside the
+workspace, because git turns a `diff` with a path outside the tree into `--no-index` on its own; and
+nothing looked at positionals at all. The table lists only history, diff, blame, search and ref
+listing options. It contains no option that writes (`--output`, `-d`, `-m`, `-c`,
+`--set-upstream-to`, `--edit-description`), runs a program (`--ext-diff`, `--textconv`, `-O`,
+`--open-files-in-pager`, `--show-signature`, `tag -v`, and a `--format`/`--pretty` that asks for a
+signature, which makes git run gpg), names a file (`--file`, `-f`, `--exclude-from`, `--orderfile`,
+`--contents`, `--ignore-revs-file`) or points git at another tree (`--no-index`, `--git-dir`,
+`--work-tree`, `-C`, `-c`, global options at all). A refusal names the options the subcommand does accept.
+
+- Value options are attached (`--since=DATE`) unless they are short and git itself consumes the next
+  word (`-n 5`, `-e PATTERN`), so the validator and git never disagree about which word was a value.
+- Every positional must stay inside the workspace (`FileSystemService.resolve`: no absolute path, no
+  `..`, no `.git`, symlinks followed), including the path half of `REV:path`. `HEAD~1..HEAD` is a range
+  and is allowed. The one exception is `git grep`'s own pattern.
+- `branch` and `tag` accept a positional only with `--list`/`-l`, where it is a pattern.
+
+**The child process.** Read-only git — and the verifier's `git status`/`diff`/`log -1` — starts as
+`git --no-pager -c core.fsmonitor=false SUBCOMMAND [--no-ext-diff --no-textconv] ARGS…` with an
+environment of `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE` and `TZ` plus `GIT_CONFIG_GLOBAL=/dev/null`,
+`GIT_CONFIG_NOSYSTEM`, `GIT_OPTIONAL_LOCKS=0` (a `status` otherwise rewrites the index), `GIT_TERMINAL_PROMPT=0`
+and `GIT_CEILING_DIRECTORIES` set to the workspace's parent, so a workspace that is not itself a
+repository cannot read the history of one above it. No provider key or boot token is in that
+environment: `GitService.read_only` used to inherit the engine's whole one. The conductor's door is
+also **bounded**: 60 seconds (`GitService.read_only_timeout_s`), after which the command's whole
+process group is stopped and the model gets a sentence saying so.
+
+**What this does not cover, on purpose.** The repository's *own* config (`.git/config`,
+`.gitattributes`) is trusted, exactly as it is when a developer runs git in that repository. A
+`core.fsmonitor`, `diff.external` or textconv driver there is neutralised above because those are the
+ones plain `status`/`diff`/`log -p` start; a `filter.<name>.clean` command in that config still runs
+when git compares the working tree, and there is no single switch for those. A workspace whose
+`.git/config` came from someone else is not made safe by this table.
+
+Proven by `tests/test_sandbox_read_only_git.py`, which runs real git against a real repository and
+asserts on the repository afterwards; its property tests are the ones that would have caught the class
+(no abbreviation of any listed option is accepted).
 
 **What this is, plainly, because the name oversells it: an argv-shape allowlist and nothing more.** It is
 not a sandbox in the containment sense, and the table above is not a boundary around the code that runs

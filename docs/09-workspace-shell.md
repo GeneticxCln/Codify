@@ -2221,7 +2221,7 @@ the pipeline already makes, through the same service:
 |---|---|---|
 | `read_file` | `LibraryService.read` | path escape refused by `FileSystemService` |
 | `search_code` | `LibraryService.search` | same |
-| `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")`: subcommand names *and* their flags, one owner |
+| `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` → `engine/git_readonly.py`: subcommands, their exact options, and every positional, one owner; 60 s bound, no credentials in the child's environment |
 | `run_command` | `SandboxService.run_command` | `validate_argv`, `test` mode (docs/00 §6.6) |
 | `recon` | `ExecutorService._librarian` | read-only, bounded rounds |
 | `design` | `ExecutorService._design` | no tools at all; decides from the evidence |
@@ -2249,7 +2249,9 @@ itself is not one of the seven — it has already run, before the loop existed.
 
 `git_history` is worth calling out, because it is where "the model asked for it"
 was once the whole check. It now runs `sandbox.validate_argv(mode="read_only")` —
-**the librarian's validator, not a copy of it**. Until that call replaced its own
+**the librarian's validator, not a copy of it** (both are `engine/git_readonly.py`'s exact-match
+table since the audit of 2026-09-29, which also bounds it to 60 seconds and gives it a stripped
+environment: it used to inherit the engine's, provider keys included; docs/04 §5 "Read-only git"). Until that call replaced its own
 private list it had two defects at once: a subcommand list eight names long against
 the librarian's seventeen, so the two had already drifted; and no flag or argument
 check at all, so `git log --output=<any path>` wrote a file outside the workspace
