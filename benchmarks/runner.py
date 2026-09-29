@@ -599,6 +599,25 @@ def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _replace_file(src: str, dst: str, *, follow_symlinks: bool = True) -> str:
+    """`shutil.copy2` that replaces the destination instead of opening it for writing.
+
+    Git writes its objects read-only, and `copy2` keeps the mode, so a workspace copied once leaves read-only
+    files behind; copying it again has to open one for writing, which is `EACCES` for everyone but root.
+    Unlinking needs the directory to be writable, not the file, so it works for both.
+    """
+    try:
+        os.unlink(dst)
+    except FileNotFoundError:
+        pass
+    return shutil.copy2(src, dst, follow_symlinks=follow_symlinks)
+
+
+def _keep_record(work_root: Path, record: Path) -> None:
+    """Copy the scratch root into `--record`'s directory, over an earlier copy of itself if there is one."""
+    shutil.copytree(work_root, record, dirs_exist_ok=True, copy_function=_replace_file)
+
+
 def _run_one(
     task: dict[str, Any], work_root: Path, *, canned: bool, engine_db: Path | None, attempt: int,
     trace: bool = False,
@@ -740,7 +759,7 @@ def main(argv: list[str] | None = None) -> int:
                     # Kept as each task finishes, not only at the end: a run killed part-way (a container
                     # restart, an OOM, a closed terminal) never reaches the `finally` below, and a baseline
                     # that takes an hour on a CPU was lost with it.
-                    shutil.copytree(work_root, args.record, dirs_exist_ok=True)
+                    _keep_record(work_root, args.record)
                 # As each one finishes, not only in the summary: a slow real model makes a run long, and
                 # a run that dies late should leave a record of the tasks that were done.
                 label = task["id"] if args.repeat == 1 else f"{task['id']} (run {attempt})"
@@ -749,7 +768,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if args.record is not None:
             # Kept before it is removed: the stores hold the traced calls, the workspaces what was written.
-            shutil.copytree(work_root, args.record, dirs_exist_ok=True)
+            _keep_record(work_root, args.record)
         shutil.rmtree(work_root, ignore_errors=True)
 
     summary = summarise(results)
