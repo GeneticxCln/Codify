@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -135,7 +136,16 @@ class FileSystemService:
         if real_parent != self.root and self.root not in real_parent.parents:
             raise PathEscapeError(str(target))
         real_parent.mkdir(parents=True, exist_ok=True)
-        tmp = real_parent / (target.name + ".codify-tmp")
+        # The temp file is created, never opened: a fixed name (`<file>.codify-tmp`)
+        # is one a repository can pre-plant as a symlink, and `write_text` follows
+        # a symlink, so writing `a.txt` overwrote whatever `a.txt.codify-tmp`
+        # pointed at, outside the workspace or not. A random name cannot be
+        # planted, and `O_EXCL | O_NOFOLLOW` refuses to open anything that already
+        # exists — a symlink included, dangling or not. `0o666` lets the umask
+        # decide the mode, exactly as `write_text` did.
+        tmp = real_parent / f"{target.name}.{secrets.token_hex(6)}.codify-tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp, flags, 0o666)
         # `write_text` mints the temp file with the process default (0644 before
         # umask), and `os.replace` carries *that* mode onto the target. An edit
         # to a script that was executable came back non-executable — and since
@@ -147,7 +157,8 @@ class FileSystemService:
         except OSError:
             mode = None
         try:
-            tmp.write_text(text, encoding="utf-8")
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
             if mode is not None:
                 os.chmod(tmp, mode)
             os.replace(tmp, real_parent / target.name)

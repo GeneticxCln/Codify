@@ -381,5 +381,52 @@ class TestTheRepositorysOwnMetadataIsNotAFilesPath(unittest.TestCase):
         self.assertTrue(self.fs.resolve(".github/workflows/ci.yml"))
 
 
+class TestAWriteCannotBeRedirectedThroughItsTempFile(unittest.TestCase):
+    """The atomic write must not follow a symlink a repository planted for it.
+
+    The temp file used to be `<file>.codify-tmp`, a name anyone could predict and a
+    repository could ship as a symlink. `write_text` follows symlinks, so writing
+    `a.txt` overwrote whatever that link pointed at — outside the workspace
+    included, which is the one thing every other check in this module exists to
+    prevent.
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        base = Path(self.temp_dir.name).resolve()
+        self.root = base / "workspace"
+        self.root.mkdir()
+        self.outside = base / "outside"
+        self.outside.mkdir()
+        self.victim = self.outside / "victim.txt"
+        self.victim.write_text("ORIGINAL\n", encoding="utf-8")
+        self.fs = FileSystemService(str(self.root))
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_a_planted_temp_symlink_does_not_redirect_the_write(self) -> None:
+        (self.root / "a.txt.codify-tmp").symlink_to(self.victim)
+        self.fs.apply([{"path": "a.txt", "action": "create", "content": "engine\n"}], dry_run=False)
+        self.assertEqual("engine\n", (self.root / "a.txt").read_text(encoding="utf-8"))
+        self.assertEqual("ORIGINAL\n", self.victim.read_text(encoding="utf-8"), "the write escaped the workspace")
+
+    def test_a_dangling_planted_symlink_does_not_create_a_file_outside(self) -> None:
+        target = self.outside / "created-by-the-link"
+        (self.root / "b.txt.codify-tmp").symlink_to(target)
+        self.fs.apply([{"path": "b.txt", "action": "create", "content": "engine\n"}], dry_run=False)
+        self.assertFalse(target.exists(), "a file appeared outside the workspace")
+
+    def test_no_temp_file_is_left_behind(self) -> None:
+        self.fs.apply([{"path": "c.txt", "action": "create", "content": "x\n"}], dry_run=False)
+        self.assertEqual(["c.txt"], sorted(p.name for p in self.root.iterdir()))
+
+    def test_an_executable_keeps_its_mode_across_a_rewrite(self) -> None:
+        self.fs.apply([{"path": "d.sh", "action": "create", "content": "#!/bin/sh\n"}], dry_run=False)
+        os.chmod(self.root / "d.sh", 0o700)
+        self.fs.apply([{"path": "d.sh", "action": "create", "content": "#!/bin/sh\necho hi\n"}], dry_run=False)
+        self.assertEqual(0o700, (self.root / "d.sh").stat().st_mode & 0o777)
+
+
 if __name__ == "__main__":
     unittest.main()
