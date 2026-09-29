@@ -506,7 +506,15 @@ mod page_layer {
         if let Some(found) = find(&vbox) {
             return Ok(found);
         }
+        Ok(assemble(&vbox))
+    }
 
+    /// Restructure `vbox` into the layer: what it holds becomes the overlay's
+    /// main child, and a fixed sits above it for the pages.
+    ///
+    /// Split from [`layer`] so it can be built and inspected without a window;
+    /// `the_page_layer_lets_input_through_to_the_app_beneath_it` does exactly that.
+    pub(super) fn assemble(vbox: &gtk::Box) -> (gtk::Overlay, gtk::Fixed) {
         let overlay = gtk::Overlay::new();
         overlay.set_widget_name(LAYER_NAME);
         let fixed = gtk::Fixed::new();
@@ -522,10 +530,21 @@ mod page_layer {
             child.show();
         }
         overlay.add_overlay(&fixed);
+        // **Without this the app stops answering the moment a page exists.** An
+        // overlay child that is not pass-through gets an input window over its
+        // whole allocation, and a `Fixed` is allocated the entire overlay — so
+        // the layer's window sat over the app's own webview and took every
+        // click, key and scroll that was aimed at the tab strip, the side panel
+        // and the composer. The window kept painting (nothing was wrong with
+        // rendering), it just did not respond. Pass-through makes the *layer's*
+        // window transparent to input; the pages inside it are child windows of
+        // it and keep receiving theirs, which is what `gdk_window_set_pass_through`
+        // documents ("the child windows of window are unaffected").
+        overlay.set_overlay_pass_through(&fixed, true);
         vbox.pack_start(&overlay, true, true, 0);
         overlay.show();
         fixed.show();
-        Ok((overlay, fixed))
+        (overlay, fixed)
     }
 
     /// The widget a page's label names inside the layer's fixed.
@@ -4023,6 +4042,61 @@ mod tests {
             created < adopted,
             "the layer adopts a page that has not been created yet — there is \
              nothing to move"
+        );
+    }
+
+    /// The layer must not take the app's input.
+    ///
+    /// The tests around it read this file's source, which is how a layer that
+    /// painted perfectly and answered nothing shipped: every string they look
+    /// for was there. This builds the real widgets and asks GDK — the thing that
+    /// routes a click — whether the layer's input window lets it through.
+    /// Needs a display, and says so rather than passing without one.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    #[test]
+    fn the_page_layer_lets_input_through_to_the_app_beneath_it() {
+        use gtk::prelude::*;
+        gtk::init().expect("this test builds real GTK widgets and needs a display");
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        vbox.pack_start(&gtk::Button::with_label("the app"), true, true, 0);
+        let (overlay, fixed) = page_layer::assemble(&vbox);
+        // A page, so the fixed has something in it to keep receiving input.
+        let page = gtk::Button::with_label("a page");
+        page.set_size_request(120, 80);
+        fixed.put(&page, 40, 40);
+
+        let window = gtk::OffscreenWindow::new();
+        window.set_default_size(400, 300);
+        window.add(&vbox);
+        window.show_all();
+        while gtk::events_pending() {
+            gtk::main_iteration();
+        }
+
+        assert!(
+            overlay.is_overlay_pass_through(&fixed),
+            "the page layer is not pass-through, so its input window covers the \
+             whole app and the window stops answering the moment a page exists"
+        );
+        let gdk_window = overlay.window().expect("the overlay is realised");
+        let covering: Vec<_> = gdk_window
+            .children()
+            .into_iter()
+            .filter(|w| w.width() >= 400 && w.height() >= 300 && !w.is_pass_through())
+            .collect();
+        // The overlay's own main child is one full-size window that must take
+        // input (it is the app). The layer's is the other, and must not.
+        assert_eq!(
+            covering.len(),
+            1,
+            "exactly one full-size window may take input — the app's; a second \
+             is the layer sitting over it"
         );
     }
 
