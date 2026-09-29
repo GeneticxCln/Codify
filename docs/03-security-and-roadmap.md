@@ -57,6 +57,16 @@ The UI holds the token **in memory** when it runs under the desktop shell: it as
 - **What the allowlist does not stop (accepted risk).** `validate_argv` decides *which program* runs and with which flags; it cannot decide what the program does. `pytest`, `python <script>.py`, `npm run <script>`, `cargo test` and `go test` all execute code that lives in the workspace, and the fixer is the role that writes into the workspace. So an approved goal can write a file and a verification step can then run it, as the user, with the user's permissions, in a process group that is killed on timeout. That is inherent to running a project's tests, not a hole in the allowlist, and it is why the `write` move refuses while the goal is unapproved (docs/00 §6.9) and why the environment handed to these processes is filtered (`guarded_env`). Treat approving a goal in an untrusted repository as approving that repository's test suite. The conductor's `run_command` honours that sentence rather than only quoting it: a *turn* has no approval step, so before the goal is `RUNNING` (and never on a plan-only goal) it runs in `read_only` mode, and asking "what does this project do?" of a hostile clone cannot start its code (`tests/test_conductor.py`, `test_project_code_runs_only_once_the_plan_is_approved`).
 - Per-command argument policies (not `cmd[0]` only): e.g. `python` only with `-m pytest` / script-path-inside-workspace.
 - `FileSystemService` path containment (`root_path` boundary check).
+- **Protected workspace roots** (`fs.protected_root_reason`). A workspace root is refused — `400
+  invalid_root` when it is created, and a `ProtectedRootError` (a `PathEscapeError`, so it fails the step
+  the way an escape does) when anything tries to write into one that predates the rule — if it is `$HOME`
+  or contains it (that is `/` and `/home` too), one of the system directories themselves (`/etc`, `/usr`,
+  `/var`, `/tmp`, and `/bin`/`/lib*` however they resolve), inside `~/.ssh`, `~/.gnupg`, `~/.aws` or
+  `~/.kube`, or Codify's own state directory. The reason is that an approved goal writes through the same
+  `apply` as any source file, so a `$HOME` workspace could rewrite `~/.bashrc` or
+  `~/.ssh/authorized_keys` (audit of 2026-09-29, L3). It is about the root, not about file names: a
+  dotfiles repository *below* `$HOME` owns a `.ssh/config` and a `.bashrc` that are only files in a repo,
+  so those stay writable. There is no override; a subfolder is the answer, and reading is unaffected.
 - Engine binds to `127.0.0.1` only.
 
 ### 1.5 Embedded browser: deny-by-default webviews

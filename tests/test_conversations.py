@@ -423,8 +423,12 @@ class ConversationTestCase(unittest.IsolatedAsyncioTestCase):
         no access to. Refused, not silently dropped: dropping it would produce
         exactly the unlinked new chat this column exists to prevent.
         """
+        # A second workspace, in a folder of its own: `/tmp` itself is a shared directory and is
+        # not accepted as a workspace root (docs/03, protected roots).
+        other_root = self.root / "other-workspace"
+        other_root.mkdir()
         other = (
-            await self.call("POST", "/workspaces", json={"name": "other", "root_path": "/tmp"})
+            await self.call("POST", "/workspaces", json={"name": "other", "root_path": str(other_root)})
         ).json()
         parent = (
             await self.call(

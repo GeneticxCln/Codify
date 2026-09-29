@@ -43,6 +43,67 @@ class GitMetadataError(PathEscapeError):
         self.path = path
 
 
+class ProtectedRootError(PathEscapeError):
+    """The workspace root is somewhere a goal must never be able to write into.
+
+    A subclass of `PathEscapeError` for the reason `GitMetadataError` is: every site that already
+    handles an escape is the right answer (the fixer's step fails loudly, nothing is written).
+    """
+
+    def __init__(self, root: str, reason: str):
+        Exception.__init__(self, f"workspace root {root} is not a place goals may write: {reason}")
+        self.path = root
+        self.reason = reason
+
+
+# The directories that hold the machine rather than a project. Exact matches only: a project
+# at `/usr/local/src/thing` or `/tmp/scratch` is ordinary; `/usr` and `/tmp` themselves are not.
+SYSTEM_ROOTS = frozenset({
+    "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64", "/media", "/mnt",
+    "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var", "/var/tmp",
+    # Where `/bin`, `/sbin` and `/lib*` resolve to on a merged-/usr system, which is most of them.
+    "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib32", "/usr/lib64", "/usr/local", "/usr/share",
+    "/usr/include",
+})
+# Directories under the home that hold credentials and nothing anybody would call a project.
+CREDENTIAL_DIRS = (".ssh", ".gnupg", ".aws", ".kube")
+
+
+def protected_root_reason(root: Path) -> str | None:
+    """Why `root` may not be a workspace, or None when it may.
+
+    About the *root*, not about file names inside it: a dotfiles repository below `$HOME` owns a
+    `.ssh/config` and a `.bashrc` that are just files in a repo. What must be impossible is a root
+    that contains the real ones — an approved goal there writes through the same `apply` as any
+    source file, and `~/.bashrc` or `~/.ssh/authorized_keys` is a login.
+    """
+    from engine import home  # here, not at module top: home imports nothing of fs, keep it that way
+
+    resolved = root.resolve()
+    real_home = Path.home().resolve()
+    if resolved == real_home or real_home.is_relative_to(resolved):
+        return (
+            "it is your home directory or contains it, so a goal could rewrite ~/.bashrc or "
+            "~/.ssh/authorized_keys; choose a folder inside it"
+        )
+    # Both spellings: `/bin` is a symlink to `/usr/bin` on a merged-/usr system, and either one is
+    # the machine, however it was reached.
+    for spelled in {str(resolved), os.path.abspath(root)}:
+        if spelled in SYSTEM_ROOTS:
+            return f"{spelled} is a system directory, not a project"
+    for name in CREDENTIAL_DIRS:
+        guarded = real_home / name
+        if resolved == guarded or guarded in resolved.parents:
+            return f"{guarded} holds credentials, not a project"
+    # The state directory by the same reach rule as `$HOME`: a goal rooted *in* it, or in something
+    # that contains it, can rewrite the database, the token and the stored keys; one rooted in a
+    # subfolder cannot get out of that subfolder.
+    state = home.codify_home().resolve()
+    if resolved == state or resolved in state.parents:
+        return "it is Codify's own state directory, or contains it (the database, the token, the stored keys)"
+    return None
+
+
 def looks_binary(raw: bytes) -> bool:
     """A NUL byte in the first few KB means "not text".
 
@@ -184,6 +245,11 @@ class FileSystemService:
         `apply` replays content, never re-runs edits against a moved file.
         An `edit` that cannot be applied raises ValueError with the reason.
         """
+        # Before anything is resolved or read. A workspace saved before `protected_root_reason`
+        # existed is still in the database, and `WorkspaceService.create` cannot refuse it.
+        reason = protected_root_reason(self.root)
+        if reason is not None:
+            raise ProtectedRootError(str(self.root), reason)
         summaries: list[dict[str, Any]] = []
         for item in files:
             rel = item["path"]

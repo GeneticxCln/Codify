@@ -171,6 +171,10 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name).resolve()
         self.root = root
+        # The workspace is a folder *inside* the scratch state directory, as a real project
+        # is never the state directory itself (that root is refused: docs/03, protected roots).
+        self.project = root / "project"
+        self.project.mkdir()
         self.env = {
             "CODIFY_HOME": str(root),
             "CODIFY_DB": str(root / "codify.db"),
@@ -206,7 +210,7 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
     async def _a_workspace_and_goal(self) -> tuple[str, str]:
         ws = (await self.client.post(
             "/workspaces",
-            json={"name": "WS", "root_path": str(self.root)},
+            json={"name": "WS", "root_path": str(self.project)},
             headers=self.headers,
         )).json()
         goal = (await self.client.post(
@@ -365,7 +369,7 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
 
     async def _a_workspace(self) -> str:
         ws = (await self.client.post(
-            "/workspaces", json={"name": "WS", "root_path": str(self.root)}, headers=self.headers,
+            "/workspaces", json={"name": "WS", "root_path": str(self.project)}, headers=self.headers,
         )).json()
         return str(ws["id"])
 
@@ -393,6 +397,20 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
         # The validator's own sentence, the one that says where a turn *is* created, reaches
         # the caller instead of being dropped on the way to the response.
         self.assertIn("/conversations/{id}/turns", json.dumps(body["detail"]))
+
+    async def test_a_protected_workspace_root_is_a_coded_400_over_the_route(self) -> None:
+        """L3 through HTTP: the refusal a user sees is `invalid_root`, with the reason in words."""
+        for root in ("/", "/etc", str(Path.home())):
+            with self.subTest(root=root):
+                r = await self.client.post(
+                    "/workspaces", json={"name": "bad", "root_path": root}, headers=self.headers,
+                )
+                self.assertEqual(400, r.status_code, r.text)
+                body = r.json()
+                self._assert_declared_shape(400, body, f"POST /workspaces {root}")
+                self.assertEqual("invalid_root", body["code"])
+        listed = (await self.client.get("/workspaces", headers=self.headers)).json()
+        self.assertEqual([], listed, "a refused root was stored anyway")
 
     async def test_every_validator_has_a_route_level_rejection_and_answers_422(self) -> None:
         validators = sorted(

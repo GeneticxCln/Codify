@@ -10,7 +10,13 @@ from collections.abc import Callable
 import sqlite3
 
 from engine.db import dumps, row_to_dict
-from engine.fs import BINARY_SNIFF_BYTES, FileSystemService, PathEscapeError, looks_binary
+from engine.fs import (
+    BINARY_SNIFF_BYTES,
+    FileSystemService,
+    PathEscapeError,
+    looks_binary,
+    protected_root_reason,
+)
 from engine.models import (
     BUILTIN_PROVIDERS,
     PROVIDER_SLUG_RE,
@@ -441,6 +447,9 @@ class WorkspaceService:
                 "root_path refuses to be the filesystem root — a workspace that "
                 "contains every path makes containment checks meaningless",
             )
+        protected = protected_root_reason(Path(root))
+        if protected is not None:
+            raise ApiError(400, "invalid_root", f"root_path {root} is not accepted: {protected}")
         ws = Workspace(id=str(uuid.uuid4()), name=body.name, root_path=root, created_at=time.time())
         try:
             self._db.execute(
