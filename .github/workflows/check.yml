@@ -13,15 +13,32 @@ name: check
 # and a WebSocket isolation test that skipped itself (passing) whenever an
 # undeclared `websockets` package was missing.
 #
-# NOTE: GitHub Actions is not available to this repository, so this workflow does
-# not run — the gate is `make ci` in the Makefile, which runs these same targets
+# NOTE: GitHub Actions does not run for this repository, so this workflow is manual
+# only — the gate is `make ci` in the Makefile, which runs these same targets
 # locally on the host toolchain and on the declared-minimum Python (provisioning it
 # rather than skipping it). Keep the two in step, or fold this file into `make ci`
 # and drop the duplicate definition.
+#
+# What was observed, so nobody has to rediscover it. Every run of this workflow, from
+# the first (#1) to the latest, failed within 3-6 seconds with no log at all: the
+# jobs never reached their first step, not even checkout. That is not a test failure
+# and no change to the code can fix it. The repository is public, and GitHub's
+# standard hosted runners are free for public repositories, so it is not this
+# repository running out of minutes either — it is the account or the repository
+# being refused runners. The reason is printed at the top of any failed job's page
+# (an annotation above the log), and it is not returned by the API.
+#
+# Until that is resolved this file runs only when started by hand, so a push or a PR
+# stops carrying four red marks that say nothing about the code. The verdict that
+# matters comes from `make ci` (pre-push hook, `make hooks`), and `make ci-report`
+# publishes that verdict on the commit as a status — free, and from a machine that
+# actually ran the gate.
+#
+# To turn it back on, add `push:` and `pull_request:` under `on:` once a run of the
+# manual trigger below gets past checkout.
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
