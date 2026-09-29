@@ -526,5 +526,49 @@ class TestSorting(unittest.TestCase):
         self.assertEqual([m["id"] for m in _sorted_models(models)], ["a", "m", "z"])
 
 
+class TestOllamaDiscoveryHoldsTheLocalRule(unittest.IsolatedAsyncioTestCase):
+    """Invariant 5 (docs/00 §6.5): a local provider's base_url passes `validate_local_base_url` before every request.
+
+    The `OllamaProvider` constructor enforced it and the discovery path did not, so a stored `ollama`-protocol
+    provider pointed at a LAN host was asked for its model list anyway (review of 2026-09-29). Save-time
+    validation makes that unreachable through the settings screen; this is the same rule held where the request
+    is made.
+    """
+
+    async def discover(self, base_url: str) -> tuple[Any, list[httpx.Request]]:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"models": [{"name": "llama3:8b"}]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        async with client:
+            result = await discover_provider(
+                ProviderTarget("ollama", "ollama", base_url, needs_key=False), client=client,
+            )
+        return result, seen
+
+    async def test_a_lan_host_is_refused_and_never_asked(self) -> None:
+        result, seen = await self.discover("http://10.0.0.5:11434")
+
+        self.assertFalse(result.ok)
+        self.assertIn("localhost", result.error or "")
+        self.assertEqual([], seen, "a non-loopback host was sent a request")
+
+    async def test_https_is_refused_for_a_local_provider(self) -> None:
+        result, seen = await self.discover("https://127.0.0.1:11434")
+
+        self.assertFalse(result.ok)
+        self.assertEqual([], seen)
+
+    async def test_loopback_still_discovers(self) -> None:
+        result, seen = await self.discover("http://127.0.0.1:11434")
+
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(["llama3:8b"], [m["id"] for m in result.models])
+        self.assertEqual(1, len(seen))
+
+
 if __name__ == "__main__":
     unittest.main()

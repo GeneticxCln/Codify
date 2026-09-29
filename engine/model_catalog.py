@@ -31,7 +31,7 @@ from typing import Any
 import httpx
 
 from engine.models import BUILTIN_PROVIDERS
-from engine.providers import key_destination_problem
+from engine.providers import ProviderError, key_destination_problem, validate_local_base_url
 
 DISCOVERY_TIMEOUT_S = 8.0
 MAX_MODELS_PER_PROVIDER = 500
@@ -299,6 +299,13 @@ async def discover_provider(
         return DiscoveryResult(
             target.provider, target.protocol, ok=False, error="no base_url configured"
         )
+    if target.protocol == "ollama":
+        # Invariant 5 (docs/00 §6.5): a local provider's base_url passes `validate_local_base_url` before every
+        # request. The provider's constructor enforces it; discovery builds no provider, so it is asked here.
+        try:
+            validate_local_base_url(target.base_url)
+        except ProviderError as exc:
+            return DiscoveryResult(target.provider, target.protocol, ok=False, error=exc.message)
     discoverer = DISCOVERERS.get(target.protocol)
     if discoverer is None:
         return DiscoveryResult(

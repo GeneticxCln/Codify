@@ -21,7 +21,13 @@ from engine.providers import Keychain, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.stats_history import StatsSnapshotService
 from engine.stats_import import StatsImportService
-from engine.services import AgentRegistryService, GoalService, SettingsService, WorkspaceService
+from engine.services import (
+    AgentRegistryService,
+    ConversationService,
+    GoalService,
+    SettingsService,
+    WorkspaceService,
+)
 from typing import Any
 
 
@@ -763,13 +769,16 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )).json()
         self.assertEqual(after["model_name"], before["model_name"])
 
-    async def test_the_two_agent_config_mutators_and_no_others(self) -> None:
-        """The invariant is about the whole surface, not two endpoints.
+    async def test_no_goal_or_turn_route_writes_agent_config(self) -> None:
+        """The invariant is about the whole surface, not a couple of endpoints.
 
-        A third writer added later — a new route, a query parameter, a header —
-        would leave the two refusals above passing while the guarantee is gone.
-        So the routes that take a body are enumerated, and every one that is not
-        the documented mutator is asserted to refuse a smuggled `agent_config`.
+        Agent configuration is written by the settings routes (`PUT /settings/agents/{role}`,
+        `POST /settings/agents/repair`, `PUT /settings/engine` — docs/00 §6.2) and by nothing that
+        starts, drives or answers a goal. A writer added later — a new route, a query parameter, a
+        header — would leave the refusals above passing while the guarantee is gone. So the routes a
+        goal or a turn goes through are enumerated, and every one is asserted to refuse a smuggled
+        `agent_config` (the wording of the invariant once said "only one route", which the
+        repair and engine-settings routes had quietly made untrue).
         """
         ws_dir = self.root / "ws-mutator-surface"
         ws_dir.mkdir()
@@ -787,6 +796,10 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
 
         smuggled = {"agent_config": {"fixer": {"model_name": "attacker-model"}}}
         version = goal["version"]
+        app.state.conversations = ConversationService(app.state.conn)
+        thread = (await self.client.post(
+            "/conversations", headers=self.headers, json={"workspace_id": ws_id},
+        )).json()
 
         # Every POST/PUT/PATCH below is a candidate writer. The engine's own
         # PUT /settings/agents/{role} is the one that is *supposed* to take a
@@ -799,6 +812,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
             ("POST", f"/goals/{goal['id']}/apply", {**smuggled, "expected_version": version}),
             ("POST", f"/goals/{goal['id']}/enable-execution", {**smuggled, "expected_version": version}),
             ("PUT", f"/goals/{goal['id']}/trace", {**smuggled, "enabled": True}),
+            ("POST", f"/conversations/{thread['id']}/turns", {**smuggled, "prompt": "hello"}),
         ]
         for method, path, body in writers:
             with self.subTest(method=method, path=path):
