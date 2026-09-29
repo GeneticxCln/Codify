@@ -352,16 +352,26 @@ def _files(root: Path) -> set[str]:
     }
 
 
-def _start_repository(workspace: Path) -> None:
+def _start_repository(workspace: Path) -> bool:
     """Make the scratch workspace a git repository with the fixture committed, as a user's checkout is.
 
     A plain directory changes what a model sees: the scribe's commit is skipped (`not_a_repo`) and a
     verifier that proposes `git diff` is told "not a git repository", which reads as the change failing.
     Through `GitService`, so the spawn goes through the guard like every other one.
+
+    `.` is the pathspec, not every file: a vendored repository can hold enough files to overflow the
+    argument list. And a failure is said out loud rather than swallowed — a run that quietly fell back to a
+    plain directory would be measuring something other than what its report claims.
     """
     git = GitService()
-    if git.init_repo(str(workspace)):
-        git.commit(str(workspace), "chore: benchmark fixture", sorted(_files(workspace)))
+    if git.init_repo(str(workspace)) and git.commit(str(workspace), "chore: benchmark fixture", ["."]):
+        return True
+    print(
+        f"benchmark: could not start a git repository in {workspace} — this run's workspace is a plain "
+        "directory, which changes what a model sees",
+        file=sys.stderr, flush=True,
+    )
+    return False
 
 
 async def run_task(

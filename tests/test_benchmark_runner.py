@@ -40,6 +40,7 @@ from benchmarks.runner import (
     summarise,
 )
 from engine.db import connect
+from engine.git import GitService
 
 SYNTHETIC = "synthetic-repo"
 
@@ -537,6 +538,25 @@ class TheWorkspaceIsARealRepositoryTests(unittest.TestCase):
                 ["git", "status", "--porcelain"], cwd=work, capture_output=True, text=True, check=True,
             ).stdout
             self.assertEqual("", status, "the tree was left dirty")
+
+    def test_a_repository_that_could_not_be_started_is_said_out_loud(self) -> None:
+        # A run that quietly fell back to a plain directory would be measuring something other than what
+        # its report claims; it still runs, and the message names the consequence.
+        err = io.StringIO()
+        with mock.patch.object(GitService, "init_repo", return_value=False), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = main(["--tier", "smoke", "--only", "smoke-add-banner"])
+
+        self.assertEqual(0, code)
+        self.assertIn("could not start a git repository", err.getvalue())
+        self.assertIn("plain directory", err.getvalue())
+
+    def test_a_working_repository_start_says_nothing(self) -> None:
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            main(["--tier", "smoke", "--only", "smoke-add-banner"])
+
+        self.assertNotIn("git repository", err.getvalue())
 
     def test_git_internals_are_not_files_the_run_wrote(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
