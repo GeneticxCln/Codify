@@ -55,6 +55,11 @@ export interface KeyEventLike {
   readonly ctrlKey: boolean;
   readonly altKey: boolean;
   readonly shiftKey: boolean;
+  /**
+   * True for the auto-repeat events a held key generates. Optional so a caller
+   * that builds the event by hand does not have to say "not a repeat".
+   */
+  readonly repeat?: boolean;
 }
 
 /** Resolve a key event to a shell action, or `null` — most keys are, and must stay — typing. */
@@ -63,12 +68,17 @@ export function resolveShortcut(e: KeyEventLike): ShortcutAction | null {
 
   if (!e.shiftKey) {
     switch (e.key.toLowerCase()) {
+      // A held key sends `keydown` again at the keyboard's repeat rate. These
+      // three change the strip or a toggle, so a repeat is not "again": it is how
+      // holding ⌘T opened a tab per repeat until the strip was full of empty
+      // ones, and how holding ⌘W would have closed every tab in it. One press,
+      // one action.
       case "t":
-        return { type: "new-tab" };
+        return e.repeat ? null : { type: "new-tab" };
       case "w":
-        return { type: "close-active-tab" };
+        return e.repeat ? null : { type: "close-active-tab" };
       case "k":
-        return { type: "toggle-palette" };
+        return e.repeat ? null : { type: "toggle-palette" };
       default:
         break;
     }

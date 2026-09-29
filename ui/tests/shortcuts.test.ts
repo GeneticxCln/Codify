@@ -123,3 +123,26 @@ test("Digit0 is not a shortcut, and neither are unrelated combos", () => {
   // Shift alone must not promote a digit into a jump.
   assert.equal(resolveShortcut(key({ shiftKey: true, key: "1", code: "Digit1" })), null);
 });
+
+test("a held key is one press: new tab, close tab and the palette ignore auto-repeat", () => {
+  // Holding ⌘T sends `keydown` again at the keyboard's repeat rate. Before this,
+  // every repeat opened another tab (a strip full of empty ones), and holding ⌘W
+  // would have closed every tab in it.
+  const held = { repeat: true };
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "t", code: "KeyT", ...held })), null);
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "w", code: "KeyW", ...held })), null);
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "k", code: "KeyK", ...held })), null);
+  // The first press of the same chord still works, and so does an explicit false.
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "t", code: "KeyT" })), { type: "new-tab" });
+  assert.deepEqual(
+    resolveShortcut(key({ ctrlKey: true, key: "w", code: "KeyW", repeat: false })),
+    { type: "close-active-tab" },
+  );
+});
+
+test("focusing a tab by number is harmless to repeat, so it is not suppressed", () => {
+  assert.deepEqual(
+    resolveShortcut(key({ metaKey: true, key: "2", code: "Digit2", repeat: true })),
+    { type: "focus-tab", index: 1 },
+  );
+});
