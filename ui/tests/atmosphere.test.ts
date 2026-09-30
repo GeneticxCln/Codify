@@ -1,11 +1,13 @@
 /**
  * Every atmosphere, and the three ways a themed backdrop goes wrong.
  *
- * The rain's suite reads `RainBackdrop.tsx` *and* `App.tsx` as source, because
- * the failure it was written for — a backdrop mounted inside the transcript —
- * is invisible to any test that renders the component alone: on its own, the
- * box is correct. With six animated themes the same three failures are each
- * available more than once over, so they are pinned once and made general:
+ * The rain's failure — a backdrop mounted inside the transcript — is invisible
+ * to any test that renders the component alone (on its own, the box is correct),
+ * so where the shell mounts it is held against the mounted App in
+ * `backdropShell.test.ts`, and how the loops behave is held by running them
+ * (`stateReactiveWeather.test.ts`, `canvasRecovery.test.ts`). With many animated
+ * themes the same three failures are each available more than once over, so they
+ * are pinned once and made general:
  *
  * 1. **A theme that declares weather but gets none.** The gate is a CSS custom
  *    property, not a truthiness test on an id, and a variable the module does
@@ -43,6 +45,7 @@ import {
   MANAGED_VARS,
   MOTIONLESS_THEME_IDS,
   THEMES,
+  applyTheme,
   hexChannels,
   themeById,
 } from "../src/appearance.ts";
@@ -53,13 +56,11 @@ const { WeatherBackdrop, themesWithWeather, triggerFor, effectFor } = await impo
 const { RainBackdrop } = await import("../src/components/ui/RainBackdrop.tsx");
 const { AppearancePane } = await import("../src/components/AppearancePane.tsx");
 const { renderToStaticMarkup } = await import("react-dom/server");
+const { withCanvasRig } = await import("./canvasRig.ts");
+const { MatrixRain } = await import("../src/components/ui/MatrixRain.tsx");
 
 const UI_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "components", "ui");
-const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
 const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
-const clock = readFileSync(new URL("../src/hooks/useAtmosphereCanvas.ts", import.meta.url), "utf8");
-const rain = readFileSync(new URL("../src/components/ui/MatrixRain.tsx", import.meta.url), "utf8");
-const timeline = readFileSync(new URL("../src/components/ChatTimeline.tsx", import.meta.url), "utf8");
 const design = readFileSync(new URL("../../DESIGN.md", import.meta.url), "utf8");
 
 /** Every effect variable a theme publishes, from the triggers list. */
@@ -175,8 +176,6 @@ test("the ASCII rain needs no component of its own", () => {
   // CMatrix with a grey filter: hex bytes, and the OLED theme still has kana.
   assert.equal(ASCII_RAIN.tokens["--cmatrix-glyphs"], "0123456789ABCDEF");
   assert.equal(CMATRIX_OLED.tokens["--cmatrix-glyphs"], undefined);
-  assert.match(rain, /readVar\("--cmatrix-glyphs", GLYPHS\)/);
-  assert.match(rain, /randomGlyph\(glyphs\)/);
 
   localStorage.setItem("codify.theme", ASCII_RAIN.id);
   const out = rainFor();
@@ -186,6 +185,29 @@ test("the ASCII rain needs no component of its own", () => {
     "",
     "the weather shell also drew it, so the monochrome theme is running two raindrops",
   );
+});
+
+test("the rain draws the glyphs its theme publishes, and the default set when it publishes none", async () => {
+  // The monochrome theme is four lines of tokens rather than a forked component *because* the glyphs
+  // are a variable the rain reads live. Held by drawing: the real theme is applied to the page, the
+  // real rain is run, and every glyph it put on the canvas is looked at.
+  const drawn = (themeId: string): Promise<string[]> =>
+    withCanvasRig({}, async (rig) => {
+      applyTheme(themeId, rig.dom.window.document.documentElement.style);
+      await rig.dom.render(React.createElement(MatrixRain));
+      rig.run(20, 1000, 34);
+      return rig.fillTexts().map((t) => t.text);
+    });
+  const hex = new Set(ASCII_RAIN.tokens["--cmatrix-glyphs" as never] as string);
+  assert.equal(hex.size, 16, "the ASCII theme's glyph set changed shape");
+
+  const ascii = await drawn(ASCII_RAIN.id);
+  assert.ok(ascii.length > 500, "the ASCII rain drew almost nothing, so the check says nothing");
+  assert.deepEqual(ascii.filter((g) => !hex.has(g)).slice(0, 3), [], "the ASCII rain drew a glyph its theme did not publish");
+
+  const oled = await drawn(CMATRIX_OLED.id);
+  assert.ok(oled.length > 500);
+  assert.ok(oled.some((g) => !hex.has(g)), "the OLED theme publishes no glyphs and should keep the default set");
 });
 
 test("each weather theme mounts its own effect, and the others mount nothing", () => {
@@ -230,32 +252,12 @@ test("only the cyberpunk theme has a CSS veil, and it has an opt-out", () => {
   assert.doesNotMatch(css, /#1b0a35/);
 });
 
-test("the bounds live in one hook, and every effect goes through it", () => {
-  // One bounded budget rather than six: the cap, the accumulator, the single
-  // static frame. Asserted on the hook, then asserted that each painter is a
-  // client of it — because the strongest version of "one clock" is not the hook
-  // being correct, it being the only way to get a clock at all.
-  assert.match(clock, /Math\.min\(1, maxDimension \/ Math\.max\(cssW, cssH\)\)/);
-  assert.match(clock, /1000 \/ Math\.max\(1, fps\)/);
-  // The opt-out used to be the media query inline; it is now the motion store
-  // (`useMotionAllowed`), which folds the user's choice and the shell's
-  // starvation verdict in with that same query — so the contract is the
-  // subscription, and the query string lives (once) in `motionPreference.ts`.
-  assert.match(clock, /useMotionAllowed\(\)/);
-  const motion = readFileSync(
-    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "motionPreference.ts"),
-    "utf8",
-  );
-  assert.match(motion, /prefers-reduced-motion: reduce/);
-  assert.match(clock, /\/\/ The static frame[\s\S]*?painter\.draw\(ctx, size, tick\);/);
-  assert.match(clock, /if \(!reduced\) raf = requestAnimationFrame\(loop\);/);
-  assert.match(clock, /cancelAnimationFrame/);
-  assert.match(clock, /ResizeObserver/);
-  // The tick carries the canvas size, because a painter that owns drifting
-  // things needs somewhere to bounce them and `window.innerWidth` is the wrong
-  // unit the moment a cap is in play.
-  assert.match(clock, /size: AtmosphereSize;/);
-
+test("every effect goes through the one clock, and none pays for what it should not", () => {
+  // One bounded budget rather than many: the cap, the accumulator, the single static frame. Those
+  // are held by running the clock (`stateReactiveWeather.test.ts`: the cap, 30 frames on a 144 Hz
+  // display, the still frame, the motion subscription; `canvasRecovery.test.ts`: the resize
+  // observer and the teardown). What is left here is the strongest version of "one clock": that it
+  // is the only way to get a clock at all, which is a rule about what the painters' files contain.
   for (const file of readdirSync(UI_DIR).filter((f) => f.endsWith(".tsx"))) {
     const source = readFileSync(path.join(UI_DIR, file), "utf8");
     if (!source.includes("useAtmosphereCanvas(")) continue;
@@ -295,26 +297,6 @@ test("no painter declares a colour the theme already published", () => {
       );
     }
   }
-});
-
-test("the shell mounts once, and the transcript never mounts it", () => {
-  // The mount point is the whole design: a backdrop inside the transcript is a
-  // centred animation that vanishes on the first message, and the rain's suite
-  // exists because that bug shipped once already.
-  assert.equal(app.match(/<WeatherBackdrop/g)?.length, 1, "mounted more than once");
-  // `\b[^>]*` rather than a literal ` />`: the rain now takes `active`, so it is
-  // `<RainBackdrop active={canStop} />`. What this test is about is *where* it
-  // is mounted and how many times, and neither changed — pinning the exact
-  // closing syntax would have made a prop a false alarm about the mount point.
-  assert.equal(app.match(/<RainBackdrop\b[^>]*\/>/g)?.length, 1, "the rain's mount moved");
-  assert.ok(
-    app.indexOf("<WeatherBackdrop") < app.indexOf("<header"),
-    "the backdrop must be under the chrome, not inside it",
-  );
-  assert.doesNotMatch(timeline, /WeatherBackdrop|RainBackdrop|AbyssSpores|HudSweep/);
-  // The one piece of state an atmosphere may report, taken from the goal's own
-  // status rather than a second flag — so it cannot disagree with Stop.
-  assert.match(app, /<WeatherBackdrop active=\{canStop\} \/>/);
 });
 
 test("the settings pane draws all eight themes from data", () => {
