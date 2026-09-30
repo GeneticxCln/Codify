@@ -33,7 +33,16 @@ STUBS: dict[str, str] = {
     "git": '#!/bin/sh\necho "git version 2.43.0"\n',
     "node": '#!/bin/sh\ncase "$1" in --version) echo v24.21.0;; *) exit "${DOCTOR_STUB_NODE_EXIT:-0}";; esac\n',
     "npm": '#!/bin/sh\necho 10.9.7\n',
-    "cargo": '#!/bin/sh\necho "cargo 1.94.1"\n',
+    # `cargo fmt --version` fails when DOCTOR_STUB_NO_RUSTFMT is set: a toolchain installed with
+    # rustup's minimal profile, which has cargo and rustc and not rustfmt.
+    "cargo": (
+        '#!/bin/sh\n'
+        'if [ "$1" = fmt ]; then\n'
+        '  [ -n "$DOCTOR_STUB_NO_RUSTFMT" ] && { echo "error: cargo-fmt is not installed" >&2; exit 1; }\n'
+        '  echo "rustfmt 1.8.0-stable"; exit 0\n'
+        'fi\n'
+        'echo "cargo 1.94.1"\n'
+    ),
     "rustc": '#!/bin/sh\necho "rustc 1.94.1"\n',
     # `pkg-config --exists LIB` fails for every name in DOCTOR_STUB_MISSING_LIBS.
     "pkg-config": (
@@ -114,6 +123,15 @@ class TestEveryMissingPieceIsNamedAndFixable(DoctorCase):
         self.remove("cargo")
 
         self.assertMissing(self.doctor(DISPLAY=":0"), "cargo/rustc not installed", "rustup")
+
+    def test_a_toolchain_without_rustfmt_is_named_with_the_fix(self) -> None:
+        # The gate ends in `cargo fmt --check`. A minimal rustup profile builds and tests fine and then
+        # fails the gate at that last step, so the doctor has to say so before the long part.
+        done = self.doctor(DISPLAY=":0", DOCTOR_STUB_NO_RUSTFMT="1")
+
+        self.assertMissing(done, "rustfmt is not installed", "rustup component add rustfmt")
+        # cargo and rustc themselves were found, so they are still reported as found.
+        self.assertIn("ok       rustc 1.94.1", done.stdout)
 
     def test_a_missing_system_library_is_named_with_its_package_line(self) -> None:
         done = self.doctor(DISPLAY=":0", DOCTOR_STUB_MISSING_LIBS="webkit2gtk-4.1 libsoup-3.0")

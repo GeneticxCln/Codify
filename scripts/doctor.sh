@@ -108,6 +108,15 @@ echo
 echo "Rust and the desktop shell's system libraries"
 if have cargo && have rustc; then
   ok "$(run rustc --version)"
+  # `make check-tauri` ends in `cargo fmt --check`, and rustup's *minimal* profile (and some distro
+  # packages) leave rustfmt out: the build and the tests then pass and the gate fails at its last step,
+  # after the long part. Found by running `make ci` as a fresh user from the README alone.
+  if run cargo fmt --version >/dev/null 2>&1; then
+    ok "rustfmt ($(run cargo fmt --version 2>/dev/null))"
+  else
+    bad "rustfmt is not installed for this Rust toolchain ('make check-tauri' runs cargo fmt --check)" \
+      "Run: rustup component add rustfmt   (rustup's default profile includes it; --profile minimal does not)"
+  fi
 else
   bad "cargo/rustc not installed" "Install Rust with rustup: https://rustup.rs"
 fi
