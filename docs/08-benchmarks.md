@@ -221,9 +221,10 @@ the manifest is a test failure rather than a silently skipped check.
 
 ## 8. A real-model baseline, and what it does and does not show
 
-**Read the limits before the numbers.** This is one small model per run, on one CPU-only machine, one run per
-task. It measures *those models*, not Codify: a hosted model (or a 30B local one) would do very differently, and
-none was available. A single run is an anecdote (§3, `--repeat`), so treat a difference of one task as noise.
+**Read the limits before the numbers.** This is one small model per run, on one CPU-only machine, and the two
+tables below are one run per task (the 1.5B model was repeated afterwards: "Repeats", below). It measures *those
+models*, not Codify: a hosted model (or a 30B local one) would do very differently, and none was available. A single
+run is an anecdote (§3, `--repeat`), so treat a difference of one task as noise.
 The workspaces in these runs were **plain directories, not git repositories** (§3 now says they are), which
 changes what a verifier sees; the numbers below are not comparable with later ones.
 
@@ -249,7 +250,9 @@ changes what a verifier sees; the numbers below are not comparable with later on
 closing quote); `repo-add-whisper`, `repo-shout-exclaim` (an `edit` with an empty `old_text`);
 `repo-rename-greeting`, `repo-close-the-gap` (`old_text` that does not match the file, or matches more than
 once). Completed but failed the quality check: `repo-remove-shout` (the module was no longer importable),
-`repo-word-count` (the repository's own tests errored, though the behaviour check passed).
+`repo-word-count` (the repository's own tests errored, though the behaviour check passed). This attribution is
+one draw per task: under "Repeats" five of the nine tasks that never passed ended in a failed goal in some runs and a
+completed-but-wrong result in others.
 
 **3B, per task.** None passed. The verifier caught a bad change (`tests_failed`) in `repo-rename-greeting`
 (renamed `greet` without updating what uses it), `repo-close-the-gap` (`app.py` no longer importable),
@@ -277,6 +280,41 @@ wrong than the task needed.
   failed test (`repo-changelog`); `repo-readme-usage` spent 446 s and 25 model calls that way. That is the model
   ignoring the "no command needed" path the verifier prompt offers, and worth a prompt change tested against a real
   model before anyone trusts it.
+
+### Repeats: three runs of every task, 1.5B model
+
+Same server and model as above (`llama_cpp.server`, 8192 context, 4 threads, CPU), `--repeat 3`, so 33 runs, each in
+a workspace and store of its own, 75 minutes in all (a run took 88 to 223 s, median 128 s). **This is not the same
+condition as the first table**: it ran on the current tree, whose workspaces are git repositories (§3) and which
+carries the fixes listed below, so it is a second measurement of the same model rather than a repeat of the first.
+
+| | Passed |
+|---|---|
+| Round 1 / 2 / 3 | 2 / 1 / 1 of 11 |
+| **All 33 runs** | **4 (12%)** |
+| `repo-add-clamp`, `repo-changelog` | 2 of 3 each |
+| the other nine tasks | 0 of 3 |
+
+* **The spread is the finding.** Three rounds are 18%, 9% and 9%: the first table's 2 of 11 was the best of the
+  three, which is what "a difference of one task is noise" looks like in numbers. Three rounds is a range, not a
+  confidence interval. Both tasks that passed also failed once (`repo-add-clamp` run 2 completed but failed the
+  quality check; `repo-changelog` run 3 wrote a `CHANGELOG.md` without `0.1.0` in it).
+* **Where the 29 failed runs stopped.** 19 goals ended `FAILED`: 16 at the fixer (15 `agent_output_invalid`, 1
+  `path_escape`), 2 at the verifier (`argv must be a non-empty string list, got [None]`) and 1 at the planner (`planner
+  must return 1..20 steps`), each after its one re-ask. The other 10 completed and did the wrong thing.
+* **The fixer's failures are mostly the edit, then the JSON.** Of the 15 `agent_output_invalid` fixer replies, 9 were
+  an `edit` that could not be applied (5 with an empty `old_text`, 2 whose `old_text` matched three times, 2 that
+  matched nothing), 5 were invalid JSON and 1 was a file entry the engine rejected. The `path_escape` was one reply
+  naming `/src/app.py`: the engine refused it, so the run failed instead of writing outside the workspace.
+* **Re-asks per role**, across 33 goals: fixer 17, librarian 8, design 1, planner 1, verifier 1; none for the gate, the
+  critic or the scribe.
+* **Same task, different failure.** `repo-close-the-gap`, `repo-default-name`, `repo-shout-exclaim`,
+  `repo-remove-shout` and `repo-word-count` each ended with a failed goal in some runs and a completed-but-wrong
+  result in others, so a per-task cause read from one run is a guess about the model, not a property of the task.
+* **Where the time goes on a CPU.** Of the 75 minutes, the librarian took 44%, the fixer 20%, the design step 17% and
+  the planner 9%; the verifier, critic and scribe together took under 8%.
+
+One model, one server, one machine, three rounds. It says nothing about the 3B model, which was not repeated.
 
 ### The conductor, end to end
 
@@ -329,6 +367,7 @@ A baseline is only useful if someone reads the failures. These were fixed as a r
 
 ### Not measured
 
-Repeats (one run each, so no spread), the conductor beyond those three turns and one small model, any hosted
-model, and any hardware but one CPU. `--min-pass-rate` exists to enforce a floor, but a floor is only worth setting
-against a baseline recorded with the model *you* use: 18% is a fact about a 1.5B model, not a target.
+Repeats of the 3B model (the 1.5B was repeated three times, above), the conductor beyond those three turns and one
+small model, any hosted model, and any hardware but one CPU. `--min-pass-rate` exists to enforce a floor, but a floor
+is only worth setting against a baseline recorded with the model *you* use: 12% (4 of 33, and 9% to 18% between
+rounds) is a fact about a 1.5B model, not a target.
