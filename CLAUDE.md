@@ -39,12 +39,12 @@ mean the change is shippable.
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |
 | `make check-tauri` | `cargo check` + `cargo fmt --check` |
 | `make ci-python-floor` | Only the 3.10 leg; never skips — it fails with install instructions |
-| `make ci-report` | `make ci`, then publishes its verdict on the commit as a GitHub status (context local/make-ci) via `gh`. Not a second gate: it runs the one gate and reports it, and refuses a dirty tree — Actions does not run here, so this is how a PR shows a result |
+| `make ci-report` | `make ci`, then publishes its verdict on the commit as a GitHub status (context local/make-ci) via `gh`. Not a second gate: it runs the one gate and reports it, and refuses a dirty tree — the Actions workflow is manual-only, so this is how a PR shows a result without one |
 | `make check-history` | Every commit in `HISTORY_RANGE` (default `origin/<branch>..HEAD`), not just the tip. Separate from the gate on purpose: `make ci` asks about the tree you are about to share, this asks about the commits on the way to it. Pre-push runs it second, and it declines a one-commit range — that has no middle |
 
 `make ci` is the real gate. `.github/workflows/check.yml` describes the same targets
-split by toolchain, but GitHub Actions is unavailable to this repository, so
-`make ci` in the Makefile is what actually runs.
+split by toolchain and is manual-only (`workflow_dispatch`): start it by hand for a
+second opinion from GitHub's runners; `make ci` in the Makefile is what gates a push.
 
 `make hooks` installs the versioned hooks in `.githooks/` (`pre-commit` runs
 `make lint typecheck`; `pre-push` runs `make ci`). Do not add a second gate mechanism

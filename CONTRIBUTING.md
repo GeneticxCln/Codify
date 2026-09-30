@@ -50,11 +50,11 @@ which runs everything above and then the same Python targets again on the declar
 minimum, bringing that interpreter up on demand (it downloads one with `uv`, or uses a
 `python3.10` you already have). The floor leg never skips: if it cannot be provisioned,
 `make ci` fails and says what to install. `.github/workflows/check.yml` describes the
-same targets split by toolchain, but GitHub Actions does not run for this
-repository (its workflow is manual-only, and says why in its header) — **`make ci` is
-the gate.**
+same targets split by toolchain. That workflow is manual-only (its header says why
+and what the earlier billing lock was): start it by hand for a second opinion from
+GitHub's own runners. **`make ci` is the gate.**
 
-### Getting the verdict onto a pull request, without Actions
+### Getting the verdict onto a pull request
 
 Two commands, both free. Run `make hooks` once per clone, so `git push` runs `make ci`
 first and refuses to send a red tree. Then, with a commit pushed and a clean working
