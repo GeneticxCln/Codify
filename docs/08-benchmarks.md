@@ -288,10 +288,30 @@ request) against `Qwen2.5-Coder-3B` behind `llama_cpp.server --chat_format chatm
 on Ollama. **After it, all three turns ran without an error, and none executed a tool**: each answer was a bare
 tool-call stub (`functions.read_file:`, `functions.recon:`), and the engine reported it honestly — the change
 request finished with "the gate read this as 'code_change' and the conductor finished without planning anything: no
-file was changed". A direct request to the same server with a one-tool list returned a proper structured call, so
-the stub appears inside the conductor's much larger prompt and tool menu; whether that is the model or the server's
-function-calling parser is not established here. One model, one server, three turns: it shows that the loop now runs
-on an OpenAI-compatible endpoint, not how the conductor behaves with a capable model.
+file was changed".
+
+**The stubs were the server's, not the model's or the conductor's.** That is what the experiment below shows: the
+same model, the same script and the same three kinds of request, against a different server. The mechanism is from
+reading the first server's source rather than from isolating it: in `tool_choice=auto`, `llama-cpp-python`'s
+`chatml-function-calling` handler appears to constrain a reply meant as prose to a follow-up grammar that only allows
+`functions.X:` or the end-of-turn token (`llama_chat_format.py`), which would leave a model that wants to answer in
+words nothing to emit but a stub. The same model served by llama.cpp's own `llama-server --jinja` (built from the source
+`llama-cpp-python` 0.3.35 vendors, commit `4df29be`, using the model's own chat template) made real calls. Three
+turns through the same script, same three kinds of request:
+
+| Turn | Tools the conductor called | Outcome |
+|---|---|---|
+| *What does greeter.py do?* | `read_file` | answered, correctly, from the file it read |
+| *List the files in this workspace.* | `recon` (the librarian) | answered, correctly: one file |
+| *Add a comment above greet() explaining what it returns.* | `read_file` | **answered, and did not make the change** |
+
+Totals: 3 answered, **0 failed calls, 0 re-asks, 0 fallbacks**. What this shows and what it does not: the tool loop
+works end to end on an OpenAI-compatible endpoint with a small model, and the engine acts on what the model calls.
+It does not show that a small model can *do the work*: on the change request the 3B model read the file and then
+described the function instead of planning the edit (`steps: 0`, nothing written), so it drives `read_file` and
+`recon` and never reaches `plan`. Whether the server returned the calls as structured `tool_calls` or as JSON in the
+message that the engine's own text-call fallback (`coerce_tool_reply`) recovered was not distinguished. One model,
+one server, three turns, one run each, so no spread.
 
 ### What reading the traces found in Codify itself
 
@@ -309,6 +329,6 @@ A baseline is only useful if someone reads the failures. These were fixed as a r
 
 ### Not measured
 
-Repeats (one run each, so no spread), the conductor with a model that actually calls tools, any hosted
+Repeats (one run each, so no spread), the conductor beyond those three turns and one small model, any hosted
 model, and any hardware but one CPU. `--min-pass-rate` exists to enforce a floor, but a floor is only worth setting
 against a baseline recorded with the model *you* use: 18% is a fact about a 1.5B model, not a target.
