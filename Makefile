@@ -95,7 +95,8 @@ test: test-engine
 # `os._exit` — which is what `engine.app.main` used to do to its own test runner,
 # silently, halfway through — exits 0, so the exit code alone called it a pass
 # and half the engine suite went unrun while the gate stayed green. See the
-# module's docstring.
+# module's docstring. It also fails a run that passed but leaked a database
+# connection: Python 3.13+ reports one as a ResourceWarning that scrolls past an OK.
 test-engine:
 	python3 scripts/run_tests.py discover -s tests -p "test_*.py" -v
 

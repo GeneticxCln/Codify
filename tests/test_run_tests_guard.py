@@ -21,7 +21,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from scripts.run_tests import completed
+from scripts.run_tests import completed, leaked_connections
 
 REPO = Path(__file__).resolve().parent.parent
 WRAPPER = REPO / "scripts" / "run_tests.py"
@@ -49,6 +49,39 @@ class RunnerSummaryTest(unittest.TestCase):
 
     def test_empty_output_is_not_a_pass(self) -> None:
         self.assertFalse(completed(""))
+
+
+class LeakedConnectionsTest(unittest.TestCase):
+    """`leaked_connections()` reads the one warning that says a database handle was never closed.
+
+    Python 3.13 made that a `ResourceWarning`, and unittest prints it — into the scrollback of a run that
+    still ends `OK`. Two of them scrolled past on a developer's 3.14 host leg for as long as the suite had
+    leaked, which is how a leak in the test setup of `test_api` went unseen. Nothing older than 3.13 says
+    it, so on the 3.10 floor this finds nothing and costs nothing.
+    """
+
+    REAL = (
+        "/usr/lib/python3.14/traceback.py:393: ResourceWarning: unclosed database in "
+        "<sqlite3.Connection object at 0x7f2b8afb7790>\n  frame = frame.f_back\n"
+        "ResourceWarning: Enable tracemalloc to get the object allocation traceback\n"
+    )
+
+    def test_the_real_warning_is_found(self) -> None:
+        self.assertEqual(1, leaked_connections(self.REAL))
+
+    def test_each_one_is_counted(self) -> None:
+        self.assertEqual(2, leaked_connections(self.REAL + "...ok\n" + self.REAL))
+
+    def test_a_different_resource_warning_is_not_this_guards_business(self) -> None:
+        other = (
+            "x.py:1: ResourceWarning: unclosed file <_io.TextIOWrapper name='a' mode='r'>\n"
+            "y.py:2: ResourceWarning: unclosed <socket.socket fd=5>\n"
+        )
+        self.assertEqual(0, leaked_connections(other))
+
+    def test_a_clean_run_has_none(self) -> None:
+        self.assertEqual(0, leaked_connections("...\nRan 3 tests in 0.1s\n\nOK\n"))
+        self.assertEqual(0, leaked_connections(""))
 
 
 class RunnerRefusesADeadRunTest(unittest.TestCase):
@@ -134,6 +167,57 @@ class RunnerRefusesADeadRunTest(unittest.TestCase):
             """
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("FATAL", result.stderr)
+
+
+class RunnerRefusesALeakedConnectionTest(unittest.TestCase):
+    """The wrapper, end to end: a suite that passes but leaves an open connection behind is not a pass.
+
+    The throwaway suite emits the warning itself rather than leaking a real handle, so this holds on every
+    Python the gate runs on, the 3.10 floor included, where a real leak would say nothing at all.
+    """
+
+    def _run(self, body: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "test_it.py").write_text(textwrap.dedent(body))
+            return subprocess.run(
+                [sys.executable, str(WRAPPER), "discover", "-s", tmp, "-p", "test_*.py", "-v"],
+                capture_output=True, text=True, cwd=str(REPO), timeout=120,
+            )
+
+    def test_a_passing_suite_that_leaked_a_connection_fails_and_says_so(self) -> None:
+        result = self._run(
+            """
+            import unittest
+            import warnings
+
+
+            class Leaks(unittest.TestCase):
+                def test_passes_but_leaks(self):
+                    warnings.warn(
+                        "unclosed database in <sqlite3.Connection object at 0x7f0000000001>",
+                        ResourceWarning,
+                    )
+            """
+        )
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn("FATAL", result.stderr)
+        self.assertIn("connection", result.stderr)
+        self.assertIn("OK", result.stdout + result.stderr, "the suite itself passed; only the leak fails the run")
+
+    def test_another_resource_warning_does_not_fail_a_passing_suite(self) -> None:
+        result = self._run(
+            """
+            import unittest
+            import warnings
+
+
+            class Other(unittest.TestCase):
+                def test_passes(self):
+                    warnings.warn("unclosed file <_io.TextIOWrapper name='a' mode='r'>", ResourceWarning)
+            """
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertNotIn("FATAL", result.stderr)
 
 

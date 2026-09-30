@@ -55,17 +55,26 @@ class ServerCase(unittest.IsolatedAsyncioTestCase):
         # A goal with no events sends nothing, and a handler that has nothing to send is exactly
         # the state the leak lives in; PENDING gives the stream its first frame.
         self.goal = self.goals.update_status(goal.id, goal.version, "PENDING")
-        app.state.goals = self.goals
+
+        # The server runs on its own thread, and the engine reads through *its* connection while
+        # this thread writes through the test's. They used to be the same connection: two threads
+        # in the middle of statements on one `sqlite3` handle, which under a loaded machine made
+        # the server's poll fail to find a goal that was there (`4404`, three runs in twenty-five
+        # with six busy loops running). WAL is what lets one connection see the other's commits.
+        server_conn = connect(base / "t.db")
+        self.addCleanup(server_conn.close)
+        served = GoalService(server_conn)
+        app.state.goals = served
         app.state.token = BOOT_TOKEN
 
         self.reads = 0
-        real_get = self.goals.get
+        real_get = served.get
 
         def counting_get(goal_id: str) -> Any:
             self.reads += 1
             return real_get(goal_id)
 
-        self.goals.get = counting_get  # type: ignore[method-assign]
+        served.get = counting_get  # type: ignore[method-assign]
 
         self.port = free_port()
         config = uvicorn.Config(

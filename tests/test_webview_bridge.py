@@ -15,6 +15,7 @@ and a shell that quit leaving the engine convinced it still had a browser.
 """
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import asyncio
+import inspect
 import time
 import unittest
 from typing import Any
@@ -872,7 +873,7 @@ class TestActingOnAPage(BridgeTestCase):
         for name in ("click_page", "type_page"):
             self.assertIn(name, ConductorTools.NAMES)
             self.assertTrue(
-                asyncio.iscoroutinefunction(getattr(ConductorTools, name, None)),
+                inspect.iscoroutinefunction(getattr(ConductorTools, name, None)),
                 f"{name} is in the table but has no handler",
             )
 

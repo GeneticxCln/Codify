@@ -53,6 +53,9 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
 
         # Override app state with isolated test db
         conn = connect(self.db_path)
+        # Kept by name: a test that enters `TestClient(app)` runs the engine's lifespan, which replaces
+        # `app.state.conn` and closes its own, so teardown closing `app.state.conn` would leave this one open.
+        self.conn = conn
         # Hermetic secrets: never write to the developer's real ~/.codify store,
         # and make the file backend's behaviour assertable.
         keychain = Keychain(secrets_path=self.root / "secrets.json")
@@ -90,6 +93,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.client.aclose()
         app.state.conn.close()
+        self.conn.close()
         self.temp_dir.cleanup()
 
     async def test_repair_points_only_the_broken_roles_at_a_discovered_model(self) -> None:
