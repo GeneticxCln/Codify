@@ -112,10 +112,6 @@ const TEXT_READERS: Record<string, Reason> = {
     kind: "unconverted",
     why: "The rain's position in the tree (outside the transcript) is read from App.tsx and ChatTimeline.tsx. It could be asserted on a mounted App and has not been.",
   },
-  "canvasRecovery.test.ts": {
-    kind: "unconverted",
-    why: "Both loops must listen for contextlost and cap what they log. jsdom has no GPU context to lose, so this needs a fake context that can be lost; it has not been written.",
-  },
 };
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
