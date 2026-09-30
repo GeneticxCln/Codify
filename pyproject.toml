@@ -153,7 +153,7 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 # one here:
 #
 # S101  `assert` — in tests, narrowing before an index is the point of the
-#       line. In engine/executor.py it guards an internal invariant, and the
+#       line. In engine/executor_steps.py it guards an internal invariant, and the
 #       engine runs as `python3 -m engine`, so asserts are NOT stripped and
 #       the check is real defence, not dead code.
 # S110/S112  try-except-pass/continue — the paths documented as best-effort:
@@ -201,7 +201,26 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 "engine/app.py" = ["S110", "S608"]
 "engine/conductor.py" = ["S110"]
 "engine/db.py" = ["S110"]
-"engine/executor.py" = ["S101", "S110", "S608"]
+# S110 (engine/agent_orchestrator.py)  the stream's final flush blanks the intermediate `model_delta`
+#       snapshots once the final one holds all the text. It is housekeeping on a call that already
+#       succeeded, and a failure to tidy must never fail that call; the delta events it would log to
+#       are the ones being compacted. It moved here from engine/executor.py with the code. Scoped to
+#       that one file.
+"engine/agent_orchestrator.py" = ["S110"]
+# S110/S608 (engine/executor_core.py)  moved here from engine/executor.py with the code, three sites and one.
+#       S110: `_parallel_width` falls back to the built-in width when the settings store cannot answer (a
+#       width is a tuning value, never worth failing a wave over), and `_fail` has already published the
+#       `error` event by the time it tries to mark the step and the goal FAILED, so a second failure while
+#       recording the first must not replace it or escape the failure handler.
+#       S608: `_set_step` builds its SET clause from `status` and two column names chosen from a literal
+#       tuple, and every value travels as a bound parameter. Scoped to that one file.
+"engine/executor_core.py" = ["S110", "S608"]
+# S101 (engine/executor_steps.py)  `run_step` asserts `summaries is not None` before the review phase: every
+#       path that reaches it assigned them (the fixer loop, the replay branch), and a failure returns
+#       instead of falling through. It guards an internal invariant, and the engine runs as
+#       `python3 -m engine`, so asserts are not stripped: the check is real defence, not dead code. It
+#       moved here from engine/executor.py with the code. Scoped to that one file.
+"engine/executor_steps.py" = ["S101"]
 # S108 (engine/fs.py)  `SYSTEM_ROOTS` names `/tmp` and `/var/tmp` as directories a workspace must
 #       never be. They are paths to *refuse*: nothing here creates, opens or writes a file at
 #       either, which is the risk the rule exists for. Scoped to that one file.

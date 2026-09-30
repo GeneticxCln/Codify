@@ -73,6 +73,9 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
   chat_prompts.py  the turn + conductor prompts — no AgentRole, so not in the file above
   replies.py      extract_json (what a model's reply contains) and the re-ask prompt — pure, no orchestrator
   conductor.py    the loop that decides the sequence; its moves are the pipeline's own doors
+  executor.py     assembles ExecutorService from layers, each calling only those below it: executor_core, _evidence,
+                  _design, _plan, _steps, _conduct; exceptions in executor_support, the model-call path in
+                  agent_orchestrator, the conductor's moves in conductor_tools
   skills.py       built-in + workspace recipes (`.codify/skills/`) discovered and loaded as data
   toolcall.py     the neutral tool-calling shape and its four protocol translations
   spawn_guard.py process guard; every spawn routes through it

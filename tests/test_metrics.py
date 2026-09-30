@@ -65,7 +65,14 @@ class OutcomeVocabularyCase(unittest.TestCase):
         zero, and this fails instead."""
         import inspect
 
-        source = inspect.getsource(ExecutorService)
+        # The executor is layered (`engine/executor_*.py`, one class per layer, `ExecutorService`
+        # inheriting them all), so its call sites are read from every layer of the class, not from
+        # the body of the last one alone.
+        source = "".join(
+            inspect.getsource(layer)
+            for layer in ExecutorService.__mro__
+            if layer.__module__.startswith("engine.executor")
+        )
         published = set(re.findall(r'self\._stage\(\s*goal_id,\s*"([a-z]+)"', source))
         self.assertEqual(
             published, set(STAGE_OUTCOMES),
