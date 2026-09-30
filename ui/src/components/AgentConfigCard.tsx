@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   AgentCallStat,
   AgentConfig,
@@ -143,6 +143,11 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
   const [pendingApiKey, setPendingApiKey] = useState<string | undefined>();
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  // The timer that takes the "Saved" tick back down. Held so a second save
+  // restarts the window instead of racing the first one, and so closing the
+  // card cancels it rather than leaving it to set state on nothing.
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(savedTimer.current), []);
   const [saveError, setSaveError] = useState<string | null>(null);
   // Set when the server config moved underneath unsaved edits (e.g. the
   // panel's "Fix roles that can't run" refreshed the store). The draft keeps
@@ -230,7 +235,8 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
       setExternallyUpdated(false);
       setPendingApiKey(undefined);
       setSaved(true);
-      setTimeout(() => setSaved(false), 2500);
+      clearTimeout(savedTimer.current);
+      savedTimer.current = setTimeout(() => setSaved(false), 2500);
     } catch (err: any) {
       setSaveError(err.message || "Failed to save configuration");
     } finally {
@@ -651,7 +657,10 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
       {active.protocol === "ollama" && (
         <div className="flex flex-col gap-1.5">
           <div className="flex justify-between">
-            <label className="text-xs font-semibold text-codify-muted uppercase tracking-wider">
+            <label
+              htmlFor={`${role}-num-ctx`}
+              className="text-xs font-semibold text-codify-muted uppercase tracking-wider"
+            >
               Context Window
             </label>
             <span className="text-xs font-mono text-codify-secondary">
@@ -659,6 +668,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             </span>
           </div>
           <input
+            id={`${role}-num-ctx`}
             type="number"
             min={512}
             max={1000000}
@@ -691,7 +701,10 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
       {active.protocol === "ollama" && (
         <div className="flex flex-col gap-1.5">
           <div className="flex justify-between">
-            <label className="text-xs font-semibold text-codify-muted uppercase tracking-wider">
+            <label
+              htmlFor={`${role}-keep-alive`}
+              className="text-xs font-semibold text-codify-muted uppercase tracking-wider"
+            >
               Keep Alive
             </label>
             <span className="text-xs font-mono text-codify-secondary">
@@ -699,6 +712,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             </span>
           </div>
           <input
+            id={`${role}-keep-alive`}
             type="text"
             maxLength={32}
             placeholder="5m"

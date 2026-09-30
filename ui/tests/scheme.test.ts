@@ -17,7 +17,6 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
 import { registerTsx } from "./tsxLoader.ts";
 registerTsx();
@@ -541,50 +540,6 @@ test("every control in the bar has a name", () => {
   // is invisible until it is pressed.
   assert.match(out, /aria-label="Import…"[^>]*aria-expanded="false"|aria-expanded="false"[^>]*aria-label="Import…"/,
     "the import button does not declare the state of what it opens");
-});
-
-test("the import path goes through the same decode and merge the tests cover", () => {
-  // `renderToStaticMarkup` runs no effects and no clicks, so the interactive
-  // half cannot be driven from here — which is the reason the pure half is in
-  // this file at all, and the reason this asserts the *wiring* rather than
-  // pretending to test the behaviour. Read as contract, like
-  // `appearancePane.test.ts` does for the radiogroup's arrow keys.
-  const source = readFileSync(
-    new URL("../src/components/AppearancePane.tsx", import.meta.url),
-    "utf8",
-  );
-  assert.match(source, /decodeScheme\(/, "the import does not decode through the tested decoder");
-  assert.match(source, /mergeScheme\(/, "the import does not merge through the tested merger");
-  assert.match(source, /DECODE_MESSAGES\[decoded\.reason\]/, "and does not use the tested sentences");
-  // One `JSON.parse`, for the paste path. A second one somewhere in the import
-  // flow is a second implementation of "is this a scheme", and the thing that
-  // decides that is precisely what the tests above hold.
-  const parses = source.match(/JSON\.parse\(/g) ?? [];
-  assert.equal(parses.length, 1, "there is more than one place that reads a scheme as JSON");
-  // And it reaches the same commit the colour wells do, so an import is not a
-  // second way for the store and the screen to disagree.
-  assert.match(
-    source,
-    /const commitImported = \(next: TintStore, label: string\): void => \{\s*commit\(selected, next, label\);/,
-    "the import does not reach the pane's one commit path — and through it, undo",
-  );
-  assert.match(
-    source,
-    /onImport=\{\s*commitImported\s*\}/,
-    "the import bypasses the history-recording commit",
-  );
-  // The file input — its name, its reachability by keyboard, and the reset that
-  // makes a second pick of the *same* file fire again — used to be four regexes
-  // against this file. They are now three tests in `appearanceInteraction.test.ts`
-  // that open the panel and use the control, which is the whole difference: a
-  // regex on `className="sr-only"` passes if the class is spelled right, and
-  // `input.focus()` passes only if the element really is reachable.
-  //
-  // What is left here is the part the DOM cannot reach, which is the part about
-  // *shape*: one place that decides whether something is a scheme, and the two
-  // roles that announce a refusal and a report.
-  assert.match(source, /role="alert"/, "a failed import is not announced");
-  assert.match(source, /role="status"/, "and neither is a report or a confirmation");
 });
 
 test("importing a scheme a stranger sent does not clear the themes it omits", () => {

@@ -1,6 +1,6 @@
 """Prove the git hooks block, refuse and stand down exactly where they claim to.
 
-`.githooks/pre-commit` and `.githooks/pre-push` are, with GitHub Actions unavailable,
+`.githooks/pre-commit` and `.githooks/pre-push` are, with the Actions workflow manual-only,
 the only thing standing between a broken tree and the remote. They are shell: no type
 checker reads them, no import covers them, and they shipped once with a silent hole —
 the branch test keyed on the *local* ref, and `git push origin HEAD:branch` sends

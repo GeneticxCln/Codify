@@ -134,11 +134,11 @@ also has (`resp.status()` in `lib.rs`), and a scanner that flags it reports one
 false positive per request until nobody reads the output.
 
 A browser webview is deliberately **not** a pattern either.
-`WebviewWindowBuilder::build()` in `src-tauri/src/browser.rs` renders a window
+`WebviewWindowBuilder::build()` in `src-tauri/src/browser/` renders a window
 in the shell's own process — no child, no pty, nothing to reap at exit — so
 freezing it would claim a process boundary it does not have. What a webview
 needs is isolation from `invoke`, and that is asserted where the decision
-lives instead: `browser.rs` parses `src-tauri/capabilities/*.json` and fails if
+lives instead: the browser module's tests parse `src-tauri/capabilities/*.json` and fail if
 any permission reaches a `browser-*` label, with the same "committed and
 asserted, not assumed" shape this freeze has (`09` §7.2, `03` §1.5).
 

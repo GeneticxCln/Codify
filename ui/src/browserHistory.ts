@@ -15,7 +15,7 @@
  *
  * ## What this module is not
  *
- * It is not the authority on what may be navigated to. `browser.rs` is: the
+ * It is not the authority on what may be navigated to. `browser/mod.rs` is: the
  * loopback guard lives there, in Rust, and it is the same guard whether the
  * navigation came from here, from a redirect, or from the page itself. This
  * module's only opinion is cosmetic — that a bare `example.com` should reach

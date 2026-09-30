@@ -14,13 +14,19 @@
  * - **The ranking.** The user's own word wins in both directions, the verdict
  *   outranks the system preference, and `auto` falls through to the system.
  * - **The wiring.** The event the shell emits is the event this store listens
- *   for, and the two render loops honor the store — nothing in the two type
- *   systems spans that gap, so these tests read the committed files.
+ *   for, and the App turns it into a banner and a verdict. The Rust constant is
+ *   the one thing here that only text can reach, so that one test reads
+ *   `lib.rs`; the App half is a mounted App receiving the event. The two render
+ *   loops honoring the store is held in `atmosphereMotion.test.ts`, which mounts
+ *   both.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+
+import { registerTsx } from "./tsxLoader.ts";
+registerTsx();
 
 import {
   applyShellStarvation,
@@ -33,6 +39,8 @@ import {
   VERDICT_SURVIVES_RELOAD,
   writeSetting,
 } from "../src/motionPreference.ts";
+
+const { withApp } = await import("./appHarness.ts");
 
 /** A tiny map-backed Storage, so tests can read what a call wrote. */
 function mapStore(): Storage {
@@ -106,41 +114,50 @@ test("an unknown spelling of the setting reads as auto", () => {
   assert.equal(readMotion({ user }).setting, "auto");
 });
 
-test("the loops honor the store, and App folds the shell's verdict in", () => {
-  // Both render loops must consult the store at effect time, and App must be
-  // the listener that turns the shell's event into store state. The hooks read
-  // the store *inside* their effects, so the source is the only place this can
-  // be asserted — and the same argument as canvasRecovery's wiring test: a rule
-  // wired into one loop is a rule the other silently lacks.
-  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
-  assert.match(app, /listenShellEvent<[^>]+>\(MOTION_EVENT/);
-  assert.match(app, /applyShellStarvation\(/);
-  assert.match(app, /rearmVerdictForBoot\(\)/, "a stale verdict must not survive a boot");
-  assert.match(app, /writeSetting\("allowed"\)/, "the banner must hand back the choice");
+const BANNER = /Animated backdrops were stopped/;
 
-  for (const file of ["hooks/useAtmosphereCanvas.ts", "components/ui/MatrixRain.tsx"]) {
-    const source = readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8");
-    assert.match(
-      source,
-      /useMotionAllowed\(\)/,
-      `${file} does not consult the motion store`,
-    );
-    // The explicit preview prop still wins — a preview that cannot animate is
-    // not a preview — so the store consult sits behind an `animated` check.
-    // (`atmosphereMotion.test.ts` is the one that proves which way it plays.)
-    assert.match(source, /animated === undefined/, `${file} lost the preview escape hatch`);
-  }
+test("App folds the shell's verdict in: a banner, and a verdict for this session only", async () => {
+  await withApp({}, async ({ dom, emit, settle }) => {
+    assert.doesNotMatch(dom.text(), BANNER, "the banner is up before the shell said anything");
+    await emit(MOTION_EVENT, 88);
+    await settle();
+    assert.match(dom.text(), BANNER, "the shell's verdict did not reach the page");
+    assert.match(dom.text(), /~88%/, "the banner does not name the measurement");
+    assert.equal(readMotion().shellStarved?.measuredMs, 88);
+    assert.equal(motionAllowed(readMotion(), false), false, "the verdict did not stop motion");
+    // The two lifetimes, checked where they are stored rather than where they are read.
+    assert.notEqual(sessionStorage.getItem(MOTION_EVENT), null, "the verdict is not on the session");
+    assert.equal(localStorage.getItem(MOTION_EVENT), null, "the verdict was persisted as a preference");
+  });
+});
+
+test("'Animate anyway' hands the choice back and withdraws the verdict", async () => {
+  await withApp({}, async ({ dom, emit, settle }) => {
+    await emit(MOTION_EVENT, 90);
+    await settle();
+    await dom.click(dom.byButton("Animate anyway"));
+    await settle();
+    assert.doesNotMatch(dom.text(), BANNER, "the banner outlived the choice that answered it");
+    assert.equal(localStorage.getItem(MOTION_KEY), "allowed", "the choice was not recorded");
+    assert.equal(sessionStorage.getItem(MOTION_EVENT), null, "the verdict was not withdrawn");
+    assert.equal(motionAllowed(readMotion(), true), true, "an explicit 'allowed' outranks everything");
+  });
+});
+
+test("a verdict left by an earlier boot does not survive this one", async () => {
+  const stale = JSON.stringify({ at: 1, measuredMs: 90 });
+  await withApp({ sessionStorage: { [MOTION_EVENT]: stale } }, async ({ dom, settle }) => {
+    await settle();
+    assert.doesNotMatch(dom.text(), BANNER, "a stale verdict put the banner up at boot");
+    assert.equal(readMotion().shellStarved, null, "a boot remembered the shell's old verdict");
+  });
 });
 
 test("the shell emits the event this store names", () => {
-  // Nothing spans the Rust/TypeScript type systems, so this reads both
-  // committed sources: the Rust constant and the TS constant must agree.
+  // Nothing spans the Rust/TypeScript type systems, so this reads the Rust
+  // source: the constant there and the one imported here must agree.
   const rust = readFileSync(new URL("../../src-tauri/src/lib.rs", import.meta.url), "utf8");
-  const ts = readFileSync(new URL("../src/motionPreference.ts", import.meta.url), "utf8");
   const match = rust.match(/RENDER_STARVED_EVENT: &str = "([^"]+)"/);
   assert.ok(match, "the Rust event constant moved or was renamed");
-  assert.ok(
-    ts.includes(`"${match![1]}"`),
-    "the two ends of the starvation contract disagree",
-  );
+  assert.equal(match[1], MOTION_EVENT, "the two ends of the starvation contract disagree");
 });

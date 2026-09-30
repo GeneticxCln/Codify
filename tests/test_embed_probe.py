@@ -496,7 +496,7 @@ class TestTheThreeUserAgents(unittest.TestCase):
     def test_the_honest_preset_is_the_string_the_shell_builds(self) -> None:
         """Cross-language, and worth the read: a version that drifts here would
         mean the matrix labelled a run with a string the app never sends."""
-        source = pathlib.Path("src-tauri/src/browser.rs").read_text()
+        source = pathlib.Path("src-tauri/src/browser/mod.rs").read_text()
         for fragment in (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko)",
             "Codify/{}",
@@ -513,7 +513,7 @@ class TestTheThreeUserAgents(unittest.TestCase):
         )
 
     def test_the_env_var_is_the_one_the_shell_reads(self) -> None:
-        source = pathlib.Path("src-tauri/src/browser.rs").read_text()
+        source = pathlib.Path("src-tauri/src/browser/mod.rs").read_text()
         self.assertIn(f'pub const UA_ENV: &str = "{UA_ENV}"', source)
         self.assertIn("std::env::var(UA_ENV)", source)
 
@@ -783,7 +783,7 @@ class TestWhichRequestIsStalled(unittest.TestCase):
         the page can name the stalled request and the run can have no word for
         it, and then the fact is in the transcript and absent from the verdict.
         """
-        source = pathlib.Path("src-tauri/src/browser.rs").read_text()
+        source = pathlib.Path("src-tauri/src/browser/smoke.rs").read_text()
         self.assertIn("q: outstanding()", source)
         self.assertIn("le: loadEventEnd()", source)
         self.assertIn("lz: lastArrival()", source)
@@ -798,7 +798,7 @@ class TestWhichRequestIsStalled(unittest.TestCase):
         signed query string. So the page drops the query, caps the rows, and
         the reader names the truncation rather than blaming the page.
         """
-        source = pathlib.Path("src-tauri/src/browser.rs").read_text()
+        source = pathlib.Path("src-tauri/src/browser/smoke.rs").read_text()
         self.assertIn("PENDING_CAP = 3", source)
         self.assertIn(
             '(parsed.search ? "?" : "")',

@@ -13,40 +13,29 @@ name: check
 # and a WebSocket isolation test that skipped itself (passing) whenever an
 # undeclared `websockets` package was missing.
 #
-# NOTE: GitHub Actions does not run for this repository, so this workflow is manual
-# only — the gate is `make ci` in the Makefile, which runs these same targets
-# locally on the host toolchain and on the declared-minimum Python (provisioning it
-# rather than skipping it). Keep the two in step, or fold this file into `make ci`
-# and drop the duplicate definition.
+# NOTE: this workflow is manual (`workflow_dispatch`), and the gate is `make ci` in the
+# Makefile, which runs these same targets locally on the host toolchain and on the
+# declared-minimum Python (provisioning it rather than skipping it). Keep the two in
+# step, or fold this file into `make ci` and drop the duplicate definition.
 #
-# What was observed, so nobody has to rediscover it. Every run of this workflow, from
-# the first (#1) to the latest, failed within 3-6 seconds with no log at all: the
-# jobs never reached their first step, not even checkout. That is not a test failure
-# and no change to the code can fix it. The reason GitHub gives, verbatim:
+# History, so nobody has to rediscover it. Until 2026-09-30 every run of this workflow,
+# from the first (#1) to #14, failed within 3-6 seconds with no log at all: the jobs
+# never reached their first step, not even checkout. The reason GitHub gave, verbatim:
 #
 #   "The job was not started because your account is locked due to a billing issue."
 #
-# It is an account-wide lock, so it applies even though this repository is public
-# and GitHub's standard hosted runners are otherwise free for public repositories.
-# Nothing in a workflow file can work around it: the job is refused before it is
-# scheduled. It clears when the account's billing is resolved (Settings, Billing and
-# plans; look for a failed payment or an unpaid invoice, which is often for a paid
-# product on the account rather than for Actions itself).
+# It was an account-wide lock, so it applied even though this repository is public.
+# The owner cleared it, and run #15 (started by hand against the branch of PR #9) went
+# green on all four jobs: python 3.10, python 3.14, ui, and rust. That run is the only
+# place the suite has been seen passing on GitHub's own Ubuntu image and on the newest
+# Python, which is what it is for: a second opinion from a machine that is not the
+# developer's.
 #
-# The message is on the failed job's page, and also readable without logging in, for
-# a public repository, from the check run's annotations:
-#
-#   curl -s https://api.github.com/repos/OWNER/REPO/check-runs/CHECK_RUN_ID/annotations
-#
-# Until the lock is lifted this file runs only when started by hand, so a push or a PR
-# stops carrying four red marks that say nothing about the code. The verdict that
-# matters comes from `make ci` (pre-push hook, `make hooks`), and `make ci-report`
-# publishes that verdict on the commit as a status — free, and from a machine that
-# actually ran the gate. A commit status is an API call, not a job, which is why it is
-# not subject to the runner refusal above.
-#
-# To turn it back on, add `push:` and `pull_request:` under `on:` once a run of the
-# manual trigger below gets past checkout.
+# It stays manual on purpose. `make ci` (pre-push hook, `make hooks`) is the verdict
+# that gates a push, and `make ci-report` publishes it on the commit as a status. Start
+# this by hand when a second opinion is worth its runner minutes: a change to the
+# interpreter matrix, to a system package the Rust job installs, or before a release.
+# To run it on every push and pull request, add `push:` and `pull_request:` under `on:`.
 
 on:
   workflow_dispatch:

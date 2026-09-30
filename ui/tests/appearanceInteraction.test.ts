@@ -190,6 +190,12 @@ test("an import is one Undo, and undoing it puts every theme back", async () => 
     // reason an import reports rather than being quiet about it.
     assert.match(dom.text(), /Holo Deck 2099/, "the skipped theme was not named");
     assert.match(dom.text(), /Applied to Vector Wireframe/, "the applied theme was not named");
+    // Announced, not merely drawn: a report that is only visible is one a screen reader never says.
+    assert.match(
+      dom.container.querySelector('[role="status"]')?.textContent ?? "",
+      /Applied to Vector Wireframe/,
+      "the import's report is not announced as a status",
+    );
 
     await dom.click(dom.byLabel("Undo Import 1 theme"));
     assert.equal(

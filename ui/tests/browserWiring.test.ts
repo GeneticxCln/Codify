@@ -41,7 +41,7 @@ async function seatAPage({ dom, settle }: AppContext, url: string): Promise<void
 }
 
 test("closing a browser tab with no page does not ask the shell to close one", async () => {
-  // `close` in browser.rs refuses a tab that has no page, so calling it for a tab
+  // `close` in browser/mod.rs refuses a tab that has no page, so calling it for a tab
   // the user never gave an address would put "no browser tab is open" on screen as
   // an error they caused by closing it.
   await withApp({ viewport: VIEWPORT }, async ({ dom, shell, settle }) => {

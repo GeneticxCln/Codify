@@ -23,7 +23,7 @@ test("the shell's own prose says the page is in the window, not beside it", () =
   //
   // It happened: two comments in `App.tsx` still described the page as a
   // separate OS window, and `docs/09` §7.2's command list still named the
-  // system-browser hand-off that was deleted, after `browser.rs` had stopped
+  // system-browser hand-off that was deleted, after the browser module had stopped
   // building one and a test was failing if it did. Nothing about the running
   // app was wrong. Everything a reader would conclude from it was.
   const app = readFileSync(
@@ -42,7 +42,7 @@ test("the shell's own prose says the page is in the window, not beside it", () =
     app,
     /child\s+webview/,
     "App.tsx no longer says the page is a child webview of this window — the \
-     shape the shell actually builds (browser.rs: Window::add_child) should be \
+     shape the shell actually builds (browser/mod.rs: Window::add_child) should be \
      the shape the comment claims"
   );
   assert.match(
@@ -101,7 +101,7 @@ test("no surface invents its own name for an unnamed thread", () => {
  */
 function elementAssertions(text: string): string[] {
   const call = /assert\.(?:equal|strictEqual|notEqual|notStrictEqual|deepEqual|deepStrictEqual)\(/g;
-  const element = /(?:querySelector|querySelectorAll|closest|byLabel|byText|allByLabel|banner|pane)\((?:[^()]|\([^()]*\))*\)$|activeElement$/;
+  const element = /(?:querySelector|querySelectorAll|closest|byLabel|byText|allByLabel|banner|pane|control)\((?:[^()]|\([^()]*\))*\)$|activeElement$/;
   const found: string[] = [];
   for (const m of text.matchAll(call)) {
     const args: string[] = [];
@@ -142,6 +142,8 @@ test("no test hands a DOM element to assert.equal, whose failure exhausts the ma
   assert.equal(elementAssertions('assert.equal(dom.container.querySelector("a"), null, "m");').length, 1);
   assert.equal(elementAssertions("assert.deepEqual(dom.allByLabel('x'), []);").length, 1);
   assert.equal(elementAssertions("assert.equal(dom.window.document.activeElement, input);").length, 1);
+  assert.equal(elementAssertions('assert.equal(control(ctx, "Start recording"), null);').length, 1);
+  assert.equal(elementAssertions('assert.ok(control(ctx, "Start recording") === null);').length, 0);
   assert.equal(elementAssertions('assert.equal(dom.container.querySelector("a")?.textContent, "x");').length, 0);
   assert.equal(elementAssertions('assert.equal(dom.allByLabel("x").length, 0);').length, 0);
   assert.equal(elementAssertions('assert.ok(dom.container.querySelector("a") === null);').length, 0);
@@ -156,4 +158,19 @@ test("no test hands a DOM element to assert.equal, whose failure exhausts the ma
     for (const hit of elementAssertions(code)) offenders.push(`${f}: ${hit}`);
   }
   assert.deepEqual(offenders, [], "compare a boolean or a length instead: assert.ok(el === null, msg)");
+});
+
+test("the Appearance pane decides whether a pasted file is a scheme in one place", () => {
+  // Moved here from `scheme.test.ts`, whose other wiring assertions about the import
+  // (that it decodes, merges, commits through the one history-recording path and
+  // announces itself) are now held by mounted tests in `appearanceInteraction.test.ts`.
+  // What is left is a rule about *shape* no click can observe: a second `JSON.parse`
+  // in the import flow is a second implementation of "is this a scheme", and the thing
+  // that decides that is precisely what `scheme.test.ts` holds.
+  const source = readFileSync(
+    new URL("../src/components/AppearancePane.tsx", import.meta.url),
+    "utf8",
+  );
+  const parses = source.match(/JSON\.parse\(/g) ?? [];
+  assert.equal(parses.length, 1, "there is more than one place that reads a scheme as JSON");
 });

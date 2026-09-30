@@ -25,7 +25,7 @@ boot saying which of the facts above holds on this machine, announces
 prints `embed-smoke: report …` each time the page describes what it is
 showing, and fails itself after 20s. Both detectors are injected as
 initialization scripts (`SMOKE_PAINT_SCRIPT` and `SMOKE_PROBE_SCRIPT` in
-`src-tauri/src/browser.rs`); "two rAFs" proves the compositor consumed a
+`src-tauri/src/browser/`); "two rAFs" proves the compositor consumed a
 frame, which "document loaded" does not.
 
 **Two deliverables, and the paint is only the first.** A paint says the embed
@@ -164,7 +164,7 @@ def is_paint(line: str) -> bool:
 # is empty at load and real a second later), so the **last** one is the most
 # complete and the only one worth reading.
 #
-# This is the shell's line, not the page's title: `browser.rs`'s
+# This is the shell's line, not the page's title: the browser module's
 # `SMOKE_REPORT_LINE` is the other half of the pair, and its test reads this
 # file, so the two spellings cannot drift — which matters because a drifted one
 # prints every report and reads none.

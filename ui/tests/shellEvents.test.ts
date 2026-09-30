@@ -10,7 +10,7 @@
  * plain browser.
  *
  * The event *name* is pinned on the Rust side instead: a test in
- * `src-tauri/src/browser.rs` reads this directory's `shellEvents.ts` and fails
+ * `src-tauri/src/browser/` reads this directory's `shellEvents.ts` and fails
  * if the two ends drift, because no type system spans a Rust constant and a
  * TypeScript string.
  *
@@ -31,7 +31,7 @@ import {
 } from "../src/shellEvents.ts";
 
 test("the event name is the one the shell emits", () => {
-  // Not the interesting assertion — `browser.rs`'s test is, which reads this
+  // Not the interesting assertion — the browser module's test is, which reads this
   // file and fails if the two names differ. Written here so a reader of the UI
   // side sees the wire name rather than having to go looking for it.
   assert.equal(BROWSER_POPUP_REQUESTED, "browser-popup-requested");

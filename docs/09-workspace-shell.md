@@ -4,7 +4,7 @@
 so are both panes.** The plan approved for this work had five phases; the first
 four shipped, and what is here is what they describe — the schema and routes of
 §2–§3, `src-tauri/src/terminal.rs` plus the xterm pane that drives it in §7.1,
-the browser's isolation in `src-tauri/src/browser.rs` and
+the browser's isolation in `src-tauri/src/browser/` and
 `src-tauri/capabilities/browser.json` in §7.2, and the pane that drives that in
 §7.3.
 
@@ -721,7 +721,7 @@ of it is not, and the tail is not there in the browser build at all — outside
 Tauri there is no shell holding a pipe, so `fetchEngineStderr` answers `[]`. And
 the grant is a named permission like every other command
 (`allow-codify-engine-log`), so the command is unreachable until it is listed;
-`browser.rs`'s ACL test fails the build's test leg when the two lists drift.
+the browser module's ACL test fails the build's test leg when the two lists drift.
 
 ## 6. The restore gap, closed
 
@@ -1009,7 +1009,7 @@ already written.
 
 ### 7.2 Browser — built (shell layer)
 
-`src-tauri/src/browser.rs`, `src-tauri/capabilities/browser.json`,
+`src-tauri/src/browser/`, `src-tauri/capabilities/browser.json`,
 `src-tauri/permissions/shell.json`, commands
 `codify_browser_open` / `codify_browser_navigate` / `codify_browser_focus` /
 `codify_browser_resize` / `codify_browser_close` /
@@ -1026,7 +1026,7 @@ One embedded **page** per browser tab, labelled `browser-<tab>` — a child
 webview of the main window, not a window of its own. This is the first surface
 in Codify that renders untrusted content, and it now renders it *inside* the
 window the app's own UI runs in. Five layers of isolation, and the Rust tests
-in `browser.rs` pin them:
+in `browser/tests.rs` pin them:
 
 **1. An empty capability set.** `capabilities/browser.json` covers
 `browser-*` with an empty `permissions` list — no `invoke`, no event listeners,
@@ -1124,7 +1124,7 @@ What can still end a page without the strip asking is a load failure (layer 4 of
 the shell's browser guard) and a WebKit web-process crash, which nothing
 observable reports; the docs say so rather than pretend otherwise.
 
-Pinned by `the_ui_listens_for_the_events_this_module_emits` (`browser.rs`), which
+Pinned by `the_ui_listens_for_the_events_this_module_emits` (`browser/tests.rs`), which
 reads `ui/src/shellEvents.ts` and fails if the two ends of an event name drift —
 no type system spans a Rust constant and a TypeScript string — and which also
 fails if `browser-window-closed` reappears in the UI, since a listener for an
@@ -1173,7 +1173,7 @@ whole smoke suite was green through it:
 
 **The fix is the container the toolkit needs.** Tauri exposes no way to create a
 webview into a container of our choosing (its builder has no `build_gtk`, its
-`Webview` no `gtk_widget`), so `browser.rs`'s `page_layer` module does the
+`Webview` no `gtk_widget`), so `browser/page_layer.rs` does the
 container work itself from `Window::default_vbox()`: on the first page, the
 app's webview becomes the main child of a `gtk::Overlay` this crate owns, every
 page then lives in a `gtk::Fixed` layered above it, and placement is driven by
@@ -1238,7 +1238,7 @@ That is what shipped, deliberately, and each cost named there was paid:
 - **The grant was re-pointed, in the same change.** `default.json` matches on
   `webviews: ["main"]` and `browser.json` on `webviews: ["browser-*"]`; both
   files match on `webviews` and on nothing else, and
-  `browser.rs::no_capability_grants_through_a_window_pattern` fails the build
+  `browser::tests::no_capability_grants_through_a_window_pattern` fails the build
   if any capability that grants anything ever matches through a `windows`
   pattern again — the shape that would let a child inherit the grant. The
   reach test now asserts `main` matches through the *webview* label.
@@ -1303,7 +1303,7 @@ leave with it, and the answer to "this site renders badly in an embedded
 view" is to make the embedded view handle the site. **Every website Codify
 can open is a tab in Codify, a popup is a tab in Codify, and there is no
 code in the shell that could hand a URL to anything else** — which is an
-absence, and absences need pinning: `browser.rs`'s
+absence, and absences need pinning: the browser module's
 `the_only_escape_is_the_inspector_and_the_module_spawns_nothing` asserts
 `open_external`, `open::that_detached` and `Command::new` are *absent* (the
 inverse of the assertion that used to require them), and
@@ -1754,7 +1754,7 @@ tauri 2.11.6) — so the webview's history is unreachable and the stack lives in
 | A new address truncates what is ahead | Going back and then typing something new is a change of mind; forward must not walk into the branch the user abandoned. |
 | Re-visiting the address on screen is *not* a new entry | Reload is a navigate to the current URL, because the shell has no reload command. Without this, every reload pushed a history entry and back became a way to re-reload. |
 | A bare host gets `https://` in front | `Url::parse` in Rust has no base to resolve against, so `example.com` arrives as a relative URL and is refused. The scheme test is `^https?://` and nothing looser — "anything with a colon is a scheme" reads `localhost:3000` as a scheme named `localhost`. |
-| The loopback rule is **not** reimplemented here | `browser.rs` is the authority and its message is shown verbatim. A second implementation in TypeScript would be the one that rots, because nothing would test it against the Rust original. |
+| The loopback rule is **not** reimplemented here | `browser/mod.rs` is the authority and its message is shown verbatim. A second implementation in TypeScript would be the one that rots, because nothing would test it against the Rust original. |
 
 **The history lives on the tab**, as `Tab.history`, rather than in a side table
 keyed by tab id. It is why closing a browser tab cannot leave a stale entry
@@ -1932,7 +1932,7 @@ failure. Both are "this run measured nothing", and the difference is a
 `cargo build` versus stopping another instance.
 
 `make smoke-embed` is a local target, deliberately not part of `check` or `ci`:
-it needs a display, and GitHub Actions is unavailable to this repository
+it needs a display, and the Actions workflow is manual-only
 anyway (see `check.yml`). The unit tests keep the wiring honest; this keeps the
 claim honest.
 
@@ -2037,7 +2037,7 @@ the text of a page the user is no longer looking at, with nothing saying so.
 the page composited a frame, the page described itself, and *the same page read
 back through the bridge*. The third is `webview_bridge::smoke_probe`, which
 builds a request locally and hands it to the same `serve` the engine's poll loop
-uses — smoke mode never starts an engine (`browser.rs`'s
+uses — smoke mode never starts an engine (the browser module's
 `the_smoke_mode_is_gated_reports_and_never_starts_the_engine`), so there is no
 `/bridge/next` to poll and nothing to hand the question out. Everything the
 answer depends on is therefore measured for real: the `eval`, the custom
@@ -2054,7 +2054,7 @@ bridge that cannot reach a page becomes a passing build.
 
 The reply channel carries text only and is deliberately **not** the document
 title, which is the one channel a page with no capability is guaranteed to have
-and which `browser.rs`'s smoke probe uses. The title renames the tab, and a
+and which `browser/smoke.rs`'s probe uses. The title renames the tab, and a
 user reading a page while the model reads it too is not the smoke's throwaway
 webview. `webview_bridge.rs` explains the rest, including why the script tries
 `fetch`, `Image().src` and `sendBeacon` rather than one of them.

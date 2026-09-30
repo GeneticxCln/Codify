@@ -105,7 +105,7 @@
   "set": [
     {
       "identifier": "shell",
-      "description": "Every command this app defines, as twenty named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser.rs fails the build's test leg if the two lists ever differ. Permissions are not where a webview is decided: this set is referenced only by capabilities/default.json, whose `webviews` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.",
+      "description": "Every command this app defines, as twenty named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser/ fails the build's test leg if the two lists ever differ. Permissions are not where a webview is decided: this set is referenced only by capabilities/default.json, whose `webviews` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.",
       "permissions": [
         "allow-codify-get-engine-info",
         "allow-codify-engine-status",

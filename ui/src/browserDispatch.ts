@@ -1,7 +1,7 @@
 /**
  * What a browser address becomes, and who is allowed to answer it.
  *
- * The shell (`src-tauri/src/browser.rs`) is the enforcement point: its
+ * The shell (`src-tauri/src/browser/`) is the enforcement point: its
  * `navigation_allowed` sees every navigation a page attempts, redirects
  * included, and no caller routes around it. This module is not a second
  * guard. It exists for the two cases where waiting for the shell is the
@@ -40,7 +40,7 @@ export type BrowserDispatch =
 /**
  * The refusal sentence the shell words, mirrored here.
  *
- * `browser.rs::parse_navigation` words the same refusal; the dispatch test
+ * `browser::tests::parse_navigation` words the same refusal; the dispatch test
  * asserts the two agree, so editing one without the other fails a test on
  * whichever side runs first rather than shipping two truths about the same
  * rule.
