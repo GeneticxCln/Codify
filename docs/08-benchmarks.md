@@ -223,8 +223,8 @@ the manifest is a test failure rather than a silently skipped check.
 
 **Read the limits before the numbers.** This is one small model per run, on one CPU-only machine, and the two
 tables below are one run per task (the 1.5B model was repeated afterwards: "Repeats", below). It measures *those
-models*, not Codify: a hosted model (or a 30B local one) would do very differently, and none was available. A single
-run is an anecdote (§3, `--repeat`), so treat a difference of one task as noise.
+models*, not Codify: a hosted model would do very differently, and one was measured afterwards ("A hosted model",
+below). A single run is an anecdote (§3, `--repeat`), so treat a difference of one task as noise.
 The workspaces in these runs were **plain directories, not git repositories** (§3 now says they are), which
 changes what a verifier sees; the numbers below are not comparable with later ones.
 
@@ -316,6 +316,65 @@ carries the fixes listed below, so it is a second measurement of the same model 
 
 One model, one server, one machine, three rounds. It says nothing about the 3B model, which was not repeated.
 
+### A hosted model
+
+The first two tables are small local models on a CPU. This is the other end of the range: NVIDIA's hosted API
+(`integrate.api.nvidia.com`, OpenAI-compatible) through Codify's own `nvidia` provider, all eight roles on one model,
+run on 2026-09-30 with `benchmarks.seed_endpoint --provider nvidia` into a state directory of its own, so nothing
+touched a real `~/.codify`. Same 11 tasks, same runner, git-repository workspaces as in the repeats above.
+
+| Model | Runs | Passed |
+|---|---|---|
+| Qwen2.5-1.5B (local, CPU) | 33 (3 rounds) | **4 (12%)**; rounds 2 / 1 / 1 of 11 |
+| Qwen2.5-Coder-3B (local, CPU) | 11 (1 round) | **0 (0%)** |
+| `google/gemma-4-31b-it` (hosted) | 33 (3 rounds) | **14 (42%)**; rounds 5 / 4 / 5 of 11 |
+| `nvidia/nemotron-3-super-120b-a12b` (hosted) | 11 (1 round) | **3 (27%)** |
+
+**Per task, gemma-4-31b over three rounds.** 3 of 3: `repo-changelog`, `repo-close-the-gap`, `repo-readme-usage`. 2 of 3:
+`repo-add-whisper`, `repo-word-count`. 1 of 3: `repo-remove-shout`. 0 of 3: `repo-add-clamp`, `repo-add-version`,
+`repo-default-name`, `repo-rename-greeting`, `repo-shout-exclaim`. The profile is not the 1.5B model's turned up: the small
+model passed `repo-add-clamp` twice in three and never `repo-close-the-gap`; this one is the reverse. (A single-task smoke run of
+the same model on `repo-add-clamp`, made before the rounds to check the setup, passed; it is not counted in the 33, and it is
+a fair picture of what one run can say.) Nemotron-3-super passed `repo-add-clamp`, `repo-add-version` and `repo-close-the-gap`,
+in one round, so that is an anecdote.
+
+**Where gemma's 19 failed runs stopped.**
+
+* **13 were paused by the critic** (`request_changes`), so the goal was held and counted as a failure. Reading five of the
+  notes: it changed a different function than asked (`repo-default-name` edited `shout` instead of giving `greet` a default),
+  did not implement the request (`repo-shout-exclaim`), rewrote a test's import logic unasked (`repo-rename-greeting`),
+  wrote tests without the function they import (`repo-add-clamp`), and once objected to a test framework named in a verdict
+  (`unittest` against `pytest`, `repo-add-clamp` round 2), which reads as over-strictness rather than a catch. The
+  dominant failure of a capable model is editing the wrong thing, and the critic is what stops it.
+* **6 ended as failed goals:** two at the verifier for `tests_failed` (the repository's own tests ran and failed); two at the
+  verifier and one at the fixer for `provider_unreachable`; one at the fixer for an unusable reply (`agent_output_invalid`).
+  Three of the 33 runs (9%) were therefore lost to the hosted API not answering, independent of what the model could do.
+* **Call health over all 33 runs** (re-asks / failed calls / calls): fixer 20 / 21 / 66, verifier 1 / 3 / 59, and none at
+  all for the gate, librarian, design, planner, critic and scribe. So the fixer's first reply was not usable on roughly one
+  call in three (20 of 66), the re-ask recovered all but one of those, and every other role was clean. For comparison the
+  1.5B model's fixer needed a re-ask on 17 of 37 calls and failed its goal after the re-ask 16 times.
+* Nemotron-3-super's 8 failed runs ended `agent_output_invalid` five times (verifier 3, fixer 1, scribe 1) and
+  `provider_bad_response` three times (fixer 2, verifier 1).
+
+**Three things about the provider that the numbers do not show, all for this one account and day.**
+
+* **The live catalogue is not an entitlement.** `/v1/models` listed 81 models with no key at all. Of 24 chat models probed with
+  one tiny authenticated call each, 10 answered, 1 timed out and 13 returned `404 ... Not found for account`. Codify
+  discovers models live (`docs/06`), which is right, but a model that appears in the list can be one this key cannot call.
+* **A reasoning model can starve the reply.** `z-ai/glm-5.3` answered a verifier call with an empty reply after 66 s (the
+  reasoning used the output budget), and its re-ask hit the provider client's 120 s read timeout, failing the goal. One task,
+  so not a verdict on the model, but the timeout and the empty reply are both Codify's to handle: a hosted reasoning model
+  is slower than a 120 s ceiling can assume, and an empty reply is being read as a format slip.
+* **A planner can over-consult.** In the smoke run `nvidia/nemotron-3-super-120b-a12b` asked the librarian for more reads after
+  the one follow-up the engine allows, and the goal failed with `agent_output_invalid`.
+
+**Limits.** Three gemma rounds and one nemotron round are a range and an anecdote, not a confidence interval. The gemma rounds
+ran at the same time, sharing one API key's rate limit, so the wall times (a round took 60 to 77 minutes; a run's median was
+359 s, from 91 to 737 s) are not comparable with the CPU runs, and the two hosted models were not run under the same load
+(nemotron's round took 16 minutes, alongside them). A hosted model behind a name can change without one; this is what the name
+answered on the day. One provider, one account, eleven small edits to a committed fixture: it says what a hosted 31B model does
+on these tasks and nothing about Codify with a model you use, which is why the floor in `--min-pass-rate` is yours to set.
+
 ### The conductor, end to end
 
 `scripts/drive_a_turn.py` drove three turns through the real engine (a question about a file, a listing, a change
@@ -367,7 +426,8 @@ A baseline is only useful if someone reads the failures. These were fixed as a r
 
 ### Not measured
 
-Repeats of the 3B model (the 1.5B was repeated three times, above), the conductor beyond those three turns and one
-small model, any hosted model, and any hardware but one CPU. `--min-pass-rate` exists to enforce a floor, but a floor
+Repeats of the 3B model and of nemotron-3-super (the 1.5B and gemma-4-31b were repeated three times, above), the
+conductor beyond those three turns and one small model, any hosted model beyond the two on one provider's shared
+endpoint, and any hardware but one CPU. `--min-pass-rate` exists to enforce a floor, but a floor
 is only worth setting against a baseline recorded with the model *you* use: 12% (4 of 33, and 9% to 18% between
 rounds) is a fact about a 1.5B model, not a target.
