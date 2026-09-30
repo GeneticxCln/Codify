@@ -66,7 +66,7 @@ with a `422`.
 one: a **deliverable** goal has the design agent author a document, a step write it verbatim, and
 the critic review it before anyone relies on it. `"design"` writes `DESIGN.md`, the contract every
 later goal obeys; `"knowledge"` writes `CODIFY.md`, the prior every later run's librarian reads
-(§4.9). `DELIVERABLE_FILES` and `DELIVERABLE_ROLE` in `engine/executor.py` hold both, so the fixer,
+(§4.9). `DELIVERABLE_FILES` and `DELIVERABLE_ROLE` in `engine/executor_design.py` hold both, so the fixer,
 the verifier and the critic cannot disagree about which file is being delivered.
 
 `trace` is orthogonal to all three: it says whether the run's model calls are *recorded* (§8).
@@ -175,7 +175,7 @@ class Event(BaseModel):
 ```
 
 Payloads — one row per type the engine publishes (verified against the
-`publish` sites in `executor.py` / `services.py`; this table has drifted
+`publish` sites in `executor_*.py` / `services.py`; this table has drifted
 before, so a new event type means a new row here in the same change). The
 literal above, `ui/src/types.ts`'s `EventType` and the table below are three
 copies of one list, and `tests/test_event_type_contract.py` fails when they
@@ -853,7 +853,7 @@ labelled differently: one is the user's instruction, the other is a convention t
 **verifier** additionally checks the written artifacts against the binding contract mechanically (see
 §4.3), so a drift is caught by evidence rather than by the critic's judgment alone.
 
-Bounds — each list is trimmed, never dropped whole (`MAX_DESIGN_*` in `engine/executor.py`): 24 colors,
+Bounds — each list is trimmed, never dropped whole (`MAX_DESIGN_*` in `engine/executor_design.py`): 24 colors,
 12 typography entries, 12 spacing steps, 8 radii, 40 components, 12 each of `conventions` /
 `constraints` / `acceptance`, and `design_md` at 8000 chars. `artifact` is one of
 `web_prototype|page|dashboard|deck|mobile|document|component|style_system|other`; anything else reads
@@ -913,7 +913,7 @@ findings.
 A normal goal's design stage declares a direction the work realizes. A **design-deliverable goal**
 inverts that: the workspace's own brand contract *is* what the goal produces, and the design agent is
 its author. `POST /goals` with `mode: "design"` runs the same pipeline with four differences, all of
-them in `engine/executor.py`:
+them in `engine/executor_design.py` and `engine/executor_steps.py`:
 
 | Stage | What changes |
 |---|---|
@@ -1244,7 +1244,7 @@ and the critic reviews it before the user has it.
 
 | Stage | What changes |
 |---|---|
-| design | `_knowledge_deliverable` (`engine/executor.py`) appends `KNOWLEDGE_BRIEF_PROMPT` to the goal and the evidence pack, and shows the current `CODIFY.md` as **revision material, not a prior to trust** — read fresh rather than taken from the pack, because a prior is exactly what the pack must not carry. The reply is parsed by `_design_contract` and the body is mandatory, so a drafter that returns nothing raises `AgentOutputInvalid` and the goal still plans with a `warn` |
+| design | `_knowledge_deliverable` (`engine/executor_design.py`) appends `KNOWLEDGE_BRIEF_PROMPT` to the goal and the evidence pack, and shows the current `CODIFY.md` as **revision material, not a prior to trust** — read fresh rather than taken from the pack, because a prior is exactly what the pack must not carry. The reply is parsed by `_design_contract` and the body is mandatory, so a drafter that returns nothing raises `AgentOutputInvalid` and the goal still plans with a `warn` |
 | planner | `_design_text` names `CODIFY.md body (the file a step must produce)` — the filename comes from `DELIVERABLE_FILES[mode]`, not a literal, so a knowledge goal cannot plan a step that writes the wrong document |
 | fixer | the step whose `suggested_paths` names `CODIFY.md` is handed the reviewed draft verbatim. `_deliverable_write_path` matches on the mode's file, so a design goal is never handed a knowledge body and vice versa |
 | verifier | reviews the document instead of running a command — identical to §4.0a.2, and already mode-agnostic |

@@ -381,7 +381,7 @@ The specifications are the source of truth; the README summarises them.
 ## 📂 Layout
 
 ```
-engine/     FastAPI backend — app.py (routes), conductor.py (the loop), executor.py,
+engine/     FastAPI backend — app.py (routes), conductor.py (the loop), executor.py (+ executor_*.py, its layers),
             laya.py (gate), providers.py, sandbox.py, fs.py, git.py, db.py, watchdog.py
 ui/         React 19 + TS + Vite — App.tsx, components/, hooks/, api.ts, appearance.ts
 src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the embedded pages),
