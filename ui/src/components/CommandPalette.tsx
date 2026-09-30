@@ -7,7 +7,7 @@ import {
 } from "../commandPalette";
 
 /**
- * ⌘K: search open tabs, conversations and settings in one input.
+ * Ctrl+K: search open tabs, conversations and settings in one input.
  *
  * The model — what the list contains, how a query narrows it, where the
  * selection wraps to — lives in `commandPalette.ts` and is tested there.
@@ -23,7 +23,7 @@ import {
  *   Preventing the default keeps the input as the event target, so the
  *   input's `stopPropagation` is what every Escape and arrow key meets.
  * - **Focus comes back on close.** The composer (or whichever control) that
- *   had focus when ⌘K was pressed is refocused, so closing the palette puts
+ *   had focus when Ctrl+K was pressed is refocused, so closing the palette puts
  *   the cursor back where the typing was instead of on nothing. Best effort:
  *   a detached node's `focus()` is silently ignored, which is the right
  *   behaviour for a control that re-rendered away.
@@ -126,7 +126,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         break;
       case "Tab":
         // One input, then done — Tab cycles nothing, and Escape is the way
-        // out, with focus returned to wherever ⌘K was pressed. Letting Tab
+        // out, with focus returned to wherever Ctrl+K was pressed. Letting Tab
         // walk focus behind the overlay would land it on controls the
         // backdrop is covering, from where Escape would miss this component
         // entirely and hit the window's other listeners.

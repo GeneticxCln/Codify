@@ -40,7 +40,7 @@ export const NewTabButton: React.FC<NewTabButtonProps> = ({ onNewTab, workspaceI
       aria-label="New tab"
       title={
         enabled
-          ? "A new, empty tab in the selected project (⌘T)"
+          ? "A new, empty tab in the selected project (Ctrl+T)"
           : "Select a project to open a new tab"
       }
       onClick={onNewTab}

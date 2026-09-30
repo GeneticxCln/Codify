@@ -1087,7 +1087,7 @@ export const App: React.FC = () => {
   );
 
   // ── The keyboard layer ───────────────────────────────────────────────────
-  // ⌘/Ctrl+T new tab, +W close, +1..9 jump, +K palette. The mapping is pure
+  // Ctrl+T new tab, +W close, +1..9 jump, +K palette. The mapping is pure
   // and tested in `shortcuts.ts`; this is only dispatch. Registered in the
   // *capture* phase on `window`, so a keystroke that belongs to the shell
   // wins over whatever the focused control would otherwise do with it — these
@@ -1108,7 +1108,7 @@ export const App: React.FC = () => {
   );
 
   // Every close in the shell goes through here — the strip's close button, the
-  // ⌘W shortcut, and the browser pane — because a browser tab's page is a
+  // Ctrl+W shortcut, and the browser pane — because a browser tab's page is a
   // child webview of this window that has to be told to go. Two seams would be
   // two ways to orphan a running page: close the tab one way and the webview
   // survives, still painting itself over whatever the user switched to.
@@ -1906,7 +1906,7 @@ export const App: React.FC = () => {
           handleNewTab();
           break;
         case "close-active-tab":
-          // Through the same seam as the strip's close button, so ⌘W on a
+          // Through the same seam as the strip's close button, so Ctrl+W on a
           // browser tab closes its webview too. The listener re-binds when the
           // tab set changes: cheap, and it buys the one seam above.
           if (tabState.activeId) handleCloseTab(tabState.activeId);
@@ -3431,7 +3431,7 @@ export const App: React.FC = () => {
         }}
       />
 
-      {/* ⌘K. After SettingsModal in the DOM on purpose: both sit at z-50, and
+      {/* Ctrl+K. After SettingsModal in the DOM on purpose: both sit at z-50, and
           a later sibling paints above — the palette must be reachable while
           the dialog is open. */}
       <CommandPalette

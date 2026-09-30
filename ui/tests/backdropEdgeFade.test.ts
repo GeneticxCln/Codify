@@ -40,13 +40,14 @@ const RAIN_SRC = readFileSync(
 
 test("the fade exists once, as a class, with both the prefixed and standard property", () => {
   // The prefixed one is not redundancy: Tauri renders through the platform
-  // webview, so on macOS this is WebKit, which only took the unprefixed
-  // property in Safari 15.4 — and the desktop app supports older systems.
+  // webview, which on Linux is WebKitGTK, and a WebKit older than the one in
+  // Safari 15.4 only took the prefixed property — and the desktop app supports
+  // distributions older than that.
   const block = CSS_SRC.slice(
     CSS_SRC.indexOf(".codify-atmosphere-canvas"),
     CSS_SRC.indexOf("}", CSS_SRC.indexOf(".codify-atmosphere-canvas")),
   );
-  assert.match(block, /-webkit-mask-image/, "Safari/WKWebView would get no fade at all");
+  assert.match(block, /-webkit-mask-image/, "an older WebKitGTK would get no fade at all");
   assert.match(block, /(?<!-)mask-image/, "everything that is not WebKit gets no fade");
 });
 

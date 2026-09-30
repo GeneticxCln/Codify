@@ -69,7 +69,7 @@
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: Roboto, Helvetica, Arial, sans-serif;
   background-color: var(--codify-bg);
   color: var(--codify-secondary);
 }
@@ -287,8 +287,9 @@ body {
  * is unsupported at all is "no mask" — the old look, not an invisible backdrop.
  *
  * `-webkit-mask-image` is not redundancy. Tauri renders through the platform
- * webview, so on macOS this is WebKit, which only took the unprefixed property
- * in Safari 15.4; the desktop app supports older systems than that.
+ * webview, which on Linux is WebKitGTK, and a WebKit older than the one in
+ * Safari 15.4 only took the prefixed property; the desktop app supports
+ * distributions older than that.
  *
  * `farthest-corner` rather than a fixed pixel radius, so the fade covers the
  * short axis of a tall window and the long axis of a wide one without the value

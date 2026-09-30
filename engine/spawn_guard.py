@@ -109,7 +109,7 @@ def arm_parent_death_signal() -> bool:
         libc = ctypes.CDLL(None, use_errno=True)
         prctl = libc.prctl
     except (OSError, AttributeError):
-        # No prctl to call (macOS and the BSDs): the poll is the whole detector.
+        # No libc handle, or no prctl in it: the poll is the whole detector.
         return False
     try:
         prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
