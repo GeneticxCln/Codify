@@ -116,10 +116,6 @@ const TEXT_READERS: Record<string, Reason> = {
     kind: "unconverted",
     why: "Both loops must listen for contextlost and cap what they log. jsdom has no GPU context to lose, so this needs a fake context that can be lost; it has not been written.",
   },
-  "stateReactiveWeather.test.ts": {
-    kind: "unconverted",
-    why: "That App passes 'the agent is working' to the backdrops as `active`. A mounted App with a running goal would observe it; that test does not exist yet.",
-  },
 };
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
