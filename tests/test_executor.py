@@ -2086,11 +2086,15 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self.goals.set_parallel(self.goal.id, True)
         self._script_parallel(delays={"a": 0.6, "b": 0.6})
         await self.executor.run_planning(self.goal.id)
-        elapsed = await self._drive()
+        await self._drive()
         g = self.goals.get(self.goal.id)
         self.assertEqual(g.status, "COMPLETED", f"goal status: {g.status}")
-        # Sequential would be ~1.2s of fixer sleeps; overlapped, ~0.6s.
-        self.assertLess(elapsed, 1.05, f"steps did not overlap (took {elapsed:.2f}s)")
+        # Overlap is what the fixers observed (both in flight at once), not a wall-clock
+        # bound: sequential is ~1.2s of sleeps and overlapped ~0.6s, and a loaded CI
+        # runner can eat that margin without the steps having stopped overlapping.
+        self.assertEqual(
+            self._concurrent_peak, 2, f"steps did not overlap (peak in flight {self._concurrent_peak})"
+        )
         for name in ("a.txt", "b.txt"):
             self.assertTrue((self.root / name).exists(), f"{name} missing")
 
@@ -2360,6 +2364,13 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         same files concurrently — the torn write the batching gate exists to
         prevent. The executor's claim/release guard makes the second claim a
         no-op that just joins nothing.
+
+        The guarantee is asserted on what ran, not on how long the refusal took:
+        this used to bound the second call at 0.2 s, and on a loaded CI runner
+        that call — one claim check and one SQLite write — measured 0.2018 s.
+        A second driver that really ran the steps re-runs both fixers (four
+        calls, four in flight), and one that waited for the first would return
+        only once the first had.
         """
         self.goals.set_parallel(self.goal.id, True)
         self._script_parallel(delays={"a": 0.35, "b": 0.35})
@@ -2379,16 +2390,20 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
 
         first = asyncio.create_task(_run_steps(app, self.goal.id))  # type: ignore[arg-type]
         await asyncio.sleep(0.05)  # let the first driver claim and enter its wave
-        started = time.monotonic()
-        # second claim: must return promptly, run nothing
+        # second claim: must return while the first driver is still mid-wave, and run nothing
         await _run_steps(app, self.goal.id)  # type: ignore[arg-type]  # noqa: E501
-        second_elapsed = time.monotonic() - started
+        self.assertFalse(
+            first.done(),
+            "the second claim did not return ahead of the first driver: it waited for it, or ran the steps",
+        )
         await first
 
-        self.assertLess(
-            second_elapsed, 0.2,
-            f"second driver ran steps instead of yielding ({second_elapsed:.2f}s)",
+        fixer_calls = [role for role, _prompt in self.provider.calls if role == "fixer"]
+        self.assertEqual(
+            len(fixer_calls), 2,
+            f"each step must run once, the second driver ran steps too ({len(fixer_calls)} fixer calls)",
         )
+        self.assertEqual(self._concurrent_peak, 2, "a second driver put more fixers in flight")
         self.assertEqual(self.goals.get(self.goal.id).status, "COMPLETED")
         self.assertFalse(self.executor._drivers, "driver claim leaked after completion")
 
