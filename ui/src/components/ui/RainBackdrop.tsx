@@ -57,7 +57,14 @@ export const RainBackdrop: React.FC<RainBackdropProps> = ({ active }) => {
   const rains = Boolean(theme.tokens["--cmatrix-rain"]);
   if (!rains) return null;
   return (
-    <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+    // `data-backdrop` and `data-active`: which layer this is, and whether the shell told it the
+    // agent is working. Same attributes as `WeatherBackdrop`, for the same reason.
+    <div
+      aria-hidden="true"
+      data-backdrop="rain"
+      data-active={active ? "true" : "false"}
+      className="pointer-events-none absolute inset-0 z-0 overflow-hidden"
+    >
       {/* 1024 rather than the hero's 720: the cap is on the longer edge in CSS
           pixels and this box is now the window, not a column, so the old cap
           would stretch a 1920px span from a 1440px canvas and the glyphs would
