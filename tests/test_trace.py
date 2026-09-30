@@ -561,7 +561,9 @@ class TraceToggleCase(unittest.TestCase):
     def test_an_unknown_goal_is_a_404(self) -> None:
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
-        goals = GoalService(connect(Path(temp_dir.name) / "t.db"))
+        conn = connect(Path(temp_dir.name) / "t.db")
+        self.addCleanup(conn.close)  # after the directory's cleanup, so it runs first
+        goals = GoalService(conn)
         with self.assertRaises(ApiError) as ctx:
             goals.set_trace("no-such-goal", True)
         self.assertEqual(ctx.exception.status, 404)

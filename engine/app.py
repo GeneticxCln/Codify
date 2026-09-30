@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import FrameType
-from typing import Any
+from typing import Any, TypeVar
 
 from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -760,7 +760,7 @@ async def agent_call_stats(request: Request, limit: int = Query(20, ge=1, le=100
     # for an unused role reads as unknown rather than as broken.
     try:
         measured = await _sweep_metrics(conn)
-        outcomes = role_success_rate(measured, now=time.time())
+        outcomes = await asyncio.to_thread(role_success_rate, measured, now=time.time())
     except Exception:
         outcomes = {}
     for role in ROLES:
@@ -1791,10 +1791,8 @@ async def get_goal_audit(goal_id: str, request: Request) -> dict[str, Any]:
     }
 
 
-async def _sweep_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The raw material the stats views aggregate: goal rows and parsed call
-    events. One loader for both the live overview and the snapshot writer, so
-    the two can never read different worlds."""
+def _load_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The synchronous read behind `_sweep_stats`; it runs on a worker thread, never the loop's."""
     goal_rows = conn.execute(
         "SELECT id, status, created_at, updated_at FROM goals ORDER BY created_at DESC LIMIT 5000"
     ).fetchall()
@@ -1811,6 +1809,53 @@ async def _sweep_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], 
             continue
         parsed.append({"type": row["type"], "payload": payload, "timestamp": row["timestamp"]})
     return [dict(r) for r in goal_rows], parsed
+
+
+async def _sweep_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The raw material the stats views aggregate: goal rows and parsed call
+    events. One loader for both the live overview and the snapshot writer, so
+    the two can never read different worlds."""
+    return await _read_off_the_loop(conn, _load_stats)
+
+
+_T = TypeVar("_T")
+
+
+def _store_file(conn: sqlite3.Connection) -> str | None:
+    """The file behind `conn`, or None for a store that is not one (an in-memory database)."""
+    for row in conn.execute("PRAGMA database_list"):
+        if row["name"] == "main":
+            return str(row["file"]) or None
+    return None
+
+
+async def _read_off_the_loop(conn: sqlite3.Connection, load: Callable[[sqlite3.Connection], _T]) -> _T:
+    """Run a read on a worker thread, over a second connection that can only read.
+
+    A stats sweep is a query, a JSON parse of up to 20,000 rows and some arithmetic, about 145 ms at the
+    cap (`docs/03` §3 4.3), and on the loop's own thread that is 145 ms in which nothing else runs: every
+    goal streaming at the moment stalls with it. The engine's connection stays where it is, because it
+    is the writer and its transactions are the loop's business; WAL lets a second connection read while
+    it writes, and `query_only` makes "read" a fact about the connection rather than a habit of the
+    caller. It is opened inside the worker and closed there, so nothing is left for a garbage collector
+    to find (Python 3.13 warns about a connection it has to close for you).
+
+    A store with no file cannot be opened twice, so it is read where it is, on the caller's thread.
+    """
+    path = _store_file(conn)
+    if path is None:
+        return load(conn)
+
+    def run() -> _T:
+        reader = sqlite3.connect(path, check_same_thread=False, timeout=30.0)
+        try:
+            reader.row_factory = sqlite3.Row
+            reader.execute("PRAGMA query_only = ON")
+            return load(reader)
+        finally:
+            reader.close()
+
+    return await asyncio.to_thread(run)
 
 
 # The event types the stage/role metrics are computed from. A separate loader
@@ -1846,14 +1891,8 @@ def _metric_sweep_sql() -> str:
             ) ORDER BY timestamp, sequence"""  # noqa: S608 — placeholders and a module constant only
 
 
-async def _sweep_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Every measurement event, with the ids recovery counting needs.
-
-    `goal_id`/`step_id` are included because "did the retry get the step past
-    its failure" is a question about one step of one goal; the per-goal
-    aggregation that answers it cannot group on a list that has thrown the ids
-    away.
-    """
+def _load_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """The synchronous read behind `_sweep_metrics`; it runs on a worker thread, never the loop's."""
     rows = conn.execute(_metric_sweep_sql(), _METRIC_EVENT_TYPES).fetchall()
     parsed = []
     for row in rows:
@@ -1870,6 +1909,17 @@ async def _sweep_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             "sequence": row["sequence"],
         })
     return parsed
+
+
+async def _sweep_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every measurement event, with the ids recovery counting needs.
+
+    `goal_id`/`step_id` are included because "did the retry get the step past
+    its failure" is a question about one step of one goal; the per-goal
+    aggregation that answers it cannot group on a list that has thrown the ids
+    away.
+    """
+    return await _read_off_the_loop(conn, _load_metrics)
 
 
 @app.get("/stats/overview")
@@ -1931,7 +1981,7 @@ async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, 
         pass
 
     window_days = normalize_window(window)
-    overview = build_overview(goals, parsed, window_days=window_days, now=now)
+    overview = await asyncio.to_thread(build_overview, goals, parsed, window_days=window_days, now=now)
     # The per-stage and per-role view (docs/04 §4.7). Read from a second sweep
     # over the measurement events, and failing that read is not allowed to take
     # the overview down with it: the goal-level numbers above are the ones
@@ -1939,8 +1989,8 @@ async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, 
     # view rather than remove the other.
     try:
         measured = await _sweep_metrics(conn)
-        stages = stage_costs(measured, window_days, now=now)
-        roles = role_success_rate(measured, window_days, now=now)
+        stages = await asyncio.to_thread(stage_costs, measured, window_days, now=now)
+        roles = await asyncio.to_thread(role_success_rate, measured, window_days, now=now)
     except Exception:
         stages, roles = [], {}
     return {
@@ -1969,8 +2019,9 @@ async def stats_failures(request: Request, window: int = Query(0)) -> dict[str, 
     window_days = normalize_window(window)
     now = time.time()
     events = await _sweep_metrics(conn)
+    breakdown = await asyncio.to_thread(failure_breakdown, events, window_days, now=now)
     return {
-        **failure_breakdown(events, window_days, now=now),
+        **breakdown,
         "window_days": window_days,
         "generated_at": now,
     }

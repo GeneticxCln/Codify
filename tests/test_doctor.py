@@ -14,6 +14,7 @@ present a machine without `cargo` even when the developer running the suite has 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,7 @@ from pathlib import Path
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "doctor.sh"
+SCRIPTS = SCRIPT.parent
 
 # Each stub answers the few questions the doctor asks and nothing else.
 STUBS: dict[str, str] = {
@@ -51,6 +53,21 @@ class DoctorCase(unittest.TestCase):
         self.bin.mkdir()
         for name, body in STUBS.items():
             self.install(name, body)
+        # A checkout of its own, so the answer never depends on whether the developer running
+        # the suite has a `.venv` of their own, or how current it is. The script finds its
+        # checkout from where it lives, so a copy of it *is* a different checkout.
+        self.root = Path(self.tmp.name) / "checkout"
+        (self.root / "scripts").mkdir(parents=True)
+        for name in ("doctor.sh", "venv_gaps.py"):
+            shutil.copy2(SCRIPTS / name, self.root / "scripts" / name)
+        (self.root / "pyproject.toml").write_text('dependencies = [\n    "httpx",\n]\n', encoding="utf-8")
+
+    def make_venv(self, body: str | None = None) -> None:
+        """A `.venv` whose interpreter is the real one, so `venv_gaps.py` really runs in it."""
+        python = self.root / ".venv" / "bin" / "python3"
+        python.parent.mkdir(parents=True)
+        python.write_text(body or f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+        python.chmod(0o755)
 
     def install(self, name: str, body: str) -> None:
         path = self.bin / name
@@ -66,7 +83,7 @@ class DoctorCase(unittest.TestCase):
         base["DOCTOR_TOOL_PATH"] = str(self.bin)
         base.update(env)
         return subprocess.run(
-            [str(SCRIPT)], env=base, capture_output=True, text=True, timeout=60,
+            [str(self.root / "scripts" / "doctor.sh")], env=base, capture_output=True, text=True, timeout=60,
         )
 
 
@@ -157,6 +174,70 @@ class TestEveryMissingPieceIsNamedAndFixable(DoctorCase):
         self.assertEqual(1, done.returncode)
         self.assertIn("cargo/rustc not installed", done.stdout)
         self.assertIn("git is not installed", done.stdout)
+
+
+class TestTheCheckoutsVirtualEnvironment(DoctorCase):
+    """The machine being ready and this checkout's `.venv` being current are different questions.
+
+    A `.venv` made before `httpx2` joined the `dev` extra kept working and kept warning on every
+    run of the suite, and nothing said `make setup` would fix it.
+    """
+
+    def test_no_venv_is_not_a_problem_and_is_said(self) -> None:
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertIn("no .venv in this checkout", done.stdout)
+
+    def test_a_venv_with_everything_declared_is_fine(self) -> None:
+        self.make_venv()
+
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertIn("ok       .venv has every dependency pyproject.toml declares", done.stdout)
+
+    def test_a_venv_missing_a_declared_dependency_names_it_and_says_make_setup(self) -> None:
+        self.make_venv()
+        (self.root / "pyproject.toml").write_text(
+            'dependencies = [\n    "httpx",\n]\n'
+            '[project.optional-dependencies]\ndev = [\n    "no-such-distribution-anywhere-xyz>=1",\n]\n',
+            encoding="utf-8",
+        )
+
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertEqual(1, done.returncode, done.stdout)
+        self.assertIn("MISSING  .venv is missing: no-such-distribution-anywhere-xyz", done.stdout)
+        self.assertIn("make setup", done.stdout)
+
+    def test_every_missing_name_is_listed_not_only_the_first(self) -> None:
+        self.make_venv()
+        (self.root / "pyproject.toml").write_text(
+            'dependencies = [\n    "absent-one-xyz",\n    "httpx",\n    "absent-two-xyz",\n]\n', encoding="utf-8",
+        )
+
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertIn("absent-one-xyz, absent-two-xyz", done.stdout)
+
+    def test_a_venv_whose_interpreter_will_not_run_is_reported(self) -> None:
+        self.make_venv("#!/bin/sh\nexit 127\n")
+
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertEqual(1, done.returncode, done.stdout)
+        self.assertIn("MISSING  .venv could not be checked", done.stdout)
+        self.assertIn("make setup", done.stdout)
+
+    def test_a_pyproject_the_check_cannot_read_is_not_a_pass(self) -> None:
+        self.make_venv()
+        (self.root / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertEqual(1, done.returncode, done.stdout)
+        self.assertIn(".venv could not be checked", done.stdout)
 
 
 class TestItIsWired(unittest.TestCase):

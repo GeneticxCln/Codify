@@ -14,9 +14,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from engine.db import connect
-from engine.stats_history import StatsSnapshotService, utc_day
+from engine import stats_history
+from engine.stats_history import StatsSnapshotService, active_days, utc_day
 from typing import Any
 
 # A day/hour clock anchored at 00:30 UTC so `at(n, h)` provably stays inside
@@ -138,6 +140,56 @@ class TestMaybeSnapshot(StatsHistoryTestCase):
         # Each fixture spans two UTC days, so backfill freezes both active days
         # per call — four rows, and no zeroed row for the gap in between.
         self.assertEqual(len(self.snap.list_days()), 4)
+
+
+class TestFindingTheActiveDays(StatsHistoryTestCase):
+    """`maybe_snapshot` runs on every stats read and used to format a date for every event it was handed.
+
+    Up to 20,000 events, a `datetime` and a `strftime` each, on the event loop, on every call — 40 to 100 ms
+    measured at the cap, on reads where every past day was already frozen and there was nothing to do. Found
+    while moving the stats routes off the loop (`docs/03` §3 4.3), whose remaining stall it was.
+    """
+
+    def test_a_read_with_nothing_to_freeze_formats_a_date_per_day_not_per_event(self) -> None:
+        goals = [goal("COMPLETED", at(0, 2))]
+        events = [usage_ev(at(0, 3 + i % 20)) for i in range(5000)] + [usage_ev(at(1, 5))]
+        self.snap.maybe_snapshot(self.conn, goals, events, now=at(2, 8))  # freezes days 0 and 1
+        calls = 0
+        real = stats_history.utc_day
+
+        def counting(ts: float) -> str:
+            nonlocal calls
+            calls += 1
+            return real(ts)
+
+        with patch.object(stats_history, "utc_day", counting):
+            again = self.snap.maybe_snapshot(self.conn, goals, events, now=at(2, 20))
+
+        self.assertIsNone(again, "everything was already frozen")
+        self.assertLessEqual(calls, 10, f"{calls} dates were formatted for 5,001 events on two days")
+
+    def test_the_days_are_the_ones_reading_every_timestamp_would_find(self) -> None:
+        # Midnights, the milliseconds either side of them, the epoch, a missing stamp and one before it.
+        stamps = [0.0, 86399.999, 86400.0, 86400.001, -1.0, -86400.0, -86400.001, at(0, 0), at(0, 23),
+                  at(1, 0), at(1, 23), at(400, 11)]
+        goals = [goal("COMPLETED", ts) for ts in stamps[:6]]
+        events: list[dict[str, Any]] = [usage_ev(ts) for ts in stamps[6:]]
+        events.append({"type": "usage", "timestamp": None, "payload": {}})
+
+        found = active_days(goals, events)
+
+        expected = sorted({utc_day(g["created_at"]) for g in goals}
+                          | {utc_day(e["timestamp"] or 0.0) for e in events})
+        self.assertEqual(expected, found)
+
+    def test_a_goal_is_placed_by_when_it_was_last_touched(self) -> None:
+        # `updated_at` wins over `created_at`, and a goal with neither is on the epoch's day.
+        goals: list[dict[str, Any]] = [
+            {"id": "a", "status": "COMPLETED", "created_at": at(0, 2), "updated_at": at(3, 2)},
+            {"id": "b", "status": "COMPLETED", "created_at": None, "updated_at": None},
+        ]
+
+        self.assertEqual(sorted({utc_day(at(3, 2)), utc_day(0.0)}), active_days(goals, []))
 
 
 class TestHistory(StatsHistoryTestCase):

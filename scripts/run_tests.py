@@ -32,6 +32,9 @@ import sys
 # ("OK (skipped=1)", "FAILED (failures=1, errors=2)").
 _SUMMARY = re.compile(r"^Ran \d+ tests? in ", re.MULTILINE)
 _VERDICT = re.compile(r"^(OK|FAILED)\b", re.MULTILINE)
+# Python 3.13 warns when a sqlite3 connection is garbage-collected still open, and unittest prints it
+# into the scrollback of a run that goes on to say OK. Nothing older says it at all.
+_LEAKED_CONNECTION = re.compile(r"ResourceWarning: unclosed database in <sqlite3\.Connection", re.MULTILINE)
 
 
 def completed(output: str) -> bool:
@@ -42,6 +45,17 @@ def completed(output: str) -> bool:
     the count would pass the first, which is the case this whole file exists for.
     """
     return bool(_SUMMARY.search(output) and _VERDICT.search(output))
+
+
+def leaked_connections(output: str) -> int:
+    """How many database connections the run left open for the garbage collector to find.
+
+    Only connections: other `ResourceWarning`s (a file, a socket) are real too, but they are not what
+    this guards, and turning every one of them into a failure would make the guard something people
+    route around. A leaked connection is the one this repository has had, and the one that survives
+    a green run unseen.
+    """
+    return len(_LEAKED_CONNECTION.findall(output))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -70,6 +84,18 @@ def main(argv: list[str] | None = None) -> int:
             "  tests after the cut never ran. Look for a code path calling\n"
             "  engine.watchdog.hard_exit, or anything that signals its own\n"
             "  process group.\n"
+        )
+        return 1
+
+    leaks = leaked_connections(output)
+    if proc.returncode == 0 and leaks:
+        sys.stderr.write(
+            "\n"
+            f"FATAL: {leaks} database connection(s) were garbage-collected while still open.\n"
+            "  The tests passed, and that is not the same as clean: a connection that a test\n"
+            "  opened and nothing closed is a leak, and Python 3.13+ reports it as a\n"
+            "  'ResourceWarning: unclosed database' line earlier in this output. Find the\n"
+            "  test that opened it (its setUp or a helper) and close it in its teardown.\n"
         )
         return 1
     return proc.returncode

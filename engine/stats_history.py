@@ -39,6 +39,23 @@ def utc_day(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
+_SECONDS_PER_DAY = 86400.0
+
+
+def active_days(goals: list[dict[str, Any]], events: list[dict[str, Any]]) -> list[str]:
+    """The UTC days any goal or event falls on, oldest first.
+
+    Timestamps are put into whole-day buckets *before* a date is formatted, so the cost is one division per
+    record and one `utc_day` per distinct day, not one `datetime` and one `strftime` per record. This runs on
+    every stats read over up to 20,000 events, on reads where every past day is already frozen, and the
+    per-record version measured 40 to 100 ms on the event loop for nothing. POSIX time counts whole days
+    from a UTC midnight, so a bucket and the day `utc_day` names for any moment in it cannot disagree.
+    """
+    buckets = {int((g.get("updated_at") or g.get("created_at") or 0.0) // _SECONDS_PER_DAY) for g in goals}
+    buckets |= {int((e.get("timestamp") or 0.0) // _SECONDS_PER_DAY) for e in events}
+    return sorted({utc_day(bucket * _SECONDS_PER_DAY) for bucket in buckets})
+
+
 class StatsSnapshotService:
     """Freezes one document per UTC day, on the first read after it ends."""
 
@@ -60,13 +77,8 @@ class StatsSnapshotService:
         # Backfill every unfrozen past day with activity, oldest first — the
         # old single-day version froze only latest_activity's day, so two
         # missed days left the older one unfrozen forever.
-        active_days = sorted({
-            utc_day(g.get("updated_at") or g.get("created_at") or 0.0) for g in goals
-        } | {
-            utc_day(e.get("timestamp") or 0.0) for e in events
-        })
         frozen: str | None = None
-        for day in active_days:
+        for day in active_days(goals, events):
             if day >= today:
                 continue
             if self.get_day(day) is not None:

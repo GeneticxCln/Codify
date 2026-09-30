@@ -4,14 +4,10 @@
 into an atomic, verified execution plan, run by specialised subagents under a pre-flight gate, with
 sandboxed commands, scoped git commits and live telemetry.
 
-<p align="center">
-  <img src="docs/demo.gif" alt="The Codify desktop window wearing the OLED CMatrix theme: green rain falling behind the whole app, a project selected, a model discovered from the local provider, and a turn running" width="720">
-</p>
-
 <sub>The app connected to a local engine, wearing the <b>OLED CMatrix</b> theme — one of nineteen,
 seventeen of them with an animated backdrop of their own and two deliberately flat. The clip is a real
 turn: the gate ruled on it, the conductor answered, and the transcript says plainly that no file
-changed. <a href="docs/demo.webm">Full-quality video</a>.</sub>
+changed. <a href="docs/demo.webm">Watch the video</a>.</sub>
 
 Everything below is specified in [`docs/`](docs/00-codify-architecture-overview.md). That set is the
 source of truth; this file is the tour.
