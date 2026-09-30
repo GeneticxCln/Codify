@@ -1334,7 +1334,7 @@ fn apply_display_backend() {
 /// is most of what a smoke test is for, so the smoke exits for real instead.
 ///
 /// Taking the process down with it is safe *here* and only here: smoke mode
-/// never starts an engine (frozen by browser.rs's
+/// never starts an engine (frozen by the browser module's
 /// `the_smoke_mode_is_gated_reports_and_never_starts_the_engine`), so there
 /// is no child to reap and no lease to break, and the harness that drives
 /// this terminates the child on every path out anyway. Both streams are
@@ -1773,7 +1773,7 @@ pub fn run() {
     // The first-paint facts, on the launch log: the session bus the
     // single-instance guard claims, the WebKit sandbox's ability to start a
     // web process, the DMABUF rendering path, the display backend. Diagnosis
-    // only — nothing here changes behaviour (see browser.rs's rationale).
+    // only — nothing here changes behaviour (see the browser module's rationale).
     browser::log_environment_diagnostics();
     let engine_state: SharedEngineState = Arc::new(Mutex::new(EngineState::default()));
     let state_clone = engine_state.clone();

@@ -431,7 +431,7 @@ export function tabsOfKind(state: TabState, kind: TabKind): Tab[] {
  * ## The id is the caller's, and that is the whole contract
  *
  * `browser::open` names the webview window `browser-<tab_id>` and
- * `browser::navigate` looks that label up again (`src-tauri/src/browser.rs`), so
+ * `browser::navigate` looks that label up again (`src-tauri/src/browser/`), so
  * the tab id *is* the shell's handle on that page. This used to mint its own id
  * while the caller separately asked the shell to open a window under a
  * different freshly-minted one — two ids for one page, which meant the first

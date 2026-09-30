@@ -12,7 +12,7 @@
  * never has to ask "am I in the desktop app" itself.
  *
  * The event names and payload shapes here are the other end of
- * `src-tauri/src/browser.rs` and `src-tauri/src/terminal.rs`. Nothing in either
+ * `src-tauri/src/browser/` and `src-tauri/src/terminal.rs`. Nothing in either
  * type system spans the two, so a test on the Rust side reads *this file* and
  * fails if they ever drift — the same "parse the committed file, do not assume"
  * move as the browser capability test.

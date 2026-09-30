@@ -5,7 +5,7 @@
  * `ui/src/browserDispatch.ts` classifies an address *before* the round trip,
  * so a refusal lands in the tab the user typed in, in the same frame, and no
  * page is ever seated for an address that cannot load. The shell
- * (`src-tauri/src/browser.rs`) stays the enforcement point — its guard sees
+ * (`src-tauri/src/browser/`) stays the enforcement point — its guard sees
  * every navigation a page attempts, redirects included — which makes this
  * module a *mirror*, not a second guard, and a mirror that disagreed with the
  * original would be worse than no mirror: stricter, and addresses that work
@@ -16,7 +16,7 @@
  *
  * - everything this module refuses, the shell's guard must refuse too
  *   (asserted from Rust, in
- *   `browser.rs::the_ui_dispatch_mirror_agrees_with_the_navigation_guard`,
+ *   `browser::tests::the_ui_dispatch_mirror_agrees_with_the_navigation_guard`,
  *   which reads this file's tables and runs them through
  *   `navigation_allowed`);
  * - everything this module allows, the shell's guard must allow too

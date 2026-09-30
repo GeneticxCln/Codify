@@ -23,7 +23,7 @@ test("the shell's own prose says the page is in the window, not beside it", () =
   //
   // It happened: two comments in `App.tsx` still described the page as a
   // separate OS window, and `docs/09` §7.2's command list still named the
-  // system-browser hand-off that was deleted, after `browser.rs` had stopped
+  // system-browser hand-off that was deleted, after the browser module had stopped
   // building one and a test was failing if it did. Nothing about the running
   // app was wrong. Everything a reader would conclude from it was.
   const app = readFileSync(
@@ -42,7 +42,7 @@ test("the shell's own prose says the page is in the window, not beside it", () =
     app,
     /child\s+webview/,
     "App.tsx no longer says the page is a child webview of this window — the \
-     shape the shell actually builds (browser.rs: Window::add_child) should be \
+     shape the shell actually builds (browser/mod.rs: Window::add_child) should be \
      the shape the comment claims"
   );
   assert.match(

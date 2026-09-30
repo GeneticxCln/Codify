@@ -7,7 +7,7 @@
 //!
 //! # Why the document title is not the channel
 //!
-//! `browser.rs`'s smoke probe reports through `document.title`, and that is
+//! `browser/smoke.rs`'s probe reports through `document.title`, and that is
 //! the one channel a page with an empty capability set is *guaranteed* to
 //! have: it needs no permission at all. It is also destructive — it renames
 //! the tab — and the probe is deliberately confined to a throwaway webview
@@ -986,7 +986,7 @@ const SMOKE_BRIDGE_DELAY: Duration = Duration::from_millis(1_500);
 ///
 /// This is the one place the bridge is driven **without** the engine, and that
 /// is a deliberate limit rather than a shortcut: smoke mode never starts an
-/// engine (see `browser.rs`'s
+/// engine (see the browser module's
 /// `the_smoke_mode_is_gated_reports_and_never_starts_the_engine`), so there is
 /// no `/bridge/next` to poll and nothing to hand out the question. The
 /// request is therefore constructed here and passed to the same [`serve`] the
@@ -1429,7 +1429,7 @@ mod tests {
         // The pair that matters, and the failure mode is quiet: a drifted
         // prefix prints every answer and reads none, which is indistinguishable
         // from a page that refused to answer. Same reasoning, and the same
-        // defence, as `browser.rs`'s probe-prefix test.
+        // defence, as the browser module's probe-prefix test.
         let reader = include_str!("../../scripts/embed_smoke.py");
         assert!(
             reader.contains(SMOKE_BRIDGE_LINE),

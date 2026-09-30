@@ -379,7 +379,7 @@ class TestNavigation(BridgeTestCase):
     """The model proposes an address; the shell's guard decides.
 
     Everything here is about *not* deciding anything in Python. The loopback
-    rule lives in `browser.rs` and runs on the URL that arrives in the shell,
+    rule lives in `browser/mod.rs` and runs on the URL that arrives in the shell,
     through the same `browser::navigate` a user's click calls. These tests
     cover the parts that are legitimately the engine's — refusing nonsense
     locally, carrying the URL faithfully, and not answering with anything a

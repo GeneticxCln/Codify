@@ -23,7 +23,7 @@ tauri-build = { version = "2", features = [] }
 # (capabilities/browser.json) and the ACL manifest in permissions/shell.json.
 #
 # `devtools` keeps the inspector available in release builds; without it,
-# open_devtools compiles away and the UI hides its control (browser.rs's
+# open_devtools compiles away and the UI hides its control (the browser module's
 # devtools_available). Debug builds have it regardless.
 tauri = { version = "2", features = ["unstable", "devtools"] }
 
@@ -34,7 +34,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # There is no `open` crate here, and there is not meant to be one: it exists to
 # hand a URL to the OS's own browser, and every website Codify can open is a
-# tab in Codify. `browser.rs::the_only_escape_is_the_inspector_and_the_module_spawns_nothing`
+# tab in Codify. `browser::tests::the_only_escape_is_the_inspector_and_the_module_spawns_nothing`
 # fails the build if the crate or the hand-off comes back, and it says why in
 # the failure rather than in a comment nobody reads before `cargo add`.
 # Only what lib.rs names: `process` for the engine subprocess, `io-util` for the
