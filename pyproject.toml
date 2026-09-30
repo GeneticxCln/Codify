@@ -207,6 +207,14 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 #       are the ones being compacted. It moved here from engine/executor.py with the code. Scoped to
 #       that one file.
 "engine/agent_orchestrator.py" = ["S110"]
+# S110/S608 (engine/executor_core.py)  moved here from engine/executor.py with the code, three sites and one.
+#       S110: `_parallel_width` falls back to the built-in width when the settings store cannot answer (a
+#       width is a tuning value, never worth failing a wave over), and `_fail` has already published the
+#       `error` event by the time it tries to mark the step and the goal FAILED, so a second failure while
+#       recording the first must not replace it or escape the failure handler.
+#       S608: `_set_step` builds its SET clause from `status` and two column names chosen from a literal
+#       tuple, and every value travels as a bound parameter. Scoped to that one file.
+"engine/executor_core.py" = ["S110", "S608"]
 "engine/executor.py" = ["S101", "S110", "S608"]
 # S108 (engine/fs.py)  `SYSTEM_ROOTS` names `/tmp` and `/var/tmp` as directories a workspace must
 #       never be. They are paths to *refuse*: nothing here creates, opens or writes a file at
