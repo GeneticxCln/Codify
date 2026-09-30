@@ -483,19 +483,26 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
 
         started: list[tuple[()]] = []
         bound: list[int] = []
+        # Which address each socket uvicorn was handed is bound to, and which `host` the config it was built
+        # from names. Kept on the test rather than returned, so the callers that want the port are unchanged.
+        self.boot_socket_hosts: list[str] = []
+        self.boot_config_hosts: list[str] = []
+        self_outer = self
 
         class FakeServer:
             def __init__(self, config: Any) -> None:
                 self.config = config
+                self_outer.boot_config_hosts.append(str(getattr(config, "host", None)))
 
             def run(self, sockets: Any = None) -> None:
                 started.append(tuple(sockets or ()))
                 for s in sockets or ():
                     bound.append(int(s.getsockname()[1]))
+                    self_outer.boot_socket_hosts.append(str(s.getsockname()[0]))
                     s.close()
 
         fake_uvicorn = _stub_module(
-            "uvicorn", Config=lambda *a, **k: types.SimpleNamespace(), Server=FakeServer
+            "uvicorn", Config=lambda *a, **k: types.SimpleNamespace(**k), Server=FakeServer
         )
 
         out, err = io.StringIO(), io.StringIO()
@@ -539,6 +546,20 @@ class TestIsolatedRunsCannotTouchTheRealStore(_EnvCase):
         self.assertEqual(bound, [port], "the announced port is the port that was bound")
         self.assertEqual(len(started), 1, "the server is still started")
         self.assertEqual(len(started[0]), 1, "uvicorn is handed the pre-bound socket")
+
+    def test_the_engine_listens_on_loopback_and_nowhere_else(self) -> None:
+        """docs/00 section 6.3: the engine binds 127.0.0.1.
+
+        The socket is what uvicorn serves, so it is the socket's own address that decides who can connect:
+        `0.0.0.0` there puts the engine, and the boot token's only protection, on every interface the machine
+        has. The config's `host` is asserted as well. uvicorn ignores it while it is handed a socket, which is
+        exactly why it would be easy to change without anything noticing, and why a later change that stops
+        passing the socket would otherwise start listening wherever it said.
+        """
+        self._boot_with_stubbed_uvicorn(_free_port())
+
+        self.assertEqual(["127.0.0.1"], self.boot_socket_hosts)
+        self.assertEqual(["127.0.0.1"], self.boot_config_hosts)
 
     def test_the_boot_notice_survives_a_live_engine_on_the_default_port(self) -> None:
         """`make check` has to work with the app open.

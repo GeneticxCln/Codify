@@ -13,13 +13,16 @@ configuration) in the key sweep, and the two routes that act on the outside worl
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 import typing
 import unittest
 import uuid
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import httpx
 from httpx import ASGITransport
@@ -31,7 +34,7 @@ from engine.app import BOOT_TOKEN, app
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.model_catalog import ModelCatalogService
-from engine.models import ROLES, AgentRole
+from engine.models import ROLES, AgentRole, TurnCreate
 from engine.providers import Keychain, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.services import (
@@ -45,6 +48,36 @@ from engine.stats_history import StatsSnapshotService
 from engine.stats_import import StatsImportService
 
 EIGHT = ["laya", "librarian", "design", "planner", "fixer", "verifier", "critic", "scribe"]
+
+# The three routes docs/00 section 6.2 names as the only writers of agent configuration.
+SETTINGS_WRITERS = {
+    ("PUT", "/settings/agents/{role}"),
+    ("POST", "/settings/agents/repair"),
+    ("PUT", "/settings/engine"),
+}
+# The one route that may create a turn (docs/00 section 6.8).
+TURN_ROUTE = ("POST", "/conversations/{conversation_id}/turns")
+# Routes a sweep cannot drive from a test, each with the reason; neither takes or stores configuration, and
+# neither creates a goal.
+ACTS_OUTSIDE = {
+    ("POST", "/workspaces/browse"): "opens the desktop folder dialog",
+    ("POST", "/settings/agents/{role}/test-connection"): "calls the role's provider over the network; it reads "
+    "the configuration and has no write to make",
+}
+# Bodies made of the fields a route really has, so that the handler, where a writer would be, is reached: an
+# unknown field is a 422 before it. A goal and a turn both take the command bar's `provider` and `model`, which
+# were once described as seeded onto roles; a goal may name the thread it joins. A value written `{name}` is
+# replaced by the id of the thing the sweep created.
+LEGITIMATE_BODIES: dict[tuple[str, str], dict[str, Any]] = {
+    ("POST", "/goals"): {
+        "workspace_id": "{workspace_id}",
+        "conversation_id": "{conversation_id}",
+        "title": "t",
+        "provider": "evil",
+        "model": "evil",
+    },
+    TURN_ROUTE: {"prompt": "hello", "provider": "evil", "model": "evil"},
+}
 
 
 class BoundaryCase(unittest.IsolatedAsyncioTestCase):
@@ -112,6 +145,58 @@ class BoundaryCase(unittest.IsolatedAsyncioTestCase):
         )).json()
         return {"workspace_id": ws["id"], "goal_id": goal["id"], "conversation_id": thread["id"]}
 
+    async def sweep(
+        self, observe: Callable[[], Any], skip: Collection[tuple[str, str]] = ()
+    ) -> tuple[list[tuple[tuple[str, str], Any, Any]], int]:
+        """Call every route that writes, with hostile bodies and with bodies made of the route's own fields.
+
+        Returns, for each call, the route and what `observe()` read just before and just after it, and how
+        many calls were accepted. The hostile body carries every field a client might use to reach a write it
+        should not have: a smuggled `agent_config`, a model to seed, the flags that shape a run, `mode: chat`.
+        Routes are addressed with ids of things that exist, deletes come last, and what `skip` names is left out.
+        """
+        ids = await self.workspace_goal_and_thread()
+        ids.update(step_id="x", key="x", role="fixer")
+        hostile = {
+            "agent_config": {"fixer": {"model_name": "evil"}},
+            "config": {"model_name": "evil"},
+            "provider": "evil",
+            "model": "evil",
+            "model_name": "evil",
+            "conductor_model": "evil",
+            "expected_version": 0,
+            "prompt": "hello",
+            "title": "t",
+            "workspace_id": ids["workspace_id"],
+            "conversation_id": ids["conversation_id"],
+            "mode": "chat",
+            "dry_run": True,
+            "plan_only": True,
+            "parallel": True,
+            "enabled": True,
+        }
+        calls: list[tuple[tuple[str, str], Any, Any]] = []
+        accepted = 0
+        writing = sorted(
+            ((m, p) for m, p in routes() if m in ("POST", "PUT", "PATCH", "DELETE") and (m, p) not in skip),
+            key=lambda mp: mp[0] == "DELETE",
+        )
+        for key in writing:
+            method, template = key
+            path = re.sub(r"\{([^}]+)\}", lambda m: ids.get(m.group(1), "x"), template)
+            bodies = [hostile]
+            if key in LEGITIMATE_BODIES:
+                bodies.append({
+                    field: ids[value[1:-1]] if isinstance(value, str) and value.startswith("{") else value
+                    for field, value in LEGITIMATE_BODIES[key].items()
+                })
+            for body in bodies:
+                before = observe()
+                r = await self.client.request(method, path, headers=self.headers, json=body)
+                accepted += r.status_code < 300
+                calls.append((key, before, observe()))
+        return calls, accepted
+
 
 def routes() -> list[tuple[str, str]]:
     """Every (method, path template) the engine registers over HTTP."""
@@ -173,28 +258,6 @@ class TestEightRolesAndNoOthers(BoundaryCase):
 
 # --- 2. only the settings routes write agent configuration ---------------------------------------------------
 
-# The three routes docs/00 section 6.2 names as the only writers.
-SETTINGS_WRITERS = {
-    ("PUT", "/settings/agents/{role}"),
-    ("POST", "/settings/agents/repair"),
-    ("PUT", "/settings/engine"),
-}
-# Routes the sweep cannot drive from a test, each with the reason; neither takes or stores configuration.
-ACTS_OUTSIDE = {
-    ("POST", "/workspaces/browse"): "opens the desktop folder dialog",
-    ("POST", "/settings/agents/{role}/test-connection"): "calls the role's provider over the network; it reads "
-    "the configuration and has no write to make",
-}
-# The bodies that could carry a config write in through a field the route really has: a goal and a turn both
-# take the command bar's `provider` and `model`, and once were described as seeding them onto roles.
-# A value written `{name}` is replaced by the id of the thing the sweep created; a route must be sent exactly the
-# fields it has, because an unknown one is a 422 and the handler, where a writer would be, is never reached.
-LEGITIMATE_BODIES: dict[tuple[str, str], dict[str, Any]] = {
-    ("POST", "/goals"): {"workspace_id": "{workspace_id}", "title": "t", "provider": "evil", "model": "evil"},
-    ("POST", "/conversations/{conversation_id}/turns"): {"prompt": "hello", "provider": "evil", "model": "evil"},
-}
-
-
 class TestAgentConfigHasOnlyTheSettingsWriters(BoundaryCase):
     """docs/00 section 6.2: configuration is written by the settings routes, never by a goal or a turn."""
 
@@ -202,49 +265,12 @@ class TestAgentConfigHasOnlyTheSettingsWriters(BoundaryCase):
         return self.rows("agent_configs"), self.rows("engine_settings")
 
     async def test_no_other_route_changes_it_however_it_is_called(self) -> None:
-        ids = await self.workspace_goal_and_thread()
-        ids.update(step_id="x", key="x", role="fixer")
-        hostile = {
-            "agent_config": {"fixer": {"model_name": "evil"}},
-            "config": {"model_name": "evil"},
-            "provider": "evil",
-            "model": "evil",
-            "model_name": "evil",
-            "conductor_model": "evil",
-            "expected_version": 0,
-            "prompt": "hello",
-            "title": "t",
-            "workspace_id": ids["workspace_id"],
-            "enabled": True,
-        }
-        swept: list[tuple[str, str]] = []
-        accepted = 0
-        # Deletes last, so the things the other routes address still exist when they are called.
-        mutating = sorted(
-            ((m, p) for m, p in routes() if m in ("POST", "PUT", "PATCH", "DELETE")),
-            key=lambda mp: mp[0] == "DELETE",
-        )
-        for method, template in mutating:
-            if (method, template) in SETTINGS_WRITERS:
-                continue
-            if (method, template) in ACTS_OUTSIDE:
-                continue
-            path = re.sub(r"\{([^}]+)\}", lambda m: ids.get(m.group(1), "x"), template)
-            bodies = [hostile]
-            if (method, template) in LEGITIMATE_BODIES:
-                bodies.append({
-                    field: ids[value[1:-1]] if isinstance(value, str) and value.startswith("{") else value
-                    for field, value in LEGITIMATE_BODIES[(method, template)].items()
-                })
-            for body in bodies:
-                with self.subTest(method=method, path=template, body=sorted(body)):
-                    before = self.config_state()
-                    r = await self.client.request(method, path, headers=self.headers, json=body)
-                    accepted += r.status_code < 300
-                    self.assertEqual(before, self.config_state(), f"{method} {template} changed agent configuration")
-            swept.append((method, template))
+        calls, accepted = await self.sweep(self.config_state, skip=SETTINGS_WRITERS | set(ACTS_OUTSIDE))
 
-        self.assertGreater(len(swept), 20, "the sweep found almost no writing routes; is it reading app.routes?")
+        for key, before, after in calls:
+            with self.subTest(method=key[0], path=key[1]):
+                self.assertEqual(before, after, f"{key[0]} {key[1]} changed agent configuration")
+        self.assertGreater(len({key for key, _, _ in calls}), 20, "the sweep found almost no writing routes")
         self.assertGreater(accepted, 3, "no swept request was ever accepted, so the sweep proves little")
         # The names above are real routes: a rename that left a stale exemption would quietly sweep one more
         # route and stop exempting the one that was meant.
@@ -289,6 +315,101 @@ class TestNoResponseCarriesAKey(BoundaryCase):
             if provider_key in text or role_key in text
         ]
         self.assertEqual([], leaks, "a stored key came back in a response")
+
+
+# --- 8. a turn has one door ---------------------------------------------------------------------------------
+
+
+class TestATurnHasOneDoor(BoundaryCase):
+    """docs/00 section 6.8: a turn is created only by `POST /conversations/{id}/turns`."""
+
+    def chat_goals(self) -> int:
+        return int(self.conn.execute("SELECT COUNT(*) FROM goals WHERE mode = 'chat'").fetchone()[0])
+
+    async def test_post_goals_refuses_a_chat_goal_at_the_route_and_creates_nothing(self) -> None:
+        ids = await self.workspace_goal_and_thread()
+        before = self.chat_goals()
+
+        r = await self.client.post(
+            "/goals", headers=self.headers, json={"workspace_id": ids["workspace_id"], "title": "hi", "mode": "chat"},
+        )
+
+        self.assertEqual(422, r.status_code, r.text)
+        self.assertIn("conversations", r.text, "the refusal says where a turn is made")
+        self.assertEqual(before, self.chat_goals())
+
+    async def test_a_turn_body_carries_no_pipeline_flags(self) -> None:
+        ids = await self.workspace_goal_and_thread()
+        before = self.chat_goals()
+
+        for field, value in (
+            ("mode", "design"),
+            ("mode", "normal"),
+            ("dry_run", True),
+            ("plan_only", True),
+            ("parallel", True),
+            ("workspace_id", ids["workspace_id"]),
+        ):
+            with self.subTest(field=field, value=value):
+                r = await self.client.post(
+                    f"/conversations/{ids['conversation_id']}/turns",
+                    headers=self.headers,
+                    json={"prompt": "hi", field: value},
+                )
+                self.assertEqual(422, r.status_code, r.text)
+
+        self.assertEqual(before, self.chat_goals())
+        self.assertEqual({"prompt", "provider", "model", "trace"}, set(TurnCreate.model_fields))
+
+    async def test_no_route_but_the_turn_route_creates_a_turn(self) -> None:
+        calls, _ = await self.sweep(self.chat_goals, skip=set(ACTS_OUTSIDE))
+
+        created = {key for key, before, after in calls if after > before}
+
+        self.assertEqual({TURN_ROUTE}, created, "the turn route makes a turn, and nothing else does")
+
+
+# --- 7. one database file ------------------------------------------------------------------------------------
+
+
+class TestOneDatabaseFile(unittest.TestCase):
+    """docs/00 section 6.7: a single SQLite file, `~/.codify/codify.db`; there is no `agents.db`."""
+
+    def test_a_running_engine_keeps_everything_it_stores_in_one_database(self) -> None:
+        from starlette.testclient import TestClient
+
+        from engine import home
+
+        with tempfile.TemporaryDirectory() as scratch, mock.patch.dict(
+            os.environ, {home.ENV_HOME: scratch, home.ENV_SECRETS: str(Path(scratch) / "secrets.json")}
+        ):
+            os.environ.pop(home.ENV_DB, None)
+            folder = Path(scratch) / "work"
+            folder.mkdir()
+            with TestClient(app) as client:
+                headers = {"Authorization": f"Bearer {BOOT_TOKEN}"}
+                # What writes: a workspace, a thread, a tab, an engine setting, an agent's configuration.
+                # What opens the store a second time: the statistics routes, which read on their own connection.
+                calls: tuple[tuple[str, str, dict[str, Any] | None], ...] = (
+                    ("POST", "/workspaces", {"name": "W", "root_path": str(folder)}),
+                    ("PUT", "/settings/agents/fixer", {"model_name": "m"}),
+                    ("PUT", "/settings/engine", {}),
+                    ("GET", "/stats/overview", None),
+                    ("GET", "/stats/history", None),
+                    ("GET", "/stats/failures", None),
+                    ("GET", "/goals", None),
+                )
+                statuses = [client.request(m, p, headers=headers, json=b).status_code for m, p, b in calls]
+
+            # Looked for by content, not by name: a second database called anything at all is a second database.
+            databases = sorted(
+                str(p.relative_to(scratch))
+                for p in Path(scratch).rglob("*")
+                if p.is_file() and p.read_bytes()[:16] == b"SQLite format 3\x00"
+            )
+
+        self.assertLess(max(statuses), 500, statuses)
+        self.assertEqual(["codify.db"], databases)
 
 
 if __name__ == "__main__":
