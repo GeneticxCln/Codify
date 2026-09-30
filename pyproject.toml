@@ -215,6 +215,12 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 #       S608: `_set_step` builds its SET clause from `status` and two column names chosen from a literal
 #       tuple, and every value travels as a bound parameter. Scoped to that one file.
 "engine/executor_core.py" = ["S110", "S608"]
+# S101 (engine/executor_steps.py)  `run_step` asserts `summaries is not None` before the review phase: every
+#       path that reaches it assigned them (the fixer loop, the replay branch), and a failure returns
+#       instead of falling through. It guards an internal invariant, and the engine runs as
+#       `python3 -m engine`, so asserts are not stripped: the check is real defence, not dead code. It
+#       moved here from engine/executor.py with the code. Scoped to that one file.
+"engine/executor_steps.py" = ["S101"]
 "engine/executor.py" = ["S101", "S110", "S608"]
 # S108 (engine/fs.py)  `SYSTEM_ROOTS` names `/tmp` and `/var/tmp` as directories a workspace must
 #       never be. They are paths to *refuse*: nothing here creates, opens or writes a file at
