@@ -1116,7 +1116,7 @@ strip could follow. The pane is now a **child webview** of the main window
 (§7.2). A child has no window events of its own — `WebviewEvent` carries
 drag-and-drop and nothing else (checked against tauri 2.11.6) — so the tab strip
 is the only closer, and the event, its handler and its listener are gone with
-the window they announced. Closing goes one way: the strip's button, ⌘W and the
+the window they announced. Closing goes one way: the strip's button, Ctrl+W and the
 pane all reach `codify_browser_close` through `handleCloseTab` (§7.3), the one
 seam, so there are not two ways to orphan a running page.
 
@@ -2062,30 +2062,30 @@ webview. `webview_bridge.rs` explains the rest, including why the script tries
 ## 8. The keyboard layer (built)
 
 `ui/src/shortcuts.ts` maps a keystroke to a shell action, `ui/src/commandPalette.ts`
-holds what ⌘K can find, `ui/src/components/CommandPalette.tsx` renders the
+holds what Ctrl+K can find, `ui/src/components/CommandPalette.tsx` renders the
 overlay, and `App.tsx` dispatches through one capture-phase `window` listener.
 All three logic modules are pure and tested in `ui/tests/` (`shortcuts.test.ts`,
 `commandPalette.test.ts`), for the reason `tabs.ts` is: the mapping is a table
-of decisions — AltGr, shifted digits, what ⌘9 means — that markup cannot show.
+of decisions — AltGr, shifted digits, what Ctrl+9 means — that markup cannot show.
 
 | Keystroke | Acts as |
 |---|---|
-| ⌘/Ctrl+T | New Tab — a clean, empty tab in the selected project, the same act as the header's New Tab button |
-| ⌘/Ctrl+W | Close the active tab, landing on the left neighbour (§4 arithmetic) |
-| ⌘/Ctrl+1..8 | Focus the tab in that strip position |
-| ⌘/Ctrl+9 | Focus the **last** tab — the browser convention, so a strip past nine stays reachable at its end |
-| ⌘/Ctrl+K | Command palette: open tabs, every conversation in this workspace, and both settings destinations (`Provider keys & endpoints`, `Agent roles & prompts`), token-filtered with title-prefix hits ranked first |
+| Ctrl+T | New Tab — a clean, empty tab in the selected project, the same act as the header's New Tab button |
+| Ctrl+W | Close the active tab, landing on the left neighbour (§4 arithmetic) |
+| Ctrl+1..8 | Focus the tab in that strip position |
+| Ctrl+9 | Focus the **last** tab — the browser convention, so a strip past nine stays reachable at its end |
+| Ctrl+K | Command palette: open tabs, every conversation in this workspace, and both settings destinations (`Provider keys & endpoints`, `Agent roles & prompts`), token-filtered with title-prefix hits ranked first |
 
 Decisions, and why:
 
-- **The modifier is Cmd *or* Ctrl, either** — one rule, no platform sniffing.
-  `Alt` never fires a shortcut: AltGr reports Ctrl+Alt together, and without
+- **The modifier is Ctrl, and only Ctrl.** `Super` belongs to the desktop, so an event carrying
+  it is never ours, alone or chorded with Ctrl. `Alt` never fires a shortcut: AltGr reports Ctrl+Alt together, and without
   that guard AltGr+T on a European layout would open a tab mid-sentence.
-- **Letters require no Shift** (⌘⇧T is somebody else's reopen-last-tab
+- **Letters require no Shift** (Ctrl+Shift+T is somebody else's reopen-last-tab
   muscle memory); **digits ignore Shift** and are read from `code`, so the
   physical `1` key works on layouts where `key` is `!`.
 - **The listener runs in the capture phase** — a shell shortcut beats the
-  focused control — and consumes its keystroke with `preventDefault`. ⌘W closes
+  focused control — and consumes its keystroke with `preventDefault`. Ctrl+W closes
   the active tab through the same `handleCloseTab` seam as the strip's close
   button, because a browser tab's embedded page has to be told to go (§7.2) —
   the strip is the only closer a child webview has; the listener therefore
@@ -2097,14 +2097,14 @@ Decisions, and why:
   *window-level* Escape and one keystroke must never close two surfaces. The
   panel also prevents mousedown's default so a click inside it cannot blur
   the input onto `<body>`, where Escape would miss the palette entirely — and
-  focus returns to the control ⌘K interrupted when the palette closes.
+  focus returns to the control Ctrl+K interrupted when the palette closes.
 - A thread with no title is "New chat" in the palette, matching
   `Sidebar.threadTitle` — two surfaces that named the same row differently
   would be a bug the eye would find first.
 
-Honest limit: this layer is registered in the DOM, the *last* stop — an OS
-that consumes a keystroke before the webview reaches it (a macOS build where
-⌘W natively closes the window, say) degrades to that platform default. The
+Honest limit: this layer is registered in the DOM, the *last* stop — a compositor
+or window manager that consumes a keystroke before the webview reaches it (a desktop that
+binds Ctrl+W itself, say) degrades to that binding. The
 tests pin the mapping, not the platform.
 
 `TabBar`'s module docs promise exactly these tab shortcuts; this section is

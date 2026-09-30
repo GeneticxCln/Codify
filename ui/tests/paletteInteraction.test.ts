@@ -87,7 +87,7 @@ interface Report {
  * Mount the palette, with a control beside it to steal and return focus from.
  *
  * The control is not decoration. "Focus comes back on close" is only a claim
- * about *somebody else's* element, so there has to be one, and ⌘K is pressed
+ * about *somebody else's* element, so there has to be one, and Ctrl+K is pressed
  * from somewhere in a real window rather than from nothing.
  */
 async function withPalette(

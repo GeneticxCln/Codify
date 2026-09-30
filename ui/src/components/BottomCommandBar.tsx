@@ -349,9 +349,9 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   }, [prompt]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // `isComposing` matters for any input method that confirms with Enter (CJK,
-    // and the emoji pickers on macOS): sending there truncates the word being
-    // composed and dispatches a goal on half of it.
+    // `isComposing` matters for any input method that confirms with Enter (CJK
+    // input methods such as ibus and fcitx): sending there truncates the word
+    // being composed and dispatches a goal on half of it.
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSubmit();

@@ -3,34 +3,33 @@
  *
  * A pure module, for the same reason `tabs.ts` is: the mapping is a table of
  * decisions that is easy to get subtly wrong (a digit with Shift, AltGr
- * pretending to be Ctrl, `Cmd+9` meaning *last* rather than *ninth*) and
+ * pretending to be Ctrl, `Ctrl+9` meaning *last* rather than *ninth*) and
  * impossible to see in markup. `ui/tests/shortcuts.test.ts` walks the table.
  * The wiring in `App.tsx` only dispatches what this returns.
  *
  * ## The rules, and why they are these
  *
- * - **The modifier is `Cmd` or `Ctrl`, either.** One rule instead of
- *   platform sniffing: `Cmd` on macOS, `Ctrl` everywhere else, and a Linux
- *   user's `Super` never reaches the DOM reliably anyway. Accepting both
- *   keeps the module free of `navigator.userAgent` and behaves like every
- *   other Electron/Tauri app that maps ⌃ to ⌘.
+ * - **The modifier is `Ctrl`, and only `Ctrl`.** Codify is a Linux desktop app.
+ *   `Super` belongs to the desktop (the overview, the launcher, tiling), so an
+ *   event that carries `metaKey` is never ours, alone or chorded with `Ctrl`:
+ *   binding it would steal a key the window manager already owns.
  * - **`Alt` never fires a shortcut.** AltGr on European layouts reports
  *   `ctrlKey` *and* `altKey` together — without this guard, AltGr+T on a
  *   German keyboard would open a tab while the user types.
- * - **Letters require no `Shift`.** `Cmd+Shift+T` is somebody else's
+ * - **Letters require no `Shift`.** `Ctrl+Shift+T` is somebody else's
  *   muscle memory (reopen a closed tab); firing "new tab" for it would be
- *   the wrong surprise. Digits, by contrast, ignore `Shift`: `Cmd+Shift+1`
+ *   the wrong surprise. Digits, by contrast, ignore `Shift`: `Ctrl+Shift+1`
  *   is how the key is physically reached on some layouts.
  * - **Digits are read from `code`, not `key`.** On layouts where `1` is
  *   `Shift+1` (and `key` is `!`), the physical digit key still means
  *   "go to tab 1". `code` is the physical key, layout be damned.
- * - **`Cmd+9` is the *last* tab, not the ninth** — the browser convention.
+ * - **`Ctrl+9` is the *last* tab, not the ninth** — the browser convention.
  *   Tabs 1–8 jump by position; 9 lands on the end of the strip, which is
  *   the one a keyboard cannot otherwise name when there are more than nine.
  *
- * What this module cannot promise: an OS that consumes a keystroke before it
- * reaches the webview (some macOS setups close the window on ⌘W natively)
- * degrades to that platform default — the shortcut is registered in the
+ * What this module cannot promise: a compositor or window manager that consumes
+ * a keystroke before it reaches the webview (a desktop that binds `Ctrl+W`
+ * itself, say) degrades to that binding — the shortcut is registered in the
  * DOM, which is the last stop, not the first.
  */
 
@@ -38,7 +37,7 @@
 export type ShortcutAction =
   | { type: "new-tab" }
   | { type: "close-active-tab" }
-  /** 0-based strip position, from `Cmd+1..8`. */
+  /** 0-based strip position, from `Ctrl+1..8`. */
   | { type: "focus-tab"; index: number }
   | { type: "focus-last-tab" }
   | { type: "toggle-palette" };
@@ -64,14 +63,14 @@ export interface KeyEventLike {
 
 /** Resolve a key event to a shell action, or `null` — most keys are, and must stay — typing. */
 export function resolveShortcut(e: KeyEventLike): ShortcutAction | null {
-  if (!(e.metaKey || e.ctrlKey) || e.altKey) return null;
+  if (!e.ctrlKey || e.metaKey || e.altKey) return null;
 
   if (!e.shiftKey) {
     switch (e.key.toLowerCase()) {
       // A held key sends `keydown` again at the keyboard's repeat rate. These
       // three change the strip or a toggle, so a repeat is not "again": it is how
-      // holding ⌘T opened a tab per repeat until the strip was full of empty
-      // ones, and how holding ⌘W would have closed every tab in it. One press,
+      // holding Ctrl+T opened a tab per repeat until the strip was full of empty
+      // ones, and how holding Ctrl+W would have closed every tab in it. One press,
       // one action.
       case "t":
         return e.repeat ? null : { type: "new-tab" };

@@ -1,5 +1,5 @@
 /**
- * The command palette (⌘K): what can be jumped to, how a query narrows the
+ * The command palette (Ctrl+K): what can be jumped to, how a query narrows the
  * list, and where the selection lands.
  *
  * Pure, like `tabs.ts` and `shortcuts.ts` — the palette's job is *finding*

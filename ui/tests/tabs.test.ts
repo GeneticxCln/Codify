@@ -123,7 +123,7 @@ test("reopening a thread focuses the tab already showing it", () => {
 test("a thread in a project you are not looking at gets its own tab", () => {
   // The rule that the single-tab model broke, in the form that still holds: a
   // thread you open from somewhere else must not take over the tab you are
-  // reading. The ⌘K case — the palette can name a thread in another project,
+  // reading. The Ctrl+K case — the palette can name a thread in another project,
   // and that project has to become visible to be read.
   let s = openConversation(emptyTabs, "c1", "Fix the flaky test", "w1");
   s = openConversation(s, "c2", "Refactor the parser", "w2");
@@ -204,7 +204,7 @@ test("a thread already open in a background tab is focused, not moved", () => {
 });
 
 test("an empty tab in the project is filled before a new one is made", () => {
-  // The ⌘K case within one project: a terminal is on screen, and the project has
+  // The Ctrl+K case within one project: a terminal is on screen, and the project has
   // a clean slate in the strip. The thread goes in the slate, because opening
   // another tab when one is free is how a strip fills with near-identical rows.
   let s = openTerminalTab(openBlankTab(emptyTabs, "w1"), "term-1", "w1");

@@ -270,7 +270,7 @@ test("the active tab is the one marked, and it is the one the keyboard lands on"
     async (dom) => {
       assert.equal(selectedId(dom), "Conversation: Refactor the parser");
       assert.equal(tablist(dom).filter((t) => t.getAttribute("aria-selected") === "true").length, 1);
-      // Roving tabindex: ⌘1..9 and Tab both depend on the keyboard being able to
+      // Roving tabindex: Ctrl+1..9 and Tab both depend on the keyboard being able to
       // enter the strip exactly once.
       assert.deepEqual(tablist(dom).map((t) => t.getAttribute("tabindex")), ["-1", "0", "-1"]);
       // A run in flight on a background tab is a fact about the strip, not only

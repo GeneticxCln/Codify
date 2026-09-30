@@ -15,7 +15,7 @@ import { threadLabel } from "../threadTitle";
  * the kind louder than the title.
  *
  * Keyboard reach matters more here than in most components. Tabs are a keyboard
- * object — `Cmd+1..9` to switch, `Cmd+W` to close, `Cmd+T` to open — so every
+ * object — `Ctrl+1..9` to switch, `Ctrl+W` to close, `Ctrl+T` to open — so every
  * tab is focusable and carries an `aria-label` naming both its kind and its
  * title. A tab that can only be reached with a mouse is a tab that a keyboard
  * user cannot close.
@@ -176,7 +176,7 @@ export const TabBar: React.FC<TabBarProps> = ({
               <button
                 type="button"
                 aria-label={`Close ${KIND_NAME[tab.kind].toLowerCase()}: ${tab.title}`}
-                title={`Close (⌘W)`}
+                title={`Close (Ctrl+W)`}
                 onClick={(e) => {
                   e.stopPropagation();
                   onClose(tab.id);

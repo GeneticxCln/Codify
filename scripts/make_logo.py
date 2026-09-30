@@ -73,8 +73,8 @@ PNG_PATHS = [
     TAURI_ICONS / "128x128.png",
     TAURI_ICONS / "128x128@2x.png",  # 256px
 ]
-# No `.ico` and no `.icns`: Codify is a Linux desktop app and ships no installer, so the
-# Windows and macOS icon containers had no reader.
+# No `.ico` and no `.icns`: Codify is a Linux desktop app and ships no installer, so no other
+# platform's icon container has a reader.
 
 # Geometry is a 24×24 unit grid, scaled to the render size. One scale, so the
 # mark at 32px is the mark at 256px — never a re-layout per size.
