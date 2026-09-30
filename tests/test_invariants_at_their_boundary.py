@@ -494,6 +494,46 @@ class TestEveryCommandIsValidatedBeforeItRuns(unittest.TestCase):
         self.assertIn("ran", ran["stdout"])
 
 
+class TestTheLibrariansCommandsCannotRunTheProject(unittest.TestCase):
+    """docs/00 section 6.6: the librarian's requests use `read_only` mode and cannot run the workspace's code.
+
+    The validator's refusals are tested on the validator. What decides whether they apply to the librarian is
+    the mode it asks for, and that was not tested: the `test` allowlist admits `python3 evil.py` and `pytest`
+    (which imports every conftest.py it finds), so a librarian asking in `test` mode would run a hostile
+    repository's code while believing it was only reading.
+    """
+
+    def test_a_librarian_request_refuses_project_code_and_still_reads(self) -> None:
+        from engine.library import LibraryService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+            mark = Path(tmp) / "MARK-project-code-ran"
+            line = f"open({str(mark)!r}, 'w').write('ran')\n"
+            (workspace / "evil.py").write_text(line, encoding="utf-8")
+            (workspace / "conftest.py").write_text(line, encoding="utf-8")
+            (workspace / "test_x.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+            library = LibraryService(str(workspace))
+
+            for label, ask, argv in (
+                ("run", library.run, ["python3", "evil.py"]),
+                ("run", library.run, ["pytest", "-q"]),
+                ("run", library.run, ["python3", "-m", "pytest"]),
+                ("run", library.run, ["npm", "test"]),
+                ("git", library.git, ["commit", "-m", "x"]),
+            ):
+                with self.subTest(label=label, argv=argv):
+                    with self.assertRaises(CommandNotAllowed):
+                        ask(argv)
+            ran = mark.exists()
+            listing = library.run(["ls"])
+
+        self.assertFalse(ran, "repository code ran on a librarian's request")
+        self.assertEqual(0, listing["exit_code"])
+        self.assertIn("evil.py", listing["stdout"])
+
+
 # --- 9. only the fixer writes ---------------------------------------------------------------------------------
 
 ENGINE_DIR = Path(__file__).resolve().parent.parent / "engine"
