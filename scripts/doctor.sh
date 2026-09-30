@@ -70,6 +70,28 @@ else
 fi
 echo
 
+# The machine being ready and this checkout's environment being current are different
+# questions. A `.venv` made before a dev dependency was added keeps working, and keeps
+# warning (Starlette's TestClient says to install `httpx2`), and nothing said why. The
+# check runs in the checkout's own interpreter, the one the Makefile puts first on PATH,
+# and never reads DOCTOR_TOOL_PATH: it is about this checkout, not about what is installed
+# elsewhere.
+echo "This checkout's virtual environment"
+venv_py="$root/.venv/bin/python3"
+if [ -e "$root/.venv" ]; then
+  gaps="$("$venv_py" "$root/scripts/venv_gaps.py" "$root/pyproject.toml" 2>&1)"
+  case "$?" in
+    0) ok ".venv has every dependency pyproject.toml declares" ;;
+    1) bad ".venv is missing: ${gaps//$'\n'/, }" \
+         "make setup   (installs into the existing .venv; one made before a dependency was added does not have it)" ;;
+    *) bad ".venv could not be checked: ${gaps:-its python3 did not run}" \
+         "make setup   (or delete .venv and run it again if its python3 is gone)" ;;
+  esac
+else
+  ok "no .venv in this checkout (fine if you install into an environment of your own; 'make setup' makes one)"
+fi
+echo
+
 echo "Node (the UI)"
 if have node && have npm; then
   if run node "$root/ui/scripts/check-node.mjs" >/dev/null 2>&1; then

@@ -27,7 +27,7 @@ mean the change is shippable.
 
 | Target | What it runs |
 |---|---|
-| `make setup` / `make doctor` | From a fresh clone: create `.venv` + install everything / check the machine and say how to fix what is missing (read-only). The Makefile prefers `./.venv/bin` automatically, except inside the 3.10 floor leg |
+| `make setup` / `make doctor` | From a fresh clone: create `.venv` + install everything / check the machine, and this checkout's `.venv` against `pyproject.toml`, and say how to fix what is missing (read-only). The Makefile prefers `./.venv/bin` automatically, except inside the 3.10 floor leg |
 | `make check` | Everything below, on the interpreter you have |
 | `make ci` | `make check`, then the same Python legs again on the declared 3.10 minimum |
 | `make lint` | `ruff check engine tests scripts` — rules and target Python pinned in `pyproject.toml` |
