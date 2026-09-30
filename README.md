@@ -94,8 +94,9 @@ make doctor     # checks everything below, prints the install command for what i
 
 It looks for **Python 3.10+** with `venv` (3.10 is a real deployment floor: the shell boots the engine as
 `python3 -m engine`), **Node 22.22.2+ / 24.15+ / 26+** (jsdom's range, which the UI suite inherits), **Rust
-stable** with WebKitGTK 4.1, GTK 3, libsoup 3, librsvg, OpenSSL and `pkg-config`, and a display for the Tauri leg
-(`xvfb` is used automatically on a headless machine). It also checks this checkout's `.venv` against
+stable** with `rustfmt` (rustup's default profile includes it, `--profile minimal` does not) and WebKitGTK 4.1,
+GTK 3, libsoup 3, librsvg, OpenSSL and `pkg-config`, and a display for the Tauri leg (`xvfb` is used
+automatically on a headless machine). It also checks this checkout's `.venv` against
 `pyproject.toml`, so a virtualenv made before a dependency was added is reported rather than quietly running.
 
 ```bash
