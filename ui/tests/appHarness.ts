@@ -31,6 +31,13 @@ export interface AppOptions {
   workspaces?: Array<{ id: string; name: string; root_path: string }>;
   /** Conversations the engine already holds. */
   conversations?: Conversation[];
+  /**
+   * Goals the engine already holds, each with the `conversation_id` of the thread it belongs to. A
+   * thread that is opened lists them as its turns, the way `GET /conversations/{id}/turns` derives
+   * them from goals. `PUT /goals/{id}/trace` answers like the engine: recording can start only while
+   * the goal is PLANNING (409 `trace_locked` otherwise) and can be switched off at any time.
+   */
+  goals?: Array<Record<string, unknown> & { id: string; conversation_id: string; status: string }>;
   /** A remembered tab strip (`CODIFY_TABS`), as the app would have written it. */
   storedTabs?: unknown;
   /** Shell commands that answer with something other than the default `null`. */
@@ -106,6 +113,8 @@ export interface AppContext {
   tabs(): HTMLElement[];
   /** The rows the engine currently holds for the shared strip. */
   engineTabs(): EngineTabRow[];
+  /** The engine's live record of a goal, so a test can move it on behind the app's back. */
+  engineGoal(id: string): Record<string, unknown> | undefined;
   /** Another window writing a row into the shared strip, behind this app's back. */
   putEngineTab(row: EngineTabRow): void;
   /** Emit a shell event to the listeners the app registered, the way Rust's `emit` does. */
@@ -151,6 +160,31 @@ export async function withApp(
   // the way the real one does (`GET /conversations/{id}/turns` derives them from goals).
   const goalsById = new Map<string, Record<string, unknown>>();
   const turnsByThread = new Map<string, Array<Record<string, unknown>>>();
+  for (const seeded of options.goals ?? []) {
+    const goal = {
+      workspace_id: "ws-a",
+      title: "A goal",
+      description: "A goal",
+      version: 1,
+      dry_run: false,
+      plan_only: false,
+      parallel: false,
+      created_at: 1,
+      updated_at: 1,
+      ...seeded,
+    };
+    goalsById.set(goal.id, goal);
+    turnsByThread.set(goal.conversation_id, [
+      ...(turnsByThread.get(goal.conversation_id) ?? []),
+      {
+        goal_id: goal.id,
+        conversation_id: goal.conversation_id,
+        prompt: goal.title,
+        status: goal.status,
+        created_at: 1,
+      },
+    ]);
+  }
 
   // The shell's event bus, as the real internals keep it: `transformCallback`
   // hands out an id for each handler, `plugin:event|listen` binds an event name
@@ -241,6 +275,34 @@ export async function withApp(
     }
     if (path === "/workspaces") return respond(workspaces);
     if (path === "/models/recent") return respond([]);
+    // The two self-checks on Settings' Agent Roles tab. Both are answered with the shape the engine
+    // sends, because a card that reads `status.policy` is not written for `[]`, the fallthrough below.
+    if (path === "/settings/laya") {
+      return respond({
+        sdk_installed: false,
+        sdk_disabled: false,
+        sdk_error: null,
+        questions: {},
+        policy: { injection_block_threshold: 0.8, risk_warn_level: 3, clarify_warn_threshold: 0.6 },
+      });
+    }
+    if (path === "/settings/runtime") {
+      return respond({
+        interpreter: {
+          executable: "/home/me/Codify/.venv/bin/python",
+          version: "3.12.4",
+          version_info: [3, 12],
+          implementation: "CPython",
+          in_virtualenv: true,
+          prefix: "/home/me/Codify/.venv",
+          base_prefix: "/usr",
+        },
+        project_root: "/home/me/Codify",
+        checkout_interpreter: "/home/me/Codify/.venv/bin/python3",
+        laya_sdk: { importable: false, import_error: null, version: null, disabled_by_env: false },
+        warnings: [],
+      });
+    }
     if (path === "/models") {
       // One chat model, so the composer will send: with none, the app refuses to
       // start a turn ("No model available") before it reaches the engine.
@@ -295,6 +357,33 @@ export async function withApp(
       return respond(goal);
     }
     if (turn && method === "GET") return respond(turnsByThread.get(turn[1]) ?? []);
+    // A goal that has finished shows its token usage; a card that reads `by_role` is not written for `[]`.
+    const usage = /^\/goals\/([^/]+)\/usage$/.exec(path);
+    if (usage && method === "GET") {
+      return respond({
+        goal_id: usage[1],
+        calls: 0,
+        totals: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+        by_role: {},
+        by_model: {},
+        parallel_peak: 1,
+        parallel_waves: 0,
+      });
+    }
+    const traceToggle = /^\/goals\/([^/]+)\/trace$/.exec(path);
+    if (traceToggle && method === "GET") {
+      return respond({ goal_id: traceToggle[1], calls: 0, by_role: {}, prompts_kept: false, recorded: [] });
+    }
+    if (traceToggle && method === "PUT") {
+      const goal = goalsById.get(traceToggle[1]);
+      if (!goal) return respond({ code: "not_found", message: "no such goal" }, 404);
+      const enabled = payload?.enabled === true;
+      if (enabled && goal.status !== "PLANNING") {
+        return respond({ code: "trace_locked", message: "recording can only start before the run does" }, 409);
+      }
+      goal.trace = enabled;
+      return respond(goal);
+    }
     const goalRead = /^\/goals\/([^/]+)$/.exec(path);
     if (goalRead && method === "GET" && goalsById.has(goalRead[1])) return respond(goalsById.get(goalRead[1]));
     if (/^\/goals\/[^/]+\/events$/.test(path) && method === "GET") return respond([]);
@@ -462,6 +551,7 @@ export async function withApp(
         settle,
         tabs: () => [...dom.container.querySelectorAll('[role="tab"]')] as HTMLElement[],
         engineTabs: () => [...strip],
+        engineGoal: (id) => goalsById.get(id),
         putEngineTab: (row) => {
           const at = strip.findIndex((r) => r.key === row.key);
           if (at >= 0) strip[at] = { updated_at: 1, ...row };

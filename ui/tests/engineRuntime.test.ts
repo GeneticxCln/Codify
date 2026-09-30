@@ -16,27 +16,26 @@
  * skim it. That case is pinned here explicitly, because the bug it prevents is
  * invisible precisely when it works.
  *
- * The suite runs through `node --test` with no DOM, so the wording is imported
- * from `engineRuntime.ts` — deliberately not from the component, which pulls in
- * `api.ts` and its module-load `localStorage` read. The component and its wiring
- * are checked as source, the way `shell.test.ts` does.
+ * The wording is imported from `engineRuntime.ts` and tested as plain functions.
+ * The card around it is mounted in a DOM, with the engine's answer supplied by
+ * the test, so "it renders every warning" and "it says so when the check could
+ * not run" are claims about what is on screen rather than about the file.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+
+import { registerTsx } from "./tsxLoader.ts";
+registerTsx();
 
 import { runtimeLines, venvRootOf } from "../src/engineRuntime.ts";
 import type { EngineRuntime } from "../src/types.ts";
+import type { Dom } from "./dom.ts";
+import type { EngineCall } from "./appHarness.ts";
 
-const CARD_SRC = readFileSync(
-  new URL("../src/components/EngineRuntimeCard.tsx", import.meta.url),
-  "utf8",
-);
-const PANEL_SRC = readFileSync(
-  new URL("../src/components/SettingsPanel.tsx", import.meta.url),
-  "utf8",
-);
-const API_SRC = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+const { withDom } = await import("./dom.ts");
+const { withApp } = await import("./appHarness.ts");
+const React = (await import("react")).default;
+const h = React.createElement;
 
 function report(overrides: Partial<EngineRuntime> = {}): EngineRuntime {
   return {
@@ -153,25 +152,113 @@ test("the SDK line survives a report with no version and no error", () => {
   assert.equal(lineFor(missing, "Laya SDK").value, "not importable by this interpreter");
 });
 
-test("the card renders every warning the engine sent", () => {
+/**
+ * Mount the card while the engine answers `/settings/runtime` with `answer`.
+ *
+ * `sent` records what the card asked for, so a test can say what was sent and
+ * to where. The card is imported inside the DOM, for the reason `dom.ts` gives.
+ */
+async function withCard(
+  answer: (() => Response | Promise<Response>) | Error,
+  body: (dom: Dom, sent: Array<{ url: string; authorization: string | null }>) => Promise<void>,
+): Promise<void> {
+  await withDom(async (dom) => {
+    const sent: Array<{ url: string; authorization: string | null }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      sent.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get("authorization"),
+      });
+      if (answer instanceof Error) throw answer;
+      return answer();
+    }) as typeof fetch;
+    const { EngineRuntimeCard } = await import("../src/components/EngineRuntimeCard.tsx");
+    await dom.render(h(EngineRuntimeCard));
+    await dom.settle();
+    await body(dom, sent);
+  });
+}
+
+const json = (value: unknown, status = 200): Response =>
+  new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+
+test("the card renders every warning the engine sent", async () => {
   // Warnings are the whole point of the report; dropping one because a map was
   // written over a boolean would leave a real problem invisible.
-  assert.match(CARD_SRC, /warnings\.map\(/, "each warning is rendered, not just the first");
-  assert.match(CARD_SRC, /report\.warnings \?\? \[\]/, "an absent list renders as none, not a crash");
-});
-
-test("a self-check that could not run says so instead of looking healthy", () => {
-  assert.match(CARD_SRC, /did not answer \/settings\/runtime/);
-  assert.match(CARD_SRC, /setFailed\(true\)/);
-});
-
-test("the panel mounts the card, and the fetch is authenticated", () => {
-  assert.match(PANEL_SRC, /<EngineRuntimeCard \/>/, "the card is reachable from Settings");
-  assert.match(PANEL_SRC, /import \{ EngineRuntimeCard \}/);
-  // It names filesystem paths, so the boot token is the whole of the guard.
-  assert.match(
-    API_SRC,
-    /getEngineRuntime[\s\S]{0,400}?\/settings\/runtime[\s\S]{0,200}?Authorization: `Bearer \$\{currentEngine\.token\}`/,
-    "the route is called with the boot token",
+  const warnings = [
+    "the engine is not running in the checkout's virtualenv",
+    "laya is installed in a different environment than the one running",
+    "a third thing, so that showing only the first two is a failure",
+  ];
+  await withCard(
+    () => json(report({ warnings })),
+    async (dom) => {
+      const text = dom.text();
+      for (const warning of warnings) {
+        assert.ok(text.includes(warning), `the card dropped a warning: ${warning}`);
+      }
+      assert.match(text, /needs attention/, "warnings did not change the card's heading");
+    },
   );
+});
+
+test("a report with no warnings reads as healthy, and an absent list is not a crash", async () => {
+  await withCard(
+    () => json(report({ warnings: [] })),
+    async (dom) => {
+      assert.match(dom.text(), /Engine runtime/);
+      assert.doesNotMatch(dom.text(), /needs attention/, "a clean report is styled as a problem");
+    },
+  );
+  // Every field the engine sends is optional in practice.
+  const withoutList = { ...report() } as Partial<EngineRuntime>;
+  delete withoutList.warnings;
+  await withCard(
+    () => json(withoutList),
+    async (dom) => {
+      assert.match(dom.text(), /Engine runtime/, "an absent warnings list took the card down");
+      assert.doesNotMatch(dom.text(), /needs attention/);
+    },
+  );
+});
+
+test("a self-check that could not run says so instead of looking healthy", async () => {
+  const unavailable = /did not answer \/settings\/runtime/;
+  await withCard(
+    () => json({ message: "boom" }, 500),
+    async (dom) => assert.match(dom.text(), unavailable, "a refused check rendered as healthy"),
+  );
+  await withCard(
+    new TypeError("Failed to fetch"),
+    async (dom) => assert.match(dom.text(), unavailable, "an unreachable engine rendered as healthy"),
+  );
+});
+
+test("the fetch is authenticated with the boot token", async () => {
+  // It names filesystem paths, so the boot token is the whole of the guard.
+  const { setEngineInfo } = await import("../src/api.ts");
+  setEngineInfo({ port: 43117, token: "boot-token-under-test" });
+  await withCard(
+    () => json(report()),
+    async (_dom, sent) => {
+      assert.equal(sent.length, 1, "the card asked for the report zero or several times");
+      assert.equal(sent[0].url, "http://127.0.0.1:43117/settings/runtime");
+      assert.equal(sent[0].authorization, "Bearer boot-token-under-test");
+    },
+  );
+});
+
+test("the Agent Roles tab of Settings shows the card, so the report is reachable from the app", async () => {
+  await withApp({}, async ({ dom, engine, settle }) => {
+    const asked = (): EngineCall[] =>
+      engine.filter((c) => c.method === "GET" && c.path === "/settings/runtime");
+    await dom.click(dom.byButton("Settings"));
+    await settle();
+    assert.equal(asked().length, 0, "the self-check ran before anyone asked for the roles tab");
+    await dom.click(dom.byButton("Agent Roles"));
+    await settle();
+    assert.equal(asked().length, 1, "the Agent Roles tab did not mount the engine runtime card");
+    // The card answers even when the check cannot run, and says so.
+    assert.match(dom.text(), /Engine runtime|did not answer \/settings\/runtime/);
+  });
 });
