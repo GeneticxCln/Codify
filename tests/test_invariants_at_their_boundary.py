@@ -13,6 +13,7 @@ configuration) in the key sweep, and the two routes that act on the outside worl
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import tempfile
@@ -36,7 +37,7 @@ from engine.executor import ExecutorService
 from engine.model_catalog import ModelCatalogService
 from engine.models import ROLES, AgentRole, TurnCreate
 from engine.providers import Keychain, ProviderFactory
-from engine.sandbox import SandboxService
+from engine.sandbox import CommandNotAllowed, SandboxService
 from engine.services import (
     AgentRegistryService,
     ConversationService,
@@ -439,6 +440,119 @@ class TestATurnHasOneDoor(BoundaryCase):
         created = {key for key, before, after in calls if after > before}
 
         self.assertEqual({TURN_ROUTE}, created, "the turn route makes a turn, and nothing else does")
+
+
+# --- 6. every command is validated before it runs -----------------------------------------------------------
+
+
+class TestEveryCommandIsValidatedBeforeItRuns(unittest.TestCase):
+    """docs/00 section 6.6: every `SandboxService.run_command` call goes through `validate_argv` first."""
+
+    REFUSED: tuple[tuple[str, list[str]], ...] = (
+        ("test", ["rm", "-rf", "x"]),
+        ("test", ["sh", "-c", "true"]),
+        ("test", ["bash", "-c", "id"]),
+        ("test", ["curl", "http://example.com"]),
+        ("test", ["git", "push"]),
+        ("test", ["git", "commit", "-m", "x"]),
+        ("test", ["python3", "-c", "print(1)"]),
+        ("test", ["python3", "../escape.py"]),
+        ("test", ["npm", "install"]),
+        ("test", ["cargo", "build"]),
+        ("test", ["/bin/ls"]),
+        ("test", []),
+        ("read_only", ["python3", "x.py"]),
+        ("read_only", ["pytest"]),
+        ("read_only", ["git", "commit", "-m", "x"]),
+        ("read_only", ["git", "diff", "/etc/passwd", "/dev/null"]),
+        ("read_only", ["ls", "/etc"]),
+        ("read_only", ["cat", "x"]),
+        ("read_only", ["rm", "x"]),
+    )
+
+    def test_a_refused_argv_never_starts_a_process(self) -> None:
+        with tempfile.TemporaryDirectory() as root, mock.patch(
+            "engine.sandbox.subprocess.Popen", side_effect=AssertionError("a process was started")
+        ) as popen:
+            for mode, argv in self.REFUSED:
+                with self.subTest(mode=mode, argv=argv):
+                    with self.assertRaises(CommandNotAllowed):
+                        SandboxService().run_command(root, argv, mode=mode)
+
+        popen.assert_not_called()
+
+    def test_the_same_door_still_runs_what_it_allows(self) -> None:
+        # The control: the refusals above are not a sandbox that refuses everything.
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "ok.py").write_text("print('ran')\n", encoding="utf-8")
+            listed = SandboxService().run_command(root, ["ls"], mode="read_only")
+            ran = SandboxService().run_command(root, ["python3", "ok.py"], mode="test")
+
+        self.assertEqual(0, listed["exit_code"])
+        self.assertIn("ok.py", listed["stdout"])
+        self.assertEqual(0, ran["exit_code"])
+        self.assertIn("ran", ran["stdout"])
+
+
+# --- 9. only the fixer writes ---------------------------------------------------------------------------------
+
+ENGINE_DIR = Path(__file__).resolve().parent.parent / "engine"
+# Calls that change the filesystem, by attribute name. `replace`, `rename`, `remove` and `unlink` are also
+# `str` methods or service methods, so those are only counted on a receiver that is the os or shutil module.
+_WRITING_ATTRS = {
+    "apply", "write_text", "write_bytes", "unlink", "rmtree", "mkdir", "touch", "symlink_to", "copyfile",
+    "copytree", "move", "truncate", "makedirs", "rmdir", "chmod", "copy", "copy2", "symlink", "link",
+}
+_OS_ONLY = {"replace", "rename", "remove", "unlink", "rmdir", "makedirs", "mkdir", "chmod", "symlink", "link"}
+# The only modules of the engine that change the filesystem, each with what it writes. Anything else that
+# starts to is either a new way for a model's words to reach the disk, which this invariant forbids, or a
+# new entry here made on purpose.
+MAY_WRITE = {
+    "fs.py": "the workspace writer itself: atomic apply, the one implementation",
+    "executor_steps.py": "the fixer, and the replay of a proposal the fixer already made",
+    "home.py": "the state directory and its permissions",
+    "db.py": "creating the state directory the database lives in",
+    "providers.py": "the keychain's file backend",
+    "app.py": "no file operation: `.rename()` and `.remove()` there are database services",
+}
+
+
+def filesystem_writes(path: Path) -> list[str]:
+    found: list[str] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if isinstance(fn, ast.Attribute):
+            receiver = fn.value.id if isinstance(fn.value, ast.Name) else ""
+            if fn.attr in _WRITING_ATTRS or (receiver in ("os", "shutil") and fn.attr in _OS_ONLY):
+                found.append(f"{path.name}:{node.lineno} {receiver or '?'}.{fn.attr}()")
+        elif isinstance(fn, ast.Name) and fn.id == "open":
+            mode = node.args[1] if len(node.args) > 1 else next((k.value for k in node.keywords if k.arg == "mode"), None)
+            if isinstance(mode, ast.Constant) and isinstance(mode.value, str) and set(mode.value) & set("wax+"):
+                found.append(f"{path.name}:{node.lineno} open({mode.value!r})")
+    return found
+
+
+class TestOnlyTheFixerWrites(unittest.TestCase):
+    """docs/00 section 6.9: only the fixer writes; the `write` move is the single path from a conductor run."""
+
+    def test_nothing_outside_the_writers_changes_the_filesystem(self) -> None:
+        modules = sorted(ENGINE_DIR.glob("*.py"))
+        offenders = [hit for p in modules if p.name not in MAY_WRITE for hit in filesystem_writes(p)]
+
+        self.assertGreater(len(modules), 30, "the scan found almost no engine modules")
+        self.assertEqual([], offenders, "a module that is not a writer changes the filesystem")
+        # The scan sees writes where they are known to be, so a change to it that stopped seeing them fails here.
+        self.assertTrue(filesystem_writes(ENGINE_DIR / "fs.py"))
+        self.assertTrue(filesystem_writes(ENGINE_DIR / "executor_steps.py"))
+
+    def test_the_workspace_is_written_from_one_module(self) -> None:
+        appliers = sorted(
+            p.name for p in ENGINE_DIR.glob("*.py") if any(".apply()" in hit for hit in filesystem_writes(p))
+        )
+
+        self.assertEqual(["executor_steps.py"], appliers)
 
 
 # --- 7. one database file ------------------------------------------------------------------------------------
