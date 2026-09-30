@@ -317,6 +317,78 @@ class TestNoResponseCarriesAKey(BoundaryCase):
         self.assertEqual([], leaks, "a stored key came back in a response")
 
 
+# --- 5. a local provider only ever talks to loopback ---------------------------------------------------------
+
+REMOTE = "http://192.168.1.5:11434"
+
+
+class TestALocalProviderOnlyEverTalksToLoopback(BoundaryCase):
+    """docs/00 section 6.5: `LocalProvider.base_url` must pass `validate_local_base_url` before every request."""
+
+    def store_a_remote_target_directly(self) -> None:
+        # What a hand-edited database, an older build's row or a fault in the save path would leave behind. The
+        # check at save time is not the only line of defence, which is why the provider asks again at each request.
+        self.conn.execute(
+            "UPDATE agent_configs SET provider = 'ollama', protocol = 'ollama', base_url = ? WHERE role = 'fixer'",
+            (REMOTE,),
+        )
+        self.conn.commit()
+
+    async def test_saving_refuses_a_remote_address_for_a_local_provider(self) -> None:
+        before = self.rows("agent_configs")
+
+        for body in (
+            {"provider": "ollama", "base_url": REMOTE},
+            {"fallback_provider": "ollama", "fallback_protocol": "ollama", "fallback_base_url": REMOTE,
+             "fallback_model_name": "m"},
+            {"provider": "mybox", "protocol": "ollama", "base_url": REMOTE},
+        ):
+            with self.subTest(body=sorted(body)):
+                r = await self.client.put("/settings/agents/fixer", headers=self.headers, json=body)
+                self.assertEqual(400, r.status_code, r.text)
+                self.assertEqual("invalid_base_url", r.json()["code"])
+
+        self.assertEqual(before, self.rows("agent_configs"))
+
+    async def test_no_request_is_sent_to_a_remote_address_that_is_already_stored(self) -> None:
+        self.store_a_remote_target_directly()
+        sent: list[str] = []
+
+        async def refuse(transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
+            sent.append(str(request.url))
+            raise httpx.ConnectError("no network in tests")
+
+        # Every real HTTP request from any client in the engine passes through this; the test client does not.
+        with mock.patch.object(httpx.AsyncHTTPTransport, "handle_async_request", refuse):
+            r = await self.client.post("/settings/agents/fixer/test-connection", headers=self.headers)
+
+        self.assertEqual([], sent, "a request left for a non-loopback address")
+        self.assertEqual(200, r.status_code, r.text)
+        self.assertFalse(r.json()["ok"])
+        self.assertIn("localhost", r.json()["message"])
+
+    async def test_discovery_does_not_ask_a_remote_address_for_its_models(self) -> None:
+        self.store_a_remote_target_directly()
+        asked: list[str] = []
+
+        def record(request: httpx.Request) -> httpx.Response:
+            asked.append(request.url.host)
+            return httpx.Response(404, json={"error": "no providers in tests"})
+
+        app.state.models = ModelCatalogService(
+            app.state.registry, self.keychain, transport=httpx.MockTransport(record)
+        )
+        r = await self.client.get("/models?refresh=true", headers=self.headers)
+
+        self.assertEqual(200, r.status_code, r.text)
+        # Discovery did consider the remote target, and said why it would not ask it: without that the silence
+        # below could just be a catalog that had nothing to do.
+        (ollama,) = [p for p in r.json()["providers"] if p["provider"] == "ollama"]
+        self.assertFalse(ollama["ok"])
+        self.assertIn("localhost", ollama["error"])
+        self.assertNotIn("192.168.1.5", asked)
+
+
 # --- 8. a turn has one door ---------------------------------------------------------------------------------
 
 
