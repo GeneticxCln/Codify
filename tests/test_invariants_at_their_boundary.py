@@ -638,5 +638,77 @@ class TestOneDatabaseFile(unittest.TestCase):
         self.assertEqual(["codify.db"], databases)
 
 
+# --- the ledger ---------------------------------------------------------------------------------------------
+
+ARCHITECTURE = Path(__file__).resolve().parent.parent / "docs" / "00-codify-architecture-overview.md"
+_HERE = "tests.test_invariants_at_their_boundary"
+
+# For each invariant in docs/00 section 6, the tests that hold it at its boundary. Every name was put through the
+# survey in `docs/audit-2026-09-29.md` section 0: the enforcement removed, and the named test seen to fail. A
+# name here that stops resolving (a test renamed, moved or deleted) fails `TestTheLedger`, so the claim that an
+# invariant is held cannot outlive the test that holds it.
+LEDGER: dict[int, tuple[str, ...]] = {
+    1: (f"{_HERE}.TestEightRolesAndNoOthers",),
+    2: (
+        f"{_HERE}.TestAgentConfigHasOnlyTheSettingsWriters",
+        "tests.test_api.TestApi.test_creating_a_goal_refuses_agent_config",
+        "tests.test_api.TestApi.test_starting_a_goal_refuses_agent_config",
+        "tests.test_api.TestApi.test_no_goal_or_turn_route_writes_agent_config",
+        "tests.test_turns.TestOneDoor.test_the_turn_route_refuses_agent_config",
+    ),
+    3: (
+        "tests.test_every_route_is_authenticated.TestEveryHttpRoute",
+        "tests.test_every_route_is_authenticated.TestEveryWebSocket",
+        "tests.test_home.TestIsolatedRunsCannotTouchTheRealStore.test_the_engine_listens_on_loopback_and_nowhere_else",
+    ),
+    4: (f"{_HERE}.TestNoResponseCarriesAKey",),
+    5: (f"{_HERE}.TestALocalProviderOnlyEverTalksToLoopback",),
+    6: (
+        f"{_HERE}.TestEveryCommandIsValidatedBeforeItRuns",
+        f"{_HERE}.TestTheLibrariansCommandsCannotRunTheProject",
+        "tests.test_conductor.TestTheToolsAreThePipelinesDoors.test_project_code_runs_only_once_the_plan_is_approved",
+    ),
+    7: (f"{_HERE}.TestOneDatabaseFile",),
+    8: (f"{_HERE}.TestATurnHasOneDoor", "tests.test_turns.TestOneDoor"),
+    9: (
+        f"{_HERE}.TestOnlyTheFixerWrites",
+        "tests.test_conductor.TestTheToolsAreThePipelinesDoors.test_write_refuses_and_writes_nothing_while_unapproved",
+        "tests.test_write_gate_timing.TestTheConductorRoad",
+    ),
+}
+
+
+def _tests_in(suite: unittest.TestSuite) -> list[unittest.TestCase]:
+    found: list[unittest.TestCase] = []
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            found += _tests_in(item)
+        else:
+            found.append(item)
+    return found
+
+
+class TestTheLedger(unittest.TestCase):
+    def test_every_invariant_in_the_doc_has_an_entry_and_no_other_does(self) -> None:
+        lines = ARCHITECTURE.read_text(encoding="utf-8").splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith("## 6."))
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+        numbered = {int(m.group(1)) for line in lines[start + 1 : end] if (m := re.match(r"^(\d+)\.\s", line))}
+
+        self.assertTrue(numbered, "no invariants were read from docs/00 section 6")
+        self.assertEqual(numbered, set(LEDGER), "an invariant was added to or removed from docs/00 section 6")
+
+    def test_every_named_test_exists(self) -> None:
+        unresolved: list[str] = []
+        for number, names in LEDGER.items():
+            self.assertTrue(names, f"invariant {number} names no test")
+            for name in names:
+                found = _tests_in(unittest.defaultTestLoader.loadTestsFromName(name))
+                if not found or any(type(t).__name__ == "_FailedTest" for t in found):
+                    unresolved.append(f"{number}: {name}")
+
+        self.assertEqual([], unresolved, "a test the ledger names no longer exists")
+
+
 if __name__ == "__main__":
     unittest.main()
