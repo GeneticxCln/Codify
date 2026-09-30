@@ -201,6 +201,12 @@ select = ["E4", "E7", "E9", "F", "B", "S", "UP"]
 "engine/app.py" = ["S110", "S608"]
 "engine/conductor.py" = ["S110"]
 "engine/db.py" = ["S110"]
+# S110 (engine/agent_orchestrator.py)  the stream's final flush blanks the intermediate `model_delta`
+#       snapshots once the final one holds all the text. It is housekeeping on a call that already
+#       succeeded, and a failure to tidy must never fail that call; the delta events it would log to
+#       are the ones being compacted. It moved here from engine/executor.py with the code. Scoped to
+#       that one file.
+"engine/agent_orchestrator.py" = ["S110"]
 "engine/executor.py" = ["S101", "S110", "S608"]
 # S108 (engine/fs.py)  `SYSTEM_ROOTS` names `/tmp` and `/var/tmp` as directories a workspace must
 #       never be. They are paths to *refuse*: nothing here creates, opens or writes a file at
