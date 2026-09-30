@@ -628,12 +628,12 @@ class KnowledgeRevisionCase(_Harness):
         pack_read = _prior(PRIOR, ["ui/src/board.html", "ui/src/legacy/render.js"])
         drafter_read = _prior(other, [])
         # `read_knowledge` is looked up by name in each module that reads the prior, so one mock is
-        # patched in under each: the librarian's pack (evidence layer) and the drafter (this file's
-        # module until the design layer moves). Sharing the mock keeps the count and the order.
+        # patched in under each: the librarian's pack (evidence layer) and the drafter (design layer).
+        # Sharing the mock keeps the count and the order.
         with patch(
             "engine.executor_evidence.read_knowledge",
             side_effect=[pack_read, drafter_read],
-        ) as reader, patch("engine.executor.read_knowledge", new=reader):
+        ) as reader, patch("engine.executor_design.read_knowledge", new=reader):
             await self.executor.run_planning(self.goal.id)
         self.assertEqual(
             reader.call_count, 2, "one read for the pack, one for the drafter — and no third"
