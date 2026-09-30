@@ -105,20 +105,12 @@ const TEXT_READERS: Record<string, Reason> = {
 
   // ── behaviour held by a regex, for want of a mounted test ─────────────────
   "atmosphere.test.ts": {
-    kind: "unconverted",
-    why: "Where the backdrop is mounted in App and the shared clock's structure. The loops' behaviour is mounted in atmosphereMotion.test.ts; the mount position is not yet.",
+    kind: "text",
+    why: "Lint-style rules over the painters' own files (none runs its own rAF loop, measures the window, assigns shadowBlur, or names a colour the theme does not publish) and the stylesheet and DESIGN.md it cross-checks. They are claims about what is written, over a set of files no mounted test enumerates; where the shell mounts the weather and how the loops behave are held by backdropShell.test.ts, stateReactiveWeather.test.ts and canvasRecovery.test.ts.",
   },
   "rainBackdrop.test.ts": {
-    kind: "unconverted",
-    why: "The rain's position in the tree (outside the transcript) is read from App.tsx and ChatTimeline.tsx. It could be asserted on a mounted App and has not been.",
-  },
-  "canvasRecovery.test.ts": {
-    kind: "unconverted",
-    why: "Both loops must listen for contextlost and cap what they log. jsdom has no GPU context to lose, so this needs a fake context that can be lost; it has not been written.",
-  },
-  "stateReactiveWeather.test.ts": {
-    kind: "unconverted",
-    why: "That App passes 'the agent is working' to the backdrops as `active`. A mounted App with a running goal would observe it; that test does not exist yet.",
+    kind: "text",
+    why: "The chrome utility's translucent alpha and the content surface's solid one are written in index.css and nowhere else, and jsdom applies no Tailwind and computes no cascade, so no mounted test could observe them. The rain's position in the tree is held by backdropShell.test.ts.",
   },
 };
 

@@ -230,7 +230,15 @@ export const WeatherBackdrop: React.FC<WeatherBackdropProps> = ({ active }) => {
   }
   const { Canvas, overlayClass, vignette } = atmosphere;
   return (
-    <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+    // `data-backdrop` and `data-active` say which layer this is and whether it was told the agent
+    // is working: what the shell hands the weather, readable from the DOM (by a test, or by
+    // someone inspecting the window) rather than only by reading the loop's ref.
+    <div
+      aria-hidden="true"
+      data-backdrop="weather"
+      data-active={active ? "true" : "false"}
+      className="pointer-events-none absolute inset-0 z-0 overflow-hidden"
+    >
       {/* 1024, like the rain: the cap is on the longer edge in CSS pixels and
           this box is the window, not a column. A perspective grid is cheaper
           than a glyph shower, but the cap is not about this frame's cost — it
