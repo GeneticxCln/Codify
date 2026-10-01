@@ -5,7 +5,7 @@ that it fails when the invariant is broken: a role list that grows a ninth name 
 seeds, the prompts) passes every test that only checks the tables agree with each other, and a route that
 echoes a stored key passes every test that only checks the key was stored. So each class here states one
 invariant the way the doc does and asserts it about the running app, and each was checked by breaking the
-enforcement and watching the named test fail (`docs/audit-2026-09-29.md`, section 0).
+enforcement and watching the named test fail (`docs/00` section 6 says what that found).
 
 What is not covered, stated so it is not assumed: WebSocket frames (events, which are not built from
 configuration) in the key sweep, and the two routes that act on the outside world in the config sweep.
@@ -643,10 +643,10 @@ class TestOneDatabaseFile(unittest.TestCase):
 ARCHITECTURE = Path(__file__).resolve().parent.parent / "docs" / "00-codify-architecture-overview.md"
 _HERE = "tests.test_invariants_at_their_boundary"
 
-# For each invariant in docs/00 section 6, the tests that hold it at its boundary. Every name was put through the
-# survey in `docs/audit-2026-09-29.md` section 0: the enforcement removed, and the named test seen to fail. A
-# name here that stops resolving (a test renamed, moved or deleted) fails `TestTheLedger`, so the claim that an
-# invariant is held cannot outlive the test that holds it.
+# For each invariant in docs/00 section 6, the tests that hold it at its boundary. Every name was put through a
+# mutation survey (the result is summarised under `docs/00` section 6): the enforcement removed, and the named
+# test seen to fail. A name here that stops resolving (a test renamed, moved or deleted) fails `TestTheLedger`,
+# so the claim that an invariant is held cannot outlive the test that holds it.
 LEDGER: dict[int, tuple[str, ...]] = {
     1: (f"{_HERE}.TestEightRolesAndNoOthers",),
     2: (
