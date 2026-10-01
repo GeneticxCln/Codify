@@ -138,10 +138,10 @@ root from where it lives.
 session): try `WEBKIT_DISABLE_DMABUF_RENDERER=1 codify` on some NVIDIA/Wayland combinations, or
 `GDK_BACKEND=x11 codify` to go through XWayland.
 
-**Checked on a real display, by hand** (the maintainer, not CI): CachyOS under Niri, a Wayland compositor, with
-XWayland. The window renders without graphical artifacts, the folder picker opens the native XDG desktop portal
-dialog when `codify` is run from the project's `.venv`, and the `.desktop` entry launches the app from the desktop
-launcher. It has not been run on GNOME or KDE.
+**Checked on a real display, by hand** (the maintainer, not CI), on both Wayland and X11: CachyOS under Niri, a
+Wayland compositor, and X11 through its XWayland. The window renders without graphical artifacts, the folder picker
+opens the native XDG desktop portal dialog when `codify` is run from the project's `.venv`, and the `.desktop` entry
+launches the app from the desktop launcher. It has not been run on GNOME or KDE.
 
 **Engine without the shell**, for UI work:
 
