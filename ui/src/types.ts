@@ -597,6 +597,9 @@ export interface EngineSettings {
   tts_voice?: EngineStringSettingValue;
   /** A PipeWire source's node name; empty is the session's default microphone. */
   audio_input?: EngineStringSettingValue;
+  /** A custom speech provider's own address; built-in providers ignore it. */
+  stt_base_url?: EngineStringSettingValue;
+  tts_base_url?: EngineStringSettingValue;
   /** 1 = read each answer aloud as it arrives. Off by default. */
   tts_auto_read?: EngineSettingValue;
 }

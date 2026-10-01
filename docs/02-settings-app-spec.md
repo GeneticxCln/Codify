@@ -184,6 +184,10 @@ the pane holds no audio state of its own.
 * **No model or voice lists of its own.** The model fields browse the same discovered models as a
   role card, with free text allowed. The voice is free text, because the provider owns its voice
   names.
+* **A custom provider gets a Server address field; a built-in one does not.** This is how a local
+  speech server (speaches, LocalAI, on `127.0.0.1`) is set up without any agent role naming it. The
+  engine ignores an address beside a built-in provider, and a field that does nothing is a trap,
+  so it is not shown.
 
 General / Commands / About tabs MAY exist; they MUST NOT call `codify_update_agent_config`.
 

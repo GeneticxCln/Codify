@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import FrameType
 from typing import Any, TypeVar
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -1178,6 +1179,10 @@ ENGINE_STRING_SETTINGS: dict[str, int] = {
     "tts_voice": 64,
     # A PipeWire node name; empty is the session's default source.
     "audio_input": 200,
+    # A custom speech provider's own address (a local speech server, say), so it
+    # needs no agent role to define it. Built-in providers ignore it.
+    "stt_base_url": 500,
+    "tts_base_url": 500,
 }
 
 # The slug shape `AgentConfigUpdate` enforces, so a conductor pointed at a
@@ -1192,6 +1197,11 @@ PROVIDER_SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 SLUG_SETTINGS = frozenset({
     "conductor_provider", "conductor_fallback_provider", "stt_provider", "tts_provider",
 })
+
+# Which of them are a server's address: http(s) with a host, or empty to clear it.
+# Whether a *key* may go there is decided per request (`key_destination_problem`),
+# because the key and the address can be saved in either order.
+URL_SETTINGS = frozenset({"stt_base_url", "tts_base_url"})
 
 
 @app.get("/settings/engine")
@@ -1228,6 +1238,10 @@ def _clean_engine_string(key: str, value: Any) -> str:
         )
     if key in SLUG_SETTINGS and text and not PROVIDER_SLUG_RE.match(text):
         raise ApiError(422, "invalid_value", f"{key} is not a provider slug")
+    if key in URL_SETTINGS and text:
+        parsed = urlparse(text)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ApiError(422, "invalid_value", f"{key} must be an http(s) address, such as http://127.0.0.1:8000/v1")
     return text
 
 
@@ -1281,6 +1295,7 @@ def _speech_target(request: Request, what: str) -> speech.SpeechTarget:
     return speech.resolve(
         request.app.state.registry, keychain,
         settings.get_str(f"{what}_provider"), settings.get_str(f"{what}_model"), what=what,
+        base_url=settings.get_str(f"{what}_base_url"),
     )
 
 

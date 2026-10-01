@@ -654,12 +654,16 @@ Two features, one module (`engine/speech.py`), configured in Settings → Audio:
 
 **Engine settings** (`PUT /settings/engine`, the only writer): `stt_provider`, `stt_model`, `stt_language`,
 `tts_provider`, `tts_model`, `tts_voice`, `audio_input` (a PipeWire node name; empty is the session's default
-source) and the switch `tts_auto_read` (0/1, default 0). The two provider keys are slug-checked like the
-conductor's.
+source), `stt_base_url` and `tts_base_url` (a custom provider's own address, below), and the switch
+`tts_auto_read` (0/1, default 0). The two provider keys are slug-checked like the conductor's. The two
+addresses must be `http(s)` with a host, or empty to clear them (`422 invalid_value` otherwise).
 
-**Which provider.** A speech target is resolved the way every target is: a built-in slug from the catalogue
-(`BUILTIN_PROVIDERS`), a custom slug from the role row that defines it (`services.custom_provider_address`, the
-helper the conductor uses too). It is spoken to over the OpenAI audio API only, which a local speech server
+**Which provider.** A built-in slug resolves to the catalogue's address (`BUILTIN_PROVIDERS`) and ignores
+any typed address, so an address saved beside `openai` can never carry the OpenAI key somewhere else. A
+custom slug resolves to its own address (`stt_base_url` / `tts_base_url`) when one is saved, because a local
+speech server is nothing an agent role should have to define. Without one, it resolves to the address of the
+role row that names it (`services.custom_provider_address`, the helper the conductor uses too). With neither,
+it is refused with `409 speech_provider_unknown`. It is spoken to over the OpenAI audio API only, which a local speech server
 (speaches, LocalAI) and the hosted providers that offer speech (OpenAI, Groq) answer. Codify keeps no list of
 providers believed to have audio: a provider whose protocol is not `openai_compat` is refused with
 `409 speech_protocol_unsupported` and a sentence saying why, and the model id is the provider's own,

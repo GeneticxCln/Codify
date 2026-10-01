@@ -172,14 +172,26 @@ class TestVoiceSettings(SpeechCase):
                 r = await self.client.put("/settings/engine", headers=self.headers, json={key: "Not a slug"})
                 self.assertEqual(422, r.status_code, r.text)
 
+    async def test_a_speech_server_address_is_an_http_url_or_nothing(self) -> None:
+        for key in ("stt_base_url", "tts_base_url"):
+            for bad in ("ftp://127.0.0.1/v1", "127.0.0.1:8000", "http://", "file:///etc/passwd"):
+                with self.subTest(key=key, value=bad):
+                    r = await self.client.put("/settings/engine", headers=self.headers, json={key: bad})
+                    self.assertEqual(422, r.status_code, r.text)
+            with self.subTest(key=key, value="a server"):
+                await self.configure(**{key: " http://127.0.0.1:8000/v1 "})
+                got = (await self.client.get("/settings/engine", headers=self.headers)).json()
+                self.assertEqual("http://127.0.0.1:8000/v1", got[key]["value"])
+                await self.configure(**{key: ""})
+
 
 class TestResolution(SpeechCase):
-    def resolve(self, provider: str, model: str = "m") -> speech.SpeechTarget:
-        return speech.resolve(app.state.registry, self.keychain, provider, model, what="stt")
+    def resolve(self, provider: str, model: str = "m", base_url: str = "") -> speech.SpeechTarget:
+        return speech.resolve(app.state.registry, self.keychain, provider, model, what="stt", base_url=base_url)
 
-    def refusal(self, provider: str, model: str = "m") -> ApiError:
+    def refusal(self, provider: str, model: str = "m", base_url: str = "") -> ApiError:
         with self.assertRaises(ApiError) as caught:
-            self.resolve(provider, model)
+            self.resolve(provider, model, base_url)
         return caught.exception
 
     def test_a_built_in_provider_brings_its_address_and_its_key(self) -> None:
@@ -211,6 +223,37 @@ class TestResolution(SpeechCase):
 
     def test_a_custom_provider_no_role_defines_is_refused(self) -> None:
         self.assertEqual("speech_provider_unknown", self.refusal("nowhere").code)
+
+    def test_a_custom_provider_can_be_given_its_own_address_with_no_role_using_it(self) -> None:
+        # The fully local case: a speech server on this machine that no agent role has any business with.
+        target = self.resolve("localspeech", "Systran/faster-whisper-small", base_url="http://127.0.0.1:8000/v1/")
+
+        self.assertEqual("http://127.0.0.1:8000/v1", target.base_url)
+        self.assertEqual("", target.api_key)
+
+    def test_its_own_address_wins_over_a_role_that_also_names_it(self) -> None:
+        self.conn.execute(
+            "UPDATE agent_configs SET provider = 'localspeech', protocol = 'openai_compat', "
+            "base_url = 'http://127.0.0.1:9000/v1' WHERE role = 'scribe'"
+        )
+        self.conn.commit()
+
+        target = self.resolve("localspeech", base_url="http://127.0.0.1:8000/v1")
+
+        self.assertEqual("http://127.0.0.1:8000/v1", target.base_url)
+
+    def test_a_built_in_provider_keeps_its_own_address_whatever_is_typed(self) -> None:
+        # Otherwise a stray address beside "openai" would carry the OpenAI key somewhere else.
+        self.keychain.set_provider_key("openai", KEY)
+
+        target = self.resolve("openai", "whisper-1", base_url="https://elsewhere.example/v1")
+
+        self.assertEqual("https://api.openai.com/v1", target.base_url)
+
+    def test_a_key_saved_for_a_custom_speech_server_never_goes_to_it_in_the_clear(self) -> None:
+        self.keychain.set_provider_key("lanspeech", KEY)
+
+        self.assertEqual("invalid_base_url", self.refusal("lanspeech", base_url="http://192.168.1.5:8000/v1").code)
 
     def test_a_provider_that_does_not_speak_the_openai_audio_api_is_refused(self) -> None:
         self.keychain.set_provider_key("anthropic", KEY)
@@ -266,6 +309,22 @@ class TestReadAloud(SpeechCase):
 
         r = await self.client.post("/audio/speak", headers=self.headers, json={"text": "hi"})
 
+        self.assertEqual(200, r.status_code, r.text)
+        (request,) = self.sent
+        self.assertEqual("http://127.0.0.1:8000/v1/audio/speech", str(request.url))
+        self.assertNotIn("authorization", request.headers)
+
+    async def test_a_local_speech_server_set_up_in_settings_alone_reads_aloud(self) -> None:
+        await self.configure(
+            tts_provider="localspeech", tts_model="kokoro", tts_voice="af_heart",
+            tts_base_url="http://127.0.0.1:8000/v1",
+        )
+        self.reply = httpx.Response(200, content=b"RIFF-local")
+
+        status = (await self.client.get("/audio/status", headers=self.headers)).json()
+        r = await self.client.post("/audio/speak", headers=self.headers, json={"text": "hi"})
+
+        self.assertTrue(status["read_aloud"]["configured"], status["read_aloud"])
         self.assertEqual(200, r.status_code, r.text)
         (request,) = self.sent
         self.assertEqual("http://127.0.0.1:8000/v1/audio/speech", str(request.url))

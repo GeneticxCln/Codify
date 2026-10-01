@@ -44,6 +44,8 @@ interface VoiceDraft {
   tts_model: string;
   tts_voice: string;
   audio_input: string;
+  stt_base_url: string;
+  tts_base_url: string;
   tts_auto_read: boolean;
 }
 
@@ -55,6 +57,8 @@ const EMPTY: VoiceDraft = {
   tts_model: "",
   tts_voice: "",
   audio_input: "",
+  stt_base_url: "",
+  tts_base_url: "",
   tts_auto_read: false,
 };
 
@@ -72,6 +76,8 @@ function fromSettings(s: EngineSettings): VoiceDraft | null {
     tts_model: s.tts_model?.value ?? "",
     tts_voice: s.tts_voice?.value ?? "",
     audio_input: s.audio_input?.value ?? "",
+    stt_base_url: s.stt_base_url?.value ?? "",
+    tts_base_url: s.tts_base_url?.value ?? "",
     tts_auto_read: (s.tts_auto_read?.value ?? 0) === 1,
   };
 }
@@ -79,6 +85,23 @@ function fromSettings(s: EngineSettings): VoiceDraft | null {
 const inputClass =
   "w-full bg-codify-bg border border-codify-border rounded-lg px-3 py-2 text-xs text-codify-primary " +
   "placeholder-codify-muted focus:outline-none focus:border-codify-accent";
+
+/**
+ * Where a custom speech provider lives: a local speech server, typically. Only for a custom slug,
+ * because the engine ignores the address for a built-in one (an address typed beside "openai"
+ * must not be able to carry its key somewhere else), and a field that does nothing is a trap.
+ */
+const ServerAddress: React.FC<{ value: string; onChange: (url: string) => void }> = ({ value, onChange }) => (
+  <label className="flex flex-col gap-1.5 text-xs text-codify-secondary font-medium">
+    Server address
+    <input
+      className={inputClass}
+      value={value}
+      placeholder="http://127.0.0.1:8000/v1"
+      onChange={(e) => onChange(e.target.value)}
+    />
+  </label>
+);
 
 /** One feature's readiness, in the engine's own words. */
 const Readiness: React.FC<{ what: string; state: SpeechReadiness | null }> = ({ what, state }) => {
@@ -210,6 +233,7 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
   };
 
   const modelsFor = (provider: string) => models.filter((m) => m.provider === provider);
+  const isCustom = (provider: string) => provider !== "" && !(builtins ?? []).includes(provider);
   const discoveryFor = (provider: string) => providerStatus.find((s) => s.provider === provider);
 
   if (loadError) {
@@ -289,6 +313,9 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
             refreshing={refreshingModels}
           />
         </div>
+        {isCustom(draft.stt_provider) && (
+          <ServerAddress value={draft.stt_base_url} onChange={(url) => edit({ stt_base_url: url })} />
+        )}
         <label className="flex flex-col gap-1.5 text-xs text-codify-secondary font-medium">
           Language (optional)
           <input
@@ -342,6 +369,9 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
             refreshing={refreshingModels}
           />
         </div>
+        {isCustom(draft.tts_provider) && (
+          <ServerAddress value={draft.tts_base_url} onChange={(url) => edit({ tts_base_url: url })} />
+        )}
         <label className="flex flex-col gap-1.5 text-xs text-codify-secondary font-medium">
           Voice
           <input

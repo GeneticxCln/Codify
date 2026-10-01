@@ -413,6 +413,8 @@ export async function saveEngineSettings(
     tts_model?: string;
     tts_voice?: string;
     audio_input?: string;
+    stt_base_url?: string;
+    tts_base_url?: string;
     tts_auto_read?: boolean;
   }
 ): Promise<{ saved: Record<string, number | string> }> {

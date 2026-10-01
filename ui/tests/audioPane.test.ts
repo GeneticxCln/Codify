@@ -30,21 +30,26 @@ type Route = (body: unknown) => Response;
 
 const str = (value: string) => ({ value, max: 128 });
 
+/** The engine's settings document, with the voice keys a test overrides. */
+const settings = (voice: Record<string, string> = {}) =>
+  json({
+    parallel_width: { value: 4, min: 1, max: 16 },
+    stt_provider: str(voice.stt_provider ?? "openai"),
+    stt_model: str(voice.stt_model ?? "whisper-1"),
+    stt_language: str(""),
+    tts_provider: str(voice.tts_provider ?? "openai"),
+    tts_model: str(voice.tts_model ?? "tts-1"),
+    tts_voice: str("alloy"),
+    audio_input: str(""),
+    stt_base_url: str(voice.stt_base_url ?? ""),
+    tts_base_url: str(voice.tts_base_url ?? ""),
+    tts_auto_read: { value: 0, min: 0, max: 1 },
+  });
+
 /** What a configured engine answers, before a test changes any of it. */
 function engine(): Record<string, Route> {
   return {
-    "GET /settings/engine": () =>
-      json({
-        parallel_width: { value: 4, min: 1, max: 16 },
-        stt_provider: str("openai"),
-        stt_model: str("whisper-1"),
-        stt_language: str(""),
-        tts_provider: str("openai"),
-        tts_model: str("tts-1"),
-        tts_voice: str("alloy"),
-        audio_input: str(""),
-        tts_auto_read: { value: 0, min: 0, max: 1 },
-      }),
+    "GET /settings/engine": () => settings(),
     "GET /settings/providers": () =>
       json({ builtins: [{ slug: "openai" }, { slug: "groq" }, { slug: "ollama" }], custom: [] }),
     "GET /audio/inputs": () =>
@@ -146,11 +151,43 @@ test("saving sends the voice keys as edited, then reads the status again", async
       tts_model: "tts-1",
       tts_voice: "nova",
       audio_input: "usb.mic",
+      stt_base_url: "",
+      tts_base_url: "",
       tts_auto_read: true,
     });
     assert.equal(called(calls, "GET", "/audio/status").length, 2, "the status was not read again after saving");
     assert.match(dom.text(), /Saved\./);
   });
+});
+
+test("a built-in provider has no server address to type: the engine would ignore it", async () => {
+  await withPane({}, async (dom) => {
+    assert.throws(() => dom.byField("Server address"), /no field is labelled "Server address"/);
+  });
+});
+
+test("a custom speech server is given its address here, and it is saved", async () => {
+  await withPane(
+    {
+      "GET /settings/engine": () =>
+        settings({ tts_provider: "localspeech", tts_model: "kokoro", tts_base_url: "http://127.0.0.1:8000/v1" }),
+    },
+    async (dom, calls) => {
+      const address = dom.byField("Server address") as HTMLInputElement;
+      assert.equal(address.value, "http://127.0.0.1:8000/v1");
+      assert.equal(dom.container.querySelectorAll("input[placeholder='http://127.0.0.1:8000/v1']").length, 1,
+        "dictation, on a built-in provider, was offered an address too");
+
+      await dom.fill(address, "http://127.0.0.1:8880/v1");
+      await dom.click(dom.byButton("Save audio settings"));
+      await dom.settle();
+
+      const [put] = called(calls, "PUT", "/settings/engine");
+      const body = put.body as Record<string, unknown>;
+      assert.equal(body.tts_provider, "localspeech");
+      assert.equal(body.tts_base_url, "http://127.0.0.1:8880/v1");
+    },
+  );
 });
 
 test("without PipeWire the microphone section says what is missing instead of offering a list", async () => {

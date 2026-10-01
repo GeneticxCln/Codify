@@ -71,13 +71,17 @@ class SpeechTarget:
 
 
 def resolve(
-    registry: AgentRegistryService, keychain: Keychain, provider: str, model: str, *, what: str
+    registry: AgentRegistryService, keychain: Keychain, provider: str, model: str, *, what: str,
+    base_url: str = "",
 ) -> SpeechTarget:
     """The speech target for a provider slug and model, or an `ApiError` saying why there is none.
 
-    `what` is `stt` or `tts`, and names the setting a refusal points at.
+    `what` is `stt` or `tts`, and names the setting a refusal points at. `base_url` is the speech
+    server's own address (`stt_base_url` / `tts_base_url`), which a *custom* provider uses before
+    any role's: a local speech server is nothing an agent role has to know about. A built-in
+    provider ignores it, so an address typed beside "openai" can never carry the OpenAI key away.
     """
-    provider, model = provider.strip(), model.strip()
+    provider, model, base_url = provider.strip(), model.strip(), base_url.strip()
     label = "dictation" if what == "stt" else "read-aloud"
     if not provider or not model:
         raise ApiError(
@@ -93,12 +97,14 @@ def resolve(
                 409, "speech_key_missing",
                 f"{provider} needs an API key for {label}: save one in Settings → Provider Keys",
             )
+    elif base_url:
+        protocol, api_key = SPEECH_PROTOCOL, keychain.get_provider_key(provider)
     else:
         found = custom_provider_address(provider, registry.list_configs())
         if found is None:
             raise ApiError(
                 409, "speech_provider_unknown",
-                f"no role defines an address for the custom provider {provider!r}; set it on a role first",
+                f"the custom provider {provider!r} has no address: give its base URL in Settings → Audio",
             )
         protocol, base_url, api_key_ref = found
         api_key = keychain.get(api_key_ref) or keychain.get_provider_key(provider)
@@ -170,7 +176,7 @@ def configured(
     provider, model = settings.get_str(f"{what}_provider"), settings.get_str(f"{what}_model")
     out: dict[str, Any] = {"provider": provider, "model": model, "configured": False, "reason": None}
     try:
-        resolve(registry, keychain, provider, model, what=what)
+        resolve(registry, keychain, provider, model, what=what, base_url=settings.get_str(f"{what}_base_url"))
     except ApiError as refusal:
         out["reason"] = refusal.message
         return out

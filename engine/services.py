@@ -139,6 +139,8 @@ class SettingsService:
         "tts_model": "",
         "tts_voice": "",
         "audio_input": "",
+        "stt_base_url": "",
+        "tts_base_url": "",
     }
 
     def get_str(self, key: str) -> str:
