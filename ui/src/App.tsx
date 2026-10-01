@@ -153,6 +153,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { CommandPalette } from "./components/CommandPalette";
 import { buildPaletteItems, type PaletteItem } from "./commandPalette";
 import { resolveShortcut } from "./shortcuts";
+import { currentUiScale, DEFAULT_UI_SCALE, stepUiScale, writeUiScale } from "./uiScale";
 import {
   BROWSER_PAGE_LOADED,
   BROWSER_PAGE_LOADING,
@@ -1927,6 +1928,17 @@ export const App: React.FC = () => {
         case "toggle-palette":
           setPaletteOpen((v) => !v);
           break;
+        // The window's size, as a browser's zoom: a step each way and back to the default. The
+        // store decides the size and tells every listener (the root, the terminal, Settings).
+        case "scale-up":
+          writeUiScale(stepUiScale(currentUiScale(), 1));
+          break;
+        case "scale-down":
+          writeUiScale(stepUiScale(currentUiScale(), -1));
+          break;
+        case "scale-reset":
+          writeUiScale(DEFAULT_UI_SCALE);
+          break;
       }
       // Claimed keystrokes are consumed: no browser default, no second
       // meaning for whatever held focus.
@@ -3216,10 +3228,10 @@ export const App: React.FC = () => {
                   <ScrollText className="h-3.5 w-3.5 flex-shrink-0" />
                   <span>What the engine said before it stopped</span>
                 </div>
-                <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-codify-warning/90">
+                <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-codify-warning/90">
                   {engineStderr.join("\n")}
                 </pre>
-                <p className="mt-1.5 text-[11px] text-codify-warning/70">
+                <p className="mt-1.5 text-xs text-codify-warning/70">
                   The shell stops the engine rather than restarting it, so a new
                   engine means relaunching the app.
                 </p>

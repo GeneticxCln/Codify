@@ -117,8 +117,7 @@ test("digits are read from code, so a shifted digit key still works", () => {
   );
 });
 
-test("Digit0 is not a shortcut, and neither are unrelated combos", () => {
-  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "0", code: "Digit0" })), null);
+test("unrelated combos are not shortcuts", () => {
   assert.equal(resolveShortcut(key({ ctrlKey: true, key: "p", code: "KeyP" })), null);
   assert.equal(
     resolveShortcut(key({ ctrlKey: true, key: "ArrowLeft", code: "ArrowLeft" })),
@@ -149,4 +148,42 @@ test("focusing a tab by number is harmless to repeat, so it is not suppressed", 
     resolveShortcut(key({ ctrlKey: true, key: "2", code: "Digit2", repeat: true })),
     { type: "focus-tab", index: 1 },
   );
+});
+
+test("Ctrl + / Ctrl - / Ctrl 0 scale the window, the way a browser's zoom does", () => {
+  const up = { type: "scale-up" };
+  const down = { type: "scale-down" };
+  const reset = { type: "scale-reset" };
+  // Bigger: `=` is where `+` lives without Shift on most layouts, and Ctrl++ (with Shift) must work too.
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "=", code: "Equal" })), up);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, shiftKey: true, key: "+", code: "Equal" })), up);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "+", code: "NumpadAdd" })), up);
+  // `+` is its own key on some layouts (German), so `key` counts as much as `code`.
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "+", code: "BracketRight" })), up);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "-", code: "Minus" })), down);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "-", code: "NumpadSubtract" })), down);
+  // Reset is read from the physical key, so AZERTY's shifted `0` still resets.
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "0", code: "Digit0" })), reset);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "à", code: "Digit0" })), reset);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "0", code: "Numpad0" })), reset);
+});
+
+test("scaling needs Ctrl alone, and typing = - 0 is never a shortcut", () => {
+  for (const e of [
+    key({ key: "=", code: "Equal" }),
+    key({ key: "-", code: "Minus" }),
+    key({ key: "0", code: "Digit0" }),
+    key({ ctrlKey: true, altKey: true, key: "-", code: "Minus" }),
+    key({ ctrlKey: true, altKey: true, key: "0", code: "Digit0" }),
+    key({ ctrlKey: true, metaKey: true, key: "=", code: "Equal" }),
+  ]) {
+    assert.equal(resolveShortcut(e), null, `${e.key} / ${e.code} must not scale the window`);
+  }
+});
+
+test("a held scale key is one step, not a run to the end of the scale", () => {
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "=", code: "Equal", repeat: true })), null);
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "-", code: "Minus", repeat: true })), null);
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "0", code: "Digit0", repeat: true })), null);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "=", code: "Equal", repeat: false })), { type: "scale-up" });
 });

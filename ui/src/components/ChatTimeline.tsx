@@ -478,7 +478,7 @@ const PlanStepEditor: React.FC<{
           Description
         </span>
         <textarea
-          className={`${inputCls} min-h-[60px] resize-y`}
+          className={`${inputCls} min-h-[3.75rem] resize-y`}
           value={description}
           maxLength={20000}
           onChange={(e) => setDescription(e.target.value)}

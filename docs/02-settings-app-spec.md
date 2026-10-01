@@ -27,11 +27,13 @@ ui/src/
     PromptOverrideEditor.tsx
     ConductorSettingsCard.tsx  # the conductor's own model + budgets, not a role
     AudioPane.tsx              # microphone, dictation, read-aloud — engine settings only
+    UiScalePanel.tsx           # Appearance → UI scale: how big the whole window is
   providerSetup.ts            # search, apply plan, and the wording beside them
   conductorSettings.ts        # what a conductor pair means, and when to refuse it
   modelMenu.ts                # menu placement, shared by both pickers
   modelFreshness.ts           # which models are new since the last visit
   speech.ts                   # what an answer sounds like, where dictation lands, the one player
+  uiScale.ts                  # the window's size: one percentage on <html>, stored and followed
   hooks/
     useAgentConfigs.ts        # ONLY hook that reads/writes agent config
 ```
@@ -189,7 +191,32 @@ the pane holds no audio state of its own.
   engine ignores an address beside a built-in provider, and a field that does nothing is a trap,
   so it is not shown.
 
-General / Commands / About tabs MAY exist; they MUST NOT call `codify_update_agent_config`.
+### 3.3 UI scale
+
+Settings → Appearance opens with a **UI scale** panel (`UiScalePanel.tsx`): 100, 112.5, 125, 150
+or 175%, **125% by default**. It is client-side display state, like the theme: it is stored in
+`localStorage` under `codify.uiScale`, never sent to the engine, and not agent config.
+
+* **It is a percentage on `<html>`, and everything written in rem follows.** The type ramp, the radii
+  and Tailwind's spacing are rem (`tailwind.config.js`, `DESIGN.md` §3), so text, icons and padding
+  grow together. It is not CSS `zoom` and not the webview's own zoom, because the browser pane's
+  native webview is placed from `getBoundingClientRect()` in logical pixels (docs/09 §7.3), and
+  either of those would make that number disagree with the pixels the shell places it in.
+* **It is applied before the first render** (`startUiScale` in `main.tsx`), so the window never paints
+  at 100% and then jumps. `startUiScale` also follows another window's change (the `storage` event
+  fires only in other windows).
+* **Only the steps are accepted.** A stored value that is not exactly one of them is refused and the
+  default is used, so a hand-edited `3` or `900` cannot produce a window nobody can read or reach
+  this panel in to repair. Steps, not a slider, because layout is only checked at these sizes.
+* **Applied at once, remembered, and the same store as the keyboard.** The preview line in the panel
+  is the window itself at that size. Ctrl +, Ctrl - and Ctrl 0 (docs/09 §8) write the same store, so
+  the panel and the keys cannot disagree.
+* **What does not follow a root font size is handled where it lives.** The xterm terminal draws its own
+  canvas, so `TerminalPane` sets its font size from the scale and re-fits when it changes, and the
+  prompt box's 180px height cap is multiplied by the scale. A new text size is `text-xs` and friends,
+  **never `text-[Npx]`**, which would stay small while the window grew around it.
+
+General / Commands tabs MAY exist; they MUST NOT call `codify_update_agent_config`.
 
 ## 4. Components
 

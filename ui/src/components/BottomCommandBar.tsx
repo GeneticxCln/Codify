@@ -39,6 +39,7 @@ import { IconButton } from "./ui/IconButton";
 import { MicButton } from "./MicButton";
 import { readRejection } from "../rejection.ts";
 import { insertDictation } from "../speech.ts";
+import { uiScaleFactor, useUiScale } from "../uiScale";
 
 export type ExecutionMode = "direct" | "dry_run" | "plan_only";
 
@@ -345,13 +346,17 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
     };
   }, [isFolderOpen, isModelOpen, isModeOpen]);
 
-  // Auto-resize textarea
+  // Auto-resize textarea. The cap is 180px at 100% and grows with the UI scale: the prompt's text is
+  // rem, so a fixed cap would hold fewer lines the bigger the window is. The scale is a dependency
+  // so a change re-measures instead of waiting for the next keystroke.
+  const uiScale = useUiScale();
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 180)}px`;
+      const cap = Math.round(180 * uiScaleFactor());
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, cap)}px`;
     }
-  }, [prompt]);
+  }, [prompt, uiScale]);
 
   // Dictated words go where the caret is, read when they *arrive*: the person may have typed on while
   // speaking. The updater form, because the transcript lands after an await and a `prompt` captured at
@@ -558,7 +563,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 title={selectedWorkspace?.root_path || "Select project folder"}
               >
                 <Folder className="w-3.5 h-3.5 text-codify-accent" />
-                <span className="font-medium max-w-[150px] truncate">
+                <span className="font-medium max-w-[9.375rem] truncate">
                   {selectedWorkspace
                     ? selectedWorkspace.name
                     : "Select Project Folder"}
@@ -697,7 +702,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-codify-raised border border-codify-border text-codify-secondary hover:bg-codify-border transition-colors cursor-pointer"
               >
                 <Cpu className="w-3.5 h-3.5 text-codify-design" />
-                <span className="font-medium truncate max-w-[150px]">
+                <span className="font-medium truncate max-w-[9.375rem]">
                   {selectedModel ? selectedModel.name : "No model"}
                 </span>
                 <ChevronDown className="w-3 h-3 text-codify-muted" />
@@ -856,7 +861,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                               ) : (
                                 !badges.roles &&
                                 m.description && (
-                                  <span className="text-2xs text-codify-muted truncate max-w-[110px] flex-shrink-0">
+                                  <span className="text-2xs text-codify-muted truncate max-w-[6.875rem] flex-shrink-0">
                                     {m.description}
                                   </span>
                                 )

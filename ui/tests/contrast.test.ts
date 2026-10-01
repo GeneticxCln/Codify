@@ -434,9 +434,11 @@ test("the size table is the app's scale, read back from the config", () => {
   );
   const block = config.slice(config.indexOf("fontSize: {"));
   const fromConfig: Record<string, number> = {};
-  for (const m of block.matchAll(/"?(?:2xs|xs|sm|base|md|lg|xl)"?:\s*\["(\d+)px"/g)) {
+  // The config is in rem (so the UI scale can reach it), and this table is in px at
+  // the default 16px root: the contrast rule is about the size a person sees at 100%.
+  for (const m of block.matchAll(/"?(?:2xs|xs|sm|base|md|lg|xl)"?:\s*\["(\d+(?:\.\d+)?)rem"/g)) {
     const name = /"?(?:2xs|xs|sm|base|md|lg|xl)"?/.exec(m[0].replace(/:\s*\[.*/, ""))?.[0].replace(/"/g, "");
-    if (name) fromConfig[name] = Number(m[1]);
+    if (name) fromConfig[name] = Number(m[1]) * 16;
   }
   assert.deepEqual(
     { ...SIZES },

@@ -229,7 +229,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 ) : (
                   !badges.roles &&
                   m.description && (
-                    <span className="text-2xs text-codify-muted truncate max-w-[110px] flex-shrink-0">
+                    <span className="text-2xs text-codify-muted truncate max-w-[6.875rem] flex-shrink-0">
                       {m.description}
                     </span>
                   )

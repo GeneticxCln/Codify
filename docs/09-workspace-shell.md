@@ -2074,6 +2074,9 @@ of decisions — AltGr, shifted digits, what Ctrl+9 means — that markup cannot
 | Ctrl+W | Close the active tab, landing on the left neighbour (§4 arithmetic) |
 | Ctrl+1..8 | Focus the tab in that strip position |
 | Ctrl+9 | Focus the **last** tab — the browser convention, so a strip past nine stays reachable at its end |
+| Ctrl+= (or Ctrl++) | UI scale up one step, 100 → 112.5 → 125 → 150 → 175% (docs/02 §3.3) |
+| Ctrl+- | UI scale down one step |
+| Ctrl+0 | UI scale back to the 125% default |
 | Ctrl+K | Command palette: open tabs, every conversation in this workspace, and every settings destination (`Provider keys & endpoints`, `Agent roles & prompts`, `Audio: microphone, dictation & read-aloud`, `Appearance & themes`), token-filtered with title-prefix hits ranked first |
 
 Decisions, and why:
@@ -2084,6 +2087,10 @@ Decisions, and why:
 - **Letters require no Shift** (Ctrl+Shift+T is somebody else's reopen-last-tab
   muscle memory); **digits ignore Shift** and are read from `code`, so the
   physical `1` key works on layouts where `key` is `!`.
+- **The scale keys ignore Shift and read both `key` and `code`.** `+` is Shift+`=` on many layouts and
+  its own key on others (German), so Ctrl+Shift+= must scale as well as Ctrl+=, and reset is the
+  physical `0` because that key types `à` on AZERTY. A held key is one step: auto-repeat would run
+  the window from 100% to 175% in a blink.
 - **The listener runs in the capture phase** — a shell shortcut beats the
   focused control — and consumes its keystroke with `preventDefault`. Ctrl+W closes
   the active tab through the same `handleCloseTab` seam as the strip's close

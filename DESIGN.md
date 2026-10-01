@@ -591,17 +591,26 @@ that change.
 
 | Token | Size | Used for |
 |---|---|---|
-| `2xs` | `10px` | badges, timestamps, counts, meta |
-| `xs` | `11px` | dense rows, picker items, toolbars |
-| `sm` | `12px` | chat prose, control labels, the default body |
-| `base` | `13px` | reading copy, paragraph text |
-| `md` | `14px` | section headings, card titles |
-| `lg` | `16px` | panel headings |
-| `xl` | `20px` | the app's one true hero moment, if any |
+| `2xs` | `0.625rem` | 10px: badges, timestamps, counts, meta |
+| `xs` | `0.6875rem` | 11px: dense rows, picker items, toolbars |
+| `sm` | `0.75rem` | 12px: chat prose, control labels, the default body |
+| `base` | `0.8125rem` | 13px: reading copy, paragraph text |
+| `md` | `0.875rem` | 14px: section headings, card titles |
+| `lg` | `1rem` | 16px: panel headings |
+| `xl` | `1.25rem` | 20px: the app's one true hero moment, if any |
 
 Consequences to know before you use these: `text-sm` is **12px**, not Tailwind's
 14px, and `text-xs` is **11px**, not 12px. Anything written expecting the default is
 two steps too large.
+
+**The sizes are rem, and the px in the table is the size at a 16px root.** That is what
+makes the UI scale work: Settings → Appearance (and Ctrl +, Ctrl -, Ctrl 0) sets one
+percentage on `<html>`, and everything written in rem, which is the type ramp, the
+radii, and Tailwind's spacing, grows with it. So **a size is never a `text-[Npx]`**.
+That would be the one run of text that stays small while the window grows around it.
+Line heights are rem for the same reason: text that grew inside a fixed-px line box
+overlaps itself. The default scale is 125%, so the table's `sm` is 15px on screen
+out of the box.
 
 **Code is always `font-mono`, and never scaled below `2xs`.** Diffs, JSON and payloads
 are the payload of this app; they get the monospace stack and their own size, and they
@@ -616,10 +625,12 @@ same two things, that is a bug.
 
 | Token | Value | Used for |
 |---|---|---|
-| `sm` | `4px` | icon-to-label inside a control |
-| `md` | `6px` | inset rows, nested chips |
-| `lg` | `8px` | **the default control radius** |
-| `xl` | `12px` | cards, the command bar, drawers |
+| `sm` | `0.25rem` | 4px: icon-to-label inside a control |
+| `md` | `0.375rem` | 6px: inset rows, nested chips |
+| `lg` | `0.5rem` | 8px: **the default control radius** |
+| `xl` | `0.75rem` | 12px: cards, the command bar, drawers |
+
+Radii are rem, like the type ramp, so a scaled window keeps its proportions.
 
 `rounded-lg` is the default for anything a pointer lands on; `rounded-full` is for
 circles only (status dots, avatars). Nesting a `lg` inside an `lg` looks wrong — step

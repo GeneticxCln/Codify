@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Check, ClipboardPaste, Copy, FileDown, FileUp, Palette, RotateCcw, Undo2 } from "lucide-react";
 import { Panel } from "./ui/Panel";
+import { UiScalePanel } from "./UiScalePanel";
 import { MatrixRain } from "./ui/MatrixRain";
 import { effectFor } from "./ui/WeatherBackdrop";
 import {
@@ -259,6 +260,7 @@ export const AppearancePane: React.FC = () => {
 
   return (
     <div className="space-y-4">
+      <UiScalePanel />
       <Panel title={<><Palette className="w-3.5 h-3.5" /> Theme</>}>
         <div className="grid grid-cols-1 lg:grid-cols-[17rem_minmax(0,1fr)] gap-4">
           <div

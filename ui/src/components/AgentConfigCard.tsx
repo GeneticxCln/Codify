@@ -684,7 +684,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
           {/* The one warning worth its row: an empty field here is not "smaller
               and cheaper", it is "silently truncates whatever does not fit" —
               the failure mode that ships degraded plans with no error anywhere. */}
-          <p className="text-[11px] leading-relaxed text-codify-muted">
+          <p className="text-xs leading-relaxed text-codify-muted">
             Raise this for roles that send large prompts (evidence packs, contracts).
             Ollama silently truncates to its default — 4096 — which degrades the
             reply without erroring. qwen2.5-coder supports 32768.
@@ -720,7 +720,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             onChange={(e) => updateDraft({ keep_alive: e.target.value })}
             className="bg-codify-bg border border-codify-border rounded px-3 py-1.5 text-sm text-codify-secondary font-mono"
           />
-          <p className="text-[11px] leading-relaxed text-codify-muted">
+          <p className="text-xs leading-relaxed text-codify-muted">
             How long Ollama holds this model loaded after a request finishes — a
             duration (<code>30m</code>, <code>1h30m</code>), bare seconds,{" "}
             <code>-1</code> for until the server stops. It does not make a call

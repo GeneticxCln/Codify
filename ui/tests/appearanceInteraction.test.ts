@@ -329,8 +329,9 @@ test("the radiogroup keeps its promise when a key is pressed, not only when one 
       "radiogroup",
       "the element the arrow keys are pressed on is not the radiogroup",
     );
+    // Inside the Theme group: the UI scale panel above it is a radiogroup too, with its own checked option.
     const checked = (): string | null =>
-      dom.container.querySelector('[role="radio"][aria-checked="true"]')?.textContent ?? null;
+      group.querySelector('[role="radio"][aria-checked="true"]')?.textContent ?? null;
     assert.match(checked() ?? "", /Toxic Lab/);
 
     await dom.press(group, "ArrowDown");

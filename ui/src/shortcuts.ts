@@ -26,6 +26,10 @@
  * - **`Ctrl+9` is the *last* tab, not the ninth** — the browser convention.
  *   Tabs 1–8 jump by position; 9 lands on the end of the strip, which is
  *   the one a keyboard cannot otherwise name when there are more than nine.
+ * - **`Ctrl+=` / `Ctrl+-` / `Ctrl+0` scale the window**, as a browser's zoom does.
+ *   Bigger is `=` *or* `+` (so Ctrl+Shift+= works), by `key` or by `code`: `+` is
+ *   its own key on a German layout and `=` is not where it is on others. Reset
+ *   is read from the physical `0`, because on AZERTY that key types `à`.
  *
  * What this module cannot promise: a compositor or window manager that consumes
  * a keystroke before it reaches the webview (a desktop that binds `Ctrl+W`
@@ -40,7 +44,11 @@ export type ShortcutAction =
   /** 0-based strip position, from `Ctrl+1..8`. */
   | { type: "focus-tab"; index: number }
   | { type: "focus-last-tab" }
-  | { type: "toggle-palette" };
+  | { type: "toggle-palette" }
+  /** One step bigger or smaller on the UI scale (`uiScale.ts`), or back to its default. */
+  | { type: "scale-up" }
+  | { type: "scale-down" }
+  | { type: "scale-reset" };
 
 /**
  * The five fields this decision needs — structurally satisfied by
@@ -81,6 +89,18 @@ export function resolveShortcut(e: KeyEventLike): ShortcutAction | null {
       default:
         break;
     }
+  }
+
+  // Scaling ignores Shift on purpose (Ctrl+Shift+= is how `+` is typed on many layouts), and a held
+  // key is one step: auto-repeat would run the window from 100% to 175% in a blink.
+  if (e.key === "=" || e.key === "+" || e.code === "Equal" || e.code === "NumpadAdd") {
+    return e.repeat ? null : { type: "scale-up" };
+  }
+  if (e.key === "-" || e.code === "Minus" || e.code === "NumpadSubtract") {
+    return e.repeat ? null : { type: "scale-down" };
+  }
+  if (e.code === "Digit0" || e.code === "Numpad0") {
+    return e.repeat ? null : { type: "scale-reset" };
   }
 
   // The physical digit keys, layout-independent. 9 is the last tab, so the

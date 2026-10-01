@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import { readStoredThemeId } from "./appearance";
 import { applyTintedTheme } from "./tint";
+import { startUiScale } from "./uiScale";
 import "./index.css";
 // xterm's stylesheet, here rather than in `TerminalPane.tsx`. A CSS import is a
 // bundler statement that node cannot parse, so putting it in the component would
@@ -16,6 +17,10 @@ import "@xterm/xterm/css/xterm.css";
 // tints included, so a user's chosen colour does not flash the stock one for a
 // frame either; the settings pane re-applies on every choice and every edit.
 applyTintedTheme(readStoredThemeId());
+
+// The window's size, for the same reason and the same place: a window that painted at 100% and then
+// grew to the saved 125% would shift every pixel of layout after the user had begun reading it.
+startUiScale();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
