@@ -7,6 +7,7 @@ import {
   type PinReadiness,
 } from "../designDeliverable";
 import type { Goal } from "../types";
+import { DeliverableText } from "./DeliverableText";
 
 /** The outcome of the last pin attempt, per goal card. */
 export interface PinOutcome {
@@ -87,14 +88,13 @@ const DeliverableBody: React.FC<{
   path: string;
   body: string;
   label: string;
-}> = ({ path, body, label }) => (
+  onOpenLink?: (url: string) => void;
+}> = ({ path, body, label, onOpenLink }) => (
   <details className="text-xs text-codify-muted">
     <summary className="cursor-pointer text-codify-muted">
       {path} ({body.length} chars) — {label}
     </summary>
-    <pre className="mt-1.5 p-2 rounded bg-codify-surface border border-codify-raised text-2xs text-codify-secondary whitespace-pre-wrap max-h-64 overflow-auto">
-      {body}
-    </pre>
+    <DeliverableText body={body} boxClassName="max-h-64" onOpenLink={onOpenLink} />
   </details>
 );
 
@@ -121,7 +121,9 @@ export const DesignDeliverableCard: React.FC<{
   /** The file this workspace already obeys, keyed by the goal's workspace. */
   pinnedPath?: string;
   onPin: (goalId: string, workspaceId: string, path: string) => Promise<void>;
-}> = ({ payload, goal, pinOutcome, pinnedPath, onPin }) => {
+  /** A link in the body was clicked: open it in a browser tab. */
+  onOpenLink?: (url: string) => void;
+}> = ({ payload, goal, pinOutcome, pinnedPath, onPin, onOpenLink }) => {
   // A design-mode goal's contract is the artifact itself, not the direction a
   // step is written against: the difference between input and deliverable, so it
   // is named.
@@ -242,6 +244,7 @@ export const DesignDeliverableCard: React.FC<{
             path={path}
             body={payload.design_md}
             label={readiness.bodyLabel}
+            onOpenLink={onOpenLink}
           />
         </div>
       )}

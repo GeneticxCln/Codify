@@ -98,15 +98,19 @@ const text = (markup: string): string =>
 
 // ── the body is the point of the card ─────────────────────────────────────
 
-test("the authored body is on screen, in a preformatted block", () => {
+test("the authored body is on screen, rendered as the document it is", () => {
   const markup = render();
-  assert.match(markup, /<pre[^>]*>[\s\S]*<\/pre>/, "a document is prose, not markup");
+  // Rendered is the default: the file is Markdown, and a preformatted wall of `#` is not a way to
+  // read one. The exact source is one click away (`deliverableText.test.ts` owns that toggle).
+  assert.match(markup, /<h3[^>]*>What this repository is<\/h3>/, "the body's heading is not drawn as a heading");
   assert.ok(
     markup.includes("A KPI dashboard"),
     "the body the run authored must be readable, not merely counted"
   );
-  // The backticks are content: a document that quotes paths has to show them.
-  assert.ok(markup.includes("python3 -m pytest"));
+  // The backticks are markup now and the path is content: a document that quotes paths has to show them.
+  assert.match(markup, /<code[^>]*>python3 -m pytest<\/code>/);
+  assert.doesNotMatch(markup, /<pre\b/, "the default view is the rendered one, not the source block");
+  assert.ok(!markup.includes("# What this repository is"), "the raw heading marker leaked into the rendered view");
 });
 
 test("the heading names what this file is, not what a design file is", () => {

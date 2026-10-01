@@ -282,3 +282,35 @@ test("a turn that planned keeps the run's card", () => {
   assert.match(words, /PENDING/, "a plan awaiting approval shows the status it awaits it in");
   assert.match(words, /planner/, "and the roles that produced it");
 });
+
+test("a turn's reply and its live snapshot are both drawn as Markdown", () => {
+  const finished = timeline([
+    event(1, "log", { level: "info", message: "## Plan\n\nRun **make test** first.", turn: true }),
+  ]);
+  assert.match(finished, /<h4[^>]*>Plan<\/h4>/, "the reply's heading is raw text");
+  assert.match(finished, /<strong[^>]*>make test<\/strong>/);
+  assert.ok(!text(finished).includes("**make test**") && !text(finished).includes("## Plan"));
+
+  // The streamed snapshot is the same answer in progress, and goes through the same component, so a
+  // half-written fence already looks like code instead of snapping into shape at the end.
+  const streaming = timeline(
+    [event(1, "model_delta", { role: "conductor", text: "Try:\n\n```sh\nmake te" })],
+    { status: "RUNNING" },
+  );
+  assert.match(streaming, /<pre[^>]*><code>make te<\/code><\/pre>/);
+  assert.ok(!text(streaming).includes("```"), "an open fence showed its backticks while it streamed");
+});
+
+test("a plan step's description keeps its marks, and the person's own message wraps", () => {
+  const markup = timeline([event(1, "goal_status", { status: "PENDING" })], {
+    status: "PENDING",
+    steps: [
+      { id: "s1", title: "S1", description: "Fix `parse()` in **utils**", status: "PENDING" } as unknown as PlanStep,
+    ],
+  });
+  assert.match(markup, /<code[^>]*>parse\(\)<\/code>/, "a step description's `code` is raw text");
+  assert.match(markup, /<strong[^>]*>utils<\/strong>/);
+  assert.ok(!markup.includes("`parse()`"), "the backticks of a step description are on screen");
+  // The person's own words: line breaks kept, and a long word wraps instead of widening the column.
+  assert.match(markup, /<div class="[^"]*\bwhitespace-pre-wrap\b[^"]*\bbreak-words\b[^"]*">hi<\/div>/);
+});

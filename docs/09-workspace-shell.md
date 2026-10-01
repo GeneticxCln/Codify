@@ -2693,3 +2693,55 @@ when the terminal status arrives as well, so a finished message carries no stale
 flag for the next reader. `ui/tests/goalActions.test.ts` pins all three cases: a
 finished goal is not busy whatever the flag says, a live goal is, and a message
 with no goal yet is busy only while its dispatch is pending.
+
+### 10.17 An answer is Markdown, and nothing in it is interpreted as markup
+
+A model answers in Markdown, and the transcript drew it raw: `##`, `**` and fences, all showing.
+The usual remedy is a Markdown library plus an HTML sanitiser plus `dangerouslySetInnerHTML`, and this
+app has none of the three: no Markdown library is installed even transitively, and nothing under
+`ui/src` sets inner HTML. A reply can be steered by any file or page the model read, so adding the one
+door that turns it into live markup, for the sake of headings, was the wrong trade. The renderer is
+therefore structural rather than defensive:
+
+* **`ui/src/markdown.ts` is a parser that returns data.** Text in, a tree out: no DOM, no React, no
+  HTML. **`ui/src/components/Markdown.tsx`** turns the tree into React elements, and React escapes
+  every string it is given, so there is no step at which text is read as markup and nothing to forget
+  to sanitise. `<script>` in an answer is the characters `<script>`. Headings, paragraphs, bullet and
+  numbered lists (nested by indentation), fenced code, quotes, rules, inline code, bold, italic,
+  strikethrough, links, images and bare URLs are understood. Raw HTML, tables, footnotes and setext
+  headings are not: each degrades to readable text. A single newline is a line break, not a space,
+  because plain-text answers were drawn with `whitespace-pre-wrap` until now and a model that wrote two
+  lines meant two lines.
+* **An unterminated fence runs to the end.** The streamed snapshot (§10.15) is re-parsed on every
+  update, so half a code block is the normal state of a reply in flight; it looks like code while it
+  arrives instead of snapping into shape at the end. Unclosed `**` or a lone backtick stay literal
+  until they close.
+* **The input is untrusted and is parsed in bounded time.** Nothing is quadratic in the length of a
+  line: an opener with no closer is remembered, a link label and URL are scanned to a fixed length,
+  and hand-written scanners replace regexes that could backtrack. Nesting is capped at `MAX_DEPTH`
+  (8), and past it the content is still all there as text. `ui/tests/markdown.test.ts` feeds
+  200,000-character hostile inputs against a time budget and random input against "never throws".
+* **No `<img>`, and no `<a href>`.** An image is never fetched: the answer shows `[image: alt text]`.
+  A link is a *button*, because the main webview has no `on_navigation` guard and a real anchor would
+  navigate the app itself away, taking the UI with it. A click calls `onOpenLink(url)`, which `App.tsx`
+  turns into a new browser tab through the same path a page's popup request takes (§7.2): the shell's
+  `navigation_allowed` still decides, and a refusal is shown in that tab. There is still no system
+  opener (§7.2); a link is the one route from an answer to a web page, and it is the app's own browser.
+* **What may be a link** is `ui/src/markdownLinks.ts`: an explicit `http://` or `https://` address, one
+  that `classifyBrowserAddress` accepts (so never a loopback or unspecified host), with no whitespace or
+  control characters. `javascript:`, `data:`, `file:`, `mailto:`, `tauri://`, relative paths, anchors and
+  bare hosts are words with the address in a tooltip. It is stricter than the address bar on purpose:
+  a model's reply is not a person typing, and a bare word does not get to claim to be a website.
+* **Where it is used.** The turn's answer and its streamed snapshot; the Knowledge and Design
+  deliverable bodies (`DeliverableText.tsx`), which open **Rendered** and have a **Source** button that
+  shows the exact bytes in a `<pre>` (the file the next run will treat as fact, or that the user may
+  pin as a contract, is never only shown interpreted); and a plan step's description, with inline marks
+  only. Role replies, logs, errors and the audit report stay raw: tests assert their JSON. The person's
+  own message keeps its line breaks and wraps a long word (`whitespace-pre-wrap break-words`).
+* **Speech is unchanged.** `speakableText` (§9.1) already drops the marks and reads a code block as
+  "(code omitted)"; it reads the engine's string, not the rendered tree.
+
+`ui/tests/markdown.test.ts` is the parser (structure and hostile input), `markdownRender.test.ts` is
+the mounted renderer (no live element or attribute, whatever the answer says; link behaviour; copy),
+`deliverableText.test.ts` is the Rendered/Source toggle, and `answerLinks.test.ts` mounts the whole App
+and clicks a link in a real answer through to `codify_browser_open`.

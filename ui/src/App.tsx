@@ -1861,6 +1861,21 @@ export const App: React.FC = () => {
     setTabState((prev) => openTab(prev, { id, kind: "browser", title: "New tab" }));
   }, []);
 
+  // Open an address in a new browser tab: the one place a web page is opened from the app's own
+  // content. A popup a page asked for and a link the user clicked in an answer are the same request
+  // (an address, a new tab, the guarded path), so they share this; `classifyBrowserAddress` and the
+  // shell's `navigation_allowed` decide, as they do for a typed address.
+  const handleOpenLink = useCallback(
+    (url: string) => {
+      const id = tabId("browser");
+      setTabState((prev) =>
+        openTab(prev, { id, kind: "browser", title: hostOf(url), workspaceId: selectedWs?.id }),
+      );
+      void handleOpenBrowser(id, url);
+    },
+    [handleOpenBrowser, selectedWs?.id],
+  );
+
   // A page can still ask the shell for something — a popup window. The shell
   // refuses it (`window.open` returns null to the page, the same answer a
   // popup blocker gives) and announces the target instead, so the *user*
@@ -1877,16 +1892,7 @@ export const App: React.FC = () => {
     void listenShellEvent<unknown>(BROWSER_POPUP_REQUESTED, (payload) => {
       const popup = readBrowserPopupRequested(payload);
       if (!popup) return;
-      const id = tabId("browser");
-      setTabState((prev) =>
-        openTab(prev, {
-          id,
-          kind: "browser",
-          title: hostOf(popup.url),
-          workspaceId: selectedWs?.id,
-        }),
-      );
-      void handleOpenBrowser(id, popup.url);
+      handleOpenLink(popup.url);
     })
       .then((off) => {
         // The unlisten can land after unmount — StrictMode mounts, unmounts
@@ -1910,7 +1916,7 @@ export const App: React.FC = () => {
       cancelled = true;
       unlisten?.();
     };
-  }, [handleOpenBrowser, selectedWs?.id]);
+  }, [handleOpenLink]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -3336,6 +3342,7 @@ export const App: React.FC = () => {
               onImportAudit={handleImportAudit}
               onPinDesignContract={handleSetDesignContract}
               pinnedContracts={pinnedContracts}
+              onOpenLink={handleOpenLink}
             />
 
             <BottomCommandBar

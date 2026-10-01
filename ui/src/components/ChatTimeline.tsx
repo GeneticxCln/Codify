@@ -58,6 +58,7 @@ import {
 import { readRejection } from "../rejection.ts";
 import { answersToRead, type AutoReadMemory } from "../speech.ts";
 import { SpeakButton } from "./SpeakButton";
+import { Markdown } from "./Markdown";
 
 /**
  * Laya's pre-flight verdict, rendered as one honest line of chat: which engine
@@ -338,7 +339,9 @@ const TurnExchange: React.FC<{
   onToggleTrace: () => void;
   /** Auto-read chose this answer: read it as soon as it is drawn. */
   autoRead: boolean;
-}> = ({ msg, traceOpen, onToggleTrace, autoRead }) => {
+  /** A link in the answer was clicked: open this address in a browser tab. */
+  onOpenLink?: (url: string) => void;
+}> = ({ msg, traceOpen, onToggleTrace, autoRead, onOpenLink }) => {
   const reply = turnReply(msg.events);
   // Only while there is nothing to show yet: the streamed snapshot *is* the
   // answer being produced, and once the engine publishes the reply it is the
@@ -349,16 +352,17 @@ const TurnExchange: React.FC<{
 
   return (
     <div className="space-y-2">
-      <div className="rounded-2xl rounded-tl-sm border border-codify-border bg-codify-surface px-4 py-2.5 text-sm leading-relaxed text-codify-primary whitespace-pre-wrap break-words">
-        {reply ??
-          live ??
-          (active ? (
-            <span className="text-codify-muted italic animate-pulse">
-              Thinking…
-            </span>
-          ) : (
-            <span className="text-codify-muted">(no answer)</span>
-          ))}
+      <div className="rounded-2xl rounded-tl-sm border border-codify-border bg-codify-surface px-4 py-2.5 text-sm leading-relaxed text-codify-primary break-words">
+        {/* The answer is Markdown, drawn as elements and never as HTML (`markdown.ts` says why), so
+            the streamed snapshot and the finished reply are the same component and an unterminated
+            fence mid-stream already looks like code. */}
+        {reply ?? live ? (
+          <Markdown text={(reply ?? live) as string} onOpenLink={onOpenLink} />
+        ) : active ? (
+          <span className="text-codify-muted italic animate-pulse">Thinking…</span>
+        ) : (
+          <span className="text-codify-muted">(no answer)</span>
+        )}
       </div>
       {alerts.length > 0 && (
         <div className="space-y-1.5">
@@ -753,6 +757,11 @@ interface ChatTimelineProps {
    * would offer a pin that is already in force.
    */
   pinnedContracts: Record<string, string>;
+  /**
+   * Open an address from a link in an answer, in the app's own browser tab. Optional: without it a
+   * link in an answer is its words only (`markdownLinks.ts`).
+   */
+  onOpenLink?: (url: string) => void;
 }
 
 export const ChatTimeline: React.FC<ChatTimelineProps> = ({
@@ -770,6 +779,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   onImportAudit,
   onPinDesignContract,
   pinnedContracts,
+  onOpenLink,
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState<{
@@ -1016,7 +1026,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                  bubble has no edge and `shadow-sm` does nothing on pure black.
                  The border is what draws the panel on every theme. */
               <div className="flex items-start gap-3 justify-end">
-                <div className="bg-codify-raised border border-codify-border text-codify-primary px-4 py-2.5 rounded-2xl rounded-tr-sm max-w-xl text-sm leading-relaxed shadow-sm">
+                <div className="bg-codify-raised border border-codify-border text-codify-primary px-4 py-2.5 rounded-2xl rounded-tr-sm max-w-xl min-w-0 text-sm leading-relaxed shadow-sm whitespace-pre-wrap break-words">
                   {msg.content}
                 </div>
                 <div
@@ -1059,6 +1069,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                           traceFor === msg.goal?.id ? null : (msg.goal?.id ?? null),
                         )
                       }
+                      onOpenLink={onOpenLink}
                     />
                   ) : msg.auditDoc ? (
                     <>
@@ -1556,7 +1567,9 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                     ) : (
                                       <>
                                         <p className="text-xs text-codify-muted pl-6 leading-relaxed">
-                                          {step.description}
+                                          {/* A planner writes `code` and **emphasis** here; marks only, because a
+                                              step description is a sentence and not a document. */}
+                                          <Markdown inline text={step.description} onOpenLink={onOpenLink} />
                                         </p>
 
                                         {/* When this step ran, on the goal's shared axis.
@@ -1885,6 +1898,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                         <KnowledgeDeliverableCard
                                           goal={msg.goal}
                                           payload={ev.payload}
+                                          onOpenLink={onOpenLink}
                                         />
                                       )}
 
@@ -1910,6 +1924,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                             : undefined
                                           }
                                           onPin={handlePinDeliverable}
+                                          onOpenLink={onOpenLink}
                                         />
                                       )}
 

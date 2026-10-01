@@ -645,6 +645,17 @@ out of the box.
 are the payload of this app; they get the monospace stack and their own size, and they
 keep their own colour rather than inheriting a component's.
 
+### Markdown in an answer
+
+An answer is drawn from `ui/src/markdown.ts` by `components/Markdown.tsx` (`docs/09` §10.17), and it
+uses the ramp above rather than adding to it. `#` is `lg`, `##` `md`, `###` `base`, and anything
+deeper `sm`, all `font-semibold`, and drawn two heading levels down (`##` is an `h4`) so an answer
+never outranks the app's own headings. Inline code is mono at `0.9em` on `raised`; a fenced block is a
+`bg` box with a `raised` label bar and a Copy button, scrolling sideways rather than wrapping. A link is
+`info` and underlined, a quote has a `border-strong` rule on its left, and none of it is dimmed: bold is
+weight, not a quieter colour. Every pair is a token the contrast audit already measures; the markdown
+layer introduces no colour of its own.
+
 ## 4. Spacing and radius
 
 Spacing is a 2px-multiple scale, and **components use the same gaps for the same

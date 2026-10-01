@@ -192,17 +192,21 @@ test("the speaker reads the answer's words, not its markup, and stops it", async
   await withTranscript({}, async (dom, io) => {
     await io.show([turn("t1", "COMPLETED", "The **fix** is in `parse_line`.\n\n```py\nx = 1\n```")]);
     assert.deepEqual(io.spoken, [], "a finished answer read itself with auto-read off");
+    // The answer is drawn as the Markdown it is (that is why the card is found by its words above and
+    // not by its source), and the words it speaks are those same words.
+    assert.equal(dom.container.querySelector("strong")?.textContent, "fix", "the answer was not rendered as Markdown");
+    assert.ok(!dom.text().includes("**fix**"), "the answer still shows its raw markup");
 
-    await dom.click(speakerOf(dom, "The **fix**"));
+    await dom.click(speakerOf(dom, "The fix is in"));
     await dom.settle();
 
     assert.deepEqual(io.spoken, ["The fix is in parse_line.\n(code omitted)"]);
     assert.deepEqual(io.played, ["blob:answer-1"]);
-    assert.equal(speakerOf(dom, "The **fix**").textContent, "Stop reading");
+    assert.equal(speakerOf(dom, "The fix is in").textContent, "Stop reading");
 
-    await dom.click(speakerOf(dom, "The **fix**"));
+    await dom.click(speakerOf(dom, "The fix is in"));
     assert.deepEqual(io.paused, ["blob:answer-1"]);
-    assert.equal(speakerOf(dom, "The **fix**").textContent, "Read aloud");
+    assert.equal(speakerOf(dom, "The fix is in").textContent, "Read aloud");
   });
 });
 

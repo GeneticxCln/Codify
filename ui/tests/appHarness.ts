@@ -38,6 +38,11 @@ export interface AppOptions {
    * the goal is PLANNING (409 `trace_locked` otherwise) and can be switched off at any time.
    */
   goals?: Array<Record<string, unknown> & { id: string; conversation_id: string; status: string }>;
+  /**
+   * The events each seeded goal holds, by goal id, as `GET /goals/{id}/events` returns them: how a
+   * test gives a turn its reply. A goal with none has none, which is what it did before this option.
+   */
+  goalEvents?: Record<string, Array<Record<string, unknown>>>;
   /** A remembered tab strip (`CODIFY_TABS`), as the app would have written it. */
   storedTabs?: unknown;
   /** Shell commands that answer with something other than the default `null`. */
@@ -408,7 +413,8 @@ export async function withApp(
     }
     const goalRead = /^\/goals\/([^/]+)$/.exec(path);
     if (goalRead && method === "GET" && goalsById.has(goalRead[1])) return respond(goalsById.get(goalRead[1]));
-    if (/^\/goals\/[^/]+\/events$/.test(path) && method === "GET") return respond([]);
+    const goalEvents = /^\/goals\/([^/]+)\/events$/.exec(path);
+    if (goalEvents && method === "GET") return respond(options.goalEvents?.[goalEvents[1]!] ?? []);
     const archive = /^\/conversations\/([^/]+)\/archive$/.exec(path);
     if (archive && method === "POST") {
       const found = conversations.find((c) => c.id === archive[1]);
