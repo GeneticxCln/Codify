@@ -132,5 +132,14 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
 Each of the nine is held by a test at the boundary it names (a route, the sandbox, the running app, the
 engine's own source) and not only by a test of a constructor or a table. `tests/test_invariants_at_their_boundary.py`
 keeps the ledger of which tests hold which invariant and fails if an invariant is added here without an
-entry or a test it names goes missing. Each was checked by removing its enforcement and watching the named
-test fail; `docs/audit-2026-09-29.md` section 0 records what that found.
+entry or a test it names goes missing.
+
+Each was checked by removing its enforcement and watching the named test fail. 41 breaks were tried and 12
+passed the suite as it stood: eleven real gaps (an unknown role no longer a 404, a role added to the type alone,
+a route that creates a role slot, a goal or a turn copying the command bar's model onto a role, the engine
+binding every interface, the keys routes returning a stored key, the provider's own `base_url` check, the
+librarian asking in `test` mode, a conductor move calling `fs.apply`) and one that changes nothing at run time
+(the `host=` in uvicorn's config, ignored while it is handed a socket). All are caught now. That shows the
+breaks someone thought of are noticed, not that no other gap exists. The audit of 2026-09-29, which comments
+across the tree refer to, was removed once its findings were fixed or moved into the docs that own them;
+`git show 407982a:docs/audit-2026-09-29.md` has it.
