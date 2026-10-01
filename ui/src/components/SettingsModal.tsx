@@ -13,6 +13,7 @@ import { fetchModelCatalog, fetchProviderKeys, saveProviderKey } from "../api";
 import { SettingsPanel } from "./SettingsPanel";
 import { AppearancePane } from "./AppearancePane";
 import { AudioPane } from "./AudioPane";
+import { AboutPane } from "./AboutPane";
 import { ProviderRow } from "./ProviderRow";
 import { useAgentConfigs } from "../hooks/useAgentConfigs";
 import { checkedLabel, discoveredFooter, needsOwnRefresh } from "../providerSetup";
@@ -23,7 +24,7 @@ import {
   saveSeen,
   type SeenIndex,
 } from "../modelFreshness";
-import { X, Key, Sliders, HardDrive, Lock, AlertCircle, RefreshCw, Palette, Mic } from "lucide-react";
+import { X, Key, Sliders, HardDrive, Lock, AlertCircle, RefreshCw, Palette, Mic, Info } from "lucide-react";
 
 /**
  * How often the panel re-asks while it is open, and how long after a check a
@@ -390,9 +391,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     : "Every keyed provider has a credential. Models are discovered live from each provider."
                   : tab === "appearance"
                     ? "Themes swap the app's surface and text colours at runtime — no restart, no rebuild."
-                    : tab === "audio"
-                      ? "The microphone, dictation into the prompt, and answers read aloud — through the speech providers you choose."
-                      : "Each role's model, endpoint, temperature, and prompt. Roles run in the order of the pipeline."}
+                    : tab === "about"
+                      ? "What this app is, what it is running on, and the keyboard shortcuts."
+                      : tab === "audio"
+                        ? "The microphone, dictation into the prompt, and answers read aloud — through the speech providers you choose."
+                        : "Each role's model, endpoint, temperature, and prompt. Roles run in the order of the pipeline."}
               </p>
             </div>
           </div>
@@ -456,6 +459,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }`}
           >
             <Palette className="w-3.5 h-3.5" /> Appearance
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("about")}
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+              tab === "about"
+                ? "bg-codify-raised text-codify-primary border border-codify-border"
+                : "text-codify-muted hover:text-codify-secondary"
+            }`}
+          >
+            <Info className="w-3.5 h-3.5" /> About
           </button>
         </div>
 
@@ -573,6 +587,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           )}
 
           {tab === "appearance" && <AppearancePane />}
+
+          {tab === "about" && <AboutPane />}
         </div>
 
         {/* Footer */}

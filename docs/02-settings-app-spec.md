@@ -13,7 +13,7 @@ Agent configuration is edited only at **Settings → Agents**. Enforced at three
 ```
 ui/src/
   components/
-    SettingsModal.tsx         # the tabs: providers, agent roles, audio, appearance
+    SettingsModal.tsx         # the tabs: providers, agent roles, audio, appearance, about
     SettingsPanel.tsx
     AgentConfigCard.tsx
     ProviderRow.tsx           # one provider: key field, model picker, apply button
@@ -28,6 +28,7 @@ ui/src/
     ConductorSettingsCard.tsx  # the conductor's own model + budgets, not a role
     AudioPane.tsx              # microphone, dictation, read-aloud — engine settings only
     UiScalePanel.tsx           # Appearance → UI scale: how big the whole window is
+    AboutPane.tsx              # About: version, engine, data folder, shortcuts — read-only
   providerSetup.ts            # search, apply plan, and the wording beside them
   conductorSettings.ts        # what a conductor pair means, and when to refuse it
   modelMenu.ts                # menu placement, shared by both pickers
@@ -215,6 +216,34 @@ or 175%, **125% by default**. It is client-side display state, like the theme: i
   canvas, so `TerminalPane` sets its font size from the scale and re-fits when it changes, and the
   prompt box's 180px height cap is multiplied by the scale. A new text size is `text-xs` and friends,
   **never `text-[Npx]`**, which would stay small while the window grew around it.
+
+### 3.4 The About tab
+
+Settings → About (`AboutPane.tsx`, last tab) says what this app is and what it is running on. It is
+**read-only**, so it can never be a second writer of agent config (§1), and it prints only what the app
+can truthfully know:
+
+* **Version.** The desktop shell's own name, version and Tauri version, read through Tauri's app API
+  (`getAppFacts` in `api.ts`; `core:app` is already granted, so no capability of its own). Under the
+  shell, a version that comes back blank or not a string is shown as "unavailable", never as an empty
+  fact. In the standalone browser preview there is no shell, and the pane says so instead of a version.
+* **The engine.** Health (`running`, `not answering`, or `running, but this window's token is stale`),
+  the port the window is connected to, and the existing engine runtime card (§3.0: the interpreter and
+  what it can import). The engine has no version of its own, so none is invented: it ships in the same
+  checkout as the app, and the interpreter line is what tells two installs apart. **The boot token is
+  never shown.**
+* **Where things live.** `~/.codify` (or `$CODIFY_HOME`), as text: no route exposes the data folder, and
+  adding one only to print a path was not worth a new engine contract.
+* **Keyboard shortcuts**, from `SHORTCUT_HELP` in `shortcuts.ts`. Each line carries a real key event
+  that `shortcuts.test.ts` resolves through `resolveShortcut`, and a second assertion pins the set of
+  actions, so a binding that changes, or a shortcut added without a line, fails a test instead of
+  leaving this tab describing keys that no longer do that.
+* **Project facts** (repository, licence, where the specification is) as plain text rather than links:
+  the page is not a browser, and an external link opened from here would be a navigation the app has no
+  reason to offer.
+
+The palette (Ctrl+K) lists it as `About Codify`, and Appearance as `Appearance, themes & UI scale` so
+that searching "scale" finds the UI scale.
 
 General / Commands tabs MAY exist; they MUST NOT call `codify_update_agent_config`.
 

@@ -119,3 +119,48 @@ export function resolveShortcut(e: KeyEventLike): ShortcutAction | null {
 
   return null;
 }
+
+/**
+ * One line of the shortcut list the About tab shows.
+ *
+ * `probe` is a real key event that must resolve to `action`: the list is *checked against*
+ * `resolveShortcut` (`ui/tests/shortcuts.test.ts`), so a binding that changes, or an action added
+ * without a line here, fails a test instead of leaving the About tab describing keys that no longer
+ * do that. The list is documentation, and documentation that cannot be wrong without a test noticing
+ * is the only kind this project has found to stay true.
+ */
+export interface ShortcutHelp {
+  /** How a person reads the chord. */
+  readonly keys: string;
+  /** What it does. */
+  readonly does: string;
+  readonly probe: KeyEventLike;
+  readonly action: ShortcutAction["type"];
+}
+
+const ctrlKey = (key: string, code: string): KeyEventLike => ({
+  key,
+  code,
+  ctrlKey: true,
+  metaKey: false,
+  altKey: false,
+  shiftKey: false,
+});
+
+/** Every shortcut, in the order the About tab lists them. */
+export const SHORTCUT_HELP: readonly ShortcutHelp[] = [
+  { keys: "Ctrl+T", does: "New tab", probe: ctrlKey("t", "KeyT"), action: "new-tab" },
+  { keys: "Ctrl+W", does: "Close the active tab", probe: ctrlKey("w", "KeyW"), action: "close-active-tab" },
+  { keys: "Ctrl+1 to 8", does: "Go to that tab", probe: ctrlKey("1", "Digit1"), action: "focus-tab" },
+  { keys: "Ctrl+9", does: "Go to the last tab", probe: ctrlKey("9", "Digit9"), action: "focus-last-tab" },
+  { keys: "Ctrl+K", does: "Command palette", probe: ctrlKey("k", "KeyK"), action: "toggle-palette" },
+  {
+    keys: "Ctrl+B",
+    does: "Hide or show the left panel (a terminal keeps Ctrl+B for itself)",
+    probe: ctrlKey("b", "KeyB"),
+    action: "toggle-sidebar",
+  },
+  { keys: "Ctrl+=", does: "Make the UI bigger", probe: ctrlKey("=", "Equal"), action: "scale-up" },
+  { keys: "Ctrl+-", does: "Make the UI smaller", probe: ctrlKey("-", "Minus"), action: "scale-down" },
+  { keys: "Ctrl+0", does: "Back to the default size", probe: ctrlKey("0", "Digit0"), action: "scale-reset" },
+];

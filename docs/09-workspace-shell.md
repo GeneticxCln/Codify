@@ -2078,7 +2078,7 @@ of decisions — AltGr, shifted digits, what Ctrl+9 means — that markup cannot
 | Ctrl+= (or Ctrl++) | UI scale up one step, 100 → 112.5 → 125 → 150 → 175% (docs/02 §3.3) |
 | Ctrl+- | UI scale down one step |
 | Ctrl+0 | UI scale back to the 125% default |
-| Ctrl+K | Command palette: open tabs, every conversation in this workspace, and every settings destination (`Provider keys & endpoints`, `Agent roles & prompts`, `Audio: microphone, dictation & read-aloud`, `Appearance & themes`), token-filtered with title-prefix hits ranked first |
+| Ctrl+K | Command palette: open tabs, every conversation in this workspace, and every settings destination (`Provider keys & endpoints`, `Agent roles & prompts`, `Audio: microphone, dictation & read-aloud`, `Appearance, themes & UI scale`, `About Codify`), token-filtered with title-prefix hits ranked first |
 
 Decisions, and why:
 

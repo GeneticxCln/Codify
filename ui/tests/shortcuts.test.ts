@@ -10,7 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveShortcut, type KeyEventLike } from "../src/shortcuts.ts";
+import { resolveShortcut, SHORTCUT_HELP, type KeyEventLike } from "../src/shortcuts.ts";
 
 /** A key event with everything off; each case turns on what it is about. */
 const key = (over: Partial<KeyEventLike>): KeyEventLike => ({
@@ -197,4 +197,26 @@ test("a held scale key is one step, not a run to the end of the scale", () => {
   assert.equal(resolveShortcut(key({ ctrlKey: true, key: "-", code: "Minus", repeat: true })), null);
   assert.equal(resolveShortcut(key({ ctrlKey: true, key: "0", code: "Digit0", repeat: true })), null);
   assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "=", code: "Equal", repeat: false })), { type: "scale-up" });
+});
+
+test("the shortcut list the About tab shows is what the keyboard layer really does", () => {
+  // Each line carries a real key event, and it must resolve to the action the line claims. A binding
+  // that changes, or a key the list names wrongly, fails here instead of misleading a reader.
+  for (const line of SHORTCUT_HELP) {
+    assert.equal(
+      resolveShortcut(line.probe)?.type,
+      line.action,
+      `${line.keys} (${line.does}) does not resolve to ${line.action}`,
+    );
+  }
+  // And nothing the layer can do goes unlisted: every action type has a line. This is the pin that
+  // makes adding a shortcut without documenting it a failure.
+  assert.deepEqual(
+    [...new Set(SHORTCUT_HELP.map((line) => line.action))].sort(),
+    [
+      "close-active-tab", "focus-last-tab", "focus-tab", "new-tab", "scale-down", "scale-reset",
+      "scale-up", "toggle-palette", "toggle-sidebar",
+    ],
+  );
+  assert.equal(new Set(SHORTCUT_HELP.map((line) => line.keys)).size, SHORTCUT_HELP.length, "a chord is listed twice");
 });

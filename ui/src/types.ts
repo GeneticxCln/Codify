@@ -605,7 +605,7 @@ export interface EngineSettings {
 }
 
 /** The Settings screen's tabs, in the order they are shown. One definition, so a new tab is one edit. */
-export type SettingsTab = "keys" | "agents" | "audio" | "appearance";
+export type SettingsTab = "keys" | "agents" | "audio" | "appearance" | "about";
 
 /** Whether one voice feature can run now, and if not, the engine's reason (`GET /audio/status`). */
 export interface SpeechReadiness {
