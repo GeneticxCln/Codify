@@ -32,6 +32,7 @@ animation are sped up and carry a speed badge; <a href="docs/media/demo.mp4">the
 [Quickstart](#-quickstart) ·
 [How it works](#-how-it-works) ·
 [Themes](#-appearance) ·
+[Voice](#-voice) ·
 [Security](#-security--invariants) ·
 [Documentation](#-documentation)
 
@@ -96,7 +97,8 @@ It looks for **Python 3.10+** with `venv` (3.10 is a real deployment floor: the 
 `python3 -m engine`), **Node 22.22.2+ / 24.15+ / 26+** (jsdom's range, which the UI suite inherits), **Rust
 stable** with `rustfmt` (rustup's default profile includes it, `--profile minimal` does not) and WebKitGTK 4.1,
 GTK 3, libsoup 3, librsvg, OpenSSL and `pkg-config`, and a display for the Tauri leg (`xvfb` is used
-automatically on a headless machine). It also checks this checkout's `.venv` against
+automatically on a headless machine). PipeWire's `pw-record` is optional and only needed for the mic (see
+[Voice](#-voice)). It also checks this checkout's `.venv` against
 `pyproject.toml`, so a virtualenv made before a dependency was added is reported rather than quietly running.
 
 ```bash
@@ -310,6 +312,33 @@ needed it. The terminal follows the theme by reading it out of the document: `ui
 twenty of xterm's colours onto variables a theme publishes, and the pane re-reads them on every switch, so a
 terminal opened before you changed theme is not left behind. Before that, it was the one grey-blue box in an OLED
 app that was otherwise black and phosphor.
+
+---
+
+## 🎙️ Voice
+
+You can speak a prompt instead of typing it, and have answers read back to you.
+
+- **The mic beside Send** puts what you said into the prompt at the caret. It never sends: you still press
+  Send. Esc while recording throws the recording away.
+- **Read aloud** sits under each answer. Turn on *Read each answer aloud as it arrives* in **Settings → Audio**
+  and new answers read themselves. Answers already in a thread you open never do.
+
+Both go through a speech provider you choose in **Settings → Audio**. Any server that speaks the OpenAI audio
+API (`/audio/transcriptions`, `/audio/speech`) works:
+
+| Setup | What to choose |
+|---|---|
+| **Fully local**: nothing leaves the machine | Run a speech server such as speaches or LocalAI on `127.0.0.1`. Choose *Custom Provider…* and give it a slug (`localspeech`) and its **Server address** (`http://127.0.0.1:8000/v1`). It needs no key. |
+| **Hosted** | `openai` or `groq`, with its key under **Provider Keys**. |
+
+Model and voice names are the provider's own, and Codify keeps no list of them.
+
+The engine, not the webview, records the microphone, using PipeWire's `pw-record`. It records only while you
+dictate, for at most two minutes, and deletes the recording once it has been transcribed. If PipeWire's tools are
+missing, `make doctor` says so as a note, not a failure; everything else runs without them. Details:
+[docs/09 §9](docs/09-workspace-shell.md), [docs/04 §3.0.2](docs/04-engine-data-and-runtime.md) and
+[docs/03 §1.9](docs/03-security-and-roadmap.md).
 
 ---
 

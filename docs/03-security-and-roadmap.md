@@ -188,7 +188,9 @@ are written down:
 - **Sent only where the user chose.** Audio goes to the dictation provider named in Settings → Audio, which may
   be a local server; a stored key follows the same destination rule as every other (§1.2): https or loopback,
   never plain http to another host. The engine keeps no list of "speech providers": a provider is refused if
-  it does not speak the OpenAI audio API, and says so.
+  it does not speak the OpenAI audio API, and says so. A typed server address applies to a custom provider
+  only. A built-in provider keeps the catalogue's address, so an address saved beside `openai` cannot
+  redirect the OpenAI key.
 
 ## 2. Persistence layer
 
