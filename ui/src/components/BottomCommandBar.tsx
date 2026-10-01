@@ -36,7 +36,9 @@ import { COMPOSER_ANCHOR_ID } from "../composerAnchor";
 import { Toggle } from "./ui/Toggle";
 import { Button } from "./ui/Button";
 import { IconButton } from "./ui/IconButton";
+import { MicButton } from "./MicButton";
 import { readRejection } from "../rejection.ts";
+import { insertDictation } from "../speech.ts";
 
 export type ExecutionMode = "direct" | "dry_run" | "plan_only";
 
@@ -118,6 +120,8 @@ interface BottomCommandBarProps {
   /** A goal is actively being worked on — drives the "running" affordance. */
   isRunning?: boolean;
   onOpenSettings: () => void;
+  /** Settings → Audio, where dictation gets its provider. The mic opens it when dictation has none. */
+  onOpenAudioSettings: () => void;
 }
 
 export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
@@ -151,6 +155,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   canStop = false,
   isRunning = false,
   onOpenSettings,
+  onOpenAudioSettings,
 }) => {
   const [prompt, setPrompt] = useState("");
   const [isFolderOpen, setIsFolderOpen] = useState(false);
@@ -346,6 +351,29 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
       textareaRef.current.style.height = "auto";
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 180)}px`;
     }
+  }, [prompt]);
+
+  // Dictated words go where the caret is, read when they *arrive*: the person may have typed on while
+  // speaking. The updater form, because the transcript lands after an await and a `prompt` captured at
+  // the click would drop whatever was typed since. The caret is put back after the commit, at the end
+  // of the inserted words, so typing can carry straight on.
+  const dictatedCaret = useRef<number | null>(null);
+  const insertTranscript = (spoken: string) => {
+    const el = textareaRef.current;
+    setPrompt((current) => {
+      const start = el?.selectionStart ?? current.length;
+      const end = el?.selectionEnd ?? current.length;
+      const next = insertDictation(current, start, end, spoken);
+      dictatedCaret.current = next.caret;
+      return next.value;
+    });
+  };
+  useLayoutEffect(() => {
+    const caret = dictatedCaret.current;
+    if (caret === null || !textareaRef.current) return;
+    dictatedCaret.current = null;
+    textareaRef.current.focus();
+    textareaRef.current.setSelectionRange(caret, caret);
   }, [prompt]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1156,6 +1184,8 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
               quieter Cancel for when the user is looking at the goal rather than the
               bar. */}
           <div className="flex items-center gap-2 flex-shrink-0">
+            {/* Dictation, left of the send slot: it fills the prompt, it never sends it. */}
+            <MicButton disabled={isLoading} onTranscript={insertTranscript} onNeedsSetup={onOpenAudioSettings} />
             {/* The shortcut hint appears only when there is a destructive action to
                 shortcut, and it sits BESIDE the button rather than above it.
 

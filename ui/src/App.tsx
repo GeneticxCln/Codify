@@ -3322,6 +3322,7 @@ export const App: React.FC = () => {
               canStop={canStop}
               isRunning={isGoalActive(activeGoal?.status)}
               onOpenSettings={() => openSettings("keys")}
+              onOpenAudioSettings={() => openSettings("audio")}
             />
             </>
           )}
