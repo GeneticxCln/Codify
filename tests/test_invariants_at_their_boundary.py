@@ -553,6 +553,7 @@ MAY_WRITE = {
     "home.py": "the state directory and its permissions",
     "db.py": "creating the state directory the database lives in",
     "providers.py": "the keychain's file backend",
+    "speech.py": "deletes its own dictation recordings, in the engine's private state directory; never a workspace",
     "app.py": "no file operation: `.rename()` and `.remove()` there are database services",
 }
 

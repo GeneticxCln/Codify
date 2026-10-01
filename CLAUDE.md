@@ -79,6 +79,7 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
   skills.py       built-in + workspace recipes (`.codify/skills/`) discovered and loaded as data
   toolcall.py     the neutral tool-calling shape and its four protocol translations
   spawn_guard.py process guard; every spawn routes through it
+  speech.py       voice: dictation and read-aloud through an OpenAI-compatible speech provider; the engine records the mic (pw-record)
 ui/             React 19 + TS + Vite; ui/tests/ run through node --test
 src-tauri/      Tauri v2 Rust shell
 tests/          Python suite; stream_isolation.py is the shared isolation helper

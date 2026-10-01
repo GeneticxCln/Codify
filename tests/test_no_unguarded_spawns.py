@@ -70,6 +70,9 @@ GUARDED_SPAWN_SITES: dict[str, dict[str, str]] = {
     "engine/app.py": {
         "Popen": "the folder picker (_run_picker): _picker_command's, and the zenity/kdialog fallbacks', guarded_argv/guarded_env + start_new_session, and a whole-group kill at PICKER_TIMEOUT_S; pinned by tests/test_sandbox.py, tests/test_workspace_browse.py and the live-engine e2e",
     },
+    "engine/speech.py": {
+        "Popen": "PipeWire's own tools (_spawn): `pw-record` for a dictation and `pw-dump` to list microphones, each a fixed binary resolved by shutil.which with a fixed argv (the only variable is the recording's path in the engine's private directory and a `--target` node name from engine settings, passed as one argv element, never a shell), guarded_argv/guarded_env + start_new_session; a recording ends by a group TERM then KILL, and is capped at MAX_DICTATION_S; pinned by tests/test_speech.py",
+    },
     "benchmarks/runner.py": {
         "Popen": "a task's test command: manifest-owned argv, guarded_argv/guarded_env + start_new_session + a whole-group kill on timeout, pinned by tests/test_benchmark_runner.py. Deliberately NOT routed through SandboxService: that allowlist is a security boundary for model-proposed argv, and widening it for a reviewed manifest would weaken it for every agent in the pipeline",
     },

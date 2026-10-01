@@ -19,7 +19,7 @@ from engine.laya import LayaDecision, build_state
 from engine.models import AgentConfig, AgentRole, BUILTIN_PROVIDERS, Goal
 from engine.providers import ProviderError
 from engine.recall import build_brief
-from engine.services import ApiError
+from engine.services import ApiError, custom_provider_address
 from engine.skills import SkillSet, load_skills
 from engine.toolcall import ToolSpec
 from engine.executor_plan import _Plan
@@ -514,18 +514,11 @@ class _Conduct(_Plan):
             rows = self.orchestrator.registry.list_configs()
         except Exception:
             return cfg
-        for row in rows:
-            if row.provider == cfg.provider and row.base_url:
-                return cfg.model_copy(update={
-                    "protocol": row.protocol, "base_url": row.base_url, "api_key_ref": row.api_key_ref,
-                })
-        for row in rows:
-            if row.fallback_provider == cfg.provider and row.fallback_base_url:
-                return cfg.model_copy(update={
-                    "protocol": row.fallback_protocol or "openai_compat",
-                    "base_url": row.fallback_base_url, "api_key_ref": None,
-                })
-        return cfg
+        found = custom_provider_address(cfg.provider, rows)
+        if found is None:
+            return cfg
+        protocol, base_url, api_key_ref = found
+        return cfg.model_copy(update={"protocol": protocol, "base_url": base_url, "api_key_ref": api_key_ref})
 
     def conductor_menu(self, goal_id: str) -> Callable[[], list[ToolSpec]]:
         """The moves offered for a goal, as a callable the loop asks each turn.
