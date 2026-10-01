@@ -31,12 +31,12 @@ export type ToggleTone = "accent" | "warning" | "design" | "knowledge";
  * and different colours in five others, so it looked finished and was not.
  */
 const ARMED: Record<ToggleTone, string> = {
-  accent: "bg-codify-accent/20 border-codify-accent/50 text-codify-accent hover:bg-codify-accent/30",
+  accent: "bg-codify-accent/20 border-codify-accent/50 text-codify-accent-ink hover:bg-codify-accent/30",
   // "This records every model call" is genuinely a caution, so amber is right here.
-  warning: "bg-codify-warning/20 border-codify-warning/50 text-codify-warning hover:bg-codify-warning/30",
-  design: "bg-codify-design/20 border-codify-design/50 text-codify-design hover:bg-codify-design/30",
+  warning: "bg-codify-warning/20 border-codify-warning/50 text-codify-warning-ink hover:bg-codify-warning/30",
+  design: "bg-codify-design/20 border-codify-design/50 text-codify-design-ink hover:bg-codify-design/30",
   knowledge:
-    "bg-codify-knowledge/20 border-codify-knowledge/50 text-codify-knowledge hover:bg-codify-knowledge/30",
+    "bg-codify-knowledge/20 border-codify-knowledge/50 text-codify-knowledge-ink hover:bg-codify-knowledge/30",
 };
 
 const REST =

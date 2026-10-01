@@ -21,6 +21,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { registerTsx } from "./tsxLoader.ts";
 registerTsx();
 
+import { deriveToneInks, inkVar } from "../src/toneInk.ts";
+import { relativeLuminance } from "../src/contrast.ts";
 import {
   CMATRIX_OLED,
   CODIFY_DARK,
@@ -112,8 +114,20 @@ function hueOf(hex: string): number {
   return h < 0 ? h + 360 : h;
 }
 
+/** A grey has no hue at all: `hueOf` reports 0° for it, which is red, so a grey would pass `isWarm` by accident. */
+function isGrey(hex: string): boolean {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
+  return m !== null && m[1]!.toLowerCase() === m[2]!.toLowerCase() && m[2]!.toLowerCase() === m[3]!.toLowerCase();
+}
+
+/** A theme is monochrome when every one of its six tones is a grey: severity then has to be brightness. */
+const isMonochrome = (theme: (typeof THEMES)[number]): boolean =>
+  STATUS_TONE_VARS.every((v) => isGrey(theme.tokens[v] as string));
+
 /** True for red → orange → gold, the arc `danger` and `warning` must stay on. */
 function isWarm(hex: string): boolean {
+  // A grey is not warm: it is not anything. Where a grey is allowed is stated below, not inferred from a hue of 0.
+  if (isGrey(hex)) return false;
   const h = hueOf(hex);
   // `h >= 345 || h <= 70` is the warm arc across the 0° seam: a red at 350 and
   // a gold at 65 are both "warm", and a green at 140 is neither.
@@ -147,27 +161,60 @@ test("a theme may restate failure, and may not make failure cyan", () => {
     for (const name of ["--codify-danger", "--codify-warning"] as const) {
       const value = theme.tokens[name];
       assert.ok(value, `${theme.id} does not state ${name}`);
+      // The one carve-out: a theme whose whole palette is grey has no hue to put on the arc, and says
+      // severity in brightness instead (the test below owns that). A grey `danger` in a theme that
+      // otherwise has colour is the failure this rule exists for, and is not excused.
+      if (isMonochrome(theme)) continue;
       assert.ok(
         isWarm(value as string),
-        `${theme.id} puts ${name} at ${value}, which is hue ` +
-          `${Math.round(hueOf(value as string))}° — off the warm arc`,
+        `${theme.id} puts ${name} at ${value}, which is ` +
+          (isGrey(value as string)
+            ? "a grey in a theme that has colour — only an all-grey theme may say severity in brightness"
+            : `hue ${Math.round(hueOf(value as string))}° — off the warm arc`),
       );
     }
   }
 });
 
-test("a monochrome theme still tells success from failure", () => {
-  // ASCII rain publishes no hue, so severity has to be brightness. If its
-  // `danger` and `success` were the same grey, the theme would be claiming
-  // that "failed" and "passed" are the same sentence — which is the one thing
-  // the five tones exist to prevent, in a theme that cannot use colour to say it.
-  const ascii = themeById("ascii-rain");
-  assert.notEqual(
-    ascii.tokens["--codify-danger"],
-    ascii.tokens["--codify-success"],
-    "a monochrome theme expresses severity as brightness, so danger and " +
-      "success cannot be the same value",
+test("a monochrome theme says severity in brightness, in the order failure, warning, success, idle", () => {
+  // ASCII Rain publishes no hue, so brightness is all it has to say "failed" from "passed". The
+  // order is the severity order: the brightest thing on a black screen is the failure, then the
+  // warning, then the success, and idle is the dimmest. It was `warning` #757575 against `success`
+  // #a3a3a3, which read as the quieter of the two, and no test noticed because the warm-arc rule
+  // gave every grey a hue of 0°. The rule is stated for the theme by name, not inferred.
+  const mono = THEMES.filter(isMonochrome);
+  assert.deepEqual(
+    mono.map((t) => t.id),
+    ["ascii-rain"],
+    "the set of all-grey themes changed: a theme that went grey needs this rule, and one that gained colour no longer does",
   );
+  for (const theme of mono) {
+    const lum = (v: string): number => relativeLuminance(theme.tokens[v as keyof typeof theme.tokens] as string);
+    const chain = ["--codify-danger", "--codify-warning", "--codify-success", "--codify-neutral"];
+    for (let i = 0; i + 1 < chain.length; i += 1) {
+      // A step of 0.04 in relative luminance is what makes two greys tell apart at a glance on a
+      // black screen; anything closer is the same sentence.
+      assert.ok(
+        lum(chain[i]!) - lum(chain[i + 1]!) >= 0.04,
+        `${theme.id}: ${chain[i]} is not brighter than ${chain[i + 1]} by a visible step, so severity is not in order`,
+      );
+    }
+    // The ink is what a pill is read in; it may be lifted to clear the floor but may never reorder the tones.
+    const inks = deriveToneInks(theme.tokens as Record<string, string>);
+    const inkLum = (tone: "danger" | "warning" | "success"): number =>
+      relativeLuminance(inks[inkVar(tone)]!);
+    assert.ok(inkLum("danger") >= inkLum("warning") && inkLum("warning") >= inkLum("success"),
+      `${theme.id}: the pill inks are out of severity order`);
+  }
+});
+
+test("only a monochrome theme may state a grey danger or warning", () => {
+  for (const theme of THEMES) {
+    if (isMonochrome(theme)) continue;
+    for (const name of ["--codify-danger", "--codify-warning"] as const) {
+      assert.ok(!isGrey(theme.tokens[name] as string), `${theme.id}: ${name} is grey in a theme that has colour`);
+    }
+  }
 });
 
 test("no theme states a tone inline, where it would silently beat the table", () => {

@@ -40,7 +40,7 @@ const DesignDeliverablePin: React.FC<{
 }> = ({ goal, path, readiness, outcome, onPin }) => (
   <div className="flex items-center gap-2 flex-wrap">
     {readiness.pinned ? (
-      <span className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-codify-design/10 border border-codify-design/30 text-codify-design/90 text-xs">
+      <span className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-codify-design/10 border border-codify-design/30 text-codify-design-ink text-xs">
         <Check className="w-3 h-3" />
         {path} is this workspace’s brand contract
       </span>
@@ -49,7 +49,7 @@ const DesignDeliverablePin: React.FC<{
         type="button"
         disabled={!readiness.ready}
         onClick={() => void onPin(goal.id, goal.workspace_id, path)}
-        className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-codify-design/20 border border-codify-design/50 text-codify-design hover:bg-codify-design/30 text-xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-codify-design/20"
+        className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-codify-design/20 border border-codify-design/50 text-codify-design-ink hover:bg-codify-design/30 text-xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-codify-design/20"
       >
         <Pin className="w-3 h-3" />
         Pin as brand contract
@@ -156,7 +156,7 @@ export const DesignDeliverableCard: React.FC<{
           instruction, a discovery is a convention the engine noticed, and a
           proposal exists because there was nothing to obey. */}
           {payload.design_system.origin === "pinned" ? (
-            <span className="text-codify-design/90">
+            <span className="text-codify-design">
               {" "}
               — pinned at {payload.design_system.source}
             </span>
@@ -209,7 +209,7 @@ export const DesignDeliverableCard: React.FC<{
           {payload.components.map(
             (c: { name: string; purpose?: string }, i: number) => (
               <div key={i} className="text-xs flex items-start gap-1.5">
-                <span className="font-mono text-codify-design/90">{c.name}</span>
+                <span className="font-mono text-codify-design">{c.name}</span>
                 {c.purpose && <span className="text-codify-muted">— {c.purpose}</span>}
               </div>
             )
@@ -222,7 +222,7 @@ export const DesignDeliverableCard: React.FC<{
         </div>
       )}
       {(payload.constraints?.length ?? 0) > 0 && (
-        <div className="text-xs text-codify-warning/90">
+        <div className="text-xs text-codify-warning">
           constraints: {payload.constraints.join("; ")}
         </div>
       )}

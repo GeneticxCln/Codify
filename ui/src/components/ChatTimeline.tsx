@@ -934,7 +934,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 max-w-4xl mx-auto w-full">
       {exportError && (
-        <div className="flex items-start gap-2 p-2.5 rounded-xl bg-codify-danger/20 border border-codify-danger/60 text-xs text-codify-danger">
+        <div className="flex items-start gap-2 p-2.5 rounded-xl bg-codify-danger/20 border border-codify-danger/60 text-xs text-codify-danger-ink">
           <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-codify-danger" />
           <span className="leading-relaxed">{exportError}</span>
         </div>
@@ -1089,18 +1089,18 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             </span>
                           )}
                           {msg.goal?.dry_run && (
-                            <span className="text-2xs px-1.5 py-0.5 rounded bg-codify-warning/20 border border-codify-warning/60 text-codify-warning font-semibold">
+                            <span className="text-2xs px-1.5 py-0.5 rounded bg-codify-warning/20 border border-codify-warning/60 text-codify-warning-ink font-semibold">
                               DRY RUN
                             </span>
                           )}
                           {msg.goal?.plan_only && (
-                            <span className="text-2xs px-1.5 py-0.5 rounded bg-codify-info/20 border border-codify-info/60 text-codify-info font-semibold">
+                            <span className="text-2xs px-1.5 py-0.5 rounded bg-codify-info/20 border border-codify-info/60 text-codify-info-ink font-semibold">
                               PLAN ONLY
                             </span>
                           )}
                           {msg.goal?.parallel && (
                             <span
-                              className="text-2xs px-1.5 py-0.5 rounded bg-codify-design/20 border border-codify-design/60 text-codify-design font-semibold"
+                              className="text-2xs px-1.5 py-0.5 rounded bg-codify-design/20 border border-codify-design/60 text-codify-design-ink font-semibold"
                               title="Independent steps of this goal may run concurrently"
                             >
                               PARALLEL
@@ -1161,7 +1161,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                   <button
                                     type="button"
                                     onClick={jump("edits")}
-                                    className={`${badgeCls} bg-codify-design/20 border-codify-design/60 text-codify-design hover:bg-codify-design/30`}
+                                    className={`${badgeCls} bg-codify-design/20 border-codify-design/60 text-codify-design-ink hover:bg-codify-design/30`}
                                     title={`Plan steps were edited after planning — click to cycle through each edit${positionSuffix("edits")}`}
                                     aria-label={`Plan steps were edited after planning — click to cycle through each edit${positionSuffix("edits")}`}
                                   >
@@ -1173,7 +1173,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                   <button
                                     type="button"
                                     onClick={jump("fallbacks")}
-                                    className={`${badgeCls} bg-codify-knowledge/20 border-codify-knowledge/60 text-codify-knowledge hover:bg-codify-knowledge/30`}
+                                    className={`${badgeCls} bg-codify-knowledge/20 border-codify-knowledge/60 text-codify-knowledge-ink hover:bg-codify-knowledge/30`}
                                     title={`Model calls that fell back — click to cycle through each fallback${positionSuffix("fallbacks")}`}
                                     aria-label={`Model calls that fell back — click to cycle through each fallback${positionSuffix("fallbacks")}`}
                                   >
@@ -1185,7 +1185,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                   <button
                                     type="button"
                                     onClick={jump("errors")}
-                                    className={`${badgeCls} bg-codify-danger/20 border-codify-danger/60 text-codify-danger hover:bg-codify-danger/30`}
+                                    className={`${badgeCls} bg-codify-danger/20 border-codify-danger/60 text-codify-danger-ink hover:bg-codify-danger/30`}
                                     title={`Errors recorded during the run — click to cycle through each error${positionSuffix("errors")}`}
                                     aria-label={`Errors recorded during the run — click to cycle through each error${positionSuffix("errors")}`}
                                   >
@@ -1391,7 +1391,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               msg.goal.steps.filter(
                                 (s: PlanStep) => s.status === "IN_PROGRESS",
                               ).length > 1 && (
-                                <span className="flex items-center gap-1 text-2xs font-mono px-2 py-0.5 rounded-full bg-codify-info/25 border border-codify-info/60 text-codify-info">
+                                <span className="flex items-center gap-1 text-2xs font-mono px-2 py-0.5 rounded-full bg-codify-info/25 border border-codify-info/60 text-codify-info-ink">
                                   <PlayCircle className="w-3 h-3 animate-pulse" />
                                   {
                                     msg.goal.steps.filter(
@@ -1504,7 +1504,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                 stepId: step.id,
                                               })
                                             }
-                                            className="flex items-center gap-1 px-2 py-0.5 bg-codify-info/20 hover:bg-codify-info/40 text-codify-info border border-codify-info/50 rounded text-xs font-semibold transition-colors"
+                                            className="flex items-center gap-1 px-2 py-0.5 bg-codify-info/20 hover:bg-codify-info/40 text-codify-info-ink border border-codify-info/50 rounded text-xs font-semibold transition-colors"
                                             title="Edit this step's title, description, and target paths"
                                           >
                                             <Pencil className="w-3 h-3" /> Edit
@@ -1525,7 +1525,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                 msg.goal!.version,
                                               )
                                             }
-                                            className="flex items-center gap-1 px-2 py-0.5 bg-codify-warning/30 hover:bg-codify-warning/50 text-codify-warning border border-codify-warning/50 rounded text-xs font-semibold transition-colors"
+                                            className="flex items-center gap-1 px-2 py-0.5 bg-codify-warning/30 hover:bg-codify-warning/40 text-codify-warning-ink border border-codify-warning/50 rounded text-xs font-semibold transition-colors"
                                           >
                                             <RotateCcw className="w-3 h-3" />{" "}
                                             Retry
@@ -1576,7 +1576,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                         )}
 
                                         {step.review_notes && (
-                                          <div className="ml-6 mt-1 p-2 rounded-lg bg-codify-warning/15 border border-codify-warning/60 text-xs text-codify-warning flex items-start gap-1.5">
+                                          <div className="ml-6 mt-1 p-2 rounded-lg bg-codify-warning/15 border border-codify-warning/60 text-xs text-codify-warning-ink flex items-start gap-1.5">
                                             <ShieldCheck className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
                                             <div>
                                               <span className="font-semibold">
@@ -1634,7 +1634,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 }
                                 className={`ml-auto flex items-center gap-1 px-2 py-0.5 rounded-full border text-2xs font-semibold normal-case tracking-normal transition-colors cursor-pointer ${
                                   issueOnly
-                                    ? "bg-codify-warning/20 text-codify-warning border-codify-warning/60"
+                                    ? "bg-codify-warning/20 text-codify-warning-ink border-codify-warning/60"
                                     : "bg-codify-bg text-codify-muted border-codify-border hover:text-codify-secondary"
                                 }`}
                               >
@@ -1816,7 +1816,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                   key={i}
                                                   className="text-xs flex items-start gap-1.5"
                                                 >
-                                                  <span className="font-mono text-codify-knowledge/90">
+                                                  <span className="font-mono text-codify-knowledge">
                                                     {f.path}
                                                   </span>
                                                   {f.evidence && (
@@ -1854,7 +1854,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                           )}
                                         {ev.payload.risks &&
                                           ev.payload.risks.length > 0 && (
-                                            <div className="text-xs text-codify-warning/90">
+                                            <div className="text-xs text-codify-warning">
                                               risks:{" "}
                                               {ev.payload.risks.join("; ")}
                                             </div>
@@ -1862,7 +1862,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                         {ev.payload.dropped_paths &&
                                           ev.payload.dropped_paths.length >
                                             0 && (
-                                            <div className="flex items-start gap-1.5 text-xs text-codify-warning/90">
+                                            <div className="flex items-start gap-1.5 text-xs text-codify-warning">
                                               <ShieldAlert className="w-3 h-3 flex-shrink-0 mt-0.5" />
                                               <span className="font-mono">
                                                 never opened, dropped:{" "}
@@ -1919,9 +1919,9 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                           <span
                                             className={`font-semibold uppercase text-xs px-1.5 py-0.5 rounded ${
                                               ev.payload.verdict === "pass"
-                                                ? "bg-codify-success/20 text-codify-success border border-codify-success/60"
+                                                ? "bg-codify-success/20 text-codify-success-ink border border-codify-success/60"
                                                 : ev.payload.verdict === "fail"
-                                                  ? "bg-codify-danger/15 text-codify-danger border border-codify-danger/60"
+                                                  ? "bg-codify-danger/15 text-codify-danger-ink border border-codify-danger/60"
                                                   : "bg-codify-raised text-codify-secondary border border-codify-border"
                                             }`}
                                           >
@@ -1949,7 +1949,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                 (d: string, i: number) => (
                                                   <div
                                                     key={i}
-                                                    className="flex items-start gap-1.5 text-xs text-codify-warning/90"
+                                                    className="flex items-start gap-1.5 text-xs text-codify-warning"
                                                   >
                                                     <Palette className="w-3 h-3 flex-shrink-0 mt-0.5" />
                                                     <span className="font-mono">
@@ -1969,7 +1969,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                 (r: string, i: number) => (
                                                   <div
                                                     key={i}
-                                                    className="flex items-start gap-1.5 text-xs text-codify-warning/90"
+                                                    className="flex items-start gap-1.5 text-xs text-codify-warning"
                                                   >
                                                     <ShieldAlert className="w-3 h-3 flex-shrink-0 mt-0.5" />
                                                     <span className="font-mono">
@@ -2093,7 +2093,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                               {pathChanged && (
                                                 <span className="block font-mono text-xs text-codify-muted">
                                                   paths:{" "}
-                                                  <span className="text-codify-danger/80 line-through">
+                                                  <span className="text-codify-danger line-through">
                                                     {fmtPaths(paths.before)}
                                                   </span>{" "}
                                                   →{" "}
@@ -2172,7 +2172,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               Settings screen's "last error" reads these too. */}
                                     {ev.type === "agent_call_failed" && (
                                       <div
-                                        className="flex items-start gap-1.5 pl-2 text-codify-warning/90 rounded"
+                                        className="flex items-start gap-1.5 pl-2 text-codify-warning rounded"
                                         data-audit-marker="errors"
                                       >
                                         <ShieldAlert className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
@@ -2245,7 +2245,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
 
                                     {ev.type === "error" && (
                                       <div
-                                        className="p-2 rounded-lg bg-codify-danger/20 border border-codify-danger/60 text-codify-danger font-semibold flex flex-col gap-2"
+                                        className="p-2 rounded-lg bg-codify-danger/20 border border-codify-danger/60 text-codify-danger-ink font-semibold flex flex-col gap-2"
                                         data-audit-marker="errors"
                                       >
                                         <span>

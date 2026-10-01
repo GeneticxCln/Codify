@@ -502,7 +502,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <EngineRuntimeCard />
 
       {rolesError && (
-        <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
+        <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">Role descriptions unavailable — {rolesError}</span>
         </div>
@@ -516,7 +516,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       )}
 
       {engineSettingsError && (
-        <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
+        <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">Engine settings unavailable — {engineSettingsError}</span>
         </div>
@@ -750,7 +750,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 </span>
                 <div className="flex flex-col gap-0.5">
                   {repairReport.unfixable.map((row) => (
-                    <span key={row.role} className="text-xs text-codify-warning/80">
+                    <span key={row.role} className="text-xs text-codify-warning">
                       <span className="font-mono">{row.role}</span> — {row.reason}
                     </span>
                   ))}
@@ -777,7 +777,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             )}
 
             {repairReport.notes.map((note, i) => (
-              <span key={i} className="text-xs text-codify-warning/90 flex items-start gap-1.5">
+              <span key={i} className="text-xs text-codify-warning flex items-start gap-1.5">
                 <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
                 {note}
               </span>
@@ -839,7 +839,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       {/* Summary first: the role cards live in a scroll container, so a warning
           on the fifth of eight cards is invisible without knowing to look. */}
       {staleRoles.length > 0 && (
-        <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
+        <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             {staleRoles.length} of {orderedRoles.length} roles point at a model their provider no
@@ -855,7 +855,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       )}
 
       {providerListError && (
-        <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
+        <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             Could not read the engine&apos;s provider list ({providerListError}), so the role

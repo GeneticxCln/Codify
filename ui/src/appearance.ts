@@ -29,6 +29,8 @@
  * importable from `node --test` (see `tsxLoader.ts`'s `localStorage` note) —
  * so storage reads happen inside functions, with the store injectable.
  */
+// `.ts` explicitly: tests load this module without an extension resolver, and it used to import nothing.
+import { deriveToneInks } from "./toneInk.ts";
 
 /** The CSS custom properties a theme may set. `applyTheme` clears exactly
  * these before applying a theme, so switching from OLED back to dark cannot
@@ -90,6 +92,24 @@ export const MANAGED_VARS = [
   "--codify-warning-rgb",
   "--codify-danger-rgb",
   "--codify-neutral-rgb",
+  // The inks: a tone moved just far enough to be readable as text on its own tint (`toneInk.ts`).
+  // Derived from the resolved tokens on every apply, so a theme switch or a tint has to clear the
+  // old ones first, like everything else here. The mode accents are not theme-managed, but their
+  // inks depend on the theme's surfaces, so they are.
+  "--codify-accent-ink",
+  "--codify-info-ink",
+  "--codify-success-ink",
+  "--codify-warning-ink",
+  "--codify-danger-ink",
+  "--codify-design-ink",
+  "--codify-knowledge-ink",
+  "--codify-accent-ink-rgb",
+  "--codify-info-ink-rgb",
+  "--codify-success-ink-rgb",
+  "--codify-warning-ink-rgb",
+  "--codify-danger-ink-rgb",
+  "--codify-design-ink-rgb",
+  "--codify-knowledge-ink-rgb",
   "--cyber-cyan",
   "--cyber-magenta",
   "--cyber-amber",
@@ -533,7 +553,7 @@ export const WINTER_SNOW: AppearanceTheme = {
     "--codify-border-strong": "#3a689a",
     "--codify-primary": "#eaf4ff",
     "--codify-secondary": "#c3d9f0",
-    "--codify-muted": "#758fae",
+    "--codify-muted": "#7b94b2",
     "--snow-flake": "#e8f4ff",
     "--snow-flake-2": "#a9c8ea",
   },
@@ -984,19 +1004,24 @@ export const THEME_TONES: Readonly<
   // and accent is where that gets said.
   [SOLAR_FLARE.id]: {
     "--codify-accent": "#a855f7",
-    "--codify-info": "#6366f1",
+    "--codify-info": "#6c6ff2",
     "--codify-success": "#34d399",
     "--codify-warning": "#fb923c",
     "--codify-danger": "#f43f5e",
     "--codify-neutral": "#6b5f8f",
   },
   // Monochrome by intent, so severity is brightness rather than hue: failure is
-  // the brightest thing on a black screen, and idle is the dimmest.
+  // the brightest thing on a black screen, then a warning, then a success, and
+  // idle is the dimmest. The order is `danger` > `warning` > `success`, and
+  // `appearance.test.ts` states it for this theme in particular, because with
+  // every tone grey the warm-arc rule has no hue to check. A warning that was
+  // dimmer than a success (`#757575` against `#a3a3a3`) read as the quieter
+  // of the two, which is backwards.
   [ASCII_RAIN.id]: {
     "--codify-accent": "#f5f5f5",
     "--codify-info": "#d4d4d4",
     "--codify-success": "#a3a3a3",
-    "--codify-warning": "#757575",
+    "--codify-warning": "#e0e0e0",
     "--codify-danger": "#ffffff",
     "--codify-neutral": "#525252",
   },
@@ -1027,7 +1052,7 @@ export const THEME_TONES: Readonly<
     "--codify-info": "#7fd1a8",
     "--codify-success": "#7fd1a8",
     "--codify-warning": "#ffc85c",
-    "--codify-danger": "#e2564d",
+    "--codify-danger": "#e5675f",
     "--codify-neutral": "#8a927e",
   },
 
@@ -1044,7 +1069,7 @@ export const THEME_TONES: Readonly<
   },
   [CYBER_ORGANISM.id]: {
     "--codify-accent": "#00e5ff",
-    "--codify-info": "#0077ff",
+    "--codify-info": "#2e8fff",
     "--codify-success": "#7cffb2",
     "--codify-warning": "#ffd166",
     "--codify-danger": "#ff5c7a",
@@ -1328,6 +1353,15 @@ export function applyTheme(
       root.setProperty(rgbName, channels);
       applied.push([rgbName, channels]);
     }
+  }
+  // The inks, from the tokens as they now stand (overrides included), so a tint of the accent gets
+  // an accent ink that is readable on *its* tint rather than on the theme's.
+  for (const [name, value] of Object.entries(deriveToneInks(tokens))) {
+    root.setProperty(name, value);
+    applied.push([name, value]);
+    const channels = hexChannels(value);
+    root.setProperty(`${name}-rgb`, channels);
+    applied.push([`${name}-rgb`, channels]);
   }
   // Announce it for the subscribers that hold the id as state. Guarded: a
   // `node --test` process has no window, and applying a theme there must

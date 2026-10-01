@@ -30,6 +30,9 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
+import { THEMES } from "../src/appearance.ts";
+import { INK_TONES, MODE_ACCENTS, deriveToneInks, inkVar } from "../src/toneInk.ts";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.join(HERE, "..", "src");
 
@@ -107,7 +110,7 @@ test("a variant utility is defined at the variant, not only at the base", () => 
   // a hover, a focus and a `focus-within`, because those are the three that were
   // broken and they fail in the same way for the same reason.
   const variants: ReadonlyArray<[string, string]> = [
-    ["hover:bg-codify-info/60", ".hover\\:bg-codify-info\\/60:hover"],
+    ["hover:bg-codify-warning/40", ".hover\\:bg-codify-warning\\/40:hover"],
     ["focus:border-codify-accent", ".focus\\:border-codify-accent:focus"],
     [
       "focus-within:border-codify-accent",
@@ -145,6 +148,27 @@ test("the default theme publishes every tone the source can ask for", () => {
       new RegExp(`--codify-${tone}:`),
       `:root does not declare --codify-${tone}, so a theme that does not ` +
         "restate it leaves that tone undefined",
+    );
+  }
+});
+
+test("the mode accents toneInk.ts derives against are the ones the stylesheet declares", () => {
+  // The mode accents are not theme-managed, so a theme's tokens do not carry them and the ink for
+  // `design` and `knowledge` is derived from this copy. If `:root` moved one, the ink would be
+  // derived against a colour that is no longer painted.
+  assert.match(css, new RegExp(`--codify-design:\\s*${MODE_ACCENTS.design};`, "i"));
+  assert.match(css, new RegExp(`--codify-knowledge:\\s*${MODE_ACCENTS.knowledge};`, "i"));
+});
+
+test("index.css reads every ink, and carries the default theme's inks as its :root fallback", () => {
+  const dark = THEMES.find((t) => t.id === "codify-dark")!;
+  const inks = deriveToneInks({ ...dark.tokens });
+  for (const tone of INK_TONES) {
+    assert.ok(css.includes(`.text-codify-${tone}-ink {`), `no .text-codify-${tone}-ink rule`);
+    assert.ok(css.includes(`var(--codify-${tone}-ink-rgb)`), `${tone}-ink-rgb is never read`);
+    assert.ok(
+      new RegExp(`${inkVar(tone)}:\\s*${inks[inkVar(tone)]};`, "i").test(css),
+      `:root has no fallback for ${inkVar(tone)} = ${inks[inkVar(tone)]}`,
     );
   }
 });

@@ -240,7 +240,7 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
               className={
                 "w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-xs transition-colors cursor-pointer " +
                 (m.id === value
-                  ? "bg-codify-info/20 text-codify-info font-medium"
+                  ? "bg-codify-info/20 text-codify-info-ink font-medium"
                   : "text-codify-secondary hover:bg-codify-raised")
               }
             >
@@ -248,13 +248,13 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
               {isNew.has(m.id) && (
                 <span
                   title="Not on this provider when you last looked"
-                  className="text-2xs font-medium text-codify-design bg-codify-design/20 border border-codify-design/60 px-1.5 py-px rounded-full flex-shrink-0"
+                  className="text-2xs font-medium text-codify-design-ink bg-codify-design/20 border border-codify-design/60 px-1.5 py-px rounded-full flex-shrink-0"
                 >
                   new
                 </span>
               )}
               {m.supports_chat === false && (
-                <span className="text-2xs text-codify-warning/80 flex-shrink-0">not chat</span>
+                <span className="text-2xs text-codify-warning flex-shrink-0">not chat</span>
               )}
               {m.id === value && <Check className="w-3 h-3 text-codify-info flex-shrink-0" />}
             </button>

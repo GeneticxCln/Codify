@@ -314,10 +314,10 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
                     <span
                       className={`font-mono ${
                         (callStat.success_rate ?? 0) >= 90
-                          ? "text-codify-success/90"
+                          ? "text-codify-success"
                           : (callStat.success_rate ?? 0) >= 60
-                            ? "text-codify-warning/90"
-                            : "text-codify-danger/90"
+                            ? "text-codify-warning"
+                            : "text-codify-danger"
                       }`}
                     >
                       {callStat.success_rate == null ? "—" : `${callStat.success_rate}%`}
@@ -339,7 +339,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
                 )}
                 {callStat.last_error && (
                   <span
-                    className="whitespace-nowrap text-codify-warning/90"
+                    className="whitespace-nowrap text-codify-warning"
                     title={callStat.last_error.message ?? undefined}
                   >
                     · last error <span className="font-mono">{callStat.last_error.code}</span>
@@ -374,7 +374,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
           comes back 404 for a model the provider retired or renamed. Verdict
           computed by SettingsPanel, so it matches the panel's summary. */}
       {stale && (
-        <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg px-3 py-2">
+        <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg px-3 py-2">
           <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             {stale.reportedCount > 0 ? (
@@ -401,7 +401,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
           repair refreshed the store). The draft keeps the user's edits — this
           names that fact and offers the server values in one click. */}
       {externallyUpdated && dirty && (
-        <div className="flex items-start gap-2 text-xs text-codify-info bg-codify-info/15 border border-codify-info/60 rounded-lg px-3 py-2">
+        <div className="flex items-start gap-2 text-xs text-codify-info-ink bg-codify-info/15 border border-codify-info/60 rounded-lg px-3 py-2">
           <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed flex-1">
             The saved config changed underneath your unsaved edits (a repair or another save).
@@ -571,7 +571,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               )}
             </div>
             {staleFallback && (
-              <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg px-3 py-2">
+              <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg px-3 py-2">
                 <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                 <span className="leading-relaxed">
                   {staleFallback.reportedCount > 0 ? (
@@ -595,7 +595,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               </div>
             )}
             {!hasFallback && (
-              <span className="text-xs text-codify-warning/90">
+              <span className="text-xs text-codify-warning">
                 Not in force yet: a fallback needs a model as well as a provider, and half of one
                 fails exactly when it is needed.
               </span>

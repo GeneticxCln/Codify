@@ -67,7 +67,7 @@ export const KnowledgeDeliverableCard: React.FC<{
       {body ? (
         <>
           <div className="flex items-start gap-1.5 text-2xs text-codify-muted">
-            <ShieldCheck className="w-3 h-3 flex-shrink-0 mt-0.5 text-codify-knowledge/80" />
+            <ShieldCheck className="w-3 h-3 flex-shrink-0 mt-0.5 text-codify-knowledge" />
             <span>{readiness.note}</span>
           </div>
           <details className="text-xs text-codify-muted" open>
@@ -92,7 +92,7 @@ export const KnowledgeDeliverableCard: React.FC<{
               </summary>
               <div className="flex flex-col gap-1.5 mt-1.5">
                 {previous.stale_paths.length > 0 && (
-                  <div className="text-2xs text-codify-warning/90">
+                  <div className="text-2xs text-codify-warning">
                     the engine told the drafter to disregard these:{" "}
                     <span className="font-mono">{previous.stale_paths.join(", ")}</span>
                   </div>

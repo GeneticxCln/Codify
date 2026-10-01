@@ -401,7 +401,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       {failed && (
         <div
           role="alert"
-          className="mx-3 mt-2 p-2 rounded-lg text-xs bg-codify-danger/40 border border-codify-danger text-codify-danger"
+          className="mx-3 mt-2 p-2 rounded-lg text-xs bg-codify-danger/40 border border-codify-danger text-codify-danger-ink"
         >
           {failed}
         </div>

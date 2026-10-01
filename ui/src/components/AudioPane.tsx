@@ -238,7 +238,7 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
 
   if (loadError) {
     return (
-      <div className="flex items-start gap-2 p-3 bg-codify-danger/20 border border-codify-danger/60 rounded-xl text-xs text-codify-danger">
+      <div className="flex items-start gap-2 p-3 bg-codify-danger/20 border border-codify-danger/60 rounded-xl text-xs text-codify-danger-ink">
         <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
         <span>{loadError}</span>
       </div>

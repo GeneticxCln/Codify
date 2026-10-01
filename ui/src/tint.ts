@@ -1,4 +1,9 @@
-import { contrastRatio, hexToRgb } from "./contrast";
+import { clampForContrast, contrastRatio } from "./contrast";
+
+// The lightness clamp lives in `contrast.ts` now, because `appearance.ts` needs it to derive the status
+// inks and cannot import this module (this one imports it). Re-exported so `tint.test.ts`, and anything
+// else that asked tint.ts for it, keeps one place to look.
+export { clampForContrast };
 import {
   MANAGED_VARS,
   applyTheme,
@@ -158,118 +163,6 @@ export function ruleFor(name: string, theme: AppearanceTheme): { floor: number; 
       .filter((s) => typeof theme.tokens[s] === "string")
       .map((s) => theme.tokens[s] as string),
   };
-}
-
-/** `#rrggbb` → `hsl(h, s%, l%)`, all in 0–360 / 0–100 / 0–100. */
-function toHsl(hex: string): [number, number, number] {
-  const [r255, g255, b255] = hexToRgb(hex);
-  const r = r255 / 255;
-  const g = g255 / 255;
-  const b = b255 / 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const l = (max + min) / 2;
-  const d = max - min;
-  if (d === 0) return [0, 0, l * 100];
-  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-  let h: number;
-  if (max === r) h = ((g - b) / d) % 6;
-  else if (max === g) h = (b - r) / d + 2;
-  else h = (r - g) / d + 4;
-  h *= 60;
-  if (h < 0) h += 360;
-  return [h, s * 100, l * 100];
-}
-
-function hslToHex(h: number, s: number, l: number): string {
-  const sn = Math.max(0, Math.min(100, s)) / 100;
-  const ln = Math.max(0, Math.min(100, l)) / 100;
-  const c = (1 - Math.abs(2 * ln - 1)) * sn;
-  const hp = (((h % 360) + 360) % 360) / 60;
-  const x = c * (1 - Math.abs((hp % 2) - 1));
-  let rgb: [number, number, number];
-  if (hp < 1) rgb = [c, x, 0];
-  else if (hp < 2) rgb = [x, c, 0];
-  else if (hp < 3) rgb = [0, c, x];
-  else if (hp < 4) rgb = [0, x, c];
-  else if (hp < 5) rgb = [x, 0, c];
-  else rgb = [c, 0, x];
-  const m = ln - c / 2;
-  return (
-    "#" +
-    rgb
-      .map((v) => Math.max(0, Math.min(255, Math.round((v + m) * 255))).toString(16).padStart(2, "0"))
-      .join("")
-  );
-}
-
-/**
- * Move a colour's lightness until it clears `floor` against every surface,
- * keeping its hue and saturation. Returns `null` if no lightness of this hue
- * and saturation can.
- *
- * ## Why it sweeps both ways and keeps the smaller change
- *
- * Two earlier versions each picked a direction and walked it, and each was
- * wrong in a way the other's test happened to miss.
- *
- * The first compared the colour's luminance against the surfaces' **mean** and
- * went whichever way that pointed. On a dark theme the mean sits below almost
- * every colour a user picks, so a deep crimson was told to get *darker* and
- * returned `#fefbfb` — a near-white — having exhausted its sweep without ever
- * passing.
- *
- * The second compared against the **brightest** surface instead, which fixed
- * that and broke the mirror case: a colour already above every surface is
- * *further* from them than one below, so it must also get lighter, and the
- * comparison said darker. A crimson at luminance 0.066 on Toxic Lab's
- * `#050a06`/`#12271a` came back `#fefbfb` again — the same wrong answer, from a
- * rule that looked right and had a test against it.
- *
- * The reason both are wrong is the same: contrast against a surface you are
- * *above* improves by getting lighter, and against one you are *below* by
- * getting darker, so "which way" is not a fact about the surfaces at all. It is
- * a fact about whether a direction has **room** — the lightest a colour can go
- * is white and the darkest is black, so lightening can only ever clear the
- * floor if white does, and darkening only if black does.
- *
- * So both directions are swept, the first passing candidate in each is the
- * nearest that way, and the one that got there in fewer lightness steps wins.
- * A near-passing colour barely moves, a colour with room on one side only takes
- * that side, and a colour with room on neither is `null` — which is the honest
- * answer, and the caller keeps the theme's own value rather than shipping one
- * that failed the check it was run through.
- *
- * Two hundred `hslToHex` calls at worst, and only when a proposal already
- * failed — which is a colour drag ending, not a frame.
- */
-export function clampForContrast(
-  hex: string,
-  against: ReadonlyArray<string>,
-  floor: number,
-): string | null {
-  if (against.length === 0) return hex;
-  const passes = (candidate: string): boolean =>
-    against.every((bg) => contrastRatio(candidate, bg) >= floor);
-  if (passes(hex)) return hex;
-
-  const [h, s, start] = toHsl(hex);
-  /** The nearest lightness in one direction that clears `floor`, or `null`. */
-  const nearest = (up: boolean): { hex: string; moved: number } | null => {
-    for (let step = 1; step <= 100; step++) {
-      const l = up ? start + step : start - step;
-      if (l < 0 || l > 100) continue;
-      const candidate = hslToHex(h, s, l);
-      if (passes(candidate)) return { hex: candidate, moved: step };
-    }
-    return null;
-  };
-
-  const lighter = nearest(true);
-  const darker = nearest(false);
-  if (!lighter && !darker) return null;
-  if (lighter && darker) return lighter.moved <= darker.moved ? lighter.hex : darker.hex;
-  return (lighter ?? darker)!.hex;
 }
 
 /** The outcome of resolving one proposed tint, and why it came out that way. */

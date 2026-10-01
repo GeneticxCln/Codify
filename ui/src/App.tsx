@@ -3176,7 +3176,7 @@ export const App: React.FC = () => {
             <div className="mx-auto mt-3 mb-1 w-full max-w-4xl px-4">
               <div
                 role="alert"
-                className="flex items-start gap-2 p-2.5 rounded-xl bg-codify-danger/40 border border-codify-danger text-xs text-codify-danger"
+                className="flex items-start gap-2 p-2.5 rounded-xl bg-codify-danger/40 border border-codify-danger text-xs text-codify-danger-ink"
               >
                 <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-codify-danger" />
                 <span className="leading-relaxed flex-1">{error}</span>
@@ -3263,10 +3263,10 @@ export const App: React.FC = () => {
                   <ScrollText className="h-3.5 w-3.5 flex-shrink-0" />
                   <span>What the engine said before it stopped</span>
                 </div>
-                <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-codify-warning/90">
+                <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-codify-warning">
                   {engineStderr.join("\n")}
                 </pre>
-                <p className="mt-1.5 text-xs text-codify-warning/70">
+                <p className="mt-1.5 text-xs text-codify-warning">
                   The shell stops the engine rather than restarting it, so a new
                   engine means relaunching the app.
                 </p>

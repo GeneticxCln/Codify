@@ -379,7 +379,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Header */}
         <div className="flex items-start justify-between border-b border-codify-border px-6 py-4 flex-shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-codify-info/20 border border-codify-info/30 flex items-center justify-center text-codify-info">
+            <div className="w-9 h-9 rounded-xl bg-codify-info/20 border border-codify-info/30 flex items-center justify-center text-codify-info-ink">
               <Key className="w-4 h-4" />
             </div>
             <div>
@@ -425,7 +425,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <Key className="w-3.5 h-3.5" /> Provider Keys
             {needsKeyCount > 0 && (
-              <span className="ml-0.5 text-2xs px-1.5 rounded-full bg-codify-warning/40 border border-codify-warning/60 text-codify-warning">
+              <span className="ml-0.5 text-2xs px-1.5 rounded-full bg-codify-warning/40 border border-codify-warning/60 text-codify-warning-ink">
                 {needsKeyCount}
               </span>
             )}
@@ -481,13 +481,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {tab === "keys" && (
             <div className="space-y-4">
               {error && (
-                <div className="flex items-start gap-2 p-3 bg-codify-danger/20 border border-codify-danger/60 rounded-xl text-xs text-codify-danger">
+                <div className="flex items-start gap-2 p-3 bg-codify-danger/20 border border-codify-danger/60 rounded-xl text-xs text-codify-danger-ink">
                   <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <span>{error}</span>
                 </div>
               )}
               {catalogError && (
-                <div className="flex items-start gap-2 p-3 bg-codify-warning/20 border border-codify-warning/60 rounded-xl text-xs text-codify-warning">
+                <div className="flex items-start gap-2 p-3 bg-codify-warning/20 border border-codify-warning/60 rounded-xl text-xs text-codify-warning-ink">
                   <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <span>{catalogError}</span>
                 </div>
@@ -604,7 +604,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {checked && (
               <span
                 className={
-                  checking === "auto" ? "text-codify-info/90 flex items-center gap-1" : undefined
+                  checking === "auto" ? "text-codify-info flex items-center gap-1" : undefined
                 }
                 title={
                   checking === "auto"
@@ -616,7 +616,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </span>
             )}
             {catalogError && (
-              <span className="text-codify-warning/90" title={catalogError}>
+              <span className="text-codify-warning" title={catalogError}>
                 — last check failed
               </span>
             )}

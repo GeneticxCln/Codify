@@ -196,6 +196,9 @@ test("the CSS custom properties agree with the config too", () => {
   const root = css.slice(css.indexOf(":root"), css.indexOf("}"));
   const declared = new Map<string, string>();
   for (const match of root.matchAll(/--codify-([\w-]+)\s*:\s*(#[0-9a-fA-F]{6})/g)) {
+    // The inks are *derived* from the palette (`ui/src/toneInk.ts`), not palette tokens: the config
+    // has no entry for them by design, and `ink.test.ts` pins these fallbacks to the derivation.
+    if (match[1].endsWith("-ink")) continue;
     declared.set(match[1], match[2]);
   }
   assert.ok(

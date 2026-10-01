@@ -160,11 +160,11 @@ export const ENGINE_STATE_CLASSES: Record<EngineState, { pill: string; dot: stri
     dot: "bg-codify-neutral",
   },
   "auth-stale": {
-    pill: "bg-codify-warning/40 text-codify-warning border-codify-warning",
+    pill: "bg-codify-warning/40 text-codify-warning-ink border-codify-warning",
     dot: "bg-codify-warning",
   },
   offline: {
-    pill: "bg-codify-danger/40 text-codify-danger border-codify-danger",
+    pill: "bg-codify-danger/40 text-codify-danger-ink border-codify-danger",
     dot: "bg-codify-danger",
   },
 };
