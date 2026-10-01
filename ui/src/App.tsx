@@ -154,6 +154,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { buildPaletteItems, type PaletteItem } from "./commandPalette";
 import { resolveShortcut } from "./shortcuts";
 import { currentUiScale, DEFAULT_UI_SCALE, stepUiScale, writeUiScale } from "./uiScale";
+import { readSidebarOpen, writeSidebarOpen } from "./sidebarPref";
 import {
   BROWSER_PAGE_LOADED,
   BROWSER_PAGE_LOADING,
@@ -196,6 +197,8 @@ import {
   X,
   RefreshCw,
   ScrollText,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { notableStderrLines } from "./engineLog";
 import { RainBackdrop } from "./components/ui/RainBackdrop";
@@ -879,6 +882,16 @@ export const App: React.FC = () => {
   // second is asked on the *kind*, not on the presence of a `url`, so a terminal
   // tab can never be mistaken for a browser tab by sharing a field.
   const activeTabNow = activeTab(tabState);
+  const activeTabKind = activeTabNow?.kind;
+  // Whether the left panel is showing. View state, remembered across restarts (`sidebarPref.ts`), and
+  // the panel is *unmounted* when hidden rather than collapsed: it keeps no state of its own worth
+  // keeping (its right-click menu is transient), and it must leave the layout entirely so the centre
+  // column, and a browser pane's native webview inside it, really get the room.
+  const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
+  useEffect(() => {
+    writeSidebarOpen(sidebarOpen);
+  }, [sidebarOpen]);
+  const toggleSidebar = useCallback(() => setSidebarOpen((open) => !open), []);
   const activeConversationId = activeTabNow?.conversationId;
   const activeBrowserTab =
     activeTabNow?.kind === "browser" ? activeTabNow : undefined;
@@ -1928,6 +1941,13 @@ export const App: React.FC = () => {
         case "toggle-palette":
           setPaletteOpen((v) => !v);
           break;
+        // Ctrl+B is also tmux's prefix and readline's back-a-character, so with a terminal in front
+        // it is the shell's, not ours: the key goes through untouched (no `preventDefault` below),
+        // and the header button still reaches the panel.
+        case "toggle-sidebar":
+          if (activeTabKind === "terminal") return;
+          toggleSidebar();
+          break;
         // The window's size, as a browser's zoom: a step each way and back to the default. The
         // store decides the size and tells every listener (the root, the terminal, Settings).
         case "scale-up":
@@ -1946,7 +1966,7 @@ export const App: React.FC = () => {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [handleNewTab, handleCloseTab, tabState.activeId]);
+  }, [handleNewTab, handleCloseTab, tabState.activeId, activeTabKind, toggleSidebar]);
 
   /** Palette pick. The item carries data; this switch is the whole act. */
   const handlePaletteSelect = (item: PaletteItem) => {
@@ -2983,6 +3003,18 @@ export const App: React.FC = () => {
       {/* Top Header Bar */}
       <header className="relative bg-codify-chrome border-b border-codify-border px-4 py-2.5 flex items-center gap-3 z-10 flex-shrink-0">
         <div className="flex items-center gap-3 flex-shrink-0">
+          {/* Hide or show the left panel. At the left edge, above the panel it controls, and in the
+              header because the header is the one bar that is always there: a toggle inside the panel
+              could not bring the panel back. `aria-pressed` is true while it is *hidden*, the state
+              the button is currently holding. */}
+          <IconButton
+            label={sidebarOpen ? "Hide left panel" : "Show left panel"}
+            title={sidebarOpen ? "Hide the left panel (Ctrl+B)" : "Show the left panel (Ctrl+B)"}
+            aria-pressed={!sidebarOpen}
+            onClick={toggleSidebar}
+          >
+            {sidebarOpen ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeftOpen className="w-4 h-4" />}
+          </IconButton>
           <div className="flex items-center gap-2 font-bold text-sm tracking-tight text-codify-primary">
             {/* The mark, not a stand-in: `logo.gif` is generated into the brand
                 palette by `scripts/make_logo.py`, and the primitive swaps the
@@ -3110,21 +3142,23 @@ export const App: React.FC = () => {
         {/* The threads. A flex sibling, not an overlay: the transcript reflows
             rather than being covered, which is the same reasoning as the drawers
             below. */}
-        <Sidebar
-          conversations={conversations}
-          selectedWorkspaceId={selectedWs?.id}
-          workspaces={workspaces}
-          activeConversationId={activeConversationId}
-          onNewThread={(parentId) => void handleNewThread(parentId)}
-          onNewProject={() => void handleBrowseWorkspace()}
-          onSelect={handleSelectConversation}
-          onRename={(id, title) => void handleRenameConversation(id, title)}
-          onArchive={(id) => void handleArchiveConversation(id)}
-          onOpenBrowser={handleNewBrowserTab}
-          onOpenTerminal={() => void handleOpenTerminal()}
-          onOpenSettings={() => setIsSettingsOpen(true)}
-          loading={conversationsLoading}
-        />
+        {sidebarOpen && (
+          <Sidebar
+            conversations={conversations}
+            selectedWorkspaceId={selectedWs?.id}
+            workspaces={workspaces}
+            activeConversationId={activeConversationId}
+            onNewThread={(parentId) => void handleNewThread(parentId)}
+            onNewProject={() => void handleBrowseWorkspace()}
+            onSelect={handleSelectConversation}
+            onRename={(id, title) => void handleRenameConversation(id, title)}
+            onArchive={(id) => void handleArchiveConversation(id)}
+            onOpenBrowser={handleNewBrowserTab}
+            onOpenTerminal={() => void handleOpenTerminal()}
+            onOpenSettings={() => setIsSettingsOpen(true)}
+            loading={conversationsLoading}
+          />
+        )}
         <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
           {/* The one place a refusal is shown when there is no pane to show it
               in. It carries a dismiss control because it has no natural

@@ -150,6 +150,17 @@ test("focusing a tab by number is harmless to repeat, so it is not suppressed", 
   );
 });
 
+test("Ctrl+B hides and shows the left panel, and is not repeated by a held key", () => {
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "b", code: "KeyB" })), { type: "toggle-sidebar" });
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "B", code: "KeyB" })), { type: "toggle-sidebar" });
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "b", code: "KeyB", repeat: true })), null, "held Ctrl+B flickered the panel");
+  // Letters take no Shift (Ctrl+Shift+B is somebody else's bookmarks bar), no Alt, no Super.
+  assert.equal(resolveShortcut(key({ ctrlKey: true, shiftKey: true, key: "B", code: "KeyB" })), null);
+  assert.equal(resolveShortcut(key({ ctrlKey: true, altKey: true, key: "b", code: "KeyB" })), null);
+  assert.equal(resolveShortcut(key({ ctrlKey: true, metaKey: true, key: "b", code: "KeyB" })), null);
+  assert.equal(resolveShortcut(key({ key: "b", code: "KeyB" })), null, "typing a b is not a shortcut");
+});
+
 test("Ctrl + / Ctrl - / Ctrl 0 scale the window, the way a browser's zoom does", () => {
   const up = { type: "scale-up" };
   const down = { type: "scale-down" };

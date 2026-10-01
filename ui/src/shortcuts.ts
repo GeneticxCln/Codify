@@ -45,6 +45,8 @@ export type ShortcutAction =
   | { type: "focus-tab"; index: number }
   | { type: "focus-last-tab" }
   | { type: "toggle-palette" }
+  /** Hide or show the left panel (threads, Browser, Terminal, Settings). */
+  | { type: "toggle-sidebar" }
   /** One step bigger or smaller on the UI scale (`uiScale.ts`), or back to its default. */
   | { type: "scale-up" }
   | { type: "scale-down" }
@@ -86,6 +88,8 @@ export function resolveShortcut(e: KeyEventLike): ShortcutAction | null {
         return e.repeat ? null : { type: "close-active-tab" };
       case "k":
         return e.repeat ? null : { type: "toggle-palette" };
+      case "b":
+        return e.repeat ? null : { type: "toggle-sidebar" };
       default:
         break;
     }

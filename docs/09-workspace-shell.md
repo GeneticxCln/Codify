@@ -2074,6 +2074,7 @@ of decisions — AltGr, shifted digits, what Ctrl+9 means — that markup cannot
 | Ctrl+W | Close the active tab, landing on the left neighbour (§4 arithmetic) |
 | Ctrl+1..8 | Focus the tab in that strip position |
 | Ctrl+9 | Focus the **last** tab — the browser convention, so a strip past nine stays reachable at its end |
+| Ctrl+B | Hide or show the left panel (§8.1) |
 | Ctrl+= (or Ctrl++) | UI scale up one step, 100 → 112.5 → 125 → 150 → 175% (docs/02 §3.3) |
 | Ctrl+- | UI scale down one step |
 | Ctrl+0 | UI scale back to the 125% default |
@@ -2116,6 +2117,32 @@ tests pin the mapping, not the platform.
 
 `TabBar`'s module docs promise exactly these tab shortcuts; this section is
 the half that keeps the promise.
+
+### 8.1 Hiding the left panel
+
+The left panel (threads, New Project, Browser, Terminal, Settings) can be hidden with the first
+control in the header, an icon button that reads **Hide left panel** / **Show left panel**, or with
+Ctrl+B. The choice is remembered across restarts (`codify.sidebar` in `localStorage`, `ui/src/sidebarPref.ts`).
+
+- **View state, not a tab record.** How the window is laid out is not what is open in it, so the flag
+  lives beside the theme and the UI scale, and never in a `Tab`, `tabPersistence.ts` or the engine's
+  `/shell/tabs` (§2.1).
+- **Unmounted, not collapsed, so the room is real.** The panel is a flex sibling of the centre
+  column (the same rule as the drawers). Hiding it removes it from the layout, so the transcript,
+  a terminal or a browser pane widens. A browser pane's native webview is told its new rectangle
+  by the pane's own `ResizeObserver` (§7.3), which fires because the column changed size; an
+  overlay or a slide-over would have been painted *under* the native view.
+- **The button lives in the header** because the header is the one bar that is always there. A toggle
+  inside the panel could not bring the panel back. It is before the tab strip, so it does not move as
+  tabs open, and it is not a tab.
+- **Open is the only default.** A missing, empty or unrecognised stored value means open; only the
+  exact word `closed` hides it. A panel kept hidden by a misread word would take Browser, Terminal
+  and Settings out of reach with no hint why.
+- **With a terminal in front, Ctrl+B is the shell's.** It is tmux's prefix and readline's
+  back-a-character, so the key passes through untouched (the handler returns before
+  `preventDefault`). The header button still works with a pointer, so the panel is never out of reach.
+- **What is not in the header or the palette.** While the panel is hidden, Browser and Terminal are one
+  click away (show the panel). Settings stays reachable through the palette (Ctrl+K).
 
 ## 9. Voice: the mic beside Send, and answers read aloud (built)
 
