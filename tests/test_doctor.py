@@ -96,6 +96,27 @@ class DoctorCase(unittest.TestCase):
         )
 
 
+class TestVoiceIsOptional(DoctorCase):
+    def test_no_pipewire_tools_is_a_note_and_not_a_failure(self) -> None:
+        # The mic button records with PipeWire's tools; the gate does not need them, so a machine
+        # without them is told what it is missing and still passes.
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertIn("note     pw-record/pw-dump not found", done.stdout)
+        self.assertIn("Arch/CachyOS: pipewire", done.stdout)
+        self.assertNotIn("MISSING", done.stdout)
+
+    def test_the_pipewire_tools_are_reported_when_present(self) -> None:
+        self.install("pw-record", "#!/bin/sh\nexit 0\n")
+        self.install("pw-dump", "#!/bin/sh\nexit 0\n")
+
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertIn("ok       PipeWire's pw-record and pw-dump", done.stdout)
+
+
 class TestAHealthyMachine(DoctorCase):
     def test_everything_present_exits_zero_and_says_what_next(self) -> None:
         done = self.doctor()

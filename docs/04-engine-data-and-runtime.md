@@ -522,6 +522,12 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `PUT` | `/settings/engine` | `{parallel_width, …}` | `{saved: {…}}` — echoes what was actually stored, clamped for numbers |
 | `GET` | `/models?refresh=` | — | live-discovered catalog, per-provider status (`06`) |
 | `GET` | `/models/recent?limit={1..25}` | — | `[{provider, model, role, ran_at}]`, newest first (`06` §3.1) |
+| `GET` | `/audio/status` | — | `{dictation, read_aloud, recorder, auto_read}`: whether each can run now and, if not, the reason (§3.0.2) |
+| `GET` | `/audio/inputs` | — | `{available, reason, inputs: [{name, description, default}]}` from PipeWire (§3.0.2) |
+| `POST` | `/audio/dictation/start` | — | `{recording, max_seconds}`; `409 stt_not_configured` / `already_recording`, `503 recorder_unavailable` / `recorder_failed` |
+| `POST` | `/audio/dictation/stop` | — | `{text, seconds}`; `409 not_recording`, `422 no_audio`, `502` with the provider's own code |
+| `POST` | `/audio/dictation/cancel` | — | `{cancelled}`; the recording is deleted and sent nowhere |
+| `POST` | `/audio/speak` | `{text}` | `audio/wav`; `400 text_empty` / `text_too_long`, `409 tts_not_configured`, `502` with the provider's own code |
 
 Declaration order matters for the parameterised settings routes: `/settings/agents/stats` and `/settings/agents/repair` are registered **before** `/settings/agents/{role}`, or FastAPI's in-order matching would read `stats` and `repair` as role ids and 404/422 them.
 
@@ -634,6 +640,57 @@ well, so a `1` whose stderr mentions the display is a failure, not a cancel. A r
 ends the search. A dialog that has not answered within `PICKER_TIMEOUT_S` is killed with its whole process
 group, so a dialog the engine gave up on does not stay open on the screen. The UI shows the 503's message
 in its error banner; typing a path in the folder menu always works without any dialog.
+
+### 3.0.2 Voice: dictation and read-aloud
+
+Two features, one module (`engine/speech.py`), configured in Settings → Audio:
+
+- **Dictation** turns speech into text in the composer. The engine records the microphone, sends the recording
+  to the dictation provider's `POST {base_url}/audio/transcriptions` (multipart: `model`, `file`, optional
+  `language`), and answers with the text. The text goes into the prompt; it is never sent as a turn by
+  itself.
+- **Read-aloud** turns an answer into speech: `POST {base_url}/audio/speech` with
+  `{model, voice, input, response_format: "wav"}`, and the WAV goes straight back to the UI, which plays it.
+
+**Engine settings** (`PUT /settings/engine`, the only writer): `stt_provider`, `stt_model`, `stt_language`,
+`tts_provider`, `tts_model`, `tts_voice`, `audio_input` (a PipeWire node name; empty is the session's default
+source), `stt_base_url` and `tts_base_url` (a custom provider's own address, below), and the switch
+`tts_auto_read` (0/1, default 0). The two provider keys are slug-checked like the conductor's. The two
+addresses must be `http(s)` with a host, or empty to clear them (`422 invalid_value` otherwise).
+
+**Which provider.** A built-in slug resolves to the catalogue's address (`BUILTIN_PROVIDERS`) and ignores
+any typed address, so an address saved beside `openai` can never carry the OpenAI key somewhere else. A
+custom slug resolves to its own address (`stt_base_url` / `tts_base_url`) when one is saved, because a local
+speech server is nothing an agent role should have to define. Without one, it resolves to the address of the
+role row that names it (`services.custom_provider_address`, the helper the conductor uses too). With neither,
+it is refused with `409 speech_provider_unknown`. It is spoken to over the OpenAI audio API only, which a local speech server
+(speaches, LocalAI) and the hosted providers that offer speech (OpenAI, Groq) answer. Codify keeps no list of
+providers believed to have audio: a provider whose protocol is not `openai_compat` is refused with
+`409 speech_protocol_unsupported` and a sentence saying why, and the model id is the provider's own,
+discovered or typed. A built-in that needs a key and has none is `409 speech_key_missing`. A custom provider
+with no key is called with no `Authorization` header, so a keyless local speech server works. A stored key is
+never sent to a plain-http, non-loopback address (`invalid_base_url`, the same rule as `03` §1.2), however the
+two came together. A provider that refuses or cannot be reached is a `502` carrying the provider error's own
+code, with any credential the request carried redacted from the message.
+
+**The recording.** The microphone is recorded by the engine, not the webview: PipeWire's `pw-record`
+(`--rate 16000 --channels 1 --format s16 [--target <audio_input>]`), started under the spawn guard in a session
+of its own, like the folder dialog above. Why not the webview: WebKitGTK through wry neither enables media
+capture nor answers a permission request, and granting the microphone to the app's webview, beside an in-app
+browser, is a door nobody needs. Lifecycle:
+
+| step | what happens |
+|---|---|
+| start | refused **before anything is spawned** if dictation has no target (`409 stt_not_configured`) or `pw-record` is not installed (`503 recorder_unavailable`); a recorder that exits within 0.3 s is `503 recorder_failed` with its own reason; one recording at a time (`409 already_recording`) |
+| record | into `<state dir>/dictation/<random>.wav`, in a directory created `0700` |
+| stop | a group SIGTERM (the guard forwards nothing to a live engine's TERM and pw-record finishes the file), SIGKILL after 2 s; the file is read, **deleted**, and sent once; a header with no samples is `422 no_audio` and is sent nowhere |
+| cap | a recording nobody stops ends at `MAX_DICTATION_S` (120 s); what was recorded is kept for the stop that collects it |
+| cancel | the recording is ended and deleted and nothing is sent |
+| engine stop | the lifespan's shutdown ends any recording and deletes its file |
+
+`GET /audio/inputs` lists sources from `pw-dump` (`media.class` `Audio/Source…`, with the session's
+`default.audio.source` marked). Without PipeWire's tools both routes say so and name the package; `make doctor`
+reports it as a note, never a failure, because the gate does not need a microphone.
 
 ### 3.1.1 The same rule at the start of every goal
 

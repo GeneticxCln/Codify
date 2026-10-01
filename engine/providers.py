@@ -257,6 +257,33 @@ async def post_json(
     provider's `Retry-After` honoured; and the error for a status that stays
     carries the provider's own message, not just its number.
     """
+    response = await _post_until_answered(client, url, label=label, **kwargs)
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise ProviderError(
+            "provider_bad_response",
+            f"{label} answered with a body that is not JSON (HTTP {response.status_code})",
+        ) from exc
+
+
+async def post_bytes(
+    client: httpx.AsyncClient, url: str, *, label: str, **kwargs: Any
+) -> bytes:
+    """POST for a binary reply — speech audio — with `post_json`'s retries and error reporting.
+
+    The failures are the same ones `post_json` names (unreachable, refused, rate-limited) and are
+    reported the same way, with any credential the request carried redacted from the message; only
+    the success is different, because a voice is not JSON.
+    """
+    response = await _post_until_answered(client, url, label=label, **kwargs)
+    return response.content
+
+
+async def _post_until_answered(
+    client: httpx.AsyncClient, url: str, *, label: str, **kwargs: Any
+) -> httpx.Response:
+    """The retry loop `post_json` and `post_bytes` share: a successful response, or a `ProviderError`."""
     limit = _attempts.get()
     known = _known_secrets(kwargs)
     attempt = 0
@@ -270,18 +297,11 @@ async def post_json(
                 continue
             raise _unreachable(label, exc, attempt, known) from exc
         if response.status_code < 400:
-            break
+            return response
         error, wait = _refusal(label, response, response.text[:_MAX_ERROR_BODY], attempt, limit, known)
         if wait is None:
             raise error
         await _sleep(wait)
-    try:
-        return response.json()
-    except ValueError as exc:
-        raise ProviderError(
-            "provider_bad_response",
-            f"{label} answered with a body that is not JSON (HTTP {response.status_code})",
-        ) from exc
 
 
 @contextlib.asynccontextmanager

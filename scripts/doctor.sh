@@ -36,6 +36,12 @@ have() { find_tool "$1" >/dev/null; }
 run() { local bin; bin="$(find_tool "$1")" || return 127; shift; "$bin" "$@"; }
 
 ok() { printf '  ok       %s\n' "$1"; }
+# Something the app can use and the gate does not need: reported, never a failure.
+note() {
+  printf '  note     %s\n' "$1"
+  [ -n "${2:-}" ] && printf '           %s\n' "$2"
+  return 0
+}
 bad() {
   printf '  MISSING  %s\n' "$1"
   missing=1
@@ -149,6 +155,15 @@ echo
 
 echo "Git"
 if have git; then ok "$(run git --version)"; else bad "git is not installed" "Install git."; fi
+echo
+
+echo "Voice (optional: the app's mic button; 'make ci' does not need it)"
+if have pw-record && have pw-dump; then
+  ok "PipeWire's pw-record and pw-dump — the mic button can record"
+else
+  note "pw-record/pw-dump not found: the app runs, but the mic button cannot record" \
+    "For dictation install PipeWire's tools — Arch/CachyOS: pipewire, Debian/Ubuntu: pipewire-bin, Fedora: pipewire-utils (package names not verified here)"
+fi
 echo
 
 if [ "$missing" -eq 0 ]; then

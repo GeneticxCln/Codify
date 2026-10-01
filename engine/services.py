@@ -108,6 +108,8 @@ class SettingsService:
         # point of having one; 0 is the escape hatch for a model that is not yet
         # good enough to be trusted with the order, and it needs no rebuild.
         "conductor_drives_execution": (1, lambda v: 1 if v else 0),
+        # Read each answer aloud as it arrives (Settings → Audio). Off unless asked for.
+        "tts_auto_read": (0, lambda v: 1 if v else 0),
     }
 
     # The conductor's model, and why it is here rather than in `agent_configs`:
@@ -128,6 +130,17 @@ class SettingsService:
         "conductor_model": "",
         "conductor_fallback_provider": "",
         "conductor_fallback_model": "",
+        # Voice (engine/speech.py). Empty means "not chosen", and a feature with an
+        # empty provider or model says so rather than guessing one.
+        "stt_provider": "",
+        "stt_model": "",
+        "stt_language": "",
+        "tts_provider": "",
+        "tts_model": "",
+        "tts_voice": "",
+        "audio_input": "",
+        "stt_base_url": "",
+        "tts_base_url": "",
     }
 
     def get_str(self, key: str) -> str:
@@ -183,6 +196,27 @@ class SettingsService:
         )
         self._db.commit()
         return clamped
+
+
+def custom_provider_address(
+    provider: str, rows: list[AgentConfig]
+) -> tuple[str, str, str | None] | None:
+    """Where a custom provider slug points: `(protocol, base_url, api_key_ref)`, or None.
+
+    A built-in slug is explained by the catalogue; a custom one is only a label, and its endpoint,
+    protocol and credential live on the role row (or fallback columns) that introduced it. Anything
+    else that names a provider without holding an address of its own (the conductor's pair, a speech
+    setting) means that row's address, whichever role holds it. The credential reference comes along
+    only from a primary row, where it belongs to the provider being named; a fallback column carries
+    none.
+    """
+    for row in rows:
+        if row.provider == provider and row.base_url:
+            return row.protocol, row.base_url, row.api_key_ref
+    for row in rows:
+        if row.fallback_provider == provider and row.fallback_base_url:
+            return row.fallback_protocol or "openai_compat", row.fallback_base_url, None
+    return None
 
 
 class AgentRegistryService:

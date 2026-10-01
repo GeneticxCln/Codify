@@ -17,6 +17,7 @@ import {
   ModelOption,
   AgentConfig,
   RecentRunModel,
+  SettingsTab,
   ShellTabRow,
 } from "./types";
 import { buildModelSignals } from "./modelSignals";
@@ -454,8 +455,8 @@ export const App: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   // Which settings tab to land on. A failure diagnosis sends the user straight
   // to the screen that holds the fix instead of making them find it.
-  const [settingsTab, setSettingsTab] = useState<"keys" | "agents" | "appearance">("keys");
-  const openSettings = (tab: "keys" | "agents" | "appearance" = "keys") => {
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("keys");
+  const openSettings = (tab: SettingsTab = "keys") => {
     setSettingsTab(tab);
     setIsSettingsOpen(true);
   };
@@ -3321,6 +3322,7 @@ export const App: React.FC = () => {
               canStop={canStop}
               isRunning={isGoalActive(activeGoal?.status)}
               onOpenSettings={() => openSettings("keys")}
+              onOpenAudioSettings={() => openSettings("audio")}
             />
             </>
           )}

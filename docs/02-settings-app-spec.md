@@ -13,7 +13,7 @@ Agent configuration is edited only at **Settings → Agents**. Enforced at three
 ```
 ui/src/
   components/
-    SettingsModal.tsx         # the two tabs: providers, then agent roles
+    SettingsModal.tsx         # the tabs: providers, agent roles, audio, appearance
     SettingsPanel.tsx
     AgentConfigCard.tsx
     ProviderRow.tsx           # one provider: key field, model picker, apply button
@@ -26,10 +26,12 @@ ui/src/
     TestConnectionButton.tsx
     PromptOverrideEditor.tsx
     ConductorSettingsCard.tsx  # the conductor's own model + budgets, not a role
+    AudioPane.tsx              # microphone, dictation, read-aloud — engine settings only
   providerSetup.ts            # search, apply plan, and the wording beside them
   conductorSettings.ts        # what a conductor pair means, and when to refuse it
   modelMenu.ts                # menu placement, shared by both pickers
   modelFreshness.ts           # which models are new since the last visit
+  speech.ts                   # what an answer sounds like, where dictation lands, the one player
   hooks/
     useAgentConfigs.ts        # ONLY hook that reads/writes agent config
 ```
@@ -151,6 +153,41 @@ pair the draft has begun to empty. When nothing is configured it states which
 model the conductor is borrowing, and when the scribe has no model either it
 says there is no conductor on this install rather than naming a model that does
 not exist.
+
+### 3.2 The Audio tab
+
+Settings → Audio (`AudioPane.tsx`) is where voice is set up. It has three sections:
+
+* **Microphone:** the input, read from `GET /audio/inputs`.
+* **Dictation:** provider, model and an optional language.
+* **Read aloud:** provider, model, a voice name, and the "read each answer aloud as it arrives"
+  switch, which is off by default. Which answers that switch reads is docs/09 §9.1.
+
+Like the Conductor card, it is **not** agent config. Every field is an `engine_settings` key
+(`stt_*`, `tts_*`, `audio_input`, `tts_auto_read`), written through `PUT /settings/engine` and
+nothing else. The engine is what records and what calls the speech providers (docs/04 §3.0.2), so
+the pane holds no audio state of its own.
+
+* **The status lines are the engine's.** Under each section, `GET /audio/status` says whether that
+  feature can run and, if it cannot, why, in the engine's words. The pane reads it again after every
+  save. A pane that worked out "ready" for itself could say so about a provider the engine refuses
+  (a non-OpenAI protocol, a key that may not go to that address).
+* **Trials use what is saved.** "Try dictation" and "Play sample" go through the same routes the
+  composer and the answers use, so they are disabled while the draft differs from what is saved.
+  Testing an unsaved draft would test something other than what Save would keep.
+* **PipeWire missing is a reason, not a list.** Without `pw-dump` the Microphone section shows the
+  engine's reason in place of the input select. The engine records with PipeWire's tools, and
+  `make doctor` notes their absence without failing (docs/04 §3.0.2).
+* **An engine without the keys is told so.** An engine that predates voice answers without them.
+  The pane then says the engine needs updating and offers nothing to save, because a save it
+  offered would be refused.
+* **No model or voice lists of its own.** The model fields browse the same discovered models as a
+  role card, with free text allowed. The voice is free text, because the provider owns its voice
+  names.
+* **A custom provider gets a Server address field; a built-in one does not.** This is how a local
+  speech server (speaches, LocalAI, on `127.0.0.1`) is set up without any agent role naming it. The
+  engine ignores an address beside a built-in provider, and a field that does nothing is a trap,
+  so it is not shown.
 
 General / Commands / About tabs MAY exist; they MUST NOT call `codify_update_agent_config`.
 

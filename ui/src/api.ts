@@ -2,6 +2,8 @@ import { readErrorBody } from "./errorBody.ts";
 import type {
   AgentCallStat,
   AgentConfig,
+  AudioInputs,
+  AudioStatus,
   Conversation,
   ConversationTurn,
   DeletedGoal,
@@ -404,6 +406,16 @@ export async function saveEngineSettings(
     conductor_max_turns?: number;
     conductor_max_moves?: number;
     conductor_drives_execution?: boolean;
+    stt_provider?: string;
+    stt_model?: string;
+    stt_language?: string;
+    tts_provider?: string;
+    tts_model?: string;
+    tts_voice?: string;
+    audio_input?: string;
+    stt_base_url?: string;
+    tts_base_url?: string;
+    tts_auto_read?: boolean;
   }
 ): Promise<{ saved: Record<string, number | string> }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
@@ -1532,4 +1544,65 @@ export async function deleteShellTab(key: string): Promise<ShellTabRow[]> {
     throw new Error(err.message || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+// ── voice (docs/04 §3.0.2) ──────────────────────────────────────────────────
+//
+// Each of these throws through `engineError`, so a caller can read the engine's
+// own `code` (`stt_not_configured`, `recorder_unavailable`, …) off the error and
+// act on it — the mic button opens Settings → Audio for the first one — rather
+// than parsing a sentence.
+
+async function audioPost(path: string, fallback: string, body?: unknown): Promise<Response> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${currentEngine.token}`,
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) throw await engineError(res, fallback);
+  return res;
+}
+
+/** Whether dictation and read-aloud can run now, and if not, why. */
+export async function getAudioStatus(): Promise<AudioStatus> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/audio/status`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to read the audio status");
+  return res.json();
+}
+
+/** The microphones PipeWire knows, or why none can be listed. */
+export async function getAudioInputs(): Promise<AudioInputs> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/audio/inputs`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to list microphones");
+  return res.json();
+}
+
+/** Start recording the microphone for dictation. */
+export async function startDictation(): Promise<{ recording: boolean; max_seconds: number }> {
+  return (await audioPost("/audio/dictation/start", "Could not start dictation")).json();
+}
+
+/** Stop recording; answers with what was said. The recording is deleted either way. */
+export async function stopDictation(): Promise<{ text: string; seconds: number }> {
+  return (await audioPost("/audio/dictation/stop", "Could not transcribe the dictation")).json();
+}
+
+/** End a recording and delete it without sending it anywhere. */
+export async function cancelDictation(): Promise<{ cancelled: boolean }> {
+  return (await audioPost("/audio/dictation/cancel", "Could not cancel dictation")).json();
+}
+
+/** The read-aloud provider's WAV for `text`. */
+export async function speak(text: string): Promise<Blob> {
+  return (await audioPost("/audio/speak", "Could not read this aloud", { text })).blob();
 }

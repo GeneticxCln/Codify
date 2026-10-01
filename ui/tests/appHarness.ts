@@ -91,6 +91,18 @@ export interface AppOptions {
    * zero-sized pane; a test about seating needs the pane to have a size.
    */
   viewport?: { width: number; height: number };
+  /**
+   * Answers for routes this engine does not otherwise model, keyed `"METHOD /path"` — the voice
+   * routes, say. Each is an answer or a function of the request body that returns one, and is
+   * consulted before the defaults, so a test can also make a modelled route refuse.
+   */
+  answers?: Record<string, EngineAnswer | ((body: Record<string, unknown> | null) => EngineAnswer)>;
+}
+
+/** One answer from the engine: a JSON body, or a `Blob` for a route that answers with bytes. */
+export interface EngineAnswer {
+  status?: number;
+  body: unknown;
 }
 
 export interface EngineTabRow {
@@ -234,11 +246,21 @@ export async function withApp(
   };
 
   const respond = (data: unknown, status = 200): Response =>
-    ({ ok: status < 400, status, json: async () => data }) as unknown as Response;
+    ({
+      ok: status < 400,
+      status,
+      json: async () => data,
+      blob: async () => (data instanceof Blob ? data : new Blob([JSON.stringify(data)])),
+    }) as unknown as Response;
 
   const route = (path: string, method: string, query: URLSearchParams, payload: Record<string, unknown> | null): Response => {
     if ((options.failRoutes ?? []).some((prefix) => path.startsWith(prefix))) {
       return respond({ code: "unavailable", message: "engine is restarting" }, 503);
+    }
+    const answer = options.answers?.[`${method} ${path}`];
+    if (answer) {
+      const { status, body } = typeof answer === "function" ? answer(payload) : answer;
+      return respond(body, status ?? 200);
     }
     if (path === "/shell/tabs" && method === "GET") return respond([...strip].sort((a, b) => a.position - b.position));
     if (path === "/shell/tabs" && method === "PUT") {

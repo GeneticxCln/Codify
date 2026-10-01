@@ -586,6 +586,60 @@ export interface EngineSettings {
   conductor_max_moves?: EngineSettingValue;
   /** 1 = the conductor drives an approved plan, 0 = the engine's own sequence. */
   conductor_drives_execution?: EngineSettingValue;
+  /** Voice (Settings → Audio, docs/04 §3.0.2): who turns speech into text, and
+   * text into speech. Optional like the others: an engine that predates voice
+   * answers without them and the Audio tab says so instead of saving blind. */
+  stt_provider?: EngineStringSettingValue;
+  stt_model?: EngineStringSettingValue;
+  stt_language?: EngineStringSettingValue;
+  tts_provider?: EngineStringSettingValue;
+  tts_model?: EngineStringSettingValue;
+  tts_voice?: EngineStringSettingValue;
+  /** A PipeWire source's node name; empty is the session's default microphone. */
+  audio_input?: EngineStringSettingValue;
+  /** A custom speech provider's own address; built-in providers ignore it. */
+  stt_base_url?: EngineStringSettingValue;
+  tts_base_url?: EngineStringSettingValue;
+  /** 1 = read each answer aloud as it arrives. Off by default. */
+  tts_auto_read?: EngineSettingValue;
+}
+
+/** The Settings screen's tabs, in the order they are shown. One definition, so a new tab is one edit. */
+export type SettingsTab = "keys" | "agents" | "audio" | "appearance";
+
+/** Whether one voice feature can run now, and if not, the engine's reason (`GET /audio/status`). */
+export interface SpeechReadiness {
+  provider: string;
+  model: string;
+  configured: boolean;
+  reason: string | null;
+}
+
+/** `GET /audio/status`. */
+export interface AudioStatus {
+  dictation: SpeechReadiness;
+  read_aloud: SpeechReadiness;
+  recorder: {
+    available: boolean;
+    reason: string | null;
+    recording: boolean;
+    max_seconds: number;
+  };
+  auto_read: boolean;
+}
+
+/** One microphone PipeWire knows. */
+export interface AudioInput {
+  name: string;
+  description: string;
+  default: boolean;
+}
+
+/** `GET /audio/inputs`. */
+export interface AudioInputs {
+  available: boolean;
+  reason: string | null;
+  inputs: AudioInput[];
 }
 
 /** Payload of a `laya_decision` event (one pre-flight gate verdict). */

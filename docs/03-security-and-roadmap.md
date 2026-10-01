@@ -169,6 +169,29 @@ off disk or received over the bridge — so its containment is an allow-list, no
 - **Labels are asserted in tests.** `tests/test_recall.py` pins the exclusions by name, the log-level gate,
   the workspace join, the bounds, and the wording of the honesty labels.
 
+### 1.9 The microphone (`built`)
+
+Dictation (`04` §3.0.2) opens a microphone, which is the most personal thing this app touches, so the rules
+are written down:
+
+- **Only on a person's action, only through the engine.** A recording starts from the mic button through
+  `POST /audio/dictation/start`, behind the boot token like every route (invariant 3). The webview is never
+  granted the microphone: WebKitGTK's permission requests keep their default *no*, so neither the app's page
+  nor anything in the embedded browser (§1.5) can open it.
+- **Nothing is opened for nothing.** Start is refused before anything is spawned when dictation has no
+  provider to send to.
+- **Bounded.** One recording at a time, ended by stop, cancel, the engine's shutdown, or the 120 s cap,
+  whichever comes first. `pw-record` runs under the spawn guard, so an engine that dies takes it down.
+- **Not kept.** The recording lives in a `0700` directory under the state directory, is read once, sent once,
+  and deleted on every road out (stop, cancel, cap-then-stop, failure, shutdown). A synthesized answer is
+  streamed back and never written.
+- **Sent only where the user chose.** Audio goes to the dictation provider named in Settings → Audio, which may
+  be a local server; a stored key follows the same destination rule as every other (§1.2): https or loopback,
+  never plain http to another host. The engine keeps no list of "speech providers": a provider is refused if
+  it does not speak the OpenAI audio API, and says so. A typed server address applies to a custom provider
+  only. A built-in provider keeps the catalogue's address, so an address saved beside `openai` cannot
+  redirect the OpenAI key.
+
 ## 2. Persistence layer
 
 Single file. **No `agents.db`.**

@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import FrameType
 from typing import Any, TypeVar
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +25,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
-from engine import capabilities, home, watchdog
+from engine import capabilities, home, speech, watchdog
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.laya import LayaService
@@ -66,6 +67,7 @@ from engine.models import (
     ShellTabWrite,
     ProviderKeyUpdate,
     ROLES,
+    SpeakRequest,
     TurnCreate,
     VersionedAction,
     TraceToggle,
@@ -306,9 +308,13 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     # (`engine/catalog_watch.py`), so a quiet engine spends nothing on it.
     watch_task = asyncio.create_task(app.state.catalog_watch.run())
     app.state.catalog_watch_task = watch_task
+    # One recorder for the engine's life (engine/speech.py): a microphone left open by a closed
+    # window is closed here, and its file deleted, rather than left to the two-minute cap.
+    app.state.recorder = speech.Recorder()
     try:
         yield
     finally:
+        await asyncio.to_thread(app.state.recorder.discard)
         # Stopped before the database closes, and before the socket does: a task
         # that outlived the state directory it was watching for is an orphan with a
         # publish callback into a store that is being closed underneath it.
@@ -384,6 +390,15 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
             "A refused body: a field that failed validation (`code: invalid_request`, "
             "with the field errors under `detail`) or a body the engine understood "
             "and declined."
+        ),
+    },
+    502: {
+        "model": ErrorBody,
+        "description": (
+            "A provider the engine called on the caller's behalf refused or could not be reached; "
+            "the code is the provider error's own (`provider_http`, `provider_unreachable`, …) and the "
+            "message carries the provider's reason with any credential redacted. Raised by the voice "
+            "routes (`/audio/dictation/stop`, `/audio/speak`)."
         ),
     },
     503: {
@@ -1135,7 +1150,14 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     # A switch rather than a number a user has to know the meaning of, stored as
     # the 0/1 the engine already reads.
     "conductor_drives_execution": (0, 1),
+    # Read each answer aloud as it arrives (Settings → Audio). Off by default: a
+    # voice that starts talking unasked is not something a fresh install does.
+    "tts_auto_read": (0, 1),
 }
+
+# The integer settings that are really switches, so a checkbox's `true` is a 1
+# rather than the truthiness trap it would be for a number someone chooses.
+ENGINE_SWITCH_SETTINGS = frozenset({"conductor_drives_execution", "tts_auto_read"})
 
 # The conductor's own provider and model, keyed to the longest value each
 # accepts. They are settings rather than an `AgentConfig` row because
@@ -1146,6 +1168,21 @@ ENGINE_STRING_SETTINGS: dict[str, int] = {
     "conductor_model": 128,
     "conductor_fallback_provider": 64,
     "conductor_fallback_model": 128,
+    # Voice (Settings → Audio, engine/speech.py): which provider and model turn
+    # speech into text and back, the voice that reads, and the microphone. Engine
+    # settings rather than a role for the conductor's reason: neither is a stage.
+    "stt_provider": 64,
+    "stt_model": 128,
+    "stt_language": 16,
+    "tts_provider": 64,
+    "tts_model": 128,
+    "tts_voice": 64,
+    # A PipeWire node name; empty is the session's default source.
+    "audio_input": 200,
+    # A custom speech provider's own address (a local speech server, say), so it
+    # needs no agent role to define it. Built-in providers ignore it.
+    "stt_base_url": 500,
+    "tts_base_url": 500,
 }
 
 # The slug shape `AgentConfigUpdate` enforces, so a conductor pointed at a
@@ -1157,7 +1194,14 @@ PROVIDER_SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 # Which of the string settings name a provider rather than free text. Named
 # rather than inferred from the key, so a setting added later does not inherit a
 # validation rule it never agreed to.
-SLUG_SETTINGS = frozenset({"conductor_provider", "conductor_fallback_provider"})
+SLUG_SETTINGS = frozenset({
+    "conductor_provider", "conductor_fallback_provider", "stt_provider", "tts_provider",
+})
+
+# Which of them are a server's address: http(s) with a host, or empty to clear it.
+# Whether a *key* may go there is decided per request (`key_destination_problem`),
+# because the key and the address can be saved in either order.
+URL_SETTINGS = frozenset({"stt_base_url", "tts_base_url"})
 
 
 @app.get("/settings/engine")
@@ -1194,6 +1238,10 @@ def _clean_engine_string(key: str, value: Any) -> str:
         )
     if key in SLUG_SETTINGS and text and not PROVIDER_SLUG_RE.match(text):
         raise ApiError(422, "invalid_value", f"{key} is not a provider slug")
+    if key in URL_SETTINGS and text:
+        parsed = urlparse(text)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ApiError(422, "invalid_value", f"{key} must be an http(s) address, such as http://127.0.0.1:8000/v1")
     return text
 
 
@@ -1214,9 +1262,9 @@ async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[st
         if key in ENGINE_INT_SETTINGS:
             # A boolean is refused for a number the user is *choosing*: JSON's
             # `true` reaching `int()` is a truthiness trap, not a 1. The 0/1
-            # switch is the one exception — a checkbox genuinely sends one, and
-            # its clamp turns anything truthy into 1.
-            if isinstance(value, bool) and key != "conductor_drives_execution":
+            # switches are the exception — a checkbox genuinely sends one, and
+            # their clamp turns anything truthy into 1.
+            if isinstance(value, bool) and key not in ENGINE_SWITCH_SETTINGS:
                 raise ApiError(422, "invalid_value", f"{key} must be an integer, not a boolean")
             try:
                 out[key] = settings.set_int(key, int(value))
@@ -1227,6 +1275,111 @@ async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[st
         else:
             raise ApiError(400, "unknown_setting", f"unknown engine setting: {key}")
     return {"saved": out}
+
+
+# ── voice (engine/speech.py, docs/04) ─────────────────────────────────────────
+
+
+def _recorder(app: FastAPI) -> speech.Recorder:
+    """The engine's one recorder, made on first use so a test that builds `app.state` by hand has one."""
+    recorder: speech.Recorder | None = getattr(app.state, "recorder", None)
+    if recorder is None:
+        recorder = speech.Recorder()
+        app.state.recorder = recorder
+    return recorder
+
+
+def _speech_target(request: Request, what: str) -> speech.SpeechTarget:
+    settings: SettingsService = request.app.state.settings
+    keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
+    return speech.resolve(
+        request.app.state.registry, keychain,
+        settings.get_str(f"{what}_provider"), settings.get_str(f"{what}_model"), what=what,
+        base_url=settings.get_str(f"{what}_base_url"),
+    )
+
+
+@app.get("/audio/status")
+async def audio_status(request: Request) -> dict[str, Any]:
+    """Whether dictation and read-aloud can run now (and if not, why), and whether a mic can be recorded."""
+    settings: SettingsService = request.app.state.settings
+    keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
+    available, reason = speech.Recorder.available()
+    return {
+        "dictation": speech.configured(settings, request.app.state.registry, keychain, "stt"),
+        "read_aloud": speech.configured(settings, request.app.state.registry, keychain, "tts"),
+        "recorder": {
+            "available": available,
+            "reason": reason,
+            "recording": _recorder(request.app).recording(),
+            "max_seconds": speech.MAX_DICTATION_S,
+        },
+        "auto_read": bool(settings.get_int("tts_auto_read")),
+    }
+
+
+@app.get("/audio/inputs")
+async def audio_inputs() -> dict[str, Any]:
+    """The microphones PipeWire knows. Off the loop: it asks a subprocess."""
+    return await asyncio.to_thread(speech.inputs)
+
+
+@app.post("/audio/dictation/start")
+async def start_dictation(request: Request) -> dict[str, Any]:
+    """Start recording the microphone for dictation.
+
+    Refused before anything is spawned when dictation has nowhere to go: a recording that could
+    only ever be thrown away is a microphone opened for nothing.
+    """
+    _speech_target(request, "stt")
+    settings: SettingsService = request.app.state.settings
+    return await asyncio.to_thread(_recorder(request.app).start, settings.get_str("audio_input"))
+
+
+@app.post("/audio/dictation/stop")
+async def stop_dictation(request: Request) -> dict[str, Any]:
+    """Stop recording and answer with what was said. The recording is deleted either way."""
+    wav, seconds = await asyncio.to_thread(_recorder(request.app).stop)
+    target = _speech_target(request, "stt")
+    settings: SettingsService = request.app.state.settings
+    try:
+        text = await speech.transcribe(
+            target, wav, settings.get_str("stt_language"),
+            transport=getattr(request.app.state, "speech_transport", None),
+        )
+    except ProviderError as exc:
+        raise ApiError(502, exc.code, exc.message) from exc
+    return {"text": text, "seconds": round(seconds, 1)}
+
+
+@app.post("/audio/dictation/cancel")
+async def cancel_dictation(request: Request) -> dict[str, Any]:
+    """End and delete a recording without sending it anywhere."""
+    return {"cancelled": await asyncio.to_thread(_recorder(request.app).cancel)}
+
+
+@app.post("/audio/speak")
+async def speak(body: SpeakRequest, request: Request) -> Response:
+    """Read `text` aloud: WAV audio from the read-aloud provider, straight back, never stored."""
+    text = body.text.strip()
+    if not text:
+        raise ApiError(400, "text_empty", "there is nothing to read aloud")
+    if len(text) > speech.MAX_SPEAK_CHARS:
+        raise ApiError(
+            400, "text_too_long", f"read-aloud takes at most {speech.MAX_SPEAK_CHARS} characters at a time",
+        )
+    target = _speech_target(request, "tts")
+    settings: SettingsService = request.app.state.settings
+    voice = settings.get_str("tts_voice")
+    if not voice:
+        raise ApiError(409, "tts_not_configured", "read-aloud has no voice yet: name one in Settings → Audio")
+    try:
+        audio = await speech.synthesize(
+            target, voice, text, transport=getattr(request.app.state, "speech_transport", None),
+        )
+    except ProviderError as exc:
+        raise ApiError(502, exc.code, exc.message) from exc
+    return Response(content=audio, media_type="audio/wav")
 
 
 @app.get("/workspaces")

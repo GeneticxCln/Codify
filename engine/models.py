@@ -603,6 +603,14 @@ class VersionedAction(BaseModel):
     expected_version: int = Field(..., ge=0)
 
 
+class SpeakRequest(BaseModel):
+    """Text to read aloud (`POST /audio/speak`). The voice and model are settings, not request fields."""
+
+    model_config = {"extra": "forbid"}
+    # Bounded here for memory; the friendlier limit (`speech.MAX_SPEAK_CHARS`) is the route's.
+    text: str = Field(..., max_length=20000)
+
+
 class TraceToggle(BaseModel):
     """Whether a goal records its model calls (docs/04 §8).
 
