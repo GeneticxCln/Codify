@@ -16,7 +16,7 @@
  */
 
 import type { Tab } from "./tabs";
-import type { Conversation } from "./types";
+import type { Conversation, SettingsTab } from "./types";
 
 /** Where an item sends you. Three sources — the strip, the thread list, settings. */
 export type PaletteItemKind = "tab" | "conversation" | "settings";
@@ -42,7 +42,7 @@ export type PaletteItem =
     })
   | (BaseItem & {
       kind: "settings";
-      settingsTab: "keys" | "agents" | "appearance";
+      settingsTab: SettingsTab;
     });
 
 /** What the palette is choosing from. */
@@ -62,10 +62,11 @@ export interface PaletteSources {
 export const SETTINGS_ENTRIES: ReadonlyArray<{
   id: string;
   title: string;
-  settingsTab: "keys" | "agents" | "appearance";
+  settingsTab: SettingsTab;
 }> = [
   { id: "settings:keys", title: "Provider keys & endpoints", settingsTab: "keys" },
   { id: "settings:agents", title: "Agent roles & prompts", settingsTab: "agents" },
+  { id: "settings:audio", title: "Audio: microphone, dictation & read-aloud", settingsTab: "audio" },
   { id: "settings:appearance", title: "Appearance & themes", settingsTab: "appearance" },
 ];
 

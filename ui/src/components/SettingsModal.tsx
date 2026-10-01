@@ -7,10 +7,12 @@ import {
   ProviderKeyStatus,
   ProviderModelStatus,
   RecentRunModel,
+  SettingsTab,
 } from "../types";
 import { fetchModelCatalog, fetchProviderKeys, saveProviderKey } from "../api";
 import { SettingsPanel } from "./SettingsPanel";
 import { AppearancePane } from "./AppearancePane";
+import { AudioPane } from "./AudioPane";
 import { ProviderRow } from "./ProviderRow";
 import { useAgentConfigs } from "../hooks/useAgentConfigs";
 import { checkedLabel, discoveredFooter, needsOwnRefresh } from "../providerSetup";
@@ -21,7 +23,7 @@ import {
   saveSeen,
   type SeenIndex,
 } from "../modelFreshness";
-import { X, Key, Sliders, HardDrive, Lock, AlertCircle, RefreshCw, Palette } from "lucide-react";
+import { X, Key, Sliders, HardDrive, Lock, AlertCircle, RefreshCw, Palette, Mic } from "lucide-react";
 
 /**
  * How often the panel re-asks while it is open, and how long after a check a
@@ -40,7 +42,7 @@ interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   /** Which tab to open on (defaults to keys). */
-  initialTab?: "keys" | "agents" | "appearance";
+  initialTab?: SettingsTab;
   /**
    * Models that recently answered, handed down so a role's model field badges the
    * ids the app has actually run — the same hint the chat's menu shows.
@@ -85,7 +87,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   catalogTick = 0,
   catalogLive = false,
 }) => {
-  const [tab, setTab] = useState<"keys" | "agents" | "appearance">(initialTab);
+  const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [keys, setKeys] = useState<ProviderKeyStatus[]>([]);
   // No draft keys here any more. Each `ProviderRow` owns the text in its own
   // field, so this component no longer holds a second copy of a secret it does
@@ -388,7 +390,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     : "Every keyed provider has a credential. Models are discovered live from each provider."
                   : tab === "appearance"
                     ? "Themes swap the app's surface and text colours at runtime — no restart, no rebuild."
-                    : "Each role's model, endpoint, temperature, and prompt. Roles run in the order of the pipeline."}
+                    : tab === "audio"
+                      ? "The microphone, dictation into the prompt, and answers read aloud — through the speech providers you choose."
+                      : "Each role's model, endpoint, temperature, and prompt. Roles run in the order of the pipeline."}
               </p>
             </div>
           </div>
@@ -430,6 +434,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }`}
           >
             <Sliders className="w-3.5 h-3.5" /> Agent Roles
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("audio")}
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+              tab === "audio"
+                ? "bg-codify-raised text-codify-primary border border-codify-border"
+                : "text-codify-muted hover:text-codify-secondary"
+            }`}
+          >
+            <Mic className="w-3.5 h-3.5" /> Audio
           </button>
           <button
             type="button"
@@ -543,6 +558,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               models={models}
               providerStatus={modelStatus}
               recentRuns={recentRuns}
+              onRefreshModels={() => loadCatalog(true)}
+              refreshingModels={catalogLoading}
+            />
+          )}
+
+          {tab === "audio" && (
+            <AudioPane
+              models={models}
+              providerStatus={modelStatus}
               onRefreshModels={() => loadCatalog(true)}
               refreshingModels={catalogLoading}
             />
