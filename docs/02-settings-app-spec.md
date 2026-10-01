@@ -212,6 +212,14 @@ or 175%, **125% by default**. It is client-side display state, like the theme: i
 * **Applied at once, remembered, and the same store as the keyboard.** The preview line in the panel
   is the window itself at that size. Ctrl +, Ctrl - and Ctrl 0 (docs/09 §8) write the same store, so
   the panel and the keys cannot disagree.
+* **Layout is checked at these sizes, in the real build.** Rendered in Chromium at 1280×800 and at the
+  900×600 minimum window, at 100, 125 and 175%, with the Stats and History drawers open and the left
+  panel shown and hidden, across the Settings tabs. That found three things a unit test cannot see, all
+  fixed: icon buttons drew their icon at 8px instead of 20px (`IconButton`'s `p-0` was outranked by
+  `Button`'s `px-*`), the Settings tab bar clipped its last tabs and scrolled the whole modal sideways
+  at 175% (it now wraps), and the left panel took nearly half of a 900px window at 175% (it is capped
+  at 35% of the row). At 175% in a 600px-tall window the Settings body is short and scrolls: that is
+  the extreme corner, and 125% is the default.
 * **What does not follow a root font size is handled where it lives.** The xterm terminal draws its own
   canvas, so `TerminalPane` sets its font size from the scale and re-fits when it changes, and the
   prompt box's 180px height cap is multiplied by the scale. A new text size is `text-xs` and friends,

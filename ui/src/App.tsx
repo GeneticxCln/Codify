@@ -3008,6 +3008,7 @@ export const App: React.FC = () => {
               could not bring the panel back. `aria-pressed` is true while it is *hidden*, the state
               the button is currently holding. */}
           <IconButton
+            tone="subtle"
             label={sidebarOpen ? "Hide left panel" : "Show left panel"}
             title={sidebarOpen ? "Hide the left panel (Ctrl+B)" : "Show the left panel (Ctrl+B)"}
             aria-pressed={!sidebarOpen}

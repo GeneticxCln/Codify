@@ -13,7 +13,7 @@ import { useEffect, useState } from "react";
  * **The default is 125%.** Most text in this UI is 10 or 11px, which reads small on a desktop
  * display; the choice below goes down to 100% for anyone who liked it as it was.
  *
- * **Why steps and not a free slider.** Layout is checked at these sizes (docs/09 §9.2) and a
+ * **Why steps and not a free slider.** Layout is checked at these sizes (docs/02 §3.3) and a
  * stored value that is not one of them is refused rather than trusted: a hand-edited `3` or `900`
  * would otherwise be a window nobody can read or reach the Settings pane to fix.
  *

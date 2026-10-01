@@ -410,11 +410,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Tab bar */}
-        <div className="flex items-center gap-1 px-6 pt-3 flex-shrink-0">
+        {/* `flex-wrap`: five tabs are wider than a 900px window once the UI is scaled to 175%, and a
+            fixed row clipped the last ones and let the browser scroll the whole modal sideways to
+            reach them. Wrapped, every tab is always on screen. */}
+        <div className="flex flex-wrap items-center gap-1 px-6 pt-3 flex-shrink-0">
           <button
             type="button"
             onClick={() => setTab("keys")}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "keys"
                 ? "bg-codify-raised text-codify-primary border border-codify-border"
                 : "text-codify-muted hover:text-codify-secondary"
@@ -430,7 +433,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={() => setTab("agents")}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "agents"
                 ? "bg-codify-raised text-codify-primary border border-codify-border"
                 : "text-codify-muted hover:text-codify-secondary"
@@ -441,7 +444,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={() => setTab("audio")}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "audio"
                 ? "bg-codify-raised text-codify-primary border border-codify-border"
                 : "text-codify-muted hover:text-codify-secondary"
@@ -452,7 +455,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={() => setTab("appearance")}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "appearance"
                 ? "bg-codify-raised text-codify-primary border border-codify-border"
                 : "text-codify-muted hover:text-codify-secondary"
@@ -463,7 +466,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={() => setTab("about")}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "about"
                 ? "bg-codify-raised text-codify-primary border border-codify-border"
                 : "text-codify-muted hover:text-codify-secondary"

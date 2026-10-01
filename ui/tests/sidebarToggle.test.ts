@@ -54,6 +54,21 @@ test("the panel is open by default, and the button in the header hides and shows
   });
 });
 
+test("the button reads as a button, and the panel is capped so a big UI scale cannot swallow a narrow window", async () => {
+  await withApp({}, async (ctx) => {
+    // Rendered at 125% it was a bare glyph that looked like nothing was there. The subtle tone gives it
+    // the same border and fill as Stats and History beside it.
+    const classes = toggle(ctx).className.split(/\s+/);
+    assert.ok(classes.includes("border-codify-border") && classes.includes("bg-codify-raised"), `the toggle has no visible button chrome: ${classes.join(" ")}`);
+    // 15rem grows with the UI scale: 420px at 175%, nearly half of a 900px window. The cap is what
+    // makes the panel give way first (measured in a real render; jsdom has no layout to measure).
+    assert.ok(
+      (panel(ctx) as Element).classList.contains("max-w-[35%]"),
+      "the left panel has no width cap, so at 175% it takes nearly half of a narrow window",
+    );
+  });
+});
+
 test("the button is beside New Tab, outside the tab strip, and the header gains no Browser or Terminal control", async () => {
   await withApp({}, async (ctx) => {
     const header = ctx.dom.container.querySelector("header") as HTMLElement;

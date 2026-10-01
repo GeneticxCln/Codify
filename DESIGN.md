@@ -645,7 +645,7 @@ a shortcut.
 | Primitive | Owns |
 |---|---|
 | `Button` | tone, size, icon slot, disabled reasoning, focus ring |
-| `IconButton` | square icon-only control, **must** carry `aria-label` |
+| `IconButton` | square icon-only control, **must** carry `aria-label`; its padding reset is `!p-0`, because `Button`'s own `px-*` outranks a plain `p-0` in the stylesheet and squeezes the icon to a sliver |
 | `Toggle` | the armed/at-rest distinction, and the feature's own armed hue |
 | `Badge` | one of the five status tones, at `2xs` |
 | `Panel` | surface, border, heading row, body padding |

@@ -43,3 +43,20 @@ test("searching the palette for About opens Settings on the About tab", async ()
     assert.match(ctx.dom.text(), /Keyboard shortcuts/, "the palette did not land on About");
   });
 });
+
+test("the tab bar wraps rather than clipping, so every tab stays reachable at a large UI scale", async () => {
+  await withApp({}, async (ctx) => {
+    await ctx.dom.click(ctx.dom.byButton("Settings"));
+    await ctx.settle();
+    const bar = ctx.dom.byButton("About").parentElement as HTMLElement;
+    // jsdom has no layout to measure, so this pins the classes that make the real thing wrap; the
+    // measured check is a render at 175% in a 900px window (docs/02 §3.3).
+    assert.ok(bar.classList.contains("flex-wrap"), "a row of five tabs does not wrap, and clips at 175%");
+    for (const label of ["Provider Keys", "Agent Roles", "Audio", "Appearance", "About"]) {
+      assert.ok(
+        ctx.dom.byButton(label).classList.contains("whitespace-nowrap"),
+        `${label} can wrap its own label onto two lines`,
+      );
+    }
+  });
+});
