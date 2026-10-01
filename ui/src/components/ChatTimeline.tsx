@@ -552,8 +552,11 @@ const UsageCard: React.FC<{ goalId: string }> = ({ goalId }) => {
 
   return (
     <div className="p-2.5 rounded-xl bg-codify-bg border border-codify-border text-xs">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-codify-muted">
+      {/* Wraps rather than squeezes: in a narrow centre column the label used to be broken one
+          letter to a line while the totals kept their width. The label does not break; the totals drop
+          to the next line instead. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+        <div className="flex items-center gap-1.5 whitespace-nowrap text-xs font-semibold uppercase tracking-wider text-codify-muted">
           <Coins className="w-3.5 h-3.5 text-codify-warning" />
           Token Usage
         </div>
@@ -1448,8 +1451,11 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                     key={step.id}
                                     className="bg-codify-bg border border-codify-border rounded-xl p-3 flex flex-col gap-1.5"
                                   >
-                                    <div className="flex items-center justify-between gap-2">
-                                      <div className="flex items-center gap-2">
+                                    {/* The title may shrink and wrap; the status cluster may not. It was the other
+                                  way round, so in a narrow column the title kept its width and the status pill
+                                  was broken a letter to a line. */}
+                                    <div className="flex items-start justify-between gap-2">
+                                      <div className="flex min-w-0 flex-1 items-center gap-2">
                                         {/* One icon per tone, chosen from the same table the
                                   badges use, so an icon and a pill about the same
                                   state can never be different colours. The
@@ -1477,7 +1483,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                             className={`w-4 h-4 flex-shrink-0 ${toneText(stepTone(step.status))}`}
                                           />
                                         )}
-                                        <span className="text-xs font-semibold text-codify-secondary">
+                                        <span className="min-w-0 break-words text-xs font-semibold text-codify-secondary">
                                           Step {step.ordinal + 1}: {step.title}
                                         </span>
                                         {/* This step is one of several running right now —
@@ -1515,7 +1521,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                                 stepId: step.id,
                                               })
                                             }
-                                            className="flex items-center gap-1 px-2 py-0.5 bg-codify-info/20 hover:bg-codify-info/40 text-codify-info-ink border border-codify-info/50 rounded text-xs font-semibold transition-colors"
+                                            className="flex flex-shrink-0 items-center gap-1 px-2 py-0.5 bg-codify-info/20 hover:bg-codify-info/40 text-codify-info-ink border border-codify-info/50 rounded text-xs font-semibold transition-colors"
                                             title="Edit this step's title, description, and target paths"
                                           >
                                             <Pencil className="w-3 h-3" /> Edit
@@ -1523,7 +1529,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                         )}
 
                                       {/* Step Status or Retry */}
-                                      <div className="flex items-center gap-2">
+                                      <div className="flex flex-shrink-0 items-center gap-2">
                                         {step.status === "FAILED" ||
                                         (step.status === "IN_PROGRESS" &&
                                           step.review_notes) ? (
@@ -1543,7 +1549,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                           </button>
                                         ) : null}
 
-                                        <span className="text-2xs uppercase font-mono px-1.5 py-0.5 rounded bg-codify-surface text-codify-muted">
+                                        <span className="whitespace-nowrap text-2xs uppercase font-mono px-1.5 py-0.5 rounded bg-codify-surface text-codify-muted">
                                           {step.status}
                                         </span>
                                       </div>

@@ -413,6 +413,34 @@ export async function withApp(
     }
     const goalRead = /^\/goals\/([^/]+)$/.exec(path);
     if (goalRead && method === "GET" && goalsById.has(goalRead[1])) return respond(goalsById.get(goalRead[1]));
+    // The statistics drawer reads these three on open. An empty list is not an answer to any of them
+    // (the overview is an object, and `[]` made the panel throw on `.goals`), so each is the engine's
+    // own shape with nothing in it: a workspace that has run no goals yet.
+    if (path === "/stats/overview" && method === "GET") {
+      const lane = { input_tokens: 0, output_tokens: 0, total_tokens: 0, calls: 0, avg_duration_ms: null };
+      return respond({
+        window_days: 0,
+        generated_at: 0,
+        goals: { goals: 0, active: 0, succeeded: 0, failed: 0, cancelled: 0, success_rate: null },
+        usage: { ...lane, failures: 0, by_role: {}, by_model: {} },
+        daily: [],
+      });
+    }
+    if (path === "/stats/failures" && method === "GET") {
+      return respond({
+        window_days: 0,
+        generated_at: 0,
+        total: 0,
+        by_code: {},
+        by_role: {},
+        by_stage: {},
+        causes: [],
+        retries: 0,
+        recovered: 0,
+        recovery_rate: null,
+      });
+    }
+    if (path === "/stats/history" && method === "GET") return respond({ days: [] });
     const goalEvents = /^\/goals\/([^/]+)\/events$/.exec(path);
     if (goalEvents && method === "GET") return respond(options.goalEvents?.[goalEvents[1]!] ?? []);
     const archive = /^\/conversations\/([^/]+)\/archive$/.exec(path);

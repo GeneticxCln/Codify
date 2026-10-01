@@ -213,8 +213,8 @@ test("the badge counts in words, and says nothing when there is nothing", () => 
   assert.equal(newCountLabel(1), "1 new");
   assert.equal(newCountLabel(3), "3 new");
   assert.equal(newCountTitle("nvidia", 0), "");
-  assert.match(newCountTitle("nvidia", 1), /nvidia did not list when you last looked/);
-  assert.match(newCountTitle("nvidia", 3), /3 models nvidia did not list when you last looked/);
+  assert.match(newCountTitle("nvidia", 1), /NVIDIA did not list when you last looked/);
+  assert.match(newCountTitle("nvidia", 3), /3 models NVIDIA did not list when you last looked/);
   // Not "the last time you were here": the panel re-discovers while it sits
   // open, so the reader can be looking straight at the list as a release lands,
   // and that phrasing is then false in the only sense the reader can check.

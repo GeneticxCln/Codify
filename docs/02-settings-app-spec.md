@@ -220,6 +220,21 @@ or 175%, **125% by default**. It is client-side display state, like the theme: i
   at 175% (it now wraps), and the left panel took nearly half of a 900px window at 175% (it is capped
   at 35% of the row). At 175% in a 600px-tall window the Settings body is short and scrolls: that is
   the extreme corner, and 125% is the default.
+* **A drawer and the left panel do not both fit at 125%, so the panel gives way.** Rendering the real
+  build with Stats open found the transcript squeezed to about 400px, a step's status pill broken a
+  letter to a line while its title kept its width, the "TOKEN USAGE" label broken while the totals kept
+  theirs, and the composer's placeholder cut mid-word. The panel now yields to a drawer when the row
+  cannot hold both (`docs/09` §8.1); the step header lets its title shrink and its status not, the usage
+  header wraps its totals under the label, and the placeholder is short with the long sentence in its
+  `title`. `ui/tests/layoutWrapping.test.ts` pins which side may shrink.
+* **Providers are read by name, not by slug.** The Provider Keys row printed the slug through CSS
+  `capitalize` ("Openai", "Nvidia") and the protocol as the raw tag `openai_compat`, and the provider
+  select printed every slug in capitals. `ui/src/providerLabels.ts` supplies the words (OpenAI,
+  OpenRouter, DeepSeek, NVIDIA, Groq, Google, Anthropic, Ollama; any other slug title-cased) and the
+  protocol's name ("OpenAI-compatible"; the choice list keeps its endpoint). The slug stays the
+  identifier everywhere: it is the name's tooltip and what every request carries. The table is a
+  spelling guide for eight names and is not a catalogue (`docs/06` §1): which providers exist, and every
+  model, still come from the engine and from live discovery.
 * **What does not follow a root font size is handled where it lives.** The xterm terminal draws its own
   canvas, so `TerminalPane` sets its font size from the scale and re-fits when it changes, and the
   prompt box's 180px height cap is multiplied by the scale. A new text size is `text-xs` and friends,

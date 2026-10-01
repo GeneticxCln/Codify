@@ -1169,7 +1169,11 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={isLoading}
-            placeholder="Ask Codify to build, edit files, fix tests, or refactor code..."
+            // Short, because a placeholder does not wrap: the long sentence was cut mid-word in a narrow
+            // column. What the composer can be asked is still said, in full, to a pointer and to a screen
+            // reader, which read the title as the field's description.
+            placeholder="Ask Codify to build, fix or refactor…"
+            title="Ask Codify to build, edit files, fix tests, or refactor code"
             aria-label="Chat prompt"
             className="flex-1 min-w-0 bg-transparent text-codify-primary placeholder-codify-muted text-sm resize-none focus:outline-none leading-relaxed cursor-text"
           />

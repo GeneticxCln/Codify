@@ -44,6 +44,7 @@ import {
   rolesOnProvider,
 } from "../providerSetup";
 import { newCountLabel, newCountTitle } from "../modelFreshness";
+import { protocolLabel, providerLabel } from "../providerLabels";
 
 export interface ProviderRowProps {
   keyStatus: ProviderKeyStatus;
@@ -162,8 +163,13 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <Cpu className="w-4 h-4 text-codify-design flex-shrink-0" />
-          <span className="font-semibold text-sm text-codify-primary capitalize truncate">{provider}</span>
-          <span className="text-2xs text-codify-muted font-mono truncate">{keyStatus.protocol}</span>
+          {/* The slug stays the identifier everywhere; this is only how it is read (`providerLabels.ts`). */}
+          <span className="font-semibold text-sm text-codify-primary truncate" title={provider}>
+            {providerLabel(provider)}
+          </span>
+          <span className="text-2xs text-codify-muted truncate" title={keyStatus.protocol}>
+            {protocolLabel(keyStatus.protocol)}
+          </span>
           {status?.ok && (
             <span className="text-2xs text-codify-muted flex-shrink-0">{status.count} models</span>
           )}

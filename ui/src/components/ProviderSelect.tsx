@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { providerLabel } from "../providerLabels";
 
 interface ProviderSelectProps {
   value: string;
@@ -51,7 +52,7 @@ export const ProviderSelect: React.FC<ProviderSelectProps> = ({
         >
           {builtins.map((b) => (
             <option key={b} value={b}>
-              {b.toUpperCase()}
+              {providerLabel(b)}
             </option>
           ))}
           <option value="custom">Custom Provider...</option>

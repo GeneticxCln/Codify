@@ -2143,6 +2143,22 @@ Ctrl+B. The choice is remembered across restarts (`codify.sidebar` in `localStor
   `preventDefault`). The header button still works with a pointer, so the panel is never out of reach.
 - **What is not in the header or the palette.** While the panel is hidden, Browser and Terminal are one
   click away (show the panel). Settings stays reachable through the palette (Ctrl+K).
+- **The panel gives way to a drawer, as a derived state.** At 125% the panel (`w-60`, 15rem), the Stats
+  drawer (`w-[28rem]`) and a centre column that can still hold the composer did not fit a 1280px window,
+  and the transcript was squeezed to about 400px. While a drawer is open and the row is narrower than
+  panel + drawer + 30rem (`sidebarYields`, `ui/src/drawers.ts`: 15 + 28 + 30 = 73rem for Stats, 65rem
+  for History), the panel is not drawn. The threshold is in **rem**, so it follows the UI scale; a pixel
+  media query would be right at one scale and wrong at the next. It is measured with a `ResizeObserver`
+  on the row (`useSidebarYield.ts`), and a row that cannot be measured never hides anything.
+  **It is never stored.** `codify.sidebar` is written only by the person's own press of the toggle, so
+  closing the drawer brings the panel back as it was, and a window that was widened meanwhile never
+  remembers a panel it was only asked to put aside. The toggle reports what is on screen (**Show left
+  panel** while a drawer has displaced it), and pressing it then closes the drawer, because the two do
+  not fit; an ordinary press is an ordinary hide. The drawers stay flex siblings, never overlays, for
+  the reason above, with caps (Stats 45%, History 40% of the row) so the centre column keeps at least
+  the rest even where the panel is hidden and the window is smaller than the rule assumed.
+  `ui/tests/drawers.test.ts` holds the rule; `drawerLayout.test.ts` mounts the App at 100, 125 and 175%
+  in a window whose width it controls.
 
 ## 9. Voice: the mic beside Send, and answers read aloud (built)
 

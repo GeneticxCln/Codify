@@ -155,6 +155,8 @@ import { buildPaletteItems, type PaletteItem } from "./commandPalette";
 import { resolveShortcut } from "./shortcuts";
 import { currentUiScale, DEFAULT_UI_SCALE, stepUiScale, writeUiScale } from "./uiScale";
 import { readSidebarOpen, writeSidebarOpen } from "./sidebarPref";
+import { closeDrawer, nextDrawer, type Drawer } from "./drawers";
+import { useSidebarYield } from "./useSidebarYield";
 import {
   BROWSER_PAGE_LOADED,
   BROWSER_PAGE_LOADING,
@@ -891,7 +893,26 @@ export const App: React.FC = () => {
   useEffect(() => {
     writeSidebarOpen(sidebarOpen);
   }, [sidebarOpen]);
-  const toggleSidebar = useCallback(() => setSidebarOpen((open) => !open), []);
+  // The right-hand drawer that is open, if any. One state, not a boolean each: they cannot both be open,
+  // and "which one" is what the layout rule below needs to know (`drawers.ts`).
+  const [drawer, setDrawer] = useState<Drawer | null>(null);
+  const statsOpen = drawer === "stats";
+  const historyOpen = drawer === "history";
+  // The left panel gives way while a drawer is open and the window cannot hold both. Derived, never
+  // stored: `codify.sidebar` is written only by the person's own press of the toggle, so closing the
+  // drawer brings the panel back as it was (`docs/09` §8.1).
+  const mainRef = useRef<HTMLElement>(null);
+  const sidebarYielded = useSidebarYield(mainRef, drawer);
+  const sidebarShown = sidebarOpen && !sidebarYielded;
+  // Pressing the toggle while the panel is out of the way because of a drawer means "show it", and the
+  // two do not fit, so the drawer is what closes. Otherwise it flips the person's own choice.
+  const toggleSidebar = useCallback(() => {
+    if (sidebarOpen && sidebarYielded) {
+      setDrawer(null);
+      return;
+    }
+    setSidebarOpen((open) => !open);
+  }, [sidebarOpen, sidebarYielded]);
   const activeConversationId = activeTabNow?.conversationId;
   const activeBrowserTab =
     activeTabNow?.kind === "browser" ? activeTabNow : undefined;
@@ -2142,13 +2163,10 @@ export const App: React.FC = () => {
   // read that was missing, and the restore path below is what makes them more
   // than rows in a database nobody sees after a restart.
   const [history, setHistory] = useState<Goal[]>([]);
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [restoring, setRestoring] = useState(false);
-  // Cross-goal statistics drawer. Mirrors the history drawer; the two are
-  // mutually exclusive — both overlay the transcript's right edge, and two
-  // overlapping overlays is a z-index fight, not a feature.
-  const [statsOpen, setStatsOpen] = useState(false);
+  // The cross-goal statistics drawer and this one are mutually exclusive, which is what `drawer` (above)
+  // is: both sit at the transcript's right edge, and two of them is a squeeze, not a feature.
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -2256,7 +2274,7 @@ export const App: React.FC = () => {
             openConversation(prev, thread, goal.title, goal.workspace_id),
           );
         }
-        setHistoryOpen(false);
+        setDrawer((open) => closeDrawer(open, "history"));
         const terminal = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
         if (!terminal.has(goal.status)) {
           subscribeToGoal(goalId, assistantMsg.id);
@@ -3015,12 +3033,12 @@ export const App: React.FC = () => {
               the button is currently holding. */}
           <IconButton
             tone="subtle"
-            label={sidebarOpen ? "Hide left panel" : "Show left panel"}
-            title={sidebarOpen ? "Hide the left panel (Ctrl+B)" : "Show the left panel (Ctrl+B)"}
-            aria-pressed={!sidebarOpen}
+            label={sidebarShown ? "Hide left panel" : "Show left panel"}
+            title={sidebarShown ? "Hide the left panel (Ctrl+B)" : "Show the left panel (Ctrl+B)"}
+            aria-pressed={!sidebarShown}
             onClick={toggleSidebar}
           >
-            {sidebarOpen ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeftOpen className="w-4 h-4" />}
+            {sidebarShown ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeftOpen className="w-4 h-4" />}
           </IconButton>
           <div className="flex items-center gap-2 font-bold text-sm tracking-tight text-codify-primary">
             {/* The mark, not a stand-in: `logo.gif` is generated into the brand
@@ -3102,10 +3120,7 @@ export const App: React.FC = () => {
           <Toggle
             armed={statsOpen}
             tone="accent"
-            onClick={() => {
-              setStatsOpen(!statsOpen);
-              if (!statsOpen) setHistoryOpen(false);
-            }}
+            onClick={() => setDrawer((open) => nextDrawer(open, "stats"))}
             title="Cross-goal statistics — success rate, token spend, daily trend"
           >
             <BarChart3 className="w-3.5 h-3.5" />
@@ -3115,10 +3130,7 @@ export const App: React.FC = () => {
           <Toggle
             armed={historyOpen}
             tone="accent"
-            onClick={() => {
-              setHistoryOpen(!historyOpen);
-              if (!historyOpen) setStatsOpen(false);
-            }}
+            onClick={() => setDrawer((open) => nextDrawer(open, "history"))}
             title="Goal history — reopen a past goal with its full transcript"
           >
             <History className="w-3.5 h-3.5" />
@@ -3145,11 +3157,11 @@ export const App: React.FC = () => {
           A flex sibling shrinks the column instead of covering it. The transcript
           reflows, the command bar stays whole, and the boundary is a visible border
           rather than an occlusion. */}
-      <main className="relative z-10 flex-1 flex overflow-hidden">
+      <main ref={mainRef} className="relative z-10 flex-1 flex overflow-hidden">
         {/* The threads. A flex sibling, not an overlay: the transcript reflows
             rather than being covered, which is the same reasoning as the drawers
             below. */}
-        {sidebarOpen && (
+        {sidebarShown && (
           <Sidebar
             conversations={conversations}
             selectedWorkspaceId={selectedWs?.id}
@@ -3390,7 +3402,7 @@ export const App: React.FC = () => {
               table measured 500px of content inside a 384px drawer, so it scrolled
               sideways and clipped its own last column. */}
         {statsOpen && (
-          <aside className="w-[28rem] max-w-[60%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
+          <aside className="w-[28rem] max-w-[45%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
             <div className="flex items-center justify-between px-4 py-3 border-b border-codify-border">
               <div className="flex items-center gap-2 text-sm font-semibold text-codify-primary">
                 <BarChart3 className="w-4 h-4 text-codify-info" />
@@ -3398,7 +3410,7 @@ export const App: React.FC = () => {
               </div>
               <IconButton
                 label="Close statistics"
-                onClick={() => setStatsOpen(false)}
+                onClick={() => setDrawer((open) => closeDrawer(open, "stats"))}
               >
                 <X className="w-4 h-4" />
               </IconButton>
@@ -3411,7 +3423,7 @@ export const App: React.FC = () => {
 
         {/* Goal history drawer. Empty only when this workspace never ran a goal. */}
         {historyOpen && (
-          <aside className="w-80 max-w-[50%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
+          <aside className="w-80 max-w-[40%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
             <div className="flex items-center justify-between px-4 py-3 border-b border-codify-border">
               <div className="flex items-center gap-2 text-sm font-semibold text-codify-primary">
                 <History className="w-4 h-4 text-codify-info" />
@@ -3431,7 +3443,7 @@ export const App: React.FC = () => {
                 </IconButton>
                 <IconButton
                   label="Close goal history"
-                  onClick={() => setHistoryOpen(false)}
+                  onClick={() => setDrawer((open) => closeDrawer(open, "history"))}
                 >
                   <X className="w-4 h-4" />
                 </IconButton>
