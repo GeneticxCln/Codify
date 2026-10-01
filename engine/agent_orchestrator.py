@@ -344,9 +344,10 @@ class AgentOrchestrator:
 
         Per-role registry config (Settings → Agents) is the single source of
         truth: model, temperature, max_tokens, and system-prompt override all
-        come from the role's AgentConfig. The command-bar model selection no
-        longer overrides roles here — GoalService.create seeds only roles the
-        user has never configured, so defaults and explicit choices compose.
+        come from the role's AgentConfig. The command-bar model selection does
+        not override roles here, and nothing writes it onto them either: it is
+        recorded on the goal (`goals.provider/model`) and a role runs on its own
+        configuration (docs/00 §6.2).
 
         The fallback exists so a goal keeps running when the primary cannot be
         used — no key stored, the endpoint down, the model retired, or a reply the

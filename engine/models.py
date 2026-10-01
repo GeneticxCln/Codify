@@ -589,8 +589,9 @@ class TurnCreate(BaseModel):
     # after the strip below is what makes "  " a 422 rather than a goal whose
     # planner is handed an empty request.
     prompt: str = Field(..., min_length=1, max_length=20000)
-    # The command bar's model choice, seeded onto the roles the user has never
-    # configured, exactly as `POST /goals` does. It does not override a role.
+    # The command bar's model choice, recorded on the goal as what the user asked for, exactly as
+    # `POST /goals` does. It is written onto no role (docs/00 §6.2): a role runs on its own
+    # configuration, which only the settings routes change.
     provider: str | None = None
     model: str | None = None
     # Record this turn's model calls (docs/04 §8), same opt-in as a goal.
