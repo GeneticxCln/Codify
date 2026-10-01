@@ -161,7 +161,7 @@ Settings → Audio (`AudioPane.tsx`) is where voice is set up. It has three sect
 * **Microphone:** the input, read from `GET /audio/inputs`.
 * **Dictation:** provider, model and an optional language.
 * **Read aloud:** provider, model, a voice name, and the "read each answer aloud as it arrives"
-  switch, which is off by default.
+  switch, which is off by default. Which answers that switch reads is docs/09 §9.1.
 
 Like the Conductor card, it is **not** agent config. Every field is an `engine_settings` key
 (`stt_*`, `tts_*`, `audio_input`, `tts_auto_read`), written through `PUT /settings/engine` and

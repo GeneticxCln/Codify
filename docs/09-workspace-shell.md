@@ -2110,11 +2110,11 @@ tests pin the mapping, not the platform.
 `TabBar`'s module docs promise exactly these tab shortcuts; this section is
 the half that keeps the promise.
 
-## 9. Voice: the mic beside Send (built)
+## 9. Voice: the mic beside Send, and answers read aloud (built)
 
 The composer has a mic button immediately left of Send (`ui/src/components/MicButton.tsx`). It turns
-speech into text in the prompt. Setup lives in Settings → Audio (docs/02 §3.2), and the engine side
-is in docs/04 §3.0.2.
+speech into text in the prompt. Each answer has a speaker that reads it aloud (§9.1). Setup lives
+in Settings → Audio (docs/02 §3.2), and the engine side is in docs/04 §3.0.2.
 
 - **The engine records, not the webview.** The webview is WebKitGTK through wry, and wry neither
   enables media capture nor answers a permission request. Granting it the microphone would mean
@@ -2144,6 +2144,40 @@ is in docs/04 §3.0.2.
 
 `ui/tests/micButton.test.ts` mounts the whole App for each of these, except Esc and unmount. Those
 two mount the button alone, in front of a stand-in prompt that records whether the Esc reached it.
+
+### 9.1 Answers read aloud
+
+A turn's finished answer has a **Read aloud** button under it (`ui/src/components/SpeakButton.tsx`).
+The engine asks the read-aloud provider for a WAV (`POST /audio/speak`), and the webview plays it
+through an `<audio>` element fed a `blob:` URL. The CSP already allows `media-src blob:`, and
+playback needs no permission.
+
+- **The words, not the markup.** `speakableText` (`ui/src/speech.ts`) drops emphasis, heading and
+  list marks. It reads a link as its text and a code block as "(code omitted)": a voice spelling
+  out forty lines of code is worse than silence. `clipForSpeech` cuts at a sentence end inside the
+  engine's 4,096-character limit.
+- **One voice at a time.** There is one player. Starting an answer stops whichever one is playing,
+  and a stop pressed while the audio is still being fetched wins over audio that arrives late.
+- **Only the finished answer.** While a turn is still arriving, its streamed snapshot stands in for
+  the answer (§10.15). That snapshot has no speaker, because a voice reading a draft that is then
+  replaced has said the wrong thing.
+- **Auto-read is for answers you watched arrive.** With "read each answer aloud as it arrives" on in
+  Settings → Audio, an answer reads itself only if this window saw its turn unfinished (in flight,
+  or still being dispatched). It is read once, when the reply is in and the engine says the turn is
+  over (`answersToRead`). Opening a thread, restoring one from History or reloading never starts
+  talking. The switch is asked of the engine when an answer is due rather than held in the
+  transcript, so turning it on takes effect for the next answer. When several answers land
+  together only the newest is read. A turn that planned is a run, not an answer, and is never read.
+- **A failure is a sentence.** If read-aloud cannot run, for example because it has no provider or
+  the provider refused, the engine's reason is shown beside that answer's button. That includes an
+  auto-read nobody pressed.
+
+Not yet: pipeline goals' summaries have no speaker; a turn is the conversational case this was
+built for.
+
+`ui/tests/speakButton.test.ts` holds the rule and mounts the transcript. It then re-renders the
+transcript the way the app feeds it, with a turn in flight and then the same turn finished, because
+that difference is the whole of what auto-read decides.
 
 ## 10. What a turn is
 

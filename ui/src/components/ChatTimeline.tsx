@@ -15,7 +15,7 @@ import { Wordmark } from "./ui/Wordmark";
 import { FailureDiagnosisPanel } from "./FailureDiagnosisPanel";
 import { DiffViewer } from "./DiffViewer";
 import type { LayaDecision } from "../types";
-import { getGoalUsage, GoalUsage, getGoalAudit } from "../api";
+import { getAudioStatus, getGoalUsage, GoalUsage, getGoalAudit } from "../api";
 import { AuditReport } from "./AuditReport";
 import { TracePanel } from "./TracePanel";
 import { canArmTrace } from "../traceSummary";
@@ -56,6 +56,8 @@ import {
   Radio,
 } from "lucide-react";
 import { readRejection } from "../rejection.ts";
+import { answersToRead, type AutoReadMemory } from "../speech.ts";
+import { SpeakButton } from "./SpeakButton";
 
 /**
  * Laya's pre-flight verdict, rendered as one honest line of chat: which engine
@@ -334,7 +336,9 @@ const TurnExchange: React.FC<{
   /** This message's recording panel is open. */
   traceOpen: boolean;
   onToggleTrace: () => void;
-}> = ({ msg, traceOpen, onToggleTrace }) => {
+  /** Auto-read chose this answer: read it as soon as it is drawn. */
+  autoRead: boolean;
+}> = ({ msg, traceOpen, onToggleTrace, autoRead }) => {
   const reply = turnReply(msg.events);
   // Only while there is nothing to show yet: the streamed snapshot *is* the
   // answer being produced, and once the engine publishes the reply it is the
@@ -375,6 +379,9 @@ const TurnExchange: React.FC<{
           )}
         </div>
       )}
+      {/* Only the finished answer: the streamed snapshot is still changing, and a voice reading a
+          draft that is then replaced is a voice that said the wrong thing. */}
+      {reply !== null && <SpeakButton id={msg.id} text={reply} autoPlay={autoRead} />}
       {/* A turn can be recorded like any other goal, so the recording stays
           reachable from the turn's own card. Nothing to arm: a turn spends its
           life between PLANNING and COMPLETED, and the composer is where its
@@ -838,6 +845,34 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Read answers aloud as they arrive, when Settings → Audio says to. `answersToRead` decides which
+  // (only turns this window saw unfinished, each once); whether to is asked of the engine when one
+  // is due rather than held here, so the switch takes effect for the next answer without a reload.
+  // When several land together only the newest is read: one voice at a time, and the latest is the
+  // one the person is waiting for.
+  const autoReadMemory = useRef<AutoReadMemory>({ watched: new Set(), read: new Set() });
+  const [autoReadId, setAutoReadId] = useState<string | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    const due = answersToRead(messages, autoReadMemory.current);
+    if (due.length === 0) return;
+    const newest = due[due.length - 1].id;
+    getAudioStatus()
+      .then((status) => {
+        if (mounted.current && status.auto_read === true) setAutoReadId(newest);
+      })
+      .catch(() => {
+        // An engine that cannot say is an engine that did not ask for it: the answer is on screen,
+        // with its own button.
+      });
+  }, [messages]);
+
   if (messages.length === 0) {
     return (
       <div className="relative flex-1 flex flex-col items-center justify-center p-6 text-center max-w-2xl mx-auto">
@@ -1017,6 +1052,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                   {conversational ? (
                     <TurnExchange
                       msg={msg}
+                      autoRead={autoReadId === msg.id}
                       traceOpen={traceFor === msg.goal?.id}
                       onToggleTrace={() =>
                         setTraceFor(

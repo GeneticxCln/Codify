@@ -11,9 +11,11 @@ import assert from "node:assert/strict";
 import { registerTsx } from "./tsxLoader.ts";
 registerTsx();
 
-import { clipForSpeech, formatElapsed, insertDictation, speakableText } from "../src/speech.ts";
 import type { Dom } from "./dom.ts";
 
+// Dynamic, after the loader: `speech.ts` reaches `turnTranscript.ts`, whose extensionless imports
+// only resolve once `registerTsx` has run, and a static import is hoisted above it.
+const { clipForSpeech, formatElapsed, insertDictation, speakableText } = await import("../src/speech.ts");
 const { withDom } = await import("./dom.ts");
 
 test("an answer is read as its words, not its markup", () => {

@@ -11,7 +11,12 @@
  *   and never as a sent prompt: the person still presses Send.
  * - **One voice at a time.** Two answers talking over each other is never what anyone meant, so
  *   there is exactly one player and starting a second stops the first.
+ * - **Which answers read themselves.** With auto-read on, only an answer this window watched
+ *   arrive, and only once: opening a thread or restoring one from History never starts talking.
  */
+import { isGoalActive } from "./goalActions.ts";
+import { isConversationalTurn, turnReply } from "./turnTranscript.ts";
+import type { ChatMessage } from "./types";
 
 /** The longest text one read-aloud request takes (the engine's `MAX_SPEAK_CHARS`). */
 export const MAX_SPEAK_CHARS = 4096;
@@ -146,4 +151,42 @@ export async function playSpeech(
     if (current?.audio === audio) stopPlayback();
     throw err;
   }
+}
+
+// ── answers that read themselves ────────────────────────────────────────────
+
+/** What auto-read remembers in this window: turns it saw unfinished, and answers it already read. */
+export interface AutoReadMemory {
+  watched: Set<string>;
+  read: Set<string>;
+}
+
+/**
+ * The answers to read aloud now, oldest first, each recorded as read.
+ *
+ * A turn qualifies only if this window saw it unfinished (in flight, or still being dispatched), so
+ * an answer that was already there when the thread was opened, restored from History or reloaded
+ * is never read by itself. It is read when its reply is in and the engine says the turn is over,
+ * and once, however many times the transcript renders after that. A turn that planned is a run,
+ * not an answer, and is left alone.
+ */
+export function answersToRead(
+  messages: readonly ChatMessage[],
+  memory: AutoReadMemory,
+): Array<{ id: string; text: string }> {
+  const due: Array<{ id: string; text: string }> = [];
+  for (const msg of messages) {
+    const goal = msg.goal;
+    if (msg.role !== "assistant" || !goal || msg.auditDoc || !isConversationalTurn(goal)) continue;
+    if (isGoalActive(goal.status) || msg.isStreaming) {
+      memory.watched.add(goal.id);
+      continue;
+    }
+    if (!memory.watched.has(goal.id) || memory.read.has(goal.id)) continue;
+    const reply = turnReply(msg.events);
+    if (reply === null) continue;
+    memory.read.add(goal.id);
+    due.push({ id: msg.id, text: reply });
+  }
+  return due;
 }
