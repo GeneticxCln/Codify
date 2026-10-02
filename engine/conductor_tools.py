@@ -102,6 +102,10 @@ class _Conducted:
     # The question the conductor put to the person, as data (`engine/ask.py`), when it ended the run with
     # `ask_user`. The words are `answer`; this is what lets the window offer the options as choices.
     question: dict[str, Any] | None = None
+    # The run changed the text in the person's open editor (`edit_editor`, unsaved). Not a plan and not a file, so a
+    # turn that did only this is neither of the things `run_chat` otherwise tests for, and is still a turn that did
+    # what was asked: it must not be told "no file was changed".
+    buffer_edited: bool = False
 
     @property
     def finished(self) -> bool:
@@ -534,7 +538,13 @@ class ConductorTools:
             return f"That edit was not made. {exc}"
         except SurfaceRefused as exc:
             return f"That edit was not made. {exc}"
-        return format_edit(cast(EditorEditResult, result))
+        edited = cast(EditorEditResult, result)
+        if edited.replaced > 0:
+            # Counted only when text really changed: a refusal, or an edit that matched nothing, is not a change the
+            # person has to look at, and the turn must not be excused for it (`run_chat`'s "no file was changed").
+            edits = self.service._editor_edits
+            edits[self.goal_id] = edits.get(self.goal_id, 0) + 1
+        return format_edit(edited)
 
     async def recall(self, args: dict[str, Any]) -> str:
         """What this workspace has already learned the hard way.

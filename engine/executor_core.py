@@ -172,6 +172,10 @@ class _ExecutorCore:
         # One driver per goal: start, retry, and apply each spawn a driver
         # loop, and two loops on one goal re-run the same steps concurrently.
         self._drivers: set[str] = set()
+        # How many edits a goal's conductor run has landed in the person's open editor (`edit_editor`), by goal. Read
+        # once, when the run ends, to tell a turn that changed the editor from one that changed nothing: the editor is
+        # not a file and not a plan, so neither of the things a turn is otherwise judged by can say.
+        self._editor_edits: dict[str, int] = {}
 
     def _event(self, goal_id: str, step_id: str | None, type_: EventType, payload: dict[str, Any]) -> Event:
         return Event(

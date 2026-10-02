@@ -3199,6 +3199,9 @@ The three tools are always on the conductor's menu and are not stage moves: they
 the writers patched to raise. `edit_editor` replaces text in the **open buffer** like the fixer's `edit` op (absent, or occurring other than `count` times, is a refusal that says so),
 as **one undoable step marked as the assistant's**, and never saves; it opens the file in the background if it is not open and closes it again if the edit did not apply.
 Invariant 9 is therefore unchanged for an agent, and widened by exactly one door, which is a person's and which an agent cannot reach (`docs/00` §6.9).
+A turn whose only change was such an edit is **not** told "no file was changed" (`run_chat` withholds that warning when `edit_editor` landed text, counted per goal
+in `ExecutorService._editor_edits` and read when the run ends): the conductor did what was asked, in the one place it may, and "ask again" would send the person back to a
+request that was carried out. A refused edit, or no edit, still gets the warning, because that is the case it exists for.
 
 ### 13.5 Where an opened file goes, and what it never does
 
