@@ -502,6 +502,61 @@ neither focus nor answer. And the eighth role is out of reach entirely — the
 gate runs at the top of a turn, before the loop is constructed, so a conductor
 can summon seven of the eight roles and never the gate.
 
+### 5.1b What a move says back, and what a step remembers
+
+A move's result is the only account of it the conductor has, so it has to be
+true and it has to carry what the next decision needs. The state between moves
+is per step and per run (`_StepState` in `engine/conductor_tools.py`), and each
+piece is invalidated the moment it stops being true:
+
+- **`write` accumulates.** A step has one entry per *file*, latest write wins, so
+  `verify`, `review` and the commit all see the whole change. An unchanged
+  proposal never erases the diff of the write that did change the file. It then
+  **clears the step's verdict and its approval**: both describe files that no
+  longer exist. A dry run refuses a second `write` on a step, because a dry run
+  stores one proposal per step and a second would replace the first. A step
+  that is `COMPLETED` refuses a `write` (its commit already recorded the files).
+- **`write` says what it did.** Its result carries a bounded diff per changed
+  file and `needs_another_pass` when the fixer asked for one. The recipe grants
+  that pass itself; here the conductor decides, so it is told rather than the
+  flag being dropped.
+- **`verify` and `review` are ordered by state, not by hope.** `review` needs a
+  verdict reached *in this run, for the current files*, and that verdict must be
+  `pass` or `skip`: a failed `verify` is not reviewable, and the last
+  `test_result` in the event log no longer stands in for a missing one (it was
+  the verdict of whatever was written before the latest `write`).
+- **`review` returns the critic's reasons**, every one, and says the goal is now
+  paused and that only the user resumes it, with Start. A critic's request for
+  changes pauses the goal (`docs/00` §4 flow: "goal PAUSED; STOP. No auto-fix"), and the conductor used to
+  be told only "the critic asked for changes", then refused its next `write` as
+  "not approved".
+- **`summarize` reports what the scribe did** (`committed`, `nothing_to_commit`,
+  `not_a_repo`, dry run) and a cancelled scribe leaves the step incomplete. It
+  used to say "recorded and committed" in every case.
+- **`plan` can fail without failing the goal.** `_plan_steps(fail_goal=False)`
+  re-raises instead of marking the goal FAILED; the move says "Planning failed"
+  and the conductor may plan again. The recipe's planner still fails the goal,
+  because nothing after it can run without a plan. A plan's result carries each
+  step's description and suggested paths.
+- **`_write_allowed` says why.** `PAUSED` is not "unapproved" (the plan was
+  approved and something stopped the run), and a `FAILED`, `CANCELLED` or
+  `COMPLETED` goal says so. Every message still begins "Nothing was written".
+- **A turn never overwrites a terminal status.** `_complete_turn` leaves a goal
+  that failed during the run `FAILED`; the unconditional `COMPLETED` raised
+  `illegal_status` out of the turn after its answer was shown.
+
+- **A failure says why.** `verify` and the fixer's retry carry `output_tail`, the
+  end of what the failed command printed (`library.command_tail`: stderr up to
+  half the budget, stdout the rest, the *end* of each, since a test runner puts
+  its reason last). `format_command`, which the conductor's `run_command` and the
+  librarian use, shows stdout and stderr when both exist; it used to show stdout
+  alone, so a banner hid the traceback. The fixer's view of a file longer than
+  4000 characters now ends with how much was not shown.
+
+Proven by `tests/test_conductor_moves_state.py`, which drives the real moves, the
+real fixer and a real git repository and asserts on files, commits and step rows,
+and `tests/test_failure_visibility.py` for the output.
+
 **`delegate` is gone, and its absence is the point.** It ran the whole recipe —
 librarian, design, planner — whether or not the request needed them, which made
 the sequence a property of the code rather than a decision of the decider. The
@@ -548,12 +603,31 @@ schema.
   the loop's tool calls are *dropped* and the reply's text is returned with a
   sentence saying it was cut off. An earlier version nudged the model to stop
   and then honoured the next request anyway; `TestTheCap` found it.
+  `Conductor.exhausted` is set only when that forced final call is made, that
+  is, when the model still wanted more after its last allowed call. It used to
+  be `calls_made >= max_turns`, which is also true of a model that *answered* on
+  that last call, so a finished run read as cut off and the caller overrode it
+  (`tests/test_conductor_budget.py`).
+- **An approved plan is driven one step per run.** After Start,
+  `run_conductor_resume` gives the conductor one open step at a time, each run
+  with its own `conductor_max_turns` and `conductor_max_moves` (default 14 and
+  12), and judges by the step's *stored* status. A step the run did not complete
+  pauses the goal with a `reason_code` from `models.PAUSE_CODES`; the engine adds
+  no second pass behind the conductor (`docs/09` §10.14,
+  `tests/test_conductor_drives.py`). The recipe still drives where there is no
+  tool-capable model, for `parallel` goals and with `conductor_drives_execution`
+  off.
 - **Spend is bounded twice.** `conductor_max_moves` bounds *stage* moves
   separately from model calls, because they are not the same currency: a model
   call costs seconds, a `write` or a `plan` is a whole sub-agent run that can
   take minutes and touch files. When the move budget is spent the stage moves
   are taken off the menu rather than refused at call time — a refusal a model
-  can retry costs a turn every time.
+  can retry costs a turn every time. The menu is only rebuilt between model
+  calls, so the bound is also enforced where the move *runs*: a stage move is
+  reserved before it is awaited (a reply of four moves with one left runs one
+  and answers the other three that the budget is spent), and a call to a tool
+  that is not on the current menu is refused rather than dispatched from the
+  table, so a model cannot run a move it was never offered by naming it.
 - **The menu narrows with the state.** `write`, `verify`, `review` and
   `summarize` are only offered once `plan` has produced a step for them to act
   on. Eight tools choose better than twelve, and this costs no prompt work.

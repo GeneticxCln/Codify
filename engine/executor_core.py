@@ -20,7 +20,7 @@ from engine.agent_orchestrator import AgentOrchestrator
 from engine.executor_support import AgentOutputInvalid, CriticRejection, TestsFailed, WriteWithdrawn
 from engine.git import GitService
 from engine.laya import LayaService
-from engine.models import Event, EventType, PlanStep, ROLES
+from engine.models import PAUSE_REASONS, Event, EventType, PlanStep, ROLES
 from engine.recall import distill_observations
 from engine.role_repair import config_problems
 from engine.sandbox import SandboxService
@@ -396,6 +396,7 @@ class _ExecutorCore:
         exit_code: int | None = None,
         refusals: list[str] | None = None,
         brand_drifts: list[str] | None = None,
+        output_tail: str = "",
     ) -> None:
         if verdict not in ("pass", "fail", "skip"):
             raise AgentOutputInvalid(f"verifier verdict invalid: {verdict!r}", role="verifier")
@@ -414,6 +415,11 @@ class _ExecutorCore:
                 # contract. Advisory: they are on the record the critic reads
                 # and they never change the verdict, which stays the tests'.
                 "brand_drifts": brand_drifts or [],
+                # The end of what the command printed (`library.command_tail`), so the fixer's retry and the
+                # conductor's `verify` can say *why* it failed and not only that it did. Third-party text,
+                # produced by the repository's own code: never recallable (`RECALLABLE["test_result"]` is
+                # the verdict alone) and only ever shown to the role that has to fix the failure.
+                "output_tail": output_tail,
             },
         ))
         if verdict == "fail":
@@ -568,11 +574,19 @@ class _ExecutorCore:
             )
         db.commit()
 
-    def _reset_step(self, goal_id: str, step: PlanStep) -> None:
-        self.goals._db.execute(
-            "UPDATE plan_steps SET status='PENDING', review_notes=NULL, commit_message=NULL, last_agent_role=NULL WHERE id = ?",
-            (step.id,),
-        )
+    def _reset_step(self, goal_id: str, step: PlanStep, *, keep_notes: bool = False) -> None:
+        if keep_notes:
+            # A retry that a conductor will drive: the critic's notes are what its next `write` acts on.
+            self.goals._db.execute(
+                "UPDATE plan_steps SET status='PENDING', commit_message=NULL, last_agent_role=NULL WHERE id = ?",
+                (step.id,),
+            )
+        else:
+            self.goals._db.execute(
+                "UPDATE plan_steps SET status='PENDING', review_notes=NULL, commit_message=NULL, "
+                "last_agent_role=NULL WHERE id = ?",
+                (step.id,),
+            )
         self.goals._db.commit()
 
     def _set_step(self, goal_id: str, step: PlanStep, status: str, **fields: Any) -> None:
@@ -601,7 +615,10 @@ class _ExecutorCore:
             # A goal that no longer exists is not one anything should keep running for.
             return True
 
-    def _set_status(self, goal_id: str, status: str, step_id: str | None) -> None:
+    def _set_status(
+        self, goal_id: str, status: str, step_id: str | None,
+        *, reason_code: str | None = None, reason: str | None = None,
+    ) -> None:
         # update_status publishes the goal_status event itself.
         current = self.goals.get(goal_id)
         if current.status == "CANCELLED" and status != "CANCELLED":
@@ -610,7 +627,9 @@ class _ExecutorCore:
             # race from surfacing that refusal as a crash in a background task.
             return
         try:
-            self.goals.update_status(goal_id, current.version, status, step_id)
+            self.goals.update_status(
+                goal_id, current.version, status, step_id, reason_code=reason_code, reason=reason,
+            )
         except ApiError as exc:
             if exc.code in ("illegal_status", "version_conflict") and self._is_cancelled(goal_id):
                 # The cancel landed between the read above and the write.
@@ -629,6 +648,24 @@ class _ExecutorCore:
                     goal_id, None, "warn",
                     f"observation consolidation failed: {exc}",
                 )
+
+    def _pause(self, goal_id: str, step_id: str | None, code: str, detail: str = "") -> None:
+        """Pause a goal for an engine reason, and say why in the engine's own words.
+
+        `code` is one of `models.PAUSE_CODES`; the sentence is `PAUSE_REASONS[code]` and nothing a model wrote.
+        A pause can be caused by text a model produced about a repository (a critic's reasons, a provider's
+        error message), which is third-party, and the status event and the log line this writes are read by
+        other tools (recall surfaces warn logs). `detail` is for words the engine itself composed, such as a
+        provider's error *code*, never its message.
+
+        The write gate is untouched: `PAUSED` refuses `write` (`_write_allowed`), and only the person's Start
+        moves a paused goal back to RUNNING (invariant 9).
+        """
+        reason = PAUSE_REASONS[code] + (f" ({detail})" if detail else "")
+        self._set_status(goal_id, "PAUSED", step_id, reason_code=code, reason=reason)
+        # Not logged when the pause did not land: a Cancel that won the race leaves the goal CANCELLED.
+        if self.goals.get(goal_id).status == "PAUSED":
+            self._log(goal_id, step_id, "warn", f"paused: {reason}")
 
     def _consolidate(self, goal_id: str) -> int:
         """Distill this run's outcomes into the durable observation store.

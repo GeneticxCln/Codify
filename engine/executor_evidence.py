@@ -435,7 +435,12 @@ class _Evidence(_ExecutorCore):
                 kind = "a directory" if target.is_dir() else "not readable as text"
                 skipped.append(f"{p} ({kind})")
                 continue
-            lines.append(f"- {p}: {text[:limit]}")
+            shown = f"- {p}: {text[:limit]}"
+            if len(text) > limit:
+                # Said, not implied: a model shown the head of a long file with nothing marking the cut edits
+                # the top of it believing it has read all of it.
+                shown += f"\n…[{len(text) - limit} more characters of {p} not shown]"
+            lines.append(shown)
         ctx = "\n".join(lines) if lines else "(no readable suggested path)"
         note = ""
         if skipped:

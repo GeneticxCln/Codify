@@ -2299,10 +2299,14 @@ why.
 
 The two are not in tension. The pipeline is a superset of answering, so with no
 conductor, guessing wrong costs a slower answer while the reverse guess costs a
-code change the user believed was acted on. And when a conductor is configured
-but *fails* — its model errors, says nothing, or spends its whole call budget without
-producing an answer or a plan — that same pipeline runs as the floor, and the
-transcript says so.
+code change the user believed was acted on. When a conductor is configured but
+*fails* — its model errors, says nothing, or spends its whole call budget without
+producing an answer or a plan — the pipeline does **not** run as a floor: a
+question, a greeting or an unclassified request gets a single plain reply, and a
+request the gate read as a change ends honestly (§10.14). A second driver
+quietly taking over a conductor that failed was the same fault as the sweep
+behind an approved plan: it spent twice, and it planned something the conductor
+never chose.
 
 A blocked turn is a blocked goal: same gate, same `laya_blocked` code, same
 event. The gate guards the engine, not a pipeline.
@@ -2382,8 +2386,12 @@ model, and "the model asked for it" is not a reason to run `git commit`.
 
 ### 10.7 The loop terminates, and says so
 
-`conductor_max_turns` (default 8, settings-clamped to 1..40) bounds *model
-calls*, because that is what costs money. The bound is a hard stop, not advice:
+`conductor_max_turns` (default 14, settings-clamped to 1..40) bounds *model
+calls*, because that is what costs money. It is a budget per *run*: a turn is a
+run, and so is each step of an approved plan (§10.14), so a plan of five steps
+has five budgets and step one cannot starve step five. Fourteen is one step's
+worth (four moves, a failed `verify` sent back through `write`, and the reads
+between); a turn needs far fewer. The bound is a hard stop, not advice:
 when it is reached the loop makes one final call, **drops** whatever tools that
 reply asks for, and returns its text with a sentence saying it was cut off. An
 earlier version appended a "you are out of calls" nudge and then honoured the
@@ -2554,34 +2562,77 @@ fixer writes, and the move refuses while the goal is unapproved. The seam is
 `RUNNING`, reachable only through `POST /goals/{id}/start` — a person saying yes.
 So a turn that produces a plan ends with the plan in front of the user and
 **nothing written**; the approval starts it, and `run_conductor_resume` hands the
-approved plan back to the same conductor to execute. That run is re-derived from
-rows — the goal, its steps, the conversation — rather than a persisted
-transcript, which is the same choice §10.5 already makes for turn history.
+approved plan back to the conductor to execute.
 
-**The recipe is the floor.** If the conductor's model errors, returns empty
-content, or spends its whole call budget without producing an answer or a plan,
-`run_chat` runs the
-sequence it would have run before the conductor existed and says that it did. If
-the conductor drives an approved plan but leaves steps open, the engine finishes
-them. A model that is bad at this therefore costs a plan some time and nothing
-else, and `conductor_drives_execution = 0` turns the arrangement off without a
-rebuild.
+**After Start the conductor owns every step it is given.** It is one conductor
+*run* per open step, each with its own budget and a prompt that names the plan in
+outline and gives one step in full (the critic's earlier notes ride along as
+quoted data when there are any). One run over the whole plan piled every move's
+result into one context, which a local model's window cannot hold for a plan of
+any size. Each run is re-derived from rows — the goal, its steps, the step's diff
+events — rather than a persisted transcript, which is the same choice §10.5
+already makes for turn history: a resumed step recovers the *files* an earlier
+run wrote (so `verify` works without a second `write`) but never a verdict or an
+approval, which describe files as they were when they were given.
+
+The step's stored status is the judge, never the conductor's last sentence. A
+step that is `COMPLETED` after the run was completed, however the run ended. One
+that is not leaves the goal `PAUSED` with a reason from `models.PAUSE_CODES`
+(`conductor_budget`: it used its calls; `conductor_provider`: its model could not
+be reached; `conductor_stopped`: it stopped without finishing; and the critic's
+`critic_rejected`), and **nothing else touches the step**. There is no engine
+sweep behind the conductor: that sweep re-ran any step left open through the
+fixed recipe from scratch, so a conductor that wrote a step and ran out of calls
+before `summarize` had the fixer run on it a second time, and "the conductor
+drives execution" was a switch that could double-write. Only the person's Start
+resumes a paused goal, at the step that was left open; Retry resumes with that
+step in focus, and keeps the critic's notes for the conductor that will act on
+them (the recipe's fixer never reads them, so a recipe retry still clears them).
+A critic that asks for changes pauses the goal and the conductor is told so, with
+every reason, and told to stop; the next `write` is allowed again only after
+Start (`tests/test_conductor_drives.py`).
+
+**Where the recipe still drives an approved plan.** An install with no
+tool-capable model, a goal with `parallel` set (the engine's batcher proves which
+steps touch disjoint paths and a conductor has no such proof), and
+`conductor_drives_execution = 0`, which turns the conductor off without a rebuild.
+Benchmarks and `scripts/replay_trace.py` call the recipe directly and measure it.
+
+**A turn the conductor could not finish ends honestly; there is no second
+pipeline.** If the conductor's model errors, returns empty content, or spends its
+whole call budget without producing an answer or a plan, `run_chat` used to run
+the sequence it would have run before the conductor existed. On an install that
+has a conductor it no longer does. What the turn ends in depends on what was
+asked: a question, a greeting or a request nothing classified gets **one plain
+streamed reply** (answering is safe, and a plain reply cannot change a file), with
+a warning that the conductor did not finish; a request the gate read as a change
+gets **no pipeline** — if the conductor ran out of calls but had words, they are
+the turn's reply, with a warning that nothing was changed and that the budget is
+a setting; if its model failed, or said nothing, the turn **fails** with
+`conductor_failed` and a sentence naming the provider's *code* (never its
+message, which is third-party text) that says nothing was changed and what to do
+about it. A plan made before the conductor stopped still stands. Where there is
+no conductor at all (no tool-capable model), nothing changed: the recipe is the
+driver there, as it always was (`tests/test_conductor_turn_end.py`).
 
 One distinction the design rests on, and the reason declining and failing are
 modelled separately: **a conductor that declines is obeyed; a conductor that
 fails is caught.** Judging that no change is needed is a decision, and running
 the recipe over the top of it would make the brain a suggestion. Producing
-neither an answer nor a plan is not a decision, and falling back beats failing
-the turn. `TestDecliningIsObeyedAndFailingIsCaught` holds both.
+neither an answer nor a plan is not a decision, and it is *caught*: the turn says
+so and nothing is done in the conductor's name that it did not choose.
+`TestDecliningIsObeyedAndFailingIsCaught` holds the first and
+`tests/test_conductor_turn_end.py` the second.
 
 *Empty is silence, not an answer.* A reply of no text and no tool call used to
 count as finished — the turn completed with the literal words "(no answer)" and
 the floor never ran, which a small model that spends its budget thinking, or a
 server that answers `{}`, produces on demand. An empty answer with no plan now
-falls back exactly as an error does (a plain streamed reply for a question, the
-full pipeline for a change); an empty final word *after* a plan stands, because
-the plan is the turn's result. "(no answer)" is still what a person sees if the
-fallback is silent too, since there is nothing left to try
+is handled exactly as an error is (a plain streamed reply for a question; for a
+change, a failed turn that says the model said nothing and that nothing was
+changed); an empty final word *after* a plan stands, because the plan is the
+turn's result. "(no answer)" is still what a person sees if the plain reply is
+silent too, since there is nothing left to try
 (`tests/test_empty_conductor_reply.py`).
 
 ### 10.14a What the live runs actually showed
@@ -2636,8 +2687,9 @@ The five runs below were against `qwen2.5-coder:7b` on a local Ollama, through
 
 The honest conclusion from 3, 5 and 6: **the architecture is sound and a 7B local
 model is not good enough to drive it reliably.** That is the risk this section
-named before it was built, it is why the recipe is the floor, and it is why
-`conductor_drives_execution` exists. A model that can call three tools in a row
+named before it was built, it is why a goal the conductor cannot finish pauses
+for a person rather than failing, and it is why `conductor_drives_execution`
+exists. A model that can call three tools in a row
 without narrating them is a different machine, not a different design.
 
 ### 10.15 A benign turn is a conversation
@@ -2762,23 +2814,46 @@ the mounted renderer (no live element or attribute, whatever the answer says; li
 `deliverableText.test.ts` is the Rendered/Source toggle, and `answerLinks.test.ts` mounts the whole App
 and clicks a link in a real answer through to `codify_browser_open`.
 
+### 10.18a A paused goal says why
+
+`PAUSED` has several causes and the badge alone names none of them: the person pressed Pause, the critic
+asked for changes, or the conductor could not finish a step (§10.14). An engine pause carries a `reason_code`
+from a closed set and a `reason` sentence the engine wrote on its `goal_status` event (`docs/04` §1.4). The
+goal's card draws them in a banner **above the buttons that resume it** (`PauseBanner`, rules in
+`ui/src/pauseReason.ts`): the cause as a heading, the engine's sentence under it (which ends in what to do),
+and, for the critic's pause, the critic's own reasons quoted from the step's notes as plain text.
+
+* **The newest `goal_status` event is the whole state.** A Start publishes `RUNNING` with no reason, so a
+  resumed goal stops showing one with no bookkeeping, and a goal record that has not caught up with the event
+  cannot keep a stale banner alive.
+* **The person's own Pause shows nothing.** It carries no code; they know why.
+* **A code this build does not know is not drawn.** A half-drawn pause is worse than the plain `PAUSED` badge.
+* **Wrapping, not clipping.** The sentence ends in the next action; a clipped one would end before it.
+* The conductor settings card says the same from the other side: a step that runs out of calls pauses the
+  goal, where a turn answers with what it has.
+
+Proven by `ui/tests/pauseReason.test.ts` (the rules) and `ui/tests/pauseApp.test.ts` (the card and the
+notification through the whole App).
+
 ### 10.18 The notification inbox: what happened while you were looking elsewhere
 
 A **Notifications** button in the header, between Stats and History, opens a drawer of what this window
 saw happen. It is in-app only: no desktop notification and no sound. It is kept on the client and nowhere
-else, because each of its four sources is a fact only this window knows. A goal's result is already
+else, because each of its sources is a fact only this window knows. A goal's result is already
 durable in History, and the other three are not facts the engine keeps. The rules live in
 `ui/src/notifications.ts`, pure and DOM-free, so each has a test that needs no renderer.
 
 | Source | When it is news | When it is not |
 |---|---|---|
 | **Goal finished or failed** | The end of a goal stream **this window opened** (`onTerminal`). A failure names the first failed step. | Opening a thread or restoring History opens no stream for a finished goal, so old results are never announced (the `answersToRead` rule, auto-read's). **Cancelled** is silent: the person did it. |
+| **Goal paused by the engine** | A `goal_status` for a pause that carries a `reason_code` (the critic asked for changes, or the conductor could not finish a step) **and is the goal's current state**: the event's version is the goal's version (`pausedNotification`). Titled with the cause, detailed with the engine's sentence, and opens the goal. | The person's own Pause carries no code, and a pause the stream replayed after the goal had moved on has an old version. A code this build does not know is not announced. |
 | **Plan ready for approval** | A `goal_status` that finds the goal `PENDING` and the plan will really wait: plan-only, dry-run, or a composer mode other than Direct Apply. | In Direct Apply the plan starts itself (the poll starts a `PENDING` goal), so "waiting for you" would be false. |
 | **Engine connection** | A change that **held for 4 s**: offline, back, token refused, restored. The engine's last stderr line is the offline detail. | `checking` never settles. The first settled state is only a baseline, so an engine that is up when the window opens says nothing, and a flap that reverses inside the settle time is one that never happened. |
 | **Model list change** | A `model_catalog_changed` frame with something in it, counted per provider (added and removed). docs/06 §6. | An empty diff, `model_catalog_checked`, and a payload that does not read. |
 
 * **No duplicates, because the engine replays.** Every entry has an id that names the event
-  (`goal:<id>:<status>:<updated_at>`, `plan:<id>:<version>`, `models:<fetched_at>:<diff>`), and an id already
+  (`goal:<id>:<status>:<updated_at>`, `paused:<id>:<version>`, `plan:<id>:<version>`,
+  `models:<fetched_at>:<diff>`), and an id already
   in the list is dropped. A goal that is retried and fails again is a new entry, because `updated_at` moved.
 * **Opening is reading.** Everything is marked read when the drawer opens, and as entries arrive while it
   stays open, so the header count clears at once. The dot on a row is for the ones that were new when the

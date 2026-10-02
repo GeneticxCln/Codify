@@ -224,6 +224,12 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
                             "model_name": "wire-model",
                         })
                         self.assertEqual(r.status_code, 200, f"configuring {role}")
+                    # This file pins stream isolation between goals, not who drives them. The fake answers each
+                    # role call in a fixed shape and cannot play a conductor, and a conductor that stopped without
+                    # finishing a step is now a paused goal rather than a step the recipe quietly ran. The recipe
+                    # is the documented driver when the conductor is switched off (docs/09 §10.14).
+                    r = await client.put("/settings/engine", json={"conductor_drives_execution": 0})
+                    self.assertEqual(r.status_code, 200, f"switching the conductor off: {r.text}")
 
                     r = await client.post("/workspaces", json={"name": "ws", "root_path": str(home / "ws")})
                     self.assertEqual(r.status_code, 200)

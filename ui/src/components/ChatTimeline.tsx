@@ -59,6 +59,8 @@ import { readRejection } from "../rejection.ts";
 import { answersToRead, type AutoReadMemory } from "../speech.ts";
 import { SpeakButton } from "./SpeakButton";
 import { Markdown } from "./Markdown";
+import { PauseBanner } from "./PauseBanner";
+import { pauseReasonOf } from "../pauseReason.ts";
 
 /**
  * Laya's pre-flight verdict, rendered as one honest line of chat: which engine
@@ -1089,6 +1091,12 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                     </>
                   ) : (
                     <>
+                      {/* Why the goal is paused, above the buttons that resume it. Only an engine pause has a
+                          reason; the person's own Pause shows nothing here. */}
+                      {(() => {
+                        const pause = pauseReasonOf(msg.goal?.status, msg.events);
+                        return pause ? <PauseBanner pause={pause} /> : null;
+                      })()}
                       {/* Header: Title and Status */}
                       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-codify-border/60 pb-3">
                         <div className="flex items-center gap-2">

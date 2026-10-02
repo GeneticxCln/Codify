@@ -23,7 +23,7 @@ from engine.executor_support import (
     _verifier_outcome,
 )
 from engine.fs import FileSystemService, PathEscapeError, ProtectedRootError
-from engine.library import READ_ONLY_TIMEOUT_S
+from engine.library import READ_ONLY_TIMEOUT_S, command_tail
 from engine.models import Goal, PlanStep
 from engine.providers import ProviderError
 from engine.sandbox import CommandNotAllowed
@@ -501,7 +501,9 @@ class _Steps(_Design):
         await self.run_step(goal_id, step_id)
         return self._step(goal_id, step_id)
 
-    def begin_retry(self, goal_id: str, step_id: str, expected_version: int) -> PlanStep:
+    def begin_retry(
+        self, goal_id: str, step_id: str, expected_version: int, *, keep_notes: bool = False,
+    ) -> PlanStep:
         """Validate a retry, claim the goal's driver, re-open the step, and return at once.
 
         The retry route used to await the whole step inside the request — minutes of fixer,
@@ -511,11 +513,12 @@ class _Steps(_Design):
         409; the run itself is the caller's to start in the background, and the driver claimed
         here is theirs to release when it ends.
         """
-        step = self._prepare_retry(goal_id, step_id, expected_version, claim=True)
+        step = self._prepare_retry(goal_id, step_id, expected_version, claim=True, keep_notes=keep_notes)
         return step
 
     def _prepare_retry(
         self, goal_id: str, step_id: str, expected_version: int, *, claim: bool = False,
+        keep_notes: bool = False,
     ) -> PlanStep:
         step = self._step(goal_id, step_id)
         if not (step.status == "FAILED" or (step.status == "IN_PROGRESS" and bool(step.review_notes))):
@@ -547,7 +550,7 @@ class _Steps(_Design):
             raise ApiError(409, "driver_busy", "another driver is already running this goal")
         try:
             self.goals.update_status(goal_id, expected_version, "RUNNING")
-            self._reset_step(goal_id, step)
+            self._reset_step(goal_id, step, keep_notes=keep_notes)
         except BaseException:
             # A refused or failed retry must not leave the goal claimed by nobody.
             if claim:
@@ -606,6 +609,10 @@ class _Steps(_Design):
                 lines.append(
                     f"Command that was run: {argv_str} (exit {outcome.get('exit_code')})"
                 )
+            if outcome.get("output_tail"):
+                # The reason, not just the fact: "tests failed" and an exit code sent the second attempt
+                # back to guess at what the first got wrong.
+                lines.append(f"What the command printed (the last part):\n{outcome['output_tail']}")
             lines.append(
                 "Fix what the failure describes. Do not start over from scratch — "
                 "edit your previous approach."
@@ -838,6 +845,7 @@ class _Steps(_Design):
                     "refused": refusals or [],
                     "ran": argv is not None,
                     "brand_drifts": brand_drifts,
+                    "output_tail": command_tail(result) if result else "",
                 }
                 # Explicit fields rather than **-splatting: `outcome` also
                 # carries `ran`/`refused` (event-payload keys the critic's
@@ -846,7 +854,7 @@ class _Steps(_Design):
                     goal_id, step, argv=outcome["argv"],
                     verdict=outcome["verdict"], explanation=outcome["explanation"],
                     exit_code=outcome["exit_code"], refusals=outcome["refused"],
-                    brand_drifts=brand_drifts,
+                    brand_drifts=brand_drifts, output_tail=outcome["output_tail"],
                 )
                 self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="verifier")
                 return outcome
@@ -1086,14 +1094,16 @@ class _Steps(_Design):
                 prompt = f"{base_prompt}\n\n--- Your requested inspection round ---\n{output}\n\nNow give your decision. {tail}"
                 continue
             if decision == "approve":
-                self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="critic")
+                # An approval supersedes the notes of an earlier rejection: they were acted on, and a run
+                # that resumes this step later must not be told to act on them again.
+                self._set_step(goal_id, step, "IN_PROGRESS", review_notes=None, last_agent_role="critic")
                 return
             if decision == "request-changes":
                 if not reasons:
                     raise AgentOutputInvalid("critic request-changes requires >=1 reason", role="critic")
                 self._set_step(goal_id, step, "IN_PROGRESS", review_notes="\n".join(reasons), last_agent_role="critic")
                 self._log(goal_id, step.id, "warn", f"critic requested changes: {reasons}")
-                self._set_status(goal_id, "PAUSED", step.id)
+                self._pause(goal_id, step.id, "critic_rejected")
                 raise CriticRejection("critic requested changes; human retry required", reasons)
             raise AgentOutputInvalid(f"critic decision invalid: {decision!r}", role="critic")
 
@@ -1211,7 +1221,7 @@ class _Steps(_Design):
         # user's own half-finished work under this step's message. The git
         # lock serializes the index: two parallel steps committing at once
         # would otherwise interleave their staged paths.
-        paths = [d["path"] for d in diffs]
+        paths = list(dict.fromkeys(d["path"] for d in diffs))
         async with self._git_lock:
             commit_hash = await asyncio.to_thread(
                 self.git.commit, root_path, commit_message, paths,

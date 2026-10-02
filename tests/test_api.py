@@ -1978,8 +1978,76 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(409, r.status_code)
         self.assertFalse(app.state.executor.is_driving(goal_id), "a refused retry left the goal claimed")
 
-    async def test_a_cancel_during_the_retried_step_starts_no_conductor(self) -> None:
-        """M2 through the route: the driver spawned after the step used to run regardless."""
+    async def test_a_retry_on_a_conductor_install_runs_the_conductor_at_that_step_and_not_the_recipe(self) -> None:
+        """The conductor owns every step it is given, a retried one included (docs/09 §10.14).
+
+        The route used to run the recipe's `run_step` for the retried step and then hand the rest to the
+        conductor. Now the conductor resumes at the step the person named, and `run_step` is not called.
+        """
+        goal_id, step_id = await self._a_failed_goal_with_a_failed_step("ws-retry-conductor")
+        executor = app.state.executor
+        calls: list[tuple[str, Any]] = []
+
+        async def resume(gid: str, focus_step_id: str | None = None) -> None:
+            calls.append(("resume", focus_step_id))
+
+        async def run_step(gid: str, sid: str, stored_files: Any = None) -> None:
+            calls.append(("run_step", sid))
+
+        executor.run_step = run_step
+        executor.conductor_can_drive = lambda gid: True
+        executor.run_conductor_resume = resume
+
+        r = await self.client.post(
+            f"/goals/{goal_id}/steps/{step_id}/retry", headers=self.headers,
+            json={"expected_version": app.state.goals.get(goal_id).version},
+        )
+
+        self.assertEqual(200, r.status_code, r.text)
+        self.assertTrue(await self._until(lambda: not executor.is_driving(goal_id)))
+        self.assertEqual([("resume", step_id)], calls)
+
+    async def _retry_with_notes(self, name: str, conductor: bool) -> Any:
+        """Retry a step the critic left notes on, on an install where the conductor does or does not drive."""
+        goal_id, step_id = await self._a_failed_goal_with_a_failed_step(name)
+        executor = app.state.executor
+        executor._set_step(
+            goal_id, executor._step(goal_id, step_id), "IN_PROGRESS", review_notes="a.py: explain the value",
+        )
+
+        async def resume(gid: str, focus_step_id: str | None = None) -> None:
+            return None
+
+        async def run_step(gid: str, sid: str, stored_files: Any = None) -> None:
+            return None
+
+        executor.run_step = run_step
+        executor.conductor_can_drive = lambda gid: conductor
+        executor.run_conductor_resume = resume
+
+        r = await self.client.post(
+            f"/goals/{goal_id}/steps/{step_id}/retry", headers=self.headers,
+            json={"expected_version": app.state.goals.get(goal_id).version},
+        )
+        self.assertEqual(200, r.status_code, r.text)
+        self.assertTrue(await self._until(lambda: not executor.is_driving(goal_id)))
+        return r.json()["review_notes"]
+
+    async def test_a_retry_on_a_conductor_install_keeps_the_critics_notes(self) -> None:
+        # What the conductor's next `write` has to act on: the fixer is only ever shown a critic's notes
+        # through what the conductor passes it.
+        self.assertEqual("a.py: explain the value", await self._retry_with_notes("ws-notes-kept", True))
+
+    async def test_a_retry_on_a_recipe_install_clears_the_notes_as_it_always_did(self) -> None:
+        # The recipe's fixer never reads them, so a stale note would only sit on the timeline.
+        self.assertIsNone(await self._retry_with_notes("ws-notes-cleared", False))
+
+    async def test_a_cancel_during_the_retried_step_starts_no_conductor_on_a_recipe_install(self) -> None:
+        """M2 through the route: the driver spawned after the step used to run regardless.
+
+        Still true where the recipe drives (no tool-capable model, or the conductor switched off): the retried
+        step runs through `run_step`, and a Cancel that lands during it is followed by nothing.
+        """
         goal_id, step_id = await self._a_failed_goal_with_a_failed_step("ws-retry-cancel")
         executor = app.state.executor
         conducted: list[str] = []
@@ -1988,11 +2056,11 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
             g = app.state.goals.get(gid)
             app.state.goals.update_status(gid, g.version, "CANCELLED")
 
-        async def resume(gid: str) -> None:
+        async def resume(gid: str, focus_step_id: str | None = None) -> None:
             conducted.append(gid)
 
         executor.run_step = cancelling_run_step
-        executor.conductor_can_drive = lambda gid: True
+        executor.conductor_can_drive = lambda gid: False
         executor.run_conductor_resume = resume
 
         r = await self.client.post(
@@ -2315,7 +2383,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         # Borrowed by default, and said so rather than left to be discovered.
         self.assertEqual(body["conductor_provider"], {"value": "", "max": 64})
         self.assertEqual(body["conductor_model"], {"value": "", "max": 128})
-        self.assertEqual(body["conductor_max_turns"]["value"], 8)
+        self.assertEqual(body["conductor_max_turns"]["value"], 14)
         self.assertEqual(body["conductor_max_moves"]["value"], 12)
         self.assertEqual(body["conductor_drives_execution"]["value"], 1)
 

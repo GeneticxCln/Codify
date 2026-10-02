@@ -353,25 +353,16 @@ class TestDecliningIsObeyedAndFailingIsCaught(ConductorTestCase):
         )
         self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
 
-    async def test_a_conductor_that_fails_falls_back_to_the_recipe(self) -> None:
-        # No answer and no plan. The engine runs the sequence it would have run
-        # before the conductor existed, and says that it did. This is the floor
-        # that makes "the conductor decides" safe to default on.
+    async def test_a_conductor_that_fails_on_a_change_does_not_run_the_recipe_over_it(self) -> None:
+        # No answer and no plan on a request the gate read as a change. There used to be a floor here: the
+        # engine ran the sequence it would have run before the conductor existed. That second pipeline is
+        # gone on an install that has a conductor (docs/09 §10.14). The turn fails plainly, says nothing
+        # was changed, and plans nothing. `tests/test_conductor_turn_end.py` holds the whole contract.
         executor = self._executor(_FailingConductor(), laya=_ChangeGate())
         await executor.run_chat(self.goal.id)
 
-        self.assertEqual(
-            [s.title for s in self.goals.steps(self.goal.id)], ["S1"],
-            "the fallback did not produce the pipeline's plan",
-        )
-        self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
-        text = " ".join(
-            str((e.payload or {}).get("message") or "")
-            for e in self.goals.events_after(self.goal.id, 0)
-            if e.type == "log"
-        )
-        self.assertIn("did not finish", text)
-        self.assertIn("standard sequence", text)
+        self.assertEqual(self.goals.steps(self.goal.id), [], "a plan appeared that the conductor did not make")
+        self.assertEqual(self.goals.get(self.goal.id).status, "FAILED")
 
     async def test_a_question_still_degrades_to_a_plain_answer(self) -> None:
         # The conductor is an upgrade and never a prerequisite (docs/09 §10.9).

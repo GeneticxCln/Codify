@@ -509,7 +509,7 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
           <NumberSetting
             id="conductor-max-turns"
             label="Tool-calling turns per run"
-            hint="How many times one conductor run may call the model before the engine stops it and answers with what it has."
+            hint="How many times one conductor run may call the model before the engine stops it. A turn answers with what it has; each step of an approved plan is a run of its own, and one that runs out pauses the goal so you can press Start to carry on."
             value={turns.value}
             min={turns.min}
             max={turns.max}

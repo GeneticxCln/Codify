@@ -157,6 +157,7 @@ class _Plan(_Design):
         evidence: dict[str, Any],
         design: dict[str, Any],
         task: str | None = None,
+        fail_goal: bool = True,
     ) -> None:
         """Ask the planner for steps, with its bounded consult loop, and store them.
 
@@ -172,6 +173,12 @@ class _Plan(_Design):
         descriptions still come from the planner, because the plan is what the
         user reviews and approves and a model should not be able to relabel it
         on the way past.
+
+        `fail_goal` is the recipe's behaviour: a planner that cannot produce a plan ends the goal, because
+        nothing else in the recipe can run without one. The conductor's `plan` move passes False and gets the
+        error re-raised instead: it is one move among several, the conductor decides what a failed plan means,
+        and a goal marked FAILED under it could not be planned again, nor completed, nor resumed (the turn
+        then asked for COMPLETED from FAILED, which is not a legal move).
         """
         prompt = (
             f"Title: {goal.title}\nDescription:\n{task or goal.description}\n\n"
@@ -269,6 +276,8 @@ class _Plan(_Design):
                 self._log(goal_id, None, "info", f"planner produced {len(steps)} steps")
                 break
         except (AgentOutputInvalid, ProviderError, ValueError) as exc:
+            if not fail_goal:
+                raise
             # Planning is the planner's phase; anything raised here is its.
             self._fail(
                 goal_id, None, getattr(exc, "code", "agent_output_invalid"), str(exc),

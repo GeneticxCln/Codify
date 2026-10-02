@@ -83,6 +83,12 @@ WS events: goal_status, step_status, log, diff, test_result,
 
 Critic rejection: Desktop click required to retry the step (`04` §4.3). Settings never appears on this path.
 
+Who runs the loop after Start: on an install with a tool-capable conductor model, **the conductor takes each
+open step through these phases, one run per step with its own budget, and pauses the goal with a stated reason
+if it cannot finish one** (`04` §1.4, pause codes). The engine adds no second pass behind it. The fixed
+sequence above is the driver when there is no such model, when `conductor_drives_execution` is 0, and for
+`parallel` goals; benchmarks and replay measure it directly. See `09` §10.14.
+
 **This diagram is the common path, not a guarantee.** It is the order the built-in `ship-a-change`
 skill sequences, drawn out because it is what most goals do — not a schedule the engine keeps. The
 conductor picks moves, so a goal that only needs a plan never reaches the scribe, and one that

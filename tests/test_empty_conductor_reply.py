@@ -4,7 +4,9 @@
 content — a small model that spent its budget on `<think>`, an Ollama context overflow, a server that
 answered `{}` — completed the turn with the literal text `(no answer)` and never reached the floor the
 docs describe ("a conductor that ... produced neither an answer worth having nor a plan has not decided
-anything, and falling back to the engine's own sequence is strictly better than failing the turn").
+anything, and falling back to the engine's own sequence is strictly better than failing the turn"). That floor has since
+been removed for a request the gate read as a change (docs/09 §10.14): the silent conductor now ends such a turn with
+a plain failure, and a question still falls back to the plain reply.
 Found by driving a real engine against a server whose `/api/chat` answered in the wrong shape: the turn
 "completed" without a single model call having said anything.
 """
@@ -84,16 +86,17 @@ class TestASilentModelFallsBack(ConductorTestCase):
                     if e.type == "log" and e.payload.get("level") == "warn"]
         self.assertTrue(any("did not finish" in w for w in warnings), warnings)
 
-    async def test_a_silent_conductor_on_a_change_runs_the_standard_sequence(self) -> None:
+    async def test_a_silent_conductor_on_a_change_fails_the_turn_rather_than_running_a_second_pipeline(self) -> None:
         # Two empty replies: the first is met with the loop's one-time nudge (a change with nothing
-        # planned), and the second is the silence that ends the loop.
+        # planned), and the second is the silence that ends the loop. The recipe used to run here; on an
+        # install with a conductor it no longer does (`tests/test_conductor_turn_end.py`).
         replies = [ToolReply(text=""), ToolReply(text="")]
         executor = self._executor(_ToolProvider(replies=replies), laya=_ChangeGate())
 
         await executor.run_chat(self.goal.id)
 
-        self.assertEqual(1, len(self.goals.steps(self.goal.id)), "the standard sequence did not plan")
-        self.assertEqual("PENDING", self.goals.get(self.goal.id).status)
+        self.assertEqual(0, len(self.goals.steps(self.goal.id)), "a plan appeared that the conductor did not make")
+        self.assertEqual("FAILED", self.goals.get(self.goal.id).status)
 
     async def test_a_conductor_that_answers_is_not_second_guessed(self) -> None:
         provider = _SaysNothingThenAnswers(replies=[ToolReply(text="It parses text.")])

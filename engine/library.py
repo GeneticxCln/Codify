@@ -717,10 +717,46 @@ def format_command(result: dict[str, Any]) -> str:
     argv = " ".join(result.get("argv") or [])
     out = (result.get("stdout") or "").strip()
     err = (result.get("stderr") or "").strip()
-    body = out if out else err
-    if len(body) > 4_000:
-        body = body[:4_000] + "\n… (output truncated)"
+    if out and err:
+        # Both, labelled. This used to print stdout *or* stderr, so a run that printed a banner on stdout and
+        # its traceback on stderr showed the banner and hid the reason it failed.
+        body = f"stdout:\n{_head(out, 2_500)}\nstderr:\n{_head(err, 1_500)}"
+    else:
+        body = _head(out or err, 4_000)
     return f"--- $ {argv} (exit {result.get('exit_code')})\n{body}"
+
+
+def _head(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n… (output truncated)"
+
+
+def _tail(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return "…" + text[-limit:]
+
+
+def command_tail(result: dict[str, Any], limit: int = 2_000) -> str:
+    """The end of what a command printed, for whoever has to act on a failure. Empty when it printed nothing.
+
+    The *end*, not the start: a test runner puts its reason (the failed assertion, the traceback's last
+    frame, the summary line) last, and the head of a long run is progress dots. Stderr gets up to half the
+    budget and stdout the rest, so a command that is noisy on one stream cannot push the other out.
+    """
+    out = (result.get("stdout") or "").strip()
+    err = (result.get("stderr") or "").strip()
+    if not out and not err:
+        return ""
+    err_budget = min(len(err), limit // 2)
+    out_budget = min(len(out), limit - err_budget)
+    parts = []
+    if out:
+        parts.append(f"stdout:\n{_tail(out, out_budget)}")
+    if err:
+        parts.append(f"stderr:\n{_tail(err, err_budget)}")
+    return "\n".join(parts)
 
 
 __all__ = [
@@ -730,6 +766,7 @@ __all__ = [
     "format_read",
     "format_search",
     "format_command",
+    "command_tail",
     "fts5_available",
     "MAX_READ_CHARS",
     "MAX_ROUND_CHARS",
