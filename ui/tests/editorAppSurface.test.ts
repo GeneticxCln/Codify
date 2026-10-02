@@ -217,6 +217,22 @@ test("opening a file the person is already looking at says it is in front, and s
   });
 });
 
+test("a file the person has open but is not looking at is reported as already open, in the background", async () => {
+  await withEditorApp({ shellAnswers: shells(id("t1")) }, async (ctx) => {
+    await openShell(ctx);
+    await openFile(ctx, "main", "src/main.py");
+    await click(ctx, tabNamed(ctx, "Terminal:"));
+    const before = selectedTab(ctx);
+
+    const reply = await ctx.surface.ask({ op: "open", args: { path: "src/main.py" } });
+    await ctx.settle();
+
+    assert.deepEqual([reply.result.opened, reply.result.shown], [false, "background"], "an editor that was already there was reported as newly opened");
+    assert.equal(selectedTab(ctx), before, "the assistant moved the person");
+    assert.equal(editorTabs(ctx).length, 1);
+  });
+});
+
 test("when the window is too narrow for two panes, the file opens in the background instead", async () => {
   await withEditorApp({ ...SEEDED, viewport: { width: 700, height: 900 } }, async (ctx) => {
     await openThread(ctx, "c1");
