@@ -2497,6 +2497,15 @@ python3 -m scripts.drive_a_turn "Remember my favourite colour is teal" \
                                "What is my favourite colour?"
 ```
 
+`--approve` presses Start on the plan a turn makes and reports how the run ended (finished, paused with the
+engine's reason, or failed; the exit status is non-zero unless it completed). With no model at all,
+`FAKE_CONDUCTOR=1 python3 scripts/fake_ollama.py` plays a scripted conductor over the real Ollama wire format
+(`CONTRIBUTING.md` lists its scenarios), and `tests/test_fake_conductor.py` runs the whole path against it: a turn
+that plans, Start, the four step moves, one fixer call, one commit, the conductor's calls booked as `conductor`,
+a stalled conductor paused as `conductor_stopped`, a question and the turn that answers it, and a note kept
+across the run. What that proves is the loop, the wire, the driver and git together; what it cannot prove is that
+a real small model behaves like the script (§10.14a is the measurement that does).
+
 The four expected outcomes, all observed:
 
 1. **question → conductor answers in prose, 0 steps.** ~3-4s, where the same

@@ -300,6 +300,20 @@ python3 scripts/fake_ollama.py   # serves :11435
 
 then point the roles' base_url at `http://127.0.0.1:11435` in Settings.
 
+With `FAKE_CONDUCTOR=1` the same server plays a conductor that calls tools (as Ollama sends them), so a goal can
+be driven from a turn to a committed step with no model at all, and `drive_a_turn` can press Start on the plan:
+
+```
+FAKE_CONDUCTOR=1 python3 scripts/fake_ollama.py &
+python3 -m scripts.drive_a_turn --provider ollama --base-url http://127.0.0.1:11435 \
+    --approve "add a banner file"
+```
+
+The request text picks the scenario: a question gets prose, `[ask]` makes the conductor put a question first,
+`[todo]` makes a step run keep a note, and `[stall]` makes it stop after `write` (the goal pauses with
+`conductor_stopped`). The run exits non-zero unless it completes. `tests/test_fake_conductor.py` and
+`tests/test_drive_a_turn_approve.py` run exactly this.
+
 ## Docs
 
 Architecture lives in `docs/00`–`11` (`07` is the spawn guard and the

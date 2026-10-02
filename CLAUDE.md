@@ -83,8 +83,8 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
 ui/             React 19 + TS + Vite; ui/tests/ run through node --test
 src-tauri/      Tauri v2 Rust shell
 tests/          Python suite; stream_isolation.py is the shared isolation helper
-scripts/        fake_ollama.py (drive a goal with no API keys), replay_trace.py
-                 drive_a_turn.py (drive a turn against a real local model),
+scripts/        fake_ollama.py (drive a goal with no API keys; FAKE_CONDUCTOR=1 plays a tool-calling conductor), replay_trace.py
+                 drive_a_turn.py (drive a turn against a real local model; --approve presses Start),
                  make_logo.py, check_history.py (does every commit in a range build)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
 docs/           00–11, below
