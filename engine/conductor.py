@@ -264,6 +264,12 @@ class Conductor:
         self.on_tool = on_tool
         self.calls_made = 0
         self.moves_made = 0
+        # True when the loop stopped because it hit the cap, not because the model finished. Set only when
+        # the forced final call is made, i.e. when the model still wanted more after its last allowed call:
+        # `calls_made >= max_turns` also holds for a model that *answered* on that last call, which is a
+        # finished run, and reading it as a cut-off had the caller override a good answer. The caller says
+        # so in what it publishes, because a run that was cut off and one that completed read identically.
+        self.exhausted = False
         self.nudged = False
         self.tools_used: list[str] = []
 
@@ -344,13 +350,6 @@ class Conductor:
             self.was_cancelled = True
         return self.was_cancelled
 
-    @property
-    def exhausted(self) -> bool:
-        """True when the loop stopped because it hit the cap, not because the
-        model finished. The caller says so in the answer, because a turn that
-        was cut off and one that completed read identically otherwise."""
-        return self.calls_made >= self.max_turns
-
     async def run(self, user_prompt: str, history: list[dict[str, str]] | None = None) -> str:
         """Run the loop to a final answer, or to the cap. Always returns text.
 
@@ -380,6 +379,7 @@ class Conductor:
             # kept the loop running forever — the cap was advice, not a bound.
             exhausted = self.calls_made >= self.max_turns
             if exhausted:
+                self.exhausted = True
                 messages.append({
                     "role": "user",
                     "content": (
@@ -436,10 +436,6 @@ class Conductor:
                 if self._is_cancelled():
                     return ""
                 content = await self._run_tool(call, messages)
-                if call.name in STAGE_MOVES and not content.startswith(
-                    "There is no tool called"
-                ):
-                    self.moves_made += 1
                 self.tools_used.append(call.name)
                 messages.append({
                     "role": "tool",
@@ -447,6 +443,13 @@ class Conductor:
                     "name": call.name,
                     "content": content,
                 })
+
+    def _budget_refusal(self, name: str) -> str:
+        return (
+            f"The move budget for this run is spent ({self.moves_made} of {self.max_moves} stage moves "
+            f"used), so `{name}` was not run. Reading tools still work. Answer with what you have, and "
+            "say plainly what you did not get to."
+        )
 
     async def _run_tool(self, call: Any, messages: list[dict[str, Any]]) -> str:
         """One tool call, and the text handed back for it.
@@ -474,6 +477,26 @@ class Conductor:
                 f"There is no tool called {call.name!r}. The tools are: {available}{note}. "
                 "Call one of those, or answer without a tool."
             )
+        # The menu as it stands *now*, not the dispatch table. The table holds every tool that could ever be
+        # offered, so dispatching on it let a move the model was never shown (a `write` before any plan
+        # existed, a stage move after the budget was spent) run because the model happened to name it. An
+        # empty menu is a caller that never narrowed anything and dispatches on the table alone.
+        if self.tools and call.name not in {t.name for t in self.tools}:
+            if call.name in STAGE_MOVES and self.moves_made >= self.max_moves:
+                return self._budget_refusal(call.name)
+            now = ", ".join(t.name for t in self.tools)
+            return (
+                f"`{call.name}` is not available right now: it is only offered when there is something "
+                f"for it to act on. The tools available now are: {now}. Call one of those, or "
+                "answer without a tool."
+            )
+        if call.name in STAGE_MOVES:
+            if self.moves_made >= self.max_moves:
+                return self._budget_refusal(call.name)
+            # Reserved *before* awaiting: a stage move is a whole sub-agent run, a reply can ask for
+            # several at once, and the menu is only rebuilt between model calls. Counting afterwards let a
+            # reply of four moves with one left run all four. A move that fails has still cost one.
+            self.moves_made += 1
         if self.on_tool is not None:
             try:
                 self.on_tool(call.name, json.dumps(call.arguments, default=str))

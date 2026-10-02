@@ -548,12 +548,22 @@ schema.
   the loop's tool calls are *dropped* and the reply's text is returned with a
   sentence saying it was cut off. An earlier version nudged the model to stop
   and then honoured the next request anyway; `TestTheCap` found it.
+  `Conductor.exhausted` is set only when that forced final call is made, that
+  is, when the model still wanted more after its last allowed call. It used to
+  be `calls_made >= max_turns`, which is also true of a model that *answered* on
+  that last call, so a finished run read as cut off and the caller overrode it
+  (`tests/test_conductor_budget.py`).
 - **Spend is bounded twice.** `conductor_max_moves` bounds *stage* moves
   separately from model calls, because they are not the same currency: a model
   call costs seconds, a `write` or a `plan` is a whole sub-agent run that can
   take minutes and touch files. When the move budget is spent the stage moves
   are taken off the menu rather than refused at call time — a refusal a model
-  can retry costs a turn every time.
+  can retry costs a turn every time. The menu is only rebuilt between model
+  calls, so the bound is also enforced where the move *runs*: a stage move is
+  reserved before it is awaited (a reply of four moves with one left runs one
+  and answers the other three that the budget is spent), and a call to a tool
+  that is not on the current menu is refused rather than dispatched from the
+  table, so a model cannot run a move it was never offered by naming it.
 - **The menu narrows with the state.** `write`, `verify`, `review` and
   `summarize` are only offered once `plan` has produced a step for them to act
   on. Eight tools choose better than twelve, and this costs no prompt work.
