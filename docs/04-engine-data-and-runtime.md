@@ -184,7 +184,7 @@ the UI's copy a member behind both.
 
 | type | `step_id` | payload |
 |---|---|---|
-| `goal_status` | — | `{status, version}` |
+| `goal_status` | — | `{status, version}`, plus `{reason_code, reason}` on a pause the *engine* made (see below), and on nothing else |
 | `step_status` | step | `{status, review_notes?, commit_message?}` — `commit_message` appears **only once a commit has landed** (a plain folder, a dry run, a cancel and a step whose files already match the last commit never carry one; the scribe's message is in the step's `log` instead, with the reason), so a client may show it as "Commit: …" without checking anything else — republished with `status: "IN_PROGRESS"` at every role transition inside a step (fixer → verifier → critic → scribe); only a start from a not-running state is a real attempt |
 | `log` | any | `{level: "info"\|"warn"\|"error", message}` |
 | `diff` | step | `{path, unified_diff, note?}` — `note` says why a real change has an empty diff (binary, or over the 1 MB cap) |
@@ -218,6 +218,21 @@ stored config, its provider's credential state, and the provider's live discover
 catalog, then ranks the findings so the cause is first and its symptoms below it.
 See `ui/src/failureDiagnosis.ts` for the rules (a failed discovery proves nothing, so
 it is never reported as "your model was retired").
+
+`goal_status.reason_code` and `reason` say why the *engine* paused a goal. `PAUSED` has
+several causes and the status alone names none of them: the person pressed Pause (no code,
+they know), the critic asked for changes, or the conductor could not finish a step. The code
+is from a closed set (`models.PAUSE_CODES`) and the sentence is the engine's own
+(`models.PAUSE_REASONS`), never a quotation of the critic or a model: a pause can be caused by
+text a model wrote about a repository, which is third-party, and this event and the `paused:`
+log line beside it are read by other tools. Where to look is part of the sentence (the critic's
+reasons are on the step's `review_notes`). The two keys come together, only with `PAUSED`, and
+every other status change carries neither, so the newest `goal_status` event is the current
+reason: `RUNNING` after a Start has none. `update_status` refuses an unknown code, a code
+without a reason, or either on a status other than `PAUSED`. A pause never widens the write
+gate: `PAUSED` refuses `write`, and only the person's Start moves it (`docs/00` §6.9).
+
+**Pause codes**: `conductor_budget`, `conductor_provider`, `conductor_stopped`, `critic_rejected`.
 
 `GoalService.next_sequence(goal_id)` is atomic (`UPDATE goals SET event_seq = event_seq + 1 ... RETURNING`).
 

@@ -19,6 +19,7 @@ from engine.fs import (
 )
 from engine.models import (
     BUILTIN_PROVIDERS,
+    PAUSE_CODES,
     PROVIDER_SLUG_RE,
     ROLES,
     AgentConfig,
@@ -1767,9 +1768,15 @@ class GoalService:
         return self.get(goal_id)
 
     def update_status(
-        self, goal_id: str, expected_version: int, status: str, step_id: str | None = None
+        self, goal_id: str, expected_version: int, status: str, step_id: str | None = None,
+        *, reason_code: str | None = None, reason: str | None = None,
     ) -> Goal:
         """Set the goal status and announce it.
+
+        `reason_code` and `reason` are for an engine-initiated pause and nothing else: a code from the closed
+        set in `models.PAUSE_CODES` and the plain-language sentence that goes with it, published on the same
+        `goal_status` event. They come together, only with `PAUSED`, and every other status change carries
+        neither key, so the event's shape for everything but a pause is what it always was.
 
         The event is published here rather than by callers so *every* status
         change reaches live streams — pause and cancel used to write the DB and
@@ -1781,6 +1788,10 @@ class GoalService:
         `COMPLETED` that overwrote it. Repeating the status a goal already has is
         not a move and is allowed.
         """
+        if (reason_code is None) != (reason is None):
+            raise ValueError("a pause reason and its code go together")
+        if reason_code is not None and (reason_code not in PAUSE_CODES or status != "PAUSED"):
+            raise ValueError(f"{reason_code!r} is not a pause code, or the status is not PAUSED")
         row = self._db.execute("SELECT status FROM goals WHERE id = ?", (goal_id,)).fetchone()
         if row is None:
             raise ApiError(404, "unknown_goal", "goal not found")
@@ -1803,7 +1814,10 @@ class GoalService:
             goal_id=goal_id,
             step_id=step_id,
             type="goal_status",
-            payload={"status": status, "version": updated.version},
+            payload={
+                "status": status, "version": updated.version,
+                **({"reason_code": reason_code, "reason": reason} if reason_code else {}),
+            },
             timestamp=now,
             sequence=self.next_sequence(goal_id),
         ))

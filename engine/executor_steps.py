@@ -1098,7 +1098,7 @@ class _Steps(_Design):
                     raise AgentOutputInvalid("critic request-changes requires >=1 reason", role="critic")
                 self._set_step(goal_id, step, "IN_PROGRESS", review_notes="\n".join(reasons), last_agent_role="critic")
                 self._log(goal_id, step.id, "warn", f"critic requested changes: {reasons}")
-                self._set_status(goal_id, "PAUSED", step.id)
+                self._pause(goal_id, step.id, "critic_rejected")
                 raise CriticRejection("critic requested changes; human retry required", reasons)
             raise AgentOutputInvalid(f"critic decision invalid: {decision!r}", role="critic")
 

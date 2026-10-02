@@ -40,6 +40,33 @@ GoalStatus = Literal[
     "PLANNING", "PENDING", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"
 ]
 StepStatus = Literal["PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"]
+
+# Why the *engine* paused a goal, on the `goal_status` event of the pause (docs/04 §1.4). `PAUSED` has three
+# causes and the status alone says none of them: the person pressed Pause (no code: they know), the critic
+# asked for changes, or the conductor could not finish a step. A closed set, so the UI can say something
+# specific for each and a new cause cannot arrive without a decision about what to say. The words are the
+# engine's own: a pause can be caused by text a model wrote about a repository, which is third-party, so a
+# reason never quotes the critic or the model. Where to look (the step's notes, the log) is part of the words.
+PAUSE_REASONS: dict[str, str] = {
+    "conductor_budget": (
+        "The conductor used all the calls it was given on this step before finishing it. "
+        "Press Start to let it carry on from where it stopped."
+    ),
+    "conductor_provider": (
+        "The conductor's model could not be reached, so the run stopped before this step was finished. "
+        "Check the model in Settings, then press Start to carry on."
+    ),
+    "conductor_stopped": (
+        "The conductor stopped without finishing this step. "
+        "Press Start to let it try again, or edit the plan first."
+    ),
+    "critic_rejected": (
+        "The critic asked for changes and stopped the run. Its reasons are on the step. "
+        "Press Start to carry on, or edit the plan first."
+    ),
+}
+PAUSE_CODES: tuple[str, ...] = tuple(PAUSE_REASONS)
+
 EventType = Literal[
     "goal_status",
     "step_status",
