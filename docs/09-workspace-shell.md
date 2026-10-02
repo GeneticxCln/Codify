@@ -913,13 +913,14 @@ the app has, not merely unshown. The half-line is a display problem, and
 
 #### Output a terminal earns while no pane displays it
 
-A pane mounts only while its tab is active, and the shell behind an inactive
-tab never stops — so every byte a background build printed used to be emitted
+A pane mounts only while its tab is on screen (the active tab, or one of a split's two,
+§12), and the shell behind a tab that is not never stops — so every byte a background build printed used to be emitted
 to nobody and dropped, gone from the live pane on return and from the workspace
 scrollback too, because the scrollback append lived in the same unmounting
 listener. `ui/src/terminalBuffer.ts` is the fix, and it is a **separation of
-recording from rendering**: rendering stays active-tab-only (the same decision
-the browser pane made, and unchanged); recording moves to a subscription at
+recording from rendering**: rendering stays to what is on screen (the active tab; in a
+split, its two panes, each owning its own terminal), the same decision the browser pane made;
+recording moves to a subscription at
 app scope, alive for as long as the app is.
 
 The rule that keeps every byte displayed once and filed once is **ownership**.
