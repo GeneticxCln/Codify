@@ -860,8 +860,8 @@ class _Conduct(_Plan):
                 "If they do ask for the workspace to be changed, read the "
                 "`ship-a-change` skill with `use_skill` and follow it: recon, then "
                 "plan, then stop so they can approve the plan. Prefer acting over "
-                "asking — ask only when the request genuinely cannot be planned "
-                "without more information, and say plainly what you are blocked on."
+                "asking: use `ask_user` only when the request genuinely cannot be "
+                "planned without something only they know, and ask the one thing."
             )
         return (
             "The pre-flight gate could not tell what this request asks for "
@@ -886,8 +886,8 @@ class _Conduct(_Plan):
             "You have not done anything yet: no move has been called and there "
             "is no plan. Do not ask the user what to do and do not describe what "
             "you are about to do — call `recon` now saying what you need to find "
-            "out, then call `plan`. If you genuinely cannot proceed without an "
-            "answer from them, ask for it in one sentence and stop."
+            "out, then call `plan`. If you genuinely cannot proceed without something "
+            "only they know, call `ask_user` with that one question and stop."
         )
 
     async def _conduct(

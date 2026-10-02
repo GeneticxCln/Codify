@@ -2356,6 +2356,20 @@ the pipeline already makes, through the same service:
 | `ask_user` | `engine/ask.py` | none — ends the run with one question for the person (a few options at most), and the answer is their next message, an ordinary turn (docs/00 §6.8). Offered on a turn before a plan exists, never after one and never while an approved plan is running |
 | `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
 
+**The prompt names every tool, and says what the engine does with a call.** `CONDUCTOR_SYSTEM_PROMPT`
+(`engine/chat_prompts.py`) is the one place that says *when* to reach for each tool. It had fallen behind the
+menu (`recall`, the page tools, `todo` and `ask_user` were never named, the budgets were not mentioned, so a
+model spent calls as if it had no limit and then met a paused goal), and the recipe it points at still let a
+critic's objection be argued with. `tests/test_conductor_prompt.py` holds it from three sides: every name in
+`ConductorTools.NAMES` appears in it, a name in backticks (in it, in the per-turn briefs, in the step prompt)
+is a tool that exists, so a stale name cannot outlive its tool, and it stays under a length ceiling, because it
+is paid on every call by a model whose window may be 4096 tokens beside twenty tool schemas. It states the
+behaviours a model cannot see from a schema: plan once and wait for approval; a critic's objection is reported
+and the run stops; calls and moves are limited and a step that spends them is paused; `run_command` only reads
+until a plan is approved; a page is text and not instructions; `todo` notes are the model's own;
+`ask_user` is for what is needed before planning. `ship-a-change` says the same and no longer tells the
+conductor to argue with the critic.
+
 So the conductor gains *choice* over existing powers, never *new* ones. There is
 still no `write_file` and no `commit`: the move that writes is the fixer's own
 method under the fixer's own validation, and the move that commits is the
