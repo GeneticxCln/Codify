@@ -76,6 +76,16 @@ export interface TabBarProps {
    * be contradicted by the composer changing workspace underneath it.
    */
   workspaces?: Workspace[];
+  /**
+   * The tabs a split is showing, so the strip says what is on screen. Marked, not selected: only the active tab, the
+   * focused pane's, is `aria-selected`, because everything keyed to "the active tab" means the one being worked in.
+   */
+  splitIds?: readonly string[];
+  /**
+   * A right-click on a tab, or the Menu key on a focused one (the browser delivers both as `contextmenu`), asks for that
+   * tab's menu. Absent, the strip leaves the browser's own menu alone.
+   */
+  onMenu?: (tabId: string, x: number, y: number) => void;
 }
 
 export const TabBar: React.FC<TabBarProps> = ({
@@ -87,6 +97,8 @@ export const TabBar: React.FC<TabBarProps> = ({
   loadingTabIds = [],
   unreadTerminalIds = [],
   workspaces = [],
+  splitIds = [],
+  onMenu,
 }) => {
   return (
     <div className="flex flex-1 min-w-0 items-center gap-1">
@@ -100,6 +112,7 @@ export const TabBar: React.FC<TabBarProps> = ({
           const active = tab.id === activeId;
           const busy = busyTabIds.includes(tab.id);
           const unread = unreadTerminalIds.includes(tab.id);
+          const inSplit = splitIds.includes(tab.id);
           // The folder this tab is in, resolved from the id the tab carries. Not
           // `selectedWs`: with two tabs in two folders, one global name would be
           // wrong for one of them.
@@ -119,15 +132,25 @@ export const TabBar: React.FC<TabBarProps> = ({
               tabIndex={active ? 0 : -1}
               aria-label={`${KIND_NAME[tab.kind]}: ${label}${
                 ws ? ` in ${ws.root_path}` : ""
-              }${unread ? " — new output" : ""}`}
+              }${unread ? " — new output" : ""}${inSplit ? " — in split view" : ""}`}
               title={ws ? `${ws.root_path} — ${label}` : label}
+              data-in-split={inSplit ? "true" : undefined}
               onClick={() => onFocus(tab.id)}
+              onContextMenu={
+                onMenu
+                  ? (event) => {
+                      event.preventDefault();
+                      onMenu(tab.id, event.clientX, event.clientY);
+                    }
+                  : undefined
+              }
               className={
                 "group relative flex items-center gap-1 px-2.5 py-1 rounded-md " +
                 "cursor-pointer max-w-48 border " +
                 (active
                   ? "bg-codify-bg border-codify-border text-codify-primary"
-                  : "bg-codify-surface border-transparent text-codify-muted hover:text-codify-secondary")
+                  : (inSplit ? "border-codify-accent/30 " : "border-transparent ") +
+                    "bg-codify-surface text-codify-muted hover:text-codify-secondary")
               }
             >
               <Icon

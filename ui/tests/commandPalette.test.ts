@@ -280,3 +280,93 @@ test("settings items name the page they open, not just 'Settings'", () => {
   assert.ok(shown.includes("Provider keys & endpoints"));
   assert.ok(shown.includes("Agent roles & prompts"));
 });
+
+// ── split actions ───────────────────────────────────────────────────────────
+
+const chatTab = (id: string): Tab => ({ id, kind: "chat", title: `Chat ${id}`, conversationId: id });
+const termTab = (id: string): Tab => ({ id, kind: "terminal", title: `Shell ${id}` });
+const pageTab = (id: string): Tab => ({ id, kind: "browser", title: `Page ${id}`, url: "https://example.com" });
+
+const actionItems = (sources: PaletteSources): PaletteItem[] => buildPaletteItems(sources).filter((i) => i.kind === "action");
+const actionOf = (item: PaletteItem) => (item.kind === "action" ? item.action : null);
+
+test("with no word about splits, the palette has no split actions: what it listed before is what it lists", () => {
+  const sources: PaletteSources = { tabs: [chatTab("c"), termTab("t")], activeId: "c", conversations: [] };
+  assert.deepEqual(actionItems(sources), []);
+});
+
+test("while a split is showing the palette offers to close it, and nothing else about splits", () => {
+  const items = actionItems({ tabs: [chatTab("c"), termTab("t")], activeId: "c", conversations: [], split: { showing: true } });
+  assert.deepEqual(items.map(actionOf), [{ type: "close-split" }]);
+  assert.equal(items[0].title, "Close split");
+});
+
+test("with no split showing it offers a new terminal beside this tab, and each tab that can sit beside it", () => {
+  const items = actionItems({
+    tabs: [chatTab("c"), termTab("t1"), chatTab("c2"), pageTab("p"), termTab("t2")],
+    activeId: "c",
+    conversations: [],
+    split: { showing: false },
+  });
+  assert.deepEqual(
+    items.map(actionOf),
+    [{ type: "split-new-terminal" }, { type: "show-beside", tabId: "t1" }, { type: "show-beside", tabId: "t2" }],
+    "a chat beside a chat or a page was offered",
+  );
+  assert.deepEqual(
+    items.map((i) => i.title),
+    ["Split: new terminal beside this one", "Show beside: Shell t1", "Show beside: Shell t2"],
+  );
+});
+
+test("from a terminal, another terminal and a chat can sit beside it", () => {
+  const items = actionItems({
+    tabs: [termTab("t"), chatTab("c"), termTab("t2")],
+    activeId: "t",
+    conversations: [],
+    split: { showing: false },
+  });
+  assert.deepEqual(items.map(actionOf), [
+    { type: "split-new-terminal" },
+    { type: "show-beside", tabId: "c" },
+    { type: "show-beside", tabId: "t2" },
+  ]);
+});
+
+test("a browser page, or nothing open, has no split to offer", () => {
+  assert.deepEqual(actionItems({ tabs: [pageTab("p"), termTab("t")], activeId: "p", conversations: [], split: { showing: false } }), []);
+  assert.deepEqual(actionItems({ tabs: [], activeId: null, conversations: [], split: { showing: false } }), []);
+});
+
+test("the split actions come last, under their own heading, and have unique ids", () => {
+  const items = buildPaletteItems({
+    tabs: [chatTab("c"), termTab("t")],
+    activeId: "c",
+    conversations: [convo({ id: "c" })],
+    split: { showing: false },
+  });
+  const kinds = items.map((i) => i.kind);
+  assert.deepEqual([...new Set(kinds)], ["tab", "conversation", "settings", "action"]);
+  assert.equal(new Set(items.map((i) => i.id)).size, items.length, "two items share an id");
+  assert.ok(items.filter((i) => i.kind === "action").every((i) => i.label === "Split"));
+});
+
+test("typing 'split' finds the split actions", () => {
+  const items = buildPaletteItems({ tabs: [chatTab("c"), termTab("t")], activeId: "c", conversations: [], split: { showing: false } });
+  const found = filterPalette(items, "split");
+  assert.ok(found.length >= 2 && found.every((i) => i.kind === "action"), found.map((i) => i.title).join(" | "));
+  const closing = filterPalette(
+    buildPaletteItems({ tabs: [chatTab("c"), termTab("t")], activeId: "c", conversations: [], split: { showing: true } }),
+    "close",
+  );
+  assert.deepEqual(closing.map((i) => i.title), ["Close split"]);
+});
+
+test("the palette draws the split group under its own heading", () => {
+  const items = buildPaletteItems({ tabs: [chatTab("c"), termTab("t")], activeId: "c", conversations: [], split: { showing: true } });
+  const markup = renderToStaticMarkup(
+    React.createElement(CommandPalette, { open: true, items, onClose: () => {}, onSelect: () => {} }),
+  );
+  assert.match(markup, />Split</);
+  assert.match(markup, /Close split/);
+});

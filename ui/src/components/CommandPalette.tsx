@@ -46,6 +46,7 @@ const GROUP_HEADING: Record<PaletteItemKind, string> = {
   tab: "Open tabs",
   conversation: "Conversations",
   settings: "Settings",
+  action: "Split",
 };
 
 const optionDomId = (item: PaletteItem): string => `palette-option-${item.id}`;

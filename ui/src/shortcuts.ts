@@ -47,6 +47,8 @@ export type ShortcutAction =
   | { type: "toggle-palette" }
   /** Hide or show the left panel (threads, Browser, Terminal, Settings). */
   | { type: "toggle-sidebar" }
+  /** Split the view (a chat or terminal beside this one), or close the split that is showing. */
+  | { type: "toggle-split" }
   /** One step bigger or smaller on the UI scale (`uiScale.ts`), or back to its default. */
   | { type: "scale-up" }
   | { type: "scale-down" }
@@ -90,6 +92,10 @@ export function resolveShortcut(e: KeyEventLike): ShortcutAction | null {
         return e.repeat ? null : { type: "toggle-palette" };
       case "b":
         return e.repeat ? null : { type: "toggle-sidebar" };
+      // Not `\\`, which a terminal turns into SIGQUIT: this has to work while a terminal has the focus, and
+      // `.` is a key no shell reads as a control character.
+      case ".":
+        return e.repeat ? null : { type: "toggle-split" };
       default:
         break;
     }
@@ -159,6 +165,12 @@ export const SHORTCUT_HELP: readonly ShortcutHelp[] = [
     does: "Hide or show the left panel (a terminal keeps Ctrl+B for itself)",
     probe: ctrlKey("b", "KeyB"),
     action: "toggle-sidebar",
+  },
+  {
+    keys: "Ctrl+.",
+    does: "Split the view (a terminal or chat beside this one), or close the split",
+    probe: ctrlKey(".", "Period"),
+    action: "toggle-split",
   },
   { keys: "Ctrl+=", does: "Make the UI bigger", probe: ctrlKey("=", "Equal"), action: "scale-up" },
   { keys: "Ctrl+-", does: "Make the UI smaller", probe: ctrlKey("-", "Minus"), action: "scale-down" },

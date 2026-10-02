@@ -215,8 +215,21 @@ test("the shortcut list the About tab shows is what the keyboard layer really do
     [...new Set(SHORTCUT_HELP.map((line) => line.action))].sort(),
     [
       "close-active-tab", "focus-last-tab", "focus-tab", "new-tab", "scale-down", "scale-reset",
-      "scale-up", "toggle-palette", "toggle-sidebar",
+      "scale-up", "toggle-palette", "toggle-sidebar", "toggle-split",
     ],
   );
   assert.equal(new Set(SHORTCUT_HELP.map((line) => line.keys)).size, SHORTCUT_HELP.length, "a chord is listed twice");
+});
+
+test("Ctrl+. splits the view or closes the split, and a held key is one press", () => {
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: ".", code: "Period" })), { type: "toggle-split" });
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: ".", code: "Period", repeat: true })), null);
+});
+
+test("Ctrl+. is not Ctrl+\\, which a terminal turns into SIGQUIT, and does not need Shift, Alt or Meta", () => {
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "\\", code: "Backslash" })), null);
+  assert.equal(resolveShortcut(key({ ctrlKey: true, shiftKey: true, key: ">", code: "Period" })), null);
+  assert.equal(resolveShortcut(key({ ctrlKey: true, altKey: true, key: ".", code: "Period" })), null);
+  assert.equal(resolveShortcut(key({ metaKey: true, key: ".", code: "Period" })), null);
+  assert.equal(resolveShortcut(key({ key: ".", code: "Period" })), null, "a plain full stop is typing");
 });
