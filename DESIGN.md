@@ -118,7 +118,36 @@ left to good intentions:
   own palette; it may not make failure cyan. The old rule said no theme could touch
   these at all, which protected a *meaning* by freezing a *habit* — and the habit was
   the part that was wrong. Monochrome themes say severity as brightness instead of hue,
-  which the same test checks by requiring `danger ≠ success` there.
+  and that is a stated carve-out, not an accident of a grey having a hue of 0°: a theme
+  whose six tones are all grey (ASCII Rain) is exempt from the warm arc and instead has to
+  order them `danger` > `warning` > `success` > idle by a visible step of luminance, and a
+  grey `danger` or `warning` in any theme that has colour fails. ASCII Rain had `warning`
+  dimmer than `success`, which read as the quieter of the two. Because brightness is all it
+  has, `Badge` also draws a glyph beside the word for the three severities (a tick, a
+  triangle, a cross): failed, warning and done are never told apart by colour alone.
+
+**Status ink: a tone as the text of a pill.** A pill is a tone as text on a tint of itself
+(`bg-codify-danger/40 text-codify-danger`), and that pair is far closer in lightness than
+either is to the surface behind it. Measured, red on its own 40% tint was under AA in 54 of
+57 theme-and-surface combinations (worst 2.55:1), and the audit never saw it because it had
+skipped every translucent background. So there is a derived token per tone,
+`--codify-{accent,info,success,warning,danger,design,knowledge}-ink`, with a matching
+`text-codify-X-ink` class: the tone moved in *lightness only* (hue and saturation kept, so
+`danger` is still red) until it reaches 4.7:1 against its own 40% tint over `bg`, `surface`
+and `raised`. `applyTheme` computes it for every theme, so a theme states nothing extra and a
+tint of the accent gets its own ink. The rules, all in `ui/tests/contrast.test.ts` and
+`ui/tests/ink.test.ts`:
+
+- **A tint is read in its ink.** A class string with `bg-codify-X/N` and the same tone as text
+  uses `text-codify-X-ink`. The bare tone stays for icons, borders and text on a plain surface.
+- **No tint over 40% carries text.** The ink is derived against 40, which is the strongest
+  resting tint; a weaker one is further from the text and so easier. Hover feedback on a tint is
+  `hover:brightness-110`, or a step up to 40 at most.
+- **Status text is never dimmed.** `text-codify-warning/90` composites the tone toward a surface
+  the class string does not name, so no test can measure it, and emphasis comes from size or
+  weight, not from a thinner colour.
+- **Bare tones are measured on every surface.** Each of the seven is a declared pair on `bg`,
+  `surface` and `raised` at 11px, so a theme that picks a tone too dark for `raised` fails.
 
 ### Mode accents — reserved, and each one means one thing
 
@@ -572,7 +601,7 @@ wrong. Three separate ideas were all being drawn as "a coloured pill":
 
 | State | How it is drawn |
 |---|---|
-| **Armed** (a toggle you have switched on) | the tone's `/-20` background, `/-50` border, `-300` text |
+| **Armed** (a toggle you have switched on) | the tone's `/20` background, `/50` border, and the tone's **ink** as text |
 | **Selected** (the current choice in a list) | `accent` tint — one colour, everywhere |
 | **At rest** | `raised` fill, `border` border, `muted` or `secondary` text |
 
@@ -591,21 +620,41 @@ that change.
 
 | Token | Size | Used for |
 |---|---|---|
-| `2xs` | `10px` | badges, timestamps, counts, meta |
-| `xs` | `11px` | dense rows, picker items, toolbars |
-| `sm` | `12px` | chat prose, control labels, the default body |
-| `base` | `13px` | reading copy, paragraph text |
-| `md` | `14px` | section headings, card titles |
-| `lg` | `16px` | panel headings |
-| `xl` | `20px` | the app's one true hero moment, if any |
+| `2xs` | `0.625rem` | 10px: badges, timestamps, counts, meta |
+| `xs` | `0.6875rem` | 11px: dense rows, picker items, toolbars |
+| `sm` | `0.75rem` | 12px: chat prose, control labels, the default body |
+| `base` | `0.8125rem` | 13px: reading copy, paragraph text |
+| `md` | `0.875rem` | 14px: section headings, card titles |
+| `lg` | `1rem` | 16px: panel headings |
+| `xl` | `1.25rem` | 20px: the app's one true hero moment, if any |
 
 Consequences to know before you use these: `text-sm` is **12px**, not Tailwind's
 14px, and `text-xs` is **11px**, not 12px. Anything written expecting the default is
 two steps too large.
 
+**The sizes are rem, and the px in the table is the size at a 16px root.** That is what
+makes the UI scale work: Settings → Appearance (and Ctrl +, Ctrl -, Ctrl 0) sets one
+percentage on `<html>`, and everything written in rem, which is the type ramp, the
+radii, and Tailwind's spacing, grows with it. So **a size is never a `text-[Npx]`**.
+That would be the one run of text that stays small while the window grows around it.
+Line heights are rem for the same reason: text that grew inside a fixed-px line box
+overlaps itself. The default scale is 125%, so the table's `sm` is 15px on screen
+out of the box.
+
 **Code is always `font-mono`, and never scaled below `2xs`.** Diffs, JSON and payloads
 are the payload of this app; they get the monospace stack and their own size, and they
 keep their own colour rather than inheriting a component's.
+
+### Markdown in an answer
+
+An answer is drawn from `ui/src/markdown.ts` by `components/Markdown.tsx` (`docs/09` §10.17), and it
+uses the ramp above rather than adding to it. `#` is `lg`, `##` `md`, `###` `base`, and anything
+deeper `sm`, all `font-semibold`, and drawn two heading levels down (`##` is an `h4`) so an answer
+never outranks the app's own headings. Inline code is mono at `0.9em` on `raised`; a fenced block is a
+`bg` box with a `raised` label bar and a Copy button, scrolling sideways rather than wrapping. A link is
+`info` and underlined, a quote has a `border-strong` rule on its left, and none of it is dimmed: bold is
+weight, not a quieter colour. Every pair is a token the contrast audit already measures; the markdown
+layer introduces no colour of its own.
 
 ## 4. Spacing and radius
 
@@ -616,10 +665,12 @@ same two things, that is a bug.
 
 | Token | Value | Used for |
 |---|---|---|
-| `sm` | `4px` | icon-to-label inside a control |
-| `md` | `6px` | inset rows, nested chips |
-| `lg` | `8px` | **the default control radius** |
-| `xl` | `12px` | cards, the command bar, drawers |
+| `sm` | `0.25rem` | 4px: icon-to-label inside a control |
+| `md` | `0.375rem` | 6px: inset rows, nested chips |
+| `lg` | `0.5rem` | 8px: **the default control radius** |
+| `xl` | `0.75rem` | 12px: cards, the command bar, drawers |
+
+Radii are rem, like the type ramp, so a scaled window keeps its proportions.
 
 `rounded-lg` is the default for anything a pointer lands on; `rounded-full` is for
 circles only (status dots, avatars). Nesting a `lg` inside an `lg` looks wrong — step
@@ -634,9 +685,9 @@ a shortcut.
 | Primitive | Owns |
 |---|---|
 | `Button` | tone, size, icon slot, disabled reasoning, focus ring |
-| `IconButton` | square icon-only control, **must** carry `aria-label` |
+| `IconButton` | square icon-only control, **must** carry `aria-label`; its padding reset is `!p-0`, because `Button`'s own `px-*` outranks a plain `p-0` in the stylesheet and squeezes the icon to a sliver |
 | `Toggle` | the armed/at-rest distinction, and the feature's own armed hue |
-| `Badge` | one of the five status tones, at `2xs` |
+| `Badge` | one of the five status tones, at `2xs`, in the tone's ink; success, warning and danger carry a glyph (`icon={false}` for a count or a tag) |
 | `Panel` | surface, border, heading row, body padding |
 | `Field` | label, control, hint and error, and the spacing between all three |
 

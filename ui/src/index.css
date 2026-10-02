@@ -65,6 +65,24 @@
   --codify-knowledge: #39c5cf;
   --codify-design-rgb: 219 97 162;
   --codify-knowledge-rgb: 57 197 207;
+  /* The inks: each tone moved in lightness until it is readable as text on its own 40% tint
+     (`ui/src/toneInk.ts`). `applyTheme` writes the real ones per theme; these are the default
+     theme's, so a pill is readable before a theme is applied and in a test that never applies
+     one. `ink.test.ts` fails if they drift from what the derivation gives. */
+  --codify-accent-ink: #a3c8fc;
+  --codify-accent-ink-rgb: 163 200 252;
+  --codify-info-ink: #a3c8fc;
+  --codify-info-ink-rgb: 163 200 252;
+  --codify-success-ink: #a2dfab;
+  --codify-success-ink-rgb: 162 223 171;
+  --codify-warning-ink: #eccd8c;
+  --codify-warning-ink-rgb: 236 205 140;
+  --codify-danger-ink: #fcaaa6;
+  --codify-danger-ink-rgb: 252 170 166;
+  --codify-design-ink: #edb0d0;
+  --codify-design-ink-rgb: 237 176 208;
+  --codify-knowledge-ink: #ace7eb;
+  --codify-knowledge-ink-rgb: 172 231 235;
 }
 
 body {
@@ -320,6 +338,15 @@ body {
 .text-codify-warning { color: rgb(var(--codify-warning-rgb) / 1); }
 .text-codify-danger { color: rgb(var(--codify-danger-rgb) / 1); }
 .text-codify-neutral { color: rgb(var(--codify-neutral-rgb) / 1); }
+/* The ink: a tone as readable *text on its own tint*. A pill is `bg-codify-X/40 text-codify-X-ink`;
+   an icon, a border or bare text on a surface keeps `text-codify-X`. */
+.text-codify-accent-ink { color: rgb(var(--codify-accent-ink-rgb) / 1); }
+.text-codify-info-ink { color: rgb(var(--codify-info-ink-rgb) / 1); }
+.text-codify-success-ink { color: rgb(var(--codify-success-ink-rgb) / 1); }
+.text-codify-warning-ink { color: rgb(var(--codify-warning-ink-rgb) / 1); }
+.text-codify-danger-ink { color: rgb(var(--codify-danger-ink-rgb) / 1); }
+.text-codify-design-ink { color: rgb(var(--codify-design-ink-rgb) / 1); }
+.text-codify-knowledge-ink { color: rgb(var(--codify-knowledge-ink-rgb) / 1); }
 .bg-codify-accent { background-color: rgb(var(--codify-accent-rgb) / 1); }
 .bg-codify-info { background-color: rgb(var(--codify-info-rgb) / 1); }
 .bg-codify-success { background-color: rgb(var(--codify-success-rgb) / 1); }
@@ -386,7 +413,6 @@ body {
 .focus\:border-codify-accent.focus\:border-codify-accent:focus { border-color: rgb(var(--codify-accent-rgb) / 1); }
 .group:hover .group-hover\:text-codify-accent.group-hover\:text-codify-accent { color: rgb(var(--codify-accent-rgb) / 1); }
 .hover\:bg-codify-border.hover\:bg-codify-border:hover { background-color: rgb(var(--codify-border-rgb) / 1); }
-.hover\:bg-codify-info\/60.hover\:bg-codify-info\/60:hover { background-color: rgb(var(--codify-info-rgb) / 0.60); }
 .hover\:bg-codify-raised.hover\:bg-codify-raised:hover { background-color: rgb(var(--codify-raised-rgb) / 1); }
 .hover\:bg-codify-raised\/60.hover\:bg-codify-raised\/60:hover { background-color: rgb(var(--codify-raised-rgb) / 0.60); }
 .hover\:bg-codify-surface.hover\:bg-codify-surface:hover { background-color: rgb(var(--codify-surface-rgb) / 1); }
@@ -618,7 +644,7 @@ body {
 .hover\:bg-codify-info\/40.hover\:bg-codify-info\/40:hover { background-color: rgb(var(--codify-info-rgb) / 0.40); }
 .hover\:bg-codify-knowledge\/30.hover\:bg-codify-knowledge\/30:hover { background-color: rgb(var(--codify-knowledge-rgb) / 0.30); }
 .hover\:bg-codify-warning\/30.hover\:bg-codify-warning\/30:hover { background-color: rgb(var(--codify-warning-rgb) / 0.30); }
-.hover\:bg-codify-warning\/50.hover\:bg-codify-warning\/50:hover { background-color: rgb(var(--codify-warning-rgb) / 0.50); }
+.hover\:bg-codify-warning\/40.hover\:bg-codify-warning\/40:hover { background-color: rgb(var(--codify-warning-rgb) / 0.40); }
 .hover\:text-codify-design.hover\:text-codify-design:hover { color: rgb(var(--codify-design-rgb) / 1); }
 .hover\:text-codify-warning.hover\:text-codify-warning:hover { color: rgb(var(--codify-warning-rgb) / 1); }
 .text-codify-design\/80.text-codify-design\/80 { color: rgb(var(--codify-design-rgb) / 0.80); }

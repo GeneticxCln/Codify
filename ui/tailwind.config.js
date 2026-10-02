@@ -83,25 +83,33 @@ export default {
       // CONSEQUENCE, and it surprises people: `text-sm` is 12px here, not Tailwind's
       // 14px, and `text-xs` is 11px, not 12px. Anything written expecting the stock
       // values comes out two steps too large.
+      //
+      // In rem, and that is what makes the UI scale work. The sizes are the ones
+      // above at a 16px root (`0.625rem` is 10px), but they are written against the
+      // root so Settings → Appearance can scale the whole window by changing one
+      // number on `<html>` (`ui/src/uiScale.ts`). In px, a scale would have grown
+      // the icons and padding and left every word the same size. Line heights are
+      // rem for the same reason: text that grew inside a fixed-px line box overlaps.
       fontSize: {
-        "2xs": ["10px", { lineHeight: "14px" }], // badges, timestamps, counts
-        xs: ["11px", { lineHeight: "16px" }],    // dense rows, pickers, toolbars
-        sm: ["12px", { lineHeight: "18px" }],    // chat prose, labels, default body
-        base: ["13px", { lineHeight: "20px" }],  // reading copy
-        md: ["14px", { lineHeight: "21px" }],    // card titles
-        lg: ["16px", { lineHeight: "24px" }],    // panel headings
-        xl: ["20px", { lineHeight: "28px" }],    // the one true hero moment
+        "2xs": ["0.625rem", { lineHeight: "0.875rem" }],  // 10px: badges, timestamps, counts
+        xs: ["0.6875rem", { lineHeight: "1rem" }],        // 11px: dense rows, pickers, toolbars
+        sm: ["0.75rem", { lineHeight: "1.125rem" }],      // 12px: chat prose, labels, default body
+        base: ["0.8125rem", { lineHeight: "1.25rem" }],   // 13px: reading copy
+        md: ["0.875rem", { lineHeight: "1.3125rem" }],    // 14px: card titles
+        lg: ["1rem", { lineHeight: "1.5rem" }],           // 16px: panel headings
+        xl: ["1.25rem", { lineHeight: "1.75rem" }],       // 20px: the one true hero moment
       },
 
       // ── Radius ─────────────────────────────────────────────────────────────
       // `lg` is the default for anything a pointer lands on, which is why it is the
       // value that was already dominant. Nesting a `lg` inside a `lg` looks wrong,
       // so a surface sitting inside a surface of the same kind steps down one level.
+      // rem, like the type ramp, so a scaled window keeps its proportions.
       borderRadius: {
-        sm: "4px",  // icon-to-label inside a control
-        md: "6px",  // inset rows, nested chips
-        lg: "8px",  // the default control radius
-        xl: "12px", // cards, the command bar, drawers
+        sm: "0.25rem",  // 4px: icon-to-label inside a control
+        md: "0.375rem", // 6px: inset rows, nested chips
+        lg: "0.5rem",   // 8px: the default control radius
+        xl: "0.75rem",  // 12px: cards, the command bar, drawers
       },
     },
   },

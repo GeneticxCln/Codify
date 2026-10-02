@@ -13,7 +13,7 @@ Agent configuration is edited only at **Settings → Agents**. Enforced at three
 ```
 ui/src/
   components/
-    SettingsModal.tsx         # the tabs: providers, agent roles, audio, appearance
+    SettingsModal.tsx         # the tabs: providers, agent roles, audio, appearance, about
     SettingsPanel.tsx
     AgentConfigCard.tsx
     ProviderRow.tsx           # one provider: key field, model picker, apply button
@@ -27,11 +27,14 @@ ui/src/
     PromptOverrideEditor.tsx
     ConductorSettingsCard.tsx  # the conductor's own model + budgets, not a role
     AudioPane.tsx              # microphone, dictation, read-aloud — engine settings only
+    UiScalePanel.tsx           # Appearance → UI scale: how big the whole window is
+    AboutPane.tsx              # About: version, engine, data folder, shortcuts — read-only
   providerSetup.ts            # search, apply plan, and the wording beside them
   conductorSettings.ts        # what a conductor pair means, and when to refuse it
   modelMenu.ts                # menu placement, shared by both pickers
   modelFreshness.ts           # which models are new since the last visit
   speech.ts                   # what an answer sounds like, where dictation lands, the one player
+  uiScale.ts                  # the window's size: one percentage on <html>, stored and followed
   hooks/
     useAgentConfigs.ts        # ONLY hook that reads/writes agent config
 ```
@@ -189,7 +192,91 @@ the pane holds no audio state of its own.
   engine ignores an address beside a built-in provider, and a field that does nothing is a trap,
   so it is not shown.
 
-General / Commands / About tabs MAY exist; they MUST NOT call `codify_update_agent_config`.
+### 3.3 UI scale
+
+Settings → Appearance opens with a **UI scale** panel (`UiScalePanel.tsx`): 100, 112.5, 125, 150
+or 175%, **125% by default**. It is client-side display state, like the theme: it is stored in
+`localStorage` under `codify.uiScale`, never sent to the engine, and not agent config.
+
+* **It is a percentage on `<html>`, and everything written in rem follows.** The type ramp, the radii
+  and Tailwind's spacing are rem (`tailwind.config.js`, `DESIGN.md` §3), so text, icons and padding
+  grow together. It is not CSS `zoom` and not the webview's own zoom, because the browser pane's
+  native webview is placed from `getBoundingClientRect()` in logical pixels (docs/09 §7.3), and
+  either of those would make that number disagree with the pixels the shell places it in.
+* **It is applied before the first render** (`startUiScale` in `main.tsx`), so the window never paints
+  at 100% and then jumps. `startUiScale` also follows another window's change (the `storage` event
+  fires only in other windows).
+* **Only the steps are accepted.** A stored value that is not exactly one of them is refused and the
+  default is used, so a hand-edited `3` or `900` cannot produce a window nobody can read or reach
+  this panel in to repair. Steps, not a slider, because layout is only checked at these sizes.
+* **Applied at once, remembered, and the same store as the keyboard.** The preview line in the panel
+  is the window itself at that size. Ctrl +, Ctrl - and Ctrl 0 (docs/09 §8) write the same store, so
+  the panel and the keys cannot disagree.
+* **Layout is checked at these sizes, in the real build.** Rendered in Chromium at 1280×800 and at the
+  900×600 minimum window, at 100, 125 and 175%, with the Stats and History drawers open and the left
+  panel shown and hidden, across the Settings tabs. That found three things a unit test cannot see, all
+  fixed: icon buttons drew their icon at 8px instead of 20px (`IconButton`'s `p-0` was outranked by
+  `Button`'s `px-*`), the Settings tab bar clipped its last tabs and scrolled the whole modal sideways
+  at 175% (it now wraps), and the left panel took nearly half of a 900px window at 175% (it is capped
+  at 35% of the row). At 175% in a 600px-tall window the Settings body is short and scrolls: that is
+  the extreme corner, and 125% is the default.
+* **A drawer and the left panel do not both fit at 125%, so the panel gives way.** Rendering the real
+  build with Stats open found the transcript squeezed to about 400px, a step's status pill broken a
+  letter to a line while its title kept its width, the "TOKEN USAGE" label broken while the totals kept
+  theirs, and the composer's placeholder cut mid-word. The panel now yields to a drawer when the row
+  cannot hold both (`docs/09` §8.1); the step header lets its title shrink and its status not, the usage
+  header wraps its totals under the label, and the placeholder is short with the long sentence in its
+  `title`. `ui/tests/layoutWrapping.test.ts` pins which side may shrink.
+* **Notifications are a third drawer, in the same slot.** A **Notifications** button (a bell, with the
+  unread count as a badge that is absent at zero) sits between Stats and History in the header. The three
+  drawers are one state, so at most one is open and each button is armed only for its own. It is a flex
+  sibling of the centre column and not a popover, for the reason the others are (`docs/09` §8.1: a native
+  browser view paints above any overlay), and it takes the same width as History, so the left panel's
+  yield rule (`ui/src/drawers.ts`) treats it the same. What it collects, and what it refuses to, is
+  `docs/09` §10.18. The button's title does not begin with Browser, Terminal, Keys or Settings, which is
+  how the panel's own buttons are found.
+* **Providers are read by name, not by slug.** The Provider Keys row printed the slug through CSS
+  `capitalize` ("Openai", "Nvidia") and the protocol as the raw tag `openai_compat`, and the provider
+  select printed every slug in capitals. `ui/src/providerLabels.ts` supplies the words (OpenAI,
+  OpenRouter, DeepSeek, NVIDIA, Groq, Google, Anthropic, Ollama; any other slug title-cased) and the
+  protocol's name ("OpenAI-compatible"; the choice list keeps its endpoint). The slug stays the
+  identifier everywhere: it is the name's tooltip and what every request carries. The table is a
+  spelling guide for eight names and is not a catalogue (`docs/06` §1): which providers exist, and every
+  model, still come from the engine and from live discovery.
+* **What does not follow a root font size is handled where it lives.** The xterm terminal draws its own
+  canvas, so `TerminalPane` sets its font size from the scale and re-fits when it changes, and the
+  prompt box's 180px height cap is multiplied by the scale. A new text size is `text-xs` and friends,
+  **never `text-[Npx]`**, which would stay small while the window grew around it.
+
+### 3.4 The About tab
+
+Settings → About (`AboutPane.tsx`, last tab) says what this app is and what it is running on. It is
+**read-only**, so it can never be a second writer of agent config (§1), and it prints only what the app
+can truthfully know:
+
+* **Version.** The desktop shell's own name, version and Tauri version, read through Tauri's app API
+  (`getAppFacts` in `api.ts`; `core:app` is already granted, so no capability of its own). Under the
+  shell, a version that comes back blank or not a string is shown as "unavailable", never as an empty
+  fact. In the standalone browser preview there is no shell, and the pane says so instead of a version.
+* **The engine.** Health (`running`, `not answering`, or `running, but this window's token is stale`),
+  the port the window is connected to, and the existing engine runtime card (§3.0: the interpreter and
+  what it can import). The engine has no version of its own, so none is invented: it ships in the same
+  checkout as the app, and the interpreter line is what tells two installs apart. **The boot token is
+  never shown.**
+* **Where things live.** `~/.codify` (or `$CODIFY_HOME`), as text: no route exposes the data folder, and
+  adding one only to print a path was not worth a new engine contract.
+* **Keyboard shortcuts**, from `SHORTCUT_HELP` in `shortcuts.ts`. Each line carries a real key event
+  that `shortcuts.test.ts` resolves through `resolveShortcut`, and a second assertion pins the set of
+  actions, so a binding that changes, or a shortcut added without a line, fails a test instead of
+  leaving this tab describing keys that no longer do that.
+* **Project facts** (repository, licence, where the specification is) as plain text rather than links:
+  the page is not a browser, and an external link opened from here would be a navigation the app has no
+  reason to offer.
+
+The palette (Ctrl+K) lists it as `About Codify`, and Appearance as `Appearance, themes & UI scale` so
+that searching "scale" finds the UI scale.
+
+General / Commands tabs MAY exist; they MUST NOT call `codify_update_agent_config`.
 
 ## 4. Components
 

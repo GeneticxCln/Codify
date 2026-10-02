@@ -105,8 +105,8 @@ function blockTokens(key: string, value: RegExp, label: string): Map<string, str
 }
 
 const COLOR = /"?([\w-]+)"?\s*:\s*"(#[0-9a-fA-F]{6})"/g;
-const FONT_SIZE = /"?([\w-]+)"?\s*:\s*\["(\d+px)"/g;
-const RADIUS = /"?([\w-]+)"?\s*:\s*"(\d+px)"/g;
+const FONT_SIZE = /"?([\w-]+)"?\s*:\s*\["(\d+(?:\.\d+)?rem)"/g;
+const RADIUS = /"?([\w-]+)"?\s*:\s*"(\d+(?:\.\d+)?rem)"/g;
 
 // The colour sections of DESIGN.md, in the order they appear. All four document
 // names inside the same `codify` colour group, so they are compared as one set.
@@ -196,6 +196,9 @@ test("the CSS custom properties agree with the config too", () => {
   const root = css.slice(css.indexOf(":root"), css.indexOf("}"));
   const declared = new Map<string, string>();
   for (const match of root.matchAll(/--codify-([\w-]+)\s*:\s*(#[0-9a-fA-F]{6})/g)) {
+    // The inks are *derived* from the palette (`ui/src/toneInk.ts`), not palette tokens: the config
+    // has no entry for them by design, and `ink.test.ts` pins these fallbacks to the derivation.
+    if (match[1].endsWith("-ink")) continue;
     declared.set(match[1], match[2]);
   }
   assert.ok(
@@ -234,9 +237,10 @@ test("the type ramp in DESIGN.md is the type ramp in the config", () => {
   assertSameSet(documentedTokens("## 3. Type"), configured, "type step", 7);
   assert.equal(
     configured.get("2xs"),
-    "10px",
-    "`2xs` is the reason this ramp exists at all — a 10px badge is the single most " +
-      "common piece of meta text in this UI, and Tailwind's smallest step is 12px",
+    "0.625rem",
+    "`2xs` is the reason this ramp exists at all — a 10px badge (0.625rem at a 16px " +
+      "root) is the single most common piece of meta text in this UI, and Tailwind's " +
+      "smallest step is 12px",
   );
 });
 

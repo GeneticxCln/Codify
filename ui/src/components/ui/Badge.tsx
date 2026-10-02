@@ -1,4 +1,5 @@
 import React from "react";
+import { AlertTriangle, CheckCircle2, XCircle, type LucideIcon } from "lucide-react";
 
 /**
  * A status pill: one of the five tones, at `2xs`.
@@ -26,10 +27,10 @@ const TONES: Record<BadgeTone, string> = {
   // says what, the shape says "this is a state". `neutral` is the resting surface
   // rather than a hue, because idle is "nothing to report", not a colour.
   neutral: "bg-codify-raised text-codify-muted border-codify-border",
-  info: "bg-codify-info/40 text-codify-info border-codify-info",
-  success: "bg-codify-success/40 text-codify-success border-codify-success",
-  warning: "bg-codify-warning/40 text-codify-warning border-codify-warning",
-  danger: "bg-codify-danger/40 text-codify-danger border-codify-danger",
+  info: "bg-codify-info/40 text-codify-info-ink border-codify-info",
+  success: "bg-codify-success/40 text-codify-success-ink border-codify-success",
+  warning: "bg-codify-warning/40 text-codify-warning-ink border-codify-warning",
+  danger: "bg-codify-danger/40 text-codify-danger-ink border-codify-danger",
 };
 
 /*
@@ -53,6 +54,21 @@ export function toneText(tone: BadgeTone): string {
   return TONE_TEXT[tone];
 }
 
+/**
+ * The shape that says what colour says, for the three tones where "which one" matters most.
+ *
+ * Failed, warning and done must not be told apart by colour alone: roughly one man in twelve cannot
+ * separate the red from the green, and in a monochrome theme (ASCII Rain) *nobody* can, because
+ * severity there is brightness. So each of the three carries a glyph beside its word. `info` and
+ * `neutral` are not severities and have none. The icon is decoration for the word next to it, so it
+ * is `aria-hidden` and adds no text: a screen reader reads "failed", not "failed, cross icon".
+ */
+const TONE_ICON: Partial<Record<BadgeTone, LucideIcon>> = {
+  success: CheckCircle2,
+  warning: AlertTriangle,
+  danger: XCircle,
+};
+
 export interface BadgeProps {
   tone?: BadgeTone;
   className?: string;
@@ -63,6 +79,8 @@ export interface BadgeProps {
    * that had to hand-roll a `<span>` to get one was a caller without a primitive.
    */
   title?: string;
+  /** Show the tone's glyph (success, warning, danger only). On by default; a pill that is a count or a tag turns it off. */
+  icon?: boolean;
   children: React.ReactNode;
 }
 
@@ -70,17 +88,22 @@ export const Badge: React.FC<BadgeProps> = ({
   tone = "neutral",
   className = "",
   title,
+  icon = true,
   children,
-}) => (
-  <span
-    title={title}
-    className={
-      "inline-flex items-center rounded-full border font-mono text-2xs px-1.5 " +
-      "py-0.5 font-medium leading-none shrink-0 " +
-      TONES[tone] +
-      (className ? " " + className : "")
-    }
-  >
-    {children}
-  </span>
-);
+}) => {
+  const Icon = icon ? TONE_ICON[tone] : undefined;
+  return (
+    <span
+      title={title}
+      className={
+        "inline-flex items-center rounded-full border font-mono text-2xs px-1.5 " +
+        "py-0.5 font-medium leading-none shrink-0 " +
+        TONES[tone] +
+        (className ? " " + className : "")
+      }
+    >
+      {Icon ? <Icon aria-hidden="true" className="mr-1 h-2.5 w-2.5 shrink-0" /> : null}
+      {children}
+    </span>
+  );
+};

@@ -13,6 +13,7 @@ import { fetchModelCatalog, fetchProviderKeys, saveProviderKey } from "../api";
 import { SettingsPanel } from "./SettingsPanel";
 import { AppearancePane } from "./AppearancePane";
 import { AudioPane } from "./AudioPane";
+import { AboutPane } from "./AboutPane";
 import { ProviderRow } from "./ProviderRow";
 import { useAgentConfigs } from "../hooks/useAgentConfigs";
 import { checkedLabel, discoveredFooter, needsOwnRefresh } from "../providerSetup";
@@ -23,7 +24,7 @@ import {
   saveSeen,
   type SeenIndex,
 } from "../modelFreshness";
-import { X, Key, Sliders, HardDrive, Lock, AlertCircle, RefreshCw, Palette, Mic } from "lucide-react";
+import { X, Key, Sliders, HardDrive, Lock, AlertCircle, RefreshCw, Palette, Mic, Info } from "lucide-react";
 
 /**
  * How often the panel re-asks while it is open, and how long after a check a
@@ -378,7 +379,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Header */}
         <div className="flex items-start justify-between border-b border-codify-border px-6 py-4 flex-shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-codify-info/20 border border-codify-info/30 flex items-center justify-center text-codify-info">
+            <div className="w-9 h-9 rounded-xl bg-codify-info/20 border border-codify-info/30 flex items-center justify-center text-codify-info-ink">
               <Key className="w-4 h-4" />
             </div>
             <div>
@@ -390,9 +391,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     : "Every keyed provider has a credential. Models are discovered live from each provider."
                   : tab === "appearance"
                     ? "Themes swap the app's surface and text colours at runtime — no restart, no rebuild."
-                    : tab === "audio"
-                      ? "The microphone, dictation into the prompt, and answers read aloud — through the speech providers you choose."
-                      : "Each role's model, endpoint, temperature, and prompt. Roles run in the order of the pipeline."}
+                    : tab === "about"
+                      ? "What this app is, what it is running on, and the keyboard shortcuts."
+                      : tab === "audio"
+                        ? "The microphone, dictation into the prompt, and answers read aloud — through the speech providers you choose."
+                        : "Each role's model, endpoint, temperature, and prompt. Roles run in the order of the pipeline."}
               </p>
             </div>
           </div>
@@ -407,11 +410,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Tab bar */}
-        <div className="flex items-center gap-1 px-6 pt-3 flex-shrink-0">
+        {/* `flex-wrap`: five tabs are wider than a 900px window once the UI is scaled to 175%, and a
+            fixed row clipped the last ones and let the browser scroll the whole modal sideways to
+            reach them. Wrapped, every tab is always on screen. */}
+        <div className="flex flex-wrap items-center gap-1 px-6 pt-3 flex-shrink-0">
           <button
             type="button"
             onClick={() => setTab("keys")}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "keys"
                 ? "bg-codify-raised text-codify-primary border border-codify-border"
                 : "text-codify-muted hover:text-codify-secondary"
@@ -419,7 +425,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <Key className="w-3.5 h-3.5" /> Provider Keys
             {needsKeyCount > 0 && (
-              <span className="ml-0.5 text-2xs px-1.5 rounded-full bg-codify-warning/40 border border-codify-warning/60 text-codify-warning">
+              <span className="ml-0.5 text-2xs px-1.5 rounded-full bg-codify-warning/40 border border-codify-warning/60 text-codify-warning-ink">
                 {needsKeyCount}
               </span>
             )}
@@ -427,7 +433,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={() => setTab("agents")}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "agents"
                 ? "bg-codify-raised text-codify-primary border border-codify-border"
                 : "text-codify-muted hover:text-codify-secondary"
@@ -438,7 +444,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={() => setTab("audio")}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "audio"
                 ? "bg-codify-raised text-codify-primary border border-codify-border"
                 : "text-codify-muted hover:text-codify-secondary"
@@ -449,13 +455,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={() => setTab("appearance")}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
               tab === "appearance"
                 ? "bg-codify-raised text-codify-primary border border-codify-border"
                 : "text-codify-muted hover:text-codify-secondary"
             }`}
           >
             <Palette className="w-3.5 h-3.5" /> Appearance
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("about")}
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+              tab === "about"
+                ? "bg-codify-raised text-codify-primary border border-codify-border"
+                : "text-codify-muted hover:text-codify-secondary"
+            }`}
+          >
+            <Info className="w-3.5 h-3.5" /> About
           </button>
         </div>
 
@@ -464,13 +481,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {tab === "keys" && (
             <div className="space-y-4">
               {error && (
-                <div className="flex items-start gap-2 p-3 bg-codify-danger/20 border border-codify-danger/60 rounded-xl text-xs text-codify-danger">
+                <div className="flex items-start gap-2 p-3 bg-codify-danger/20 border border-codify-danger/60 rounded-xl text-xs text-codify-danger-ink">
                   <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <span>{error}</span>
                 </div>
               )}
               {catalogError && (
-                <div className="flex items-start gap-2 p-3 bg-codify-warning/20 border border-codify-warning/60 rounded-xl text-xs text-codify-warning">
+                <div className="flex items-start gap-2 p-3 bg-codify-warning/20 border border-codify-warning/60 rounded-xl text-xs text-codify-warning-ink">
                   <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <span>{catalogError}</span>
                 </div>
@@ -573,6 +590,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           )}
 
           {tab === "appearance" && <AppearancePane />}
+
+          {tab === "about" && <AboutPane />}
         </div>
 
         {/* Footer */}
@@ -585,7 +604,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {checked && (
               <span
                 className={
-                  checking === "auto" ? "text-codify-info/90 flex items-center gap-1" : undefined
+                  checking === "auto" ? "text-codify-info flex items-center gap-1" : undefined
                 }
                 title={
                   checking === "auto"
@@ -597,7 +616,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </span>
             )}
             {catalogError && (
-              <span className="text-codify-warning/90" title={catalogError}>
+              <span className="text-codify-warning" title={catalogError}>
                 — last check failed
               </span>
             )}

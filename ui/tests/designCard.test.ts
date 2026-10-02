@@ -115,7 +115,9 @@ const renderBare = (p: Record<string, any> = CONTRACT): string =>
  * substring of the styling.
  */
 const pinButton = (markup: string): string => {
-  const open = /<button\b[^>]*>/.exec(markup);
+  // The pin is found by what it says, not by being the first button: the body has a Rendered/Source
+  // toggle of its own, and a position-based match would take that for the pin.
+  const open = /<button\b[^>]*>(?=(?:(?!<\/button>)[\s\S])*Pin as brand contract)/.exec(markup);
   return open ? open[0] : "";
 };
 

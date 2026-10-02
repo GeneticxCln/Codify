@@ -36,6 +36,8 @@
  */
 
 /** Where the per-provider baseline lives. Namespaced with the other UI keys. */
+import { providerLabel } from "./providerLabels.ts";
+
 export const SEEN_KEY = "CODIFY_SEEN_MODELS";
 
 /**
@@ -200,9 +202,10 @@ export function newCountTitle(provider: string, count: number): string {
   // re-discovers on its own (docs/06 §6), so a release can land while the reader
   // is looking straight at it, and "the last time you were here" would then be
   // false in the only sense the reader can check.
+  const name = providerLabel(provider) || provider;
   return count === 1
-    ? `1 model ${provider} did not list when you last looked`
-    : `${count} models ${provider} did not list when you last looked`;
+    ? `1 model ${name} did not list when you last looked`
+    : `${count} models ${name} did not list when you last looked`;
 }
 
 // ── the browser's own store ────────────────────────────────────────────────

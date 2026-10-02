@@ -300,7 +300,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <nav
-      className="flex flex-col gap-1.5 w-60 flex-shrink-0 border-r border-codify-border bg-codify-chrome p-1.5"
+      // `max-w-[35%]`: 15rem is the panel's width, and rem grows with the UI scale. At 175% that is 420px,
+      // nearly half of a 900px window, so the panel gives way before the transcript does. Hiding it
+      // entirely is the header's toggle.
+      className="flex flex-col gap-1.5 w-60 max-w-[35%] flex-shrink-0 border-r border-codify-border bg-codify-chrome p-1.5"
       onContextMenu={onPanelContextMenu}
     >
       {/* One button, and it adds a *project*.

@@ -7,6 +7,7 @@ import {
   type PinReadiness,
 } from "../designDeliverable";
 import type { Goal } from "../types";
+import { DeliverableText } from "./DeliverableText";
 
 /** The outcome of the last pin attempt, per goal card. */
 export interface PinOutcome {
@@ -40,7 +41,7 @@ const DesignDeliverablePin: React.FC<{
 }> = ({ goal, path, readiness, outcome, onPin }) => (
   <div className="flex items-center gap-2 flex-wrap">
     {readiness.pinned ? (
-      <span className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-codify-design/10 border border-codify-design/30 text-codify-design/90 text-xs">
+      <span className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-codify-design/10 border border-codify-design/30 text-codify-design-ink text-xs">
         <Check className="w-3 h-3" />
         {path} is this workspace’s brand contract
       </span>
@@ -49,7 +50,7 @@ const DesignDeliverablePin: React.FC<{
         type="button"
         disabled={!readiness.ready}
         onClick={() => void onPin(goal.id, goal.workspace_id, path)}
-        className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-codify-design/20 border border-codify-design/50 text-codify-design hover:bg-codify-design/30 text-xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-codify-design/20"
+        className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-codify-design/20 border border-codify-design/50 text-codify-design-ink hover:bg-codify-design/30 text-xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-codify-design/20"
       >
         <Pin className="w-3 h-3" />
         Pin as brand contract
@@ -87,14 +88,13 @@ const DeliverableBody: React.FC<{
   path: string;
   body: string;
   label: string;
-}> = ({ path, body, label }) => (
+  onOpenLink?: (url: string) => void;
+}> = ({ path, body, label, onOpenLink }) => (
   <details className="text-xs text-codify-muted">
     <summary className="cursor-pointer text-codify-muted">
       {path} ({body.length} chars) — {label}
     </summary>
-    <pre className="mt-1.5 p-2 rounded bg-codify-surface border border-codify-raised text-2xs text-codify-secondary whitespace-pre-wrap max-h-64 overflow-auto">
-      {body}
-    </pre>
+    <DeliverableText body={body} boxClassName="max-h-64" onOpenLink={onOpenLink} />
   </details>
 );
 
@@ -121,7 +121,9 @@ export const DesignDeliverableCard: React.FC<{
   /** The file this workspace already obeys, keyed by the goal's workspace. */
   pinnedPath?: string;
   onPin: (goalId: string, workspaceId: string, path: string) => Promise<void>;
-}> = ({ payload, goal, pinOutcome, pinnedPath, onPin }) => {
+  /** A link in the body was clicked: open it in a browser tab. */
+  onOpenLink?: (url: string) => void;
+}> = ({ payload, goal, pinOutcome, pinnedPath, onPin, onOpenLink }) => {
   // A design-mode goal's contract is the artifact itself, not the direction a
   // step is written against: the difference between input and deliverable, so it
   // is named.
@@ -156,7 +158,7 @@ export const DesignDeliverableCard: React.FC<{
           instruction, a discovery is a convention the engine noticed, and a
           proposal exists because there was nothing to obey. */}
           {payload.design_system.origin === "pinned" ? (
-            <span className="text-codify-design/90">
+            <span className="text-codify-design">
               {" "}
               — pinned at {payload.design_system.source}
             </span>
@@ -209,7 +211,7 @@ export const DesignDeliverableCard: React.FC<{
           {payload.components.map(
             (c: { name: string; purpose?: string }, i: number) => (
               <div key={i} className="text-xs flex items-start gap-1.5">
-                <span className="font-mono text-codify-design/90">{c.name}</span>
+                <span className="font-mono text-codify-design">{c.name}</span>
                 {c.purpose && <span className="text-codify-muted">— {c.purpose}</span>}
               </div>
             )
@@ -222,7 +224,7 @@ export const DesignDeliverableCard: React.FC<{
         </div>
       )}
       {(payload.constraints?.length ?? 0) > 0 && (
-        <div className="text-xs text-codify-warning/90">
+        <div className="text-xs text-codify-warning">
           constraints: {payload.constraints.join("; ")}
         </div>
       )}
@@ -242,6 +244,7 @@ export const DesignDeliverableCard: React.FC<{
             path={path}
             body={payload.design_md}
             label={readiness.bodyLabel}
+            onOpenLink={onOpenLink}
           />
         </div>
       )}

@@ -197,6 +197,13 @@ keys selections on the `(provider, id)` pair.
     diff: silence about *changes* and a report of the *check* are different jobs.
   * **A reconnect re-reads.** The engine only announces to current subscribers and does not replay, so
     a release that landed while the socket was down is one nobody would otherwise ever hear about.
+  * **The diff is also recorded, because the badge cannot say a model went away.** The frame used to be
+    used only as a signal to re-read, and its payload thrown away. It is now also counted per provider and
+    kept as a notification (`ui/src/notifications.ts`, docs/09 §10.18): "Groq +1 · NVIDIA +3 −1". The
+    "new" badge above never shows removals, so this is the one place that says a model was retired. It
+    does not duplicate the baseline: `CODIFY_SEEN_MODELS` decides what is *new* to the reader, and this
+    reports what *changed*. A frame with empty lists, a `model_catalog_checked`, and a payload this build
+    cannot read are not announced.
 
 ## 7. Stale role models are warned about, not just stored
 

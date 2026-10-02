@@ -37,7 +37,10 @@ const canvases = (html: string): number => (html.match(/<canvas/g) ?? []).length
 
 test("every theme is a row, so the last one is not two scrolls down a modal", () => {
   const out = markup();
-  const radios = out.match(/role="radio"/g) ?? [];
+  // The theme list only: the UI scale panel above it is a radiogroup too, and its five sizes are not themes.
+  const themeList = out.slice(out.indexOf('aria-label="Theme"'));
+  assert.ok(out.includes('aria-label="Theme"'), "the theme radiogroup is gone");
+  const radios = themeList.match(/role="radio"/g) ?? [];
   assert.equal(
     radios.length,
     THEMES.length,

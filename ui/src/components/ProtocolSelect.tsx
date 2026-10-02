@@ -1,5 +1,6 @@
 import React from "react";
 import type { ProviderProtocol } from "../types.ts";
+import { PROTOCOL_LABELS } from "../providerLabels.ts";
 
 interface ProtocolSelectProps {
   value: ProviderProtocol;
@@ -17,10 +18,11 @@ export const ProtocolSelect: React.FC<ProtocolSelectProps> = ({ value, onChange 
         onChange={(e) => onChange(e.target.value as ProviderProtocol)}
         className="bg-codify-bg border border-codify-border rounded px-3 py-2 text-sm text-codify-secondary focus:outline-none focus:border-codify-accent"
       >
-        <option value="openai_compat">OpenAI Compatible (chat/completions)</option>
-        <option value="anthropic">Anthropic (v1/messages)</option>
-        <option value="ollama">Ollama (api/generate)</option>
-        <option value="google">Google Gemini (v1beta)</option>
+        {(Object.keys(PROTOCOL_LABELS) as ProviderProtocol[]).map((p) => (
+          <option key={p} value={p}>
+            {PROTOCOL_LABELS[p].long}
+          </option>
+        ))}
       </select>
     </div>
   );

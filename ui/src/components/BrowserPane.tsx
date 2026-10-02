@@ -224,7 +224,7 @@ export const BrowserPane: React.FC<BrowserPaneProps> = ({
       {problem && (
         <div
           role="alert"
-          className="mx-3 mt-2 p-2 rounded-lg text-xs bg-codify-danger/20 border border-codify-danger/60 text-codify-danger"
+          className="mx-3 mt-2 p-2 rounded-lg text-xs bg-codify-danger/20 border border-codify-danger/60 text-codify-danger-ink"
         >
           {problem}
         </div>

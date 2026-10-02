@@ -34,6 +34,7 @@ import type { ModelOption } from "../types";
 import { MENU_EDGE, MenuPlacement, menuPlacement } from "../modelMenu";
 import { countLabel, searchModels } from "../providerSetup";
 import { newFirst } from "../modelFreshness";
+import { providerLabel } from "../providerLabels";
 
 export interface ModelPickerProps {
   provider: string;
@@ -168,10 +169,12 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
     close();
   };
 
+  // How a person reads the provider, not its slug (`providerLabels.ts`).
+  const name = providerLabel(provider) || provider;
   const emptyMessage = discoveryError
-    ? `Could not reach ${provider} — ${discoveryError}`
+    ? `Could not reach ${name} — ${discoveryError}`
     : options.length === 0
-      ? `${provider} reported no models. Type an id and press Enter if you know it.`
+      ? `${name} reported no models. Type an id and press Enter if you know it.`
       : `Nothing matches “${query.trim()}”. Every discovered model is listed — clear the search to see them.`;
 
   const menu = placement && (
@@ -198,7 +201,7 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search models"
-          aria-label={`Search ${provider} models`}
+          aria-label={`Search ${name} models`}
           className="flex-1 min-w-0 bg-transparent text-xs text-codify-secondary placeholder-codify-muted focus:outline-none"
         />
         {onRefresh && (
@@ -206,7 +209,7 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
             type="button"
             onClick={onRefresh}
             disabled={refreshing}
-            title={`Ask ${provider} what it serves right now`}
+            title={`Ask ${name} what it serves right now`}
             className="flex items-center gap-1 text-2xs text-codify-muted hover:text-codify-secondary disabled:opacity-50 cursor-pointer flex-shrink-0"
           >
             <RefreshCw className={refreshing ? "w-2.5 h-2.5 animate-spin" : "w-2.5 h-2.5"} />
@@ -240,7 +243,7 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
               className={
                 "w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-xs transition-colors cursor-pointer " +
                 (m.id === value
-                  ? "bg-codify-info/20 text-codify-info font-medium"
+                  ? "bg-codify-info/20 text-codify-info-ink font-medium"
                   : "text-codify-secondary hover:bg-codify-raised")
               }
             >
@@ -248,13 +251,13 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
               {isNew.has(m.id) && (
                 <span
                   title="Not on this provider when you last looked"
-                  className="text-2xs font-medium text-codify-design bg-codify-design/20 border border-codify-design/60 px-1.5 py-px rounded-full flex-shrink-0"
+                  className="text-2xs font-medium text-codify-design-ink bg-codify-design/20 border border-codify-design/60 px-1.5 py-px rounded-full flex-shrink-0"
                 >
                   new
                 </span>
               )}
               {m.supports_chat === false && (
-                <span className="text-2xs text-codify-warning/80 flex-shrink-0">not chat</span>
+                <span className="text-2xs text-codify-warning flex-shrink-0">not chat</span>
               )}
               {m.id === value && <Check className="w-3 h-3 text-codify-info flex-shrink-0" />}
             </button>
@@ -288,14 +291,14 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
         />
         <button
           type="button"
-          aria-label={`Browse ${provider} models`}
+          aria-label={`Browse ${name} models`}
           aria-expanded={open}
           disabled={disabled}
           onClick={() => (open ? close() : setOpen(true))}
           title={
             options.length === 0
-              ? `${provider} has not reported any models`
-              : `Browse ${options.length} ${provider} models`
+              ? `${name} has not reported any models`
+              : `Browse ${options.length} ${name} models`
           }
           className="flex items-center gap-1 px-2.5 py-1.5 bg-codify-raised border border-l-0 border-codify-border rounded-r-lg text-codify-secondary hover:bg-codify-border transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed flex-shrink-0"
         >

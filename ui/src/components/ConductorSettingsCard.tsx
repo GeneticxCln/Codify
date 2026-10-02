@@ -252,7 +252,7 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
 
   if (stored === null) {
     return loadError ? (
-      <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
+      <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
         <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
         <span className="leading-relaxed">Conductor settings unavailable — {loadError}</span>
       </div>
@@ -425,7 +425,7 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
         {status.text}
       </p>
       {stale && (
-        <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
+        <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             {stale.provider} no longer reports <span className="font-mono">{stale.model}</span> (
@@ -493,7 +493,7 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
           {fallbackStatus.text}
         </p>
         {staleFallback && (
-          <div className="flex items-start gap-2 text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
+          <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
             <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
             <span className="leading-relaxed">
               {staleFallback.provider} no longer reports{" "}

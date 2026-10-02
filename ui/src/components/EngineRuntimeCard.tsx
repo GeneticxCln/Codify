@@ -93,7 +93,7 @@ export const EngineRuntimeCard: React.FC = () => {
       {warnings.map((warning) => (
         <p
           key={warning}
-          className="text-xs text-codify-warning bg-codify-warning/20 border border-codify-warning/60 rounded p-2"
+          className="text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded p-2"
         >
           {warning}
         </p>

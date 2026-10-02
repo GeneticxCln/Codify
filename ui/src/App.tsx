@@ -153,6 +153,13 @@ import { SettingsModal } from "./components/SettingsModal";
 import { CommandPalette } from "./components/CommandPalette";
 import { buildPaletteItems, type PaletteItem } from "./commandPalette";
 import { resolveShortcut } from "./shortcuts";
+import { currentUiScale, DEFAULT_UI_SCALE, stepUiScale, writeUiScale } from "./uiScale";
+import { readSidebarOpen, writeSidebarOpen } from "./sidebarPref";
+import { closeDrawer, nextDrawer, type Drawer } from "./drawers";
+import { useSidebarYield } from "./useSidebarYield";
+import { useEngineNotices, useNotifications } from "./useNotifications";
+import { catalogNotification, goalNotification, planNotification, type AppNotification } from "./notifications";
+import { NotificationsDrawer } from "./components/NotificationsDrawer";
 import {
   BROWSER_PAGE_LOADED,
   BROWSER_PAGE_LOADING,
@@ -195,6 +202,9 @@ import {
   X,
   RefreshCw,
   ScrollText,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Bell,
 } from "lucide-react";
 import { notableStderrLines } from "./engineLog";
 import { RainBackdrop } from "./components/ui/RainBackdrop";
@@ -249,6 +259,9 @@ export const App: React.FC = () => {
   const [agentConfigs, setAgentConfigs] = useState<AgentConfig[]>([]);
   const [recentRuns, setRecentRuns] = useState<RecentRunModel[]>([]);
   const [mode, setMode] = useState<ExecutionMode>("direct");
+  // The stream callbacks below outlive a render, so what they ask about the composer's mode is read here.
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
   // What the goal is for, orthogonal to how it executes: a design deliverable
   // drafts or revises the workspace's own brand contract.
   const [goalMode, setGoalMode] = useState<GoalMode>("normal");
@@ -461,6 +474,11 @@ export const App: React.FC = () => {
     setIsSettingsOpen(true);
   };
   const [error, setError] = useState<string | null>(null);
+  // What happened while the person was looking elsewhere: goals this window watched ending, plans waiting
+  // for approval, engine connection changes and model list changes. Client-side and in-app only
+  // (`notifications.ts` says what is in it and what is not).
+  const inbox = useNotifications();
+  const notify = inbox.notify;
   const [engineUp, setEngineUp] = useState<boolean | null>(null); // null = checking
   // The motion store, as React state so a change re-renders the tree and every
   // backdrop's effect re-reads it on the way past (the loops read the store at
@@ -498,6 +516,11 @@ export const App: React.FC = () => {
   const [authOk, setAuthOk] = useState<boolean | null>(null);
   /** The connection, as one word: the pill's label, hint and colours all key off it. */
   const engineConnection = engineState(engineUp, authOk);
+  // The outage's own words, for the notice: the last line the engine said on its way out. A ref, because
+  // the notice fires on a timer and must read what is known *then*, not when the effect was set up.
+  const engineStderrRef = useRef<string[]>([]);
+  engineStderrRef.current = engineStderr;
+  useEngineNotices(engineConnection, notify, () => engineStderrRef.current[engineStderrRef.current.length - 1]);
 
   // Live goal streams (one per goal, with reconnect backoff).
   const goalStreams = useRef<Record<string, GoalStreamHandle>>({});
@@ -778,7 +801,11 @@ export const App: React.FC = () => {
   useEffect(() => {
     const everConnected = { current: false };
     const handle = openEngineStream({
-      onFrame: () => {
+      onFrame: (frame) => {
+        // The frame carries the diff, and until the notifications existed it was thrown away. Counted
+        // here, per provider, so the one place that says a model went *away* is the inbox: the "new"
+        // badge on a provider row never shows removals.
+        if (frame.type === "model_catalog_changed") notify(catalogNotification(frame.payload, Date.now()));
         setCatalogTick((n) => n + 1);
         void loadModels(false);
       },
@@ -802,7 +829,7 @@ export const App: React.FC = () => {
       handle.close();
       setCatalogLive(false);
     };
-  }, [loadModels]);
+  }, [loadModels, notify]);
 
   // Whether the "enter a folder path" dialog is open. Owned here rather than by the command bar so a
   // picker that cannot open can open it: on a desktop with no dialog helper the folder button never
@@ -878,6 +905,36 @@ export const App: React.FC = () => {
   // second is asked on the *kind*, not on the presence of a `url`, so a terminal
   // tab can never be mistaken for a browser tab by sharing a field.
   const activeTabNow = activeTab(tabState);
+  const activeTabKind = activeTabNow?.kind;
+  // Whether the left panel is showing. View state, remembered across restarts (`sidebarPref.ts`), and
+  // the panel is *unmounted* when hidden rather than collapsed: it keeps no state of its own worth
+  // keeping (its right-click menu is transient), and it must leave the layout entirely so the centre
+  // column, and a browser pane's native webview inside it, really get the room.
+  const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
+  useEffect(() => {
+    writeSidebarOpen(sidebarOpen);
+  }, [sidebarOpen]);
+  // The right-hand drawer that is open, if any. One state, not a boolean each: they cannot both be open,
+  // and "which one" is what the layout rule below needs to know (`drawers.ts`).
+  const [drawer, setDrawer] = useState<Drawer | null>(null);
+  const statsOpen = drawer === "stats";
+  const historyOpen = drawer === "history";
+  const notificationsOpen = drawer === "notifications";
+  // The left panel gives way while a drawer is open and the window cannot hold both. Derived, never
+  // stored: `codify.sidebar` is written only by the person's own press of the toggle, so closing the
+  // drawer brings the panel back as it was (`docs/09` §8.1).
+  const mainRef = useRef<HTMLElement>(null);
+  const sidebarYielded = useSidebarYield(mainRef, drawer);
+  const sidebarShown = sidebarOpen && !sidebarYielded;
+  // Pressing the toggle while the panel is out of the way because of a drawer means "show it", and the
+  // two do not fit, so the drawer is what closes. Otherwise it flips the person's own choice.
+  const toggleSidebar = useCallback(() => {
+    if (sidebarOpen && sidebarYielded) {
+      setDrawer(null);
+      return;
+    }
+    setSidebarOpen((open) => !open);
+  }, [sidebarOpen, sidebarYielded]);
   const activeConversationId = activeTabNow?.conversationId;
   const activeBrowserTab =
     activeTabNow?.kind === "browser" ? activeTabNow : undefined;
@@ -1847,6 +1904,21 @@ export const App: React.FC = () => {
     setTabState((prev) => openTab(prev, { id, kind: "browser", title: "New tab" }));
   }, []);
 
+  // Open an address in a new browser tab: the one place a web page is opened from the app's own
+  // content. A popup a page asked for and a link the user clicked in an answer are the same request
+  // (an address, a new tab, the guarded path), so they share this; `classifyBrowserAddress` and the
+  // shell's `navigation_allowed` decide, as they do for a typed address.
+  const handleOpenLink = useCallback(
+    (url: string) => {
+      const id = tabId("browser");
+      setTabState((prev) =>
+        openTab(prev, { id, kind: "browser", title: hostOf(url), workspaceId: selectedWs?.id }),
+      );
+      void handleOpenBrowser(id, url);
+    },
+    [handleOpenBrowser, selectedWs?.id],
+  );
+
   // A page can still ask the shell for something — a popup window. The shell
   // refuses it (`window.open` returns null to the page, the same answer a
   // popup blocker gives) and announces the target instead, so the *user*
@@ -1863,16 +1935,7 @@ export const App: React.FC = () => {
     void listenShellEvent<unknown>(BROWSER_POPUP_REQUESTED, (payload) => {
       const popup = readBrowserPopupRequested(payload);
       if (!popup) return;
-      const id = tabId("browser");
-      setTabState((prev) =>
-        openTab(prev, {
-          id,
-          kind: "browser",
-          title: hostOf(popup.url),
-          workspaceId: selectedWs?.id,
-        }),
-      );
-      void handleOpenBrowser(id, popup.url);
+      handleOpenLink(popup.url);
     })
       .then((off) => {
         // The unlisten can land after unmount — StrictMode mounts, unmounts
@@ -1896,7 +1959,7 @@ export const App: React.FC = () => {
       cancelled = true;
       unlisten?.();
     };
-  }, [handleOpenBrowser, selectedWs?.id]);
+  }, [handleOpenLink]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1927,6 +1990,24 @@ export const App: React.FC = () => {
         case "toggle-palette":
           setPaletteOpen((v) => !v);
           break;
+        // Ctrl+B is also tmux's prefix and readline's back-a-character, so with a terminal in front
+        // it is the shell's, not ours: the key goes through untouched (no `preventDefault` below),
+        // and the header button still reaches the panel.
+        case "toggle-sidebar":
+          if (activeTabKind === "terminal") return;
+          toggleSidebar();
+          break;
+        // The window's size, as a browser's zoom: a step each way and back to the default. The
+        // store decides the size and tells every listener (the root, the terminal, Settings).
+        case "scale-up":
+          writeUiScale(stepUiScale(currentUiScale(), 1));
+          break;
+        case "scale-down":
+          writeUiScale(stepUiScale(currentUiScale(), -1));
+          break;
+        case "scale-reset":
+          writeUiScale(DEFAULT_UI_SCALE);
+          break;
       }
       // Claimed keystrokes are consumed: no browser default, no second
       // meaning for whatever held focus.
@@ -1934,7 +2015,7 @@ export const App: React.FC = () => {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [handleNewTab, handleCloseTab, tabState.activeId]);
+  }, [handleNewTab, handleCloseTab, tabState.activeId, activeTabKind, toggleSidebar]);
 
   /** Palette pick. The item carries data; this switch is the whole act. */
   const handlePaletteSelect = (item: PaletteItem) => {
@@ -2045,6 +2126,11 @@ export const App: React.FC = () => {
                   msg.id === messageId ? { ...msg, goal: refreshed } : msg,
                 ),
               );
+              // A plan that has come back and will *wait* for the person is news; one that starts itself
+              // (Direct Apply) is not. Only on a goal_status event: a step or plan edit is the person's own.
+              if (ev.type === "goal_status") {
+                notify(planNotification(refreshed, modeRef.current, Date.now()));
+              }
             })
             .catch((err: any) => {
               setError(readRejection(err, "Failed to refresh goal"));
@@ -2089,6 +2175,11 @@ export const App: React.FC = () => {
                     : msg,
                 ),
               );
+              // This stream ended because the goal did, and a stream exists only for a goal this window
+              // watched in flight: opening a thread or restoring History never opens one for a goal that
+              // had already finished. That *is* the watched-only rule, and it needs no bookkeeping of its
+              // own. A cancel is the person's own act and `goalNotification` stays silent for it.
+              notify(goalNotification(refreshed, Date.now()));
             })
             .catch((err: any) => {
               setError(readRejection(err, "Failed to refresh goal"));
@@ -2096,7 +2187,7 @@ export const App: React.FC = () => {
         },
       });
     },
-    [],
+    [notify],
   );
 
   // Goal history: every goal the engine has persisted for the selected
@@ -2104,13 +2195,10 @@ export const App: React.FC = () => {
   // read that was missing, and the restore path below is what makes them more
   // than rows in a database nobody sees after a restart.
   const [history, setHistory] = useState<Goal[]>([]);
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [restoring, setRestoring] = useState(false);
-  // Cross-goal statistics drawer. Mirrors the history drawer; the two are
-  // mutually exclusive — both overlay the transcript's right edge, and two
-  // overlapping overlays is a z-index fight, not a feature.
-  const [statsOpen, setStatsOpen] = useState(false);
+  // The cross-goal statistics drawer and this one are mutually exclusive, which is what `drawer` (above)
+  // is: both sit at the transcript's right edge, and two of them is a squeeze, not a feature.
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -2218,7 +2306,7 @@ export const App: React.FC = () => {
             openConversation(prev, thread, goal.title, goal.workspace_id),
           );
         }
-        setHistoryOpen(false);
+        setDrawer((open) => closeDrawer(open, "history"));
         const terminal = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
         if (!terminal.has(goal.status)) {
           subscribeToGoal(goalId, assistantMsg.id);
@@ -2230,6 +2318,18 @@ export const App: React.FC = () => {
       }
     },
     [restoring, subscribeToGoal, updateWorkspaceConversations],
+  );
+
+  /** A notification was pressed: go where the event is. A goal reopens the way History reopens one. */
+  const handleOpenNotification = useCallback(
+    (item: AppNotification) => {
+      const target = item.target;
+      if (!target) return;
+      if (target.kind === "goal") void restoreGoal(target.goalId);
+      else openSettings(target.tab);
+    },
+    // `openSettings` is a plain function that only sets two pieces of state, so it is stable in effect.
+    [restoreGoal],
   );
 
   // Goals whose execution we have already kicked off in direct mode. Without
@@ -2971,6 +3071,19 @@ export const App: React.FC = () => {
       {/* Top Header Bar */}
       <header className="relative bg-codify-chrome border-b border-codify-border px-4 py-2.5 flex items-center gap-3 z-10 flex-shrink-0">
         <div className="flex items-center gap-3 flex-shrink-0">
+          {/* Hide or show the left panel. At the left edge, above the panel it controls, and in the
+              header because the header is the one bar that is always there: a toggle inside the panel
+              could not bring the panel back. `aria-pressed` is true while it is *hidden*, the state
+              the button is currently holding. */}
+          <IconButton
+            tone="subtle"
+            label={sidebarShown ? "Hide left panel" : "Show left panel"}
+            title={sidebarShown ? "Hide the left panel (Ctrl+B)" : "Show the left panel (Ctrl+B)"}
+            aria-pressed={!sidebarShown}
+            onClick={toggleSidebar}
+          >
+            {sidebarShown ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeftOpen className="w-4 h-4" />}
+          </IconButton>
           <div className="flex items-center gap-2 font-bold text-sm tracking-tight text-codify-primary">
             {/* The mark, not a stand-in: `logo.gif` is generated into the brand
                 palette by `scripts/make_logo.py`, and the primitive swaps the
@@ -3051,23 +3164,38 @@ export const App: React.FC = () => {
           <Toggle
             armed={statsOpen}
             tone="accent"
-            onClick={() => {
-              setStatsOpen(!statsOpen);
-              if (!statsOpen) setHistoryOpen(false);
-            }}
+            onClick={() => setDrawer((open) => nextDrawer(open, "stats"))}
             title="Cross-goal statistics — success rate, token spend, daily trend"
           >
             <BarChart3 className="w-3.5 h-3.5" />
             <span>Stats</span>
           </Toggle>
 
+          {/* Notifications: goals that finished or failed, plans waiting for approval, engine connection
+              changes and model list changes. Between Stats and History because it is the third of the same
+              thing (a drawer on the right, armed while open); the unread count is the whole of the badge, and
+              it is absent at zero because a "0" is a control-shaped lie. The title must not start with
+              Browser, Terminal, Keys or Settings: those are how the panel's own buttons are found. */}
+          <Toggle
+            armed={notificationsOpen}
+            tone="accent"
+            onClick={() => setDrawer((open) => nextDrawer(open, "notifications"))}
+            title="Notifications — goals finished or failed, plans waiting for approval, engine and model changes"
+            aria-label={inbox.unread > 0 ? `Notifications, ${inbox.unread} unread` : "Notifications"}
+          >
+            <Bell className="w-3.5 h-3.5" />
+            <span>Notifications</span>
+            {inbox.unread > 0 && (
+              <Badge tone="info" icon={false} className="ml-0.5">
+                {inbox.unread > 99 ? "99+" : inbox.unread}
+              </Badge>
+            )}
+          </Toggle>
+
           <Toggle
             armed={historyOpen}
             tone="accent"
-            onClick={() => {
-              setHistoryOpen(!historyOpen);
-              if (!historyOpen) setStatsOpen(false);
-            }}
+            onClick={() => setDrawer((open) => nextDrawer(open, "history"))}
             title="Goal history — reopen a past goal with its full transcript"
           >
             <History className="w-3.5 h-3.5" />
@@ -3094,25 +3222,27 @@ export const App: React.FC = () => {
           A flex sibling shrinks the column instead of covering it. The transcript
           reflows, the command bar stays whole, and the boundary is a visible border
           rather than an occlusion. */}
-      <main className="relative z-10 flex-1 flex overflow-hidden">
+      <main ref={mainRef} className="relative z-10 flex-1 flex overflow-hidden">
         {/* The threads. A flex sibling, not an overlay: the transcript reflows
             rather than being covered, which is the same reasoning as the drawers
             below. */}
-        <Sidebar
-          conversations={conversations}
-          selectedWorkspaceId={selectedWs?.id}
-          workspaces={workspaces}
-          activeConversationId={activeConversationId}
-          onNewThread={(parentId) => void handleNewThread(parentId)}
-          onNewProject={() => void handleBrowseWorkspace()}
-          onSelect={handleSelectConversation}
-          onRename={(id, title) => void handleRenameConversation(id, title)}
-          onArchive={(id) => void handleArchiveConversation(id)}
-          onOpenBrowser={handleNewBrowserTab}
-          onOpenTerminal={() => void handleOpenTerminal()}
-          onOpenSettings={() => setIsSettingsOpen(true)}
-          loading={conversationsLoading}
-        />
+        {sidebarShown && (
+          <Sidebar
+            conversations={conversations}
+            selectedWorkspaceId={selectedWs?.id}
+            workspaces={workspaces}
+            activeConversationId={activeConversationId}
+            onNewThread={(parentId) => void handleNewThread(parentId)}
+            onNewProject={() => void handleBrowseWorkspace()}
+            onSelect={handleSelectConversation}
+            onRename={(id, title) => void handleRenameConversation(id, title)}
+            onArchive={(id) => void handleArchiveConversation(id)}
+            onOpenBrowser={handleNewBrowserTab}
+            onOpenTerminal={() => void handleOpenTerminal()}
+            onOpenSettings={() => setIsSettingsOpen(true)}
+            loading={conversationsLoading}
+          />
+        )}
         <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
           {/* The one place a refusal is shown when there is no pane to show it
               in. It carries a dismiss control because it has no natural
@@ -3129,7 +3259,7 @@ export const App: React.FC = () => {
             <div className="mx-auto mt-3 mb-1 w-full max-w-4xl px-4">
               <div
                 role="alert"
-                className="flex items-start gap-2 p-2.5 rounded-xl bg-codify-danger/40 border border-codify-danger text-xs text-codify-danger"
+                className="flex items-start gap-2 p-2.5 rounded-xl bg-codify-danger/40 border border-codify-danger text-xs text-codify-danger-ink"
               >
                 <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-codify-danger" />
                 <span className="leading-relaxed flex-1">{error}</span>
@@ -3216,10 +3346,10 @@ export const App: React.FC = () => {
                   <ScrollText className="h-3.5 w-3.5 flex-shrink-0" />
                   <span>What the engine said before it stopped</span>
                 </div>
-                <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-codify-warning/90">
+                <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-codify-warning">
                   {engineStderr.join("\n")}
                 </pre>
-                <p className="mt-1.5 text-[11px] text-codify-warning/70">
+                <p className="mt-1.5 text-xs text-codify-warning">
                   The shell stops the engine rather than restarting it, so a new
                   engine means relaunching the app.
                 </p>
@@ -3289,6 +3419,7 @@ export const App: React.FC = () => {
               onImportAudit={handleImportAudit}
               onPinDesignContract={handleSetDesignContract}
               pinnedContracts={pinnedContracts}
+              onOpenLink={handleOpenLink}
             />
 
             <BottomCommandBar
@@ -3336,7 +3467,7 @@ export const App: React.FC = () => {
               table measured 500px of content inside a 384px drawer, so it scrolled
               sideways and clipped its own last column. */}
         {statsOpen && (
-          <aside className="w-[28rem] max-w-[60%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
+          <aside className="w-[28rem] max-w-[45%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
             <div className="flex items-center justify-between px-4 py-3 border-b border-codify-border">
               <div className="flex items-center gap-2 text-sm font-semibold text-codify-primary">
                 <BarChart3 className="w-4 h-4 text-codify-info" />
@@ -3344,7 +3475,7 @@ export const App: React.FC = () => {
               </div>
               <IconButton
                 label="Close statistics"
-                onClick={() => setStatsOpen(false)}
+                onClick={() => setDrawer((open) => closeDrawer(open, "stats"))}
               >
                 <X className="w-4 h-4" />
               </IconButton>
@@ -3355,9 +3486,23 @@ export const App: React.FC = () => {
           </aside>
         )}
 
+        {/* Notifications: the same slot as the other drawers, and a flex sibling for the same reason (the
+            native browser webview paints above any overlay). Opening a row goes where the event is: a goal
+            reopens through the history restore, an engine or model change opens the Settings tab that
+            holds it. */}
+        {notificationsOpen && (
+          <NotificationsDrawer
+            items={inbox.items}
+            onMarkAllRead={inbox.markAllRead}
+            onClear={inbox.clear}
+            onClose={() => setDrawer((open) => closeDrawer(open, "notifications"))}
+            onOpenItem={handleOpenNotification}
+          />
+        )}
+
         {/* Goal history drawer. Empty only when this workspace never ran a goal. */}
         {historyOpen && (
-          <aside className="w-80 max-w-[50%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
+          <aside className="w-80 max-w-[40%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
             <div className="flex items-center justify-between px-4 py-3 border-b border-codify-border">
               <div className="flex items-center gap-2 text-sm font-semibold text-codify-primary">
                 <History className="w-4 h-4 text-codify-info" />
@@ -3377,7 +3522,7 @@ export const App: React.FC = () => {
                 </IconButton>
                 <IconButton
                   label="Close goal history"
-                  onClick={() => setHistoryOpen(false)}
+                  onClick={() => setDrawer((open) => closeDrawer(open, "history"))}
                 >
                   <X className="w-4 h-4" />
                 </IconButton>

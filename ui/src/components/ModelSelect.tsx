@@ -208,28 +208,28 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 className={
                   "w-full text-left px-2 py-1 rounded-lg flex items-center gap-2 text-xs transition-colors cursor-pointer " +
                   (m.id === value
-                    ? "bg-codify-info/20 text-codify-info font-medium"
+                    ? "bg-codify-info/20 text-codify-info-ink font-medium"
                     : "text-codify-secondary hover:bg-codify-raised")
                 }
               >
                 <span className="font-mono truncate flex-1 min-w-0">{m.id}</span>
                 {badges.roles && (
                   <span
-                    className="text-2xs text-codify-knowledge/90 flex-shrink-0 max-w-[9rem] truncate"
+                    className="text-2xs text-codify-knowledge flex-shrink-0 max-w-[9rem] truncate"
                     title={badges.rolesTitle}
                   >
                     {badges.roles}
                   </span>
                 )}
                 {badges.lastRun && (
-                  <span className="text-2xs text-codify-info/90 flex-shrink-0">last run</span>
+                  <span className="text-2xs text-codify-info flex-shrink-0">last run</span>
                 )}
                 {badges.notChat ? (
-                  <span className="text-2xs text-codify-warning/80 flex-shrink-0">not a chat model</span>
+                  <span className="text-2xs text-codify-warning flex-shrink-0">not a chat model</span>
                 ) : (
                   !badges.roles &&
                   m.description && (
-                    <span className="text-2xs text-codify-muted truncate max-w-[110px] flex-shrink-0">
+                    <span className="text-2xs text-codify-muted truncate max-w-[6.875rem] flex-shrink-0">
                       {m.description}
                     </span>
                   )
@@ -297,7 +297,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
         {menu}
       </div>
       <span
-        className={`text-2xs ${discovery && !discovery.ok ? "text-codify-warning/90" : "text-codify-muted"}`}
+        className={`text-2xs ${discovery && !discovery.ok ? "text-codify-warning" : "text-codify-muted"}`}
       >
         {note}
       </span>

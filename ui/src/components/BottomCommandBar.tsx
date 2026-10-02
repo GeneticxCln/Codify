@@ -39,6 +39,7 @@ import { IconButton } from "./ui/IconButton";
 import { MicButton } from "./MicButton";
 import { readRejection } from "../rejection.ts";
 import { insertDictation } from "../speech.ts";
+import { uiScaleFactor, useUiScale } from "../uiScale";
 
 export type ExecutionMode = "direct" | "dry_run" | "plan_only";
 
@@ -345,13 +346,17 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
     };
   }, [isFolderOpen, isModelOpen, isModeOpen]);
 
-  // Auto-resize textarea
+  // Auto-resize textarea. The cap is 180px at 100% and grows with the UI scale: the prompt's text is
+  // rem, so a fixed cap would hold fewer lines the bigger the window is. The scale is a dependency
+  // so a change re-measures instead of waiting for the next keystroke.
+  const uiScale = useUiScale();
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 180)}px`;
+      const cap = Math.round(180 * uiScaleFactor());
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, cap)}px`;
     }
-  }, [prompt]);
+  }, [prompt, uiScale]);
 
   // Dictated words go where the caret is, read when they *arrive*: the person may have typed on while
   // speaking. The updater form, because the transcript lands after an await and a `prompt` captured at
@@ -553,12 +558,12 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
                   selectedWorkspace
                     ? "bg-codify-raised border-codify-border text-codify-secondary hover:bg-codify-border"
-                    : "bg-codify-info/40 border-codify-info text-codify-info hover:bg-codify-info/60"
+                    : "bg-codify-info/40 border-codify-info text-codify-info-ink hover:brightness-110"
                 }`}
                 title={selectedWorkspace?.root_path || "Select project folder"}
               >
                 <Folder className="w-3.5 h-3.5 text-codify-accent" />
-                <span className="font-medium max-w-[150px] truncate">
+                <span className="font-medium max-w-[9.375rem] truncate">
                   {selectedWorkspace
                     ? selectedWorkspace.name
                     : "Select Project Folder"}
@@ -614,7 +619,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                           key={ws.id}
                           className={`w-full flex items-center gap-1 rounded-lg transition-colors ${
                             selectedWorkspace?.id === ws.id
-                              ? "bg-codify-accent/20 text-codify-accent border border-codify-accent/30"
+                              ? "bg-codify-accent/20 text-codify-accent-ink border border-codify-accent/30"
                               : "text-codify-secondary hover:bg-codify-raised"
                           }`}
                         >
@@ -697,7 +702,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-codify-raised border border-codify-border text-codify-secondary hover:bg-codify-border transition-colors cursor-pointer"
               >
                 <Cpu className="w-3.5 h-3.5 text-codify-design" />
-                <span className="font-medium truncate max-w-[150px]">
+                <span className="font-medium truncate max-w-[9.375rem]">
                   {selectedModel ? selectedModel.name : "No model"}
                 </span>
                 <ChevronDown className="w-3 h-3 text-codify-muted" />
@@ -796,7 +801,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                           className={
                             "px-2.5 pt-1.5 pb-0.5 text-2xs font-semibold uppercase tracking-wider " +
                             (section.pinned
-                              ? "text-codify-design/80"
+                              ? "text-codify-design"
                               : "text-codify-muted")
                           }
                         >
@@ -829,7 +834,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                               className={
                                 "w-full text-left px-2.5 py-1 rounded-lg flex items-center gap-2 text-xs transition-colors cursor-pointer " +
                                 (isCurrent
-                                  ? "bg-codify-design/20 text-codify-design border border-codify-design/30 font-medium"
+                                  ? "bg-codify-design/20 text-codify-design-ink border border-codify-design/30 font-medium"
                                   : "text-codify-secondary hover:bg-codify-raised")
                               }
                             >
@@ -838,25 +843,25 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                               </span>
                               {badges.roles && (
                                 <span
-                                  className="text-2xs text-codify-knowledge/90 flex-shrink-0 max-w-[9rem] truncate"
+                                  className="text-2xs text-codify-knowledge flex-shrink-0 max-w-[9rem] truncate"
                                   title={badges.rolesTitle}
                                 >
                                   {badges.roles}
                                 </span>
                               )}
                               {badges.lastRun && (
-                                <span className="text-2xs text-codify-info/90 flex-shrink-0">
+                                <span className="text-2xs text-codify-info flex-shrink-0">
                                   last run
                                 </span>
                               )}
                               {badges.notChat ? (
-                                <span className="text-2xs text-codify-warning/80 flex-shrink-0">
+                                <span className="text-2xs text-codify-warning flex-shrink-0">
                                   not a chat model
                                 </span>
                               ) : (
                                 !badges.roles &&
                                 m.description && (
-                                  <span className="text-2xs text-codify-muted truncate max-w-[110px] flex-shrink-0">
+                                  <span className="text-2xs text-codify-muted truncate max-w-[6.875rem] flex-shrink-0">
                                     {m.description}
                                   </span>
                                 )
@@ -877,7 +882,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                       .map((p) => (
                         <div
                           key={"status:" + p.provider}
-                          className="flex items-start gap-1.5 px-2.5 py-1 text-2xs text-codify-warning/90"
+                          className="flex items-start gap-1.5 px-2.5 py-1 text-2xs text-codify-warning"
                         >
                           <AlertCircle className="w-3 h-3 flex-shrink-0 mt-0.5" />
                           <span className="truncate">
@@ -976,7 +981,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                     }}
                     className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between cursor-pointer ${
                       mode === "direct"
-                        ? "bg-codify-success/20 text-codify-success font-medium"
+                        ? "bg-codify-success/20 text-codify-success-ink font-medium"
                         : "text-codify-secondary hover:bg-codify-raised"
                     }`}
                   >
@@ -999,7 +1004,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                     }}
                     className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between mt-1 cursor-pointer ${
                       mode === "dry_run"
-                        ? "bg-codify-warning/20 text-codify-warning font-medium"
+                        ? "bg-codify-warning/20 text-codify-warning-ink font-medium"
                         : "text-codify-secondary hover:bg-codify-raised"
                     }`}
                   >
@@ -1024,7 +1029,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                     }}
                     className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between mt-1 cursor-pointer ${
                       mode === "plan_only"
-                        ? "bg-codify-info/20 text-codify-info font-medium"
+                        ? "bg-codify-info/20 text-codify-info-ink font-medium"
                         : "text-codify-secondary hover:bg-codify-raised"
                     }`}
                   >
@@ -1164,7 +1169,11 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={isLoading}
-            placeholder="Ask Codify to build, edit files, fix tests, or refactor code..."
+            // Short, because a placeholder does not wrap: the long sentence was cut mid-word in a narrow
+            // column. What the composer can be asked is still said, in full, to a pointer and to a screen
+            // reader, which read the title as the field's description.
+            placeholder="Ask Codify to build, fix or refactor…"
+            title="Ask Codify to build, edit files, fix tests, or refactor code"
             aria-label="Chat prompt"
             className="flex-1 min-w-0 bg-transparent text-codify-primary placeholder-codify-muted text-sm resize-none focus:outline-none leading-relaxed cursor-text"
           />

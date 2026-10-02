@@ -29,11 +29,11 @@ interface FailureDiagnosisPanelProps {
 
 const LEVEL_STYLE: Record<Verdict["level"], { wrap: string; icon: React.ReactNode }> = {
   blocker: {
-    wrap: "bg-codify-danger/15 border-codify-danger/60 text-codify-danger",
+    wrap: "bg-codify-danger/15 border-codify-danger/60 text-codify-danger-ink",
     icon: <ShieldAlert className="w-4 h-4 text-codify-danger flex-shrink-0 mt-0.5" />,
   },
   warning: {
-    wrap: "bg-codify-warning/15 border-codify-warning/60 text-codify-warning",
+    wrap: "bg-codify-warning/15 border-codify-warning/60 text-codify-warning-ink",
     icon: <AlertTriangle className="w-4 h-4 text-codify-warning flex-shrink-0 mt-0.5" />,
   },
   info: {
@@ -162,7 +162,7 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
           )}
 
           {!loading && loadError && (
-            <div className="border border-codify-danger/60 bg-codify-danger/15 rounded-xl px-3.5 py-2.5 text-xs text-codify-danger">
+            <div className="border border-codify-danger/60 bg-codify-danger/15 rounded-xl px-3.5 py-2.5 text-xs text-codify-danger-ink">
               Could not read the engine's current state: {loadError} The verdicts below are
               based on the failure alone.
             </div>

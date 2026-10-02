@@ -24,6 +24,7 @@
  */
 
 import type { AgentRole, ModelOption } from "./types";
+import { providerLabel } from "./providerLabels.ts";
 
 /** A row's worth of role config: who, and which provider they are on. */
 export interface RoleProvider {
@@ -276,14 +277,16 @@ export function noModelsMessage(
   provider: string,
   opts: { hasKey?: boolean; needsKey?: boolean; discoveryError?: string | null },
 ): string {
+  // The name a person reads, not the slug (`providerLabels.ts`): "Could not reach NVIDIA", not "nvidia".
+  const name = providerLabel(provider) || provider;
   if (opts.discoveryError) {
-    return `Could not reach ${provider} — ${opts.discoveryError}`;
+    return `Could not reach ${name} — ${opts.discoveryError}`;
   }
   if (opts.needsKey && !opts.hasKey) {
-    return `Add a ${provider} API key, then refresh — its models cannot be listed without one.`;
+    return `Add a ${name} API key, then refresh — its models cannot be listed without one.`;
   }
   if (opts.needsKey) {
-    return `${provider} is configured but reported no models.`;
+    return `${name} is configured but reported no models.`;
   }
-  return `${provider} reported no models. Check that the server is running.`;
+  return `${name} reported no models. Check that the server is running.`;
 }

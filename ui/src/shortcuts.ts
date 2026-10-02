@@ -26,6 +26,10 @@
  * - **`Ctrl+9` is the *last* tab, not the ninth** — the browser convention.
  *   Tabs 1–8 jump by position; 9 lands on the end of the strip, which is
  *   the one a keyboard cannot otherwise name when there are more than nine.
+ * - **`Ctrl+=` / `Ctrl+-` / `Ctrl+0` scale the window**, as a browser's zoom does.
+ *   Bigger is `=` *or* `+` (so Ctrl+Shift+= works), by `key` or by `code`: `+` is
+ *   its own key on a German layout and `=` is not where it is on others. Reset
+ *   is read from the physical `0`, because on AZERTY that key types `à`.
  *
  * What this module cannot promise: a compositor or window manager that consumes
  * a keystroke before it reaches the webview (a desktop that binds `Ctrl+W`
@@ -40,7 +44,13 @@ export type ShortcutAction =
   /** 0-based strip position, from `Ctrl+1..8`. */
   | { type: "focus-tab"; index: number }
   | { type: "focus-last-tab" }
-  | { type: "toggle-palette" };
+  | { type: "toggle-palette" }
+  /** Hide or show the left panel (threads, Browser, Terminal, Settings). */
+  | { type: "toggle-sidebar" }
+  /** One step bigger or smaller on the UI scale (`uiScale.ts`), or back to its default. */
+  | { type: "scale-up" }
+  | { type: "scale-down" }
+  | { type: "scale-reset" };
 
 /**
  * The five fields this decision needs — structurally satisfied by
@@ -78,9 +88,23 @@ export function resolveShortcut(e: KeyEventLike): ShortcutAction | null {
         return e.repeat ? null : { type: "close-active-tab" };
       case "k":
         return e.repeat ? null : { type: "toggle-palette" };
+      case "b":
+        return e.repeat ? null : { type: "toggle-sidebar" };
       default:
         break;
     }
+  }
+
+  // Scaling ignores Shift on purpose (Ctrl+Shift+= is how `+` is typed on many layouts), and a held
+  // key is one step: auto-repeat would run the window from 100% to 175% in a blink.
+  if (e.key === "=" || e.key === "+" || e.code === "Equal" || e.code === "NumpadAdd") {
+    return e.repeat ? null : { type: "scale-up" };
+  }
+  if (e.key === "-" || e.code === "Minus" || e.code === "NumpadSubtract") {
+    return e.repeat ? null : { type: "scale-down" };
+  }
+  if (e.code === "Digit0" || e.code === "Numpad0") {
+    return e.repeat ? null : { type: "scale-reset" };
   }
 
   // The physical digit keys, layout-independent. 9 is the last tab, so the
@@ -95,3 +119,48 @@ export function resolveShortcut(e: KeyEventLike): ShortcutAction | null {
 
   return null;
 }
+
+/**
+ * One line of the shortcut list the About tab shows.
+ *
+ * `probe` is a real key event that must resolve to `action`: the list is *checked against*
+ * `resolveShortcut` (`ui/tests/shortcuts.test.ts`), so a binding that changes, or an action added
+ * without a line here, fails a test instead of leaving the About tab describing keys that no longer
+ * do that. The list is documentation, and documentation that cannot be wrong without a test noticing
+ * is the only kind this project has found to stay true.
+ */
+export interface ShortcutHelp {
+  /** How a person reads the chord. */
+  readonly keys: string;
+  /** What it does. */
+  readonly does: string;
+  readonly probe: KeyEventLike;
+  readonly action: ShortcutAction["type"];
+}
+
+const ctrlKey = (key: string, code: string): KeyEventLike => ({
+  key,
+  code,
+  ctrlKey: true,
+  metaKey: false,
+  altKey: false,
+  shiftKey: false,
+});
+
+/** Every shortcut, in the order the About tab lists them. */
+export const SHORTCUT_HELP: readonly ShortcutHelp[] = [
+  { keys: "Ctrl+T", does: "New tab", probe: ctrlKey("t", "KeyT"), action: "new-tab" },
+  { keys: "Ctrl+W", does: "Close the active tab", probe: ctrlKey("w", "KeyW"), action: "close-active-tab" },
+  { keys: "Ctrl+1 to 8", does: "Go to that tab", probe: ctrlKey("1", "Digit1"), action: "focus-tab" },
+  { keys: "Ctrl+9", does: "Go to the last tab", probe: ctrlKey("9", "Digit9"), action: "focus-last-tab" },
+  { keys: "Ctrl+K", does: "Command palette", probe: ctrlKey("k", "KeyK"), action: "toggle-palette" },
+  {
+    keys: "Ctrl+B",
+    does: "Hide or show the left panel (a terminal keeps Ctrl+B for itself)",
+    probe: ctrlKey("b", "KeyB"),
+    action: "toggle-sidebar",
+  },
+  { keys: "Ctrl+=", does: "Make the UI bigger", probe: ctrlKey("=", "Equal"), action: "scale-up" },
+  { keys: "Ctrl+-", does: "Make the UI smaller", probe: ctrlKey("-", "Minus"), action: "scale-down" },
+  { keys: "Ctrl+0", does: "Back to the default size", probe: ctrlKey("0", "Digit0"), action: "scale-reset" },
+];

@@ -128,7 +128,7 @@ export const StaleAuthBanner: React.FC<{
           <span className="font-medium">{STALE_AUTH_FIX.heading}</span>
         </div>
         <p className="mb-2 leading-relaxed text-codify-secondary">{STALE_AUTH_FIX.body}</p>
-        <div className="mb-2 rounded-lg border border-codify-border bg-codify-bg p-2 font-mono text-[11px] leading-relaxed">
+        <div className="mb-2 rounded-lg border border-codify-border bg-codify-bg p-2 font-mono text-xs leading-relaxed">
           {/* `pre` with wrapping, not a scroll box: a token cut off at the right
               edge is the exact character the paste needs. */}
           <pre className="whitespace-pre-wrap break-all text-codify-primary">

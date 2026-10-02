@@ -2,6 +2,7 @@ import { readRejection } from "../rejection.ts";
 import React, { useEffect, useRef, useState } from "react";
 import { writeTerminal } from "../api";
 import { THEME_CHANGE_EVENT } from "../appearance";
+import { UI_SCALE_CHANGED, uiScaleFactor } from "../uiScale";
 import { xtermThemeFromDocument } from "../terminalTheme";
 import {
   listenShellEvent,
@@ -26,6 +27,11 @@ import {
   replayFor,
 } from "../terminalHistory";
 import { claimTerminal, releaseTerminal, RESUME_SEAM } from "../terminalBuffer";
+
+/** The terminal's text size in px: 12 at 100%, and the same proportion at any UI scale. */
+export function terminalFontSize(): number {
+  return Math.round(12 * uiScaleFactor());
+}
 
 /**
  * A terminal, rendered by xterm.js and driven by a PTY the shell owns.
@@ -263,7 +269,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         cursorBlink: false,
         convertEol: false,
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-        fontSize: 12,
+        fontSize: terminalFontSize(),
         scrollback: 5000,
         // Read out of the document rather than written here. These three hexes
         // used to be literals, and they were the *default theme's* — so the
@@ -344,6 +350,18 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
       settle();
 
+      // The UI scale is a root font size, and xterm draws its own canvas in a font size we hand it,
+      // so it is the one text surface that does not follow along by itself. A new size also changes
+      // how many columns fit, and a font change does not resize the host (so the ResizeObserver
+      // below stays quiet): the fit and the grid the shell is told have to be redone here.
+      const onScaleChange = (): void => {
+        if (disposed || !term) return;
+        term.options.fontSize = terminalFontSize();
+        settle();
+      };
+      window.addEventListener(UI_SCALE_CHANGED, onScaleChange);
+      unsubscribes.push(() => window.removeEventListener(UI_SCALE_CHANGED, onScaleChange));
+
       if (typeof ResizeObserver !== "undefined" && hostRef.current) {
         observer = new ResizeObserver(settle);
         observer.observe(hostRef.current);
@@ -383,7 +401,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       {failed && (
         <div
           role="alert"
-          className="mx-3 mt-2 p-2 rounded-lg text-xs bg-codify-danger/40 border border-codify-danger text-codify-danger"
+          className="mx-3 mt-2 p-2 rounded-lg text-xs bg-codify-danger/40 border border-codify-danger text-codify-danger-ink"
         >
           {failed}
         </div>

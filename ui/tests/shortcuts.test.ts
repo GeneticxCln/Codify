@@ -10,7 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveShortcut, type KeyEventLike } from "../src/shortcuts.ts";
+import { resolveShortcut, SHORTCUT_HELP, type KeyEventLike } from "../src/shortcuts.ts";
 
 /** A key event with everything off; each case turns on what it is about. */
 const key = (over: Partial<KeyEventLike>): KeyEventLike => ({
@@ -117,8 +117,7 @@ test("digits are read from code, so a shifted digit key still works", () => {
   );
 });
 
-test("Digit0 is not a shortcut, and neither are unrelated combos", () => {
-  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "0", code: "Digit0" })), null);
+test("unrelated combos are not shortcuts", () => {
   assert.equal(resolveShortcut(key({ ctrlKey: true, key: "p", code: "KeyP" })), null);
   assert.equal(
     resolveShortcut(key({ ctrlKey: true, key: "ArrowLeft", code: "ArrowLeft" })),
@@ -149,4 +148,75 @@ test("focusing a tab by number is harmless to repeat, so it is not suppressed", 
     resolveShortcut(key({ ctrlKey: true, key: "2", code: "Digit2", repeat: true })),
     { type: "focus-tab", index: 1 },
   );
+});
+
+test("Ctrl+B hides and shows the left panel, and is not repeated by a held key", () => {
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "b", code: "KeyB" })), { type: "toggle-sidebar" });
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "B", code: "KeyB" })), { type: "toggle-sidebar" });
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "b", code: "KeyB", repeat: true })), null, "held Ctrl+B flickered the panel");
+  // Letters take no Shift (Ctrl+Shift+B is somebody else's bookmarks bar), no Alt, no Super.
+  assert.equal(resolveShortcut(key({ ctrlKey: true, shiftKey: true, key: "B", code: "KeyB" })), null);
+  assert.equal(resolveShortcut(key({ ctrlKey: true, altKey: true, key: "b", code: "KeyB" })), null);
+  assert.equal(resolveShortcut(key({ ctrlKey: true, metaKey: true, key: "b", code: "KeyB" })), null);
+  assert.equal(resolveShortcut(key({ key: "b", code: "KeyB" })), null, "typing a b is not a shortcut");
+});
+
+test("Ctrl + / Ctrl - / Ctrl 0 scale the window, the way a browser's zoom does", () => {
+  const up = { type: "scale-up" };
+  const down = { type: "scale-down" };
+  const reset = { type: "scale-reset" };
+  // Bigger: `=` is where `+` lives without Shift on most layouts, and Ctrl++ (with Shift) must work too.
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "=", code: "Equal" })), up);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, shiftKey: true, key: "+", code: "Equal" })), up);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "+", code: "NumpadAdd" })), up);
+  // `+` is its own key on some layouts (German), so `key` counts as much as `code`.
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "+", code: "BracketRight" })), up);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "-", code: "Minus" })), down);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "-", code: "NumpadSubtract" })), down);
+  // Reset is read from the physical key, so AZERTY's shifted `0` still resets.
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "0", code: "Digit0" })), reset);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "à", code: "Digit0" })), reset);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "0", code: "Numpad0" })), reset);
+});
+
+test("scaling needs Ctrl alone, and typing = - 0 is never a shortcut", () => {
+  for (const e of [
+    key({ key: "=", code: "Equal" }),
+    key({ key: "-", code: "Minus" }),
+    key({ key: "0", code: "Digit0" }),
+    key({ ctrlKey: true, altKey: true, key: "-", code: "Minus" }),
+    key({ ctrlKey: true, altKey: true, key: "0", code: "Digit0" }),
+    key({ ctrlKey: true, metaKey: true, key: "=", code: "Equal" }),
+  ]) {
+    assert.equal(resolveShortcut(e), null, `${e.key} / ${e.code} must not scale the window`);
+  }
+});
+
+test("a held scale key is one step, not a run to the end of the scale", () => {
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "=", code: "Equal", repeat: true })), null);
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "-", code: "Minus", repeat: true })), null);
+  assert.equal(resolveShortcut(key({ ctrlKey: true, key: "0", code: "Digit0", repeat: true })), null);
+  assert.deepEqual(resolveShortcut(key({ ctrlKey: true, key: "=", code: "Equal", repeat: false })), { type: "scale-up" });
+});
+
+test("the shortcut list the About tab shows is what the keyboard layer really does", () => {
+  // Each line carries a real key event, and it must resolve to the action the line claims. A binding
+  // that changes, or a key the list names wrongly, fails here instead of misleading a reader.
+  for (const line of SHORTCUT_HELP) {
+    assert.equal(
+      resolveShortcut(line.probe)?.type,
+      line.action,
+      `${line.keys} (${line.does}) does not resolve to ${line.action}`,
+    );
+  }
+  // And nothing the layer can do goes unlisted: every action type has a line. This is the pin that
+  // makes adding a shortcut without documenting it a failure.
+  assert.deepEqual(
+    [...new Set(SHORTCUT_HELP.map((line) => line.action))].sort(),
+    [
+      "close-active-tab", "focus-last-tab", "focus-tab", "new-tab", "scale-down", "scale-reset",
+      "scale-up", "toggle-palette", "toggle-sidebar",
+    ],
+  );
+  assert.equal(new Set(SHORTCUT_HELP.map((line) => line.keys)).size, SHORTCUT_HELP.length, "a chord is listed twice");
 });

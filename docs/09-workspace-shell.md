@@ -2074,7 +2074,11 @@ of decisions — AltGr, shifted digits, what Ctrl+9 means — that markup cannot
 | Ctrl+W | Close the active tab, landing on the left neighbour (§4 arithmetic) |
 | Ctrl+1..8 | Focus the tab in that strip position |
 | Ctrl+9 | Focus the **last** tab — the browser convention, so a strip past nine stays reachable at its end |
-| Ctrl+K | Command palette: open tabs, every conversation in this workspace, and every settings destination (`Provider keys & endpoints`, `Agent roles & prompts`, `Audio: microphone, dictation & read-aloud`, `Appearance & themes`), token-filtered with title-prefix hits ranked first |
+| Ctrl+B | Hide or show the left panel (§8.1) |
+| Ctrl+= (or Ctrl++) | UI scale up one step, 100 → 112.5 → 125 → 150 → 175% (docs/02 §3.3) |
+| Ctrl+- | UI scale down one step |
+| Ctrl+0 | UI scale back to the 125% default |
+| Ctrl+K | Command palette: open tabs, every conversation in this workspace, and every settings destination (`Provider keys & endpoints`, `Agent roles & prompts`, `Audio: microphone, dictation & read-aloud`, `Appearance, themes & UI scale`, `About Codify`), token-filtered with title-prefix hits ranked first |
 
 Decisions, and why:
 
@@ -2084,6 +2088,10 @@ Decisions, and why:
 - **Letters require no Shift** (Ctrl+Shift+T is somebody else's reopen-last-tab
   muscle memory); **digits ignore Shift** and are read from `code`, so the
   physical `1` key works on layouts where `key` is `!`.
+- **The scale keys ignore Shift and read both `key` and `code`.** `+` is Shift+`=` on many layouts and
+  its own key on others (German), so Ctrl+Shift+= must scale as well as Ctrl+=, and reset is the
+  physical `0` because that key types `à` on AZERTY. A held key is one step: auto-repeat would run
+  the window from 100% to 175% in a blink.
 - **The listener runs in the capture phase** — a shell shortcut beats the
   focused control — and consumes its keystroke with `preventDefault`. Ctrl+W closes
   the active tab through the same `handleCloseTab` seam as the strip's close
@@ -2109,6 +2117,48 @@ tests pin the mapping, not the platform.
 
 `TabBar`'s module docs promise exactly these tab shortcuts; this section is
 the half that keeps the promise.
+
+### 8.1 Hiding the left panel
+
+The left panel (threads, New Project, Browser, Terminal, Settings) can be hidden with the first
+control in the header, an icon button that reads **Hide left panel** / **Show left panel**, or with
+Ctrl+B. The choice is remembered across restarts (`codify.sidebar` in `localStorage`, `ui/src/sidebarPref.ts`).
+
+- **View state, not a tab record.** How the window is laid out is not what is open in it, so the flag
+  lives beside the theme and the UI scale, and never in a `Tab`, `tabPersistence.ts` or the engine's
+  `/shell/tabs` (§2.1).
+- **Unmounted, not collapsed, so the room is real.** The panel is a flex sibling of the centre
+  column (the same rule as the drawers). Hiding it removes it from the layout, so the transcript,
+  a terminal or a browser pane widens. A browser pane's native webview is told its new rectangle
+  by the pane's own `ResizeObserver` (§7.3), which fires because the column changed size; an
+  overlay or a slide-over would have been painted *under* the native view.
+- **The button lives in the header** because the header is the one bar that is always there. A toggle
+  inside the panel could not bring the panel back. It is before the tab strip, so it does not move as
+  tabs open, and it is not a tab.
+- **Open is the only default.** A missing, empty or unrecognised stored value means open; only the
+  exact word `closed` hides it. A panel kept hidden by a misread word would take Browser, Terminal
+  and Settings out of reach with no hint why.
+- **With a terminal in front, Ctrl+B is the shell's.** It is tmux's prefix and readline's
+  back-a-character, so the key passes through untouched (the handler returns before
+  `preventDefault`). The header button still works with a pointer, so the panel is never out of reach.
+- **What is not in the header or the palette.** While the panel is hidden, Browser and Terminal are one
+  click away (show the panel). Settings stays reachable through the palette (Ctrl+K).
+- **The panel gives way to a drawer, as a derived state.** At 125% the panel (`w-60`, 15rem), the Stats
+  drawer (`w-[28rem]`) and a centre column that can still hold the composer did not fit a 1280px window,
+  and the transcript was squeezed to about 400px. While a drawer is open and the row is narrower than
+  panel + drawer + 30rem (`sidebarYields`, `ui/src/drawers.ts`: 15 + 28 + 30 = 73rem for Stats, 65rem
+  for History), the panel is not drawn. The threshold is in **rem**, so it follows the UI scale; a pixel
+  media query would be right at one scale and wrong at the next. It is measured with a `ResizeObserver`
+  on the row (`useSidebarYield.ts`), and a row that cannot be measured never hides anything.
+  **It is never stored.** `codify.sidebar` is written only by the person's own press of the toggle, so
+  closing the drawer brings the panel back as it was, and a window that was widened meanwhile never
+  remembers a panel it was only asked to put aside. The toggle reports what is on screen (**Show left
+  panel** while a drawer has displaced it), and pressing it then closes the drawer, because the two do
+  not fit; an ordinary press is an ordinary hide. The drawers stay flex siblings, never overlays, for
+  the reason above, with caps (Stats 45%, History 40% of the row) so the centre column keeps at least
+  the rest even where the panel is hidden and the window is smaller than the rule assumed.
+  `ui/tests/drawers.test.ts` holds the rule; `drawerLayout.test.ts` mounts the App at 100, 125 and 175%
+  in a window whose width it controls.
 
 ## 9. Voice: the mic beside Send, and answers read aloud (built)
 
@@ -2659,3 +2709,92 @@ when the terminal status arrives as well, so a finished message carries no stale
 flag for the next reader. `ui/tests/goalActions.test.ts` pins all three cases: a
 finished goal is not busy whatever the flag says, a live goal is, and a message
 with no goal yet is busy only while its dispatch is pending.
+
+### 10.17 An answer is Markdown, and nothing in it is interpreted as markup
+
+A model answers in Markdown, and the transcript drew it raw: `##`, `**` and fences, all showing.
+The usual remedy is a Markdown library plus an HTML sanitiser plus `dangerouslySetInnerHTML`, and this
+app has none of the three: no Markdown library is installed even transitively, and nothing under
+`ui/src` sets inner HTML. A reply can be steered by any file or page the model read, so adding the one
+door that turns it into live markup, for the sake of headings, was the wrong trade. The renderer is
+therefore structural rather than defensive:
+
+* **`ui/src/markdown.ts` is a parser that returns data.** Text in, a tree out: no DOM, no React, no
+  HTML. **`ui/src/components/Markdown.tsx`** turns the tree into React elements, and React escapes
+  every string it is given, so there is no step at which text is read as markup and nothing to forget
+  to sanitise. `<script>` in an answer is the characters `<script>`. Headings, paragraphs, bullet and
+  numbered lists (nested by indentation), fenced code, quotes, rules, inline code, bold, italic,
+  strikethrough, links, images and bare URLs are understood. Raw HTML, tables, footnotes and setext
+  headings are not: each degrades to readable text. A single newline is a line break, not a space,
+  because plain-text answers were drawn with `whitespace-pre-wrap` until now and a model that wrote two
+  lines meant two lines.
+* **An unterminated fence runs to the end.** The streamed snapshot (§10.15) is re-parsed on every
+  update, so half a code block is the normal state of a reply in flight; it looks like code while it
+  arrives instead of snapping into shape at the end. Unclosed `**` or a lone backtick stay literal
+  until they close.
+* **The input is untrusted and is parsed in bounded time.** Nothing is quadratic in the length of a
+  line: an opener with no closer is remembered, a link label and URL are scanned to a fixed length,
+  and hand-written scanners replace regexes that could backtrack. Nesting is capped at `MAX_DEPTH`
+  (8), and past it the content is still all there as text. `ui/tests/markdown.test.ts` feeds
+  200,000-character hostile inputs against a time budget and random input against "never throws".
+* **No `<img>`, and no `<a href>`.** An image is never fetched: the answer shows `[image: alt text]`.
+  A link is a *button*, because the main webview has no `on_navigation` guard and a real anchor would
+  navigate the app itself away, taking the UI with it. A click calls `onOpenLink(url)`, which `App.tsx`
+  turns into a new browser tab through the same path a page's popup request takes (§7.2): the shell's
+  `navigation_allowed` still decides, and a refusal is shown in that tab. There is still no system
+  opener (§7.2); a link is the one route from an answer to a web page, and it is the app's own browser.
+* **What may be a link** is `ui/src/markdownLinks.ts`: an explicit `http://` or `https://` address, one
+  that `classifyBrowserAddress` accepts (so never a loopback or unspecified host), with no whitespace or
+  control characters. `javascript:`, `data:`, `file:`, `mailto:`, `tauri://`, relative paths, anchors and
+  bare hosts are words with the address in a tooltip. It is stricter than the address bar on purpose:
+  a model's reply is not a person typing, and a bare word does not get to claim to be a website.
+* **Where it is used.** The turn's answer and its streamed snapshot; the Knowledge and Design
+  deliverable bodies (`DeliverableText.tsx`), which open **Rendered** and have a **Source** button that
+  shows the exact bytes in a `<pre>` (the file the next run will treat as fact, or that the user may
+  pin as a contract, is never only shown interpreted); and a plan step's description, with inline marks
+  only. Role replies, logs, errors and the audit report stay raw: tests assert their JSON. The person's
+  own message keeps its line breaks and wraps a long word (`whitespace-pre-wrap break-words`).
+* **Speech is unchanged.** `speakableText` (§9.1) already drops the marks and reads a code block as
+  "(code omitted)"; it reads the engine's string, not the rendered tree.
+
+`ui/tests/markdown.test.ts` is the parser (structure and hostile input), `markdownRender.test.ts` is
+the mounted renderer (no live element or attribute, whatever the answer says; link behaviour; copy),
+`deliverableText.test.ts` is the Rendered/Source toggle, and `answerLinks.test.ts` mounts the whole App
+and clicks a link in a real answer through to `codify_browser_open`.
+
+### 10.18 The notification inbox: what happened while you were looking elsewhere
+
+A **Notifications** button in the header, between Stats and History, opens a drawer of what this window
+saw happen. It is in-app only: no desktop notification and no sound. It is kept on the client and nowhere
+else, because each of its four sources is a fact only this window knows. A goal's result is already
+durable in History, and the other three are not facts the engine keeps. The rules live in
+`ui/src/notifications.ts`, pure and DOM-free, so each has a test that needs no renderer.
+
+| Source | When it is news | When it is not |
+|---|---|---|
+| **Goal finished or failed** | The end of a goal stream **this window opened** (`onTerminal`). A failure names the first failed step. | Opening a thread or restoring History opens no stream for a finished goal, so old results are never announced (the `answersToRead` rule, auto-read's). **Cancelled** is silent: the person did it. |
+| **Plan ready for approval** | A `goal_status` that finds the goal `PENDING` and the plan will really wait: plan-only, dry-run, or a composer mode other than Direct Apply. | In Direct Apply the plan starts itself (the poll starts a `PENDING` goal), so "waiting for you" would be false. |
+| **Engine connection** | A change that **held for 4 s**: offline, back, token refused, restored. The engine's last stderr line is the offline detail. | `checking` never settles. The first settled state is only a baseline, so an engine that is up when the window opens says nothing, and a flap that reverses inside the settle time is one that never happened. |
+| **Model list change** | A `model_catalog_changed` frame with something in it, counted per provider (added and removed). docs/06 §6. | An empty diff, `model_catalog_checked`, and a payload that does not read. |
+
+* **No duplicates, because the engine replays.** Every entry has an id that names the event
+  (`goal:<id>:<status>:<updated_at>`, `plan:<id>:<version>`, `models:<fetched_at>:<diff>`), and an id already
+  in the list is dropped. A goal that is retried and fails again is a new entry, because `updated_at` moved.
+* **Opening is reading.** Everything is marked read when the drawer opens, and as entries arrive while it
+  stays open, so the header count clears at once. The dot on a row is for the ones that were new when the
+  drawer opened, and it lasts as long as the drawer does, so the person can still see what they had not seen.
+  The drawer also offers **Mark all read** and **Clear**.
+* **A row goes where the event is.** A goal reopens the way History reopens one (`restoreGoal`); an engine
+  entry opens Settings on About, which holds the engine card, and a model entry opens Provider Keys.
+* **Remembered, and never trusted.** The list (newest first, capped at 100) is stored under
+  `CODIFY_NOTIFICATIONS` and read back through a validator: a bad entry is dropped on its own and never
+  repaired, a list that cannot be read is an empty list, a storage that throws is an empty list on load and
+  a no-op on save, and the target of an entry is a closed set. The first render does not write back what it
+  just read: a storage that failed to read would be overwritten with the empty list it produced.
+* **What it deliberately leaves out.** The error banner (mirroring it would flood), a missing key (a derived
+  state the App cannot see), the motion banner, and anything that is not about something that happened.
+
+`ui/tests/notifications.test.ts` is the rules; `notificationsApp.test.ts` mounts the whole App against
+recorded sockets (the harness's `ctx.sockets`: the test is the engine on the other end) and checks each
+source is actually connected, that the header order is Stats, Notifications, History, that three drawers are
+one at a time, and that the list survives a restart.

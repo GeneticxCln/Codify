@@ -44,6 +44,7 @@ import {
   rolesOnProvider,
 } from "../providerSetup";
 import { newCountLabel, newCountTitle } from "../modelFreshness";
+import { protocolLabel, providerLabel } from "../providerLabels";
 
 export interface ProviderRowProps {
   keyStatus: ProviderKeyStatus;
@@ -138,7 +139,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
   const badge = (() => {
     if (hasKey) {
       return (
-        <span className="flex items-center gap-1 text-2xs font-medium text-codify-success bg-codify-success/20 border border-codify-success/60 px-2 py-0.5 rounded-full flex-shrink-0">
+        <span className="flex items-center gap-1 text-2xs font-medium text-codify-success-ink bg-codify-success/20 border border-codify-success/60 px-2 py-0.5 rounded-full flex-shrink-0">
           <ShieldCheck className="w-3 h-3" /> Configured
         </span>
       );
@@ -151,7 +152,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
       );
     }
     return (
-      <span className="text-2xs text-codify-info bg-codify-info/20 border border-codify-info/60 px-2 py-0.5 rounded-full flex-shrink-0">
+      <span className="text-2xs text-codify-info-ink bg-codify-info/20 border border-codify-info/60 px-2 py-0.5 rounded-full flex-shrink-0">
         Local / no key
       </span>
     );
@@ -162,21 +163,26 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <Cpu className="w-4 h-4 text-codify-design flex-shrink-0" />
-          <span className="font-semibold text-sm text-codify-primary capitalize truncate">{provider}</span>
-          <span className="text-2xs text-codify-muted font-mono truncate">{keyStatus.protocol}</span>
+          {/* The slug stays the identifier everywhere; this is only how it is read (`providerLabels.ts`). */}
+          <span className="font-semibold text-sm text-codify-primary truncate" title={provider}>
+            {providerLabel(provider)}
+          </span>
+          <span className="text-2xs text-codify-muted truncate" title={keyStatus.protocol}>
+            {protocolLabel(keyStatus.protocol)}
+          </span>
           {status?.ok && (
             <span className="text-2xs text-codify-muted flex-shrink-0">{status.count} models</span>
           )}
           {newHere > 0 && (
             <span
               title={newCountTitle(provider, newHere)}
-              className="text-2xs font-medium text-codify-design bg-codify-design/20 border border-codify-design/60 px-1.5 py-px rounded-full flex-shrink-0"
+              className="text-2xs font-medium text-codify-design-ink bg-codify-design/20 border border-codify-design/60 px-1.5 py-px rounded-full flex-shrink-0"
             >
               {newCountLabel(newHere)}
             </span>
           )}
           {status?.error && (
-            <span className="text-2xs text-codify-warning/90 truncate" title={status.error}>
+            <span className="text-2xs text-codify-warning truncate" title={status.error}>
               — {status.error}
             </span>
           )}
@@ -223,7 +229,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
                 className={
                   "flex items-center gap-1 px-3 rounded-r-lg text-xs font-semibold transition-colors flex-shrink-0 border border-l-0 border-codify-border " +
                   (keySaved
-                    ? "bg-codify-success/80 text-codify-bg"
+                    ? "bg-codify-success text-codify-bg"
                     : "bg-codify-accent text-codify-bg hover:brightness-110 disabled:opacity-40")
                 }
               >

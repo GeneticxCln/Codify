@@ -202,10 +202,10 @@ const SuccessRateChart: React.FC<{ days: MergedDay[] }> = ({ days }) => {
                 {" · "}
                 {d.created} started
                 {d.failed > 0 && (
-                  <span className="text-codify-danger/80"> · {d.failed} failed</span>
+                  <span className="text-codify-danger"> · {d.failed} failed</span>
                 )}
                 {d.cancelled > 0 && (
-                  <span className="text-codify-warning/80">
+                  <span className="text-codify-warning">
                     {" "}
                     · {d.cancelled} cancelled
                   </span>
@@ -577,7 +577,7 @@ export const StatsPanel: React.FC = () => {
             onClick={() => setWindowDays(w.days)}
             className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
               windowDays === w.days
-                ? "bg-codify-info/20 text-codify-info border-codify-info/60"
+                ? "bg-codify-info/20 text-codify-info-ink border-codify-info/60"
                 : "bg-codify-bg text-codify-muted border-codify-border hover:text-codify-secondary"
             }`}
           >
@@ -592,7 +592,7 @@ export const StatsPanel: React.FC = () => {
       </div>
 
       {failed && (
-        <p className="text-xs text-codify-danger bg-codify-danger/20 border border-codify-danger/60 rounded-lg p-2.5">
+        <p className="text-xs text-codify-danger-ink bg-codify-danger/20 border border-codify-danger/60 rounded-lg p-2.5">
           Could not load statistics from the engine.
         </p>
       )}
@@ -636,7 +636,7 @@ export const StatsPanel: React.FC = () => {
         </button>
       </div>
       {importedFileName && (
-        <p className="text-2xs text-codify-info/80 text-right leading-relaxed">
+        <p className="text-2xs text-codify-info text-right leading-relaxed">
           Imported {importedHistory.length} frozen day
           {importedHistory.length === 1 ? "" : "s"} from {importedFileName} and
           stored it in the engine, so it survives a restart. Merge:{" "}
@@ -646,7 +646,7 @@ export const StatsPanel: React.FC = () => {
         </p>
       )}
       {importError && (
-        <p className="text-xs text-codify-danger bg-codify-danger/20 border border-codify-danger/60 rounded-lg p-2.5">
+        <p className="text-xs text-codify-danger-ink bg-codify-danger/20 border border-codify-danger/60 rounded-lg p-2.5">
           {importError}
         </p>
       )}

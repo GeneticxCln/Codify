@@ -74,7 +74,16 @@ test("the two decisions are on the same row, and both are named", () => {
   const shown = text(render());
   assert.match(shown, /API key/i, "the credential field is not labelled");
   assert.match(shown, /Model/i, "the picker is not labelled");
-  assert.match(shown, /nvidia/);
+  // The provider is named as its own brand writes it, not as the slug the engine stores.
+  assert.match(shown, /NVIDIA/);
+  assert.doesNotMatch(shown, /\bnvidia\b/, "the raw slug is on screen as the provider's name");
+  assert.doesNotMatch(shown, /openai_compat/, "the raw protocol tag is on screen");
+  assert.match(shown, /OpenAI-compatible/, "the protocol is not named in words");
+});
+
+test("the slug is still the identifier: it is what the name's tooltip carries", () => {
+  assert.match(render(), /title="nvidia"/);
+  assert.match(render(), /title="openai_compat"/);
 });
 
 test("a keyed provider offers a password field, never a plain one", () => {
@@ -140,7 +149,7 @@ test("the model picker is present with a browse control, not a bare input", () =
   // A field with no caret is a field, and a field is what this replaces. The
   // caret is the affordance that says "there is a list behind this".
   const markup = render();
-  assert.match(markup, /aria-label="Browse nvidia models"/);
+  assert.match(markup, /aria-label="Browse NVIDIA models"/);
   assert.match(markup, /aria-expanded="false"/);
 });
 
@@ -165,7 +174,7 @@ test("a release is announced in the row's header, not only behind the caret", ()
   // everything the provider serves. "When you last looked" rather than "the last
   // time you were here": the panel re-discovers on its own, so a release can
   // land while the reader is looking right at it.
-  assert.match(markup, /nvidia did not list when you last looked/);
+  assert.match(markup, /NVIDIA did not list when you last looked/);
 });
 
 test("a provider with nothing new says nothing about it", () => {

@@ -301,6 +301,10 @@ Four constraints hold every one of them:
 - **A theme may restate the status tones; it may not renegotiate them.** All six or none, and `danger` and
   `warning` stay on the warm arc: a user who learned that orange means *needs attention* was owed that much.
 
+The whole window also **scales**: Settings → Appearance → *UI scale* (100 to 175%, **125% by default**), or
+`Ctrl +`, `Ctrl -` and `Ctrl 0` from the keyboard. The type ramp and spacing are rem, so text, icons and padding
+grow together, and the xterm terminal follows too.
+
 Any theme can be **recoloured without being forked**: the Appearance pane offers each theme's accent plus the
 weather variables its own backdrop reads, labelled with what they draw. A proposal is **clamped, not accepted
 blindly**: it keeps its hue and saturation and has its lightness moved until it clears 4.5:1, and a colour that

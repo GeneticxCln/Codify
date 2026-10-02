@@ -337,7 +337,7 @@ test("the tooltip says why the button is dead, per reason", () => {
 
 test("an unreachable provider says it could not be reached, and why", () => {
   const msg = noModelsMessage("nvidia", { needsKey: true, hasKey: true, discoveryError: "401" });
-  assert.match(msg, /Could not reach nvidia/);
+  assert.match(msg, /Could not reach NVIDIA/);
   assert.match(msg, /401/);
 });
 

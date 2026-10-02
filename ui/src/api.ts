@@ -42,7 +42,7 @@ import type {
  * fetched again after an engine restart. Only the standalone browser preview
  * has no such party, which is what the paste-into-the-console flow is for.
  */
-function underShell(): boolean {
+export function underShell(): boolean {
   return typeof window !== "undefined" && Boolean((window as any).__TAURI_INTERNALS__);
 }
 
@@ -1343,6 +1343,43 @@ export async function cancelGoal(goal_id: string, expected_version: number): Pro
 export interface HealthStatus {
   ok: boolean;
   authenticated: boolean;
+}
+
+/** What the desktop shell says about itself. */
+export interface AppFacts {
+  name: string;
+  version: string;
+  /** The Tauri runtime's version, or "" when it did not say. */
+  tauri: string;
+}
+
+/**
+ * The app's own name and version, from the shell. `null` outside it.
+ *
+ * Read through Tauri's app API, not through `tauriInvoke`: that falls back to HTTP for the commands
+ * the engine can answer, and this one has no engine equivalent, so outside the shell (the standalone
+ * browser preview) the honest answer is "there is no desktop app here", not an error. A shell that
+ * answers with nothing is treated the same, because a blank version printed as a fact would be worse
+ * than none. The permissions are already in `core:default`, so this needs no capability of its own.
+ */
+export async function getAppFacts(): Promise<AppFacts | null> {
+  if (!underShell()) return null;
+  try {
+    const app = await import("@tauri-apps/api/app");
+    const [name, version, tauri] = await Promise.all([
+      app.getName(),
+      app.getVersion(),
+      app.getTauriVersion(),
+    ]);
+    if (typeof version !== "string" || !version.trim()) return null;
+    return {
+      name: typeof name === "string" && name.trim() ? name : "Codify",
+      version,
+      tauri: typeof tauri === "string" ? tauri : "",
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**

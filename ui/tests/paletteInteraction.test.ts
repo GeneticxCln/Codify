@@ -57,7 +57,7 @@ const convo = (over: Partial<Conversation> = {}): Conversation => ({
   ...over,
 });
 
-/** Six rows: two tabs, one thread, three settings pages. */
+/** Eight rows: two tabs, one thread, five settings pages. */
 const allItems = (): PaletteItem[] =>
   buildPaletteItems(
     sources({
@@ -138,18 +138,18 @@ const rowTitles = (dom: Dom): string[] =>
 test("typing narrows the list, and the count follows it", async () => {
   await withPalette({}, async (dom) => {
     const input = dom.byLabel("Command palette") as HTMLInputElement;
-    assert.equal(rowTitles(dom).length, 7, "nothing was shown to begin with");
+    assert.equal(rowTitles(dom).length, 8, "nothing was shown to begin with");
 
     await dom.fill(input, "refactor");
     assert.deepEqual(rowTitles(dom), ["Refactor the parser"]);
-    assert.match(dom.text(), /1 of 7/, "the footer still claims the whole list");
+    assert.match(dom.text(), /1 of 8/, "the footer still claims the whole list");
 
     // Two tokens, AND not OR: the thread called "Table stakes" does not contain
     // "refactor", so naming both finds nothing.
     await dom.fill(input, "refactor parser stakes");
     assert.deepEqual(rowTitles(dom), [], "AND, not OR — and the empty list says so");
     assert.match(dom.text(), /Nothing matches/);
-    assert.match(dom.text(), /0 of 7/);
+    assert.match(dom.text(), /0 of 8/);
   });
 });
 
@@ -170,7 +170,7 @@ test("a new list starts at the top, not at the old offset", async () => {
       "palette-option-conversation:c9",
       `the single row is not the selected one: ${selectedTitle(dom)}`,
     );
-    assert.match(dom.text(), /1 of 7/);
+    assert.match(dom.text(), /1 of 8/);
     assert.equal(
       dom.container.querySelector('[role="combobox"]')?.getAttribute("aria-activedescendant"),
       "palette-option-conversation:c9",
@@ -201,7 +201,7 @@ test("the arrow keys move the selection, and the combobox names it", async () =>
     // key handler's use of it — the unit test covers the arithmetic, this is
     // the wiring.
     await dom.press(input, "ArrowUp");
-    assert.equal(box.getAttribute("aria-activedescendant"), "palette-option-settings:appearance");
+    assert.equal(box.getAttribute("aria-activedescendant"), "palette-option-settings:about");
   });
 });
 
@@ -223,6 +223,17 @@ test("Enter opens the top match after a query", async () => {
     await dom.press(input, "Enter");
   });
   assert.deepEqual(report.selected, ["settings:appearance"]);
+});
+
+test("the UI scale is found by searching for it, and About by its name", async () => {
+  for (const [query, id] of [["scale", "settings:appearance"], ["about", "settings:about"]] as const) {
+    const report = await withPalette({}, async (dom) => {
+      const input = dom.byLabel("Command palette") as HTMLInputElement;
+      await dom.fill(input, query);
+      await dom.press(input, "Enter");
+    });
+    assert.deepEqual(report.selected, [id], `searching for "${query}" did not land on ${id}`);
+  }
 });
 
 test("Enter on an empty list chooses nothing rather than the first item", async () => {
@@ -296,7 +307,7 @@ test("reopening starts from an empty query", async () => {
     await shown(false);
     await shown(true);
     assert.equal((dom.byLabel("Command palette") as HTMLInputElement).value, "");
-    assert.equal(rowTitles(dom).length, 7, "the last search survived into the next open");
+    assert.equal(rowTitles(dom).length, 8, "the last search survived into the next open");
   });
 });
 

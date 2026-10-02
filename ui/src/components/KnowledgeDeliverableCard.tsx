@@ -7,6 +7,7 @@ import {
   revises,
 } from "../designDeliverable";
 import type { Goal } from "../types";
+import { DeliverableText } from "./DeliverableText";
 
 /**
  * A knowledge deliverable: the workspace's own `CODIFY.md`, as the body the run
@@ -33,7 +34,9 @@ import type { Goal } from "../types";
 export const KnowledgeDeliverableCard: React.FC<{
   goal?: Goal;
   payload: Record<string, any>;
-}> = ({ goal, payload }) => {
+  /** A link in the body was clicked: open it in a browser tab. */
+  onOpenLink?: (url: string) => void;
+}> = ({ goal, payload, onOpenLink }) => {
   const body: string =
     typeof payload.design_md === "string" ? payload.design_md : "";
   // The event's own `mode`, not the goal's: a transcript message can carry no
@@ -67,16 +70,14 @@ export const KnowledgeDeliverableCard: React.FC<{
       {body ? (
         <>
           <div className="flex items-start gap-1.5 text-2xs text-codify-muted">
-            <ShieldCheck className="w-3 h-3 flex-shrink-0 mt-0.5 text-codify-knowledge/80" />
+            <ShieldCheck className="w-3 h-3 flex-shrink-0 mt-0.5 text-codify-knowledge" />
             <span>{readiness.note}</span>
           </div>
           <details className="text-xs text-codify-muted" open>
             <summary className="cursor-pointer text-codify-muted">
               {path} ({body.length} chars) — {readiness.bodyLabel}
             </summary>
-            <pre className="mt-1.5 p-2 rounded bg-codify-surface border border-codify-raised text-2xs text-codify-secondary whitespace-pre-wrap max-h-72 overflow-auto">
-              {body}
-            </pre>
+            <DeliverableText body={body} boxClassName="max-h-72" onOpenLink={onOpenLink} />
           </details>
           {/* What this run is rewriting, in the drafter's own words. The stale
               list is the engine telling the user which of the old claims were
@@ -92,7 +93,7 @@ export const KnowledgeDeliverableCard: React.FC<{
               </summary>
               <div className="flex flex-col gap-1.5 mt-1.5">
                 {previous.stale_paths.length > 0 && (
-                  <div className="text-2xs text-codify-warning/90">
+                  <div className="text-2xs text-codify-warning">
                     the engine told the drafter to disregard these:{" "}
                     <span className="font-mono">{previous.stale_paths.join(", ")}</span>
                   </div>

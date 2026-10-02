@@ -17,13 +17,17 @@
  * sharing one element, which is where the design system puts them: one class
  * string, one `className`. It does not cover a colour inheriting a background
  * from an ancestor three components up, because nothing in the source says which
- * ancestor that is. Backgrounds with an alpha (`bg-codify-warning/20`) are also
- * excluded, and for a real reason rather than a convenient one: what shows
- * through depends on what is behind them, and guessing a parent to composite
- * against would manufacture a number. Text *opacity* is a different matter and
- * is composited exactly — 43 of the app's text utilities are a tone at less
- * than full strength, and measuring the tone undimmed credits text with
- * contrast it does not have.
+ * ancestor that is.
+ *
+ * **Translucent backgrounds are measured too.** They used to be skipped, on the
+ * argument that what shows through depends on what is behind them and guessing a
+ * parent would manufacture a number. That left the whole status-pill idiom
+ * (`bg-codify-danger/40` with red text on it) unmeasured, and it was under AA in
+ * most themes. The honest answer to "what is behind" is a short list: every
+ * surface a pill is drawn on is `bg`, `surface` or `raised`, so a translucent
+ * background is composited over each of the three and the pair is held to the
+ * worst of them. Text *opacity* is composited exactly as well: a tone at less
+ * than full strength credits the text with contrast it does not have.
  *
  * **Why the weight is in the argument.** WCAG 1.4.3 asks for 4.5:1 and drops to
  * 3:1 for large text, where large means 18pt regular or 14pt **bold** — bold
@@ -38,6 +42,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 import { THEMES } from "../src/appearance.ts";
+import { INK_TONES, deriveToneInks } from "../src/toneInk.ts";
 import {
   aaThreshold,
   contrastRatio,
@@ -127,6 +132,8 @@ interface Pair {
   readonly foreground: string;
   readonly foregroundAlpha: number;
   readonly background: string;
+  /** 1 for an opaque fill; below 1 the fill is measured over each surface it can sit on. */
+  readonly backgroundAlpha: number;
   /** The strictest threshold any of its uses earns — a pair is as weak as its
    *  smallest use, so one 12px label is enough to hold the pair to 4.5:1. */
   readonly threshold: number;
@@ -236,15 +243,13 @@ function classGroups(src: string): string[] {
 for (const file of sourceFiles(SRC)) {
   const where = relative(SRC, file);
   for (const cls of classGroups(withoutComments(readFileSync(file, "utf8")))) {
-    const backgrounds = [
-      ...cls.matchAll(/\bbg-codify-([a-z-]+)(\/(\d+))?\b/g),
-    ].filter((m) => !m[3]); // a translucent surface has no knowable colour
+    const backgrounds = [...cls.matchAll(/\bbg-codify-([a-z-]+)(\/(\d+))?\b/g)];
     if (backgrounds.length === 0) continue;
     for (const fg of cls.matchAll(/\btext-codify-([a-z-]+)(?:\/(\d+))?\b/g)) {
       const { sizePx, weight } = typography(cls);
       const threshold = aaThreshold(sizePx, weight);
       for (const bg of backgrounds) {
-        const key = `${fg[1]}/${fg[2] ?? 100}|${bg[1]}`;
+        const key = `${fg[1]}/${fg[2] ?? 100}|${bg[1]}/${bg[3] ?? 100}`;
         const seen = pairs.get(key);
         if (seen) {
           // Keep the weakest use: a pair that is 3:1-legal at 20px bold and
@@ -260,6 +265,7 @@ for (const file of sourceFiles(SRC)) {
           foreground: fg[1]!,
           foregroundAlpha: fg[2] ? Number(fg[2]) / 100 : 1,
           background: bg[1]!,
+          backgroundAlpha: bg[3] ? Number(bg[3]) / 100 : 1,
           threshold,
           sizePx,
           weight,
@@ -314,13 +320,31 @@ const DECLARED_PAIRS: ReadonlyArray<{
   },
 ];
 
-for (const declared of DECLARED_PAIRS) {
-  const key = `${declared.foreground}/100|${declared.background}`;
+/**
+ * A status tone as bare text on a surface: the red "Error" line, a warning sentence, a success
+ * word. Those class strings carry no background (the fill belongs to the card or the page), so the
+ * scan never sees them, and four themes had a tone under AA on `raised` that no test said so.
+ * One declared pair per tone per surface, at the smallest text the app sets (11px regular).
+ */
+const STATUS_TEXT_PAIRS: ReadonlyArray<(typeof DECLARED_PAIRS)[number]> = INK_TONES.flatMap((tone) =>
+  (["bg", "surface", "raised"] as const).map((surface) => ({
+    foreground: tone,
+    background: surface,
+    sizePx: SIZES.xs!,
+    weight: 400 as FontWeight,
+    where: `status text (text-codify-${tone}) on the ${surface} surface`,
+    why: "bare status text sits on an inherited surface the class string does not name",
+  })),
+);
+
+for (const declared of [...DECLARED_PAIRS, ...STATUS_TEXT_PAIRS]) {
+  const key = `${declared.foreground}/100|${declared.background}/100`;
   if (!pairs.has(key)) {
     pairs.set(key, {
       foreground: declared.foreground,
       foregroundAlpha: 1,
       background: declared.background,
+      backgroundAlpha: 1,
       threshold: aaThreshold(declared.sizePx, declared.weight),
       sizePx: declared.sizePx,
       weight: declared.weight,
@@ -354,13 +378,19 @@ const ROOT: Readonly<Record<string, string>> = Object.fromEntries(
   )].map((m) => [m[1]!, m[2]!]),
 );
 
+/** Each theme's derived inks, computed once: what `applyTheme` publishes as `--codify-X-ink`. */
+const INKS = new Map(THEMES.map((t) => [t.id, deriveToneInks({ ...ROOT, ...t.tokens })]));
+
 /** The colour a theme renders a token as, or `undefined` if it has none. */
 function rendered(theme: (typeof THEMES)[number], name: string): string | undefined {
   const key = `--codify-${name}`;
-  return theme.tokens[key as keyof typeof theme.tokens] ?? ROOT[key];
+  return theme.tokens[key as keyof typeof theme.tokens] ?? INKS.get(theme.id)?.[key] ?? ROOT[key];
 }
 
-/** The measured ratio for one pair in one theme, with the alpha applied. */
+/** The surfaces a translucent fill can sit on, which is every surface a pill is drawn on. */
+const SURFACE_TOKENS = ["bg", "surface", "raised"] as const;
+
+/** The measured ratio for one pair in one theme: both alphas applied, the worst surface taken. */
 function measure(pair: Pair, theme: (typeof THEMES)[number]): number {
   const foreground = rendered(theme, pair.foreground);
   const background = rendered(theme, pair.background);
@@ -369,11 +399,17 @@ function measure(pair: Pair, theme: (typeof THEMES)[number]): number {
     `${theme.id} has no --codify-${pair.foreground} or --codify-${pair.background}, ` +
       `so the pair cannot be measured at all — a missing token is a failure, not a skip`,
   );
-  return contrastRatio(
-    pair.foregroundAlpha === 1
-      ? foreground
-      : composite(foreground, pair.foregroundAlpha, background),
-    background,
+  const fills =
+    pair.backgroundAlpha === 1
+      ? [background]
+      : SURFACE_TOKENS.map((surface) => composite(background, pair.backgroundAlpha, rendered(theme, surface)!));
+  return Math.min(
+    ...fills.map((fill) =>
+      contrastRatio(
+        pair.foregroundAlpha === 1 ? foreground : composite(foreground, pair.foregroundAlpha, fill),
+        fill,
+      ),
+    ),
   );
 }
 
@@ -391,14 +427,49 @@ test("the scan finds the pairs, so a passing audit is not a passing empty list",
     new Set(ALL_PAIRS.map((p) => p.background)).size >= 3,
     "the scan found fewer than three distinct backgrounds; it is not reading the source",
   );
+  // The pill idiom is a translucent fill. A scan that quietly went back to skipping those would still
+  // find 20 opaque pairs and pass, while measuring none of the status pills in the app.
+  const translucent = ALL_PAIRS.filter((p) => p.backgroundAlpha < 1);
+  assert.ok(
+    translucent.length >= 8,
+    `only ${translucent.length} translucent-background pairs were found; the status pills are no longer being measured`,
+  );
+  assert.ok(
+    translucent.some((p) => p.foreground.endsWith("-ink")),
+    "no pair reads a status ink on a tint, so the ink the pills use is not under the audit",
+  );
+});
+
+test("a translucent fill is held to the worst surface it can sit on", () => {
+  // Over black a 40% tint is dark and over white it is pale, and the same red text has a very
+  // different ratio on each. Measuring over only one surface credits the pair with the kinder answer.
+  const dark = THEMES.find((t) => t.id === "codify-dark")!;
+  const theme = {
+    ...dark,
+    tokens: { ...dark.tokens, "--codify-bg": "#000000", "--codify-surface": "#808080", "--codify-raised": "#ffffff" },
+  };
+  const pair: Pair = {
+    foreground: "danger",
+    foregroundAlpha: 1,
+    background: "danger",
+    backgroundAlpha: 0.4,
+    threshold: 4.5,
+    sizePx: 12,
+    weight: 400,
+    where: new Set(["test"]),
+  };
+  const red = "#f85149";
+  const over = (surface: string): number => contrastRatio(red, composite(red, 0.4, surface));
+  const expected = Math.min(over("#000000"), over("#808080"), over("#ffffff"));
+  assert.ok(Math.abs(measure(pair, theme) - expected) < 1e-9, `measured ${measure(pair, theme)}, the worst surface gives ${expected}`);
+  assert.ok(expected < over("#000000") - 0.5, "the test surfaces do not differ enough to tell worst-case from first-case");
 });
 
 test("dimmed text is measured dimmed", () => {
-  // No pair in the app currently combines a dimmed colour with a background in
-  // one class string, so this branch of the audit has no data behind it — which
-  // is exactly why it gets its own test rather than a hopeful assertion about
-  // the scan. `text-codify-warning/80` is used 17 times; the day one of them
-  // lands on a background, this is the arithmetic that decides its ratio.
+  // The app no longer dims a status tone (see the policy test below), so this branch of the audit
+  // has no data behind it from the source — which is exactly why it gets its own test rather than a
+  // hopeful assertion about the scan. The day a dimmed colour is declared or lands on a background,
+  // this is the arithmetic that decides its ratio.
   const dimmed = composite("#f85149", 0.8, "#0d1117");
   assert.equal(relativeLuminance(dimmed) > 0, true);
   assert.ok(
@@ -407,6 +478,59 @@ test("dimmed text is measured dimmed", () => {
   );
   assert.equal(composite("#f85149", 0, "#0d1117"), "#0d1117", "0% must be the background");
   assert.equal(composite("#f85149", 1, "#0d1117"), "#f85149", "100% must be the colour");
+});
+
+// ── the class-string rules the pair audit cannot state ──────────────────────
+
+/** Every class group in `ui/src`, with the file it is in, for rules about how a string is written. */
+const GROUPS: ReadonlyArray<{ where: string; cls: string }> = sourceFiles(SRC).flatMap((file) =>
+  classGroups(withoutComments(readFileSync(file, "utf8"))).map((cls) => ({
+    where: relative(SRC, file),
+    cls,
+  })),
+);
+
+test("a status tint is read in the tone's ink, never in the bare tone", () => {
+  // `bg-codify-danger/40 text-codify-danger` is red on a tint of itself, and it was under AA in 54 of
+  // 57 theme-and-surface combinations. The pair audit would catch a failing one by measuring it; this
+  // names the cause, so a new pill fails with the fix in the message instead of a ratio.
+  const violations: string[] = [];
+  for (const { where, cls } of GROUPS) {
+    for (const bg of cls.matchAll(/\bbg-codify-(accent|info|success|warning|danger|design|knowledge)\/\d+\b/g)) {
+      const tone = bg[1]!;
+      if (new RegExp(`\\btext-codify-${tone}(?![-\\w])`).test(cls)) {
+        violations.push(`${where}: "${cls.trim().slice(0, 110)}" — use text-codify-${tone}-ink on a tint of ${tone}`);
+      }
+    }
+  }
+  assert.deepEqual([...new Set(violations)], [], "bare tone on its own tint:\n" + violations.join("\n"));
+});
+
+test("no status tint is stronger than 40% where text sits on it", () => {
+  // The ink is derived against a 40% tint (`toneInk.ts`): a weaker tint is further from the text and so
+  // easier, which is why clearing 40 clears them all. A hover state at 60 is a stronger tint the ink was
+  // never derived for, and it failed in 14 themes. Hover feedback on a tint is brightness, or at most 40.
+  const violations: string[] = [];
+  for (const { where, cls } of GROUPS) {
+    if (!/\btext-codify-/.test(cls)) continue;
+    for (const bg of cls.matchAll(/\bbg-codify-(accent|info|success|warning|danger|design|knowledge)\/(\d+)\b/g)) {
+      if (Number(bg[2]) > 40) violations.push(`${where}: ${bg[0]} in "${cls.trim().slice(0, 100)}"`);
+    }
+  }
+  assert.deepEqual([...new Set(violations)], [], "a status tint stronger than the ink was derived for:\n" + violations.join("\n"));
+});
+
+test("status text is never dimmed: emphasis is size or weight, not a thinner colour", () => {
+  // `text-codify-warning/90` is a tone composited toward whatever is behind it, on a surface the class
+  // string does not name, so the audit cannot measure it, and DESIGN.md says emphasis never comes from
+  // opacity. The declared status-text pairs measure the full-strength tone; a dimmed one escapes them.
+  const violations: string[] = [];
+  for (const { where, cls } of GROUPS) {
+    for (const m of cls.matchAll(/\btext-codify-(accent|info|success|warning|danger|design|knowledge)\/\d+\b/g)) {
+      violations.push(`${where}: ${m[0]}`);
+    }
+  }
+  assert.deepEqual([...new Set(violations)], [], "dimmed status text:\n" + violations.join("\n"));
 });
 
 test("the size/weight rule is WCAG's and not a convenient reading of it", () => {
@@ -434,9 +558,11 @@ test("the size table is the app's scale, read back from the config", () => {
   );
   const block = config.slice(config.indexOf("fontSize: {"));
   const fromConfig: Record<string, number> = {};
-  for (const m of block.matchAll(/"?(?:2xs|xs|sm|base|md|lg|xl)"?:\s*\["(\d+)px"/g)) {
+  // The config is in rem (so the UI scale can reach it), and this table is in px at
+  // the default 16px root: the contrast rule is about the size a person sees at 100%.
+  for (const m of block.matchAll(/"?(?:2xs|xs|sm|base|md|lg|xl)"?:\s*\["(\d+(?:\.\d+)?)rem"/g)) {
     const name = /"?(?:2xs|xs|sm|base|md|lg|xl)"?/.exec(m[0].replace(/:\s*\[.*/, ""))?.[0].replace(/"/g, "");
-    if (name) fromConfig[name] = Number(m[1]);
+    if (name) fromConfig[name] = Number(m[1]) * 16;
   }
   assert.deepEqual(
     { ...SIZES },
@@ -455,7 +581,7 @@ test("every painted text/background pair reads at AA in every theme", () => {
         failures.push(
           `  ${theme.id}  ${ratio.toFixed(2)}:1, needs ${pair.threshold}:1 — ` +
             `text-codify-${pair.foreground}${pair.foregroundAlpha < 1 ? `/${Math.round(pair.foregroundAlpha * 100)}` : ""} ` +
-            `on bg-codify-${pair.background} at ${pair.sizePx}px/${pair.weight} ` +
+            `on bg-codify-${pair.background}${pair.backgroundAlpha < 1 ? `/${Math.round(pair.backgroundAlpha * 100)}` : ""} at ${pair.sizePx}px/${pair.weight} ` +
             `(${describeRequirement(pair.sizePx, pair.weight)}) ` +
             `— painted in ${[...pair.where].join(", ")}`,
         );
