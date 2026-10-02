@@ -201,13 +201,13 @@ remaining seven roles run and in what order.
 | Role | Runs | Ability |
 |---|---|---|
 | **Laya** (gate) | once per goal, before any model call | Typed decisions: intent, risk, calibrated prompt-injection. Blocks hostile requests; never writes files. |
-| **Librarian** | once per goal, before planning | **Read only**: files, search, git history. Returns a checked evidence pack: paths it actually opened, conventions, the command this repo really runs. |
-| **Design** | once per goal | Reasons only. Locks the direction (tokens, components, constraints), obeying the workspace's brand contract when it has one. Emits the contract as text; never writes it. |
-| **Planner** | once per goal | Reasons only. Decomposes goal + evidence into 1–20 steps with target paths. |
-| **Fixer** | once per step | **The only writer.** Proposes file creates, updates, deletions. |
-| **Verifier** | once per step | **The only role that runs a command.** One allowlisted command; reports what actually happened. |
-| **Critic** | once per step | Audits the diff. `request-changes` pauses for a human; there is no auto-fix loop. |
-| **Scribe** | once per step | Progress notes and a conventional commit message. |
+| **Librarian** | once per goal, before planning (`recon`) | **Read only**: files, search, git history. Returns a checked evidence pack: paths it actually opened, conventions, the command this repo really runs. |
+| **Design** | once per goal (`design`) | Reasons only. Locks the direction (tokens, components, constraints), obeying the workspace's brand contract when it has one. Emits the contract as text; never writes it. |
+| **Planner** | once per goal (`plan`) | Reasons only. Decomposes goal + evidence into 1–20 steps with target paths. |
+| **Fixer** | once per step (`write`) | **The only writer.** Proposes file creates, updates, deletions. |
+| **Verifier** | once per step (`verify`) | **The only role that runs a command.** One allowlisted command; reports what actually happened. |
+| **Critic** | once per step (`review`) | Audits the diff. `request-changes` pauses for a human; there is no auto-fix loop. |
+| **Scribe** | once per step (`summarize`) | Progress notes and a conventional commit message. |
 
 The familiar librarian → design → planner → fixer → verifier → critic → scribe order is the built-in
 `ship-a-change` **skill**, not a compiled path: a request needing three of those seven gets three. The slot count

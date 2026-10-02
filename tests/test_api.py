@@ -1,6 +1,7 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import asyncio
 import json
+import re
 import tempfile
 import time
 import unittest
@@ -254,18 +255,28 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
                 entry["timing"],
                 (
                     "once per goal, before any model call",
-                    "once per goal, before planning",
-                    "once per goal, after the librarian",
-                    "once per goal",
-                    "once per step",
+                    "once per goal, before planning (the `recon` move)",
+                    "once per goal, after the librarian (the `design` move)",
+                    "once per goal (the `plan` move)",
+                    "once per step (the `write` move)",
+                    "once per step (the `verify` move)",
+                    "once per step (the `review` move)",
+                    "once per step (the `summarize` move)",
                 ),
             )
         by_role = {entry["role"]: entry for entry in roles}
         self.assertIn("Never writes", by_role["librarian"]["job"])
         self.assertIn("fixer still writes", by_role["design"]["job"])
-        self.assertEqual(by_role["fixer"]["timing"], "once per step")
-        self.assertEqual(by_role["librarian"]["timing"], "once per goal, before planning")
-        self.assertEqual(by_role["design"]["timing"], "once per goal, after the librarian")
+        self.assertEqual(by_role["fixer"]["timing"], "once per step (the `write` move)")
+        self.assertEqual(by_role["librarian"]["timing"], "once per goal, before planning (the `recon` move)")
+        self.assertEqual(by_role["design"]["timing"], "once per goal, after the librarian (the `design` move)")
+        # The move a timing names is a move that exists: the card must not send a person looking for one
+        # that does not.
+        from engine.conductor_tools import ConductorTools
+
+        for entry in roles:
+            for named in re.findall(r"the `([a-z_]+)` move", entry["timing"]):
+                self.assertIn(named, ConductorTools.NAMES, entry["role"])
 
     async def test_a_renamed_role_is_reported_by_its_new_name(self) -> None:
         await self.client.put(

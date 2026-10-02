@@ -129,16 +129,18 @@ ROLE_JOB: dict[str, str] = {
 }
 
 # When each slot runs. This is the part users get wrong from the name alone: the
-# librarian and planner run once for a goal, the rest run for every step.
+# librarian and planner run once for a goal, the rest run for every step. The move in
+# brackets is how the conductor reaches the role (docs/09 §10.6); on an install with no
+# conductor the fixed recipe runs the same roles in the same order.
 ROLE_TIMING: dict[str, str] = {
     "laya": "once per goal, before any model call",
-    "librarian": "once per goal, before planning",
-    "design": "once per goal, after the librarian",
-    "planner": "once per goal",
-    "fixer": "once per step",
-    "verifier": "once per step",
-    "critic": "once per step",
-    "scribe": "once per step",
+    "librarian": "once per goal, before planning (the `recon` move)",
+    "design": "once per goal, after the librarian (the `design` move)",
+    "planner": "once per goal (the `plan` move)",
+    "fixer": "once per step (the `write` move)",
+    "verifier": "once per step (the `verify` move)",
+    "critic": "once per step (the `review` move)",
+    "scribe": "once per step (the `summarize` move)",
 }
 
 # Display order: the gate, then the pipeline in execution order.

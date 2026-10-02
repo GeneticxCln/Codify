@@ -14,13 +14,15 @@ be a tool that exists, because the stale name (`delegate`) was exactly how the p
 
 from __future__ import annotations
 
+import ast
 import re
 import unittest
+from pathlib import Path
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
 from engine.chat_prompts import CONDUCTOR_SYSTEM_PROMPT
-from engine.conductor import TOOLS
+from engine.conductor import READ_PAGE, TOOLS
 from engine.conductor_tools import ConductorTools
 from engine.skills import builtin_skills
 from tests.test_conductor import ConductorTestCase, _ToolProvider
@@ -130,6 +132,71 @@ class TestTheRecipeAgreesWithTheEngine(unittest.TestCase):
 
     def test_it_says_to_run_the_projects_own_checks_after_the_change(self) -> None:
         self.assertRegex(self.recipe(), r"(linter|type checker|lint)")
+
+
+ENGINE = Path(__file__).resolve().parent.parent / "engine"
+
+# Tools that existed and do not: a string that tells a model to call one is an instruction it cannot follow.
+# `delegate` ran the whole recipe in one call and was removed when the stages became moves (docs/09 §10.14).
+GONE = ("delegate",)
+
+
+def _strings_the_engine_says(path: Path) -> list[tuple[int, str]]:
+    """Every string literal in a module that is not a docstring: what the code *says*, not what it explains."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            first = node.body[0] if node.body else None
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                docstrings.add(id(first.value))
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings
+    ]
+
+
+class TestNothingTheModelIsToldNamesAToolThatIsGone(unittest.TestCase):
+    """`git_history`'s refusal told the model to "use delegate for a change", a tool removed long before.
+
+    The conductor reads tool results, refusals, descriptions, briefs and skills. A name in any of them that no
+    longer exists is an instruction it cannot follow, and a small model follows it anyway and is refused.
+    """
+
+    def test_no_string_the_engine_says_names_a_removed_tool(self) -> None:
+        found: list[str] = []
+        for path in sorted(ENGINE.glob("*.py")):
+            for line, text in _strings_the_engine_says(path):
+                for name in GONE:
+                    if re.search(rf"\b{name}\b", text, re.IGNORECASE):
+                        found.append(f"{path.name}:{line}: {text[:90]!r}")
+        self.assertEqual([], found)
+
+    def test_no_built_in_skill_names_a_removed_tool(self) -> None:
+        for path in sorted((ENGINE / "builtin_skills").glob("*.md")):
+            for name in GONE:
+                self.assertIsNone(re.search(rf"\b{name}\b", path.read_text(encoding="utf-8"), re.IGNORECASE), path.name)
+
+    def test_the_scan_can_see_a_string_and_ignores_a_docstring(self) -> None:
+        # A scan that finds nothing in anything passes forever; this is its negative control.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = Path(tmp) / "sample.py"
+            sample.write_text('"""A docstring that says delegate."""\nSAYS = "use delegate for a change"\n', encoding="utf-8")
+            texts = [text for _, text in _strings_the_engine_says(sample)]
+        self.assertEqual(["use delegate for a change"], texts)
+
+
+class TestWhatReadPageSaysAboutItself(unittest.TestCase):
+    def test_it_does_not_claim_no_page_can_be_opened_when_a_tool_opens_pages(self) -> None:
+        # `navigate_page` opens an address (through the same guard as the person's click). `read_page` only
+        # reads, and its description used to say the model "cannot open a page", which is false of the menu.
+        text = " ".join(READ_PAGE.description.lower().split())
+        self.assertNotIn("cannot open a page", text)
+        self.assertIn("`navigate_page`", READ_PAGE.description)
+        self.assertIn("quotation", text, "the page is still quoted as untrusted text")
 
 
 class TestTheBriefsSpeakOfRealToolsAndTheRightWayToAsk(ConductorTestCase):
