@@ -50,6 +50,24 @@ test("an editor tab is named for its kind and its file, and closes by that name"
   });
 });
 
+test("an editor tab's tooltip is the file's full path, not the folder and a name", async () => {
+  await withDom(async (dom) => {
+    const workspaces = [{ id: "w1", name: "Alpha", root_path: "/work/alpha", design_contract_path: "", created_at: 1 }];
+    await mount(dom, { workspaces });
+
+    assert.equal(tabEl(dom, "parser.py").getAttribute("title"), "/work/alpha/src/parser.py");
+    assert.equal(tabEl(dom, "Refactor the parser").getAttribute("title"), "Refactor the parser", "a conversation's tooltip is unchanged");
+  });
+});
+
+test("an editor tab with no workspace on hand is still told apart by its path", async () => {
+  await withDom(async (dom) => {
+    await mount(dom);
+
+    assert.equal(tabEl(dom, "lexer.py").getAttribute("title"), "src/lexer.py");
+  });
+});
+
 test("a tab with unsaved changes is marked, and says so in its name", async () => {
   await withDom(async (dom) => {
     await mount(dom, { unsavedIds: ["e1"] });

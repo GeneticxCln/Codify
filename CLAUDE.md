@@ -80,6 +80,8 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
   toolcall.py     the neutral tool-calling shape and its four protocol translations
   spawn_guard.py process guard; every spawn routes through it
   speech.py       voice: dictation and read-aloud through an OpenAI-compatible speech provider; the engine records the mic (pw-record)
+  surfaces.py     the bridge for what the app window owns: the engine asks, the window answers, ops are fixed strings in a table;
+                  surface_editor.py is the editor's table (`read_editor`, `open_in_editor`, `edit_editor`; none touches the disk)
 ui/             React 19 + TS + Vite; ui/tests/ run through node --test
 src-tauri/      Tauri v2 Rust shell
 tests/          Python suite; stream_isolation.py is the shared isolation helper
@@ -146,7 +148,7 @@ docs/           00–11, below
 | `docs/06` | Live model discovery — why there is no catalog |
 | `docs/07` | Spawn guard and deterministic tests |
 | `docs/08` | Benchmarks: what a number may claim, and the no-third-party-source policy |
-| `docs/09` | The workspace shell: conversation model, tab rules, both panes, the browser pane's separate-window decision, and §10 on what a turn is |
+| `docs/09` | The workspace shell: conversation model, tab rules, both panes, the browser pane's separate-window decision, §10 on what a turn is, §11 clipboard, §12 split panes, §13 the editor and the surface bridge |
 | `docs/10` | Agent memory: the Hindsight audit — what was built (`recall`, `recall_threads`, keyword search, the durable observation store and its fading), and what was rejected |
 | `docs/11` | The Ruflo audit: which ideas were borrowed, which were refused and by which invariant, and what was not read |
 

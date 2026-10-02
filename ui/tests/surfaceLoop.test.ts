@@ -16,7 +16,7 @@ registerTsx();
 
 import type { SurfaceRequest } from "../src/types.ts";
 
-const { createSurfaceRegistry, runSurfaceLoop } = await import("../src/surfaceLoop.ts");
+const { abortableSleep, createSurfaceRegistry, runSurfaceLoop } = await import("../src/surfaceLoop.ts");
 
 const request = (over: Partial<SurfaceRequest> = {}): SurfaceRequest => ({
   id: "r1",
@@ -240,4 +240,77 @@ test("an engine that answers at once with nothing is not hammered", async () => 
   const { slept } = await drive({ polls: [null, null, null, null] });
 
   assert.ok(slept.length >= 3 && slept.every((ms) => ms >= 250), `an instant empty poll must be waited out: ${slept}`);
+});
+
+
+// ── the pause ────────────────────────────────────────────────────────────────
+
+test("a pause lasts as long as it was asked to, and ends early the moment the loop is told to stop", async () => {
+  const quick = new AbortController();
+  const started = Date.now();
+  await abortableSleep(30, quick.signal);
+  assert.ok(Date.now() - started >= 25, "the pause ended before its time");
+
+  const stopped = new AbortController();
+  const long = abortableSleep(60_000, stopped.signal);
+  stopped.abort();
+  await assert.rejects(long, (error: Error) => error.name === "AbortError");
+});
+
+test("a pause asked for after the loop was told to stop does not even start", async () => {
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(abortableSleep(60_000, controller.signal), (error: Error) => error.name === "AbortError");
+});
+
+test("a pause that is stopped cancels its timer, so a long pause does not outlive the loop", async () => {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const started: unknown[] = [];
+  const cleared: unknown[] = [];
+  // Only the pause's own timer (a minute long) is recorded: the test runner has timers of its own.
+  globalThis.setTimeout = ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+    const timer = realSet(fn, ms, ...rest);
+    if (ms === 60_000) started.push(timer);
+    return timer;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: Parameters<typeof clearTimeout>[0]) => {
+    cleared.push(timer);
+    realClear(timer);
+  }) as typeof clearTimeout;
+  try {
+    const controller = new AbortController();
+    const pause = abortableSleep(60_000, controller.signal);
+    controller.abort();
+    await assert.rejects(pause);
+
+    assert.equal(started.length, 1);
+    assert.ok(cleared.includes(started[0]), "the stopped pause left its timer running");
+  } finally {
+    globalThis.setTimeout = realSet;
+    globalThis.clearTimeout = realClear;
+  }
+});
+
+test("a pause that ran its course leaves nothing listening to the signal, however many pauses a long run makes", async () => {
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const added: unknown[] = [];
+  const removed: unknown[] = [];
+  const add = signal.addEventListener.bind(signal);
+  const remove = signal.removeEventListener.bind(signal);
+  signal.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+    added.push(listener);
+    add(type, listener, options);
+  }) as typeof signal.addEventListener;
+  signal.removeEventListener = ((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) => {
+    removed.push(listener);
+    remove(type, listener, options);
+  }) as typeof signal.removeEventListener;
+
+  await abortableSleep(5, signal);
+
+  assert.equal(added.length, 1);
+  assert.deepEqual(removed, added, "the finished pause left its listener on the signal");
 });

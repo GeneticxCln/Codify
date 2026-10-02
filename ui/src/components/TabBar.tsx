@@ -152,7 +152,16 @@ export const TabBar: React.FC<TabBarProps> = ({
               }${unread ? " — new output" : ""}${unsaved ? " — unsaved changes" : ""}${
                 assistantEdited ? " — changed by the assistant" : ""
               }${inSplit ? " — in split view" : ""}`}
-              title={ws ? `${ws.root_path} — ${label}` : label}
+              title={
+                // An editor tab is a file, so its tooltip says which one and where: a name alone cannot tell two `index.ts` apart.
+                tab.kind === "editor" && tab.path
+                  ? ws
+                    ? `${ws.root_path}/${tab.path}`
+                    : tab.path
+                  : ws
+                    ? `${ws.root_path} — ${label}`
+                    : label
+              }
               data-in-split={inSplit ? "true" : undefined}
               onClick={() => onFocus(tab.id)}
               onContextMenu={

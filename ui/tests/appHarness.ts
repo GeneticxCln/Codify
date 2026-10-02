@@ -86,6 +86,12 @@ export interface AppOptions {
   localStorage?: Record<string, string>;
   /** Values seeded into `sessionStorage`: what an earlier page in this window left. */
   sessionStorage?: Record<string, string>;
+  /**
+   * Files on the fake engine's disk, keyed `"<workspace id>:<path>"`. They answer `GET /workspaces/{id}/files`,
+   * `GET /workspaces/{id}/file` and `PUT /workspaces/{id}/file` the way the engine does: a save names the version it
+   * read, and one that does not is a 409 `file_changed` carrying the version the file is now.
+   */
+  files?: Record<string, string>;
   /** Rows the engine already holds for the shared tab strip (`GET /shell/tabs`). */
   engineTabs?: EngineTabRow[];
   /** Engine paths (prefix match) that answer 503, as an engine mid-restart does. */
@@ -156,6 +162,31 @@ export interface AppContext {
   emit(event: string, payload: unknown): Promise<void>;
   /** Run a change inside React's `act`, so state it sets is flushed before you look. */
   act(body: () => void | Promise<void>): Promise<void>;
+  /** The fake engine's files (see `AppOptions.files`), and the saves a person made. */
+  disk: {
+    read(workspaceId: string, path: string): string | undefined;
+    /** Change a file behind the app's back, as the fixer or a terminal would. */
+    write(workspaceId: string, path: string, content: string): void;
+    delete(workspaceId: string, path: string): void;
+    /** Every `PUT /workspaces/{id}/file` the app made, in order. */
+    saves: Array<{ workspaceId: string; path: string; content: string; base_version: string }>;
+  };
+  /**
+   * The engine's side of the surface bridge (`engine/surfaces.py`): the window polls `/surfaces/next` and posts
+   * `/surfaces/answer`, and this is the engine asking it a question and reading what comes back. Polls and answers are
+   * kept out of `engine`, as a goal's WebSocket is: they are background traffic, and a test counting what the app
+   * asked the engine for must not have to subtract a heartbeat.
+   */
+  surface: {
+    ask(request: {
+      op: string;
+      surface?: string;
+      workspace_id?: string;
+      args?: Record<string, unknown>;
+    }): Promise<{ ok: boolean; result?: any; error?: string }>;
+    /** How many polls the window has made. */
+    polls(): number;
+  };
 }
 
 const DEFAULT_WORKSPACES = [
@@ -276,6 +307,93 @@ export async function withApp(
       blob: async () => (data instanceof Blob ? data : new Blob([JSON.stringify(data)])),
     }) as unknown as Response;
 
+  // The engine's files: content and a version that moves on every write, so a save that names a stale one conflicts.
+  const diskFiles = new Map<string, { content: string; version: string }>();
+  let diskWrites = 0;
+  for (const [key, content] of Object.entries(options.files ?? {})) {
+    diskWrites += 1;
+    diskFiles.set(key, { content, version: `v${diskWrites}` });
+  }
+  const diskSaves: AppContext["disk"]["saves"] = [];
+  const fileRoute = (path: string, method: string, query: URLSearchParams, payload: Record<string, unknown> | null): Response | null => {
+    const files = /^\/workspaces\/([^/]+)\/files$/.exec(path);
+    if (files && method === "GET") {
+      const ws = decodeURIComponent(files[1]!);
+      const mine = [...diskFiles.keys()].filter((k) => k.startsWith(`${ws}:`)).map((k) => k.slice(ws.length + 1)).sort();
+      return respond({ files: mine, truncated: false, limit: 5000 });
+    }
+    const one = /^\/workspaces\/([^/]+)\/file$/.exec(path);
+    if (!one) return null;
+    const ws = decodeURIComponent(one[1]!);
+    if (method === "GET") {
+      const wanted = query.get("path") ?? "";
+      const file = diskFiles.get(`${ws}:${wanted}`);
+      if (!file) return respond({ code: "file_missing", message: `there is no file at ${wanted} in this workspace` }, 404);
+      return respond({ path: wanted, content: file.content, version: file.version, size: file.content.length });
+    }
+    if (method === "PUT") {
+      const wanted = String(payload?.path ?? "");
+      const file = diskFiles.get(`${ws}:${wanted}`);
+      diskSaves.push({
+        workspaceId: ws,
+        path: wanted,
+        content: String(payload?.content ?? ""),
+        base_version: String(payload?.base_version ?? ""),
+      });
+      if (!file) return respond({ code: "file_missing", message: `there is no file at ${wanted} in this workspace` }, 404);
+      if (file.version !== payload?.base_version) {
+        return respond({ code: "file_changed", message: "changed on disk", current_version: file.version }, 409);
+      }
+      diskWrites += 1;
+      const content = String(payload?.content ?? "");
+      diskFiles.set(`${ws}:${wanted}`, { content, version: `v${diskWrites}` });
+      return respond({ path: wanted, version: `v${diskWrites}`, size: content.length });
+    }
+    return null;
+  };
+
+  // The surface bridge's two routes. A poll hangs until the test puts a question to the window or the app stops asking
+  // (the request is aborted), the way the engine's long poll does; an answer lands on the question it names.
+  const surfaceQueue: Array<Record<string, unknown>> = [];
+  const surfaceWaiters: Array<() => void> = [];
+  const surfaceAnswers = new Map<string, (answer: { ok: boolean; result?: unknown; error?: string }) => void>();
+  let surfacePolls = 0;
+  let surfaceSeq = 0;
+  const surfaceRoute = async (
+    path: string,
+    method: string,
+    payload: Record<string, unknown> | null,
+    signal: AbortSignal | undefined,
+  ): Promise<Response | null> => {
+    if (path === "/surfaces/next" && method === "GET") {
+      surfacePolls += 1;
+      for (;;) {
+        const next = surfaceQueue.shift();
+        if (next) return respond(next);
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = (): void => reject(new DOMException("aborted", "AbortError"));
+          if (signal?.aborted) {
+            onAbort();
+            return;
+          }
+          surfaceWaiters.push(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+          });
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+      }
+    }
+    if (path === "/surfaces/answer" && method === "POST") {
+      const id = String(payload?.id ?? "");
+      const done = surfaceAnswers.get(id);
+      surfaceAnswers.delete(id);
+      done?.({ ok: payload?.ok === true, result: payload?.result, error: payload?.error as string | undefined });
+      return respond({ accepted: Boolean(done) });
+    }
+    return null;
+  };
+
   const route = (path: string, method: string, query: URLSearchParams, payload: Record<string, unknown> | null): Response => {
     if ((options.failRoutes ?? []).some((prefix) => path.startsWith(prefix))) {
       return respond({ code: "unavailable", message: "engine is restarting" }, 503);
@@ -285,6 +403,8 @@ export async function withApp(
       const { status, body } = typeof answer === "function" ? answer(payload) : answer;
       return respond(body, status ?? 200);
     }
+    const fileAnswer = fileRoute(path, method, query, payload);
+    if (fileAnswer) return fileAnswer;
     if (path === "/shell/tabs" && method === "GET") return respond([...strip].sort((a, b) => a.position - b.position));
     if (path === "/shell/tabs" && method === "PUT") {
       const row = { updated_at: 1, ...(payload as unknown as EngineTabRow) };
@@ -480,6 +600,12 @@ export async function withApp(
       } catch {
         payload = null;
       }
+    }
+    // The window's heartbeat to the engine is not an engine call a test counts (see `AppContext.surface`).
+    if (url.pathname.startsWith("/surfaces/")) {
+      if (options.health === "down") throw new TypeError("Failed to fetch");
+      const surface = await surfaceRoute(url.pathname, method, payload, init?.signal ?? undefined);
+      if (surface) return surface;
     }
     const call: EngineCall = { method, url: url.toString(), path: url.pathname, body: payload };
     engine.push(call);
@@ -680,6 +806,40 @@ export async function withApp(
           });
         },
         act: (fn) => act(async () => { await fn(); }),
+        disk: {
+          read: (workspaceId, path) => diskFiles.get(`${workspaceId}:${path}`)?.content,
+          write(workspaceId, path, content) {
+            diskWrites += 1;
+            diskFiles.set(`${workspaceId}:${path}`, { content, version: `v${diskWrites}` });
+          },
+          delete: (workspaceId, path) => void diskFiles.delete(`${workspaceId}:${path}`),
+          saves: diskSaves,
+        },
+        surface: {
+          polls: () => surfacePolls,
+          async ask(request) {
+            const id = `surface-${++surfaceSeq}`;
+            const answered = new Promise<{ ok: boolean; result?: unknown; error?: string }>((resolve, reject) => {
+              surfaceAnswers.set(id, resolve);
+              setTimeout(() => reject(new Error("the window never answered the engine's question")), 4000);
+            });
+            let reply: { ok: boolean; result?: unknown; error?: string } = { ok: false };
+            // Inside `act`: the handler runs the app's own state updates, and they must be flushed before a test looks.
+            await act(async () => {
+              surfaceQueue.push({
+                id,
+                surface: request.surface ?? "editor",
+                op: request.op,
+                workspace_id: request.workspace_id ?? "ws-a",
+                args: request.args ?? {},
+              });
+              for (const wake of surfaceWaiters.splice(0)) wake();
+              reply = await answered;
+            });
+            await settle();
+            return reply;
+          },
+        },
       });
       }
     });

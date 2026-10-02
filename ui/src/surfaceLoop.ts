@@ -54,6 +54,25 @@ export function createSurfaceRegistry(): SurfaceRegistry {
   };
 }
 
+/** A pause that ends early, by rejecting, when the loop is told to stop. */
+export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", stop);
+      resolve();
+    }, ms);
+    const stop = (): void => {
+      clearTimeout(timer);
+      reject(new DOMException("aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", stop, { once: true });
+  });
+}
+
 export interface SurfaceLoopIo {
   /** The next question, or null after `wait` seconds with none. Throws when the engine cannot be reached. */
   next(wait: number, signal: AbortSignal): Promise<SurfaceRequest | null>;

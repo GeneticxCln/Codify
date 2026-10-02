@@ -97,6 +97,8 @@ const GLOBALS = [
   "MutationObserver",
   "Range",
   "Selection",
+  // ...and asks whether a scroller is the window (`elt instanceof Window`) on every measure.
+  "Window",
 ] as const;
 
 /** One document, and everything a test can do to it. */

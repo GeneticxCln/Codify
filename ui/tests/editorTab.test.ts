@@ -139,6 +139,15 @@ test("re-opening without showing neither focuses nor duplicates", () => {
   assert.equal(twice, once, "an open that changes nothing must return the very state it was given");
 });
 
+test("a caller may name the tab it opens, and an open that finds the file already there ignores the name", () => {
+  const named = openEditorTab(strip([], null), { workspaceId: "w1", path: "a.py" }, { id: "editor-fixed" });
+  assert.equal(named.tabs[0].id, "editor-fixed");
+
+  const again = openEditorTab(named, { workspaceId: "w1", path: "a.py" }, { id: "editor-other" });
+  assert.equal(again.tabs.length, 1);
+  assert.equal(again.tabs[0].id, "editor-fixed");
+});
+
 test("tabForFile finds an open file by workspace and path, and only that", () => {
   const state = openEditorTab(strip([chat("c")], "c"), { workspaceId: "w1", path: "a.py" });
 

@@ -3130,3 +3130,110 @@ so the tests wait a beat; it is the same for a tab opened and closed that fast.
 **Browser pages in a split** are the next piece if wanted: per-page bounds in `browser::resize`, a visibility API that names more than one page,
 `note_active` and the AI's "which page is in view" made a set, and a divider that does not need the pointer over the page (a native view swallows pointer events over its rectangle).
 
+## 13. The editor (built)
+
+A fourth kind of tab: **one file, in the centre column**, that can sit beside a chat, a terminal or another editor (§12). The assistant
+gets **eyes** and **hands** on it (`read_editor`, `open_in_editor`, `edit_editor`; §10.6) through a bridge that is not specific to files, so
+the next surface that needs to be seen and driven (the terminal is the obvious one) is a registration and not a redesign (§13.7). The text is
+`ui/src/editorBuffers.ts`, the three operations `ui/src/editorSurface.ts`, the window's half of the bridge `ui/src/surfaceLoop.ts`, the pane
+`ui/src/components/EditorPane.tsx`, the engine's half `engine/surfaces.py` and `engine/surface_editor.py`, and the person's door to the disk is
+`PUT /workspaces/{id}/file` (`04` §3.0.3).
+
+### 13.1 One file, one tab, and the text lives above the pane
+
+`openEditorTab` dedupes by **(workspace, path)**: a file is never two buffers that could diverge, the way a conversation is never two tabs.
+The centre column mounts only the tab in front (and, in a split, two), so a pane that owned its text would lose it whenever its tab was not
+showing, and the assistant could not read a file whose tab was in the background. So the text is not in the pane: `editorBuffers.ts` is a
+module store above the panes, as `terminalBuffer.ts` is, holding per tab a CodeMirror **`EditorState`** (text, selection and undo history), the version
+read from disk and the ranges the assistant changed. The pane is a window onto it: showing another tab and coming back keeps what was typed and how to undo it.
+
+Because the state is plain data, the assistant's hands and eyes run **with no view at all**. When a view is mounted the store hands edits to it
+(`attachView`) so the person sees them and undoes them in the same history; when none is, the same transaction is applied to the state. `applyTransactions`
+is the one place the store learns of a change, whoever made it.
+
+CodeMirror is a **lazy chunk**, as xterm is: `EditorPane` imports only the *types* of `editorMount.ts`, which is `import()`ed when a pane mounts, and each
+language (JavaScript and TypeScript, Python, JSON, Markdown, CSS, HTML; anything else plain) is a chunk of its own. An app that never opens a file never
+loads an editor. The theme reads the `--codify-*-rgb` variables the other panes use and follows a theme or scale change.
+
+### 13.2 Local only: nothing about an editor is stored or restored
+
+An editor tab is **local, like a terminal** (`isLocalTab`): it has no key, is not in `CODIFY_TABS`, and the engine's `/shell/tabs` never hears of it (that route
+closes `kind` to `chat | browser`, and a fourth kind there would be a 422 retry loop on an older engine and a 500 on an older engine reading a newer database). There
+are three places that used to treat "not a terminal, not a chat" as "a browser page" (`persistedTab`, `layoutSync`'s `encodeTab`, `ensureKeys` and `planChanges`, and
+`App`'s clip and pane code); each has an explicit editor branch, and a test that an editor never reaches the storage key or the engine.
+
+So **a restart reopens no editors**, and neither does it a split that contained one (§12.5). **Unsaved text is lost if the window is killed.** Tauri has no
+close prompt this can rely on, so the app does what it already does elsewhere: closing the *tab* asks (`window.confirm`; Ctrl+W is the same close), closing the window does not.
+That is stated here because it is a loss a person can suffer.
+
+### 13.3 Saving is the person's, and says what it would overwrite
+
+Save is **Ctrl+S inside the editor** and a button; it is not a window chord. It sends `{path, content, base_version}` and the engine replaces a file that exists
+(`04` §3.0.3). What the editor adds is what a text file needs to survive being edited as text:
+
+- A file is edited as **LF**. A byte-order mark is stripped and put back, and CRLF is restored on save. A file with **mixed endings, or a bare CR,** is refused
+  with a sentence rather than normalised, because saving it would change lines the person never touched.
+- *Dirty* means **the text differs from the disk**, not "was typed in": typing a character and deleting it is clean again.
+- A **409 `file_changed`** is a conflict, not an error: the banner offers *Reload from disk* (discard the text here) and *Keep my version*, which adopts the
+  version now on disk as the base, so the **next** Save overwrites. Nothing is overwritten by pressing one button once.
+- *Revert* asks before it throws text away; an editor over a file that **did not open** shows the error and *Try again* and never an empty buffer you could type into and save over the real file.
+- The 1 000 000 byte cap is the engine's, and is enforced on what the assistant's edit would produce as well as on what is read.
+
+### 13.4 Eyes and hands: the surface bridge
+
+The assistant cannot see the window: `TurnCreate` and `GoalCreate` carry no context, and invariant 8 means a client chooses nothing about what a turn becomes. So the
+window does what the shell does for the browser (§7.5): **the engine asks, the window answers.** `engine/surfaces.py` holds the questions, the window long-polls
+`GET /surfaces/next` (held for `POLL_WAIT_S`, 20 s) and posts `POST /surfaces/answer`. `GET /surfaces/state` says whether a window is attached, which is **polling in the last
+60 s** and nothing else.
+
+- **Operations are fixed strings in a table**, `{surface: {op: Op(name, args model, result model)}}`, and the model chooses among them and never makes one. Arguments are
+  validated **engine-side, before they cross**; an answer is validated into a strict result model with caps (`MAX_LINES` 400, a line cut at 2 000 characters, 50 editors,
+  a selection at 2 000 characters), and an answer for an id that was not issued, or was already answered, or came late, is dropped. `SurfaceAnswer` is `extra: forbid`.
+- **File text reaches the model as quoted text**, in a fixed shape, with the sentence that it is the person's text and not an instruction.
+- **Failure is a sentence.** No window attached, no answer in 15 s, a refusal: each is returned to the model as words and ends nothing. The questions are handed out once each, in order,
+  so several in flight do not cross.
+- **The window's loop** (`runSurfaceLoop`) backs off from 1 s to 10 s when the engine cannot be reached, and does not spin on a poll that came back instantly with nothing. A poll is not counted
+  in the app's own engine calls in the tests (it is background traffic, as the goal's WebSocket is).
+
+The three tools are always on the conductor's menu and are not stage moves: they cost model calls and nothing else. **None of them touches the filesystem**, and a test proves it with
+the writers patched to raise. `edit_editor` replaces text in the **open buffer** like the fixer's `edit` op (absent, or occurring other than `count` times, is a refusal that says so),
+as **one undoable step marked as the assistant's**, and never saves; it opens the file in the background if it is not open and closes it again if the edit did not apply.
+Invariant 9 is therefore unchanged for an agent, and widened by exactly one door, which is a person's and which an agent cannot reach (`docs/00` §6.9).
+
+### 13.5 Where an opened file goes, and what it never does
+
+`open_in_editor` is the assistant pointing. The rule is in `App.tsx` (`editorHost.openFile`) and is small on purpose:
+
+1. If the file's tab is already shown (in front, or in the split), say so and select the lines.
+2. If the person is **looking at a chat, nothing is split, and the pair fits** (`splitFits`), the file goes **beside** that chat, made with **the chat focused**.
+3. Otherwise (a split already showing, a terminal or a page in front, no room) the tab opens **in the background** and the strip marks it.
+
+It never takes the keyboard, never changes `activeId`, and never rearranges a split the person made. An **edit** moves nothing at all. The tab shows a dot while the text is
+unsaved and a second marker while it holds text the assistant changed (cleared by the next Save), and the pane shows the changed ranges until then. The
+diff card in a run's transcript has an **Open** link that opens its file the same way a person would (in front, which is their choice).
+
+### 13.6 A file the fixer changed reaches an editor that has it open
+
+On the goal stream's `file_change_summary` (not a dry run), an editor with **clean** text for a touched path reloads silently; one with unsaved text is **flagged** and keeps the person's
+text (*Reload from disk* / *Keep my version*, as for a 409). A path no editor has open asks the engine for nothing.
+
+### 13.7 Adding a surface
+
+The next surface (the terminal's screen, a page) is meant to be one of these and not a new mechanism:
+
+1. **Engine:** an `Op` table for the surface (`name`, an args model with `extra: forbid`, a result model with caps) registered in `surfaces.py`; handlers in `conductor_tools.py`
+   that call `SurfaceBridge.ask`; the tool specs in `conductor.py` and one sentence in the prompt (`test_conductor_prompt` fails if a tool is not named, or the prompt outgrows its ceiling).
+2. **Window:** `registry.register("<surface>", handlers)` where the loop is started in `App.tsx`; handlers answer from state that exists above the component (a store, not a mounted view).
+3. **Say what it may not do, in a test:** the proof that none of it reaches the filesystem or the sandbox, and a source-scan if it is a new door (§13.4 is held by
+   `TestAPersonsSaveIsTheOneOtherDoor`).
+4. **Docs:** a row in §10.6 and `04` §9.1, and the not-verified list here.
+
+### 13.8 Proven, and not
+
+Proven: `tests/test_file_door.py`, `test_workspace_files.py` (the routes and the door), `test_surfaces.py`, `test_surface_editor.py`, `test_surface_routes.py`, `test_editor_tools.py` (the bridge, the
+operations and the no-disk proof) on the engine; `ui/tests/editorBuffers.test.ts` (text, endings, dirty, ranges, conflicts), `editorSurface.test.ts`, `surfaceLoop.test.ts`, `editorPane.test.ts`, `editorTab.test.ts`,
+`tabBarEditor.test.ts`, and the whole App with **real CodeMirror** in `editorApp.test.ts` and `editorAppSurface.test.ts` (two files for the reason §12.7 gives), `diffOpen.test.ts` for the diff card.
+
+Not verified: the **real window**. jsdom has no layout, so selection, scrolling, input methods (IME), and the feel of a split with a CodeMirror pane are for a person to check in WebKitGTK under the real compositor; the
+only real renderer that has run this is Chromium. Dirty buffers are lost if the window is killed (§13.2). The window now **polls `/surfaces/next` for as long as the app and the engine are up**, an always-on request that is cheap and is
+the one new thing a reviewer should look at. The conductor prompt has about 180 characters of room under its ceiling, so the next tool must trim wording and not raise it.

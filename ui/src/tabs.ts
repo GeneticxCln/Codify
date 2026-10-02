@@ -485,18 +485,21 @@ function retitleEditors(tabs: Tab[]): Tab[] {
  * buffers that disagree about what it says, and only one of them could be right when it was saved. `show: false` opens
  * (or leaves) the tab without making it the active one, which is what the assistant's `open_in_editor` does when the
  * person is not looking at the conversation that asked: it must not take them away from what they are doing. An open
- * that changes nothing returns the very state it was given.
+ * that changes nothing returns the very state it was given. `id` names the tab, for a caller that needs it before the state
+ * settles; opening a file that is already open ignores it.
  */
 export function openEditorTab(
   state: TabState,
   file: { workspaceId: string; path: string },
-  options: { show?: boolean } = {},
+  options: { show?: boolean; id?: string } = {},
 ): TabState {
   const show = options.show ?? true;
   const existing = tabForFile(state, file.workspaceId, file.path);
   if (existing) return show && state.activeId !== existing.id ? focusTab(state, existing.id) : state;
   const tab: Tab = {
-    id: tabId("editor"),
+    // The caller may name it, so one that has to know the id before the state settles (the assistant opening a file asks
+    // for the tab back at once) and a state updater that makes the same tab later agree on what it is called.
+    id: options.id ?? tabId("editor"),
     kind: "editor",
     title: file.path.split("/").pop() || file.path,
     workspaceId: file.workspaceId,
