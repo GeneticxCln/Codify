@@ -3144,6 +3144,9 @@ What a native view costs, and where each cost is paid:
 - **Which page the shell shows is what is drawn, not what is active.** `browser::focus` shows the page it is named and hides the others, and it used to be
   told the active tab's. With a chat beside a page the chat can have the focus, and the active tab is the chat, so the shell is told **the page in the drawn
   split** (`shownPageId` in `App.tsx`). A split that is showing but does not fit draws only the focused pane, and then the page is shown only if it is that pane.
+- **The shell is told where the page's pane is as soon as it is measured** (`handleBrowserBounds`): a burst of measurements is sent as its first at once and its
+  last when it settles, where it used to wait out a 120 ms quiet period for all of it. A page put beside a chat is shown the moment the shell is told which
+  page to show, before its pane has been measured, so a trailing-only send left it over the chat, full-width, for that long.
 - **A drag of the divider hides the page for its length** (`SplitPanes`'s `onDragChange`). A native view takes the pointer over its rectangle, so
   a drag that crossed the page would stop receiving moves; this is a precaution, taken whether or not the platform would have kept the capture, and the page
   comes back, at its new size, when the divider is let go.

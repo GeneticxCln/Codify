@@ -1419,6 +1419,8 @@ export const App: React.FC = () => {
   // been measured (the shell refuses a zero-sized pane by design, §7.2).
   const [browserBounds, setBrowserBounds] = useState<BrowserBounds | null>(null);
   const browserResizeTimerRef = useRef<number | null>(null);
+  // Whether a measurement arrived while the last one's quiet period was running, and so is still to be sent.
+  const browserResizeDirtyRef = useRef(false);
   const handleBrowserBounds = useCallback((bounds: BrowserBounds) => {
     browserBoundsRef.current = bounds;
     setBrowserBounds((prev) =>
@@ -1432,16 +1434,26 @@ export const App: React.FC = () => {
     );
     // The pane's observer fires on every layout change; the shell's resize is
     // cheap but not free, and a drag across the window edge would otherwise
-    // queue dozens. Coalesced, the last rectangle wins — the one the user
-    // ended on.
-    if (browserResizeTimerRef.current !== null) {
-      window.clearTimeout(browserResizeTimerRef.current);
+    // queue dozens. So a burst is sent as its **first** measurement at once and
+    // its **last** when it settles: the page is never left a tenth of a second
+    // at the size of the layout before this one (a page that has just been put
+    // beside a chat would sit over the chat, full-width, for that long, and be
+    // shown at it, because the shell is told which page to show before the pane
+    // has been measured), and a long drag is followed while it lasts and ends
+    // where the user ended it.
+    if (browserResizeTimerRef.current === null) {
+      void resizeBrowserWebviews(bounds).catch(() => {});
+      browserResizeDirtyRef.current = false;
+      browserResizeTimerRef.current = window.setTimeout(function settle() {
+        browserResizeTimerRef.current = null;
+        if (!browserResizeDirtyRef.current) return;
+        browserResizeDirtyRef.current = false;
+        const current = browserBoundsRef.current;
+        if (current) void resizeBrowserWebviews(current).catch(() => {});
+      }, 120);
+    } else {
+      browserResizeDirtyRef.current = true;
     }
-    browserResizeTimerRef.current = window.setTimeout(() => {
-      browserResizeTimerRef.current = null;
-      const current = browserBoundsRef.current;
-      if (current) void resizeBrowserWebviews(current).catch(() => {});
-    }, 120);
   }, []);
 
   // The DevTools inspector's state, as the shell last reported it. One tab at

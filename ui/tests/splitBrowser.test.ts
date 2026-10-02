@@ -126,6 +126,68 @@ test("another page cannot be shown beside a page, and the menu says why", async 
   });
 });
 
+// ── the page lands where its pane is ────────────────────────────────────────
+
+const resizeWidths = (ctx: AppContext): number[] =>
+  commands(ctx, "codify_browser_resize").map((c) => (c.bounds as { width: number }).width);
+
+test("the shell is told where the page's pane is as soon as it is measured, not a tenth of a second later", async () => {
+  await withApp({ viewport: WIDE, ...SEEDED }, async (ctx) => {
+    await openThread(ctx, "c1");
+    await seatAPage(ctx, "https://example.com/a");
+    await click(ctx, tabNamed(ctx, "Conversation:"));
+    await beat(300); // let the page's own measurements settle, so what follows is the split's
+    const before = commands(ctx, "codify_browser_resize").length;
+
+    // `chord`, not `split`: `split` waits a beat for xterm's sake, and the point is that the call is made *before* any wait.
+    await chord(ctx, ".", "Period");
+    const after = commands(ctx, "codify_browser_resize").length;
+
+    assert.ok(after > before, "the page stayed at the size it had when it filled the column, over the chat, until a timer ran");
+  });
+});
+
+test("a burst of measurements sends the first at once and the last when it settles: a drag is followed, and ends where it ended", async () => {
+  await withApp({ viewport: WIDE }, async (ctx) => {
+    // The harness's ResizeObserver never fires (jsdom has no layout), so this one keeps its callbacks to be called by hand.
+    const callbacks: Array<() => void> = [];
+    const g = globalThis as unknown as { ResizeObserver: unknown };
+    const real = g.ResizeObserver;
+    g.ResizeObserver = class {
+      constructor(callback: () => void) {
+        callbacks.push(callback);
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): unknown[] {
+        return [];
+      }
+    };
+    try {
+      await click(ctx, browserButton(ctx));
+      await ctx.settle();
+      await beat(300);
+      const el = viewport(ctx.dom.container) as HTMLElement;
+      let width = 800;
+      el.getBoundingClientRect = () =>
+        ({ left: 10, top: 20, right: 10 + width, bottom: 520, width, height: 500, x: 10, y: 20, toJSON: () => ({}) }) as DOMRect;
+      const before = resizeWidths(ctx).length;
+
+      for (const next of [780, 760, 700, 640]) {
+        width = next;
+        await ctx.act(async () => void callbacks.forEach((callback) => callback()));
+      }
+      assert.deepEqual(resizeWidths(ctx).slice(before), [780], "the first measurement of a burst waited for a timer");
+
+      await beat(300);
+      assert.deepEqual(resizeWidths(ctx).slice(before), [780, 640], "the burst was not reduced to its first and its last");
+    } finally {
+      g.ResizeObserver = real;
+    }
+  });
+});
+
 // ── the page is in the way ───────────────────────────────────────────────────
 
 test("the page is taken off the screen while the divider is dragged, and put back when it is let go", async () => {
