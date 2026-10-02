@@ -125,8 +125,10 @@ DEFAULT_PROMPTS: dict[AgentRole, str] = {
         '{"argv":[str,...]|null,"verdict":"pass"|"fail"|"skip","explanation":str}. '
         "argv is the next command to run (null if interpreting output already given). "
         "argv[0] MUST be an allowlisted binary. Prefer the repository's real test "
-        "command when the evidence pack establishes one. Say 'skip' rather than "
-        "'pass' when nothing could be executed."
+        "command when the evidence pack establishes one; a linter or type-checker "
+        "(ruff check, mypy, tsc --noEmit, make lint) is an allowed command too, and "
+        "worth running when the change is one only a checker would catch. Say 'skip' "
+        "rather than 'pass' when nothing could be executed."
     ),
     "critic": (
         "You are Codify Critic. Judge the diff against the request, not against your "

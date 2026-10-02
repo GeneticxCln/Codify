@@ -7,11 +7,13 @@ goal service and nothing else), which is why it could leave `engine/executor.py`
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+import json
 import time
 import uuid
 from collections.abc import Callable
 from typing import Any
 
+from engine.conductor import CallBooks, ToolCallRequest
 from engine.default_prompts import DEFAULT_PROMPTS
 from engine.executor_support import AgentNotConfigured, AgentOutputInvalid
 from engine.laya import GateCall
@@ -25,6 +27,7 @@ from engine.replies import (
     extract_json,
 )
 from engine.services import AgentRegistryService, GoalService
+from engine.toolcall import ToolReply
 
 if TYPE_CHECKING:
     from engine.trace import TraceService
@@ -95,6 +98,115 @@ class _CallAccounting:
 
     def duration_ms(self) -> int:
         return int((time.monotonic() - self._started) * 1000)
+
+
+def _message_json(message: dict[str, Any]) -> dict[str, Any]:
+    """One neutral conductor message as plain JSON: a `ToolCall` is a dataclass and `json` cannot see it."""
+    out = dict(message)
+    calls = out.get("tool_calls")
+    if calls:
+        out["tool_calls"] = [
+            {"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls
+        ]
+    return out
+
+
+class _ConductorLedger:
+    """The conductor loop's books: what `run_agent` does for a role, for a loop that is not a role.
+
+    The conductor borrows the scribe's *configuration* but is not the scribe, so its calls are booked under
+    `conductor`: its own bucket in the usage document and the Stats rollup, and its own rows in a trace.
+    Which target served a call is read from the provider object the loop handed over, because the loop moves
+    onto its fallback by replacing that object and a ledger told "the primary" once would credit the
+    fallback's spend to the wrong provider.
+
+    A trace row holds what the model was *newly* shown (the messages since the previous call) and what it
+    answered. Sending the whole history in every row is quadratic in the length of the run, and the rows in
+    order already hold all of it: the first the prompt, the next the tool results the model asked for.
+    """
+
+    def __init__(
+        self, orchestrator: AgentOrchestrator, goal_id: str, step_id: str | None,
+        targets: list[tuple[Any, str, AgentConfig]],
+    ) -> None:
+        self._orchestrator = orchestrator
+        self._goal_id = goal_id
+        self._step_id = step_id
+        self._targets = targets
+        # How many messages the model has already been shown, assistant replies included.
+        self.seen = 0
+
+    def identify(self, provider: Any, model: str) -> tuple[str, str]:
+        """(label, provider slug) of the target this call is on."""
+        for index, (candidate, candidate_model, cfg) in enumerate(self._targets):
+            if candidate is provider and candidate_model == model:
+                return ("primary" if index == 0 else "fallback"), cfg.provider
+        return "primary", "unknown"
+
+    def open(self, request: ToolCallRequest) -> CallBooks:
+        label, slug = self.identify(request.provider, request.model)
+        books = self._orchestrator._accounting(
+            self._goal_id, self._step_id, "conductor", slug, request.model,
+        )
+        request.provider.usage_sink = books.sink
+        return _ConductorCallBooks(self, request, label, slug, books)
+
+
+class _ConductorCallBooks:
+    def __init__(
+        self, ledger: _ConductorLedger, request: ToolCallRequest, label: str, slug: str,
+        books: _CallAccounting,
+    ) -> None:
+        self._ledger = ledger
+        self._request = request
+        self._label = label
+        self._slug = slug
+        self._books = books
+        # Taken now: the loop appends to this list as soon as the call returns.
+        self._shown = list(request.messages[ledger.seen:])
+        self._total = len(request.messages)
+
+    def succeeded(self, reply: ToolReply) -> None:
+        orchestrator = self._ledger._orchestrator
+        tracer = orchestrator.tracer
+        if tracer is not None and tracer.enabled(self._ledger._goal_id):
+            tracer.record(
+                self._ledger._goal_id, self._ledger._step_id,
+                role="conductor", provider=self._slug, model=self._request.model,
+                temperature=self._request.temperature, max_tokens=self._request.max_tokens,
+                system_prompt=self._request.system,
+                user_prompt=json.dumps([_message_json(m) for m in self._shown], default=str),
+                response=json.dumps({
+                    "text": reply.text,
+                    "tool_calls": [
+                        {"id": c.id, "name": c.name, "arguments": c.arguments}
+                        for c in reply.tool_calls
+                    ],
+                }, default=str),
+                usage=self._books.usage, duration_ms=self._books.duration_ms(),
+            )
+        # The assistant message the loop appends next is this call's own answer, which the model
+        # already holds: the next row starts after it.
+        self._ledger.seen = self._total + 1
+
+    def failed(self, exc: ProviderError) -> None:
+        orchestrator = self._ledger._orchestrator
+        orchestrator.goals.publish(orchestrator._event(
+            self._ledger._goal_id, self._ledger._step_id, "agent_call_failed",
+            {
+                "role": "conductor",
+                "provider": self._slug,
+                "model": self._request.model,
+                "target": self._label,
+                "code": exc.code,
+                "message": exc.message,
+                "duration_ms": self._books.duration_ms(),
+            },
+        ))
+
+    def close(self) -> None:
+        # The provider is shared across roles; the sink must not outlive the call it belongs to.
+        self._request.provider.usage_sink = None
 
 
 class AgentOrchestrator:
@@ -176,6 +288,16 @@ class AgentOrchestrator:
             return raw
 
         return call
+
+    def tool_call_ledger(
+        self, goal_id: str, step_id: str | None, targets: list[tuple[Any, str, AgentConfig]],
+    ) -> _ConductorLedger:
+        """The books for one conductor loop, over the targets it may run on (primary first).
+
+        The loop calls `provider.complete_with_tools` itself, so none of `run_agent`'s accounting reached
+        it: a conductor-driven goal showed no conductor spend, no failed call and no trace row.
+        """
+        return _ConductorLedger(self, goal_id, step_id, targets)
 
     def _not_configured(self, role: AgentRole, target: AgentConfig, label: str) -> AgentNotConfigured:
         """The failure for a target that has no model to call.

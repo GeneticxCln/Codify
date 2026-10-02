@@ -269,6 +269,11 @@ async def replay(
     # rather than quietly dropped from the total and making every replay of a
     # gated run report a divergence that never happened.
     gate_calls = [c for c in calls if c.get("role") == "laya"]
+    # A conductor's calls are recorded too (a tool-calling loop, booked as `conductor`), but this replay
+    # re-runs the typed role calls and can no more serve a loop than it can serve the gate. They are
+    # counted on their own line for the same reason the gate's are: left out of the arithmetic, a run
+    # the conductor drove would report a divergence that is only the loop itself.
+    conductor_calls = [c for c in calls if c.get("role") == "conductor"]
     return {
         "goal_id": goal_id,
         "replay_goal_id": replay_goal.id,
@@ -277,13 +282,15 @@ async def replay(
         "recorded_calls": len(calls),
         "served_calls": len(provider.served),
         "gate_calls_replayed": len(gate_calls),
+        "conductor_calls_skipped": len(conductor_calls),
         "stages": stages,
         "status": final.status,
         "diverged": diverged,
         # Every recorded call consumed, and no call the recording lacks was
         # ever asked. Either half failing means the run was not this run. The
         # gate's own calls are consumed by `_ReplayedGate` from the event log.
-        "matched": diverged is None and len(provider.served) + len(gate_calls) == len(calls),
+        "matched": diverged is None
+        and len(provider.served) + len(gate_calls) + len(conductor_calls) == len(calls),
     }
 
 
@@ -294,6 +301,11 @@ def _print(report: dict[str, Any]) -> None:
         print(
             f"gate     : {report['gate_calls_replayed']} call(s) replayed from the "
             f"recorded verdict"
+        )
+    if report.get("conductor_calls_skipped"):
+        print(
+            f"conductor: {report['conductor_calls_skipped']} call(s) recorded, not served — a "
+            "replay re-runs the typed role calls, not the tool-calling loop"
         )
     print(f"status   : {report['status']}")
     print(f"scratch  : {report['scratch']}")

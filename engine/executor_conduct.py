@@ -800,6 +800,7 @@ class _Conduct(_Plan):
             cancelled=lambda: self._is_cancelled(goal_id),
             num_ctx=cfg.ollama_num_ctx,
             keep_alive=cfg.ollama_keep_alive,
+            ledger=self.orchestrator.tool_call_ledger(goal_id, None, targets),
         )
         # Announced before the first call, so a run that spends its whole budget
         # is still legible as "the conductor looked at things" rather than a

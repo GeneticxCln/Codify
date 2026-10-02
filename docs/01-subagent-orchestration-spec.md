@@ -399,7 +399,17 @@ ninth `AgentRole`, and that is a structural decision rather than a naming one:
   to a plain answer, with no warning at all (`tests/test_turns.py`,
   `TestTheConductorsTargets`; `tests/test_conductor_config_is_explained.py`).
 - It is measured through the ordinary `agent_assigned` / `usage` events, so
-  stats and the Settings screen need no new case.
+  stats and the Settings screen need no new case. Its model calls are booked
+  like a role's: a `usage` event per call and an `agent_call_failed` per failure,
+  both under `role: "conductor"` (it borrows the scribe's configuration but is
+  not the scribe), attributed to whichever target served the call, plus a trace
+  row when the goal is recorded. They go through a `ToolCallLedger`
+  (`AgentOrchestrator.tool_call_ledger`), a protocol so `engine/conductor.py`
+  still imports no part of the pipeline it drives. A loop built without a ledger
+  books nothing, which is what every caller did before one existed
+  (`tests/test_conductor_books.py`). The conductor's own `agent_assigned` is
+  flagged `conductor: true` so the audit's silent-role check does not read it as
+  the scribe being assigned and never spending.
 
 ### 5.0 The chain: one fallback, tried per call
 
@@ -516,6 +526,21 @@ from someone else's API, not an error in our code. Written once and read once.
 `supports_tools` is a property, not a caught exception, because
 `Conductor`/`_conduct` asks it *first* — a provider that cannot do tools must
 degrade to a plain answer, not fail the question.
+
+**What each translation must keep.** A tool's schema is sent as written to OpenAI
+and Anthropic and rebuilt for Google, and every property of it is the model's only
+description of an argument. So: every array declares `items` (OpenAI's and
+Gemini's function validators refuse one that does not, and `git_history.args` and
+`run_command.argv` shipped without), `ToolSpec.to_google` keeps each property's
+`description`, string `enum`, `items` and nested `properties` (it once kept only
+`type`, so Gemini never saw a description), and `coerce_arguments` parses an array
+a small model wrote out as a JSON string, *only* when it is a list of strings —
+`"pytest -q"` is not guessed at, the sandbox refuses it. `schema_problems(spec,
+dialect)` checks the document each provider is actually sent, over the real
+`TOOLS`, in `tests/test_tool_schemas.py`, with negative controls so a checker that
+finds nothing wrong cannot pass for one that works. It is our reading of the
+providers' rules, not their validators: only a live call says one accepts a
+schema.
 
 ### 5.3 What the loop guarantees
 

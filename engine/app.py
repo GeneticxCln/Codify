@@ -1790,6 +1790,11 @@ def _silent_roles(
         return []
     assigned: dict[str, str] = {}
     for e in events:
+        # The conductor's own announcement names the role whose *configuration* it borrows (the
+        # scribe's), and its calls are booked as `conductor`. Counting it as the scribe being assigned
+        # flagged `scribe` as silent on every turn the conductor drove.
+        if (e.payload or {}).get("conductor"):
+            continue
         if e.type == "agent_assigned" and (e.payload or {}).get("role"):
             role = e.payload["role"]
             model = f"{e.payload.get('provider') or '?'}/{e.payload.get('model') or '?'}"

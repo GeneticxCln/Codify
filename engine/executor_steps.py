@@ -898,7 +898,9 @@ class _Steps(_Design):
                     f"({refused_because}). Propose a different command from the allowed set, or "
                     "return the verdict with argv null and say that no permitted test "
                     "command exists. Allowed: pytest, python -m pytest, npm test, pnpm test, "
-                    "cargo test, go test ./..., read-only git status/diff/log -1."
+                    "cargo test, go test ./..., ruff check, mypy, tsc --noEmit, cargo check, "
+                    "cargo clippy, go vet ./..., make lint, make typecheck, read-only git "
+                    "status/diff/log -1."
                 )
                 if proposals_left <= 0:
                     refusal_note = (

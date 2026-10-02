@@ -71,8 +71,11 @@ class ToolSpec:
         }
 
     def to_google(self) -> dict[str, Any]:
-        # Google wants only the parameter *names* declared at the top level and
-        # the properties under `parameters`; it derives the rest from the types.
+        # Google wants the properties under `parameters`, each rebuilt in its own
+        # vocabulary (upper-case types, string-only enums). `_google_schema` keeps
+        # what the model needs to choose an argument (the description, the enum, the
+        # element type of an array); this used to send only `{"type": ...}` per
+        # property, so Gemini never saw a single description.
         properties = self.parameters.get("properties") or {}
         # `required` is a statement about the schema, not about a type. It used
         # to be computed as `type != "string"`, which inverted every tool this
@@ -91,7 +94,7 @@ class ToolSpec:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    key: {"type": _google_type(spec.get("type", "string"))}
+                    key: _google_schema(spec)
                     for key, spec in properties.items()
                     if isinstance(spec, dict)
                 },
@@ -103,6 +106,140 @@ class ToolSpec:
                 ],
             },
         }
+
+
+_JSON_TYPES = frozenset({"string", "integer", "number", "boolean", "array", "object"})
+_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+DIALECTS = ("openai", "anthropic", "google")
+
+
+def _type_matches(value: Any, json_type: str) -> bool:
+    """Whether an `enum` member is a legal value of the declared JSON type."""
+    if json_type == "string":
+        return isinstance(value, str)
+    if json_type == "boolean":
+        return isinstance(value, bool)
+    if json_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if json_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return False
+
+
+def _schema_problems(schema: Any, path: str, upper: bool) -> list[str]:
+    """What is wrong with one schema node, recursing into arrays and objects."""
+    if not isinstance(schema, dict):
+        return [f"{path}: a schema must be an object, got {type(schema).__name__}"]
+    raw_type = schema.get("type")
+    if not isinstance(raw_type, str):
+        return [f"{path}: no type"]
+    json_type = raw_type.lower()
+    if json_type not in _JSON_TYPES:
+        return [f"{path}: unknown type {raw_type!r}"]
+    problems: list[str] = []
+    if upper and path != "parameters" and raw_type != raw_type.upper():
+        problems.append(f"{path}: Google wants the type upper-case, got {raw_type!r}")
+    if "description" in schema and not (
+        isinstance(schema["description"], str) and schema["description"].strip()
+    ):
+        problems.append(f"{path}: an empty or non-string description")
+    if "enum" in schema:
+        members = schema["enum"]
+        if not isinstance(members, list) or not members:
+            problems.append(f"{path}: enum must be a non-empty list")
+        else:
+            for member in members:
+                # Google takes string enums only, and `_google_schema` stringifies them.
+                wanted = "string" if upper else json_type
+                if not _type_matches(member, wanted):
+                    problems.append(f"{path}: enum member {member!r} is not a {wanted}")
+    if json_type == "array":
+        # The one that went out wrong: an array with no `items` is rejected by OpenAI's
+        # function validator and by Gemini's, and nothing here raised because every test
+        # in this repo talks to a double.
+        if "items" not in schema:
+            problems.append(f"{path}: an array with no items")
+        else:
+            problems.extend(_schema_problems(schema["items"], f"{path}[]", upper))
+    if json_type == "object":
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            problems.append(f"{path}: properties must be an object")
+            properties = {}
+        for key, spec in properties.items():
+            problems.extend(_schema_problems(spec, f"{path}.{key}", upper))
+        required = schema.get("required", [])
+        if not isinstance(required, list) or not all(isinstance(r, str) for r in required):
+            problems.append(f"{path}: required must be a list of names")
+        else:
+            for name in required:
+                if name not in properties:
+                    problems.append(f"{path}: required names {name!r}, which is not a property")
+    return problems
+
+
+def _kept(source: Any, shaped: Any, path: str) -> list[str]:
+    """What the Google translation dropped that the source schema said."""
+    if not isinstance(source, dict) or not isinstance(shaped, dict):
+        return []
+    problems: list[str] = []
+    for key in ("description", "enum"):
+        if key in source and key not in shaped:
+            problems.append(f"{path}: Google shape dropped {key!r}")
+    if "items" in source:
+        problems.extend(_kept(source["items"], shaped.get("items"), f"{path}[]"))
+    for key, spec in (source.get("properties") or {}).items():
+        problems.extend(
+            _kept(spec, (shaped.get("properties") or {}).get(key), f"{path}.{key}")
+        )
+    return problems
+
+
+def schema_problems(spec: ToolSpec, dialect: str) -> list[str]:
+    """Everything wrong with `spec` as the provider will receive it, or `[]`.
+
+    The four translations in `engine/providers.py` are the part of this pipeline
+    with no type checker, and the failure mode is someone else's HTTP 400 on a
+    tool the model needs. So the document each provider is actually sent is
+    checked here, from the same `to_*` methods the providers call: a name the
+    provider accepts, a non-empty description, a known type on every property, an
+    array that declares its `items`, enum members that are of the declared type,
+    and a `required` that names only properties that exist. For Google it also
+    checks that the translation kept the descriptions and enums the source had,
+    because that translation rebuilds the schema rather than passing it through.
+
+    This is our reading of the providers' rules, not their validator: it can say
+    a schema is well-formed, and only a live call says a provider accepts it.
+    """
+    if dialect not in DIALECTS:
+        raise ValueError(f"unknown dialect {dialect!r}; expected one of {DIALECTS}")
+    if dialect == "openai":
+        shaped = spec.to_openai()["function"]
+        schema = shaped["parameters"]
+    elif dialect == "anthropic":
+        shaped = spec.to_anthropic()
+        schema = shaped["input_schema"]
+    else:
+        shaped = spec.to_google()
+        schema = shaped["parameters"]
+    problems: list[str] = []
+    if not _TOOL_NAME.match(str(shaped.get("name", ""))):
+        problems.append(f"name {shaped.get('name')!r} is not 1-64 of [A-Za-z0-9_-]")
+    if not str(shaped.get("description", "")).strip():
+        problems.append("no description")
+    if str(schema.get("type", "")).lower() != "object":
+        problems.append("parameters: the top level must be an object")
+    problems.extend(_schema_problems(schema, "parameters", dialect == "google"))
+    if dialect == "google":
+        problems.extend(_kept(spec.parameters, schema, "parameters"))
+        # The Google translation repairs an array with no `items` (it defaults to STRING) and
+        # filters `required` down to declared properties, so the shaped document is clean
+        # where the spec is not. A spec defect hidden by the translator is still a defect:
+        # the same tool is sent to OpenAI and Anthropic as written.
+        problems.extend(
+            p for p in _schema_problems(spec.parameters, "parameters", False) if p not in problems
+        )
+    return problems
 
 
 def coerce_tool_reply(
@@ -240,6 +377,43 @@ def _google_type(json_type: Any) -> str:
     }.get(str(json_type), "STRING")
 
 
+def _google_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """One property of a tool's schema, rebuilt in Google's vocabulary.
+
+    Google's `Schema` is a subset of JSON Schema with upper-case types, and it
+    cannot be handed ours verbatim. Rebuilding it must not cost the model the
+    words that tell it what an argument is for, which is what the first version
+    did: it kept `type` and nothing else, so Gemini was told a tool had a STRING
+    called `path` and never that it was "workspace-relative".
+
+    Kept: `description`, `enum` (Google takes string enums only, so members are
+    stringified, and only on a string property), `items`, and nested
+    `properties` / `required`. An array always gets an `items`, defaulting to
+    STRING, because Google refuses an array that does not say what it holds.
+    """
+    json_type = str(schema.get("type", "string"))
+    out: dict[str, Any] = {"type": _google_type(json_type)}
+    if isinstance(schema.get("description"), str) and schema["description"].strip():
+        out["description"] = schema["description"]
+    if json_type == "string" and isinstance(schema.get("enum"), list) and schema["enum"]:
+        out["enum"] = [str(member) for member in schema["enum"]]
+    if json_type == "array":
+        items = schema.get("items")
+        out["items"] = _google_schema(items) if isinstance(items, dict) else {"type": "STRING"}
+    if json_type == "object":
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            out["properties"] = {
+                key: _google_schema(spec)
+                for key, spec in properties.items()
+                if isinstance(spec, dict)
+            }
+            required = schema.get("required")
+            if isinstance(required, list):
+                out["required"] = [key for key in required if key in out["properties"]]
+    return out
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """One call the model asked for.
@@ -303,9 +477,29 @@ def coerce_arguments(
                 out[key] = float(value.strip())
             elif want == "boolean" and isinstance(value, str):
                 out[key] = value.strip().lower() in ("true", "1", "yes")
+            elif want == "array" and isinstance(value, str):
+                out[key] = _array_from_text(value)
         except ValueError:
             pass
     return out
+
+
+def _array_from_text(value: str) -> Any:
+    """An array argument a small model wrote out as text, or the text unchanged.
+
+    `"[\\"pytest\\", \\"-q\\"]"` is parsed; nothing else is guessed at. `"pytest -q"`
+    could be one argument or two and `"[1, 2"` is a half-written list, so both come
+    back untouched and the tool (the sandbox, for an argv) refuses them in words the
+    model can read. Only a list of strings is accepted, since both array parameters
+    this pipeline declares are argv.
+    """
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        return value
+    if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+        return parsed
+    return value
 
 
 # ── message-array translation ───────────────────────────────────────────────
