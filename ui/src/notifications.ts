@@ -1,6 +1,7 @@
+import { PAUSE_HEADINGS, isPauseCode } from "./pauseReason.ts";
 import { providerLabel } from "./providerLabels.ts";
 import type { EngineState } from "./statusTone.ts";
-import type { Goal, ModelCatalogChanged, SettingsTab } from "./types.ts";
+import type { Event, Goal, ModelCatalogChanged, SettingsTab } from "./types.ts";
 
 /**
  * Notifications: what happened while you were looking at something else.
@@ -8,7 +9,8 @@ import type { Goal, ModelCatalogChanged, SettingsTab } from "./types.ts";
  * ## What they are, and are not
  *
  * Four kinds of event, each a fact only *this window* saw happen: a goal this window was watching
- * finished or failed; a plan came back and is waiting for the person to approve it; the engine
+ * finished, failed or was paused by the engine (the critic asked for changes, or the conductor could not
+ * finish a step); a plan came back and is waiting for the person to approve it; the engine
  * connection changed; a provider's model list moved. They are kept on the client and nowhere else.
  * A goal's result is already durable (History has it), and the other three are not facts the engine
  * keeps, so a server-side list would have had nothing to hold that the window did not already know.
@@ -20,7 +22,10 @@ import type { Goal, ModelCatalogChanged, SettingsTab } from "./types.ts";
  * - **Watched only, for goal results.** A goal announces its end only if this window saw it in flight
  *   (its stream is open), the same rule auto-read uses (`answersToRead`). Opening a thread or restoring
  *   History never announces old results: finding an answer that was already there is not news.
- * - **Cancelled is silent.** The person did it; telling them is noise.
+ * - **Cancelled is silent.** The person did it; telling them is noise. So is the person's own Pause:
+ *   only a pause the *engine* made carries a reason, and only that is announced.
+ * - **A pause is news only if it is the goal's current state.** The engine replays a goal's events on every
+ *   reconnect, so a pause is announced only when the goal's version is the pause's own version.
  * - **A plan is news only when it will wait.** In Direct Apply a plan starts itself, so "ready for your
  *   approval" would be a lie; in plan-only, dry-run or any other mode it waits for a person.
  * - **Engine changes are debounced and the first state is not news.** A flapping connection is one
@@ -220,6 +225,33 @@ export function goalNotification(goal: GoalLike, now: number): AppNotification |
     tone: failed ? "danger" : "success",
     title: failed ? "Goal failed" : "Goal finished",
     detail: clip(reason ? `${goal.title} · ${reason}` : goal.title, MAX_DETAIL),
+    at: now,
+    read: false,
+    target: { kind: "goal", goalId: goal.id },
+  };
+}
+
+/**
+ * A goal this window is watching was paused by the engine, and says why. `ev` is the `goal_status` event that
+ * just arrived and `goal` the record fetched after it. `null` for the person's own Pause (it carries no reason
+ * code), for a code this build does not know, and for a pause that is not the goal's current state: the
+ * stream replays history on a reconnect, and a pause the goal has since moved on from is not news.
+ *
+ * The id carries the goal's version, so a goal that pauses, is resumed and pauses again is two notifications
+ * and the same pause replayed is one.
+ */
+export function pausedNotification(ev: Pick<Event, "type" | "payload">, goal: GoalLike, now: number): AppNotification | null {
+  if (ev.type !== "goal_status") return null;
+  const payload = ev.payload ?? {};
+  if (payload.status !== "PAUSED" || goal.status !== "PAUSED") return null;
+  if (!isPauseCode(payload.reason_code) || typeof payload.reason !== "string" || payload.reason.trim().length === 0) return null;
+  if (typeof payload.version !== "number" || goal.version !== payload.version) return null;
+  return {
+    id: `paused:${goal.id}:${payload.version}`,
+    kind: "goal",
+    tone: "warning",
+    title: PAUSE_HEADINGS[payload.reason_code],
+    detail: clip(`${goal.title} · ${payload.reason.trim()}`, MAX_DETAIL),
     at: now,
     read: false,
     target: { kind: "goal", goalId: goal.id },

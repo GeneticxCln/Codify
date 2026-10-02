@@ -2814,23 +2814,46 @@ the mounted renderer (no live element or attribute, whatever the answer says; li
 `deliverableText.test.ts` is the Rendered/Source toggle, and `answerLinks.test.ts` mounts the whole App
 and clicks a link in a real answer through to `codify_browser_open`.
 
+### 10.18a A paused goal says why
+
+`PAUSED` has several causes and the badge alone names none of them: the person pressed Pause, the critic
+asked for changes, or the conductor could not finish a step (§10.14). An engine pause carries a `reason_code`
+from a closed set and a `reason` sentence the engine wrote on its `goal_status` event (`docs/04` §1.4). The
+goal's card draws them in a banner **above the buttons that resume it** (`PauseBanner`, rules in
+`ui/src/pauseReason.ts`): the cause as a heading, the engine's sentence under it (which ends in what to do),
+and, for the critic's pause, the critic's own reasons quoted from the step's notes as plain text.
+
+* **The newest `goal_status` event is the whole state.** A Start publishes `RUNNING` with no reason, so a
+  resumed goal stops showing one with no bookkeeping, and a goal record that has not caught up with the event
+  cannot keep a stale banner alive.
+* **The person's own Pause shows nothing.** It carries no code; they know why.
+* **A code this build does not know is not drawn.** A half-drawn pause is worse than the plain `PAUSED` badge.
+* **Wrapping, not clipping.** The sentence ends in the next action; a clipped one would end before it.
+* The conductor settings card says the same from the other side: a step that runs out of calls pauses the
+  goal, where a turn answers with what it has.
+
+Proven by `ui/tests/pauseReason.test.ts` (the rules) and `ui/tests/pauseApp.test.ts` (the card and the
+notification through the whole App).
+
 ### 10.18 The notification inbox: what happened while you were looking elsewhere
 
 A **Notifications** button in the header, between Stats and History, opens a drawer of what this window
 saw happen. It is in-app only: no desktop notification and no sound. It is kept on the client and nowhere
-else, because each of its four sources is a fact only this window knows. A goal's result is already
+else, because each of its sources is a fact only this window knows. A goal's result is already
 durable in History, and the other three are not facts the engine keeps. The rules live in
 `ui/src/notifications.ts`, pure and DOM-free, so each has a test that needs no renderer.
 
 | Source | When it is news | When it is not |
 |---|---|---|
 | **Goal finished or failed** | The end of a goal stream **this window opened** (`onTerminal`). A failure names the first failed step. | Opening a thread or restoring History opens no stream for a finished goal, so old results are never announced (the `answersToRead` rule, auto-read's). **Cancelled** is silent: the person did it. |
+| **Goal paused by the engine** | A `goal_status` for a pause that carries a `reason_code` (the critic asked for changes, or the conductor could not finish a step) **and is the goal's current state**: the event's version is the goal's version (`pausedNotification`). Titled with the cause, detailed with the engine's sentence, and opens the goal. | The person's own Pause carries no code, and a pause the stream replayed after the goal had moved on has an old version. A code this build does not know is not announced. |
 | **Plan ready for approval** | A `goal_status` that finds the goal `PENDING` and the plan will really wait: plan-only, dry-run, or a composer mode other than Direct Apply. | In Direct Apply the plan starts itself (the poll starts a `PENDING` goal), so "waiting for you" would be false. |
 | **Engine connection** | A change that **held for 4 s**: offline, back, token refused, restored. The engine's last stderr line is the offline detail. | `checking` never settles. The first settled state is only a baseline, so an engine that is up when the window opens says nothing, and a flap that reverses inside the settle time is one that never happened. |
 | **Model list change** | A `model_catalog_changed` frame with something in it, counted per provider (added and removed). docs/06 §6. | An empty diff, `model_catalog_checked`, and a payload that does not read. |
 
 * **No duplicates, because the engine replays.** Every entry has an id that names the event
-  (`goal:<id>:<status>:<updated_at>`, `plan:<id>:<version>`, `models:<fetched_at>:<diff>`), and an id already
+  (`goal:<id>:<status>:<updated_at>`, `paused:<id>:<version>`, `plan:<id>:<version>`,
+  `models:<fetched_at>:<diff>`), and an id already
   in the list is dropped. A goal that is retried and fails again is a new entry, because `updated_at` moved.
 * **Opening is reading.** Everything is marked read when the drawer opens, and as entries arrive while it
   stays open, so the header count clears at once. The dot on a row is for the ones that were new when the

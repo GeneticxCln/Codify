@@ -158,7 +158,7 @@ import { readSidebarOpen, writeSidebarOpen } from "./sidebarPref";
 import { closeDrawer, nextDrawer, type Drawer } from "./drawers";
 import { useSidebarYield } from "./useSidebarYield";
 import { useEngineNotices, useNotifications } from "./useNotifications";
-import { catalogNotification, goalNotification, planNotification, type AppNotification } from "./notifications";
+import { catalogNotification, goalNotification, pausedNotification, planNotification, type AppNotification } from "./notifications";
 import { NotificationsDrawer } from "./components/NotificationsDrawer";
 import {
   BROWSER_PAGE_LOADED,
@@ -2130,6 +2130,10 @@ export const App: React.FC = () => {
               // (Direct Apply) is not. Only on a goal_status event: a step or plan edit is the person's own.
               if (ev.type === "goal_status") {
                 notify(planNotification(refreshed, modeRef.current, Date.now()));
+                // An engine pause (the critic asked for changes, or the conductor could not finish a step)
+                // waits for the person too, and says why. Only one that is the goal's current state: the
+                // stream replays history on a reconnect.
+                notify(pausedNotification(ev, refreshed, Date.now()));
               }
             })
             .catch((err: any) => {
