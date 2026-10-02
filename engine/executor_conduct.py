@@ -258,13 +258,16 @@ class _Conduct(_Plan):
         # decisions, and honouring them is the point of having a brain. What it
         # is *not* allowed to do is fail silently: `_Conducted.finished` is False
         # only when its model errored or it spent its whole call budget without
-        # producing either an answer or a plan, and on that path the engine runs
-        # the sequence it would have run before the conductor existed.
-        #
-        # So the old behaviour is still the floor. It is just no longer the
-        # ceiling.
+        # producing either an answer or a plan. That is caught, and said: a
+        # question gets one plain reply, and a change request ends in its words or
+        # a plain failure that says nothing was changed. The engine does not run
+        # the sequence it would have run before the conductor existed over the
+        # top of it; that is the driver only where there is no conductor at all.
         intent = decision.intent
         root = ws.root_path or ""
+        # True once a conductor has run and not finished, and the turn is not a change: the plain reply below
+        # is then the end of the road, whatever the gate said, because there is no pipeline to hand it to.
+        answered_by_conductor_path = False
 
         if root:
             conducted = await self._conduct(goal_id, goal, root, intent=intent)
@@ -316,21 +319,19 @@ class _Conduct(_Plan):
                 )
                 return
             if not conducted.unavailable:
+                # A conductor ran and did not finish. There is no second pipeline behind it on this install:
+                # a model that is bad at this should cost the person a clear message and a retry, not a
+                # different driver quietly taking over, spending twice and planning something the conductor
+                # never chose. What the turn ends in depends on what was asked.
+                if intent in CHANGE_INTENTS:
+                    self._end_a_change_the_conductor_could_not_finish(goal_id, conducted)
+                    return
                 self._log(
                     goal_id, None, "warn",
                     f"the conductor did not finish this turn ({conducted.explanation()}) "
-                    "— running Codify's own sequence instead",
+                    "— answering with a single plain reply instead",
                 )
-                self.goals.publish(self._event(
-                    goal_id, None, "log",
-                    {
-                        "level": "warn",
-                        "message": (
-                            "the conductor could not finish this request, so Codify "
-                            "ran its standard sequence"
-                        ),
-                    },
-                ))
+                answered_by_conductor_path = True
         else:
             self._log(
                 goal_id, None, "info",
@@ -341,7 +342,7 @@ class _Conduct(_Plan):
         # Everything below is what this route did before the conductor could
         # decide: the recipe for anything that is not a plain question, and one
         # streamed call for anything that is.
-        if intent != "question" or decision.engine == "skipped":
+        if (intent != "question" or decision.engine == "skipped") and not answered_by_conductor_path:
             if decision.engine == "skipped":
                 why = (
                     f"the System-1 gate is not answering ({decision.skipped_reason}), "
@@ -371,6 +372,41 @@ class _Conduct(_Plan):
             goal_id, None, "log", {"level": "info", "message": reply, "turn": True},
         ))
         self._complete_turn(goal_id)
+
+    def _end_a_change_the_conductor_could_not_finish(self, goal_id: str, conducted: _Conducted) -> None:
+        """End a turn whose request was a change and whose conductor neither answered nor planned.
+
+        No pipeline, no plan, no file: the three ways this ends are all honest about that. A run that used
+        every call it was given and still had words says them (they end by saying it was cut off) and
+        finishes, with a warning that nothing was changed. A model that failed, or said nothing, fails the
+        turn with a plain code: the provider's own *code* is shown and never its message, which is third-party
+        text. The person's remedy is in the sentence either way.
+        """
+        words = _as_prose(conducted.answer or "")
+        if conducted.failure_code or conducted.answer is None:
+            code = conducted.failure_code or "no_answer"
+            self._fail(
+                goal_id, None, "conductor_failed",
+                f"The conductor's model could not be reached ({code}), so nothing was changed. Ask again "
+                "when it is back, or switch the conductor off in Settings and Codify will use its fixed "
+                "sequence instead.",
+            )
+        elif not words:
+            self._fail(
+                goal_id, None, "conductor_failed",
+                "The conductor's model said nothing, so nothing was changed. Ask again, or choose a "
+                "different conductor model in Settings.",
+            )
+        else:
+            self.goals.publish(self._event(
+                goal_id, None, "log", {"level": "info", "message": words, "turn": True},
+            ))
+            self._log(
+                goal_id, None, "warn",
+                "the conductor ran out of calls before it could make a plan, so nothing was changed. "
+                "Ask again with a narrower request, or raise its call budget in Settings.",
+            )
+            self._complete_turn(goal_id)
 
     def _conductor_dispatch(
         self, goal_id: str, goal: Goal, root: str, skills: SkillSet

@@ -2299,10 +2299,14 @@ why.
 
 The two are not in tension. The pipeline is a superset of answering, so with no
 conductor, guessing wrong costs a slower answer while the reverse guess costs a
-code change the user believed was acted on. And when a conductor is configured
-but *fails* — its model errors, says nothing, or spends its whole call budget without
-producing an answer or a plan — that same pipeline runs as the floor, and the
-transcript says so.
+code change the user believed was acted on. When a conductor is configured but
+*fails* — its model errors, says nothing, or spends its whole call budget without
+producing an answer or a plan — the pipeline does **not** run as a floor: a
+question, a greeting or an unclassified request gets a single plain reply, and a
+request the gate read as a change ends honestly (§10.14). A second driver
+quietly taking over a conductor that failed was the same fault as the sweep
+behind an approved plan: it spent twice, and it planned something the conductor
+never chose.
 
 A blocked turn is a blocked goal: same gate, same `laya_blocked` code, same
 event. The gate guards the engine, not a pipeline.
@@ -2594,26 +2598,41 @@ steps touch disjoint paths and a conductor has no such proof), and
 `conductor_drives_execution = 0`, which turns the conductor off without a rebuild.
 Benchmarks and `scripts/replay_trace.py` call the recipe directly and measure it.
 
-**The recipe is the floor for a *turn*.** If the conductor's model errors, returns
-empty content, or spends its whole call budget without producing an answer or a
-plan, `run_chat` runs the sequence it would have run before the conductor existed
-and says that it did.
+**A turn the conductor could not finish ends honestly; there is no second
+pipeline.** If the conductor's model errors, returns empty content, or spends its
+whole call budget without producing an answer or a plan, `run_chat` used to run
+the sequence it would have run before the conductor existed. On an install that
+has a conductor it no longer does. What the turn ends in depends on what was
+asked: a question, a greeting or a request nothing classified gets **one plain
+streamed reply** (answering is safe, and a plain reply cannot change a file), with
+a warning that the conductor did not finish; a request the gate read as a change
+gets **no pipeline** — if the conductor ran out of calls but had words, they are
+the turn's reply, with a warning that nothing was changed and that the budget is
+a setting; if its model failed, or said nothing, the turn **fails** with
+`conductor_failed` and a sentence naming the provider's *code* (never its
+message, which is third-party text) that says nothing was changed and what to do
+about it. A plan made before the conductor stopped still stands. Where there is
+no conductor at all (no tool-capable model), nothing changed: the recipe is the
+driver there, as it always was (`tests/test_conductor_turn_end.py`).
 
 One distinction the design rests on, and the reason declining and failing are
 modelled separately: **a conductor that declines is obeyed; a conductor that
 fails is caught.** Judging that no change is needed is a decision, and running
 the recipe over the top of it would make the brain a suggestion. Producing
-neither an answer nor a plan is not a decision, and falling back beats failing
-the turn. `TestDecliningIsObeyedAndFailingIsCaught` holds both.
+neither an answer nor a plan is not a decision, and it is *caught*: the turn says
+so and nothing is done in the conductor's name that it did not choose.
+`TestDecliningIsObeyedAndFailingIsCaught` holds the first and
+`tests/test_conductor_turn_end.py` the second.
 
 *Empty is silence, not an answer.* A reply of no text and no tool call used to
 count as finished — the turn completed with the literal words "(no answer)" and
 the floor never ran, which a small model that spends its budget thinking, or a
 server that answers `{}`, produces on demand. An empty answer with no plan now
-falls back exactly as an error does (a plain streamed reply for a question, the
-full pipeline for a change); an empty final word *after* a plan stands, because
-the plan is the turn's result. "(no answer)" is still what a person sees if the
-fallback is silent too, since there is nothing left to try
+is handled exactly as an error is (a plain streamed reply for a question; for a
+change, a failed turn that says the model said nothing and that nothing was
+changed); an empty final word *after* a plan stands, because the plan is the
+turn's result. "(no answer)" is still what a person sees if the plain reply is
+silent too, since there is nothing left to try
 (`tests/test_empty_conductor_reply.py`).
 
 ### 10.14a What the live runs actually showed
