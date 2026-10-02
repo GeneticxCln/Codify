@@ -129,7 +129,7 @@ test("a file the assistant opens goes beside the conversation the person is look
     await beat(80);
     await ctx.settle();
 
-    assert.equal(reply.ok, true, reply.error);
+    assert.equal(reply.ok, true, reply.error ?? "the window refused");
     assert.deepEqual(reply.result, { path: "src/main.py", opened: true, shown: "beside", from_line: 2, to_line: 2 });
     assert.equal(panes(ctx).length, 2);
     assert.match(cmText(ctx), /def main\(\):/);
@@ -217,6 +217,22 @@ test("opening a file the person is already looking at says it is in front, and s
   });
 });
 
+test("a file the person has open but is not looking at is reported as already open, in the background", async () => {
+  await withEditorApp({ shellAnswers: shells(id("t1")) }, async (ctx) => {
+    await openShell(ctx);
+    await openFile(ctx, "main", "src/main.py");
+    await click(ctx, tabNamed(ctx, "Terminal:"));
+    const before = selectedTab(ctx);
+
+    const reply = await ctx.surface.ask({ op: "open", args: { path: "src/main.py" } });
+    await ctx.settle();
+
+    assert.deepEqual([reply.result.opened, reply.result.shown], [false, "background"], "an editor that was already there was reported as newly opened");
+    assert.equal(selectedTab(ctx), before, "the assistant moved the person");
+    assert.equal(editorTabs(ctx).length, 1);
+  });
+});
+
 test("when the window is too narrow for two panes, the file opens in the background instead", async () => {
   await withEditorApp({ ...SEEDED, viewport: { width: 700, height: 900 } }, async (ctx) => {
     await openThread(ctx, "c1");
@@ -258,7 +274,7 @@ test("an edit to a file that is not open opens it in the background, changes its
     await beat(40);
     await ctx.settle();
 
-    assert.equal(reply.ok, true, reply.error);
+    assert.equal(reply.ok, true, reply.error ?? "the window refused");
     assert.deepEqual(reply.result, { path: "src/main.py", replaced: 1, from_line: 2, to_line: 2, opened: true, dirty: true });
     assert.equal(selectedTab(ctx), before, "an edit moved the person");
     assert.equal(panes(ctx).length, 0, "an edit rearranged the layout");
@@ -347,7 +363,7 @@ test("the assistant's edit lands on top of the person's unsaved typing, and neit
     });
     await ctx.settle();
 
-    assert.equal(reply.ok, true, reply.error);
+    assert.equal(reply.ok, true, reply.error ?? "the window refused");
     assert.equal(reply.result.from_line, 3, "the line is where it is now, below what the person added");
     assert.equal(viewOf(ctx).state.doc.toString(), "# mine\ndef main():\n    return 2\n");
   });

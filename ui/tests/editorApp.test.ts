@@ -81,6 +81,20 @@ test("opening the same file again is the same tab", async () => {
   });
 });
 
+test("opening a file that is open behind another tab brings its tab to the front", async () => {
+  await withEditorApp({ ...SEEDED, shellAnswers: shells(id("t1")) }, async (ctx) => {
+    await openShell(ctx);
+    await openFile(ctx, "main", "src/main.py");
+    await click(ctx, tabNamed(ctx, "Terminal:"));
+    assert.match(selectedTab(ctx), /^Terminal:/);
+
+    await openFile(ctx, "main", "src/main.py");
+
+    assert.match(selectedTab(ctx), /^Editor: main\.py/, "the file's own tab was left behind");
+    assert.equal(editorTabs(ctx).length, 1);
+  });
+});
+
 test("a file that does not exist is refused, and no dead tab is left for it", async () => {
   await withEditorApp({ files: { "ws-a:src/main.py": MAIN } }, async (ctx) => {
     await openFile(ctx, "main", "src/main.py");
@@ -422,6 +436,7 @@ test("pressing Open twice does not make a second tab for the same file", async (
       await ctx.settle();
 
       assert.equal(editorTabs(ctx).length, 1);
+      assert.match(selectedTab(ctx), /^Editor: main\.py/, "the second Open did not bring the file's tab forward");
     },
   );
 });

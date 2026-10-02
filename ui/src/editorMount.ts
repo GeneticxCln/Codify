@@ -26,7 +26,7 @@ import {
   keymap,
   lineNumbers,
 } from "@codemirror/view";
-import type { DecorationSet, ViewUpdate } from "@codemirror/view";
+import type { DecorationSet } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, isolateHistory } from "@codemirror/commands";
 import { HighlightStyle, bracketMatching, indentOnInput, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
@@ -97,7 +97,7 @@ const highlighting = syntaxHighlighting(
 /** Colour the assistant's text, from the ranges the store holds (already mapped through whatever just happened). */
 function assistantMarks(buffers: EditorBuffers, tabId: string): Extension {
   const mark = Decoration.mark({ class: "cm-ai-edit" });
-  const build = (view: EditorView): DecorationSet => {
+  const build = (): DecorationSet => {
     // (A range beyond the end of the text is ignored by CodeMirror, not an error, so there is nothing to clamp.)
     const ranges = (buffers.get(tabId)?.aiRanges ?? []).filter((r) => r.from < r.to).sort((a, b) => a.from - b.from);
     return Decoration.set(ranges.map((r) => mark.range(r.from, r.to)));
@@ -105,11 +105,12 @@ function assistantMarks(buffers: EditorBuffers, tabId: string): Extension {
   return ViewPlugin.fromClass(
     class {
       decorations: DecorationSet;
-      constructor(view: EditorView) {
-        this.decorations = build(view);
+      constructor() {
+        this.decorations = build();
       }
-      update(update: ViewUpdate) {
-        this.decorations = build(update.view);
+      // Every update, because the ranges live in the store and not in the view: whatever changed, they are re-read.
+      update() {
+        this.decorations = build();
       }
     },
     { decorations: (plugin) => plugin.decorations },
