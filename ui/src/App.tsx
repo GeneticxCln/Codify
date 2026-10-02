@@ -1964,18 +1964,6 @@ export const App: React.FC = () => {
     };
   }, [startLoading, stopLoading, notePageNavigation]);
 
-  // Visibility is the stacking order. Exactly one browser page is shown at a
-  // time — the active tab's — and switching to anything else hides them all,
-  // which is one command and no z-order bookkeeping. Fires on every change of
-  // the active tab, including to and from no browser tab at all; pages that do
-  // not exist yet are simply absent when their turn comes.
-  const activeBrowserId = activeBrowserTab?.id ?? "";
-  useEffect(() => {
-    void focusBrowserWebview(activeBrowserId).catch((err: any) =>
-      setError(readRejection(err, "Could not switch browser pages")),
-    );
-  }, [activeBrowserId]);
-
   // ── the terminal's three moves ─────────────────────────────────────────
   //
   // A terminal tab is named by the shell, so the order is: open the PTY, take
@@ -2153,6 +2141,26 @@ export const App: React.FC = () => {
     setPaneNotice(null);
   }, [tabState.activeId]);
   const [tabMenu, setTabMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
+
+  // ── which browser page is on screen ───────────────────────────────────────────────────────────────────────────
+  //
+  // Visibility is the stacking order, and exactly one page is shown at a time (`browser::focus` shows the one it is
+  // named and hides the rest, `docs/09` §7.3). It is the page that is **drawn**: the active tab's when a browser tab
+  // fills the column, or the one in a split, which is on screen while a chat beside it has the focus (so the active tab
+  // cannot be what says so). And it is hidden while anything is drawn *over* the column, because a native view paints
+  // above every DOM overlay and takes the pointer: the command palette, a tab's menu, Settings, and the divider while
+  // it is being dragged (a page under the pointer would swallow the moves the drag is made of). Fires on every change
+  // of what is drawn, including to and from no page at all; pages that do not exist yet are absent when their turn comes.
+  const [splitDragging, setSplitDragging] = useState(false);
+  const pageInSplit = drawnSplit ? [drawnSplit.left, drawnSplit.right].find((t) => t.kind === "browser") : undefined;
+  const drawnPageId = pageInSplit?.id ?? activeBrowserTab?.id ?? "";
+  const pageCovered = splitDragging || paletteOpen || tabMenu !== null || isSettingsOpen;
+  const shownPageId = pageCovered ? "" : drawnPageId;
+  useEffect(() => {
+    void focusBrowserWebview(shownPageId).catch((err: any) =>
+      setError(readRejection(err, "Could not switch browser pages")),
+    );
+  }, [shownPageId]);
   const closeSplit = useCallback(() => setSplit(null), [setSplit]);
   const startSplitWith = useCallback(
     (otherId: string) => {
@@ -2250,15 +2258,23 @@ export const App: React.FC = () => {
   // content. A popup a page asked for and a link the user clicked in an answer are the same request
   // (an address, a new tab, the guarded path), so they share this; `classifyBrowserAddress` and the
   // shell's `navigation_allowed` decide, as they do for a typed address.
+  //
+  // **Beside the tab it was clicked in** when that tab is alone in the column and the pair fits: a link in an answer is
+  // read next to the answer, and the page is the focused pane because it is the one just asked for (`startSplit` says
+  // the same). Anything else (a split already showing, no room) is the full-column tab it always was, and the split waits.
   const handleOpenLink = useCallback(
     (url: string) => {
       const id = tabId("browser");
+      const live = liveRef.current;
+      const from = live.tabState.tabs.find((t) => t.id === live.tabState.activeId);
+      const beside = from !== undefined && from.kind !== "browser" && !live.shownSplit && live.splitFitsRow;
       setTabState((prev) =>
         openTab(prev, { id, kind: "browser", title: hostOf(url), workspaceId: selectedWs?.id }),
       );
+      if (beside) setSplit({ panes: [from.id, id], focused: 1 });
       void handleOpenBrowser(id, url);
     },
-    [handleOpenBrowser, selectedWs?.id],
+    [handleOpenBrowser, selectedWs?.id, setSplit],
   );
 
   // A page can still ask the shell for something — a popup window. The shell
@@ -3487,12 +3503,35 @@ export const App: React.FC = () => {
   const renderEditor = (tab: Tab, autoFocus: boolean): React.ReactElement => (
     <EditorPane key={tab.id} tabId={tab.id} buffers={editorBuffers} autoFocus={autoFocus} />
   );
+  // The page is not in here: `BrowserPane` is its address bar and the rectangle the shell seats the native view over, in the
+  // centre column or in half of it (`docs/09` §7.3, §12.8).
+  const renderBrowser = (tab: Tab): React.ReactElement => (
+    <BrowserPane
+      key={tab.id}
+      tabId={tab.id}
+      onBounds={handleBrowserBounds}
+      onToggleDevtools={devtoolsAvailable ? () => handleToggleDevtools(tab.id) : undefined}
+      devtoolsOpen={devtoolsTabId === tab.id}
+      url={tab.url}
+      history={tab.history}
+      onOpen={(url) => void handleOpenBrowser(tab.id, url)}
+      onNavigate={(url) => {
+        if (!tab.history) return;
+        void sendToBrowser(tab.id, url, visit(tab.history, url));
+      }}
+      onBack={() => handleBackBrowser(tab.id)}
+      onForward={() => handleForwardBrowser(tab.id)}
+      error={pendingBrowser?.tabId === tab.id ? pendingBrowser.error : null}
+    />
+  );
   const renderPane = (tab: Tab, side: PaneSide): React.ReactElement =>
     tab.kind === "terminal"
       ? renderTerminal(tab, drawnSplit?.focused === side)
       : tab.kind === "editor"
         ? renderEditor(tab, drawnSplit?.focused === side)
-        : renderChat(drawnSplit?.focused === side);
+        : tab.kind === "browser"
+          ? renderBrowser(tab)
+          : renderChat(drawnSplit?.focused === side);
 
   return (
     // select-none REMOVED so text cursor and selection work normally in WebKitGTK
@@ -3863,34 +3902,11 @@ export const App: React.FC = () => {
               ratio={splitRatio}
               onFocusPane={handleFocusPane}
               onRatioChange={handleRatioChange}
+              onDragChange={setSplitDragging}
               onCloseSplit={closeSplit}
             />
           ) : activeBrowserTab ? (
-            <BrowserPane
-              tabId={activeBrowserTab.id}
-              onBounds={handleBrowserBounds}
-              onToggleDevtools={
-                devtoolsAvailable
-                  ? () => handleToggleDevtools(activeBrowserTab.id)
-                  : undefined
-              }
-              devtoolsOpen={devtoolsTabId === activeBrowserTab.id}
-              url={activeBrowserTab.url}
-              history={activeBrowserTab.history}
-              onOpen={(url) => void handleOpenBrowser(activeBrowserTab.id, url)}
-              onNavigate={(url) => {
-                const tab = activeBrowserTab;
-                if (!tab?.history) return;
-                void sendToBrowser(tab.id, url, visit(tab.history, url));
-              }}
-              onBack={() => handleBackBrowser(activeBrowserTab.id)}
-              onForward={() => handleForwardBrowser(activeBrowserTab.id)}
-              error={
-                pendingBrowser?.tabId === activeBrowserTab.id
-                  ? pendingBrowser.error
-                  : null
-              }
-            />
+            renderBrowser(activeBrowserTab)
           ) : activeEditorTab ? (
             renderEditor(activeEditorTab, true)
           ) : activeTerminalTab ? (
