@@ -60,6 +60,8 @@ import { answersToRead, type AutoReadMemory } from "../speech.ts";
 import { SpeakButton } from "./SpeakButton";
 import { Markdown } from "./Markdown";
 import { PauseBanner } from "./PauseBanner";
+import { TodoCard } from "./TodoCard";
+import { visibleTodos } from "../todoList.ts";
 import { pauseReasonOf } from "../pauseReason.ts";
 
 /**
@@ -1399,6 +1401,13 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       </div>
 
                       {tracePanel}
+
+                      {/* The conductor's own notes on this goal. Drawn only when it kept some, and apart from
+                          the plan below: they are its note to its next run, not something to approve. */}
+                      {(() => {
+                        const notes = visibleTodos(msg.events);
+                        return notes.length > 0 ? <TodoCard items={notes} /> : null;
+                      })()}
 
                       {/* Plan Steps Accordion */}
                       {msg.goal?.steps && msg.goal.steps.length > 0 && (

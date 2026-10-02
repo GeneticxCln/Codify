@@ -21,6 +21,7 @@ from engine.providers import ProviderError
 from engine.recall import build_brief
 from engine.services import ApiError, custom_provider_address
 from engine.skills import SkillSet, load_skills
+from engine.todo import TodoList
 from engine.toolcall import ToolSpec
 from engine.executor_plan import _Plan
 
@@ -785,6 +786,22 @@ class _Conduct(_Plan):
             )
         return brief
 
+    def _todos_for(self, goal_id: str) -> TodoList:
+        """The conductor's todo list for a goal: its newest snapshot, or an empty list.
+
+        A snapshot that cannot be read is an empty list rather than an error. The list is the model's own
+        note, so losing it costs the model a reminder and must never cost the run (`TodoList.from_payload`).
+        """
+        event = self.goals.latest_event(goal_id, "todo_updated")
+        return TodoList.from_payload(event.payload if event is not None else None)
+
+    def _publish_todos(self, goal_id: str, todos: TodoList) -> None:
+        """Publish the list as it now stands. A whole snapshot each time: the newest event is the list."""
+        self.goals.publish(self._event(goal_id, None, "todo_updated", todos.to_payload()))
+
+    def _todo_brief(self, goal_id: str) -> str:
+        return self._todos_for(goal_id).brief()
+
     def _intent_brief(self, intent: str) -> str:
         """What the gate decided, told to the conductor as advice, and what to do with it.
 
@@ -903,6 +920,11 @@ class _Conduct(_Plan):
         )
         prompt = prompt_override if prompt_override is not None else self._turn_prompt(goal)
         prompt = f"{prompt}\n\n{self._memory_brief(goal)}\n\n{self._intent_brief(intent)}"
+        notes = self._todo_brief(goal_id)
+        if notes:
+            # After the intent: the person's request and the plan have been stated by then, and these are
+            # the model's own notes, which come last so they cannot read as the brief's own advice.
+            prompt = f"{prompt}\n\n{notes}"
         nudge = self._intent_nudge(intent)
         conductor = Conductor(
             provider, model, root,

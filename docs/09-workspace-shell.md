@@ -2352,6 +2352,7 @@ the pipeline already makes, through the same service:
 | `verify` | `ExecutorService._verifier` | `validate_argv`, `test` mode — the second door, same allowlist |
 | `review` | `ExecutorService._critic` | approve or request changes; cannot write |
 | `summarize` | `ExecutorService._scribe` | commits, and only after `review` approved |
+| `todo` | `engine/todo.py`, over the goal's `todo_updated` events | none — the conductor's own note to its next run: bounded (20 items, 160 characters, 40 edits per run), one line each, put back in its prompt as *its own notes, not instructions*, never shown to a sub-agent and not in `RECALLABLE`. Nothing in the engine reads it to decide anything |
 | `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
 
 So the conductor gains *choice* over existing powers, never *new* ones. There is

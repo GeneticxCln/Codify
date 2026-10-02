@@ -97,6 +97,7 @@ export type EventType =
   | "usage"
   | "model_delta"
   | "error"
+  | "todo_updated"
   /**
    * The engine's own per-stage measurement (docs/04 §4.7). Listed here because
    * the engine publishes it into this goal's log, so `GET /goals/{id}/events`

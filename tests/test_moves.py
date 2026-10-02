@@ -93,7 +93,7 @@ class TestTheMenuIsTheDispatchTable(ConductorTestCase):
             base,
         )
         self.assertEqual(
-            {t.name for t in STEP_TOOLS}, {"write", "verify", "review", "summarize"},
+            {t.name for t in STEP_TOOLS}, {"write", "verify", "review", "summarize", "todo"},
         )
 
 

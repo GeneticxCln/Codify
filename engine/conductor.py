@@ -40,6 +40,7 @@ validation:
 | `review` | `ExecutorService._critic` | approve or request changes; cannot write |
 | `summarize` | `ExecutorService._scribe` | commits, and only after `review` approved |
 | `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
+| `todo` | `engine/todo.py` | none — the conductor's own note to its next run; advice to itself, read by nothing in the engine |
 
 So the conductor gains *choice* over which powers to use, never *new* powers.
 The move that writes is the fixer's, reached through the fixer's own method and
@@ -978,6 +979,35 @@ SUMMARIZE = ToolSpec(
     },
 )
 
+TODO = ToolSpec(
+    name="todo",
+    description=(
+        "Keep a short list of what is still to do, for yourself. These are your own notes: they are kept for "
+        "the next run of this goal and shown to you at the start of it, which is how you tell yourself what "
+        "you had not finished when a step ran out of calls and was resumed with a fresh context. They are not "
+        "the plan, the user does not approve them, ticking an item does not finish a step, and nothing you "
+        "write here reaches the other agents. Use it when a step has more to it than one `write` (\"run the "
+        "linter\", \"b.py needs the same change\"), not for a question or a one-move task. An item is one "
+        "short line."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["add", "start", "done", "drop", "list"],
+                "description": (
+                    "`add` a note (needs `text`); `start`, `done` or `drop` one (needs `id`); "
+                    "`list` to read them back"
+                ),
+            },
+            "text": {"type": "string", "description": "for `add`: one short line, at most 160 characters"},
+            "id": {"type": "string", "description": "for `start`, `done` and `drop`: an id from the list, like t1"},
+        },
+        "required": ["action"],
+    },
+)
+
 USE_SKILL = ToolSpec(
     name="use_skill",
     description=(
@@ -1003,8 +1033,9 @@ BASE_TOOLS: tuple[ToolSpec, ...] = (
 )
 
 # Offered once `plan` has produced steps for them to act on. `write` is the only
-# one that touches the filesystem and it still needs the goal's approval.
-STEP_TOOLS: tuple[ToolSpec, ...] = (WRITE, VERIFY, REVIEW, SUMMARIZE)
+# one that touches the filesystem and it still needs the goal's approval. `todo` rides with them: its notes
+# are for the next run of a step, so a plain question is not offered a notebook.
+STEP_TOOLS: tuple[ToolSpec, ...] = (WRITE, VERIFY, REVIEW, SUMMARIZE, TODO)
 
 # Everything, for callers that want the whole vocabulary rather than one menu:
 # the refusal list, the tests, and the honest answer to "what can it do".

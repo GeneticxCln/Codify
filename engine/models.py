@@ -88,6 +88,7 @@ EventType = Literal[
     "usage",
     "model_delta",
     "error",
+    "todo_updated",
 ]
 
 SYSTEM_PROMPT_OVERRIDE_MAX = 32768

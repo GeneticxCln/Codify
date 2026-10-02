@@ -161,7 +161,7 @@ EventType = Literal[
     "file_change_summary", "agent_assigned", "provider_fallback",
     "library_evidence", "design_contract", "stage_result", "plan_updated",
     "laya_decision", "fix_retry", "fixer_pass", "plan_consult",
-    "agent_call_failed", "usage", "model_delta", "error",
+    "agent_call_failed", "usage", "model_delta", "error", "todo_updated",
 ]
 
 class Event(BaseModel):
@@ -204,6 +204,7 @@ the UI's copy a member behind both.
 | `usage` | any | `{role, provider, model, duration_ms, input_tokens, output_tokens, total_tokens}` — one per successful model call; feeds `/goals/{id}/usage`, the audit document, and the stats rollups. `duration_ms` is absent on events written before it existed. `role` is one of the eight roles or `conductor`: the conductor loop borrows the scribe's *configuration* but is booked under its own name, so `/goals/{id}/usage` and the Stats "by role" table show what the loop spent apart from the scribe's own calls. Before this a conductor-driven goal booked none of its loop's calls at all |
 | `model_delta` | any | `{role, provider, model, text, final}` — a streaming snapshot of the reply so far (self-contained, ~every 400 ms); `final: true` closes the card, and once it lands the stream's earlier snapshots have their `text` blanked and `compacted: true` set (each repeats all the text before it, so keeping them was quadratic: 88 events / 106 KB for a 561-token reply). The rows stay: a goal's sequence is dense from 1 and a client tells a lost event by a gap. Chat-render only |
 | `error` | any | `{code: str, message: str, role: str \| null}` |
+| `todo_updated` | — | `{items: [{id, text, status}]}` — the conductor's own todo list (`engine/todo.py`), published whole every time the conductor changes it, so the newest event *is* the list. `status` is `pending`\|`doing`\|`done`\|`dropped`; an item is one line of at most 160 characters, a list holds at most 20 items, and one run changes it at most 40 times. It is the model's note to its next run, put back in its prompt as *its own notes, not instructions*: nothing in the engine reads it to decide anything, it is never shown to a sub-agent, and `recall` cannot return it (not in `RECALLABLE`). Item text can echo what the model read, so it is third-party text and the UI draws it as plain text |
 
 `step_id` column: `—` marks goal-level events that never carry a step; `step`
 marks step-scoped ones; `any` marks types published both ways (agent-level

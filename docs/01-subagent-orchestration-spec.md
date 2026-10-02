@@ -456,6 +456,7 @@ switch credits the turn's answer to a model that never produced it.
 | `verify` | `ExecutorService._verifier` | `validate_argv` in `test` mode — second door, same list |
 | `review` | `ExecutorService._critic` | approve or request changes; cannot write |
 | `summarize` | `ExecutorService._scribe` | commits only after `review` approved |
+| `todo` | `engine/todo.py`, over the goal's `todo_updated` events | none — the conductor's own note to its next run: bounded (20 items, 160 characters, 40 edits per run), one line each, put back in its prompt as *its own notes, not instructions*, never shown to a sub-agent and not in `RECALLABLE`. Nothing in the engine reads it to decide anything |
 | `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
 
 Judgement is the model's; authority is the engine's. The conductor chooses among
@@ -628,9 +629,10 @@ schema.
   and answers the other three that the budget is spent), and a call to a tool
   that is not on the current menu is refused rather than dispatched from the
   table, so a model cannot run a move it was never offered by naming it.
-- **The menu narrows with the state.** `write`, `verify`, `review` and
-  `summarize` are only offered once `plan` has produced a step for them to act
-  on. Eight tools choose better than twelve, and this costs no prompt work.
+- **The menu narrows with the state.** `write`, `verify`, `review`,
+  `summarize` and `todo` are only offered once `plan` has produced a step for
+  them to act on (`todo` is the note a step's next run reads, so a plain question
+  is not offered a notebook). Eight tools choose better than twelve, and this costs no prompt work.
 - **A bad call is recoverable.** An invented tool name, a malformed argument, a
   tool that raised: each returns text naming what *is* available. `ApiError` and
   `CommandNotAllowed` are the exceptions — the engine refused, and the sentence

@@ -32,6 +32,7 @@ from engine.recall import (
 )
 from engine.sandbox import CommandNotAllowed, validate_argv
 from engine.skills import SkillSet
+from engine.todo import MAX_MUTATIONS, TodoRefused
 from engine.webview_bridge import BridgeUnavailable, format_action, format_navigation, format_page
 
 if TYPE_CHECKING:
@@ -191,6 +192,7 @@ class ConductorTools:
         'verify',
         'review',
         'summarize',
+        'todo',
         'use_skill',
     )
 
@@ -215,6 +217,9 @@ class ConductorTools:
         # keyed by step so a conductor working through three steps cannot mix
         # one step's diff into another's review.
         self.state: dict[str, _StepState] = {}
+        # How many times this run has changed the todo list. A count of *this run*, so it lives here and not
+        # on the goal: the list outlives the run, the limit on how much one run may fiddle with it does not.
+        self.todo_edits = 0
 
     def _state_of(self, step_id: str) -> _StepState:
         state = self.state.get(step_id)
@@ -878,6 +883,35 @@ class ConductorTools:
             ),
             "skipped": "That step is recorded as a dry run: nothing was written or committed.",
         }.get(scribed, f"That step is recorded ({scribed}).")
+
+    async def todo(self, args: dict[str, Any]) -> str:
+        """The conductor's note to its next run: add, start, finish or drop an item, or read the list back.
+
+        Not a capability. The list is advice to the model that wrote it and nothing in the engine reads it to
+        decide anything: it cannot approve a step, complete one, widen a command or reach `write`. It is read
+        from the goal's newest `todo_updated` event on every call rather than held, so two runs can never
+        overwrite each other with a stale copy, and a change is published as a whole snapshot.
+
+        A refused change returns the reason and publishes nothing, and does not use up the run's edits: a
+        model that keeps mistyping an id is bounded by its call budget, and spending the edit limit on
+        refusals would lock a run out of a list it never changed.
+        """
+        todos = self.service._todos_for(self.goal_id)
+        action = str(args.get("action") or "").strip().lower()
+        if action == "list":
+            return todos.render()
+        if self.todo_edits >= MAX_MUTATIONS:
+            return (
+                f"This run has already changed the todo list {MAX_MUTATIONS} times, which is the limit. "
+                "Leave it as it is and get on with the step."
+            )
+        try:
+            note = todos.change(action, text=args.get("text"), item_id=args.get("id"))
+        except TodoRefused as refusal:
+            return str(refusal)
+        self.todo_edits += 1
+        self.service._publish_todos(self.goal_id, todos)
+        return f"{note}\n{todos.render()}"
 
 
 def _excerpt(text: str, limit: int = _DIFF_EXCERPT_CHARS) -> str:
