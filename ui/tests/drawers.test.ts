@@ -26,9 +26,9 @@ test("what cannot be measured never hides anything", () => {
 
 test("the threshold is the panel, the drawer and the centre's floor, in rem", () => {
   assert.equal(SIDEBAR_REM, 15);
-  assert.deepEqual({ ...DRAWER_REM }, { stats: 28, notifications: 20, history: 20 });
+  assert.deepEqual({ ...DRAWER_REM }, { stats: 28, notifications: 20, clipboard: 20, history: 20 });
   assert.equal(MIN_CENTRE_REM, 30);
-  for (const drawer of ["stats", "history"] as const) {
+  for (const drawer of ["stats", "clipboard", "history"] as const) {
     const need = SIDEBAR_REM + DRAWER_REM[drawer] + MIN_CENTRE_REM;
     for (const root of [16, 18, 20, 24, 28]) {
       assert.equal(sidebarYields(need * root - 1, root, drawer), true, `${drawer} @${root}px: just under the need still fits?`);
@@ -58,9 +58,9 @@ test("pressing a drawer's button opens it, switches to it, or closes it", () => 
   assert.equal(nextDrawer("stats", "stats"), null);
   assert.equal(nextDrawer("stats", "history"), "history");
   assert.equal(nextDrawer("history", "stats"), "stats");
-  // Three drawers, one at a time: each press lands on exactly the one pressed.
-  for (const from of [null, "stats", "notifications", "history"] as const) {
-    for (const to of ["stats", "notifications", "history"] as const) {
+  // Four drawers, one at a time: each press lands on exactly the one pressed.
+  for (const from of [null, "stats", "notifications", "clipboard", "history"] as const) {
+    for (const to of ["stats", "notifications", "clipboard", "history"] as const) {
       assert.equal(nextDrawer(from, to), from === to ? null : to, `${from} -> ${to}`);
     }
   }
