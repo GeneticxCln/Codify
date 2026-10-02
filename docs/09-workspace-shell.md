@@ -3037,3 +3037,89 @@ Not verified: the events in a **real WebKitGTK window**. jsdom has no `Clipboard
 by hand with the one property the code reads, so that the shell's webview delivers `copy`, `cut` and `paste` to
 the document, and that xterm writes its selection into the event's `clipboardData`, is read from the specification
 and not seen. If a terminal selection does not appear in the history, that is the place to look.
+
+## 12. Split panes (built)
+
+The centre column can show two views side by side: **a chat beside a terminal, or two terminals**. A split is made three
+ways: a right-click on a tab (or the Menu key on a focused one), an entry in the command palette (Ctrl+K, type
+"split"), and **Ctrl+.**, which splits and, pressed again, closes. The rules are `ui/src/panes.ts`, pure and DOM-free like
+`tabs.ts`; the divider and the two panes are `ui/src/components/SplitPanes.tsx`; the hook that keeps the split in step
+with the tab strip is `ui/src/useSplit.ts`.
+
+### 12.1 Beside the tabs, never in them
+
+A split is `{ panes: [leftId, rightId], focused: 0 | 1 }` held by `useSplit` **next to** the tab state. `tabs.ts`,
+`tabPersistence.ts`, `layoutSync.ts` and the engine's `/shell/tabs` never see it (§2.1: view state is not a `Tab`), so none of
+their return shapes can drop it, and it cannot reach storage. `tabState.activeId` keeps meaning *the tab I am working in*, which is
+now **the focused pane's tab**, so Ctrl+W, the strip's `aria-selected`, thread hydration and the Ctrl+B terminal passthrough
+mean what they did.
+
+### 12.2 What may be paired, and why that is the line
+
+| | |
+|---|---|
+| Chat + terminal, terminal + terminal | allowed |
+| Anything with a **browser page** | refused. A page is a native child webview seated over one measured rectangle (§7.3): Rust applies one `Bounds` to every page and shows one at a time. Two visible pages, or one in half a column, are shell changes this does not make. It is also what makes a DOM divider safe: no native view is ever in the centre while a split shows. |
+| Chat + chat | refused. There is one message box, one "a goal is running" state and one `insertRequest`. |
+
+A refusal is a sentence (`PAIR_REFUSALS`): in a tab's menu the item stays reachable with its reason under it (`aria-disabled`, not
+`disabled`, so a keyboard user hears why), and a chord that cannot work says so in a thin `role="status"` line above the panes, which goes with the next change of tab.
+
+### 12.3 When it shows, and what moves it
+
+A split **shows** while the active tab is one of its two. When the active tab is somewhere else (`resolveSplit`):
+
+1. it takes the **focused** pane's place if that is a valid pair; else
+2. the **other** pane's place if that is (a chat opened while the terminal had focus replaces the chat, never makes two); else
+3. the split **waits**: kept, not drawn, and back as it was when you return to either pane's tab. A link clicked in the chat opens a browser
+   tab, and that must not destroy the split it was clicked in.
+
+A pane whose tab has gone ends the split. Closing a showing pane's tab ends it and goes to the *other* pane's tab. Ctrl+. with no
+split picks who to split with by **distance in the strip, a tie going right** (`splitPartner`): a chat takes the nearest live terminal; a terminal takes the
+nearest other live terminal, then the nearest chat; with nobody, a new terminal opens in the same folder. A shell that has exited is never chosen for you.
+
+### 12.4 The chat follows its tab, not the focus
+
+With the terminal beside it focused, the transcript is still the one on screen: `activeConversationId` is the **chat pane's**
+conversation, so hydration, sending and the sidebar's highlight stay with it. Focus is the pane last used: a press in a pane, or focus
+arriving in it (the clipboard drawer's Insert focuses the message box, so it focuses the chat pane), moves it, and the strip follows.
+Selecting a thread from the sidebar while the terminal has focus replaces the chat pane's tab, rather than rewriting the chat tab in place as it does outside a split.
+
+### 12.5 Room
+
+Each pane is `minmax(22rem, Nfr)` (`MIN_PANE_REM`, a judgement pinned by a test), so the browser holds both at their minimum however the
+ratio and the window disagree. The rule in `drawers.ts` is derived and never stored, like §8.1's: the **left panel gives way** to a split the way it does to a
+drawer, when the row cannot hold it (`sidebarYields(..., split)`); and when two panes still do not fit (`splitFits`), only the **focused** pane is
+drawn and the split is kept, so widening the window or closing a drawer brings the other back. The divider position is the one thing remembered
+(`codify.splitRatio`, `splitPref.ts`): it is a view preference, clamped to what both panes need at the window's size when used.
+The divider is a `role="separator"`: drag it (it holds the pointer), arrow keys, Home and End, double-click for an even split.
+The composer's dropdowns are `position: fixed` and open at their button, which was always inside the window while the composer spanned
+it; in the right-hand pane they would run off the screen, so they are pulled back inside it (`clampPickerLeft`, `threadMenu.ts`).
+
+**A split does not come back after a restart.** Both pairings contain a terminal, and terminals are never restored, so the persisted layout cannot hold one.
+Nothing is written for a split.
+
+### 12.6 Terminal panes, two at once
+
+Two panes exposed two things a single pane had hidden. A pane kept **every terminal's output** in its buffer and drained only its own, so
+a build in a second shell grew a mounted pane's buffer for as long as it was mounted (and two panes would each have hoarded the other's):
+it keeps only its own (`bufferOwnOutput`). And a pane took the keyboard whenever xterm was ready, which would let the second half of
+a split take it from the pane in use: `autoFocus` (on by default) is off for a pane that appears unfocused, and clicking still focuses.
+The clipboard drawer follows: Insert needs a chat pane in view, Paste goes to the focused terminal (else the one beside the chat), so in chat + terminal both work whichever pane has focus.
+
+### 12.7 Proven, and not
+
+`ui/tests/panes.test.ts` is the rules, `splitPanes.test.ts` the divider, `useSplitFits.test.ts` the measuring, `tabMenu.test.ts` the
+menu, `terminalPaneFocus.test.ts` the focus, `pickerClamp.test.ts` the dropdowns, and `splitApp.test.ts` and `splitAppLayout.test.ts` the whole App with real
+xterm panes (two files, because forty of them outgrow one process's memory): all three ways in, both views live, the transcript and sending staying with the chat while
+the terminal is focused, replacement, closing, the page waiting, the panel yielding and a pane dropping, nothing in storage, the clipboard drawer in a split.
+
+Not verified: the **real window**. jsdom has no layout, so the collapse rule and the divider's maths are tested with the harness's stated
+widths, not seen; the feel of dragging, xterm re-fitting while it drags, and focus under the desktop's own shortcuts are for a person to check.
+One thing the tests found about xterm itself: it schedules work on a timer shortly after layout and does not cancel it on dispose, so a pane unmounted inside
+that window throws from the timer (`reading 'dimensions'`). It is harmless to the app and needs a split closed within a few milliseconds of being made,
+so the tests wait a beat; it is the same for a tab opened and closed that fast.
+
+**Browser pages in a split** are the next piece if wanted: per-page bounds in `browser::resize`, a visibility API that names more than one page,
+`note_active` and the AI's "which page is in view" made a set, and a divider that does not need the pointer over the page (a native view swallows pointer events over its rectangle).
+

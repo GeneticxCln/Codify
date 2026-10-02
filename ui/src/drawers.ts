@@ -42,13 +42,18 @@ export const MIN_CENTRE_REM = 30;
 /**
  * Whether the left panel should not be drawn right now.
  *
+ * It gives way to a drawer, and to a split (`panes.ts`), the same way: when the row cannot hold it beside what asked
+ * for the room. A split needs two panes' worth (`MIN_PANE_REM` each) where a single view needs `MIN_CENTRE_REM`.
+ *
  * `mainPx` and `rootPx` are the row's width and the root font size in pixels. If either is unknown
  * (a window with no layout yet, or a test), the answer is no: hiding something because it could not
  * be measured is the wrong default, and the drawers' own percentage caps still keep the centre usable.
  */
-export function sidebarYields(mainPx: number, rootPx: number, drawer: Drawer | null): boolean {
-  if (drawer === null || !(mainPx > 0) || !(rootPx > 0)) return false;
-  return mainPx / rootPx < SIDEBAR_REM + DRAWER_REM[drawer] + MIN_CENTRE_REM;
+export function sidebarYields(mainPx: number, rootPx: number, drawer: Drawer | null, split: boolean = false): boolean {
+  if ((drawer === null && !split) || !(mainPx > 0) || !(rootPx > 0)) return false;
+  // A split needs two panes' worth in the centre (`MIN_PANE_REM` each) where a single view needs `MIN_CENTRE_REM`.
+  const centre = split ? 2 * MIN_PANE_REM : MIN_CENTRE_REM;
+  return mainPx / rootPx < SIDEBAR_REM + (drawer === null ? 0 : DRAWER_REM[drawer]) + centre;
 }
 
 /** What pressing a drawer's button does: open it (closing the other), or close it if it is the open one. */
@@ -69,9 +74,9 @@ export function closeDrawer(current: Drawer | null, which: Drawer): Drawer | nul
  * and the split is kept, so the window never shows two panes it cannot read. Derived and never stored, like the panel's
  * own yield: widening the window or closing the drawer brings the second pane back as it was.
  *
- * The panel is not the one that leaves for a split. It is the person's choice (`docs/09` §8.1) apart from yielding to
- * a drawer, and a split that does not fit with it showing draws one pane until they hide it. Unmeasured is "fits", as
- * for `sidebarYields`: taking a pane away because the window could not be measured is the wrong default.
+ * The panel goes first: `sidebarYields` takes it out of the way of a split (and of a drawer) before a pane is dropped,
+ * so `sidebarShown` here is the answer after that. Unmeasured is "fits", as for `sidebarYields`: taking a pane away
+ * because the window could not be measured is the wrong default.
  */
 export function splitFits(mainPx: number, rootPx: number, sidebarShown: boolean, drawer: Drawer | null): boolean {
   if (!(mainPx > 0) || !(rootPx > 0)) return true;

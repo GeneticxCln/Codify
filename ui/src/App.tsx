@@ -131,8 +131,17 @@ import {
   tabForConversation,
   closeConversation,
   tabId,
+  type Tab,
   type TabState,
 } from "./tabs";
+import { PAIR_REFUSALS, closeInSplit, splitPartner, startSplit, type PaneSide } from "./panes";
+import { useSplit } from "./useSplit";
+import { useSplitFits } from "./useSplitFits";
+import { readSplitRatio, writeSplitRatio } from "./splitPref";
+import { SplitPanes } from "./components/SplitPanes";
+import { TabMenu } from "./components/TabMenu";
+import { tabMenuItems, type TabMenuItemId } from "./tabMenu";
+import { threadLabel } from "./threadTitle";
 import {
   goBack,
   goForward,
@@ -935,28 +944,50 @@ export const App: React.FC = () => {
   // stored: `codify.sidebar` is written only by the person's own press of the toggle, so closing the
   // drawer brings the panel back as it was (`docs/09` §8.1).
   const mainRef = useRef<HTMLElement>(null);
-  const sidebarYielded = useSidebarYield(mainRef, drawer);
+  // A split puts two tabs side by side (`panes.ts`, `docs/09` §12). `shownSplit` is what it is showing right now.
+  const { shown: shownSplit, split, setSplit } = useSplit(tabState);
+  const sidebarYielded = useSidebarYield(mainRef, drawer, Boolean(shownSplit));
   const sidebarShown = sidebarOpen && !sidebarYielded;
-  // Pressing the toggle while the panel is out of the way because of a drawer means "show it", and the
-  // two do not fit, so the drawer is what closes. Otherwise it flips the person's own choice.
+  // Pressing the toggle while the panel is out of the way because of a drawer or a split means "show it", and the
+  // two do not fit, so what took the room is what closes: the drawer first, then the split. Otherwise it flips the
+  // person's own choice.
   const toggleSidebar = useCallback(() => {
     if (sidebarOpen && sidebarYielded) {
-      setDrawer(null);
+      if (drawer !== null) setDrawer(null);
+      else setSplit(null);
       return;
     }
     setSidebarOpen((open) => !open);
-  }, [sidebarOpen, sidebarYielded]);
-  const activeConversationId = activeTabNow?.conversationId;
+  }, [sidebarOpen, sidebarYielded, drawer, setSplit]);
+  // `drawnSplit` is what the split is showing when the centre column can hold both panes; when it cannot, only the
+  // focused pane is drawn and the split is kept (`drawers.splitFits`), so widening the window brings the other back.
+  const splitFitsRow = useSplitFits(mainRef, sidebarShown, drawer);
+  const drawnSplit = shownSplit && splitFitsRow ? shownSplit : null;
+  const [splitRatio, setSplitRatio] = useState(readSplitRatio);
+  // The thread in view follows the *chat pane*, not the focus: with the terminal beside it focused, the transcript is
+  // still the one on screen, and the sidebar still highlights it. Outside a split it is the active tab's, as before.
+  const chatInView = shownSplit
+    ? [shownSplit.left, shownSplit.right].find((t) => t.kind === "chat")
+    : activeTabNow?.kind === "chat"
+      ? activeTabNow
+      : undefined;
+  const activeConversationId = chatInView?.conversationId;
   const activeBrowserTab =
     activeTabNow?.kind === "browser" ? activeTabNow : undefined;
   const activeTerminalTab =
     activeTabNow?.kind === "terminal" ? activeTabNow : undefined;
+  // The terminal a paste would reach: the focused one, else the one beside the chat that has it.
+  const terminalInView =
+    activeTerminalTab ??
+    (drawnSplit ? [drawnSplit.left, drawnSplit.right].find((t) => t.kind === "terminal") : undefined);
 
   // The clipboard drawer's buttons. Which of Insert and Paste can work follows from which tab is in view: the
   // message box exists only in a chat view (a browser or terminal tab replaces it), and a terminal only in a
   // terminal tab whose shell is still running.
-  const canInsertClip = !activeBrowserTab && !activeTerminalTab;
-  const canPasteClip = Boolean(activeTerminalTab) && !activeTerminalTab?.exited;
+  const canInsertClip = drawnSplit
+    ? [drawnSplit.left, drawnSplit.right].some((t) => t.kind === "chat")
+    : !activeBrowserTab && !activeTerminalTab;
+  const canPasteClip = Boolean(terminalInView) && !terminalInView?.exited;
   const [insertRequest, setInsertRequest] = useState<{ seq: number; text: string } | null>(null);
   const [clipNotice, setClipNotice] = useState<string | null>(null);
   useEffect(() => {
@@ -992,10 +1023,10 @@ export const App: React.FC = () => {
   }, []);
   const handlePasteClip = useCallback(
     (clip: Clip) => {
-      const outcome = activeTerminalTab ? pasteIntoTerminal(activeTerminalTab.id, clip.text) : "no-terminal";
+      const outcome = terminalInView ? pasteIntoTerminal(terminalInView.id, clip.text) : "no-terminal";
       setClipNotice(outcome === "pasted" ? null : PASTE_MESSAGES[outcome]);
     },
-    [activeTerminalTab],
+    [terminalInView],
   );
 
   /**
@@ -1218,8 +1249,9 @@ export const App: React.FC = () => {
         tabs: tabState.tabs,
         activeId: tabState.activeId,
         conversations,
+        split: { showing: Boolean(shownSplit) },
       }),
-    [tabState, conversations],
+    [tabState, conversations, shownSplit],
   );
 
   // Every close in the shell goes through here — the strip's close button, the
@@ -1238,7 +1270,13 @@ export const App: React.FC = () => {
   // is open" on screen as an error the user caused by closing an empty tab.
   const handleCloseTab = useCallback(
     (id: string) => {
-      setTabState((prev) => closeTab(prev, id));
+      // Closing a showing pane's tab ends the split and goes to the other pane's tab (`panes.closeInSplit`).
+      const inSplit = closeInSplit(tabState, split, id);
+      setTabState((prev) => {
+        const next = closeTab(prev, id);
+        return inSplit?.activate ? focusTab(next, inSplit.activate) : next;
+      });
+      // (A split whose tab has gone ends by itself: `resolveSplit`. What closing adds is where to land.)
       const tab = tabState.tabs.find((t) => t.id === id);
       // A close is owed to the engine until it confirms the delete. Without this
       // the row outlives the tab and the next pull, or the next boot, adopts it
@@ -1288,7 +1326,7 @@ export const App: React.FC = () => {
         );
       }
     },
-    [tabState.tabs],
+    [tabState, split],
   );
 
   // ── the browser pane's four moves ──────────────────────────────────────
@@ -1902,29 +1940,106 @@ export const App: React.FC = () => {
   // state is gone rather than trimmed: the tab *is* the record of which PTY is
   // open, and a failure before there is a tab goes to the app-wide banner.
 
+  // Opens a shell in a workspace and returns its id, or null when it could not (and the banner says why). A split
+  // wants the id back, to put the new terminal beside the tab that asked.
+  const startTerminal = useCallback(
+    async (workspaceId: string | undefined): Promise<string | null> => {
+      // The shell starts a PTY in a *workspace*, and refuses anything it cannot
+      // pin to an existing directory (`pin_cwd`). With no workspace chosen there
+      // is nothing to ask for, and the refusal is worth saying before the click
+      // rather than after it.
+      if (!workspaceId) {
+        setError("Pick a workspace before opening a terminal");
+        return null;
+      }
+      try {
+        const ptyId = await openTerminal(workspaceId, DEFAULT_GRID.cols, DEFAULT_GRID.rows);
+        // The workspace goes on the tab, not just into the open call: the shell's
+        // cwd was pinned from it, and it is the key the scrollback is filed under
+        // if this tab is closed and reopened.
+        setTabState((prev) => openTerminalTab(prev, ptyId, workspaceId));
+        return ptyId;
+      } catch (err: any) {
+        setError(readRejection(err, "Could not start a shell"));
+        return null;
+      }
+    },
+    [],
+  );
   const handleOpenTerminal = useCallback(async () => {
-    // The shell starts a PTY in a *workspace*, and refuses anything it cannot
-    // pin to an existing directory (`pin_cwd`). With no workspace chosen there
-    // is nothing to ask for, and the refusal is worth saying before the click
-    // rather than after it.
-    if (!selectedWs) {
-      setError("Pick a workspace before opening a terminal");
+    await startTerminal(selectedWs?.id);
+  }, [startTerminal, selectedWs]);
+
+  // ── split panes (`panes.ts` has the rules; `docs/09` §12 says what they are for) ─────────────────────────────
+  //
+  // A refusal is said, in a thin line above the panes, and goes with the next change of tab: a chord that does
+  // nothing in silence reads as a broken key.
+  const [paneNotice, setPaneNotice] = useState<string | null>(null);
+  useEffect(() => {
+    setPaneNotice(null);
+  }, [tabState.activeId]);
+  const [tabMenu, setTabMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
+  const closeSplit = useCallback(() => setSplit(null), [setSplit]);
+  const startSplitWith = useCallback(
+    (otherId: string) => {
+      const out = startSplit(tabState, otherId);
+      if (!out.ok) {
+        setPaneNotice(PAIR_REFUSALS[out.why]);
+        return;
+      }
+      setPaneNotice(null);
+      setTabState(out.state);
+      setSplit(out.split);
+    },
+    [tabState, setSplit],
+  );
+  const splitWithNewTerminal = useCallback(async () => {
+    const active = activeTab(tabState);
+    if (!active) {
+      setPaneNotice(PAIR_REFUSALS.missing);
       return;
     }
-    try {
-      const ptyId = await openTerminal(
-        selectedWs.id,
-        DEFAULT_GRID.cols,
-        DEFAULT_GRID.rows
-      );
-      // The workspace goes on the tab, not just into the open call: the shell's
-      // cwd was pinned from it, and it is the key the scrollback is filed under
-      // if this tab is closed and reopened.
-      setTabState((prev) => openTerminalTab(prev, ptyId, selectedWs.id));
-    } catch (err: any) {
-      setError(readRejection(err, "Could not start a shell"));
+    if (active.kind === "browser") {
+      setPaneNotice(PAIR_REFUSALS.browser);
+      return;
     }
-  }, [selectedWs]);
+    const id = await startTerminal(active.workspaceId ?? selectedWs?.id);
+    // The new tab is active (`openTerminalTab`), so the pair is shown the moment it exists.
+    if (id) setSplit({ panes: [active.id, id], focused: 1 });
+  }, [tabState, startTerminal, selectedWs, setSplit]);
+  const toggleSplit = useCallback(() => {
+    if (shownSplit) {
+      closeSplit();
+      return;
+    }
+    const partner = splitPartner(tabState);
+    if (partner.kind === "refused") setPaneNotice(PAIR_REFUSALS[partner.why]);
+    else if (partner.kind === "tab") startSplitWith(partner.id);
+    else void splitWithNewTerminal();
+  }, [shownSplit, tabState, closeSplit, startSplitWith, splitWithNewTerminal]);
+  const handleFocusPane = useCallback(
+    (side: PaneSide) => {
+      const tab = side === 0 ? shownSplit?.left : shownSplit?.right;
+      if (!tab) return;
+      setTabState((prev) => (prev.activeId === tab.id ? prev : focusTab(prev, tab.id)));
+    },
+    [shownSplit],
+  );
+  const handleRatioChange = useCallback((ratio: number, commit: boolean) => {
+    setSplitRatio(ratio);
+    if (commit) writeSplitRatio(ratio);
+  }, []);
+  const handleTabMenuChoice = useCallback(
+    (id: TabMenuItemId) => {
+      const target = tabMenu?.tabId;
+      if (id === "close-split") closeSplit();
+      else if (id === "split-new-terminal") void splitWithNewTerminal();
+      else if (target) startSplitWith(target);
+    },
+    [tabMenu, closeSplit, splitWithNewTerminal, startSplitWith],
+  );
+  const paneTitle = (tab: Tab): string =>
+    threadLabel(tab.title, workspaces.find((w) => w.id === tab.workspaceId)?.name);
 
   // The shell finished on its own — `exit`, or the user closing a window in a
   // shell that was running something. The tab stays, because a finished
@@ -2054,6 +2169,10 @@ export const App: React.FC = () => {
           if (activeTabKind === "terminal") return;
           toggleSidebar();
           break;
+        // Ctrl+. is the same from every view, a terminal's included (`shortcuts.ts` says why it is not Ctrl+\).
+        case "toggle-split":
+          toggleSplit();
+          break;
         // The window's size, as a browser's zoom: a step each way and back to the default. The
         // store decides the size and tells every listener (the root, the terminal, Settings).
         case "scale-up":
@@ -2072,7 +2191,7 @@ export const App: React.FC = () => {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [handleNewTab, handleCloseTab, tabState.activeId, activeTabKind, toggleSidebar]);
+  }, [handleNewTab, handleCloseTab, tabState.activeId, activeTabKind, toggleSidebar, toggleSplit]);
 
   /** Palette pick. The item carries data; this switch is the whole act. */
   const handlePaletteSelect = (item: PaletteItem) => {
@@ -2086,6 +2205,11 @@ export const App: React.FC = () => {
         break;
       case "settings":
         openSettings(item.settingsTab);
+        break;
+      case "action":
+        if (item.action.type === "close-split") closeSplit();
+        else if (item.action.type === "split-new-terminal") void splitWithNewTerminal();
+        else startSplitWith(item.action.tabId);
         break;
     }
   };
@@ -3101,6 +3225,80 @@ export const App: React.FC = () => {
     : undefined;
   const canStop = canStopGoal(activeGoal?.status);
 
+  // What a pane holds. The chat view is built once, here, so a split and a single view draw the same thing and the
+  // ~30 props are not written twice; a pane that appears unfocused beside another does not take the keyboard.
+  const renderChat = (autoFocus: boolean): React.ReactElement => (
+    <>
+            <ChatTimeline
+              messages={visibleMessages}
+              onStartGoal={handleStartGoal}
+              onEnableExecution={handleEnableExecution}
+              onApplyGoal={handleApplyGoal}
+              onEditStep={handleEditStep}
+              onPauseGoal={handlePauseGoal}
+              onCancelGoal={handleCancelGoal}
+              onSetGoalTrace={handleSetGoalTrace}
+              onRetryStep={handleRetryStep}
+              onDeleteGoal={handleDeleteGoal}
+              onOpenSettings={openSettings}
+              onImportAudit={handleImportAudit}
+              onPinDesignContract={handleSetDesignContract}
+              pinnedContracts={pinnedContracts}
+              onOpenLink={handleOpenLink}
+              onAnswerQuestion={(text) => void handleSendMessage(text)}
+            />
+
+            <BottomCommandBar
+              autoFocus={autoFocus}
+              insertRequest={insertRequest}
+              workspaces={workspaces}
+              selectedWorkspace={selectedWs}
+              onSelectWorkspace={setSelectedWs}
+              onBrowseWorkspace={handleBrowseWorkspace}
+              manualWorkspaceOpen={manualWorkspaceOpen}
+              onManualWorkspaceOpenChange={setManualWorkspaceOpen}
+              onCreateWorkspace={handleCreateWorkspace}
+              onDeleteWorkspace={handleDeleteWorkspace}
+              onSetDesignContract={handleSetDesignContract}
+              availableModels={modelCatalog.models}
+              selectedModel={selectedModel}
+              onSelectModel={setSelectedModel}
+              modelStatus={modelCatalog.providers}
+              modelSignals={modelSignals}
+              modelsLoading={modelsLoading}
+              onRefreshModels={() => loadModels(true)}
+              mode={mode}
+              onChangeMode={setMode}
+              goalMode={goalMode}
+              onChangeGoalMode={setGoalMode}
+              parallel={parallel}
+              onToggleParallel={setParallel}
+              record={record}
+              onToggleRecord={setRecord}
+              onSubmit={handleSendMessage}
+              isLoading={isLoading}
+              onStop={handleStopGoal}
+              canStop={canStop}
+              isRunning={isGoalActive(activeGoal?.status)}
+              onOpenSettings={() => openSettings("keys")}
+              onOpenAudioSettings={() => openSettings("audio")}
+            />
+    </>
+  );
+  const renderTerminal = (tab: Tab, autoFocus: boolean): React.ReactElement => (
+    <TerminalPane
+      key={tab.id}
+      terminalId={tab.id}
+      workspaceId={tab.workspaceId}
+      exited={tab.exited}
+      onResize={handleTerminalResize}
+      onExit={handleTerminalExit}
+      autoFocus={autoFocus}
+    />
+  );
+  const renderPane = (tab: Tab, side: PaneSide): React.ReactElement =>
+    tab.kind === "terminal" ? renderTerminal(tab, drawnSplit?.focused === side) : renderChat(drawnSplit?.focused === side);
+
   return (
     // select-none REMOVED so text cursor and selection work normally in WebKitGTK
     // `relative` for the rain: the OLED theme's backdrop is a child of this box
@@ -3181,6 +3379,8 @@ export const App: React.FC = () => {
             });
           }}
           unreadTerminalIds={[...unreadTerminalIds]}
+          splitIds={shownSplit ? [shownSplit.left.id, shownSplit.right.id] : []}
+          onMenu={(tabId, x, y) => setTabMenu({ tabId, x, y })}
           onClose={handleCloseTab}
           busyTabIds={tabState.tabs
             .filter((t) => t.conversationId && activeGoalIds.has(t.conversationId))
@@ -3443,7 +3643,32 @@ export const App: React.FC = () => {
               measured content area (`docs/09` §7.3). So the pane is both its
               address bar and the rectangle it paints in, and there is nowhere
               else for the page to be. */}
-          {activeBrowserTab ? (
+          {paneNotice && (
+            <div
+              role="status"
+              className="mx-3 mt-2 flex items-start gap-2 rounded-lg border border-codify-warning bg-codify-warning/10 px-2.5 py-1.5 text-xs text-codify-secondary"
+            >
+              <span className="min-w-0 flex-1">{paneNotice}</span>
+              <IconButton label="Dismiss message" onClick={() => setPaneNotice(null)} className="!h-5 !w-5">
+                <X className="h-3 w-3" />
+              </IconButton>
+            </div>
+          )}
+          {drawnSplit ? (
+            <SplitPanes
+              left={renderPane(drawnSplit.left, 0)}
+              right={renderPane(drawnSplit.right, 1)}
+              leftTitle={paneTitle(drawnSplit.left)}
+              rightTitle={paneTitle(drawnSplit.right)}
+              leftKind={drawnSplit.left.kind}
+              rightKind={drawnSplit.right.kind}
+              focused={drawnSplit.focused}
+              ratio={splitRatio}
+              onFocusPane={handleFocusPane}
+              onRatioChange={handleRatioChange}
+              onCloseSplit={closeSplit}
+            />
+          ) : activeBrowserTab ? (
             <BrowserPane
               tabId={activeBrowserTab.id}
               onBounds={handleBrowserBounds}
@@ -3470,70 +3695,9 @@ export const App: React.FC = () => {
               }
             />
           ) : activeTerminalTab ? (
-            <TerminalPane
-              key={activeTerminalTab.id}
-              terminalId={activeTerminalTab.id}
-              workspaceId={activeTerminalTab.workspaceId}
-              exited={activeTerminalTab.exited}
-              onResize={handleTerminalResize}
-              onExit={handleTerminalExit}
-            />
+            renderTerminal(activeTerminalTab, true)
           ) : (
-            <>
-            <ChatTimeline
-              messages={visibleMessages}
-              onStartGoal={handleStartGoal}
-              onEnableExecution={handleEnableExecution}
-              onApplyGoal={handleApplyGoal}
-              onEditStep={handleEditStep}
-              onPauseGoal={handlePauseGoal}
-              onCancelGoal={handleCancelGoal}
-              onSetGoalTrace={handleSetGoalTrace}
-              onRetryStep={handleRetryStep}
-              onDeleteGoal={handleDeleteGoal}
-              onOpenSettings={openSettings}
-              onImportAudit={handleImportAudit}
-              onPinDesignContract={handleSetDesignContract}
-              pinnedContracts={pinnedContracts}
-              onOpenLink={handleOpenLink}
-              onAnswerQuestion={(text) => void handleSendMessage(text)}
-            />
-
-            <BottomCommandBar
-              insertRequest={insertRequest}
-              workspaces={workspaces}
-              selectedWorkspace={selectedWs}
-              onSelectWorkspace={setSelectedWs}
-              onBrowseWorkspace={handleBrowseWorkspace}
-              manualWorkspaceOpen={manualWorkspaceOpen}
-              onManualWorkspaceOpenChange={setManualWorkspaceOpen}
-              onCreateWorkspace={handleCreateWorkspace}
-              onDeleteWorkspace={handleDeleteWorkspace}
-              onSetDesignContract={handleSetDesignContract}
-              availableModels={modelCatalog.models}
-              selectedModel={selectedModel}
-              onSelectModel={setSelectedModel}
-              modelStatus={modelCatalog.providers}
-              modelSignals={modelSignals}
-              modelsLoading={modelsLoading}
-              onRefreshModels={() => loadModels(true)}
-              mode={mode}
-              onChangeMode={setMode}
-              goalMode={goalMode}
-              onChangeGoalMode={setGoalMode}
-              parallel={parallel}
-              onToggleParallel={setParallel}
-              record={record}
-              onToggleRecord={setRecord}
-              onSubmit={handleSendMessage}
-              isLoading={isLoading}
-              onStop={handleStopGoal}
-              canStop={canStop}
-              isRunning={isGoalActive(activeGoal?.status)}
-              onOpenSettings={() => openSettings("keys")}
-              onOpenAudioSettings={() => openSettings("audio")}
-            />
-            </>
+            renderChat(true)
           )}
         </div>
 
@@ -3587,7 +3751,7 @@ export const App: React.FC = () => {
             notice={clipNotice}
             canInsert={canInsertClip}
             canPasteToTerminal={canPasteClip}
-            terminalExited={Boolean(activeTerminalTab?.exited)}
+            terminalExited={Boolean(terminalInView?.exited)}
             onCopy={(clip) => void handleCopyClip(clip)}
             onInsert={handleInsertClip}
             onPasteToTerminal={handlePasteClip}
@@ -3681,6 +3845,21 @@ export const App: React.FC = () => {
       {/* Ctrl+K. After SettingsModal in the DOM on purpose: both sit at z-50, and
           a later sibling paints above — the palette must be reachable while
           the dialog is open. */}
+      {tabMenu &&
+        (() => {
+          const target = tabState.tabs.find((t) => t.id === tabMenu.tabId);
+          // A tab that went (closed in another window) leaves a menu with nothing to act on, so it is not drawn.
+          return target ? (
+            <TabMenu
+              items={tabMenuItems(target, tabState, Boolean(shownSplit))}
+              x={tabMenu.x}
+              y={tabMenu.y}
+              onChoose={handleTabMenuChoice}
+              onClose={() => setTabMenu(null)}
+            />
+          ) : null;
+        })()}
+
       <CommandPalette
         open={paletteOpen}
         items={paletteItems}

@@ -40,6 +40,7 @@ import { MicButton } from "./MicButton";
 import { readRejection } from "../rejection.ts";
 import { insertDictation } from "../speech.ts";
 import { insertAtCaret } from "../clipboardHistory";
+import { clampPickerLeft } from "../threadMenu";
 import { uiScaleFactor, useUiScale } from "../uiScale";
 
 export type ExecutionMode = "direct" | "dry_run" | "plan_only";
@@ -129,6 +130,11 @@ interface BottomCommandBarProps {
    * the same text twice is two presses. One that was already there when this box mounted is not replayed.
    */
   insertRequest?: { seq: number; text: string } | null;
+  /**
+   * Take the keyboard when the box appears. On by default. A box that appears *unfocused* beside another pane in use
+   * (the chat half of a split coming back when the window widens) says no, so it does not take the keyboard.
+   */
+  autoFocus?: boolean;
 }
 
 export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
@@ -164,6 +170,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   onOpenSettings,
   onOpenAudioSettings,
   insertRequest = null,
+  autoFocus = true,
 }) => {
   const [prompt, setPrompt] = useState("");
   const [isFolderOpen, setIsFolderOpen] = useState(false);
@@ -271,7 +278,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
       const wrapRect = wrap.getBoundingClientRect();
       // Fixed-position anchor: left edge of the button, bottom edge just
       // above the whole card.
-      const left = Math.max(8, wrapRect.left);
+      const left = clampPickerLeft(wrapRect.left, menu.getBoundingClientRect().width, window.innerWidth);
       const bottom = window.innerHeight - cardRect.top + 8;
       setMenuPos((prev) => {
         const next = { left, bottom };
@@ -1185,7 +1192,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
           <textarea
             ref={textareaRef}
             rows={1}
-            autoFocus
+            autoFocus={autoFocus}
             // The other end of the empty state's skip link. A fragment link
             // moves focus to the element it names, and a textarea is focusable,
             // so no `tabIndex` is needed here and adding one would be wrong: it

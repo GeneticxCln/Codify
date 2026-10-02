@@ -202,3 +202,18 @@ export function clampMenuPosition(
     y: Math.min(Math.max(point.y, bounds.y), maxY),
   };
 }
+
+/**
+ * Where a picker menu's left edge goes so it stays inside the window.
+ *
+ * The composer's dropdowns are `position: fixed` and open at their button's left edge. That was always inside the
+ * window while the composer spanned it; in the right-hand pane of a split (`docs/09` §12) the button starts half way
+ * across and a 320px menu runs off the screen. The menu is pulled back so its right edge is `margin` inside the window, and
+ * never past the left margin; a window narrower than the menu pins to the near edge, like `clampMenuPosition`. A menu or
+ * window that could not be measured (width 0) asks for nothing beyond the left margin.
+ */
+export function clampPickerLeft(left: number, menuWidth: number, windowWidth: number, margin: number = 8): number {
+  const far = windowWidth > 0 && menuWidth > 0 ? windowWidth - margin - menuWidth : Number.POSITIVE_INFINITY;
+  const pulled = Number.isFinite(left) ? Math.min(left, far) : margin;
+  return Math.max(margin, pulled);
+}

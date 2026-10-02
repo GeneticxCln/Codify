@@ -118,3 +118,47 @@ test("a window that cannot be measured never takes a pane away", () => {
     assert.equal(splitFits(main, root, true, "stats"), true, `${main}/${root} collapsed the split`);
   }
 });
+
+// ── a split makes the panel give way too ────────────────────────────────────
+
+test("the panel yields to a split when the row cannot hold it beside two panes, in rem", () => {
+  const need = SIDEBAR_REM + 2 * MIN_PANE_REM;
+  for (const root of [16, 20, 28]) {
+    assert.equal(sidebarYields(need * root - 1, root, null, true), true, `@${root}px: a pixel short still fits?`);
+    assert.equal(sidebarYields(need * root, root, null, true), false, `@${root}px: exactly enough yields`);
+    assert.equal(sidebarYields(need * root + 1, root, null, true), false);
+  }
+});
+
+test("a split and a drawer together ask for both", () => {
+  for (const drawer of ["stats", "notifications", "clipboard", "history"] as const) {
+    const need = SIDEBAR_REM + DRAWER_REM[drawer] + 2 * MIN_PANE_REM;
+    assert.equal(sidebarYields(need * 20 - 1, 20, drawer, true), true, `${drawer}: a pixel short`);
+    assert.equal(sidebarYields(need * 20, 20, drawer, true), false, `${drawer}: exactly enough`);
+  }
+});
+
+test("without a split the rule is what it was, and a split is off unless asked for", () => {
+  assert.equal(sidebarYields(300, 16, null), false, "nothing open: never yields");
+  assert.equal(sidebarYields(300, 16, null, false), false);
+  const need = SIDEBAR_REM + DRAWER_REM.stats + MIN_CENTRE_REM;
+  assert.equal(sidebarYields(need * 20 - 1, 20, "stats"), true);
+  assert.equal(sidebarYields(need * 20 - 1, 20, "stats", false), true);
+  assert.equal(sidebarYields(need * 20, 20, "stats", false), false);
+});
+
+test("a split needs more of the row than a single view does", () => {
+  // Between the two thresholds a single view keeps the panel and a split does not.
+  const single = (SIDEBAR_REM + MIN_CENTRE_REM) * 20;
+  const both = (SIDEBAR_REM + 2 * MIN_PANE_REM) * 20;
+  assert.ok(both > single);
+  const between = (single + both) / 2;
+  assert.equal(sidebarYields(between, 20, "history", false), sidebarYields(between, 20, "history", false));
+  assert.equal(sidebarYields(between, 20, null, true), true);
+});
+
+test("a window that cannot be measured never hides the panel for a split either", () => {
+  for (const [main, root] of [[0, 20], [-5, 20], [Number.NaN, 20], [1200, 0], [1200, Number.NaN], [1200, -1]] as const) {
+    assert.equal(sidebarYields(main, root, null, true), false, `${main}/${root} hid the panel`);
+  }
+});

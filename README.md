@@ -374,6 +374,20 @@ selected text, pastes, a code block's Copy. Each clip can be **copied again**, *
 
 Details: [docs/09 §11](docs/09-workspace-shell.md) and [docs/03 §1.10](docs/03-security-and-roadmap.md).
 
+## Split panes
+
+Show a chat beside a terminal, or two terminals side by side. Right-click a tab and choose **Show beside the current tab**
+(or **Split with a new terminal**), pick **Split** in the command palette (Ctrl+K), or press **Ctrl+.** (again to close).
+Drag the divider, or use its arrow keys. Click in a pane to work in it; the tab strip follows.
+
+- **Not browser pages, and not two conversations.** A page is a native window that cannot share the column, and two chats would share one
+  message box; the menu says so instead of doing nothing. Opening a page puts the split to one side and it comes back with your tab.
+- **A narrow window draws one pane.** The left panel gives way first; if two panes still do not fit, the focused one is drawn and the other
+  returns when there is room.
+- **A split is not remembered across a restart** (terminals are not); the divider's position is.
+
+Details: [docs/09 §12](docs/09-workspace-shell.md).
+
 ---
 
 ## 🔒 Security & Invariants

@@ -240,6 +240,10 @@ or 175%, **125% by default**. It is client-side display state, like the theme: i
   History. The four drawers are one state, the drawer takes History's width and the left panel's yield rule
   treats it the same (`ui/src/drawers.ts`). What it keeps, what it refuses and what its buttons do is
   `docs/09` §11; the rules it is held to are `docs/03` §1.10.
+* **A split shows two panes in the centre column.** A chat beside a terminal, or two terminals; made from a tab's right-click
+  menu, the palette, or Ctrl+. (also in the About tab's shortcut list). A browser page and two conversations cannot be paired, and the
+  menu says why. The left panel gives way to a split as it does to a drawer, and a window too narrow for two panes draws the focused one.
+  Rules and layout: `docs/09` §12. It is never written to storage: only the divider's position is.
 * **Providers are read by name, not by slug.** The Provider Keys row printed the slug through CSS
   `capitalize` ("Openai", "Nvidia") and the protocol as the raw tag `openai_compat`, and the provider
   select printed every slug in capitals. `ui/src/providerLabels.ts` supplies the words (OpenAI,
