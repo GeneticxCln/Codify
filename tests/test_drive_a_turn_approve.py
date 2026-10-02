@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from http.server import HTTPServer
 from pathlib import Path
@@ -25,6 +26,7 @@ from unittest import mock
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
+from scripts.drive_a_turn import press_start
 from tests.test_fake_ollama import load_fake
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -88,6 +90,75 @@ class TestApprove(DriveCase):
         self.assertEqual(0, code, out)
         self.assertNotIn("[run]", out)
         self.assertIn("nothing to start", out)
+
+
+class _Response:
+    def __init__(self, status: int, body: dict[str, object] | str) -> None:
+        self.status_code = status
+        self.text = body if isinstance(body, str) else str(body)
+        self._body = body
+
+    def json(self) -> dict[str, object]:
+        if isinstance(self._body, str):
+            raise ValueError("not json")
+        return self._body
+
+
+class _Client:
+    """Answers Start with each response in turn, and remembers what version each press carried."""
+
+    def __init__(self, *answers: _Response) -> None:
+        self.answers = list(answers)
+        self.versions: list[object] = []
+
+    async def post(self, path: str, json: dict[str, object]) -> _Response:
+        self.versions.append(json["expected_version"])
+        return self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+
+
+BUSY = _Response(409, {"code": "driver_busy", "message": "this goal is still being worked on"})
+
+
+class TestPressStart(unittest.IsolatedAsyncioTestCase):
+    """Start is pressed again while the engine says the turn that made the plan is still finishing.
+
+    The plan is published (`PENDING`) while the conductor's last model call is still in flight, and the engine
+    refuses a second driver with `driver_busy` ("start it once the turn has finished"). A person pressing Start
+    a moment early simply presses again, so the script does, rather than reporting a race as a failed run.
+    """
+
+    async def test_a_busy_engine_is_pressed_again_until_the_turn_has_finished(self) -> None:
+        client = _Client(BUSY, BUSY, _Response(200, {"id": "g"}))
+        versions = iter([3, 3, 4])
+
+        pressed = await press_start(client, "g", lambda: next(versions), time.monotonic() + 30, pause=0)
+
+        self.assertEqual(200, pressed.status_code)
+        self.assertEqual([3, 3, 4], client.versions, "the version was read once, not at each press")
+
+    async def test_any_other_refusal_is_final(self) -> None:
+        for refusal in (_Response(409, {"code": "version_conflict"}), _Response(400, {"code": "bad"}), _Response(409, "not json")):
+            client = _Client(refusal, _Response(200, {}))
+
+            pressed = await press_start(client, "g", lambda: 1, time.monotonic() + 30, pause=0)
+
+            self.assertIs(refusal, pressed)
+            self.assertEqual(1, len(client.versions), f"{refusal.status_code} {refusal.text} was pressed again")
+
+    async def test_a_turn_that_never_finishes_is_reported_not_waited_for_forever(self) -> None:
+        client = _Client(BUSY)
+
+        pressed = await press_start(client, "g", lambda: 1, time.monotonic() - 1, pause=0)
+
+        self.assertEqual(409, pressed.status_code)
+        self.assertEqual(1, len(client.versions), "pressed again after the deadline")
+
+    async def test_the_first_press_is_made_even_with_no_time_left(self) -> None:
+        client = _Client(_Response(200, {}))
+
+        pressed = await press_start(client, "g", lambda: 1, time.monotonic() - 100, pause=0)
+
+        self.assertEqual(200, pressed.status_code)
 
 
 if __name__ == "__main__":  # pragma: no cover
