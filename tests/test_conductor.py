@@ -487,6 +487,45 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
         self.assertIn("(exit 0)", out)
         self.assertTrue(mark.exists(), "an approved goal could not run its project's command")
 
+    async def test_a_linter_runs_project_code_only_once_the_plan_is_approved(self) -> None:
+        # The linters on the test allowlist are not read-only: mypy imports the plugins a
+        # `mypy.ini` names, and `make lint` is whatever the Makefile says. Both are the
+        # repository's own code, so both wait for the same approval `python3 evil.py` does
+        # (docs/03 section 1.4), and a turn asking "does this type-check?" of a hostile clone
+        # runs nothing.
+        plugin_mark = self.root / "MARK-mypy-plugin-ran"
+        make_mark = self.root / "MARK-make-ran"
+        (self.repo / "plugin.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(plugin_mark)!r}).write_text('ran')\n"
+            "def plugin(version):\n"
+            "    from mypy.plugin import Plugin\n"
+            "    return Plugin\n",
+            encoding="utf-8",
+        )
+        (self.repo / "mypy.ini").write_text("[mypy]\nplugins = plugin.py\n", encoding="utf-8")
+        (self.repo / "Makefile").write_text(
+            f"lint:\n\t@touch {make_mark}\n", encoding="utf-8"
+        )
+        table = self._dispatch(self.goal.id)
+
+        for argv in (["mypy", "app.py"], ["make", "lint"], ["ruff", "check"], ["tsc", "--noEmit"],
+                     ["cargo", "check"], ["go", "vet", "./..."]):
+            with self.subTest(argv=argv):
+                with self.assertRaises(CommandNotAllowed) as caught:
+                    await table["run_command"]({"argv": argv, "reason": "does it type-check?"})
+                self.assertIn("approve", str(caught.exception))
+        self.assertFalse(plugin_mark.exists(), "a mypy plugin ran on a goal nobody approved")
+        self.assertFalse(make_mark.exists(), "`make lint` ran on a goal nobody approved")
+
+        current = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, current.version, "RUNNING")
+        out = await table["run_command"]({"argv": ["make", "lint"], "reason": "approved"})
+        self.assertIn("(exit 0)", out)
+        self.assertTrue(make_mark.exists(), "an approved goal could not run its project's lint")
+        await table["run_command"]({"argv": ["mypy", "app.py"], "reason": "approved"})
+        self.assertTrue(plugin_mark.exists(), "an approved goal could not run mypy with its plugin")
+
     async def test_a_plan_only_goal_never_runs_project_code_even_when_running(self) -> None:
         # `plan_only` switches execution off for the goal (`_write_allowed` says so for
         # writes); a command is execution, so the same switch covers it.

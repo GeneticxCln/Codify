@@ -355,8 +355,9 @@ missing, `make doctor` says so as a note, not a failure; everything else runs wi
 3. **Path containment.** All file operations verify realpath containment; escapes raise `PathEscapeError`, and a
    workspace root that is your home, a system directory or a credentials directory is refused, so an approved
    goal cannot rewrite `~/.bashrc`.
-4. **Command sandboxing.** Commands pass an allowlist (`pytest`, `npm test`, `cargo test`, `go test`, read-only
-   git). The librarian's run in `read_only` mode, so reconnaissance can never change the workspace.
+4. **Command sandboxing.** Commands pass an allowlist (`pytest`, `npm test`, `cargo test`, `go test`, linters and type-checkers
+   such as `ruff check`, `mypy`, `tsc --noEmit` and `make lint`, read-only git), and a linter is never handed a flag that
+   edits. The librarian's run in `read_only` mode, so reconnaissance can never change the workspace.
 5. **Human in the loop.** When the critic requests changes the step pauses and the goal transitions to `PAUSED`;
    only a human resumes it.
 6. **Key storage.** Keys never reach SQLite and are never echoed by the API. They go to the OS keyring when one is

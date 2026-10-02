@@ -55,6 +55,16 @@ The UI holds the token **in memory** when it runs under the desktop shell: it as
 
 - Command allowlist in `SandboxService` — additionally scoped by who asks and when: the verifier's proposed commands and the conductor's `run_command` / `verify` moves reach it in `test` mode, never the fixer's, planner's or critic's raw output, and the conductor's only once the goal is approved (see the accepted risk below). The librarian's requests reach it in `read_only` mode.
 - **What the allowlist does not stop (accepted risk).** `validate_argv` decides *which program* runs and with which flags; it cannot decide what the program does. `pytest`, `python <script>.py`, `npm run <script>`, `cargo test` and `go test` all execute code that lives in the workspace, and the fixer is the role that writes into the workspace. So an approved goal can write a file and a verification step can then run it, as the user, with the user's permissions, in a process group that is killed on timeout. That is inherent to running a project's tests, not a hole in the allowlist, and it is why the `write` move refuses while the goal is unapproved (docs/00 §6.9) and why the environment handed to these processes is filtered (`guarded_env`). Treat approving a goal in an untrusted repository as approving that repository's test suite. The conductor's `run_command` honours that sentence rather than only quoting it: a *turn* has no approval step, so before the goal is `RUNNING` (and never on a plan-only goal) it runs in `read_only` mode, and asking "what does this project do?" of a hostile clone cannot start its code (`tests/test_conductor.py`, `test_project_code_runs_only_once_the_plan_is_approved`).
+- **Linters and type-checkers are on the same side of that line as the test suite, not the read-only side.**
+  `ruff check`, `mypy`, `tsc --noEmit`, `cargo check|clippy`, `go vet` and `make lint|typecheck` are `test`-mode
+  commands (`04` §5), refused in `read_only` and so refused to the librarian and to a turn before approval.
+  Per binary, what they run: `ruff` and `tsc` read the repository's config and source and run no repository code
+  (ruff with `--no-cache`, tsc with `--noEmit`); `mypy` imports the plugins a `mypy.ini` / `pyproject.toml` names,
+  `cargo check|clippy` runs a `build.rs` and proc-macros, `go vet` can start the C compiler for cgo, and `make`
+  runs whatever the target says. Those four are covered by the sentence above (approving a goal in an untrusted
+  repository is approving that repository's tooling); the first two do not widen it. The model never supplies
+  the flags that matter: the engine appends them after validation (`hardened_args`) and the validator refuses
+  every flag it does not list, so `--fix`, `--install-types`, `-vettool`, `make -f` and the like cannot be asked for.
 - Per-command argument policies (not `cmd[0]` only): e.g. `python` only with `-m pytest` / script-path-inside-workspace.
 - `FileSystemService` path containment (`root_path` boundary check).
 - **Protected workspace roots** (`fs.protected_root_reason`). A workspace root is refused — `400

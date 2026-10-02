@@ -514,10 +514,13 @@ GIT_HISTORY = ToolSpec(
 RUN_COMMAND = ToolSpec(
     name="run_command",
     description=(
-        "Run one of the project's own commands — its tests, its type checker, "
-        "its build. This is how you find out whether something is actually "
+        "Run one of the project's own commands — its tests, its linter, its "
+        "type checker (`ruff check`, `mypy PATH`, `tsc --noEmit`, `cargo check`, "
+        "`go vet ./...`, `make lint`, `make typecheck`), its build. This is how "
+        "you find out whether something is actually "
         "true. It cannot start a shell, install anything or reach the network, "
-        "and an unlisted command is refused. Running the project's code needs "
+        "and an unlisted command, or a flag the engine does not list (`--fix` "
+        "included: a check never edits), is refused. Running the project's code needs "
         "an approved plan: until the user has approved one only reading "
         "commands run (ls, wc, git history), and asking for a test run then is "
         "refused, not deferred. Always give the reason you want it "

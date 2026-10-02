@@ -19,6 +19,14 @@ PYTEST_FLAGS = {"-q", "-v", "--tb=short", "--no-header"}
 MAXFAIL_RE = re.compile(r"^--maxfail=\d+$")
 NPM_SCRIPT_RE = re.compile(r"^[A-Za-z0-9_:-]+$")
 CARGO_FLAGS = {"--", "--lib", "--bins", "--quiet"}
+# Linters and type-checkers (docs/04 section 5). `test` mode only, so they inherit the same approval
+# gate as `pytest`: mypy plugins, `build.rs`, a `go vet` cgo build and `make` run the repository's own
+# code, exactly as a test suite does (docs/03 section 1.4). What keeps them from *writing* is what
+# the engine adds in `hardened_args`, never anything the model supplies.
+MYPY_FLAGS = {"--strict", "--ignore-missing-imports"}
+# No `--`: the engine appends `-- -D warnings` to clippy, and a second `--` would override it.
+CARGO_LINT_FLAGS = {"--lib", "--bins", "--all-targets", "--quiet"}
+MAKE_TARGETS = ("lint", "typecheck")
 
 
 class CommandNotAllowed(Exception):
@@ -100,6 +108,47 @@ def _validate_read_only(argv: list[str], fs: FileSystemService) -> None:
             raise CommandNotAllowed(f"{cmd} path not allowed: {tok}")
 
 
+def _validate_tsc(rest: list[str], fs: FileSystemService) -> None:
+    """`tsc --noEmit [-p PATH]`: a type-check that cannot emit, build or keep incremental state."""
+    saw_no_emit = False
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok == "--noEmit":
+            saw_no_emit = True
+        elif tok in {"-p", "--project"}:
+            i += 1
+            if i >= len(rest) or not _is_workspace_path(fs, rest[i]):
+                raise CommandNotAllowed(f"tsc {tok} needs a path inside the workspace")
+        else:
+            raise CommandNotAllowed(f"tsc arg not allowed: {tok}")
+        i += 1
+    if not saw_no_emit:
+        raise CommandNotAllowed("tsc only runs with --noEmit (a type-check, never a build)")
+
+
+def hardened_args(argv: list[str]) -> list[str]:
+    """What the child receives after `argv[0]`: the validated tokens plus the flags the engine adds.
+
+    A linter is safe to admit because of this function and not because of what the model asked for.
+    The flags are the engine's, appended after validation, so no spelling the model chooses can
+    remove them: ruff and mypy keep no cache in the workspace, tsc prints plain text, and clippy
+    fails on a warning (a lint that exits 0 on a warning is a lint nobody reads).
+
+    `argv` must already have passed `validate_argv`; for any other command this is `argv[1:]`.
+    """
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "ruff":
+        return ["check", "--no-cache", "--output-format=concise", *rest[1:]]
+    if cmd == "mypy":
+        return ["--cache-dir=/dev/null", *rest]
+    if cmd == "tsc":
+        return ["--pretty", "false", *rest]
+    if cmd == "cargo" and rest[:1] == ["clippy"]:
+        return ["clippy", *rest[1:], "--", "-D", "warnings"]
+    return rest
+
+
 def validate_argv(argv: list[str], fs: FileSystemService, mode: str = "test") -> None:
     if not argv:
         raise CommandNotAllowed("empty argv")
@@ -137,15 +186,49 @@ def validate_argv(argv: list[str], fs: FileSystemService, mode: str = "test") ->
             return
         raise CommandNotAllowed(f"{cmd} argv not allowed")
     if cmd == "cargo":
+        if rest and rest[0] in {"check", "clippy"}:
+            for tok in rest[1:]:
+                if tok not in CARGO_LINT_FLAGS:
+                    raise CommandNotAllowed(f"cargo {rest[0]} arg not allowed: {tok}")
+            return
         if not rest or rest[0] != "test":
-            raise CommandNotAllowed("cargo only allows test")
+            raise CommandNotAllowed("cargo only allows test, check and clippy")
         for tok in rest[1:]:
             if tok not in CARGO_FLAGS:
                 raise CommandNotAllowed(f"cargo arg not allowed: {tok}")
         return
+    if cmd == "ruff":
+        # No flags at all: `--fix`, `--add-noqa`, `format` and `--config` each write or read what the
+        # model chose. The engine adds the one flag set it wants (`hardened_args`).
+        if not rest or rest[0] != "check":
+            raise CommandNotAllowed("ruff only allows check, with workspace paths and no flags")
+        for tok in rest[1:]:
+            if not _is_workspace_path(fs, tok):
+                raise CommandNotAllowed(f"ruff arg not allowed: {tok}")
+        return
+    if cmd == "mypy":
+        # Exact spellings only: argparse accepts any unambiguous prefix of a long option, so a
+        # prefix is not in the set and is refused (`--install-t` is `--install-types`).
+        for tok in rest:
+            if tok.startswith("-"):
+                if tok not in MYPY_FLAGS:
+                    raise CommandNotAllowed(f"mypy flag not allowed: {tok}")
+                continue
+            if not _is_workspace_path(fs, tok):
+                raise CommandNotAllowed(f"mypy path not allowed: {tok}")
+        return
+    if cmd == "tsc":
+        _validate_tsc(rest, fs)
+        return
+    if cmd == "make":
+        if len(rest) == 1 and rest[0] in MAKE_TARGETS:
+            return
+        raise CommandNotAllowed(
+            "make only allows `make lint` or `make typecheck`, with no flags or variables"
+        )
     if cmd == "go":
-        if not rest or rest[0] != "test":
-            raise CommandNotAllowed("go only allows test")
+        if not rest or rest[0] not in {"test", "vet"}:
+            raise CommandNotAllowed("go only allows test and vet")
         for tok in rest[1:]:
             # Relative recursive patterns (./pkg/...) pass the path check
             # below: resolve() is lexical, the ./ prefix and /... suffix add
@@ -191,7 +274,7 @@ class SandboxService:
             child_argv = [resolved, *git_readonly.runner_args(argv[1:])]
             env = guarded_env(git_readonly.runner_env(os.environ, root_path))
         else:
-            child_argv = [resolved, *argv[1:]]
+            child_argv = [resolved, *hardened_args(argv)]
             env = guarded_env({k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME") if k in os.environ})
         try:
             proc = subprocess.Popen(  # noqa: S603 — the argv passed `validate_argv` above; guarded, own session, no shell

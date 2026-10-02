@@ -1398,11 +1398,32 @@ whole process group.
 | `python` | exactly `-m pytest` + pytest-allowed tail; OR exactly one script path under root ending `.py`. **FORBIDDEN:** `-c`, `-m` other than `pytest`, `-` |
 | `npm` | `test` or `run` + script name matching `^[A-Za-z0-9_:-]+$` |
 | `pnpm` | same as npm |
-| `cargo` | `test` + optional `--`, `--lib`, `--bins`, `--quiet` |
-| `go` | `test` + `./...` or paths under root |
+| `cargo` | `test` + optional `--`, `--lib`, `--bins`, `--quiet`; or `check` / `clippy` + optional `--lib`, `--bins`, `--all-targets`, `--quiet` (no `--`: see below) |
+| `go` | `test` or `vet` + `./...` or paths under root |
+| `ruff` | `check` + paths under root, **no flags** |
+| `mypy` | `--strict`, `--ignore-missing-imports` + paths under root |
+| `tsc` | `--noEmit` (required) + optional `-p` / `--project` PATH under root |
+| `make` | exactly `make lint` or `make typecheck` — no flags, no variables, no other target, bare `make` refused |
 | `git` | `status`, `diff`, `log -1` only (no write); run hardened like read-only git, below |
 
 Anything else → `command_not_allowed`. No shell (`shell=False`).
+
+**Linters and type-checkers (`ruff`, `mypy`, `tsc`, `cargo check|clippy`, `go vet`, `make lint|typecheck`)
+are `test`-mode commands, so they sit behind the same approval gate as `pytest`**: `read_only` refuses all
+of them, and the conductor's `run_command` is `read_only` until the goal is `RUNNING`. They are admitted because
+of what the *engine* adds after validation (`sandbox.hardened_args`), never because of anything the model
+supplies: ruff runs with `--no-cache --output-format=concise`, mypy with `--cache-dir=/dev/null`, tsc with
+`--pretty false` (and the model must name `--noEmit`), and clippy as `cargo clippy … -- -D warnings`, so a
+warning fails the run. The model is given no way to ask a checker to *edit* (`ruff --fix`, `ruff format`,
+`ruff --add-noqa`, `cargo clippy --fix`), to *install* (`mypy --install-types`), to *name* an interpreter, a
+config, a plugin, a vet tool, a makefile or a directory (`--python-executable`, `--config-file`, `-vettool`,
+`make -f`, `make -C`, `--manifest-path`), or to *build* (`tsc --build`, `--incremental`, `--outDir`). Flags are
+compared as exact spellings, because argparse-style tools accept any unambiguous prefix of a long option.
+What they still run is repository code — a mypy plugin named in `mypy.ini`, a `build.rs`, a cgo build under
+`go vet`, whatever a `Makefile` says — which is the accepted risk in `03` §1.4: approving a goal is approving
+the project's own tooling. Proven by `tests/test_sandbox_lint.py` (an accept/refuse table, the flags the child
+is handed, and real `ruff`, `mypy` and `make` runs that assert on the workspace afterwards) and, for the
+approval gate, `tests/test_conductor.py::test_a_linter_runs_project_code_only_once_the_plan_is_approved`.
 
 ### Read-only git
 
