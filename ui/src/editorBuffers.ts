@@ -84,6 +84,11 @@ export interface EditorBuffer {
   readonly saveError?: string;
   /** Bumped when the assistant (or anything else) selects lines, so the pane scrolls to them once. */
   readonly revealToken: number;
+  /**
+   * Bumped when the store *replaces* the text (the file loaded, or was reloaded or reverted), as opposed to the person or
+   * the assistant changing it. A pane showing the buffer starts over from the new text when this moves.
+   */
+  readonly epoch: number;
 }
 
 export interface BuffersSnapshot {
@@ -209,6 +214,7 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
           aiChanged: false,
           conflict: null,
           saveError: undefined,
+          epoch: entry.epoch + 1,
         });
       }
     } catch (error) {
@@ -237,6 +243,7 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
         conflict: null,
         saving: false,
         revealToken: existing?.revealToken ?? 0,
+        epoch: existing?.epoch ?? 0,
       });
       publish();
       const promise = loadInto(tabId).finally(() => void loading.delete(tabId));
@@ -287,7 +294,7 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
       const buffer = buffers.get(tabId);
       const last = transactions.at(-1);
       if (!buffer || !last) return;
-      let ranges: AiRange[] = [...buffer.aiRanges];
+      let ranges: readonly AiRange[] = buffer.aiRanges;
       let aiChanged = buffer.aiChanged;
       for (const tr of transactions) {
         if (tr.docChanged) {
@@ -309,10 +316,12 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
       }
       const dirty = isDirty(last.state, buffer.diskText);
       // Back to what is on disk: nothing is unsaved, so nothing is "changed by the assistant" either.
-      if (!dirty) {
+      if (!dirty && (ranges.length > 0 || aiChanged)) {
         ranges = [];
         aiChanged = false;
       }
+      // The same array when nothing about the ranges changed (a selection moved, a view refreshed): a pane watches
+      // this to know when to redraw, and a new array on every transaction would make that a loop.
       put(tabId, { state: last.state, dirty, aiRanges: ranges, aiChanged });
       publish();
     },
@@ -458,8 +467,9 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
           aiChanged: false,
           conflict: null,
           saveError: undefined,
+          epoch: current.epoch + 1,
         });
-        // A pane showing it must take the new text: its view is told through the next render's `state`.
+        // A pane showing it must start over from the new text, and `epoch` is how it knows.
         publish();
         return { ok: true };
       } catch (error) {

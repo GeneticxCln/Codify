@@ -406,6 +406,31 @@ test("a range the person selects part of and types over keeps what is left, and 
   assert.ok(r.from < r.to && r.to <= get().state.doc.length);
 });
 
+test("a transaction that changes no text leaves the assistant's ranges as the very same array", async () => {
+  const { buffers, get } = await opened();
+  buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+  const before = get().aiRanges;
+
+  buffers.applyTransactions("e1", [get().state.update({ selection: EditorSelection.single(1) })]);
+  buffers.applyTransactions("e1", [get().state.update({})]);
+
+  assert.equal(get().aiRanges, before, "a pane redraws when this changes, so a new array each time would be a loop");
+});
+
+test("the epoch moves when the store replaces the text, and not when anyone edits it", async () => {
+  const { buffers, get } = await opened();
+  const first = get().epoch;
+  assert.ok(first >= 1, "loading is a replacement of the text");
+
+  buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+  buffers.applyTransactions("e1", [get().state.update({ changes: { from: 0, insert: "# " } })]);
+  buffers.selectLines("e1", 1);
+  assert.equal(get().epoch, first, "typing and selecting are not replacements");
+
+  await buffers.reload("e1");
+  assert.equal(get().epoch, first + 1);
+});
+
 test("a person's own typing is never marked as the assistant's", async () => {
   const { buffers, get } = await opened();
 
