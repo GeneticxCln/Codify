@@ -200,8 +200,8 @@ the UI's copy a member behind both.
 | `fix_retry` | step | `{attempt, max_attempts, reason}` — a failing test run fed back to the fixer (bounded by `MAX_FIX_ATTEMPTS`) |
 | `fixer_pass` | step | `{attempt, max_passes, passes_left}` — the fixer asked for another pass of its own (bounded by `MAX_FIXER_PASSES`) |
 | `plan_consult` | — | `{refused, material_chars}` — the planner reopened the frozen evidence pack (`MAX_PLANNER_CONSULTS`) |
-| `agent_call_failed` | any | `{role, provider, model, target: "primary"\|"fallback", code, message, duration_ms}` — a provider call that failed; the record the Settings screen's "last error" reads |
-| `usage` | any | `{role, provider, model, duration_ms, input_tokens, output_tokens, total_tokens}` — one per successful model call; feeds `/goals/{id}/usage`, the audit document, and the stats rollups. `duration_ms` is absent on events written before it existed |
+| `agent_call_failed` | any | `{role, provider, model, target: "primary"\|"fallback", code, message, duration_ms}` — a provider call that failed; the record the Settings screen's "last error" reads. `role` is one of the eight roles or `conductor` (the loop's own call, which has no role row; the Settings screen lists only the eight) |
+| `usage` | any | `{role, provider, model, duration_ms, input_tokens, output_tokens, total_tokens}` — one per successful model call; feeds `/goals/{id}/usage`, the audit document, and the stats rollups. `duration_ms` is absent on events written before it existed. `role` is one of the eight roles or `conductor`: the conductor loop borrows the scribe's *configuration* but is booked under its own name, so `/goals/{id}/usage` and the Stats "by role" table show what the loop spent apart from the scribe's own calls. Before this a conductor-driven goal booked none of its loop's calls at all |
 | `model_delta` | any | `{role, provider, model, text, final}` — a streaming snapshot of the reply so far (self-contained, ~every 400 ms); `final: true` closes the card, and once it lands the stream's earlier snapshots have their `text` blanked and `compacted: true` set (each repeats all the text before it, so keeping them was quadratic: 88 events / 106 KB for a 561-token reply). The rows stay: a goal's sequence is dense from 1 and a client tells a lost event by a gap. Chat-render only |
 | `error` | any | `{code: str, message: str, role: str \| null}` |
 
@@ -1648,6 +1648,11 @@ model's output about the user's code, so nothing at all is kept for a goal that 
 | `prompt_hash` / `system_hash`: 32 hex chars of SHA-256 over `system \x00 user` | the goal's source, evidence pack, or diff |
 | `input_tokens`, `output_tokens`, `duration_ms` | anything at all for a goal with `trace = 0` |
 
+A conductor-driven goal records its loop's calls under `role = "conductor"`, one row per call. Its
+`user_prompt` is the JSON list of the messages the model was *newly* shown since the previous call and its
+`response` is `{text, tool_calls}`: the rows in order hold the whole conversation, and resending the history in
+every row would be quadratic in the length of the run.
+
 The digest is the point rather than an omission. It is what a replay *matches on*, and the prompt is
 the most sensitive thing in a run: the goal, the evidence pack, and the user's own source. Keeping
 the digest means a replay can prove it is replaying the same request; not keeping the text means a
@@ -1706,6 +1711,10 @@ Three rules, and each is the difference between a replay and a story:
   recording order and raises `TraceMismatch` on the first call its recording does not hold. Serving
   the recorded reply to a different question would produce a green run that proves nothing, which is
   worse than no run at all: it looks like evidence. The message names the role and both digests.
+
+A recording that holds `conductor` rows (a goal the conductor drove) still replays: the replay serves the typed
+role calls, not a tool-calling loop, so the conductor's rows are counted on their own line
+(`conductor_calls_skipped`) and left out of the served-versus-recorded arithmetic, as the gate's are.
 
 The refusal arrives as a *failed goal* rather than as an exception, because `TraceMismatch` is a
 `ProviderError` and the orchestrator absorbs it into `agent_call_failed` before the retries give up.

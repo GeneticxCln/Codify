@@ -399,7 +399,17 @@ ninth `AgentRole`, and that is a structural decision rather than a naming one:
   to a plain answer, with no warning at all (`tests/test_turns.py`,
   `TestTheConductorsTargets`; `tests/test_conductor_config_is_explained.py`).
 - It is measured through the ordinary `agent_assigned` / `usage` events, so
-  stats and the Settings screen need no new case.
+  stats and the Settings screen need no new case. Its model calls are booked
+  like a role's: a `usage` event per call and an `agent_call_failed` per failure,
+  both under `role: "conductor"` (it borrows the scribe's configuration but is
+  not the scribe), attributed to whichever target served the call, plus a trace
+  row when the goal is recorded. They go through a `ToolCallLedger`
+  (`AgentOrchestrator.tool_call_ledger`), a protocol so `engine/conductor.py`
+  still imports no part of the pipeline it drives. A loop built without a ledger
+  books nothing, which is what every caller did before one existed
+  (`tests/test_conductor_books.py`). The conductor's own `agent_assigned` is
+  flagged `conductor: true` so the audit's silent-role check does not read it as
+  the scribe being assigned and never spending.
 
 ### 5.0 The chain: one fallback, tried per call
 

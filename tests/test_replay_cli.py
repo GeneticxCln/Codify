@@ -98,6 +98,29 @@ class ReplaySurfaceCase(TraceHarness):
             "the replay took the same gate verdict as the run",
         )
 
+    async def test_conductor_rows_in_a_recording_are_counted_not_mistaken_for_a_divergence(self) -> None:
+        """A conductor-driven goal records its loop's calls under `conductor`.
+
+        The replay serves typed role calls and cannot serve a tool-calling loop, the way it cannot
+        serve the gate. Without its own line in the arithmetic, every recording that holds the loop
+        would report `matched: false` for a divergence that is only the loop being there.
+        """
+        goal_id, pristine = await self._recorded()
+        self.traces.record(
+            goal_id, None, role="conductor", provider="ollama", model="m", temperature=0.2,
+            max_tokens=2048, system_prompt="s", user_prompt="[]", response="{}",
+        )
+        into = Path(tempfile.mkdtemp()) / "scratch"
+
+        report = await replay(self.conn, goal_id, source=pristine, into=into)
+
+        self.assertEqual(1, report["conductor_calls_skipped"])
+        self.assertTrue(
+            report["matched"],
+            f"replay diverged: {report['diverged']!r} "
+            f"({report['served_calls']}/{report['recorded_calls']} served)",
+        )
+
     async def test_a_replay_never_writes_to_the_tree_it_read_from(self) -> None:
         """The whole reason the copy exists. A replay that fixed files in the
         user's checkout would be worse than no replay at all."""

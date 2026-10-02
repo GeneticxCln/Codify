@@ -79,7 +79,8 @@ past a refusal — it is told so and the refusal stands.
 from __future__ import annotations
 
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Protocol
 from collections.abc import Awaitable, Callable
 
 from engine.sandbox import CommandNotAllowed
@@ -114,8 +115,47 @@ STAGE_MOVES = frozenset({
     "recon", "design", "plan", "write", "verify", "review", "summarize",
 })
 
+# What every loop call is asked for. Named because the ledger records them: a trace row that said
+# nothing about the temperature a call ran at could not be compared with another run.
+CALL_TEMPERATURE = 0.2
+CALL_MAX_TOKENS = 2048
+
 # Refusals the model is shown but cannot argue with. Everything else is
 # recoverable and comes back as text.
+
+
+@dataclass(frozen=True)
+class ToolCallRequest:
+    """One model call as the loop is about to make it, handed to the ledger so it can book it."""
+
+    provider: Any
+    model: str
+    system: str
+    messages: list[dict[str, Any]]
+    temperature: float
+    max_tokens: int
+
+
+class CallBooks(Protocol):
+    """The books for one call. `close` always runs, and is what releases the provider's usage sink."""
+
+    def succeeded(self, reply: ToolReply) -> None: ...
+
+    def failed(self, exc: ProviderError) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class ToolCallLedger(Protocol):
+    """Where the loop's model calls are accounted: a `usage` event per call, an `agent_call_failed` per
+    failure, and a trace row when the goal asked to be recorded.
+
+    A protocol and not the orchestrator itself, so this module still imports no part of the pipeline it
+    drives (the orchestrator is what builds the real one: `AgentOrchestrator.tool_call_ledger`). A loop
+    built without a ledger books nothing, which is what every caller did before one existed.
+    """
+
+    def open(self, request: ToolCallRequest) -> CallBooks: ...
 
 
 def _clip(value: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
@@ -170,6 +210,8 @@ class Conductor:
         # between calls is normal — a move runs a command first — so this role
         # is the one most likely to want a residency window at all.
         keep_alive: str | None = None,
+        # Where this loop's model calls are booked and traced. Optional: see `ToolCallLedger`.
+        ledger: ToolCallLedger | None = None,
     ) -> None:
         # `nudge` is a directive added *once*, when the model stops without
         # having done anything and `needs_action()` still says something is
@@ -190,6 +232,7 @@ class Conductor:
         self.model = model
         self.num_ctx = num_ctx
         self.keep_alive = keep_alive
+        self._ledger = ledger
         # The target to move onto when the primary cannot serve a call, and the
         # notification that it did. The fallback is consumed on use rather than
         # kept: a loop that could hop back and forth between two providers would
@@ -256,16 +299,31 @@ class Conductor:
         than be run a second time somewhere it might succeed by luck.
         """
         while True:
+            books = (
+                self._ledger.open(ToolCallRequest(
+                    self.provider, self.model, self.system_prompt, messages,
+                    CALL_TEMPERATURE, CALL_MAX_TOKENS,
+                ))
+                if self._ledger is not None else None
+            )
             try:
                 reply: ToolReply = await self.provider.complete_with_tools(
                     self.system_prompt, messages, self.tools, self.model,
-                    temperature=0.2, max_tokens=2048,
+                    temperature=CALL_TEMPERATURE, max_tokens=CALL_MAX_TOKENS,
                     num_ctx=self.num_ctx, keep_alive=self.keep_alive,
                 )
-                return reply
             except ProviderError as exc:
+                if books is not None:
+                    books.failed(exc)
                 if exc.code not in FALLBACK_TRIGGER_CODES or not self._swap_to_fallback(exc):
                     raise
+            else:
+                if books is not None:
+                    books.succeeded(reply)
+                return reply
+            finally:
+                if books is not None:
+                    books.close()
 
     def _refresh_menu(self) -> None:
         """Rebuild the offered set, and drop the stage moves once they are spent.
