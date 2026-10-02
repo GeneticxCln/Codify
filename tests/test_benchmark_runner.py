@@ -144,6 +144,26 @@ class SmokeTierTests(unittest.TestCase):
             self.assertTrue(data["summary"]["tokens_are_synthetic"])
             self.assertEqual(data["provider"], "canned")
 
+    def test_a_report_says_which_driver_ran_the_tasks(self) -> None:
+        """A benchmark number is a number about the fixed recipe, and the report must say so.
+
+        The runner drives `POST /goals`, which is the recipe (librarian, design, planner, fixer, verifier,
+        critic, scribe in a compiled order). On an install with a conductor, a person's goal is run by the
+        conductor instead, so a benchmark rate quoted without this field reads as a claim about how the
+        product behaves when it is a claim about the floor under it (docs/08 §6).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            _run_main(["--tier", "smoke", "--report", str(report)])
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual("recipe", data["driver"])
+
+    def test_the_console_says_which_driver_ran_the_tasks_too(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            main(["--tier", "smoke"])
+        self.assertRegex(out.getvalue(), r"driver\s+recipe")
+
     def test_a_canned_run_reports_quality_as_skipped_not_passed(self) -> None:
         """The dishonest failure mode: a canned run claiming task quality."""
         with tempfile.TemporaryDirectory() as tmp:

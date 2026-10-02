@@ -232,7 +232,7 @@ credentials with `CODIFY_HOME` and disables the OS keychain (see
 `engine/home.py`). If your change needs state, put it under `CODIFY_HOME`.
 
 **`CLAUDE.md` is a distillation, not a second source of truth.** It is the
-agent-facing version of this file and `docs/00`–`10`, and it is deliberately
+agent-facing version of this file and `docs/00`–`11`, and it is deliberately
 short: depth is a pointer, not a copy. When the two disagree, this file and
 `docs/` win and `CLAUDE.md` is the bug —
 `tests/test_claude_md_contracts.py` fails if the invariants it quotes drift
@@ -300,11 +300,25 @@ python3 scripts/fake_ollama.py   # serves :11435
 
 then point the roles' base_url at `http://127.0.0.1:11435` in Settings.
 
+With `FAKE_CONDUCTOR=1` the same server plays a conductor that calls tools (as Ollama sends them), so a goal can
+be driven from a turn to a committed step with no model at all, and `drive_a_turn` can press Start on the plan:
+
+```
+FAKE_CONDUCTOR=1 python3 scripts/fake_ollama.py &
+python3 -m scripts.drive_a_turn --provider ollama --base-url http://127.0.0.1:11435 \
+    --approve "add a banner file"
+```
+
+The request text picks the scenario: a question gets prose, `[ask]` makes the conductor put a question first,
+`[todo]` makes a step run keep a note, and `[stall]` makes it stop after `write` (the goal pauses with
+`conductor_stopped`). The run exits non-zero unless it completes. `tests/test_fake_conductor.py` and
+`tests/test_drive_a_turn_approve.py` run exactly this.
+
 ## Docs
 
-Architecture lives in `docs/00`–`10` (`07` is the spawn guard and the
+Architecture lives in `docs/00`–`11` (`07` is the spawn guard and the
 deterministic tests; `08` is the benchmark harness and the vendoring policy;
-`10` is the agent-memory model). If
+`10` is the agent-memory model; `11` is the Ruflo audit). If
 your change alters a documented contract — orchestration, settings, security,
 model discovery, the Laya gate, the spawn guard, what a benchmark number is
 allowed to claim — update the matching doc in the same PR. The docs have lied

@@ -469,6 +469,24 @@ class TestASkillCannotEmpower(SkillCase):
         self.assertNotIn("write_file", before)
         self.assertNotIn("exfiltrate", before)
 
+    def test_declaring_moves_does_not_add_one_to_the_menu_or_make_a_made_up_one_real(self) -> None:
+        # `moves:` is a hint (docs/00 §6.9, engine/skills.py): the names are checked against the moves that
+        # exist, and a name that is not one is dropped. Nothing about the menu moves.
+        from engine.conductor_tools import ConductorTools
+
+        before = [t.name for t in TOOLS]
+        self.write_skill(
+            "helpful",
+            "---\ndescription: helpful\nmoves: write, run_command, delete_everything\n---\nCall write now.\n",
+        )
+        found = load_skills(str(self.root), ConductorTools.NAMES)
+        loaded = found.get("helpful")
+        assert loaded is not None
+        self.assertEqual(("write", "run_command"), loaded.moves)
+        self.assertNotIn("delete_everything", loaded.moves)
+        self.assertEqual(before, [t.name for t in TOOLS])
+        self.assertNotIn("delete_everything", ConductorTools.NAMES)
+
     def test_it_cannot_attach_itself_to_the_dispatch_table(self) -> None:
         # A skill's name is not a tool name. `use_skill` is the only dispatch
         # entry it touches, and that entry returns a string.

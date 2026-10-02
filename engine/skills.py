@@ -35,6 +35,17 @@ conductor down a silly order — and being wrong is recoverable. It cannot be
 *empowered*, and that is the property worth stating out loud in a file that
 reads attacker-influenceable text.
 
+## A skill may say which moves it is written around
+
+`moves: recon, plan, write` in the header names them. It is a hint and never a
+grant. The names are checked against the moves that exist (the caller passes
+them in, so this module imports nothing of the conductor), and a name that is
+not one is dropped and reported rather than obeyed. `use_skill` then says which
+declared moves are not on the menu right now, so a model is told before it is
+refused. Nothing here adds a move to a menu, makes a refused move run, or
+widens anything. An unknown header key is reported too: it used to vanish, which
+made a misspelt `moves:` look exactly like a skill that declared none.
+
 ## Override
 
 Built-ins ship in `engine/builtin_skills/`. A workspace file with a built-in's
@@ -47,6 +58,7 @@ instructions the user thinks they are running.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,6 +86,19 @@ MAX_DESCRIPTION_CHARS = 200
 # ten thousand files cannot turn the menu into the whole prompt.
 MAX_WORKSPACE_SKILLS = 100
 
+# The header keys a skill may use, and the most moves one may declare. A list longer than there are moves is
+# not a longer list of moves.
+HEADER_KEYS = ("name", "description", "moves")
+MAX_DECLARED_MOVES = 24
+
+# What a move's name looks like. Checked before the name is compared with the real ones, so a hostile "name"
+# is dropped by its shape and never echoed back in full.
+_MOVE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_KEY_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+# How much of a refused name or key is repeated in a report: a header is untrusted text.
+_SHOWN = 40
+_SHOWN_COUNT = 5
+
 
 @dataclass(frozen=True)
 class Skill:
@@ -83,6 +108,12 @@ class Skill:
     description: str
     body: str
     source: str
+    # The moves the header says the skill is written around, already checked against the moves that exist
+    # when the loader was given them. A hint (see the module docstring), never a grant.
+    moves: tuple[str, ...] = ()
+    # What was wrong with the header and did not stop the skill loading: a move that does not exist, a key
+    # nothing reads. Reported by the loader as problems, so the person who wrote it can find out.
+    notes: tuple[str, ...] = ()
 
     @property
     def is_workspace(self) -> bool:
@@ -126,31 +157,69 @@ class SkillSet:
         )
 
 
-def _strip_header(text: str) -> tuple[dict[str, str], str]:
-    """Split an optional `---` header from the body.
+def _strip_header(text: str) -> tuple[dict[str, str], list[str], str]:
+    """Split an optional `---` header from the body, and name the keys nothing reads.
 
     A deliberately small parser rather than a YAML dependency: the header only
-    ever holds `name` and `description`, both single-line, and a skill file that
-    happens to contain a colon in its body must not be able to break loading.
+    ever holds `name`, `description` and `moves`, all single-line, and a skill
+    file that happens to contain a colon in its body must not be able to break
+    loading. A key that is none of those is returned as well, not dropped in
+    silence.
     """
     if not text.startswith("---"):
-        return {}, text
+        return {}, [], text
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
-        return {}, text
+        return {}, [], text
     header: dict[str, str] = {}
+    unknown: list[str] = []
     for index, line in enumerate(lines[1:], start=1):
         if line.strip() == "---":
-            return header, "\n".join(lines[index + 1 :])
+            return header, unknown, "\n".join(lines[index + 1 :])
         if ":" not in line:
             continue
         key, _, value = line.partition(":")
         key = key.strip().lower()
-        if key in ("name", "description"):
+        if key in HEADER_KEYS:
             header[key] = value.strip()
+        elif _KEY_RE.match(key) and key not in unknown:
+            unknown.append(key)
     # An unterminated header is not a header. The whole text is the body, which
     # is the honest reading of a file that never closed it.
-    return {}, text
+    return {}, [], text
+
+
+def _shown(names: list[str]) -> str:
+    """Names for a report: clipped, few, and quoted, because they came from an untrusted header."""
+    shown = [repr(n[:_SHOWN] + ("…" if len(n) > _SHOWN else "")) for n in names[:_SHOWN_COUNT]]
+    more = len(names) - _SHOWN_COUNT
+    return ", ".join(shown) + (f" and {more} more" if more > 0 else "")
+
+
+def _declared_moves(value: str, known: Collection[str] | None) -> tuple[tuple[str, ...], list[str]]:
+    """The moves a header declares, and a note for everything that was dropped or cut.
+
+    A name is kept when it is well-formed and, if the caller said which moves exist, one of them. Order is the
+    skill's, a repeat is said once, and nothing past `MAX_DECLARED_MOVES` is read.
+    """
+    kept: list[str] = []
+    dropped: list[str] = []
+    for raw in value.split(","):
+        name = raw.strip().lower()
+        if not name or name in kept:
+            continue
+        if not _MOVE_RE.match(name) or (known is not None and name not in known):
+            if name not in dropped:
+                dropped.append(name)
+            continue
+        kept.append(name)
+    notes: list[str] = []
+    if dropped:
+        notes.append(f"declares moves that do not exist, ignored: {_shown(dropped)}")
+    if len(kept) > MAX_DECLARED_MOVES:
+        notes.append(f"declares {len(kept)} moves; only the first {MAX_DECLARED_MOVES} were read")
+        kept = kept[:MAX_DECLARED_MOVES]
+    return tuple(kept), notes
 
 
 def _first_line(body: str) -> str:
@@ -164,13 +233,17 @@ def _first_line(body: str) -> str:
 
 
 def parse_skill(
-    text: str, fallback_name: str, source: str
+    text: str, fallback_name: str, source: str, known_moves: Collection[str] | None = None
 ) -> tuple[Skill | None, str | None]:
     """One skill file, or the reason it is not one.
 
     Returns `(skill, None)` or `(None, problem)`. Never raises: a malformed file
     in a checked-out repository must not be able to stop a turn, and the reason
     is returned rather than logged here so the caller decides where it belongs.
+    A header problem that does not stop the skill loading rides on `Skill.notes`.
+
+    `known_moves` is the set of moves that exist, passed in so this module needs
+    no knowledge of the conductor. Without it only a move's spelling is checked.
     """
     if not text.strip():
         return None, f"{fallback_name}: the file is empty"
@@ -179,7 +252,7 @@ def parse_skill(
             f"{fallback_name}: {len(text)} characters, over the "
             f"{MAX_SKILL_CHARS} limit"
         )
-    header, body = _strip_header(text)
+    header, unknown, body = _strip_header(text)
     name = (header.get("name") or fallback_name).strip().lower()
     if not NAME_RE.match(name):
         return None, (
@@ -191,8 +264,17 @@ def parse_skill(
     description = (header.get("description") or _first_line(body)).strip()
     if len(description) > MAX_DESCRIPTION_CHARS:
         description = description[: MAX_DESCRIPTION_CHARS - 1].rstrip() + "…"
+    moves, notes = _declared_moves(header.get("moves", ""), known_moves)
+    if unknown:
+        notes.append(
+            f"has header keys nothing reads: {_shown(unknown)} "
+            f"(a skill's header holds {', '.join(HEADER_KEYS)})"
+        )
     return (
-        Skill(name=name, description=description, body=body.strip(), source=source),
+        Skill(
+            name=name, description=description, body=body.strip(), source=source,
+            moves=moves, notes=tuple(notes),
+        ),
         None,
     )
 
@@ -203,7 +285,9 @@ def parse_skill(
 MAX_SKILL_BYTES = MAX_SKILL_CHARS * 4
 
 
-def _read_file(path: Path, source: str) -> tuple[Skill | None, str | None]:
+def _read_file(
+    path: Path, source: str, known_moves: Collection[str] | None = None
+) -> tuple[Skill | None, str | None]:
     try:
         with path.open("rb") as handle:
             raw = handle.read(MAX_SKILL_BYTES + 1)
@@ -217,7 +301,7 @@ def _read_file(path: Path, source: str) -> tuple[Skill | None, str | None]:
         return None, f"{path.name}: {type(exc).__name__}: {exc}"
     except UnicodeDecodeError:
         return None, f"{path.name}: not valid UTF-8 text"
-    return parse_skill(text, path.stem.lower(), source)
+    return parse_skill(text, path.stem.lower(), source, known_moves)
 
 
 def _skill_files(directory: Path, within: Path | None = None) -> tuple[list[Path], list[str]]:
@@ -268,21 +352,29 @@ def _skill_files(directory: Path, within: Path | None = None) -> tuple[list[Path
     return files, problems
 
 
-def builtin_skills() -> tuple[list[Skill], list[str]]:
+def _noted(skill: Skill) -> list[str]:
+    """A loaded skill's header notes, as reported problems that name it and its source."""
+    return [f"{skill.source} skill {skill.name!r}: {note}" for note in skill.notes]
+
+
+def builtin_skills(known_moves: Collection[str] | None = None) -> tuple[list[Skill], list[str]]:
     skills: list[Skill] = []
     problems: list[str] = []
     files, refused = _skill_files(BUILTIN_DIR)
     problems.extend(f"built-in skill ignored — {problem}" for problem in refused)
     for path in files:
-        skill, problem = _read_file(path, "built-in")
+        skill, problem = _read_file(path, "built-in", known_moves)
         if skill is not None:
             skills.append(skill)
+            problems.extend(_noted(skill))
         elif problem:
             problems.append(f"built-in skill ignored — {problem}")
     return skills, problems
 
 
-def workspace_skills(root: str | None) -> tuple[list[Skill], list[str]]:
+def workspace_skills(
+    root: str | None, known_moves: Collection[str] | None = None
+) -> tuple[list[Skill], list[str]]:
     if not root:
         return [], []
     directory = Path(root) / SKILLS_DIRNAME
@@ -298,23 +390,26 @@ def workspace_skills(root: str | None) -> tuple[list[Skill], list[str]]:
         )
         files = files[:MAX_WORKSPACE_SKILLS]
     for path in files:
-        skill, problem = _read_file(path, "workspace")
+        skill, problem = _read_file(path, "workspace", known_moves)
         if skill is not None:
             skills.append(skill)
+            problems.extend(_noted(skill))
         elif problem:
             problems.append(f"workspace skill ignored — {problem}")
     return skills, problems
 
 
-def load_skills(root: str | None) -> SkillSet:
+def load_skills(root: str | None, known_moves: Collection[str] | None = None) -> SkillSet:
     """Every skill available for a workspace, with workspace files winning.
+
+    `known_moves` is the set of moves that exist; the moves a skill declares are checked against it.
 
     Built-ins are loaded first and a workspace skill of the same name replaces
     it in place, so the menu order is stable regardless of which layer a skill
     came from and a shadowed built-in keeps its position.
     """
-    builtin, builtin_problems = builtin_skills()
-    workspace, workspace_problems = workspace_skills(root)
+    builtin, builtin_problems = builtin_skills(known_moves)
+    workspace, workspace_problems = workspace_skills(root, known_moves)
 
     ordered: dict[str, Skill] = {s.name: s for s in builtin}
     shadows: list[str] = []

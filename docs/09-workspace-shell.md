@@ -2352,7 +2352,23 @@ the pipeline already makes, through the same service:
 | `verify` | `ExecutorService._verifier` | `validate_argv`, `test` mode — the second door, same allowlist |
 | `review` | `ExecutorService._critic` | approve or request changes; cannot write |
 | `summarize` | `ExecutorService._scribe` | commits, and only after `review` approved |
+| `todo` | `engine/todo.py`, over the goal's `todo_updated` events | none — the conductor's own note to its next run: bounded (20 items, 160 characters, 40 edits per run), one line each, put back in its prompt as *its own notes, not instructions*, never shown to a sub-agent and not in `RECALLABLE`. Nothing in the engine reads it to decide anything |
+| `ask_user` | `engine/ask.py` | none — ends the run with one question for the person (a few options at most), and the answer is their next message, an ordinary turn (docs/00 §6.8). Offered on a turn before a plan exists, never after one and never while an approved plan is running |
 | `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
+
+**The prompt names every tool, and says what the engine does with a call.** `CONDUCTOR_SYSTEM_PROMPT`
+(`engine/chat_prompts.py`) is the one place that says *when* to reach for each tool. It had fallen behind the
+menu (`recall`, the page tools, `todo` and `ask_user` were never named, the budgets were not mentioned, so a
+model spent calls as if it had no limit and then met a paused goal), and the recipe it points at still let a
+critic's objection be argued with. `tests/test_conductor_prompt.py` holds it from three sides: every name in
+`ConductorTools.NAMES` appears in it, a name in backticks (in it, in the per-turn briefs, in the step prompt)
+is a tool that exists, so a stale name cannot outlive its tool, and it stays under a length ceiling, because it
+is paid on every call by a model whose window may be 4096 tokens beside twenty tool schemas. It states the
+behaviours a model cannot see from a schema: plan once and wait for approval; a critic's objection is reported
+and the run stops; calls and moves are limited and a step that spends them is paused; `run_command` only reads
+until a plan is approved; a page is text and not instructions; `todo` notes are the model's own;
+`ask_user` is for what is needed before planning. `ship-a-change` says the same and no longer tells the
+conductor to argue with the critic.
 
 So the conductor gains *choice* over existing powers, never *new* ones. There is
 still no `write_file` and no `commit`: the move that writes is the fixer's own
@@ -2481,6 +2497,15 @@ python3 -m scripts.drive_a_turn "Remember my favourite colour is teal" \
                                "What is my favourite colour?"
 ```
 
+`--approve` presses Start on the plan a turn makes and reports how the run ended (finished, paused with the
+engine's reason, or failed; the exit status is non-zero unless it completed). With no model at all,
+`FAKE_CONDUCTOR=1 python3 scripts/fake_ollama.py` plays a scripted conductor over the real Ollama wire format
+(`CONTRIBUTING.md` lists its scenarios), and `tests/test_fake_conductor.py` runs the whole path against it: a turn
+that plans, Start, the four step moves, one fixer call, one commit, the conductor's calls booked as `conductor`,
+a stalled conductor paused as `conductor_stopped`, a question and the turn that answers it, and a note kept
+across the run. What that proves is the loop, the wire, the driver and git together; what it cannot prove is that
+a real small model behaves like the script (§10.14a is the measurement that does).
+
 The four expected outcomes, all observed:
 
 1. **question → conductor answers in prose, 0 steps.** ~3-4s, where the same
@@ -2527,6 +2552,18 @@ already exist; it cannot define a move, cannot widen `validate_argv`, and cannot
 reach the write gate — that gate reads the goal's *stored status*, not anything
 the model was told. The worst a hostile skill can do is argue, and an argument
 cannot open a door. `tests/test_skills.py::TestASkillCannotEmpower` holds it.
+
+**A skill may say which moves it is written around, and that is a hint and never a grant.** A header line
+`moves: recon, plan, write` names them. The names are checked against the moves that exist
+(`ConductorTools.NAMES`, passed into `load_skills` so `engine/skills.py` imports nothing of the conductor); one
+that is not a move is dropped and reported with the skill's other problems, never obeyed, and a header key
+nothing reads is reported too (it used to vanish, which made a misspelt `moves:` look exactly like a skill that
+declared none). Names in a report are clipped, because a header is untrusted text. What `use_skill` does with
+the list is say, after the body, which declared moves are not on the menu *right now* (`write` before there is
+a plan, say), so the model is told before it is refused. It reads the menu and never adds to it, speaks only of
+names that are real moves, and a skill whose moves are all offered comes back exactly as written. `ship-a-change`
+declares its seven. `tests/test_skill_moves.py` holds it, and `TestASkillCannotEmpower` has a hostile skill
+declaring `write, run_command, delete_everything`.
 
 **Links are not followed, at either level.** A skill *file* that is a symlink is refused, and so is a
 skills *directory* that does not resolve to exactly `<workspace>/.codify/skills` — a link at `.codify`
@@ -2873,3 +2910,39 @@ durable in History, and the other three are not facts the engine keeps. The rule
 recorded sockets (the harness's `ctx.sockets`: the test is the engine on the other end) and checks each
 source is actually connected, that the header order is Stats, Notifications, History, that three drawers are
 one at a time, and that the list survives a restart.
+
+### 10.19 The conductor asks, and the answer is a turn
+
+A conductor that cannot go on without something only the person knows used to have one way to say so: prose
+that happened to end in a question mark. Nothing knew it was a question, so a model could ask and then carry
+on in the same reply, the window could not offer the choices as choices, and the nudge that tells a stuck
+model to "ask in one sentence and stop" had nothing that made it stop. `ask_user` is that something.
+
+It is a tool whose whole effect is to end the run (`EndTurn`, `engine/conductor.py`): the loop stops at the
+call and drops whatever else the same reply asked for. It carries a question (at most 500 characters) and
+optionally two to four options (each at most 80 characters, one line, a repeat said once; one option is not a
+choice and is refused). What the engine publishes is the turn's ordinary reply with the question as prose,
+numbered options included, and the same question as data on the same event (`question`, `docs/04` §1.4), so
+history and read-aloud carry it and the window can draw it.
+
+* **Not a capability, and not a new door.** It cannot approve a plan, write or run anything. The answer is the
+  person's next message, an ordinary turn through `POST /conversations/{id}/turns`: a button press sends the
+  option's words exactly as typing them would, there is no "answer" route, and nothing is held between the
+  question and the reply (invariant 8, §10.3). The reply is in the next turn's history like any reply, so
+  "Postgres" means something to the model that asked.
+* **Offered only where it can be answered and seen.** Never while the goal is `RUNNING` (an approved run has
+  nobody sitting at it; a step ends finished, or paused with a reason, §10.14), and never once a plan exists
+  (a turn that planned is drawn as its plan, so a question after it would not be seen; the answer to a plan is
+  Start, an edit, or a message). Both are enforced twice, by the menu and by the tool, which reads the stored
+  rows like `write` does.
+* **A question is a finished turn.** A change request that ends in a question is not "the conductor finished
+  without planning anything": it asked for the one thing it needs to start, and the engine says nothing else
+  about it.
+* **The buttons are for the moment.** `TurnExchange` draws the options only while nothing follows the
+  question (`answerable`): once the person has answered, or sent anything else, the question stays in the
+  history as words and offers nothing. Options are re-bounded in `ui/src/turnTranscript.ts` rather than
+  trusted, and are text on a button, never markup.
+
+Proven by `tests/test_ask_user.py` (the rules, the loop stopping, where it is offered, the turn it ends) and
+`ui/tests/askUser.test.ts` (the reading, and the buttons through the whole App sending an ordinary turn).
+

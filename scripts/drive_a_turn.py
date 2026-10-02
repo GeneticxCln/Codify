@@ -74,6 +74,36 @@ def turn_tally(events: list[dict[str, Any]], status: str) -> dict[str, Any]:
     }
 
 
+def run_tally(events: list[dict[str, Any]], status: str) -> dict[str, Any]:
+    """How a run that was *started* ended, counted from its events (what `--approve` reports).
+
+    A turn ends in an answer or a plan; a run ends finished, paused with a reason, or failed. The pause code is
+    the part worth counting, because a model that cannot finish a step is the rate a baseline is after and the
+    code says which way it fell short (`docs/09` §10.14). Built on `turn_tally` for the calls and errors; only
+    the outcome and the pause are the run's own. `events` should be the ones published after Start, or the
+    turn's own `recon` and `plan` are counted as the run's.
+    """
+    tally = turn_tally(events, status)
+    pause: dict[str, Any] | None = None
+    for e in events:
+        payload = e.get("payload") or {}
+        if e.get("type") != "goal_status":
+            continue
+        if payload.get("status") == "PAUSED" and payload.get("reason_code"):
+            pause = {"code": str(payload["reason_code"]), "reason": str(payload.get("reason") or "")}
+        elif payload.get("status") == "RUNNING":
+            pause = None
+    if status == "COMPLETED":
+        outcome = "completed"
+    elif status == "PAUSED":
+        outcome = f"paused:{pause['code']}" if pause else "paused"
+    else:
+        outcome = status.lower()
+    tally["outcome"] = outcome
+    tally["pause"] = pause
+    return tally
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -83,6 +113,15 @@ async def main() -> int:
     parser.add_argument("--model", default=os.environ.get("CODIFY_TEST_MODEL", "qwen2.5-coder:7b"))
     parser.add_argument("--provider", default="ollama")
     parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument(
+        "--approve",
+        action="store_true",
+        help=(
+            "press Start on the plan a turn makes and report how the run ended: finished, paused with the "
+            "engine's reason, or failed. Without it a turn that plans stops there, as it always did. The "
+            "exit status is non-zero unless the run completed"
+        ),
+    )
     parser.add_argument(
         "--base-url",
         default=None,
@@ -205,6 +244,7 @@ async def main() -> int:
 
     failed = False
     tallies: list[dict[str, Any]] = []
+    run_tallies: list[dict[str, Any]] = []
     async with httpx.AsyncClient(
         transport=transport, base_url="http://testserver", headers=headers,
         timeout=60.0,
@@ -281,6 +321,46 @@ async def main() -> int:
                 print("    (no answer)")
                 failed = True
 
+            if args.approve:
+                if final_status != "PENDING" or not steps:
+                    print("    (nothing to start: this turn made no plan)")
+                    continue
+                # The real route, with the version the plan was made at: the same press a person makes.
+                before = max((e["sequence"] for e in events), default=0)
+                started_at = time.monotonic()
+                pressed = await client.post(
+                    f"/goals/{goal_id}/start", json={"expected_version": goals.get(goal_id).version}
+                )
+                if pressed.status_code != 200:
+                    print(f"    Start refused: {pressed.status_code} {pressed.text}")
+                    failed = True
+                    continue
+                print(f"\n--- start: goal {goal_id}")
+                run_status = "RUNNING"
+                deadline = time.monotonic() + args.timeout
+                while time.monotonic() < deadline:
+                    run_status = goals.get(goal_id).status
+                    if run_status not in ("RUNNING", "PENDING"):
+                        break
+                    await asyncio.sleep(0.25)
+                after = (await client.get(f"/goals/{goal_id}/events")).json()
+                run_events = [e for e in after if e["sequence"] > before]
+                listed = ", ".join(f"{step.title}: {step.status}" for step in goals.steps(goal_id))
+                print(f"    status: {run_status}   ({time.monotonic() - started_at:.1f}s)   steps: {listed}")
+                for event in run_events:
+                    payload = event["payload"] or {}
+                    if event["type"] == "log" and str(payload.get("message", "")).startswith("conductor called "):
+                        print(f"    [call] {str(payload['message'])[len('conductor called '):][:120]}")
+                    elif event["type"] == "error":
+                        print(f"    [ERROR] {payload.get('code')}: {payload.get('message')}")
+                outcome = run_tally(run_events, run_status)
+                if outcome["pause"]:
+                    print(f"    [PAUSED] {outcome['pause']['code']}: {outcome['pause']['reason']}")
+                print(f"    [run] {outcome}")
+                run_tallies.append(outcome)
+                if run_status != "COMPLETED":
+                    failed = True
+
     conn.close()
     outcomes: dict[str, int] = {}
     for tally in tallies:
@@ -290,6 +370,11 @@ async def main() -> int:
           f"failed calls: {sum(sum(t['failed_calls'].values()) for t in tallies)}   "
           f"re-asks: {sum(t['reasks'] for t in tallies)}   "
           f"fallbacks: {sum(t['fallbacks'] for t in tallies)}")
+    if run_tallies:
+        ended: dict[str, int] = {}
+        for tally in run_tallies:
+            ended[tally["outcome"]] = ended.get(tally["outcome"], 0) + 1
+        print(f"runs: {len(run_tallies)}   outcomes: {ended}")
     return 1 if failed else 0
 
 

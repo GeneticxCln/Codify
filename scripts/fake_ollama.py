@@ -1,6 +1,7 @@
 """Fake Ollama server for smoke-testing the Codify pipeline without API keys.
 
-Serves /api/tags (model list) and /api/generate (role-aware canned JSON).
+Serves /api/tags (model list), /api/generate (role-aware canned JSON) and /api/chat (the conductor's endpoint:
+prose by default, or a scripted tool-calling conductor with FAKE_CONDUCTOR=1, see `conductor_move`).
 Run: python3 scripts/fake_ollama.py
 """
 
@@ -257,6 +258,80 @@ def fixer_files(prompt: str) -> str:
     return json.dumps({"files": [{"path": target, "action": "create", "content": content}]})
 
 
+# ── the scripted conductor ──────────────────────────────────────────────────
+# FAKE_CONDUCTOR=1 makes `/api/chat` play a conductor that always does the same sensible thing, as Ollama
+# would send it (`message.tool_calls`, with an *object* for `arguments`). The server has no memory, so the
+# conductor is rebuilt from the transcript each call: which calls it already made decide the next one. The
+# *request text* picks the scenario, so one server serves them all (the marker is in the user's own words,
+# or in the goal's title on a step run):
+#
+#   a question (ends in "?")  prose, no tool
+#   [ask]                     put one question to the person first (`ask_user`), when it is offered
+#   [todo]                    a step run keeps a note before it writes
+#   [stall]                   a step run stops after `write`: the conductor that cannot finish
+#
+# It never calls a tool it was not offered, which is the property that keeps a scripted run honest: a step
+# move before a plan exists, or `ask_user` during an approved run, is the engine's to refuse, not ours to try.
+TURN_RE = r"^The user says: (.*)$"
+APPROVED = "The user has approved this plan and started it: "
+
+
+def conductor_move(payload: dict[str, Any]) -> tuple[str, dict[str, Any]] | str | None:
+    """The scripted conductor's next move: `(tool, arguments)`, a final sentence, or None when it has no script."""
+    import re
+
+    messages = [m for m in payload.get("messages") or [] if isinstance(m, dict)]
+    offered = {
+        str((t.get("function") or {}).get("name")) for t in payload.get("tools") or [] if isinstance(t, dict)
+    }
+    start = None
+    for index, message in enumerate(messages):
+        content = str(message.get("content") or "")
+        if message.get("role") == "user" and ("The user says:" in content or APPROVED in content):
+            start = index
+    if start is None:
+        return None
+    prompt = str(messages[start].get("content") or "")
+    called: list[str] = []
+    for message in messages[start + 1:]:
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                called.append(str((call.get("function") or {}).get("name")))
+
+    def next_of(sequence: list[str]) -> str | None:
+        for name in sequence:
+            if name not in called:
+                return name if name in offered else None
+        return None
+
+    if APPROVED in prompt:
+        title = prompt.split(APPROVED, 1)[1].split("\n", 1)[0]
+        found = re.search(r"one step only: step (\S+?),", prompt)
+        step_id = found.group(1) if found else ""
+        sequence = (["todo"] if "[todo]" in title else []) + ["write", "verify", "review", "summarize"]
+        if "[stall]" in title:
+            sequence = sequence[: sequence.index("write") + 1]
+        name = next_of(sequence)
+        if name is None:
+            return "I stopped after the write." if "[stall]" in title else "That step is done."
+        if name == "todo":
+            return name, {"action": "add", "text": "run the project's linter once the change is written"}
+        if name == "write":
+            return name, {"step_id": step_id, "instructions": "Make the change this step describes."}
+        return name, {"step_id": step_id}
+
+    asked = re.findall(TURN_RE, prompt, re.M)
+    request = (asked[-1] if asked else prompt).strip()
+    if request.endswith("?"):
+        return f"Fake conductor here: with a real model I would answer \u201c{request[:160]}\u201d."
+    if "[ask]" in request and "ask_user" in offered and "ask_user" not in called:
+        return "ask_user", {"question": "Which file should the banner go in?", "options": ["banner.txt", "README.md"]}
+    name = next_of(["recon", "plan"])
+    if name is None:
+        return "I have planned it. Approve the plan and I will make it."
+    return name, {"task": request}
+
+
 def chat_reply(payload: dict[str, Any]) -> dict[str, Any]:
     """`/api/chat`, the endpoint the conductor's tool loop calls — the reply is `message.content`.
 
@@ -267,6 +342,30 @@ def chat_reply(payload: dict[str, Any]) -> dict[str, Any]:
     conductor that always does the same thing.
     """
     import re
+
+    if os.environ.get("FAKE_CONDUCTOR") == "1":
+        move = conductor_move(payload)
+        if isinstance(move, tuple):
+            name, arguments = move
+            return {
+                "model": payload.get("model", "fake-model"),
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"function": {"name": name, "arguments": arguments}}],
+                },
+                "done": True,
+                "prompt_eval_count": 128,
+                "eval_count": 64,
+            }
+        if isinstance(move, str):
+            return {
+                "model": payload.get("model", "fake-model"),
+                "message": {"role": "assistant", "content": move},
+                "done": True,
+                "prompt_eval_count": 128,
+                "eval_count": 64,
+            }
 
     said = ""
     for message in reversed(payload.get("messages") or []):

@@ -24,6 +24,7 @@ import {
   isConversationalTurn,
   turnAlerts,
   turnLiveText,
+  turnQuestion,
   turnReply,
 } from "../turnTranscript";
 import {
@@ -60,6 +61,8 @@ import { answersToRead, type AutoReadMemory } from "../speech.ts";
 import { SpeakButton } from "./SpeakButton";
 import { Markdown } from "./Markdown";
 import { PauseBanner } from "./PauseBanner";
+import { TodoCard } from "./TodoCard";
+import { visibleTodos } from "../todoList.ts";
 import { pauseReasonOf } from "../pauseReason.ts";
 
 /**
@@ -343,8 +346,13 @@ const TurnExchange: React.FC<{
   autoRead: boolean;
   /** A link in the answer was clicked: open this address in a browser tab. */
   onOpenLink?: (url: string) => void;
-}> = ({ msg, traceOpen, onToggleTrace, autoRead, onOpenLink }) => {
+  /** The person picked one of the conductor's options: send its words as their next turn. */
+  onAnswerQuestion?: (text: string) => void;
+  /** Nothing has followed this turn, so a question in it is still waiting for an answer. */
+  answerable: boolean;
+}> = ({ msg, traceOpen, onToggleTrace, autoRead, onOpenLink, onAnswerQuestion, answerable }) => {
   const reply = turnReply(msg.events);
+  const question = turnQuestion(msg.events);
   // Only while there is nothing to show yet: the streamed snapshot *is* the
   // answer being produced, and once the engine publishes the reply it is the
   // same words said twice.
@@ -366,6 +374,23 @@ const TurnExchange: React.FC<{
           <span className="text-codify-muted">(no answer)</span>
         )}
       </div>
+      {/* The conductor asked something and nothing has followed: its options, as buttons. Pressing one is
+          the person typing that answer: an ordinary turn, so there is no route and no state for it. */}
+      {question && question.options.length > 0 && answerable && onAnswerQuestion && (
+        <div role="group" aria-label="Answer choices" className="flex flex-wrap gap-2 pl-1">
+          {question.options.map((option) => (
+            <button
+              key={option}
+              type="button"
+              data-ask-option="true"
+              onClick={() => onAnswerQuestion(option)}
+              className="max-w-full px-3 py-1.5 text-xs text-left break-words rounded-full border border-codify-border bg-codify-raised text-codify-primary hover:bg-codify-info/20 transition-colors"
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      )}
       {alerts.length > 0 && (
         <div className="space-y-1.5">
           {alerts.map((alert, i) =>
@@ -767,6 +792,11 @@ interface ChatTimelineProps {
    * link in an answer is its words only (`markdownLinks.ts`).
    */
   onOpenLink?: (url: string) => void;
+  /**
+   * Send the words of one of the conductor's options as the person's next message. Optional: without
+   * it a question is drawn as words and its options are not buttons.
+   */
+  onAnswerQuestion?: (text: string) => void;
 }
 
 export const ChatTimeline: React.FC<ChatTimelineProps> = ({
@@ -785,6 +815,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   onPinDesignContract,
   pinnedContracts,
   onOpenLink,
+  onAnswerQuestion,
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState<{
@@ -954,7 +985,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
           <span className="leading-relaxed">{exportError}</span>
         </div>
       )}
-      {messages.map((msg) => {
+      {messages.map((msg, index) => {
         // Scope the audit-badge jumps to THIS card: several goal cards render
         // in one transcript, and an unscoped document query would jump to the
         // first card's entry regardless of which badge was clicked.
@@ -1075,6 +1106,8 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         )
                       }
                       onOpenLink={onOpenLink}
+                      onAnswerQuestion={onAnswerQuestion}
+                      answerable={index === messages.length - 1}
                     />
                   ) : msg.auditDoc ? (
                     <>
@@ -1399,6 +1432,13 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       </div>
 
                       {tracePanel}
+
+                      {/* The conductor's own notes on this goal. Drawn only when it kept some, and apart from
+                          the plan below: they are its note to its next run, not something to approve. */}
+                      {(() => {
+                        const notes = visibleTodos(msg.events);
+                        return notes.length > 0 ? <TodoCard items={notes} /> : null;
+                      })()}
 
                       {/* Plan Steps Accordion */}
                       {msg.goal?.steps && msg.goal.steps.length > 0 && (

@@ -196,7 +196,7 @@ class GitService:
             return (
                 f"git {' '.join(args)} is refused: {refusal}. This tool only reads "
                 "history and cannot change the repository or touch a file outside "
-                "it; use delegate for a change."
+                "it; a change goes through a plan the user approves."
             )
         # Validation before the repository check, and that order is the answer a
         # caller needs: `git commit` is refused on its own terms in a workspace

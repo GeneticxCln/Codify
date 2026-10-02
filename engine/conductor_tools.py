@@ -12,6 +12,8 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from engine.ask import AskRefused, parse_question
+from engine.conductor import EndTurn
 from engine.executor_support import (
     AgentOutputInvalid,
     CriticRejection,
@@ -32,6 +34,7 @@ from engine.recall import (
 )
 from engine.sandbox import CommandNotAllowed, validate_argv
 from engine.skills import SkillSet
+from engine.todo import MAX_MUTATIONS, TodoRefused
 from engine.webview_bridge import BridgeUnavailable, format_action, format_navigation, format_page
 
 if TYPE_CHECKING:
@@ -78,6 +81,9 @@ class _Conducted:
     # The provider's own *code* (`provider_unreachable`, `rate_limited`) when its model failed under the run,
     # else None. A code and never its message: a pause shows it, and a provider's message is third-party text.
     failure_code: str | None = None
+    # The question the conductor put to the person, as data (`engine/ask.py`), when it ended the run with
+    # `ask_user`. The words are `answer`; this is what lets the window offer the options as choices.
+    question: dict[str, Any] | None = None
 
     @property
     def finished(self) -> bool:
@@ -191,6 +197,8 @@ class ConductorTools:
         'verify',
         'review',
         'summarize',
+        'todo',
+        'ask_user',
         'use_skill',
     )
 
@@ -215,6 +223,9 @@ class ConductorTools:
         # keyed by step so a conductor working through three steps cannot mix
         # one step's diff into another's review.
         self.state: dict[str, _StepState] = {}
+        # How many times this run has changed the todo list. A count of *this run*, so it lives here and not
+        # on the goal: the list outlives the run, the limit on how much one run may fiddle with it does not.
+        self.todo_edits = 0
 
     def _state_of(self, step_id: str) -> _StepState:
         state = self.state.get(step_id)
@@ -281,7 +292,19 @@ class ConductorTools:
                 f"There is no skill called {name!r}. Available:\n{self.skills.menu()}"
             )
         self.service._log(self.goal_id, None, "info", f"conductor loaded the {found.name} skill")
-        return found.body
+        # The moves the skill is written around that are not on the menu right now, said before the model
+        # tries one and is refused. Advisory and nothing more: this reads the menu, it never adds to it, and
+        # only names of moves that exist are spoken of, so a header cannot put its own words in the engine's
+        # note. A skill whose moves are all offered comes back exactly as written.
+        offered = {t.name for t in self.service.conductor_menu(self.goal_id)()}
+        missing = [m for m in found.moves if m in self.NAMES and m not in offered]
+        if not missing:
+            return found.body
+        listed = ", ".join(f"`{m}`" for m in missing)
+        return (
+            f"{found.body}\n\n(Note from the engine: this skill is written around moves that are not on "
+            f"your menu right now: {listed}. A call to one now will be refused; this note does not add them.)"
+        )
 
     async def read_file(self, args: dict[str, Any]) -> str:
         return format_read(
@@ -878,6 +901,64 @@ class ConductorTools:
             ),
             "skipped": "That step is recorded as a dry run: nothing was written or committed.",
         }.get(scribed, f"That step is recorded ({scribed}).")
+
+    async def todo(self, args: dict[str, Any]) -> str:
+        """The conductor's note to its next run: add, start, finish or drop an item, or read the list back.
+
+        Not a capability. The list is advice to the model that wrote it and nothing in the engine reads it to
+        decide anything: it cannot approve a step, complete one, widen a command or reach `write`. It is read
+        from the goal's newest `todo_updated` event on every call rather than held, so two runs can never
+        overwrite each other with a stale copy, and a change is published as a whole snapshot.
+
+        A refused change returns the reason and publishes nothing, and does not use up the run's edits: a
+        model that keeps mistyping an id is bounded by its call budget, and spending the edit limit on
+        refusals would lock a run out of a list it never changed.
+        """
+        todos = self.service._todos_for(self.goal_id)
+        action = str(args.get("action") or "").strip().lower()
+        if action == "list":
+            return todos.render()
+        if self.todo_edits >= MAX_MUTATIONS:
+            return (
+                f"This run has already changed the todo list {MAX_MUTATIONS} times, which is the limit. "
+                "Leave it as it is and get on with the step."
+            )
+        try:
+            note = todos.change(action, text=args.get("text"), item_id=args.get("id"))
+        except TodoRefused as refusal:
+            return str(refusal)
+        self.todo_edits += 1
+        self.service._publish_todos(self.goal_id, todos)
+        return f"{note}\n{todos.render()}"
+
+    async def ask_user(self, args: dict[str, Any]) -> str:
+        """Put one question to the person, and end the run.
+
+        Not a capability: it cannot approve a plan, write or run anything, and the answer is the person's next
+        message, an ordinary turn through the one door that creates turns (docs/00 §6.8). The menu does not
+        offer it while the goal is `RUNNING` or once a plan exists, and this refuses too, reading the stored
+        rows like `write`: a run carrying out a step the person approved has nobody there to answer and must
+        end finished or paused with a reason, and a plan is itself what the person is asked to answer.
+
+        A question the engine will not put (none, too long, one option) is a sentence back and the run goes on.
+        """
+        if self.service.goals.get(self.goal_id).status == "RUNNING":
+            return (
+                "There is nobody to answer while an approved plan is running, so `ask_user` is not available "
+                "now. Finish the step, or stop and say plainly what you need; the run will pause and tell "
+                "the person."
+            )
+        if self.service.goals.steps(self.goal_id):
+            return (
+                "There is a plan now, and the plan is what the person is looking at: they approve it, edit "
+                "it, or say what to change. `ask_user` is for what you need before you can plan. Stop and "
+                "say in a sentence what the plan assumes."
+            )
+        try:
+            question = parse_question(args)
+        except AskRefused as refusal:
+            return str(refusal)
+        raise EndTurn(question.prose(), question.to_payload())
 
 
 def _excerpt(text: str, limit: int = _DIFF_EXCERPT_CHARS) -> str:

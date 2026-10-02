@@ -1983,6 +1983,26 @@ class GoalService:
         self._db.commit()
         return event
 
+    def latest_event(self, goal_id: str, type_: str) -> Event | None:
+        """The goal's newest event of one type, or None.
+
+        For state that is a *snapshot* carried by events (the conductor's todo list is the one: every change
+        republishes the whole list, so the newest event is the list). Reading the whole log to find the last
+        one of a type would make a long goal pay for its history every time a run starts.
+        """
+        row = self._db.execute(
+            "SELECT * FROM events WHERE goal_id = ? AND type = ? ORDER BY sequence DESC LIMIT 1",
+            (goal_id, type_),
+        ).fetchone()
+        if row is None:
+            return None
+        d = row_to_dict(row)
+        try:
+            d["payload"] = json.loads(d["payload"])
+            return Event.model_validate(d)
+        except Exception:
+            return None
+
     def events_after(self, goal_id: str, after: int, limit: int | None = None) -> list[Event]:
         """The goal's events with a sequence above `after`, in order.
 

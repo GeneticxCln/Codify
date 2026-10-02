@@ -14,7 +14,7 @@ from typing import Any
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
-from scripts.drive_a_turn import turn_tally
+from scripts.drive_a_turn import run_tally, turn_tally
 
 
 def event(type_: str, **payload: Any) -> dict[str, Any]:
@@ -70,3 +70,55 @@ class TestTurnTally(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRunTally(unittest.TestCase):
+    """What the conductor did *after* Start: `--approve` presses it and counts how the run ended.
+
+    A turn ends in an answer or a plan; a run ends finished, paused with a reason, or failed. The pause code is
+    the part worth counting, because a model that cannot finish a step is the rate a baseline is after
+    (`docs/09` §10.14), and the code says which way it fell short.
+    """
+
+    def test_a_finished_run_is_completed_and_counts_the_moves_it_made(self) -> None:
+        tally = run_tally([
+            event("log", level="info", message="conductor called write({'step_id': 's1'})"),
+            event("log", level="info", message="conductor called verify({'step_id': 's1'})"),
+            event("log", level="info", message="conductor called review({'step_id': 's1'})"),
+            event("log", level="info", message="conductor called summarize({'step_id': 's1'})"),
+        ], "COMPLETED")
+
+        self.assertEqual("completed", tally["outcome"])
+        self.assertEqual({"write": 1, "verify": 1, "review": 1, "summarize": 1}, tally["tools"])
+        self.assertIsNone(tally["pause"])
+
+    def test_a_paused_run_says_which_way_it_fell_short(self) -> None:
+        tally = run_tally([
+            event("goal_status", status="RUNNING", version=3),
+            event("goal_status", status="PAUSED", version=4, reason_code="conductor_budget", reason="It used its calls."),
+        ], "PAUSED")
+
+        self.assertEqual("paused:conductor_budget", tally["outcome"])
+        self.assertEqual({"code": "conductor_budget", "reason": "It used its calls."}, tally["pause"])
+
+    def test_the_newest_pause_is_the_one_that_counts(self) -> None:
+        tally = run_tally([
+            event("goal_status", status="PAUSED", version=4, reason_code="conductor_budget", reason="first"),
+            event("goal_status", status="RUNNING", version=5),
+            event("goal_status", status="PAUSED", version=6, reason_code="critic_rejected", reason="second"),
+        ], "PAUSED")
+
+        self.assertEqual("paused:critic_rejected", tally["outcome"])
+
+    def test_a_pause_the_person_made_has_no_code_and_says_so(self) -> None:
+        tally = run_tally([event("goal_status", status="PAUSED", version=4)], "PAUSED")
+
+        self.assertEqual("paused", tally["outcome"])
+        self.assertIsNone(tally["pause"])
+
+    def test_a_failed_run_is_failed_and_keeps_its_error_codes(self) -> None:
+        tally = run_tally([event("error", code="provider_error", message="x")], "FAILED")
+
+        self.assertEqual("failed", tally["outcome"])
+        self.assertEqual(["provider_error"], tally["errors"])
+

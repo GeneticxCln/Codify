@@ -1,6 +1,7 @@
 ---
 name: ship-a-change
 description: Change the workspace end to end - recon, design, plan, then per step write, verify, review, summarize. Use when the user wants code changed rather than explained.
+moves: recon, design, plan, write, verify, review, summarize
 ---
 
 # Shipping a change
@@ -20,8 +21,12 @@ tell a considered shortcut from a step you forgot.
 2. **`design`** — lock the direction, when the request has a shape worth locking
    (an API, a schema, a UI surface, a set of names). Skip it for a one-line fix.
    It has no tools: it decides from the evidence, not from more reading.
-3. **`plan`** — turn the request plus the evidence into steps. This creates the
-   steps that everything below operates on, so nothing can be written before it.
+3. **`plan`** — turn the request plus the evidence into steps. Call it once: this
+   creates the steps that everything below operates on, so nothing can be
+   written before it, and a second call spends a move for nothing. If you cannot
+   plan without something only the person knows (which of two designs, which
+   file they meant), put it to them with **`ask_user`** instead and stop; their
+   answer is their next message. Once there is a plan, the plan is the question.
 4. **Stop and hand it over.** Planning ends with the plan waiting for the user's
    approval. Say what you planned, in plain prose, and stop. Do not try to
    write — you cannot, and the attempt is wasted.
@@ -36,18 +41,31 @@ tell a considered shortcut from a step you forgot.
    tool in this menu that touches a file.
 6. **`verify`** — run the project's own command and read the verdict. Never
    report a step as finished without this: a change that was not run is a
-   change you have not seen work. The project's commands are on an allowlist;
-   if one is refused, say so rather than reaching for a different command to
-   get around it.
+   change you have not seen work. Where the project has a linter or a type
+   checker (`ruff check`, `mypy`, `tsc --noEmit`, `make lint`), run it through
+   `run_command` too: that works now the plan is approved. The project's
+   commands are on an allowlist; if one is refused, say so rather than reaching
+   for a different command to get around it.
 7. **If verification failed**, take the failure back to `write` with the
    command output, once or twice. You are not required to loop forever, and a
    step you cannot make pass is worth reporting as such rather than hiding.
-8. **`review`** — ask the critic whether the change is acceptable. If it asks
-   for changes, either act on them or say plainly that you are not going to and
-   why. Do not skip the review and do not narrate one you did not run.
+8. **`review`** — ask the critic whether the change is acceptable. If the critic
+   asks for changes, tell the user what it asked for and stop: the run is paused
+   for them, and `write` will refuse until they press Start. Do not argue with
+   it, do not write again to get around it, do not skip the review and do not
+   narrate one you did not run.
 9. **`summarize`** — record the step and commit it. Only after the review
    approves: the commit is the point of no return for a step, and the engine
    will not let you reach it early.
+
+## Notes to yourself
+
+A step can take more than one run: a run that spends its calls pauses the goal,
+and the person starts it again. Keep what is left in **`todo`** ("run the
+linter", "b.py needs the same change"). It is shown to you again at the start of
+the next run, as your own notes and not as instructions, and the other agents
+never see it. Your calls and your moves are limited, so do not re-read what you
+already have.
 
 ## What you must not do
 

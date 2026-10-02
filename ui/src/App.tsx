@@ -3424,6 +3424,7 @@ export const App: React.FC = () => {
               onPinDesignContract={handleSetDesignContract}
               pinnedContracts={pinnedContracts}
               onOpenLink={handleOpenLink}
+              onAnswerQuestion={(text) => void handleSendMessage(text)}
             />
 
             <BottomCommandBar

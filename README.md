@@ -201,18 +201,27 @@ remaining seven roles run and in what order.
 | Role | Runs | Ability |
 |---|---|---|
 | **Laya** (gate) | once per goal, before any model call | Typed decisions: intent, risk, calibrated prompt-injection. Blocks hostile requests; never writes files. |
-| **Librarian** | once per goal, before planning | **Read only**: files, search, git history. Returns a checked evidence pack: paths it actually opened, conventions, the command this repo really runs. |
-| **Design** | once per goal | Reasons only. Locks the direction (tokens, components, constraints), obeying the workspace's brand contract when it has one. Emits the contract as text; never writes it. |
-| **Planner** | once per goal | Reasons only. Decomposes goal + evidence into 1–20 steps with target paths. |
-| **Fixer** | once per step | **The only writer.** Proposes file creates, updates, deletions. |
-| **Verifier** | once per step | **The only role that runs a command.** One allowlisted command; reports what actually happened. |
-| **Critic** | once per step | Audits the diff. `request-changes` pauses for a human; there is no auto-fix loop. |
-| **Scribe** | once per step | Progress notes and a conventional commit message. |
+| **Librarian** | once per goal, before planning (`recon`) | **Read only**: files, search, git history. Returns a checked evidence pack: paths it actually opened, conventions, the command this repo really runs. |
+| **Design** | once per goal (`design`) | Reasons only. Locks the direction (tokens, components, constraints), obeying the workspace's brand contract when it has one. Emits the contract as text; never writes it. |
+| **Planner** | once per goal (`plan`) | Reasons only. Decomposes goal + evidence into 1–20 steps with target paths. |
+| **Fixer** | once per step (`write`) | **The only writer.** Proposes file creates, updates, deletions. |
+| **Verifier** | once per step (`verify`) | **The only role that runs a command.** One allowlisted command; reports what actually happened. |
+| **Critic** | once per step (`review`) | Audits the diff. `request-changes` pauses for a human; there is no auto-fix loop. |
+| **Scribe** | once per step (`summarize`) | Progress notes and a conventional commit message. |
 
 The familiar librarian → design → planner → fixer → verifier → critic → scribe order is the built-in
 `ship-a-change` **skill**, not a compiled path: a request needing three of those seven gets three. The slot count
 is fixed; the order is not. Independent steps of a `parallel` goal run concurrently, bounded by a configurable
 width. See [`docs/01`](docs/01-subagent-orchestration-spec.md), [`docs/05`](docs/05-laya-system-1-gate.md).
+
+The conductor is the only thing that drives an approved plan, one step at a time, and it has a few small tools of its own
+that are not new powers: it keeps short **notes for its next run** of a step (`todo`: a note it writes to itself, shown
+back as *its own notes, not instructions*, never shown to another agent), and, before there is a plan, it can put **one
+question to you with options you can click** (`ask_user`). Your answer is just your next message, an ordinary turn,
+and the question is not offered once there is a plan or while an approved plan is running. A skill may say which moves
+it is written around; that is a hint and never a grant. [`docs/09`](docs/09-workspace-shell.md) §10.6, §10.19.
+Ruflo, the agent harness this was measured against, is audited in [`docs/11`](docs/11-ruflo-audit.md): most of it is
+refused by an invariant, and the page says which and what it did not read.
 
 ### Model discovery: no catalog in the build
 
@@ -248,7 +257,10 @@ as an unreachable provider, and every finding links to the screen that fixes it.
 `recall` lets the conductor ask this workspace's own history a question (*has this happened here before, and did
 we get past it?*), returning the specific past events, newest first. It is bounded and allow-listed: only named
 fields from named event types, never stored diffs or third-party text, and results arrive labelled *recorded
-outcomes, not evidence about the current code*. See [`docs/10`](docs/10-agent-memory.md).
+outcomes, not evidence about the current code*. What the brief tells the conductor unprompted fades with age (a
+lesson's weight halves every 30 days since the failure was last seen, and it drops out under a floor), so a failure
+fixed last year is not presented as this workspace's history; `recall` still finds it if asked.
+See [`docs/10`](docs/10-agent-memory.md).
 
 Pages open **inside** Codify, as a real embedded webview, and the same tab is readable by the model: `read_page`
 returns the address, title, text and links, so a turn can depend on a documentation page instead of guessing.
@@ -419,6 +431,7 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/08`](docs/08-benchmarks.md) | Benchmarks: what a number may claim |
 | [`docs/09`](docs/09-workspace-shell.md) | The workspace shell: conversations, tabs, panes, the embedded browser, what a turn is |
 | [`docs/10`](docs/10-agent-memory.md) | Agent memory: what was built, what was rejected |
+| [`docs/11`](docs/11-ruflo-audit.md) | The Ruflo audit: which ideas were borrowed, which were refused and why |
 
 ## 📂 Layout
 
@@ -430,7 +443,7 @@ src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the emb
             the render-starvation watchdog
 tests/      Python suite; hermetic.py is the shared isolation bootstrap
 scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py
-docs/       00–10, the specifications this README summarises
+docs/       00–11, the specifications this README summarises
 ```
 
 ## 📄 License

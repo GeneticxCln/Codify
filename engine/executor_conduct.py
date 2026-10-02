@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from engine.chat_prompts import CHAT_SYSTEM_PROMPT, CONDUCTOR_SYSTEM_PROMPT
-from engine.conductor import BASE_TOOLS, Conductor, DEFAULT_MAX_MOVES, DEFAULT_MAX_TURNS, STEP_TOOLS
+from engine.conductor import ASK_USER, BASE_TOOLS, Conductor, DEFAULT_MAX_MOVES, DEFAULT_MAX_TURNS, STEP_TOOLS
 from engine.conductor_tools import ConductorTools, _Conducted
 from engine.executor_support import AgentNotConfigured
 from engine.laya import LayaDecision, build_state
@@ -21,6 +21,7 @@ from engine.providers import ProviderError
 from engine.recall import build_brief
 from engine.services import ApiError, custom_provider_address
 from engine.skills import SkillSet, load_skills
+from engine.todo import TodoList
 from engine.toolcall import ToolSpec
 from engine.executor_plan import _Plan
 
@@ -279,10 +280,12 @@ class _Conduct(_Plan):
                 return
             if conducted.finished:
                 reply = _as_prose(conducted.answer or "") or "(no answer)"
-                self.goals.publish(self._event(
-                    goal_id, None, "log",
-                    {"level": "info", "message": reply, "turn": True},
-                ))
+                said: dict[str, Any] = {"level": "info", "message": reply, "turn": True}
+                if conducted.question is not None:
+                    # The conductor asked. The words above are the question as prose, for history and
+                    # speech; this is the same question as data, so the window can offer its options.
+                    said["question"] = conducted.question
+                self.goals.publish(self._event(goal_id, None, "log", said))
                 if not self.goals.steps(goal_id):
                     # Nothing was planned, so this turn is a finished answer.
                     #
@@ -295,7 +298,10 @@ class _Conduct(_Plan):
                     # change was needed) so it is not overridden; but it must not
                     # read as success either, or a workspace that nobody touched
                     # looks like one that was updated.
-                    if intent in CHANGE_INTENTS:
+                    #
+                    # Not when it asked: a conductor that put a question to the person has not finished
+                    # without planning, it is waiting for the one thing it needs to start.
+                    if intent in CHANGE_INTENTS and conducted.question is None:
                         self._log(
                             goal_id, None, "warn",
                             f"the gate read this as {intent!r} and the conductor "
@@ -571,7 +577,16 @@ class _Conduct(_Plan):
         """
 
         def menu() -> list[ToolSpec]:
-            return [*BASE_TOOLS, *(STEP_TOOLS if self.goals.steps(goal_id) else ())]
+            planned = bool(self.goals.steps(goal_id))
+            offered = [*BASE_TOOLS, *(STEP_TOOLS if planned else ())]
+            # A question needs somebody to answer it, and a place to be seen. An approved plan that is
+            # running has nobody sitting at it (a step ends finished, or paused with a reason, never parked
+            # on a question), and once a plan exists the plan is what the person is looking at: they
+            # approve it, edit it, or say what to change in their next message. A question asked after it
+            # would not even be drawn, because a turn that planned is shown as its plan.
+            if not planned and self.goals.get(goal_id).status != "RUNNING":
+                offered.append(ASK_USER)
+            return offered
 
         return menu
 
@@ -785,6 +800,22 @@ class _Conduct(_Plan):
             )
         return brief
 
+    def _todos_for(self, goal_id: str) -> TodoList:
+        """The conductor's todo list for a goal: its newest snapshot, or an empty list.
+
+        A snapshot that cannot be read is an empty list rather than an error. The list is the model's own
+        note, so losing it costs the model a reminder and must never cost the run (`TodoList.from_payload`).
+        """
+        event = self.goals.latest_event(goal_id, "todo_updated")
+        return TodoList.from_payload(event.payload if event is not None else None)
+
+    def _publish_todos(self, goal_id: str, todos: TodoList) -> None:
+        """Publish the list as it now stands. A whole snapshot each time: the newest event is the list."""
+        self.goals.publish(self._event(goal_id, None, "todo_updated", todos.to_payload()))
+
+    def _todo_brief(self, goal_id: str) -> str:
+        return self._todos_for(goal_id).brief()
+
     def _intent_brief(self, intent: str) -> str:
         """What the gate decided, told to the conductor as advice, and what to do with it.
 
@@ -829,8 +860,8 @@ class _Conduct(_Plan):
                 "If they do ask for the workspace to be changed, read the "
                 "`ship-a-change` skill with `use_skill` and follow it: recon, then "
                 "plan, then stop so they can approve the plan. Prefer acting over "
-                "asking — ask only when the request genuinely cannot be planned "
-                "without more information, and say plainly what you are blocked on."
+                "asking: use `ask_user` only when the request genuinely cannot be "
+                "planned without something only they know, and ask the one thing."
             )
         return (
             "The pre-flight gate could not tell what this request asks for "
@@ -855,8 +886,8 @@ class _Conduct(_Plan):
             "You have not done anything yet: no move has been called and there "
             "is no plan. Do not ask the user what to do and do not describe what "
             "you are about to do — call `recon` now saying what you need to find "
-            "out, then call `plan`. If you genuinely cannot proceed without an "
-            "answer from them, ask for it in one sentence and stop."
+            "out, then call `plan`. If you genuinely cannot proceed without something "
+            "only they know, call `ask_user` with that one question and stop."
         )
 
     async def _conduct(
@@ -886,7 +917,7 @@ class _Conduct(_Plan):
         fallback = targets[1] if len(targets) > 1 else None
         role = self._conductor_role()
 
-        skills = load_skills(root)
+        skills = load_skills(root, ConductorTools.NAMES)
         for problem in skills.problems:
             self._log(goal_id, None, "warn", problem)
         for shadowed in skills.shadows:
@@ -903,6 +934,11 @@ class _Conduct(_Plan):
         )
         prompt = prompt_override if prompt_override is not None else self._turn_prompt(goal)
         prompt = f"{prompt}\n\n{self._memory_brief(goal)}\n\n{self._intent_brief(intent)}"
+        notes = self._todo_brief(goal_id)
+        if notes:
+            # After the intent: the person's request and the plan have been stated by then, and these are
+            # the model's own notes, which come last so they cannot read as the brief's own advice.
+            prompt = f"{prompt}\n\n{notes}"
         nudge = self._intent_nudge(intent)
         conductor = Conductor(
             provider, model, root,
@@ -955,6 +991,7 @@ class _Conduct(_Plan):
             exhausted=conductor.exhausted,
             planned=bool(self.goals.steps(goal_id)),
             cancelled=conductor.was_cancelled or self._is_cancelled(goal_id),
+            question=conductor.ended.question if conductor.ended is not None else None,
         )
 
     def _conductor_fallback_notice(

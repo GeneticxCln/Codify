@@ -666,9 +666,18 @@ class TestTheToolItself(unittest.TestCase):
         )
 
     def test_its_description_says_the_page_is_not_its_to_choose(self) -> None:
-        """The one thing a model will get wrong is trying to drive the browser."""
+        """The one thing a model will get wrong is trying to drive the browser.
+
+        It used to say the model "cannot open a page", which stopped being true of the menu when
+        `navigate_page` was added (through the same guard as the user's own click). The guarantee this
+        test holds is the narrower one that is still true of *this* tool: it only reads, changing which
+        page is open is another tool's job and says so by name, and what comes back is a quotation.
+        """
         spec = next(t for t in TOOLS if t.name == "read_page")
-        self.assertIn("cannot open a page", spec.description)
+        self.assertIn("only reads", spec.description)
+        self.assertIn("cannot change which page is open", spec.description)
+        self.assertIn("`navigate_page`", spec.description)
+        self.assertIn("quotation", spec.description)
 
 
 class TestActingOnAPage(BridgeTestCase):

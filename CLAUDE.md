@@ -1,7 +1,7 @@
 # CLAUDE.md — working rules for this repository
 
 **This file is a distillation, not a second source of truth.** Everything below is
-sourced from `CONTRIBUTING.md` and `docs/00`–`10`; where this file and either of
+sourced from `CONTRIBUTING.md` and `docs/00`–`11`; where this file and either of
 those disagree, **they win and this file is the bug**. `tests/test_claude_md_contracts.py`
 fails if the invariants quoted here drift from `docs/00` §6, so that is enforced, not
 merely intended.
@@ -83,11 +83,11 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
 ui/             React 19 + TS + Vite; ui/tests/ run through node --test
 src-tauri/      Tauri v2 Rust shell
 tests/          Python suite; stream_isolation.py is the shared isolation helper
-scripts/        fake_ollama.py (drive a goal with no API keys), replay_trace.py
-                 drive_a_turn.py (drive a turn against a real local model),
+scripts/        fake_ollama.py (drive a goal with no API keys; FAKE_CONDUCTOR=1 plays a tool-calling conductor), replay_trace.py
+                 drive_a_turn.py (drive a turn against a real local model; --approve presses Start),
                  make_logo.py, check_history.py (does every commit in a range build)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–10, below
+docs/           00–11, below
 .githooks/      versioned pre-commit / pre-push
 ```
 
@@ -147,7 +147,8 @@ docs/           00–10, below
 | `docs/07` | Spawn guard and deterministic tests |
 | `docs/08` | Benchmarks: what a number may claim, and the no-third-party-source policy |
 | `docs/09` | The workspace shell: conversation model, tab rules, both panes, the browser pane's separate-window decision, and §10 on what a turn is |
-| `docs/10` | Agent memory: the Hindsight audit — what was built (`recall`, `recall_threads`, keyword search), what was rejected, and the open `reflect` half |
+| `docs/10` | Agent memory: the Hindsight audit — what was built (`recall`, `recall_threads`, keyword search, the durable observation store and its fading), and what was rejected |
+| `docs/11` | The Ruflo audit: which ideas were borrowed, which were refused and by which invariant, and what was not read |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.

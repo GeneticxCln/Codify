@@ -93,7 +93,7 @@ class TestTheMenuIsTheDispatchTable(ConductorTestCase):
             base,
         )
         self.assertEqual(
-            {t.name for t in STEP_TOOLS}, {"write", "verify", "review", "summarize"},
+            {t.name for t in STEP_TOOLS}, {"write", "verify", "review", "summarize", "todo"},
         )
 
 
@@ -147,7 +147,9 @@ class TestATurnCanPlanThroughTheConductor(ConductorTestCase):
         # approve, and marking the turn finished would clear the very state the
         # approval gate reads.
         self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
-        self.assertEqual(provider.seen_tools[0], [t.name for t in BASE_TOOLS])
+        # The base menu, and the question a turn may put to the person (`ask_user`, last: it is offered
+        # whenever somebody is there to answer, which is on a turn and never during an approved run).
+        self.assertEqual(provider.seen_tools[0], [*(t.name for t in BASE_TOOLS), "ask_user"])
         # And the run was measured as the pipeline's own stages, not as some
         # new kind of thing the stats screen would have to learn about.
         stages = {

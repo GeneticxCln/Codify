@@ -33,7 +33,7 @@ vocabulary:
 |---|---|
 | **retain** | Something already writes history: every conductor move publishes `events` (docs/04 §1.4). The store exists; only the read was missing. |
 | **recall** | Nothing read history for a model. This is the gap §4 closed. |
-| **reflect** | Nothing distills history. Repeated identical failures are stored as separate rows forever; no consolidation step turns them into a durable belief with a proof count. Still open — §6. |
+| **reflect** | Nothing distilled history: repeated identical failures were stored as separate rows forever, and no consolidation step turned them into a durable belief with a proof count. Closed — §6: mechanical formation, a brief, a durable store refined after each run, and fading with age (§6.3). |
 
 Its retrieval side is four parallel strategies — semantic vector search, BM25
 keyword search, graph traversal, and temporal — whose results are fused by
@@ -166,9 +166,10 @@ plumbing, not prose a model can act on. `format_observations` labels every
 proof count with its bound: *proof: N event(s) in the most recent 2 000
 scanned*.
 
-Still **open**, deliberately: nothing here persists. Every answer is recomputed
-from the rows that still exist — which cannot go stale, and cannot outlive the
-`MAX_SCAN_EVENTS` window. The durable store is §6.2.
+Formation itself persists nothing, deliberately: `distill_observations`
+recomputes every answer from the rows that still exist, which cannot go stale
+and cannot outlive the `MAX_SCAN_EVENTS` window. What outlives the window is the
+durable store (§6.2), and what goes stale in it is handled by fading (§6.3).
 
 ### 6.2 The durable store: `observations`, refined by the engine after each run
 
@@ -231,6 +232,32 @@ and an empty workspace gains **no section at all** — the brief returns `""
 rather than a header over an absence. A brief that cannot be computed is a
 `warn` and an unchanged prompt, because memory is an upgrade, never a
 prerequisite.
+
+### 6.3 Old lessons fade
+
+An observation never aged. A one-off failure from last year, long since fixed, carried the same weight and the
+same words as one from yesterday, and sat in the brief until five newer ones pushed it out: a stale lesson is
+worse than none, because the model is told it is what this workspace's history has *taught*. Hindsight's
+temporal strategy is the reference; the version here is the smallest one that stops the lie.
+
+* **Strength is the proof count halved every 30 days** since the failure was last seen
+  (`recall.observation_strength`, `OBSERVATION_HALF_LIFE_DAYS`). The brief leaves out an observation whose
+  strength has fallen *under* `BRIEF_FLOOR` (0.5), so a failure seen once is in it for a month, eight proofs last
+  about three months, and what stays says how long ago: *proof: 3 event(s) in the most recent 2 000 scanned,
+  last seen 12 days ago*.
+* **At read time only.** From rows and events that already exist: no column, no migration, nothing rewritten.
+  `recall` (the tool over the raw events) still finds the old failure when someone asks for it. Only the
+  *unprompted* brief forgets.
+* **"Last seen" is the newest event behind the lesson, when the scan can see one.** The consolidation pass
+  (§6.2) refines every subject still in its scan window after every run, so `refined_at` of a quiet workspace's
+  year-old failure says *yesterday*, and trusting it would make the decay a no-op exactly where it is needed.
+  The row's `refined_at` is used only for a lesson the scan cannot see (its events have left the window). A
+  lesson with no recorded time at all is kept and not dated rather than treated as ancient.
+* **A faded lesson is not brought back as a new one.** The scan's own derived observations are aged by their
+  events the same way, and a subject the store holds is never re-derived over it.
+
+Proven by `tests/test_recall_decay.py`, with an injected clock so each boundary (the floor itself, a day, a
+half-life) is exact.
 
 ## 7. Provenance rules for anything memory-adjacent
 

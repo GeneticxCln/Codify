@@ -201,6 +201,13 @@ outside `engine/` by accident of layout, not by decision.
   provider entirely. It measures the harness, which is the point of the smoke
   tier.
 
+* **Driver.** The report says `"driver": "recipe"`, and the console prints it. Every task here is run by
+  `POST /goals`, which is the fixed pipeline (librarian, design, planner, fixer, verifier, critic, scribe in a
+  compiled order). On an install with a conductor a person's goal is driven by the conductor instead, so **a
+  number from this harness is a recipe number unless the report says `conductor`**: it measures the floor under
+  the product, not how the product behaves. The conductor has been measured only by hand (§8, "The conductor,
+  end to end"), on three turns and one small model.
+
 Before quoting any of it, read `benchmarks/manifest.json`'s `_read_this_first`.
 
 ## 7. Adding a task
