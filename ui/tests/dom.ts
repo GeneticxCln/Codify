@@ -97,8 +97,9 @@ const GLOBALS = [
   "MutationObserver",
   "Range",
   "Selection",
-  // ...and asks whether a scroller is the window (`elt instanceof Window`) on every measure.
-  "Window",
+  // Deliberately not `Window`. CodeMirror asks `elt instanceof Window` on every measure; defined, the measure runs to the end,
+  // and with no layout in jsdom it settles on a two-line viewport and stops drawing the lines the tests are looking at. Undefined,
+  // the measure throws inside a timer (a line on stderr, nothing else) and the view keeps drawing the whole document.
 ] as const;
 
 /** One document, and everything a test can do to it. */

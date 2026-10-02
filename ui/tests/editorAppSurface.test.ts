@@ -129,7 +129,7 @@ test("a file the assistant opens goes beside the conversation the person is look
     await beat(80);
     await ctx.settle();
 
-    assert.equal(reply.ok, true, reply.error);
+    assert.equal(reply.ok, true, reply.error ?? "the window refused");
     assert.deepEqual(reply.result, { path: "src/main.py", opened: true, shown: "beside", from_line: 2, to_line: 2 });
     assert.equal(panes(ctx).length, 2);
     assert.match(cmText(ctx), /def main\(\):/);
@@ -258,7 +258,7 @@ test("an edit to a file that is not open opens it in the background, changes its
     await beat(40);
     await ctx.settle();
 
-    assert.equal(reply.ok, true, reply.error);
+    assert.equal(reply.ok, true, reply.error ?? "the window refused");
     assert.deepEqual(reply.result, { path: "src/main.py", replaced: 1, from_line: 2, to_line: 2, opened: true, dirty: true });
     assert.equal(selectedTab(ctx), before, "an edit moved the person");
     assert.equal(panes(ctx).length, 0, "an edit rearranged the layout");
@@ -347,7 +347,7 @@ test("the assistant's edit lands on top of the person's unsaved typing, and neit
     });
     await ctx.settle();
 
-    assert.equal(reply.ok, true, reply.error);
+    assert.equal(reply.ok, true, reply.error ?? "the window refused");
     assert.equal(reply.result.from_line, 3, "the line is where it is now, below what the person added");
     assert.equal(viewOf(ctx).state.doc.toString(), "# mine\ndef main():\n    return 2\n");
   });
