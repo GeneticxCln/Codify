@@ -57,6 +57,11 @@ from engine.trace import TraceService
 BENCH_DIR = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = BENCH_DIR / "manifest.json"
 
+# What runs the tasks: `run_task` creates a goal with `POST /goals` and waits for it, which is the fixed recipe
+# (docs/00 §4). It is a constant and not an option because there is nothing here to choose between; the day a
+# benchmark can drive the conductor, this becomes a value the run reports rather than one it assumes.
+DRIVER = "recipe"
+
 # Checks that measure the harness rather than a model. Everything else in a
 # task's `checks` is a quality claim and needs a real provider to be honest.
 HARNESS_CHECKS = frozenset({"goal_completed", "stages", "files_written"})
@@ -775,6 +780,10 @@ def main(argv: list[str] | None = None) -> int:
     report = {
         "tier": args.tier,
         "provider": "canned" if canned else "configured",
+        # What drove the tasks. The runner calls `POST /goals`, which is the fixed recipe; a person's goal on
+        # an install with a conductor is driven by the conductor, so a rate quoted without this reads as a
+        # claim about the product when it is a claim about the floor under it (docs/08 §6).
+        "driver": DRIVER,
         "summary": summary,
         "tasks": results,
     }
@@ -783,6 +792,7 @@ def main(argv: list[str] | None = None) -> int:
         args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     print(f"tier      {args.tier} ({report['provider']} provider)")
+    print(f"driver    {DRIVER} (the fixed pipeline: not the conductor)")
     rate = summary["pass_rate"]
     print(f"harness   {summary['passed']}/{summary['tasks']} passed"
           + (f" ({rate}%)" if rate is not None else ""))
