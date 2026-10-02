@@ -232,6 +232,32 @@ rather than a header over an absence. A brief that cannot be computed is a
 `warn` and an unchanged prompt, because memory is an upgrade, never a
 prerequisite.
 
+### 6.3 Old lessons fade
+
+An observation never aged. A one-off failure from last year, long since fixed, carried the same weight and the
+same words as one from yesterday, and sat in the brief until five newer ones pushed it out: a stale lesson is
+worse than none, because the model is told it is what this workspace's history has *taught*. Hindsight's
+temporal strategy is the reference; the version here is the smallest one that stops the lie.
+
+* **Strength is the proof count halved every 30 days** since the failure was last seen
+  (`recall.observation_strength`, `OBSERVATION_HALF_LIFE_DAYS`). The brief leaves out an observation whose
+  strength has fallen *under* `BRIEF_FLOOR` (0.5), so a failure seen once is in it for a month, eight proofs last
+  about three months, and what stays says how long ago: *proof: 3 event(s) in the most recent 2 000 scanned,
+  last seen 12 days ago*.
+* **At read time only.** From rows and events that already exist: no column, no migration, nothing rewritten.
+  `recall` (the tool over the raw events) still finds the old failure when someone asks for it. Only the
+  *unprompted* brief forgets.
+* **"Last seen" is the newest event behind the lesson, when the scan can see one.** The consolidation pass
+  (§6.2) refines every subject still in its scan window after every run, so `refined_at` of a quiet workspace's
+  year-old failure says *yesterday*, and trusting it would make the decay a no-op exactly where it is needed.
+  The row's `refined_at` is used only for a lesson the scan cannot see (its events have left the window). A
+  lesson with no recorded time at all is kept and not dated rather than treated as ancient.
+* **A faded lesson is not brought back as a new one.** The scan's own derived observations are aged by their
+  events the same way, and a subject the store holds is never re-derived over it.
+
+Proven by `tests/test_recall_decay.py`, with an injected clock so each boundary (the floor itself, a day, a
+half-life) is exact.
+
 ## 7. Provenance rules for anything memory-adjacent
 
 - **No third-party source is committed here.** This document was written from

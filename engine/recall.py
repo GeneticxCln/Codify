@@ -79,6 +79,7 @@ holding for exactly that reason.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 #: The event types recall will read, and the payload fields it may read from
@@ -456,6 +457,45 @@ def format_thread_recall(result: dict[str, Any]) -> str:
 #: observations compelling, which is exactly why the answer is capped.
 MAX_OBSERVATIONS = 8
 
+#: An observation fades: its strength is its proof count halved every this many days since the failure
+#: was last seen. A one-off failure from last year, long fixed, used to carry the same weight and the same
+#: words as one from yesterday, and sat in the brief until five newer ones pushed it out. A stale lesson is
+#: worse than none, because the model is told it is what this workspace's history has *taught*.
+OBSERVATION_HALF_LIFE_DAYS = 30.0
+
+#: The brief leaves out an observation whose strength has fallen *under* this. One proof is exactly the
+#: floor at one half-life, so a failure seen once is in the brief for a month. Only the brief reads it:
+#: `recall` over the raw events still finds the old failure when someone asks.
+BRIEF_FLOOR = 0.5
+
+_DAY = 86_400.0
+
+
+def observation_age_days(seen_at: float | None, now: float) -> float | None:
+    """How many days before `now` a failure was last seen, or None when nothing says.
+
+    A time that was never recorded (0, negative, missing) is an *unknown* age, which costs nothing and is
+    not dated, rather than an age of fifty years. A time in the future is age zero, never a boost.
+    """
+    if seen_at is None or seen_at <= 0:
+        return None
+    return max(0.0, (now - seen_at) / _DAY)
+
+
+def observation_strength(proof: int, age_days: float | None) -> float:
+    """The proof count, halved every `OBSERVATION_HALF_LIFE_DAYS` of age. An unknown age is full strength."""
+    if age_days is None:
+        return float(proof)
+    return float(proof) * float(0.5 ** (age_days / OBSERVATION_HALF_LIFE_DAYS))
+
+
+def seen_ago(age_days: float) -> str:
+    """How long ago, for a line a model reads: `last seen today`, `last seen 1 day ago`, `last seen 12 days ago`."""
+    days = int(age_days)
+    if days <= 0:
+        return "last seen today"
+    return f"last seen {days} day{'s' if days != 1 else ''} ago"
+
 
 def search_observations(
     rows: list[dict[str, Any]],
@@ -587,6 +627,10 @@ def _one_observation(
         "evidence": [
             str(ev.get("id") or "") for ev in reversed(group) if str(ev.get("id") or "")
         ],
+        # The newest event behind it, so a reader can age the lesson by what happened and not by when a
+        # pass last ran. Not stored (there is no column for it, and none is needed): it is read from the
+        # same rows the scan already holds.
+        "last_seen": max((float(ev.get("timestamp") or 0.0) for ev in group), default=0.0),
     }
 
 
@@ -700,17 +744,24 @@ def distill_observations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return form_observations(rows)
 
 
-def format_observations(observations: list[dict[str, Any]]) -> str:
+def format_observations(observations: list[dict[str, Any]], now: float | None = None) -> str:
     """Observations as prose for the brief. Empty input gets no line at all —
-    the brief stays silent rather than explaining an absence twice."""
+    the brief stays silent rather than explaining an absence twice.
+
+    A line says how long ago the failure was last seen when that is known (`last_seen`), because "this has
+    happened here" means something different a day after it than a quarter after it.
+    """
     if not observations:
         return ""
+    clock = time.time() if now is None else now
     lines = []
     for obs in observations[:MAX_BRIEF_OBSERVATIONS]:
         example = f' — e.g. {obs["example"]!r}' if obs.get("example") else ""
+        age = observation_age_days(obs.get("last_seen"), clock)
+        when = f", {seen_ago(age)}" if age is not None else ""
         lines.append(
             f"- {obs['subject']}: {obs['lesson']} (proof: {obs['proof']} event(s)"
-            f" in the most recent {MAX_SCAN_EVENTS} scanned{example})"
+            f" in the most recent {MAX_SCAN_EVENTS} scanned{when}{example})"
         )
     return "\n".join(lines)
 
@@ -724,6 +775,7 @@ def build_brief(
     *,
     observation_rows: list[dict[str, Any]] | None = None,
     current_thread_id: str | None = None,
+    now: float | None = None,
 ) -> str:
     """What a new turn should know before it starts, as one bounded string.
 
@@ -762,6 +814,7 @@ def build_brief(
                 lines.append(f"    asked: {ask}")
         sections.append("\n".join(lines))
 
+    clock = time.time() if now is None else now
     stored = [
         o for o in search_observations(
             observation_rows or [], None, limit=MAX_BRIEF_OBSERVATIONS,
@@ -784,11 +837,27 @@ def build_brief(
             derived.append(o)
         elif o["proof"] > known["proof"]:
             known["proof"] = o["proof"]
-    observations = (stored + derived)[:MAX_BRIEF_OBSERVATIONS]
+    # When each lesson was last seen. The newest event behind it when the scan can see one, which is the
+    # truth; the row's `refined_at` only when it cannot. The consolidation pass refines every subject still
+    # in its scan window after every run, so a quiet workspace's year-old failure has a row that says
+    # "yesterday", and trusting it would make the decay a no-op exactly where it is needed.
+    newest = {o["subject"]: float(o.get("last_seen") or 0.0) for o in fresh}
+    for o in stored:
+        o["last_seen"] = newest.get(o["subject"]) or o.get("refined_at")
+    # Decided on the lesson's own age, so a lesson the decay drops here is not brought back below as a new
+    # one: `derived` only holds subjects the store has never seen.
+    faded = [
+        o for o in (*stored, *derived)
+        if observation_strength(
+            int(o.get("proof") or 0), observation_age_days(o.get("last_seen"), clock),
+        ) < BRIEF_FLOOR
+    ]
+    gone = {id(o) for o in faded}
+    observations = [o for o in (*stored, *derived) if id(o) not in gone][:MAX_BRIEF_OBSERVATIONS]
     if observations:
         sections.append(
             "What this workspace's own history has already taught us:\n"
-            + format_observations(observations)
+            + format_observations(observations, clock)
         )
 
     if not sections:
