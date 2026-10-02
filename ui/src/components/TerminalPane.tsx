@@ -27,6 +27,7 @@ import {
   replayFor,
 } from "../terminalHistory";
 import { claimTerminal, releaseTerminal, RESUME_SEAM } from "../terminalBuffer";
+import { pasteInto, registerTerminalPaste } from "../terminalPaste";
 
 /** The terminal's text size in px: 12 at 100%, and the same proportion at any UI scale. */
 export function terminalFontSize(): number {
@@ -331,6 +332,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           setFailed(readRejection(err, "Could not write to that terminal")),
         );
       });
+
+      // The clipboard drawer's "Paste into the terminal" reaches this pane through the registry, for as long
+      // as it is mounted. It goes through xterm's own `paste`, so the shell's bracketed-paste mode applies,
+      // and what it produces is ordinary input to `onData` above (and so to the guarded `writeTerminal`).
+      const typing = term;
+      unsubscribes.push(
+        registerTerminalPaste(terminalIdRef.current, (text) => pasteInto(typing, text, exitedRef.current)),
+      );
 
       // `fit()` does the pixel work against the real font metrics and settles
       // xterm's own `cols`/`rows`; all that is left is to check them and hand

@@ -39,6 +39,7 @@ import { IconButton } from "./ui/IconButton";
 import { MicButton } from "./MicButton";
 import { readRejection } from "../rejection.ts";
 import { insertDictation } from "../speech.ts";
+import { insertAtCaret } from "../clipboardHistory";
 import { uiScaleFactor, useUiScale } from "../uiScale";
 
 export type ExecutionMode = "direct" | "dry_run" | "plan_only";
@@ -123,6 +124,11 @@ interface BottomCommandBarProps {
   onOpenSettings: () => void;
   /** Settings → Audio, where dictation gets its provider. The mic opens it when dictation has none. */
   onOpenAudioSettings: () => void;
+  /**
+   * Text the clipboard drawer asked to be put in the box, as it is, at the caret. A new `seq` is a new request:
+   * the same text twice is two presses. One that was already there when this box mounted is not replayed.
+   */
+  insertRequest?: { seq: number; text: string } | null;
 }
 
 export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
@@ -157,6 +163,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   isRunning = false,
   onOpenSettings,
   onOpenAudioSettings,
+  insertRequest = null,
 }) => {
   const [prompt, setPrompt] = useState("");
   const [isFolderOpen, setIsFolderOpen] = useState(false);
@@ -373,6 +380,26 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
       return next.value;
     });
   };
+  // A clip from the clipboard drawer goes in the same way, but exactly as it is: no space is added where two
+  // words would touch, because a clip is code or a path and a space inside one is a different command. The
+  // request already pending when this box mounted is marked handled up front, so a box that is rebuilt (a
+  // tab away and back) does not replay an insert that was done into the last one.
+  const handledInsert = useRef(insertRequest?.seq ?? 0);
+  useEffect(() => {
+    if (!insertRequest || insertRequest.seq === handledInsert.current) return;
+    handledInsert.current = insertRequest.seq;
+    const el = textareaRef.current;
+    setPrompt((current) => {
+      const next = insertAtCaret(
+        current,
+        el?.selectionStart ?? current.length,
+        el?.selectionEnd ?? current.length,
+        insertRequest.text,
+      );
+      dictatedCaret.current = next.caret;
+      return next.value;
+    });
+  }, [insertRequest]);
   useLayoutEffect(() => {
     const caret = dictatedCaret.current;
     if (caret === null || !textareaRef.current) return;

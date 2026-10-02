@@ -22,6 +22,7 @@ import {
   captureClip,
   clearUnpinned,
   displayOrder,
+  insertAtCaret,
   isPrivateField,
   loadClips,
   looksSecret,
@@ -475,4 +476,25 @@ test("nothing readable is an empty list, and storage that throws is too", () => 
   assert.deepEqual(loadClips(throwing), []);
   assert.doesNotThrow(() => saveClips(throwing, [clip("c1", "x")]));
   assert.doesNotThrow(() => saveClips(null, [clip("c1", "x")]));
+});
+
+// ── put into the message box ───────────────────────────────────────────────
+
+test("a clip goes in at the caret exactly as it is, with nothing added or trimmed", () => {
+  assert.deepEqual(insertAtCaret("fixbug", 3, 3, " the "), { value: "fix the bug", caret: 8 });
+  // Unlike dictated words, which get a space wherever two would touch: a clip is code and paths.
+  assert.deepEqual(insertAtCaret("ab", 1, 1, "XY"), { value: "aXYb", caret: 3 });
+  assert.deepEqual(insertAtCaret("", 0, 0, "  keep\n  indent\n"), { value: "  keep\n  indent\n", caret: 16 });
+});
+
+test("a selection is replaced, and the caret lands after what went in", () => {
+  assert.deepEqual(insertAtCaret("fix the bug", 4, 7, "that"), { value: "fix that bug", caret: 8 });
+  assert.deepEqual(insertAtCaret("abc", 0, 3, "z"), { value: "z", caret: 1 });
+});
+
+test("a selection given backwards, or past the end, or not a number, is read sensibly", () => {
+  assert.deepEqual(insertAtCaret("fix the bug", 7, 4, "that"), { value: "fix that bug", caret: 8 });
+  assert.deepEqual(insertAtCaret("abc", 50, 90, "!"), { value: "abc!", caret: 4 });
+  assert.deepEqual(insertAtCaret("abc", -4, -1, "!"), { value: "!abc", caret: 1 });
+  assert.deepEqual(insertAtCaret("abc", Number.NaN, Number.NaN, "!"), { value: "abc!", caret: 4 });
 });

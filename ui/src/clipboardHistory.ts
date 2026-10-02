@@ -309,3 +309,24 @@ export function saveClips(storage: ClipboardStorage | null, list: readonly Clip[
     // A full or blocked store costs the history its memory, never the window its function.
   }
 }
+
+// ── put into the message box ───────────────────────────────────────────────
+
+/**
+ * A clip into a text field at the caret, replacing the selection, exactly as it is.
+ *
+ * Not `insertDictation`, which adds a space wherever two spoken words would touch: a clip is code, a path,
+ * a command, and a space added inside one is a different command. A position that is not a number, or lies
+ * outside the text, is read as the end, or the nearest edge, rather than throwing away the clip.
+ */
+export function insertAtCaret(
+  value: string,
+  start: number,
+  end: number,
+  text: string,
+): { value: string; caret: number } {
+  const edge = (n: number): number => (Number.isFinite(n) ? Math.min(Math.max(0, Math.trunc(n)), value.length) : value.length);
+  const from = Math.min(edge(start), edge(end));
+  const to = Math.max(edge(start), edge(end));
+  return { value: value.slice(0, from) + text + value.slice(to), caret: from + text.length };
+}
