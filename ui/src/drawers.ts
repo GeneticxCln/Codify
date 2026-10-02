@@ -21,6 +21,8 @@
  * engine; `useSidebarYield.ts` is the thin part that measures.
  */
 
+import { MIN_PANE_REM } from "./panes";
+
 /** The drawers there are. A union rather than a boolean each: at most one is open, by construction. */
 export type Drawer = "stats" | "notifications" | "clipboard" | "history";
 
@@ -57,4 +59,22 @@ export function nextDrawer(current: Drawer | null, pressed: Drawer): Drawer | nu
 /** `current` unless it is `which`, in which case closed: how a drawer's own close button acts. */
 export function closeDrawer(current: Drawer | null, which: Drawer): Drawer | null {
   return current === which ? null : current;
+}
+
+/**
+ * Whether the centre column can hold two panes, for a split.
+ *
+ * The left panel and the open drawer take their rem first (the panel gives way to a drawer, and `sidebarShown` is
+ * the answer after that), and what is left must be two panes' worth. When it is not, only the focused pane is drawn
+ * and the split is kept, so the window never shows two panes it cannot read. Derived and never stored, like the panel's
+ * own yield: widening the window or closing the drawer brings the second pane back as it was.
+ *
+ * The panel is not the one that leaves for a split. It is the person's choice (`docs/09` §8.1) apart from yielding to
+ * a drawer, and a split that does not fit with it showing draws one pane until they hide it. Unmeasured is "fits", as
+ * for `sidebarYields`: taking a pane away because the window could not be measured is the wrong default.
+ */
+export function splitFits(mainPx: number, rootPx: number, sidebarShown: boolean, drawer: Drawer | null): boolean {
+  if (!(mainPx > 0) || !(rootPx > 0)) return true;
+  const centre = mainPx / rootPx - (sidebarShown ? SIDEBAR_REM : 0) - (drawer === null ? 0 : DRAWER_REM[drawer]);
+  return centre >= 2 * MIN_PANE_REM;
 }

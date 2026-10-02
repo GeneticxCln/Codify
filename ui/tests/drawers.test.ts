@@ -11,7 +11,8 @@ import assert from "node:assert/strict";
 import { registerTsx } from "./tsxLoader.ts";
 registerTsx();
 
-const { sidebarYields, nextDrawer, closeDrawer, SIDEBAR_REM, DRAWER_REM, MIN_CENTRE_REM } = await import("../src/drawers.ts");
+const { sidebarYields, splitFits, nextDrawer, closeDrawer, SIDEBAR_REM, DRAWER_REM, MIN_CENTRE_REM } = await import("../src/drawers.ts");
+const { MIN_PANE_REM } = await import("../src/panes.ts");
 
 test("with no drawer open the panel never yields, however narrow the window", () => {
   assert.equal(sidebarYields(300, 16, null), false);
@@ -70,4 +71,50 @@ test("a drawer's close button closes that drawer and nothing else", () => {
   assert.equal(closeDrawer("stats", "stats"), null);
   assert.equal(closeDrawer("history", "stats"), "history", "closing Stats closed History");
   assert.equal(closeDrawer(null, "stats"), null);
+});
+
+// ── a split needs room for two panes ────────────────────────────────────────
+
+test("a split fits when the centre column can hold two panes, counting what sits beside it, in rem", () => {
+  // Alone in the row: two panes' worth.
+  const need = 2 * MIN_PANE_REM;
+  for (const root of [16, 20, 28]) {
+    assert.equal(splitFits(need * root, root, false, null), true, `@${root}px: exactly enough`);
+    assert.equal(splitFits(need * root - 1, root, false, null), false, `@${root}px: a pixel short`);
+    // With the left panel shown it takes its share.
+    assert.equal(splitFits((need + SIDEBAR_REM) * root, root, true, null), true);
+    assert.equal(splitFits((need + SIDEBAR_REM) * root - 1, root, true, null), false);
+    // And a drawer takes its own.
+    for (const drawer of ["stats", "notifications", "clipboard", "history"] as const) {
+      const row = (need + DRAWER_REM[drawer]) * root;
+      assert.equal(splitFits(row, root, false, drawer), true, `${drawer} @${root}px`);
+      assert.equal(splitFits(row - 1, root, false, drawer), false, `${drawer} @${root}px`);
+      assert.equal(splitFits(row + SIDEBAR_REM * root, root, true, drawer), true);
+      assert.equal(splitFits(row + SIDEBAR_REM * root - 1, root, true, drawer), false);
+    }
+  }
+});
+
+test("the same window holds two panes at a small UI scale and one at a large one", () => {
+  assert.equal(splitFits(1280, 16, true, null), true, "100%");
+  assert.equal(splitFits(1280, 20, true, null), true, "125%: 64rem, 15 for the panel, 49 left");
+  assert.equal(splitFits(1280, 28, true, null), false, "175%");
+});
+
+test("at the minimum window the panel has to be hidden for two panes to fit", () => {
+  // 900px at 125% is 45rem: 30 left beside the panel, 45 without it, and two panes need 44.
+  assert.equal(splitFits(900, 20, true, null), false);
+  assert.equal(splitFits(900, 20, false, null), true);
+});
+
+test("a drawer that is open can take a split's second pane away", () => {
+  // 64rem: the panel yields to a drawer (so it does not count), a 20rem drawer leaves exactly two panes, 28rem does not.
+  assert.equal(splitFits(1280, 20, false, "history"), true);
+  assert.equal(splitFits(1280, 20, false, "stats"), false);
+});
+
+test("a window that cannot be measured never takes a pane away", () => {
+  for (const [main, root] of [[0, 20], [-5, 20], [Number.NaN, 20], [1200, 0], [1200, Number.NaN], [1200, -1]] as const) {
+    assert.equal(splitFits(main, root, true, "stats"), true, `${main}/${root} collapsed the split`);
+  }
 });
