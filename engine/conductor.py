@@ -41,6 +41,7 @@ validation:
 | `summarize` | `ExecutorService._scribe` | commits, and only after `review` approved |
 | `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
 | `todo` | `engine/todo.py` | none — the conductor's own note to its next run; advice to itself, read by nothing in the engine |
+| `ask_user` | `engine/ask.py` | none — ends the run with one question for the person; offered on a turn before a plan exists, never after one or during an approved run |
 
 So the conductor gains *choice* over which powers to use, never *new* powers.
 The move that writes is the fixer's, reached through the fixer's own method and
@@ -84,6 +85,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from collections.abc import Awaitable, Callable
 
+from engine.ask import MAX_OPTION_CHARS, MAX_OPTIONS, MAX_QUESTION_CHARS
 from engine.sandbox import CommandNotAllowed
 from engine.services import ApiError
 from engine.providers import FALLBACK_TRIGGER_CODES, ProviderError
@@ -127,6 +129,21 @@ CALL_MAX_TOKENS = 2048
 
 # Refusals the model is shown but cannot argue with. Everything else is
 # recoverable and comes back as text.
+
+
+class EndTurn(Exception):
+    """Raised by a tool whose whole effect is to end the run.
+
+    `ask_user` is the one: once the person has been asked something, nothing else in the run may happen until
+    they answer, so the loop stops at the call, drops whatever else the same reply asked for, and returns
+    `reply` as its answer. `question` is the structured form (`engine/ask.py`) that rides on the turn's reply
+    so a window can offer the options as choices.
+    """
+
+    def __init__(self, reply: str, question: dict[str, Any] | None = None) -> None:
+        super().__init__(reply)
+        self.reply = reply
+        self.question = question
 
 
 @dataclass(frozen=True)
@@ -277,6 +294,8 @@ class Conductor:
         self.exhausted = False
         self.nudged = False
         self.tools_used: list[str] = []
+        # Set when a tool ended the run (`EndTurn`): the loop stops there and its answer is the tool's reply.
+        self.ended: EndTurn | None = None
 
     def _swap_to_fallback(self, exc: ProviderError) -> bool:
         """Move the loop onto its fallback target, once. True when it moved.
@@ -448,6 +467,10 @@ class Conductor:
                     "name": call.name,
                     "content": content,
                 })
+                if self.ended is not None:
+                    # The person has been asked something. The rest of this reply is dropped unrun: a tool
+                    # that ran after the question would be a move made while its answer was still unknown.
+                    return self.ended.reply
 
     def _budget_refusal(self, name: str) -> str:
         return (
@@ -491,8 +514,9 @@ class Conductor:
                 return self._budget_refusal(call.name)
             now = ", ".join(t.name for t in self.tools)
             return (
-                f"`{call.name}` is not available right now: it is only offered when there is something "
-                f"for it to act on. The tools available now are: {now}. Call one of those, or "
+                f"`{call.name}` is not available right now: a tool is offered only when it can act (the "
+                "step moves once there is a plan, `ask_user` only while someone is there to answer, never "
+                f"during an approved run). The tools available now are: {now}. Call one of those, or "
                 "answer without a tool."
             )
         if call.name in STAGE_MOVES:
@@ -512,6 +536,9 @@ class Conductor:
         )
         try:
             return _result(await handler(coerce_arguments(spec, call.arguments)))
+        except EndTurn as end:
+            self.ended = end
+            return "Your question was put to the person. The run ends here; their answer is their next message."
         except (ApiError, CommandNotAllowed) as exc:
             # The engine refused. Recoverable-looking text would teach the model
             # to keep asking, so the refusal says it is final.
@@ -1025,6 +1052,38 @@ USE_SKILL = ToolSpec(
     },
 )
 
+ASK_USER = ToolSpec(
+    name="ask_user",
+    description=(
+        "Put one question to the person and stop. This ends your run: nothing after it happens, and their "
+        "answer is their next message. Use it only when you cannot go on without something only they know "
+        "(which of two designs, which file they meant, whether a change is allowed) and nothing you can read "
+        "or run would tell you. Do not use it to ask permission for something you can simply do, to ask what "
+        "to do when the request is clear, or to say you are unsure: answer or act. Offer `options` when the "
+        "answer is a choice between a few things; leave them out when it is a fact only they have. It is for "
+        "what you need before you can plan: once there is a plan, the plan is what you put to them, and it "
+        "is not available while an approved plan is running (a step ends finished, or paused with a reason)."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": f"the one question, in plain words (at most {MAX_QUESTION_CHARS} characters)",
+            },
+            "options": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    f"two to {MAX_OPTIONS} short choices the person can pick instead of typing, each at most "
+                    f"{MAX_OPTION_CHARS} characters; omit for an open question"
+                ),
+            },
+        },
+        "required": ["question"],
+    },
+)
+
 # The menu before a plan exists: the read tools, the skills, and the three moves
 # that produce a plan. Nothing here can change a file.
 BASE_TOOLS: tuple[ToolSpec, ...] = (
@@ -1039,7 +1098,7 @@ STEP_TOOLS: tuple[ToolSpec, ...] = (WRITE, VERIFY, REVIEW, SUMMARIZE, TODO)
 
 # Everything, for callers that want the whole vocabulary rather than one menu:
 # the refusal list, the tests, and the honest answer to "what can it do".
-TOOLS: tuple[ToolSpec, ...] = (*BASE_TOOLS, *STEP_TOOLS)
+TOOLS: tuple[ToolSpec, ...] = (*BASE_TOOLS, *STEP_TOOLS, ASK_USER)
 
 
 def tool_names() -> list[str]:

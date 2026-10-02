@@ -32,15 +32,66 @@
 import { isChatMode } from "./types";
 import type { Event, Goal } from "./types";
 
-/** The turn's answer: the last reply the engine flagged as this turn's. */
-export function turnReply(events: Event[] | undefined): string | null {
+/** The last log the engine flagged as this turn's reply: what `turnReply` and `turnQuestion` both read, so a question can never come from a different event than the words above it. */
+function lastTurnLog(events: Event[] | undefined): Event | null {
   const ordered = [...(events ?? [])].reverse();
   for (const ev of ordered) {
-    if (ev.type !== "log" || ev.payload?.turn !== true) continue;
-    const text = ev.payload?.message;
-    return typeof text === "string" && text.trim() ? text : null;
+    if (ev.type === "log" && ev.payload?.turn === true) return ev;
   }
   return null;
+}
+
+/** The turn's answer: the last reply the engine flagged as this turn's. */
+export function turnReply(events: Event[] | undefined): string | null {
+  const ev = lastTurnLog(events);
+  if (!ev) return null;
+  const text = ev.payload?.message;
+  return typeof text === "string" && text.trim() ? text : null;
+}
+
+/** The engine's limits on a question's options (`engine/ask.py`), applied again here rather than trusted. */
+export const MAX_QUESTION_OPTIONS = 4;
+export const MAX_QUESTION_OPTION_CHARS = 80;
+
+export interface TurnQuestion {
+  text: string;
+  /** The choices to offer as buttons. Empty for an open question, and for anything that is not a choice. */
+  options: string[];
+}
+
+/**
+ * The question the conductor put to the person, when the turn ended by asking one (`ask_user`; `docs/04` §1.4).
+ *
+ * It rides on the same event as the turn's reply, whose words are the question as prose, so history and speech
+ * carry it; this is the same question as data so the options can be buttons. The newest reply decides: a later
+ * plain answer clears an earlier question. Whatever the event holds is bounded again here (one line per
+ * option, at most four, each cut at 80 characters, a repeat said once), and a list that does not come to at
+ * least two options is not a choice and offers none. A `question` this build cannot read is no question: the
+ * reply's words are still shown.
+ */
+export function turnQuestion(events: Event[] | undefined): TurnQuestion | null {
+  const raw = lastTurnLog(events)?.payload?.question;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const { text, options: offered } = raw as { text?: unknown; options?: unknown };
+  if (typeof text !== "string" || text.trim().length === 0) return null;
+
+  let options: string[] = [];
+  if (Array.isArray(offered)) {
+    const seen = new Set<string>();
+    for (const entry of offered) {
+      if (typeof entry !== "string") continue;
+      let option = entry.replace(/\s+/g, " ").trim();
+      if (option.length === 0) continue;
+      if (option.length > MAX_QUESTION_OPTION_CHARS) option = `${option.slice(0, MAX_QUESTION_OPTION_CHARS - 1).trimEnd()}…`;
+      const key = option.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      options.push(option);
+      if (options.length === MAX_QUESTION_OPTIONS) break;
+    }
+  }
+  if (options.length < 2) options = [];
+  return { text: text.trim(), options };
 }
 
 /**

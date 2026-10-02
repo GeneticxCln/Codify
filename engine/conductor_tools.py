@@ -12,6 +12,8 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from engine.ask import AskRefused, parse_question
+from engine.conductor import EndTurn
 from engine.executor_support import (
     AgentOutputInvalid,
     CriticRejection,
@@ -79,6 +81,9 @@ class _Conducted:
     # The provider's own *code* (`provider_unreachable`, `rate_limited`) when its model failed under the run,
     # else None. A code and never its message: a pause shows it, and a provider's message is third-party text.
     failure_code: str | None = None
+    # The question the conductor put to the person, as data (`engine/ask.py`), when it ended the run with
+    # `ask_user`. The words are `answer`; this is what lets the window offer the options as choices.
+    question: dict[str, Any] | None = None
 
     @property
     def finished(self) -> bool:
@@ -193,6 +198,7 @@ class ConductorTools:
         'review',
         'summarize',
         'todo',
+        'ask_user',
         'use_skill',
     )
 
@@ -912,6 +918,35 @@ class ConductorTools:
         self.todo_edits += 1
         self.service._publish_todos(self.goal_id, todos)
         return f"{note}\n{todos.render()}"
+
+    async def ask_user(self, args: dict[str, Any]) -> str:
+        """Put one question to the person, and end the run.
+
+        Not a capability: it cannot approve a plan, write or run anything, and the answer is the person's next
+        message, an ordinary turn through the one door that creates turns (docs/00 §6.8). The menu does not
+        offer it while the goal is `RUNNING` or once a plan exists, and this refuses too, reading the stored
+        rows like `write`: a run carrying out a step the person approved has nobody there to answer and must
+        end finished or paused with a reason, and a plan is itself what the person is asked to answer.
+
+        A question the engine will not put (none, too long, one option) is a sentence back and the run goes on.
+        """
+        if self.service.goals.get(self.goal_id).status == "RUNNING":
+            return (
+                "There is nobody to answer while an approved plan is running, so `ask_user` is not available "
+                "now. Finish the step, or stop and say plainly what you need; the run will pause and tell "
+                "the person."
+            )
+        if self.service.goals.steps(self.goal_id):
+            return (
+                "There is a plan now, and the plan is what the person is looking at: they approve it, edit "
+                "it, or say what to change. `ask_user` is for what you need before you can plan. Stop and "
+                "say in a sentence what the plan assumes."
+            )
+        try:
+            question = parse_question(args)
+        except AskRefused as refusal:
+            return str(refusal)
+        raise EndTurn(question.prose(), question.to_payload())
 
 
 def _excerpt(text: str, limit: int = _DIFF_EXCERPT_CHARS) -> str:

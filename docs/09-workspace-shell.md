@@ -2353,6 +2353,7 @@ the pipeline already makes, through the same service:
 | `review` | `ExecutorService._critic` | approve or request changes; cannot write |
 | `summarize` | `ExecutorService._scribe` | commits, and only after `review` approved |
 | `todo` | `engine/todo.py`, over the goal's `todo_updated` events | none — the conductor's own note to its next run: bounded (20 items, 160 characters, 40 edits per run), one line each, put back in its prompt as *its own notes, not instructions*, never shown to a sub-agent and not in `RECALLABLE`. Nothing in the engine reads it to decide anything |
+| `ask_user` | `engine/ask.py` | none — ends the run with one question for the person (a few options at most), and the answer is their next message, an ordinary turn (docs/00 §6.8). Offered on a turn before a plan exists, never after one and never while an approved plan is running |
 | `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
 
 So the conductor gains *choice* over existing powers, never *new* ones. There is
@@ -2874,3 +2875,39 @@ durable in History, and the other three are not facts the engine keeps. The rule
 recorded sockets (the harness's `ctx.sockets`: the test is the engine on the other end) and checks each
 source is actually connected, that the header order is Stats, Notifications, History, that three drawers are
 one at a time, and that the list survives a restart.
+
+### 10.19 The conductor asks, and the answer is a turn
+
+A conductor that cannot go on without something only the person knows used to have one way to say so: prose
+that happened to end in a question mark. Nothing knew it was a question, so a model could ask and then carry
+on in the same reply, the window could not offer the choices as choices, and the nudge that tells a stuck
+model to "ask in one sentence and stop" had nothing that made it stop. `ask_user` is that something.
+
+It is a tool whose whole effect is to end the run (`EndTurn`, `engine/conductor.py`): the loop stops at the
+call and drops whatever else the same reply asked for. It carries a question (at most 500 characters) and
+optionally two to four options (each at most 80 characters, one line, a repeat said once; one option is not a
+choice and is refused). What the engine publishes is the turn's ordinary reply with the question as prose,
+numbered options included, and the same question as data on the same event (`question`, `docs/04` §1.4), so
+history and read-aloud carry it and the window can draw it.
+
+* **Not a capability, and not a new door.** It cannot approve a plan, write or run anything. The answer is the
+  person's next message, an ordinary turn through `POST /conversations/{id}/turns`: a button press sends the
+  option's words exactly as typing them would, there is no "answer" route, and nothing is held between the
+  question and the reply (invariant 8, §10.3). The reply is in the next turn's history like any reply, so
+  "Postgres" means something to the model that asked.
+* **Offered only where it can be answered and seen.** Never while the goal is `RUNNING` (an approved run has
+  nobody sitting at it; a step ends finished, or paused with a reason, §10.14), and never once a plan exists
+  (a turn that planned is drawn as its plan, so a question after it would not be seen; the answer to a plan is
+  Start, an edit, or a message). Both are enforced twice, by the menu and by the tool, which reads the stored
+  rows like `write` does.
+* **A question is a finished turn.** A change request that ends in a question is not "the conductor finished
+  without planning anything": it asked for the one thing it needs to start, and the engine says nothing else
+  about it.
+* **The buttons are for the moment.** `TurnExchange` draws the options only while nothing follows the
+  question (`answerable`): once the person has answered, or sent anything else, the question stays in the
+  history as words and offers nothing. Options are re-bounded in `ui/src/turnTranscript.ts` rather than
+  trusted, and are text on a button, never markup.
+
+Proven by `tests/test_ask_user.py` (the rules, the loop stopping, where it is offered, the turn it ends) and
+`ui/tests/askUser.test.ts` (the reading, and the buttons through the whole App sending an ordinary turn).
+

@@ -457,6 +457,7 @@ switch credits the turn's answer to a model that never produced it.
 | `review` | `ExecutorService._critic` | approve or request changes; cannot write |
 | `summarize` | `ExecutorService._scribe` | commits only after `review` approved |
 | `todo` | `engine/todo.py`, over the goal's `todo_updated` events | none — the conductor's own note to its next run: bounded (20 items, 160 characters, 40 edits per run), one line each, put back in its prompt as *its own notes, not instructions*, never shown to a sub-agent and not in `RECALLABLE`. Nothing in the engine reads it to decide anything |
+| `ask_user` | `engine/ask.py` | none — ends the run with one question for the person (a few options at most), and the answer is their next message, an ordinary turn (docs/00 §6.8). Offered on a turn before a plan exists, never after one and never while an approved plan is running |
 | `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
 
 Judgement is the model's; authority is the engine's. The conductor chooses among

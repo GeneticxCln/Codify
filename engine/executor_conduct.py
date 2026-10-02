@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from engine.chat_prompts import CHAT_SYSTEM_PROMPT, CONDUCTOR_SYSTEM_PROMPT
-from engine.conductor import BASE_TOOLS, Conductor, DEFAULT_MAX_MOVES, DEFAULT_MAX_TURNS, STEP_TOOLS
+from engine.conductor import ASK_USER, BASE_TOOLS, Conductor, DEFAULT_MAX_MOVES, DEFAULT_MAX_TURNS, STEP_TOOLS
 from engine.conductor_tools import ConductorTools, _Conducted
 from engine.executor_support import AgentNotConfigured
 from engine.laya import LayaDecision, build_state
@@ -280,10 +280,12 @@ class _Conduct(_Plan):
                 return
             if conducted.finished:
                 reply = _as_prose(conducted.answer or "") or "(no answer)"
-                self.goals.publish(self._event(
-                    goal_id, None, "log",
-                    {"level": "info", "message": reply, "turn": True},
-                ))
+                said: dict[str, Any] = {"level": "info", "message": reply, "turn": True}
+                if conducted.question is not None:
+                    # The conductor asked. The words above are the question as prose, for history and
+                    # speech; this is the same question as data, so the window can offer its options.
+                    said["question"] = conducted.question
+                self.goals.publish(self._event(goal_id, None, "log", said))
                 if not self.goals.steps(goal_id):
                     # Nothing was planned, so this turn is a finished answer.
                     #
@@ -296,7 +298,10 @@ class _Conduct(_Plan):
                     # change was needed) so it is not overridden; but it must not
                     # read as success either, or a workspace that nobody touched
                     # looks like one that was updated.
-                    if intent in CHANGE_INTENTS:
+                    #
+                    # Not when it asked: a conductor that put a question to the person has not finished
+                    # without planning, it is waiting for the one thing it needs to start.
+                    if intent in CHANGE_INTENTS and conducted.question is None:
                         self._log(
                             goal_id, None, "warn",
                             f"the gate read this as {intent!r} and the conductor "
@@ -572,7 +577,16 @@ class _Conduct(_Plan):
         """
 
         def menu() -> list[ToolSpec]:
-            return [*BASE_TOOLS, *(STEP_TOOLS if self.goals.steps(goal_id) else ())]
+            planned = bool(self.goals.steps(goal_id))
+            offered = [*BASE_TOOLS, *(STEP_TOOLS if planned else ())]
+            # A question needs somebody to answer it, and a place to be seen. An approved plan that is
+            # running has nobody sitting at it (a step ends finished, or paused with a reason, never parked
+            # on a question), and once a plan exists the plan is what the person is looking at: they
+            # approve it, edit it, or say what to change in their next message. A question asked after it
+            # would not even be drawn, because a turn that planned is shown as its plan.
+            if not planned and self.goals.get(goal_id).status != "RUNNING":
+                offered.append(ASK_USER)
+            return offered
 
         return menu
 
@@ -977,6 +991,7 @@ class _Conduct(_Plan):
             exhausted=conductor.exhausted,
             planned=bool(self.goals.steps(goal_id)),
             cancelled=conductor.was_cancelled or self._is_cancelled(goal_id),
+            question=conductor.ended.question if conductor.ended is not None else None,
         )
 
     def _conductor_fallback_notice(
