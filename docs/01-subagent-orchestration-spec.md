@@ -545,8 +545,17 @@ piece is invalidated the moment it stops being true:
   that failed during the run `FAILED`; the unconditional `COMPLETED` raised
   `illegal_status` out of the turn after its answer was shown.
 
+- **A failure says why.** `verify` and the fixer's retry carry `output_tail`, the
+  end of what the failed command printed (`library.command_tail`: stderr up to
+  half the budget, stdout the rest, the *end* of each, since a test runner puts
+  its reason last). `format_command`, which the conductor's `run_command` and the
+  librarian use, shows stdout and stderr when both exist; it used to show stdout
+  alone, so a banner hid the traceback. The fixer's view of a file longer than
+  4000 characters now ends with how much was not shown.
+
 Proven by `tests/test_conductor_moves_state.py`, which drives the real moves, the
-real fixer and a real git repository and asserts on files, commits and step rows.
+real fixer and a real git repository and asserts on files, commits and step rows,
+and `tests/test_failure_visibility.py` for the output.
 
 **`delegate` is gone, and its absence is the point.** It ran the whole recipe —
 librarian, design, planner — whether or not the request needed them, which made

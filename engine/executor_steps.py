@@ -23,7 +23,7 @@ from engine.executor_support import (
     _verifier_outcome,
 )
 from engine.fs import FileSystemService, PathEscapeError, ProtectedRootError
-from engine.library import READ_ONLY_TIMEOUT_S
+from engine.library import READ_ONLY_TIMEOUT_S, command_tail
 from engine.models import Goal, PlanStep
 from engine.providers import ProviderError
 from engine.sandbox import CommandNotAllowed
@@ -606,6 +606,10 @@ class _Steps(_Design):
                 lines.append(
                     f"Command that was run: {argv_str} (exit {outcome.get('exit_code')})"
                 )
+            if outcome.get("output_tail"):
+                # The reason, not just the fact: "tests failed" and an exit code sent the second attempt
+                # back to guess at what the first got wrong.
+                lines.append(f"What the command printed (the last part):\n{outcome['output_tail']}")
             lines.append(
                 "Fix what the failure describes. Do not start over from scratch — "
                 "edit your previous approach."
@@ -838,6 +842,7 @@ class _Steps(_Design):
                     "refused": refusals or [],
                     "ran": argv is not None,
                     "brand_drifts": brand_drifts,
+                    "output_tail": command_tail(result) if result else "",
                 }
                 # Explicit fields rather than **-splatting: `outcome` also
                 # carries `ran`/`refused` (event-payload keys the critic's
@@ -846,7 +851,7 @@ class _Steps(_Design):
                     goal_id, step, argv=outcome["argv"],
                     verdict=outcome["verdict"], explanation=outcome["explanation"],
                     exit_code=outcome["exit_code"], refusals=outcome["refused"],
-                    brand_drifts=brand_drifts,
+                    brand_drifts=brand_drifts, output_tail=outcome["output_tail"],
                 )
                 self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="verifier")
                 return outcome

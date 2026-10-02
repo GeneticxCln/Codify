@@ -396,6 +396,7 @@ class _ExecutorCore:
         exit_code: int | None = None,
         refusals: list[str] | None = None,
         brand_drifts: list[str] | None = None,
+        output_tail: str = "",
     ) -> None:
         if verdict not in ("pass", "fail", "skip"):
             raise AgentOutputInvalid(f"verifier verdict invalid: {verdict!r}", role="verifier")
@@ -414,6 +415,11 @@ class _ExecutorCore:
                 # contract. Advisory: they are on the record the critic reads
                 # and they never change the verdict, which stays the tests'.
                 "brand_drifts": brand_drifts or [],
+                # The end of what the command printed (`library.command_tail`), so the fixer's retry and the
+                # conductor's `verify` can say *why* it failed and not only that it did. Third-party text,
+                # produced by the repository's own code: never recallable (`RECALLABLE["test_result"]` is
+                # the verdict alone) and only ever shown to the role that has to fix the failure.
+                "output_tail": output_tail,
             },
         ))
         if verdict == "fail":
