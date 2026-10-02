@@ -574,11 +574,19 @@ class _ExecutorCore:
             )
         db.commit()
 
-    def _reset_step(self, goal_id: str, step: PlanStep) -> None:
-        self.goals._db.execute(
-            "UPDATE plan_steps SET status='PENDING', review_notes=NULL, commit_message=NULL, last_agent_role=NULL WHERE id = ?",
-            (step.id,),
-        )
+    def _reset_step(self, goal_id: str, step: PlanStep, *, keep_notes: bool = False) -> None:
+        if keep_notes:
+            # A retry that a conductor will drive: the critic's notes are what its next `write` acts on.
+            self.goals._db.execute(
+                "UPDATE plan_steps SET status='PENDING', commit_message=NULL, last_agent_role=NULL WHERE id = ?",
+                (step.id,),
+            )
+        else:
+            self.goals._db.execute(
+                "UPDATE plan_steps SET status='PENDING', review_notes=NULL, commit_message=NULL, "
+                "last_agent_role=NULL WHERE id = ?",
+                (step.id,),
+            )
         self.goals._db.commit()
 
     def _set_step(self, goal_id: str, step: PlanStep, status: str, **fields: Any) -> None:

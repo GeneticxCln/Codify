@@ -608,6 +608,15 @@ schema.
   be `calls_made >= max_turns`, which is also true of a model that *answered* on
   that last call, so a finished run read as cut off and the caller overrode it
   (`tests/test_conductor_budget.py`).
+- **An approved plan is driven one step per run.** After Start,
+  `run_conductor_resume` gives the conductor one open step at a time, each run
+  with its own `conductor_max_turns` and `conductor_max_moves` (default 14 and
+  12), and judges by the step's *stored* status. A step the run did not complete
+  pauses the goal with a `reason_code` from `models.PAUSE_CODES`; the engine adds
+  no second pass behind the conductor (`docs/09` §10.14,
+  `tests/test_conductor_drives.py`). The recipe still drives where there is no
+  tool-capable model, for `parallel` goals and with `conductor_drives_execution`
+  off.
 - **Spend is bounded twice.** `conductor_max_moves` bounds *stage* moves
   separately from model calls, because they are not the same currency: a model
   call costs seconds, a `write` or a `plan` is a whole sub-agent run that can

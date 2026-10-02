@@ -359,7 +359,9 @@ missing, `make doctor` says so as a note, not a failure; everything else runs wi
    such as `ruff check`, `mypy`, `tsc --noEmit` and `make lint`, read-only git), and a linter is never handed a flag that
    edits. The librarian's run in `read_only` mode, so reconnaissance can never change the workspace.
 5. **Human in the loop.** When the critic requests changes the step pauses and the goal transitions to `PAUSED`;
-   only a human resumes it.
+   only a human resumes it. The same goes for a conductor that cannot finish a step (it ran out of calls, lost its
+   model, or stopped): the goal pauses with a stated reason and your Start picks it up at that step. There is no
+   second engine pass behind the conductor that quietly finishes it.
 6. **Key storage.** Keys never reach SQLite and are never echoed by the API. They go to the OS keyring when one is
    usable, otherwise to an owner-only `~/.codify/secrets.json`, because a machine without a keyring must still be
    able to store a key. The settings screen says which is in force.

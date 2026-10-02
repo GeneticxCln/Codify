@@ -2304,7 +2304,12 @@ async def retry_step(goal_id: str, step_id: str, body: VersionedAction, request:
     # Everything that can be refused is decided here, and the driver is claimed here; the step
     # itself runs in the background and the stream reports how it went. The request used to
     # await the whole step, holding the connection for minutes with no driver claimed.
-    updated_step = executor.begin_retry(goal_id, step_id, body.expected_version)
+    updated_step = executor.begin_retry(
+        goal_id, step_id, body.expected_version,
+        # The critic's notes are what a conductor acts on when it takes the step again, so a retry it will
+        # drive keeps them. The recipe's fixer never reads them, and for it they would only sit on the timeline.
+        keep_notes=executor.conductor_can_drive(goal_id),
+    )
     _spawn(request.app, _retry_and_drive(request.app, goal_id, step_id), goal_id)
     return updated_step
 
@@ -2530,10 +2535,17 @@ async def _retry_and_drive(app: FastAPI, goal_id: str, step_id: str) -> None:
     """Run the retried step, then drive whatever is left, holding the driver `begin_retry` claimed."""
     executor = app.state.executor
     try:
-        await executor.run_step(goal_id, step_id)
-        # Only a goal still RUNNING is driven further: a retried step that failed, or a Cancel that
-        # landed during it, ends here (`_run_steps_locked` checks).
-        await _run_steps_locked(app, goal_id)
+        if executor.conductor_can_drive(goal_id):
+            # The conductor owns every step it is given, a retried one included: it resumes at the step the
+            # person named and carries on through whatever is still open, pausing the goal with a reason if it
+            # cannot finish one. Running the recipe's `run_step` here would be the second pipeline the
+            # conductor is supposed to have replaced.
+            await executor.run_conductor_resume(goal_id, focus_step_id=step_id)
+        else:
+            await executor.run_step(goal_id, step_id)
+            # Only a goal still RUNNING is driven further: a retried step that failed, or a Cancel that
+            # landed during it, ends here (`_run_steps_locked` checks).
+            await _run_steps_locked(app, goal_id)
     finally:
         executor.release_driver(goal_id)
 
@@ -2577,15 +2589,14 @@ async def _run_steps_locked(app: FastAPI, goal_id: str) -> None:
     # what lets the conductor be the default without a machine losing its ability
     # to execute a plan at all.
     if executor.conductor_can_drive(goal_id):
+        # And that is the end of the engine's part. The conductor completes every step it is given, or
+        # pauses the goal with a reason and the person's Start picks it up. There used to be a sweep here that
+        # ran any step left open through the fixed recipe, from scratch: a conductor that wrote a step and
+        # ran out of calls before `summarize` had the fixer run on it again. The recipe is still how a plan
+        # is driven when this install has no tool-capable model, for `parallel` goals, and through
+        # `POST /goals`; it is no longer a second driver behind the first.
         await executor.run_conductor_resume(goal_id)
-        if app.state.goals.get(goal_id).status != "RUNNING":
-            # Cancelled or paused while the conductor was driving. That wins.
-            return
-        # Fall through. Anything the conductor did not complete is still driven
-        # by the engine's own sequence below, so the recipe is the floor: a
-        # model that is not yet good at this costs the plan some time and
-        # nothing else. Without this, "the conductor drives execution" would be
-        # a switch that can strand a plan half-executed.
+        return
     remaining = [s for s in app.state.goals.steps(goal_id) if s.status != "COMPLETED"]
     while remaining:
         refreshed = app.state.goals.get(goal_id)

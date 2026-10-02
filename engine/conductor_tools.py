@@ -75,6 +75,9 @@ class _Conducted:
     # documented degradation to the engine's own path (docs/09 §10.9), not a failure, and the log must not
     # say a model failed when none was ever called.
     unavailable: bool = False
+    # The provider's own *code* (`provider_unreachable`, `rate_limited`) when its model failed under the run,
+    # else None. A code and never its message: a pause shows it, and a provider's message is third-party text.
+    failure_code: str | None = None
 
     @property
     def finished(self) -> bool:
@@ -214,7 +217,34 @@ class ConductorTools:
         self.state: dict[str, _StepState] = {}
 
     def _state_of(self, step_id: str) -> _StepState:
-        return self.state.setdefault(step_id, _StepState())
+        state = self.state.get(step_id)
+        if state is None:
+            state = self.state[step_id] = _StepState()
+            self._recover_files(step_id, state)
+        return state
+
+    def _recover_files(self, step_id: str, state: _StepState) -> None:
+        """The files an earlier run wrote for this step, from the diff events it published.
+
+        A run is one conductor over one step, and a step can take more than one run: the budget ran out after
+        `write`, the critic paused the goal, the provider died. Without this the next run found "nothing has
+        been written for that step in this run" and had to write it again, and the fixer ran twice for one
+        step. Only the *files* come back. A verdict and an approval describe the files as they were when they
+        were given, and are never recovered: `verify` and `review` run again in the run that commits.
+        """
+        latest: dict[str, dict[str, Any]] = {}
+        for event in self.service.goals.events_after(self.goal_id, 0):
+            if event.type != "diff" or event.step_id != step_id:
+                continue
+            payload = event.payload or {}
+            if payload.get("path"):
+                latest[str(payload["path"])] = {
+                    "path": str(payload["path"]),
+                    "action": "written earlier",
+                    "unified_diff": str(payload.get("unified_diff") or ""),
+                    "changed": True,
+                }
+        state.files.update(latest)
 
     def step_for(self, step_id: str) -> PlanStep | str:
         """The step, or the sentence explaining which ids exist.

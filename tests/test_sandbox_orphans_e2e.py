@@ -661,6 +661,12 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
                 "model_name": "e2e-model",
             })
             self.assertEqual(200, response.status_code, f"configuring {role}: {response.text}")
+        # This file pins what the *engine* does with a process it started, not who decided to start it. The
+        # fake answers every role call in a fixed shape and cannot play a conductor, and a conductor that
+        # stopped without finishing the step is now a paused goal rather than a step the recipe quietly ran
+        # (docs/09 §10.14). The recipe is the documented driver when the conductor is switched off.
+        response = client.put("/settings/engine", json={"conductor_drives_execution": 0})
+        self.assertEqual(200, response.status_code, f"switching the conductor off: {response.text}")
 
     def _create_workspace(self, client: httpx.Client, workspace: Path) -> str:
         response = client.post("/workspaces", json={"name": "ws", "root_path": str(workspace)})

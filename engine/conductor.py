@@ -95,10 +95,14 @@ from engine.toolcall import ToolReply, ToolSpec, coerce_arguments
 MAX_TOOL_RESULT_CHARS = 12000
 
 # The cap is on *model calls*, not tool calls, because a model call is what
-# costs money and time. Eight is enough for "look at this, look at that, now
-# answer" and low enough that a model which has lost the thread cannot spin a
-# key for an hour. Configurable via `conductor_max_turns`.
-DEFAULT_MAX_TURNS = 8
+# costs money and time. A *turn* needs only a handful ("look at this, look at
+# that, now answer"). A *step of an approved plan* needs more: its four moves
+# (`write`, `verify`, `review`, `summarize`) are four calls, a failed `verify`
+# sends it back through `write`, and it reads in between. The driver gives each
+# step a budget of its own, so fourteen is one step's worth and a model that has
+# lost the thread still cannot spin a key for an hour. Configurable via
+# `conductor_max_turns`.
+DEFAULT_MAX_TURNS = 14
 
 # A second, separate cap, because these two budgets are not the same currency.
 # A model call costs seconds; a *stage move* (recon, plan, write, verify) costs

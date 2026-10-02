@@ -501,7 +501,9 @@ class _Steps(_Design):
         await self.run_step(goal_id, step_id)
         return self._step(goal_id, step_id)
 
-    def begin_retry(self, goal_id: str, step_id: str, expected_version: int) -> PlanStep:
+    def begin_retry(
+        self, goal_id: str, step_id: str, expected_version: int, *, keep_notes: bool = False,
+    ) -> PlanStep:
         """Validate a retry, claim the goal's driver, re-open the step, and return at once.
 
         The retry route used to await the whole step inside the request — minutes of fixer,
@@ -511,11 +513,12 @@ class _Steps(_Design):
         409; the run itself is the caller's to start in the background, and the driver claimed
         here is theirs to release when it ends.
         """
-        step = self._prepare_retry(goal_id, step_id, expected_version, claim=True)
+        step = self._prepare_retry(goal_id, step_id, expected_version, claim=True, keep_notes=keep_notes)
         return step
 
     def _prepare_retry(
         self, goal_id: str, step_id: str, expected_version: int, *, claim: bool = False,
+        keep_notes: bool = False,
     ) -> PlanStep:
         step = self._step(goal_id, step_id)
         if not (step.status == "FAILED" or (step.status == "IN_PROGRESS" and bool(step.review_notes))):
@@ -547,7 +550,7 @@ class _Steps(_Design):
             raise ApiError(409, "driver_busy", "another driver is already running this goal")
         try:
             self.goals.update_status(goal_id, expected_version, "RUNNING")
-            self._reset_step(goal_id, step)
+            self._reset_step(goal_id, step, keep_notes=keep_notes)
         except BaseException:
             # A refused or failed retry must not leave the goal claimed by nobody.
             if claim:
@@ -1091,7 +1094,9 @@ class _Steps(_Design):
                 prompt = f"{base_prompt}\n\n--- Your requested inspection round ---\n{output}\n\nNow give your decision. {tail}"
                 continue
             if decision == "approve":
-                self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="critic")
+                # An approval supersedes the notes of an earlier rejection: they were acted on, and a run
+                # that resumes this step later must not be told to act on them again.
+                self._set_step(goal_id, step, "IN_PROGRESS", review_notes=None, last_agent_role="critic")
                 return
             if decision == "request-changes":
                 if not reasons:

@@ -96,7 +96,7 @@ class SettingsService:
         # engine stops it and answers with what it has. Bounded because a model
         # that has lost the thread will call tools forever, and an unbounded
         # loop is a way to spend a key and a machine's time on nothing.
-        "conductor_max_turns": (8, lambda v: max(1, min(v, 40))),
+        "conductor_max_turns": (14, lambda v: max(1, min(v, 40))),
         # How many *stage moves* one conductor run may make (recon, design, plan,
         # write, verify, review, summarize). A separate budget because the two
         # are not the same currency: a model call costs seconds, while a stage

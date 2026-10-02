@@ -502,11 +502,11 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/goals` | query: `workspace_id?`, `status?`, `limit` (1–200, default 50), `offset` | `Goal[]` — active goals first, then newest |
 | `GET` | `/goals/{id}` | — | `Goal` + `steps: PlanStep[]` |
 | `DELETE` | `/goals/{id}` | — | deletes the run record; events/steps/proposals cascade, counts returned. 409 `goal_in_progress` while PLANNING/RUNNING or a driver holds it. Never touches files |
-| `POST` | `/goals/{id}/start` | `{expected_version}` extra=forbid | `Goal` |
+| `POST` | `/goals/{id}/start` | `{expected_version}` extra=forbid | `Goal`; the goal is `RUNNING` from the response, and the conductor (or the recipe, where it still drives: no tool-capable model, `conductor_drives_execution = 0`, or a `parallel` goal) takes the open steps in the background. A conductor that cannot finish a step pauses the goal with a `goal_status` reason (§1.4); Start resumes it at that step |
 | `POST` | `/goals/{id}/pause` | `{expected_version}` | `Goal` |
 | `POST` | `/goals/{id}/cancel` | `{expected_version}` | `Goal` |
 | `PATCH` | `/goals/{id}/steps/{step_id}` | `{expected_version, title?, description?, suggested_paths?}` extra=forbid | `PlanStep` (PENDING goals only) |
-| `POST` | `/goals/{id}/steps/{step_id}/retry` | `{expected_version}` | the re-opened `PlanStep`, returned **at once**: everything refusable (409 `illegal_status`, `step_not_retryable`, `driver_busy`, `retry_collides_with_running`, `version_conflict`) is decided in the request, the goal's driver is claimed there (`is_driving` is true from the response until the run ends), and the step runs in the background — progress is on the goal stream, not in this response |
+| `POST` | `/goals/{id}/steps/{step_id}/retry` | `{expected_version}` | the re-opened `PlanStep`, returned **at once**: everything refusable (409 `illegal_status`, `step_not_retryable`, `driver_busy`, `retry_collides_with_running`, `version_conflict`) is decided in the request, the goal's driver is claimed there (`is_driving` is true from the response until the run ends), and the step runs in the background — progress is on the goal stream, not in this response. Where the conductor drives, the retried step is a conductor run with that step in focus and the critic's notes are kept for it; where the recipe drives, it is `run_step` and the notes are cleared |
 | `GET` | `/goals/{id}/events?after={seq}` | — | `Event[]` where `sequence > after` |
 | `GET` | `/goals/{id}/usage` | — | token totals + `parallel_peak`/`parallel_waves` (from `usage` events) |
 | `GET` | `/goals/{id}/audit` | — | the goal's audit document (plan edits, fallbacks, fix retries, errors, outcomes, usage, silent roles) |

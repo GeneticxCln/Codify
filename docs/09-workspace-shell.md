@@ -2382,8 +2382,12 @@ model, and "the model asked for it" is not a reason to run `git commit`.
 
 ### 10.7 The loop terminates, and says so
 
-`conductor_max_turns` (default 8, settings-clamped to 1..40) bounds *model
-calls*, because that is what costs money. The bound is a hard stop, not advice:
+`conductor_max_turns` (default 14, settings-clamped to 1..40) bounds *model
+calls*, because that is what costs money. It is a budget per *run*: a turn is a
+run, and so is each step of an approved plan (§10.14), so a plan of five steps
+has five budgets and step one cannot starve step five. Fourteen is one step's
+worth (four moves, a failed `verify` sent back through `write`, and the reads
+between); a turn needs far fewer. The bound is a hard stop, not advice:
 when it is reached the loop makes one final call, **drops** whatever tools that
 reply asks for, and returns its text with a sentence saying it was cut off. An
 earlier version appended a "you are out of calls" nudge and then honoured the
@@ -2554,18 +2558,46 @@ fixer writes, and the move refuses while the goal is unapproved. The seam is
 `RUNNING`, reachable only through `POST /goals/{id}/start` — a person saying yes.
 So a turn that produces a plan ends with the plan in front of the user and
 **nothing written**; the approval starts it, and `run_conductor_resume` hands the
-approved plan back to the same conductor to execute. That run is re-derived from
-rows — the goal, its steps, the conversation — rather than a persisted
-transcript, which is the same choice §10.5 already makes for turn history.
+approved plan back to the conductor to execute.
 
-**The recipe is the floor.** If the conductor's model errors, returns empty
-content, or spends its whole call budget without producing an answer or a plan,
-`run_chat` runs the
-sequence it would have run before the conductor existed and says that it did. If
-the conductor drives an approved plan but leaves steps open, the engine finishes
-them. A model that is bad at this therefore costs a plan some time and nothing
-else, and `conductor_drives_execution = 0` turns the arrangement off without a
-rebuild.
+**After Start the conductor owns every step it is given.** It is one conductor
+*run* per open step, each with its own budget and a prompt that names the plan in
+outline and gives one step in full (the critic's earlier notes ride along as
+quoted data when there are any). One run over the whole plan piled every move's
+result into one context, which a local model's window cannot hold for a plan of
+any size. Each run is re-derived from rows — the goal, its steps, the step's diff
+events — rather than a persisted transcript, which is the same choice §10.5
+already makes for turn history: a resumed step recovers the *files* an earlier
+run wrote (so `verify` works without a second `write`) but never a verdict or an
+approval, which describe files as they were when they were given.
+
+The step's stored status is the judge, never the conductor's last sentence. A
+step that is `COMPLETED` after the run was completed, however the run ended. One
+that is not leaves the goal `PAUSED` with a reason from `models.PAUSE_CODES`
+(`conductor_budget`: it used its calls; `conductor_provider`: its model could not
+be reached; `conductor_stopped`: it stopped without finishing; and the critic's
+`critic_rejected`), and **nothing else touches the step**. There is no engine
+sweep behind the conductor: that sweep re-ran any step left open through the
+fixed recipe from scratch, so a conductor that wrote a step and ran out of calls
+before `summarize` had the fixer run on it a second time, and "the conductor
+drives execution" was a switch that could double-write. Only the person's Start
+resumes a paused goal, at the step that was left open; Retry resumes with that
+step in focus, and keeps the critic's notes for the conductor that will act on
+them (the recipe's fixer never reads them, so a recipe retry still clears them).
+A critic that asks for changes pauses the goal and the conductor is told so, with
+every reason, and told to stop; the next `write` is allowed again only after
+Start (`tests/test_conductor_drives.py`).
+
+**Where the recipe still drives an approved plan.** An install with no
+tool-capable model, a goal with `parallel` set (the engine's batcher proves which
+steps touch disjoint paths and a conductor has no such proof), and
+`conductor_drives_execution = 0`, which turns the conductor off without a rebuild.
+Benchmarks and `scripts/replay_trace.py` call the recipe directly and measure it.
+
+**The recipe is the floor for a *turn*.** If the conductor's model errors, returns
+empty content, or spends its whole call budget without producing an answer or a
+plan, `run_chat` runs the sequence it would have run before the conductor existed
+and says that it did.
 
 One distinction the design rests on, and the reason declining and failing are
 modelled separately: **a conductor that declines is obeyed; a conductor that
@@ -2636,8 +2668,9 @@ The five runs below were against `qwen2.5-coder:7b` on a local Ollama, through
 
 The honest conclusion from 3, 5 and 6: **the architecture is sound and a 7B local
 model is not good enough to drive it reliably.** That is the risk this section
-named before it was built, it is why the recipe is the floor, and it is why
-`conductor_drives_execution` exists. A model that can call three tools in a row
+named before it was built, it is why a goal the conductor cannot finish pauses
+for a person rather than failing, and it is why `conductor_drives_execution`
+exists. A model that can call three tools in a row
 without narrating them is a different machine, not a different design.
 
 ### 10.15 A benign turn is a conversation
