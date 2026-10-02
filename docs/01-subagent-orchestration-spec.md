@@ -517,6 +517,21 @@ from someone else's API, not an error in our code. Written once and read once.
 `Conductor`/`_conduct` asks it *first* — a provider that cannot do tools must
 degrade to a plain answer, not fail the question.
 
+**What each translation must keep.** A tool's schema is sent as written to OpenAI
+and Anthropic and rebuilt for Google, and every property of it is the model's only
+description of an argument. So: every array declares `items` (OpenAI's and
+Gemini's function validators refuse one that does not, and `git_history.args` and
+`run_command.argv` shipped without), `ToolSpec.to_google` keeps each property's
+`description`, string `enum`, `items` and nested `properties` (it once kept only
+`type`, so Gemini never saw a description), and `coerce_arguments` parses an array
+a small model wrote out as a JSON string, *only* when it is a list of strings —
+`"pytest -q"` is not guessed at, the sandbox refuses it. `schema_problems(spec,
+dialect)` checks the document each provider is actually sent, over the real
+`TOOLS`, in `tests/test_tool_schemas.py`, with negative controls so a checker that
+finds nothing wrong cannot pass for one that works. It is our reading of the
+providers' rules, not their validators: only a live call says one accepts a
+schema.
+
 ### 5.3 What the loop guarantees
 
 - **It terminates.** `conductor_max_turns` bounds model calls. On the last one

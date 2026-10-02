@@ -501,6 +501,9 @@ GIT_HISTORY = ToolSpec(
         "properties": {
             "args": {
                 "type": "array",
+                # `items` is not optional: OpenAI's and Gemini's function validators refuse an array
+                # that does not say what it holds (tests/test_tool_schemas.py checks every tool).
+                "items": {"type": "string"},
                 "description": "argv after 'git', e.g. [\"log\", \"-5\", \"--oneline\"]",
             },
         },
@@ -525,6 +528,7 @@ RUN_COMMAND = ToolSpec(
         "properties": {
             "argv": {
                 "type": "array",
+                "items": {"type": "string"},
                 "description": "the command, e.g. [\"pytest\", \"-q\"]",
             },
             "reason": {"type": "string", "description": "what this run is meant to show"},
