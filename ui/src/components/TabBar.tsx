@@ -31,14 +31,14 @@ import { threadLabel } from "../threadTitle";
  */
 
 /** One icon per kind, so a tab's shape is its kind. */
-const KIND_ICON: Record<TabKind, React.FC<{ className?: string }>> = {
+export const KIND_ICON: Record<TabKind, React.FC<{ className?: string }>> = {
   chat: MessageSquareText,
   terminal: Terminal,
   browser: Globe,
 };
 
 /** What the accessible name says, since the icon alone is not a label. */
-const KIND_NAME: Record<TabKind, string> = {
+export const KIND_NAME: Record<TabKind, string> = {
   chat: "Conversation",
   terminal: "Terminal",
   browser: "Browser",
