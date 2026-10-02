@@ -65,6 +65,7 @@ class ToolCase(unittest.IsolatedAsyncioTestCase):
         self.bridge = SurfaceBridge()
         self.logged: list[str] = []
         self.asked: list[dict[str, Any]] = []
+        self.edits: dict[str, int] = {}
         self.tools = self.make(self.bridge)
 
     def make(self, bridge: SurfaceBridge | None) -> ConductorTools:
@@ -72,6 +73,7 @@ class ToolCase(unittest.IsolatedAsyncioTestCase):
             git=None,
             workspaces=SimpleNamespace(get=lambda _id: SimpleNamespace(root_path=str(self.root))),
             surfaces=bridge,
+            _editor_edits=self.edits,
             _log=lambda goal_id, step_id, level, message: self.logged.append(message),
         )
         goal = SimpleNamespace(workspace_id="ws-1")
@@ -199,6 +201,22 @@ class TestDoing(ToolCase):
         )
 
         self.assertEqual(1, self.asked[0]["args"]["count"])
+
+    async def test_an_edit_that_landed_is_counted_for_the_goal_and_one_that_did_not_is_not(self) -> None:
+        await self.with_window(
+            self.tools.edit_editor({"path": "src/a.py", "old_text": "1", "new_text": "2"}), answer=EDIT_RESULT
+        )
+        self.assertEqual({"goal-1": 1}, self.edits, "an edit that changed the text was not counted")
+
+        await self.with_window(
+            self.tools.edit_editor({"path": "src/a.py", "old_text": "1", "new_text": "2"}), answer={**EDIT_RESULT, "replaced": 0}
+        )
+        self.assertEqual({"goal-1": 1}, self.edits, "an edit that replaced nothing was counted as a change")
+
+        await self.with_window(
+            self.tools.edit_editor({"path": "src/a.py", "old_text": "1", "new_text": "2"}), ok=False, error="That text is not in src/a.py."
+        )
+        self.assertEqual({"goal-1": 1}, self.edits, "a refused edit was counted as a change")
 
     async def test_a_refusal_from_the_editor_reaches_the_model_and_says_nothing_changed(self) -> None:
         text = await self.with_window(

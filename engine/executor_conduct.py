@@ -300,8 +300,10 @@ class _Conduct(_Plan):
                     # looks like one that was updated.
                     #
                     # Not when it asked: a conductor that put a question to the person has not finished
-                    # without planning, it is waiting for the one thing it needs to start.
-                    if intent in CHANGE_INTENTS and conducted.question is None:
+                    # without planning, it is waiting for the one thing it needs to start. And not when it
+                    # changed the text in the person's open editor: that is the change, in the one place the
+                    # conductor may make one, waiting for the person to keep it or revert it (docs/09 §13.4).
+                    if intent in CHANGE_INTENTS and conducted.question is None and not conducted.buffer_edited:
                         self._log(
                             goal_id, None, "warn",
                             f"the gate read this as {intent!r} and the conductor "
@@ -972,6 +974,8 @@ class _Conduct(_Plan):
             goal_id, None, "agent_assigned",
             {"role": role, "provider": cfg.provider, "model": model, "conductor": True},
         ))
+        # A count left by an earlier run of this goal (a step that was cancelled mid-edit) must not be this run's.
+        self._editor_edits.pop(goal_id, None)
         try:
             answer = await conductor.run(prompt, history)
         except ProviderError as exc:
@@ -985,6 +989,7 @@ class _Conduct(_Plan):
                 # goal's rows, not something the failure path may assume.
                 planned=bool(self.goals.steps(goal_id)),
                 failure_code=exc.code,
+                buffer_edited=self._editor_edits.pop(goal_id, 0) > 0,
             )
         return _Conducted(
             answer=answer,
@@ -992,6 +997,7 @@ class _Conduct(_Plan):
             planned=bool(self.goals.steps(goal_id)),
             cancelled=conductor.was_cancelled or self._is_cancelled(goal_id),
             question=conductor.ended.question if conductor.ended is not None else None,
+            buffer_edited=self._editor_edits.pop(goal_id, 0) > 0,
         )
 
     def _conductor_fallback_notice(

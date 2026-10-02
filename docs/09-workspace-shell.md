@@ -3046,7 +3046,7 @@ and not seen. If a terminal selection does not appear in the history, that is th
 
 ## 12. Split panes (built)
 
-The centre column can show two views side by side: **a chat, a terminal or an editor beside any of those**, but never two chats and never a browser page. A split is made three
+The centre column can show two views side by side: **a chat, a terminal, an editor or a browser page beside any of those**, but never two chats and never two pages. A split is made three
 ways: a right-click on a tab (or the Menu key on a focused one), an entry in the command palette (Ctrl+K, type
 "split"), and **Ctrl+.**, which splits and, pressed again, closes. The rules are `ui/src/panes.ts`, pure and DOM-free like
 `tabs.ts`; the divider and the two panes are `ui/src/components/SplitPanes.tsx`; the hook that keeps the split in step
@@ -3064,8 +3064,8 @@ mean what they did.
 
 | | |
 |---|---|
-| Chat + terminal, terminal + terminal, **and any of those with an editor** (§13) | allowed. An editor shares nothing a second one would fight over: no message box, no running goal, no `insertRequest`. Two editors are two files. |
-| Anything with a **browser page** | refused. A page is a native child webview seated over one measured rectangle (§7.3): Rust applies one `Bounds` to every page and shows one at a time. Two visible pages, or one in half a column, are shell changes this does not make. It is also what makes a DOM divider safe: no native view is ever in the centre while a split shows. |
+| Chat + terminal, terminal + terminal, **and any of those with an editor** (§13) and **a browser page** (§12.8) | allowed. An editor shares nothing a second one would fight over: no message box, no running goal, no `insertRequest`. Two editors are two files. A page takes the rectangle the shell was already given: it is the one native view in the column. |
+| **Browser page + browser page** | refused. A page is a native child webview seated over one measured rectangle (§7.3): Rust applies one `Bounds` to every page and shows one at a time. Two visible pages would need a rectangle for each and a set of visible pages: the shell changes §12.8 lists, which this does not make. |
 | Chat + chat | refused. There is one message box, one "a goal is running" state and one `insertRequest`. |
 
 A refusal is a sentence (`PAIR_REFUSALS`): in a tab's menu the item stays reachable with its reason under it (`aria-disabled`, not
@@ -3077,13 +3077,16 @@ A split **shows** while the active tab is one of its two. When the active tab is
 
 1. it takes the **focused** pane's place if that is a valid pair; else
 2. the **other** pane's place if that is (a chat opened while the terminal had focus replaces the chat, never makes two); else
-3. the split **waits**: kept, not drawn, and back as it was when you return to either pane's tab. A link clicked in the chat opens a browser
-   tab, and that must not destroy the split it was clicked in.
+3. the split **waits**: kept, not drawn, and back as it was when you return to either pane's tab. This is what a **browser page arriving from
+   outside** always does, whatever it could pair with: a tab picked out of the strip, the header's Browser button, or a link clicked in a chat
+   that is already beside something must not rearrange the split it was reached from. (A page goes beside something only by being asked
+   for, §12.8.)
 
 A pane whose tab has gone ends the split. Closing a showing pane's tab ends it and goes to the *other* pane's tab. Ctrl+. with no
-split picks who to split with by **distance in the strip, a tie going right** (`splitPartner`): a chat takes the nearest live terminal **or editor**, whichever is nearer; an
-editor takes the nearest chat (the assistant it is being edited with), then the nearest live terminal; a terminal takes the nearest other live terminal, then the nearest
-chat, and never picks an editor for you; with nobody, a new terminal opens in the same folder. A shell that has exited is never chosen for you.
+split picks who to split with by **distance in the strip, a tie going right** (`splitPartner`): a chat takes the nearest live terminal, editor **or page**, whichever is nearer; an
+editor takes the nearest chat (the assistant it is being edited with), then the nearest live terminal, then a page; a terminal takes the nearest other live terminal, then the nearest
+chat, then a page, and never picks an editor for you; a page takes the nearest chat (what it is being read for), then the nearest live terminal, then an editor, and never another page;
+with nobody, a new terminal opens in the same folder. A shell that has exited is never chosen for you.
 
 ### 12.4 The chat follows its tab, not the focus
 
@@ -3103,8 +3106,8 @@ The divider is a `role="separator"`: drag it (it holds the pointer), arrow keys,
 The composer's dropdowns are `position: fixed` and open at their button, which was always inside the window while the composer spanned
 it; in the right-hand pane they would run off the screen, so they are pulled back inside it (`clampPickerLeft`, `threadMenu.ts`).
 
-**A split does not come back after a restart.** A split is never written (§12.1), and every pairing contains a terminal or an editor, neither of which is restored (§13.2),
-so there would be nothing for it to come back to.
+**A split does not come back after a restart.** A split is never written (§12.1), and most pairings contain a terminal or an editor, neither of which is restored (§13.2);
+a chat and a page are both restored, and are shown one at a time again, because the pair between them is not.
 
 ### 12.6 Terminal panes, two at once
 
@@ -3117,7 +3120,8 @@ The clipboard drawer follows: Insert needs a chat pane in view, Paste goes to th
 ### 12.7 Proven, and not
 
 `ui/tests/panes.test.ts` is the rules, `splitPanes.test.ts` the divider, `useSplitFits.test.ts` the measuring, `tabMenu.test.ts` the
-menu, `terminalPaneFocus.test.ts` the focus, `pickerClamp.test.ts` the dropdowns, and `splitApp.test.ts` and `splitAppLayout.test.ts` the whole App with real
+menu, `terminalPaneFocus.test.ts` the focus, `pickerClamp.test.ts` the dropdowns, `splitBrowser.test.ts` a page in a split (which page the shell is told to show, the drag, the
+overlays, a link in an answer; what it is told is the evidence, since jsdom has no native view), and `splitApp.test.ts` and `splitAppLayout.test.ts` the whole App with real
 xterm panes (two files, because forty of them outgrow one process's memory): all three ways in, both views live, the transcript and sending staying with the chat while
 the terminal is focused, replacement, closing, the page waiting, the panel yielding and a pane dropping, nothing in storage, the clipboard drawer in a split.
 
@@ -3127,8 +3131,36 @@ One thing the tests found about xterm itself: it schedules work on a timer short
 that window throws from the timer (`reading 'dimensions'`). It is harmless to the app and needs a split closed within a few milliseconds of being made,
 so the tests wait a beat; it is the same for a tab opened and closed that fast.
 
-**Browser pages in a split** are the next piece if wanted: per-page bounds in `browser::resize`, a visibility API that names more than one page,
-`note_active` and the AI's "which page is in view" made a set, and a divider that does not need the pointer over the page (a native view swallows pointer events over its rectangle).
+### 12.8 A browser page in a split
+
+A page can be one of the two panes. What makes it different from the others is that it is **not in the DOM**: `BrowserPane` is its address bar and
+the rectangle it measures, and the shell seats a native view over that rectangle (§7.3). In a split the rectangle is the pane's, half the column
+instead of all of it, and nothing in Rust has to know: the pane reports its own measurements (`onBounds`, from a `ResizeObserver`) as it always did, so
+moving the divider, the window's size and the sidebar's give-way all move the page the way they moved it when it filled the column. There is still **one
+page on screen at a time**, which is why two pages are refused (§12.2).
+
+What a native view costs, and where each cost is paid:
+
+- **Which page the shell shows is what is drawn, not what is active.** `browser::focus` shows the page it is named and hides the others, and it used to be
+  told the active tab's. With a chat beside a page the chat can have the focus, and the active tab is the chat, so the shell is told **the page in the drawn
+  split** (`shownPageId` in `App.tsx`). A split that is showing but does not fit draws only the focused pane, and then the page is shown only if it is that pane.
+- **The shell is told where the page's pane is as soon as it is measured** (`handleBrowserBounds`): a burst of measurements is sent as its first at once and its
+  last when it settles, where it used to wait out a 120 ms quiet period for all of it. A page put beside a chat is shown the moment the shell is told which
+  page to show, before its pane has been measured, so a trailing-only send left it over the chat, full-width, for that long.
+- **A drag of the divider hides the page for its length** (`SplitPanes`'s `onDragChange`). A native view takes the pointer over its rectangle, so
+  a drag that crossed the page would stop receiving moves; this is a precaution, taken whether or not the platform would have kept the capture, and the page
+  comes back, at its new size, when the divider is let go.
+- **Anything drawn over the column hides the page**: the command palette, a tab's menu and Settings. A native view paints above every DOM overlay (§8.1), so an
+  overlay that overlapped the page would be under it. This applies to a page that fills the column as well, where it was an omission.
+- **A link in an answer opens beside the answer** when the tab it was clicked in is alone in the column and the pair fits (`splitFits`), with the page focused:
+  it is what was just asked for. With a split already showing, or no room, it opens a full-column tab as before and the split waits (§12.3).
+- **Clicking inside the page does not move the pane focus.** The page is a native view and the DOM never sees the press; the address bar and the pane's
+  header are DOM and do. So the coloured edge can stay on the chat while the keyboard is in the page. Keystrokes go where the toolkit's focus is, so typing is
+  right, and Ctrl+W (a DOM shortcut) does not fire from inside a page; what the edge says is the thing that can be wrong. Closing it would need the shell to
+  report a focus change on the page's own widget, which is a Rust change.
+
+Not made, and listed so it is a choice: **two pages at once** (a rectangle per page in `browser::resize`, a visibility call that names a set, `note_active` and the
+assistant's "page in view" made a set), and **the pane focus following a click in the page**.
 
 ## 13. The editor (built)
 
@@ -3199,6 +3231,9 @@ The three tools are always on the conductor's menu and are not stage moves: they
 the writers patched to raise. `edit_editor` replaces text in the **open buffer** like the fixer's `edit` op (absent, or occurring other than `count` times, is a refusal that says so),
 as **one undoable step marked as the assistant's**, and never saves; it opens the file in the background if it is not open and closes it again if the edit did not apply.
 Invariant 9 is therefore unchanged for an agent, and widened by exactly one door, which is a person's and which an agent cannot reach (`docs/00` §6.9).
+A turn whose only change was such an edit is **not** told "no file was changed" (`run_chat` withholds that warning when `edit_editor` landed text, counted per goal
+in `ExecutorService._editor_edits` and read when the run ends): the conductor did what was asked, in the one place it may, and "ask again" would send the person back to a
+request that was carried out. A refused edit, or no edit, still gets the warning, because that is the case it exists for.
 
 ### 13.5 Where an opened file goes, and what it never does
 

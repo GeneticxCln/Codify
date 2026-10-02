@@ -240,8 +240,8 @@ or 175%, **125% by default**. It is client-side display state, like the theme: i
   History. The four drawers are one state, the drawer takes History's width and the left panel's yield rule
   treats it the same (`ui/src/drawers.ts`). What it keeps, what it refuses and what its buttons do is
   `docs/09` §11; the rules it is held to are `docs/03` §1.10.
-* **A split shows two panes in the centre column.** A chat beside a terminal, or two terminals; made from a tab's right-click
-  menu, the palette, or Ctrl+. (also in the About tab's shortcut list). A browser page and two conversations cannot be paired, and the
+* **A split shows two panes in the centre column.** A chat beside a terminal, an editor or a browser page, or two terminals; made from a tab's right-click
+  menu, the palette, or Ctrl+. (also in the About tab's shortcut list). Two browser pages and two conversations cannot be paired, and the
   menu says why. The left panel gives way to a split as it does to a drawer, and a window too narrow for two panes draws the focused one.
   Rules and layout: `docs/09` §12. It is never written to storage: only the divider's position is.
 * **An editor is a fourth kind of tab, and has no settings.** Ctrl+K finds a file and opens it; it can sit in a split with a chat, a

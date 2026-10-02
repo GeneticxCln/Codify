@@ -16,11 +16,12 @@ import { KIND_ICON, KIND_NAME } from "./TabBar";
  * A **grid**, not two widths: `minmax(22rem, Nfr)` on each side lets the browser hold both panes at their minimum
  * however the ratio and the window disagree, so there is no state in which a pane is drawn too narrow to read.
  *
- * The divider is a DOM element and may be, because no native view is ever in the centre while a split shows: a browser
- * page cannot be in one (`panes.ts`), which is what makes a drag safe. It holds the pointer for the drag, so the moves
- * reach it wherever the pointer is, and is a separator a keyboard can drive (arrows, Home, End; a double-click puts it
- * back in the middle), as the splitter pattern asks. The position is reported as it moves and again, as final, when
- * it is let go, so the caller can keep it in state while dragging and remember it once.
+ * The divider is a DOM element. It holds the pointer for the drag, so the moves reach it wherever the pointer is, and is a
+ * separator a keyboard can drive (arrows, Home, End; a double-click puts it back in the middle), as the splitter pattern
+ * asks. The position is reported as it moves and again, as final, when it is let go, so the caller can keep it in state
+ * while dragging and remember it once. When one pane holds a browser page, which is a native view the DOM cannot hold
+ * the pointer against, the caller is told when a drag starts and stops (`onDragChange`) so it can take the page out of
+ * the way for the length of the drag.
  */
 
 /** One arrow press, as a share of the row. */
@@ -44,6 +45,8 @@ export interface SplitPanesProps {
   onFocusPane: (side: PaneSide) => void;
   /** The divider moved. `commit` is false while it is being dragged and true when the position is final. */
   onRatioChange: (ratio: number, commit: boolean) => void;
+  /** A drag of the divider began (`true`) or ended (`false`). Optional: only a pane holding a native view needs it. */
+  onDragChange?: (dragging: boolean) => void;
   onCloseSplit: () => void;
 }
 
@@ -97,6 +100,7 @@ export const SplitPanes: React.FC<SplitPanesProps> = ({
   ratio,
   onFocusPane,
   onRatioChange,
+  onDragChange,
   onCloseSplit,
 }) => {
   const rowRef = useRef<HTMLDivElement>(null);
@@ -117,6 +121,7 @@ export const SplitPanes: React.FC<SplitPanesProps> = ({
     dragging.current = false;
     setEngaged(false);
     onRatioChange(lastRatio.current, true);
+    onDragChange?.(false);
   };
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
@@ -160,6 +165,7 @@ export const SplitPanes: React.FC<SplitPanesProps> = ({
           dragging.current = true;
           lastRatio.current = ratio;
           setEngaged(true);
+          onDragChange?.(true);
           // Hold the pointer, so the moves reach this element wherever it goes (a terminal's canvas under it
           // would otherwise take them). Absent where the platform has no pointer capture.
           event.currentTarget.setPointerCapture?.(event.pointerId);

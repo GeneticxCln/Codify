@@ -174,7 +174,7 @@ function splitActions(sources: PaletteSources): PaletteItem[] {
   if (sources.split.showing) return [make("close-split", "Close split", { type: "close-split" })];
 
   const active = sources.tabs.find((t) => t.id === sources.activeId);
-  if (!active || active.kind === "browser") return [];
+  if (!active) return [];
   return [
     make("split-new-terminal", "Split: new terminal beside this one", { type: "split-new-terminal" }),
     // `canPair` refuses the tab itself ("same"), so the active tab is not offered beside itself.

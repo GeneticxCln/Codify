@@ -184,8 +184,10 @@ export interface AppContext {
       workspace_id?: string;
       args?: Record<string, unknown>;
     }): Promise<{ ok: boolean; result?: any; error?: string }>;
-    /** How many polls the window has made. */
+    /** How many polls the window has made, attempts that failed included. */
     polls(): number;
+    /** How many of them are still waiting for a question: a window that has stopped asking has none. */
+    waiting(): number;
   };
 }
 
@@ -366,20 +368,24 @@ export async function withApp(
     signal: AbortSignal | undefined,
   ): Promise<Response | null> => {
     if (path === "/surfaces/next" && method === "GET") {
-      surfacePolls += 1;
       for (;;) {
         const next = surfaceQueue.shift();
         if (next) return respond(next);
         await new Promise<void>((resolve, reject) => {
-          const onAbort = (): void => reject(new DOMException("aborted", "AbortError"));
+          const wake = (): void => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+          };
+          const onAbort = (): void => {
+            const at = surfaceWaiters.indexOf(wake);
+            if (at >= 0) surfaceWaiters.splice(at, 1);
+            reject(new DOMException("aborted", "AbortError"));
+          };
           if (signal?.aborted) {
             onAbort();
             return;
           }
-          surfaceWaiters.push(() => {
-            signal?.removeEventListener("abort", onAbort);
-            resolve();
-          });
+          surfaceWaiters.push(wake);
           signal?.addEventListener("abort", onAbort, { once: true });
         });
       }
@@ -603,6 +609,8 @@ export async function withApp(
     }
     // The window's heartbeat to the engine is not an engine call a test counts (see `AppContext.surface`).
     if (url.pathname.startsWith("/surfaces/")) {
+      // An attempt is a poll even when the engine is down: whether the window tries at all is what a test asks.
+      if (url.pathname === "/surfaces/next" && method === "GET") surfacePolls += 1;
       if (options.health === "down") throw new TypeError("Failed to fetch");
       const surface = await surfaceRoute(url.pathname, method, payload, init?.signal ?? undefined);
       if (surface) return surface;
@@ -783,7 +791,7 @@ export async function withApp(
         // Unmount, so the app's effects clean up. A mounted app keeps probing the
         // engine every few seconds through the shared API client, and the next
         // test's app would then be sharing its connection state with a ghost.
-        await dom.render(React.createElement(React.Fragment));
+        await dom.unmount();
       }
       async function runBody(): Promise<void> {
       await body({
@@ -817,6 +825,7 @@ export async function withApp(
         },
         surface: {
           polls: () => surfacePolls,
+          waiting: () => surfaceWaiters.length,
           async ask(request) {
             const id = `surface-${++surfaceSeq}`;
             const answered = new Promise<{ ok: boolean; result?: unknown; error?: string }>((resolve, reject) => {

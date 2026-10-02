@@ -110,6 +110,8 @@ export interface Dom {
   window: Window & typeof globalThis;
   /** Mount an element, replacing anything already mounted. */
   render(element: React.ReactElement): Promise<void>;
+  /** Unmount what is mounted, as a window closing would: effects clean up, and nothing is torn down for the test. */
+  unmount(): Promise<void>;
   /** Click, and let React finish before returning. */
   click(element: Element): Promise<void>;
   /** Set a controlled input's value the way a person would, then let React see it. */
@@ -449,6 +451,11 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
     async render(element) {
       await act(async () => {
         root.render(element);
+      });
+    },
+    async unmount() {
+      await act(async () => {
+        root.unmount();
       });
     },
     async click(element) {
