@@ -232,7 +232,7 @@ credentials with `CODIFY_HOME` and disables the OS keychain (see
 `engine/home.py`). If your change needs state, put it under `CODIFY_HOME`.
 
 **`CLAUDE.md` is a distillation, not a second source of truth.** It is the
-agent-facing version of this file and `docs/00`–`10`, and it is deliberately
+agent-facing version of this file and `docs/00`–`11`, and it is deliberately
 short: depth is a pointer, not a copy. When the two disagree, this file and
 `docs/` win and `CLAUDE.md` is the bug —
 `tests/test_claude_md_contracts.py` fails if the invariants it quotes drift
@@ -302,9 +302,9 @@ then point the roles' base_url at `http://127.0.0.1:11435` in Settings.
 
 ## Docs
 
-Architecture lives in `docs/00`–`10` (`07` is the spawn guard and the
+Architecture lives in `docs/00`–`11` (`07` is the spawn guard and the
 deterministic tests; `08` is the benchmark harness and the vendoring policy;
-`10` is the agent-memory model). If
+`10` is the agent-memory model; `11` is the Ruflo audit). If
 your change alters a documented contract — orchestration, settings, security,
 model discovery, the Laya gate, the spawn guard, what a benchmark number is
 allowed to claim — update the matching doc in the same PR. The docs have lied

@@ -419,6 +419,7 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/08`](docs/08-benchmarks.md) | Benchmarks: what a number may claim |
 | [`docs/09`](docs/09-workspace-shell.md) | The workspace shell: conversations, tabs, panes, the embedded browser, what a turn is |
 | [`docs/10`](docs/10-agent-memory.md) | Agent memory: what was built, what was rejected |
+| [`docs/11`](docs/11-ruflo-audit.md) | The Ruflo audit: which ideas were borrowed, which were refused and why |
 
 ## 📂 Layout
 
@@ -430,7 +431,7 @@ src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the emb
             the render-starvation watchdog
 tests/      Python suite; hermetic.py is the shared isolation bootstrap
 scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py
-docs/       00–10, the specifications this README summarises
+docs/       00–11, the specifications this README summarises
 ```
 
 ## 📄 License

@@ -110,7 +110,8 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
 | `07-spawn-guard-and-deterministic-tests.md` | The spawn guard, the guarded choke points, the freeze that keeps them honest |
 | `08-benchmarks.md` | The benchmark harness, what a number may claim, and the no-third-party-source policy |
 | `09-workspace-shell.md` | Conversations, tabs, terminal, browser — and §10, what a turn is |
-| `10-agent-memory.md` | The agent-memory model: the Hindsight audit, what was built (`recall`, `recall_threads`, keyword search), what was rejected, and the open `reflect` half |
+| `10-agent-memory.md` | The agent-memory model: the Hindsight audit, what was built (`recall`, `recall_threads`, keyword search, the durable observation store and its fading), and what was rejected |
+| `11-ruflo-audit.md` | The Ruflo audit: which of its ideas were borrowed, which were refused and by which invariant, and what was not read |
 
 ## 6. Invariants (non-negotiable)
 

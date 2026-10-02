@@ -33,7 +33,7 @@ vocabulary:
 |---|---|
 | **retain** | Something already writes history: every conductor move publishes `events` (docs/04 §1.4). The store exists; only the read was missing. |
 | **recall** | Nothing read history for a model. This is the gap §4 closed. |
-| **reflect** | Nothing distills history. Repeated identical failures are stored as separate rows forever; no consolidation step turns them into a durable belief with a proof count. Still open — §6. |
+| **reflect** | Nothing distilled history: repeated identical failures were stored as separate rows forever, and no consolidation step turned them into a durable belief with a proof count. Closed — §6: mechanical formation, a brief, a durable store refined after each run, and fading with age (§6.3). |
 
 Its retrieval side is four parallel strategies — semantic vector search, BM25
 keyword search, graph traversal, and temporal — whose results are fused by
@@ -166,9 +166,10 @@ plumbing, not prose a model can act on. `format_observations` labels every
 proof count with its bound: *proof: N event(s) in the most recent 2 000
 scanned*.
 
-Still **open**, deliberately: nothing here persists. Every answer is recomputed
-from the rows that still exist — which cannot go stale, and cannot outlive the
-`MAX_SCAN_EVENTS` window. The durable store is §6.2.
+Formation itself persists nothing, deliberately: `distill_observations`
+recomputes every answer from the rows that still exist, which cannot go stale
+and cannot outlive the `MAX_SCAN_EVENTS` window. What outlives the window is the
+durable store (§6.2), and what goes stale in it is handled by fading (§6.3).
 
 ### 6.2 The durable store: `observations`, refined by the engine after each run
 
