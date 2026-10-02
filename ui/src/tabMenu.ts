@@ -5,8 +5,8 @@
  * is already showing, whether the tab is the one in view, and whether it could sit beside it. Pure, like `threadMenu.ts`
  * (whose `clampMenuPosition` places the menu), so each rule is a test that needs no renderer.
  *
- * An item that cannot work is **shown with its reason**, not left out and not left silent: a menu that offers nothing on
- * a browser page would read as broken, and one that offered the split and then did nothing would be worse.
+ * An item that cannot work is **shown with its reason**, not left out and not left silent: a menu that offered a split and
+ * then did nothing would be worse than one that says why it cannot (two browser pages, two conversations).
  */
 
 import { PAIR_REFUSALS, pairRefusal } from "./panes";
@@ -39,16 +39,7 @@ export function tabMenuItems(opened: Tab, state: TabState, splitShowing: boolean
   if (splitShowing) return [{ id: "close-split", label: "Close split" }];
 
   const active = state.tabs.find((t) => t.id === state.activeId);
-  if (opened.id === state.activeId) {
-    const why = opened.kind === "browser" ? "browser" : null;
-    return [
-      {
-        id: "split-new-terminal",
-        label: "Split with a new terminal",
-        ...(why ? { reason: PAIR_REFUSALS[why] } : {}),
-      },
-    ];
-  }
+  if (opened.id === state.activeId) return [{ id: "split-new-terminal", label: "Split with a new terminal" }];
   const why = pairRefusal(active, opened);
   return [
     {

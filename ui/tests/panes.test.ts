@@ -29,6 +29,7 @@ const {
 const chat = (id: string): Tab => ({ id, kind: "chat", title: id });
 const term = (id: string, over: Partial<Tab> = {}): Tab => ({ id, kind: "terminal", title: id, ...over });
 const page = (id: string): Tab => ({ id, kind: "browser", title: id });
+const tab = (id: string, kind: Tab["kind"]): Tab => ({ id, kind, title: id });
 const strip = (tabs: Tab[], activeId: string | null): TabState => ({ tabs, activeId });
 
 // ── which two may sit together ──────────────────────────────────────────────
@@ -44,11 +45,16 @@ test("two conversations may not: they would share one message box", () => {
   assert.equal(canPair(chat("a"), chat("b")), false);
 });
 
-test("a browser page may not sit in a split, with anything", () => {
-  for (const other of [chat("c"), term("t"), page("p2")]) {
-    assert.equal(pairRefusal(page("p"), other), "browser");
-    assert.equal(pairRefusal(other, page("p")), "browser");
+test("a browser page may sit beside a chat, a terminal or an editor, in either order", () => {
+  for (const other of [chat("c"), term("t"), tab("e", "editor")]) {
+    assert.equal(canPair(page("p"), other), true);
+    assert.equal(canPair(other, page("p")), true);
   }
+});
+
+test("two browser pages may not: each is a native view seated over one rectangle of the window", () => {
+  assert.equal(pairRefusal(page("p"), page("p2")), "two-pages");
+  assert.equal(canPair(page("p"), page("p2")), false);
 });
 
 test("a tab cannot be paired with itself, and a tab that is not there cannot be paired", () => {
@@ -59,15 +65,16 @@ test("a tab cannot be paired with itself, and a tab that is not there cannot be 
 });
 
 test("the reasons are checked in an order that names the real obstacle", () => {
-  // A browser page beside itself is "the same tab", not a browser problem; a missing tab beats everything.
+  // A browser page beside itself is "the same tab", not a two-pages problem; a missing tab beats everything.
   assert.equal(pairRefusal(page("p"), page("p")), "same");
   assert.equal(pairRefusal(undefined, page("p")), "missing");
-  assert.equal(pairRefusal(page("p"), chat("c")), "browser", "browser must be named before two-chats");
+  assert.equal(pairRefusal(page("p"), page("q")), "two-pages");
+  assert.equal(pairRefusal(chat("a"), chat("b")), "two-chats");
 });
 
 test("every refusal has a sentence, and it says why", () => {
-  assert.match(PAIR_REFUSALS.browser, /browser/i);
-  assert.match(PAIR_REFUSALS.browser, /separate|native/i);
+  assert.match(PAIR_REFUSALS["two-pages"], /two browser pages/i);
+  assert.match(PAIR_REFUSALS["two-pages"], /native/i);
   assert.match(PAIR_REFUSALS["two-chats"], /two conversations/i);
   assert.match(PAIR_REFUSALS["two-chats"], /message box/i);
   assert.match(PAIR_REFUSALS.same, /already/i);
@@ -93,13 +100,23 @@ test("starting a split does not change the state it was given", () => {
 });
 
 test("a split that cannot be made says why, and changes nothing", () => {
-  const state = strip([chat("c"), chat("c2"), page("p"), term("t")], "c");
+  const state = strip([chat("c"), chat("c2"), page("p"), page("p2"), term("t")], "c");
   assert.deepEqual(startSplit(state, "c2"), { ok: false, why: "two-chats" });
-  assert.deepEqual(startSplit(state, "p"), { ok: false, why: "browser" });
+  assert.deepEqual(startSplit(strip(state.tabs, "p"), "p2"), { ok: false, why: "two-pages" });
   assert.deepEqual(startSplit(state, "c"), { ok: false, why: "same" });
   assert.deepEqual(startSplit(state, "nope"), { ok: false, why: "missing" });
   assert.deepEqual(startSplit(strip([term("t")], null), "t"), { ok: false, why: "missing" });
-  assert.deepEqual(startSplit(strip([page("p"), term("t")], "p"), "t"), { ok: false, why: "browser" });
+});
+
+test("a browser page can be shown beside the active tab, and a page can be the active tab being split from", () => {
+  const beside = startSplit(strip([chat("c"), page("p")], "c"), "p");
+  assert.ok(beside.ok);
+  assert.deepEqual(beside.split, { panes: ["c", "p"], focused: 1 });
+  assert.equal(beside.state.activeId, "p");
+
+  const from = startSplit(strip([page("p"), term("t")], "p"), "t");
+  assert.ok(from.ok);
+  assert.deepEqual(from.split, { panes: ["p", "t"], focused: 1 });
 });
 
 // ── who to split with ───────────────────────────────────────────────────────
@@ -132,8 +149,24 @@ test("a shell that has exited is never picked for you: it is not what you meant"
   assert.deepEqual(splitPartner(strip([term("a"), term("dead", { exited: true }), chat("c")], "a")), { kind: "tab", id: "c" });
 });
 
-test("a browser page, or nothing open, has no partner and says why", () => {
-  assert.deepEqual(splitPartner(strip([page("p"), term("t")], "p")), { kind: "refused", why: "browser" });
+test("a chat, a terminal or an editor may be split with a browser page, whichever is nearest", () => {
+  assert.deepEqual(splitPartner(strip([chat("c"), page("p"), term("t")], "c")), { kind: "tab", id: "p" }, "the page is nearer than the terminal");
+  assert.deepEqual(splitPartner(strip([chat("c"), term("t"), page("p")], "c")), { kind: "tab", id: "t" }, "the terminal is nearer than the page");
+  assert.deepEqual(splitPartner(strip([chat("c"), chat("c2"), page("p")], "c")), { kind: "tab", id: "p" }, "a page is a partner when there is no terminal");
+  assert.deepEqual(splitPartner(strip([term("a"), page("p")], "a")), { kind: "tab", id: "p" }, "a terminal with no other terminal or chat takes a page");
+  assert.deepEqual(splitPartner(strip([term("a"), page("p"), chat("c")], "a")), { kind: "tab", id: "c" }, "a chat comes before a page for a terminal");
+});
+
+test("a browser page is split with the nearest chat, then the nearest live terminal, then an editor, else a new terminal", () => {
+  assert.deepEqual(splitPartner(strip([term("t"), page("p"), chat("c")], "p")), { kind: "tab", id: "c" });
+  assert.deepEqual(splitPartner(strip([chat("c"), term("t"), page("p")], "p")), { kind: "tab", id: "c" }, "a chat beats a nearer terminal");
+  assert.deepEqual(splitPartner(strip([term("dead", { exited: true }), page("p"), term("t")], "p")), { kind: "tab", id: "t" });
+  assert.deepEqual(splitPartner(strip([tab("e", "editor"), page("p")], "p")), { kind: "tab", id: "e" });
+  assert.deepEqual(splitPartner(strip([page("p"), page("q")], "p")), { kind: "new-terminal" }, "never another page");
+  assert.deepEqual(splitPartner(strip([page("p")], "p")), { kind: "new-terminal" });
+});
+
+test("nothing open has no partner and says why", () => {
   assert.deepEqual(splitPartner(strip([], null)), { kind: "refused", why: "missing" });
 });
 
@@ -202,7 +235,7 @@ test("a chat shown over two terminals replaces the focused one", () => {
   assert.deepEqual(out.split, { panes: ["c", "b"], focused: 0 });
 });
 
-test("a browser page cannot be shown in a split, so the split waits, and comes back when you return to a pane's tab", () => {
+test("a browser page that arrives from outside never takes a pane, so the split waits, and comes back when you return to a pane's tab", () => {
   const tabs = [chat("c"), term("t"), page("p")];
   const split = { panes: ["c", "t"] as const, focused: 1 as const };
 
@@ -213,6 +246,28 @@ test("a browser page cannot be shown in a split, so the split waits, and comes b
   const back = resolveSplit(strip(tabs, "c"), away.split);
   assert.ok(back.shown, "the split did not come back");
   assert.deepEqual([back.shown.left.id, back.shown.right.id, back.shown.focused], ["c", "t", 0]);
+});
+
+test("a split that holds a page keeps showing it, and the page is the focused pane when it is the active tab", () => {
+  const tabs = [chat("c"), page("p")];
+  const split = { panes: ["c", "p"] as const, focused: 0 as const };
+
+  const out = resolveSplit(strip(tabs, "p"), split);
+  assert.ok(out.shown);
+  assert.deepEqual([out.shown.left.id, out.shown.right.id, out.shown.focused], ["c", "p", 1]);
+});
+
+test("a chat chosen while a page is beside another chat replaces that chat, and keeps the page", () => {
+  const out = resolveSplit(strip([chat("a"), chat("b"), page("p")], "b"), { panes: ["a", "p"], focused: 0 });
+  assert.ok(out.shown);
+  assert.deepEqual(out.split, { panes: ["b", "p"], focused: 0 });
+});
+
+test("a second page arriving while a page is in the split waits, and does not replace it", () => {
+  const split = { panes: ["c", "p"] as const, focused: 1 as const };
+  const out = resolveSplit(strip([chat("c"), page("p"), page("q")], "q"), split);
+  assert.equal(out.shown, null);
+  assert.ok(out.split === split);
 });
 
 test("two terminals with a browser page between waits the same way", () => {

@@ -1,8 +1,8 @@
 /**
  * Split panes: which two tabs may share the centre column, and what happens to the pair as the tab strip moves.
  *
- * The centre column shows one thing, and a split shows two: a chat, a terminal or an editor beside any of those, but never two
- * chats and never a browser page. The pair is `{ panes, focused }` and lives **beside** the tab state, never in it: `tabs.ts`, `tabPersistence.ts`,
+ * The centre column shows one thing, and a split shows two: a chat, a terminal, an editor or a browser page beside any of those,
+ * but never two chats and never two pages. The pair is `{ panes, focused }` and lives **beside** the tab state, never in it: `tabs.ts`, `tabPersistence.ts`,
  * `layoutSync.ts` and the engine's shared strip never see it, so none of their return shapes can quietly drop it, and
  * a split is view state in the sense of `docs/09` §2.1. The active tab stays what it always was, the tab the person
  * is working in, which is now the *focused pane's*; every rule below is about keeping those two in step.
@@ -11,10 +11,11 @@
  *
  * What may be paired is a short list on purpose:
  *
- *  - **A browser page may not.** It is a native child window seated over one measured rectangle, which the shell
- *    shows or hides as a whole (`docs/09` §7.3); two visible pages, or one in half a column, would be Rust changes
- *    this does not make. Leaving them out is also what makes a DOM divider safe: no native view is ever in the
- *    centre while a split is showing.
+ *  - **Two browser pages may not.** A page is a native child window seated over one measured rectangle, which the shell
+ *    shows or hides as a whole (`docs/09` §7.3), so one page can take a half of the column (it is the rectangle the pane
+ *    measured) and two would be Rust changes this does not make: a rectangle for each, and a set of visible pages.
+ *    What a native view costs the DOM is handled where the split is drawn (`docs/09` §12.8): the page is hidden while
+ *    the divider is dragged and while an overlay is open, because a native view takes the pointer and paints over both.
  *  - **Two conversations may not.** There is one message box, one "a goal is running" state and one `insertRequest`.
  */
 
@@ -52,12 +53,12 @@ export const MIN_PANE_REM = 22;
 export const DEFAULT_RATIO = 0.5;
 
 /** Why two tabs cannot be paired. */
-export type PairRefusal = "browser" | "two-chats" | "same" | "missing";
+export type PairRefusal = "two-pages" | "two-chats" | "same" | "missing";
 
 /** The sentence for each, said where a split was asked for and could not be made. */
 export const PAIR_REFUSALS: Readonly<Record<PairRefusal, string>> = {
-  browser:
-    "A browser page can't be shown in a split: it is a separate native view that cannot share the column with another pane.",
+  "two-pages":
+    "Two browser pages can't be side by side yet: each is a separate native view placed over one rectangle of the window.",
   "two-chats": "Two conversations can't be side by side yet: they would share one message box.",
   same: "That tab is already in view.",
   missing: "Open a tab first.",
@@ -66,13 +67,13 @@ export const PAIR_REFUSALS: Readonly<Record<PairRefusal, string>> = {
 /**
  * Why `a` and `b` cannot share the column, or null when they can.
  *
- * Checked in an order that names the real obstacle: a tab that is not there beats everything, being the same tab
- * beats being a page, and a page is named before two chats are.
+ * Checked in an order that names the real obstacle: a tab that is not there beats everything, and being the same tab
+ * beats being a second page.
  */
 export function pairRefusal(a: Tab | undefined, b: Tab | undefined): PairRefusal | null {
   if (!a || !b) return "missing";
   if (a.id === b.id) return "same";
-  if (a.kind === "browser" || b.kind === "browser") return "browser";
+  if (a.kind === "browser" && b.kind === "browser") return "two-pages";
   if (a.kind === "chat" && b.kind === "chat") return "two-chats";
   return null;
 }
@@ -107,18 +108,18 @@ export type Partner = { kind: "tab"; id: string } | { kind: "new-terminal" } | {
 /**
  * Who the active tab is split with when nobody was named (the shortcut, and "split" in the palette).
  *
- * A chat takes the nearest terminal or editor, whichever is nearer: the conversation is the thing you want a file or a shell
- * beside. An editor takes the nearest chat (the assistant it is being edited with), then the nearest terminal. A terminal
- * takes the nearest other terminal, then the nearest chat; it never picks an editor for you, and neither does an editor pick
- * another editor. Nearest is by distance in the strip, and a tie goes to the right. A shell that has exited is never chosen
- * for you: it is not what was meant, and a new terminal is more use than a dead one. With nobody to share with, a new
- * terminal is asked for; a chat is never offered a chat.
+ * A chat takes the nearest terminal, editor or browser page, whichever is nearer: the conversation is the thing you want a
+ * file, a shell or a page beside. An editor takes the nearest chat (the assistant it is being edited with), then the nearest
+ * terminal, then a page. A terminal takes the nearest other terminal, then the nearest chat, then a page; it never picks an
+ * editor for you, and neither does an editor pick another editor. A page takes the nearest chat (what it is being read
+ * for), then the nearest terminal, then an editor, and never another page. Nearest is by distance in the strip, and a tie
+ * goes to the right. A shell that has exited is never chosen for you: it is not what was meant, and a new terminal is more
+ * use than a dead one. With nobody to share with, a new terminal is asked for; a chat is never offered a chat.
  */
 export function splitPartner(state: TabState): Partner {
   const at = state.tabs.findIndex((t) => t.id === state.activeId);
   const active = state.tabs[at];
   if (!active) return { kind: "refused", why: "missing" };
-  if (active.kind === "browser") return { kind: "refused", why: "browser" };
 
   const nearest = (wants: (t: Tab) => boolean): Tab | undefined => {
     for (let d = 1; d < state.tabs.length; d += 1) {
@@ -131,13 +132,17 @@ export function splitPartner(state: TabState): Partner {
   };
   const liveTerminal = (t: Tab): boolean => t.kind === "terminal" && !t.exited;
   const chat = (t: Tab): boolean => t.kind === "chat";
+  const editor = (t: Tab): boolean => t.kind === "editor";
+  const page = (t: Tab): boolean => t.kind === "browser";
 
   const pick =
     active.kind === "chat"
-      ? nearest((t) => liveTerminal(t) || t.kind === "editor")
+      ? nearest((t) => liveTerminal(t) || editor(t) || page(t))
       : active.kind === "editor"
-        ? (nearest(chat) ?? nearest(liveTerminal))
-        : (nearest(liveTerminal) ?? nearest(chat));
+        ? (nearest(chat) ?? nearest(liveTerminal) ?? nearest(page))
+        : active.kind === "browser"
+          ? (nearest(chat) ?? nearest(liveTerminal) ?? nearest(editor))
+          : (nearest(liveTerminal) ?? nearest(chat) ?? nearest(page));
   return pick ? { kind: "tab", id: pick.id } : { kind: "new-terminal" };
 }
 
@@ -157,8 +162,10 @@ export interface Resolution {
  *  1. it takes the **focused** pane's place if that is a valid pair;
  *  2. else it takes the **other** pane's place if that is (a chat shown while the terminal had focus replaces the
  *     chat, never makes two);
- *  3. else the split **waits**: kept, not drawn, and back as it was when the active tab returns to either pane. A link
- *     clicked in the chat opens a browser tab, and that must not destroy the split it was clicked in.
+ *  3. else the split **waits**: kept, not drawn, and back as it was when the active tab returns to either pane. A browser
+ *     page that arrives this way waits too, whatever it could pair with: a tab picked out of the strip, or a link clicked in
+ *     a chat that is already beside something, must not rearrange the split it was reached from. A page goes beside
+ *     something only by being asked for (`startSplit`, or a link clicked in a chat that is alone in the column).
  *
  * A pane whose tab has gone ends the split. When nothing changed, the very `split` that came in comes back, so a
  * caller that writes the result back to state does not loop.
@@ -185,6 +192,7 @@ export function resolveSplit(state: TabState, split: Split | null): Resolution {
   if (!incoming) return { shown: null, split };
 
   const replacing = (slot: PaneSide): Resolution | null => {
+    if (incoming.kind === "browser") return null;
     const other = slot === 0 ? right : left;
     if (!canPair(incoming, other)) return null;
     const panes: readonly [string, string] = slot === 0 ? [incoming.id, rightId] : [leftId, incoming.id];

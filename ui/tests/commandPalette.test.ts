@@ -310,12 +310,17 @@ test("with no split showing it offers a new terminal beside this tab, and each t
   });
   assert.deepEqual(
     items.map(actionOf),
-    [{ type: "split-new-terminal" }, { type: "show-beside", tabId: "t1" }, { type: "show-beside", tabId: "t2" }],
-    "a chat beside a chat or a page was offered",
+    [
+      { type: "split-new-terminal" },
+      { type: "show-beside", tabId: "t1" },
+      { type: "show-beside", tabId: "p" },
+      { type: "show-beside", tabId: "t2" },
+    ],
+    "a chat beside a chat was offered, or a page was left out",
   );
   assert.deepEqual(
     items.map((i) => i.title),
-    ["Split: new terminal beside this one", "Show beside: Shell t1", "Show beside: Shell t2"],
+    ["Split: new terminal beside this one", "Show beside: Shell t1", "Show beside: Page p", "Show beside: Shell t2"],
   );
 });
 
@@ -333,8 +338,21 @@ test("from a terminal, another terminal and a chat can sit beside it", () => {
   ]);
 });
 
-test("a browser page, or nothing open, has no split to offer", () => {
-  assert.deepEqual(actionItems({ tabs: [pageTab("p"), termTab("t")], activeId: "p", conversations: [], split: { showing: false } }), []);
+test("from a browser page, a new terminal and each tab but another page can sit beside it", () => {
+  const items = actionItems({
+    tabs: [pageTab("p"), termTab("t"), pageTab("q"), chatTab("c")],
+    activeId: "p",
+    conversations: [],
+    split: { showing: false },
+  });
+  assert.deepEqual(items.map(actionOf), [
+    { type: "split-new-terminal" },
+    { type: "show-beside", tabId: "t" },
+    { type: "show-beside", tabId: "c" },
+  ]);
+});
+
+test("nothing open has no split to offer", () => {
   assert.deepEqual(actionItems({ tabs: [], activeId: null, conversations: [], split: { showing: false } }), []);
 });
 

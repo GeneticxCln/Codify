@@ -41,11 +41,11 @@ test("on the tab you are in, the menu offers a split with a new terminal", () =>
   }
 });
 
-test("on a browser page you are in, that same item says why it cannot", () => {
+test("on a browser page you are in, the same item works: a page can sit beside a new terminal", () => {
   const state = strip([page("p"), term("t")], "p");
   const [item] = tabMenuItems(page("p"), state, false);
   assert.equal(item.id, "split-new-terminal");
-  assert.equal(item.reason, PAIR_REFUSALS.browser);
+  assert.equal(item.reason, undefined, "an item that can work says it cannot");
 });
 
 test("on another tab, the menu offers to show it beside the current one", () => {
@@ -60,10 +60,17 @@ test("on another tab, the menu offers to show it beside the current one", () => 
 test("another tab that cannot sit beside the current one says why, in the reason's own words", () => {
   const twoChats = strip([chat("a"), chat("b")], "a");
   assert.equal(tabMenuItems(chat("b"), twoChats, false)[0].reason, PAIR_REFUSALS["two-chats"]);
+  const twoPages = strip([page("p"), page("q")], "p");
+  assert.equal(tabMenuItems(page("q"), twoPages, false)[0].reason, PAIR_REFUSALS["two-pages"]);
+});
+
+test("a page can be shown beside the current tab, and the current page can have a tab shown beside it", () => {
   const withPage = strip([chat("a"), page("p")], "a");
-  assert.equal(tabMenuItems(page("p"), withPage, false)[0].reason, PAIR_REFUSALS.browser);
+  const [toPage] = tabMenuItems(page("p"), withPage, false);
+  assert.equal(toPage.id, "show-beside");
+  assert.equal(toPage.reason, undefined);
   const fromPage = strip([page("p"), chat("a")], "p");
-  assert.equal(tabMenuItems(chat("a"), fromPage, false)[0].reason, PAIR_REFUSALS.browser);
+  assert.equal(tabMenuItems(chat("a"), fromPage, false)[0].reason, undefined);
 });
 
 test("while a split is showing, every tab's menu offers to close it, and only that", () => {

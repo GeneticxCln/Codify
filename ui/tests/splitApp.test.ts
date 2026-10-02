@@ -134,25 +134,13 @@ test("the palette does not offer a conversation beside a conversation", async ()
   });
 });
 
-test("a browser page cannot be in a split, and the chord says so", async () => {
-  await withApp({ viewport: WIDE, shellAnswers: shells(id("b")) }, async (ctx) => {
-    await click(ctx, ctx.dom.container.querySelector('button[title^="Browser"]') as HTMLElement);
-    await ctx.settle();
+test("with no tab open the chord says so, and the refusal goes when the tab changes", async () => {
+  await withApp({ viewport: WIDE, ...SEEDED }, async (ctx) => {
     await split(ctx);
     assert.equal(panes(ctx).length, 0);
-    const note = ctx.dom.container.querySelector('[role="status"]');
-    assert.match(note?.textContent ?? "", /browser page can't be shown in a split/i);
-  });
-});
-
-test("the refusal goes when the tab changes", async () => {
-  await withApp({ viewport: WIDE, ...SEEDED }, async (ctx) => {
-    await click(ctx, ctx.dom.container.querySelector('button[title^="Browser"]') as HTMLElement);
-    await ctx.settle();
-    await split(ctx);
-    assert.ok(ctx.dom.container.querySelector('[role="status"]'));
+    assert.match(ctx.dom.container.querySelector('[role="status"]')?.textContent ?? "", /Open a tab first/);
     await openThread(ctx, "c1");
-    assert.ok(!/browser page can't be shown in a split/i.test(ctx.dom.text()), "the refusal outlived the tab it was about");
+    assert.ok(!/Open a tab first/i.test(ctx.dom.text()), "the refusal outlived the tab it was about");
   });
 });
 

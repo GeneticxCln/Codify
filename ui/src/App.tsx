@@ -2173,10 +2173,6 @@ export const App: React.FC = () => {
       setPaneNotice(PAIR_REFUSALS.missing);
       return;
     }
-    if (active.kind === "browser") {
-      setPaneNotice(PAIR_REFUSALS.browser);
-      return;
-    }
     const id = await startTerminal(active.workspaceId ?? selectedWs?.id);
     // The new tab is active (`openTerminalTab`), so the pair is shown the moment it exists.
     if (id) setSplit({ panes: [active.id, id], focused: 1 });
