@@ -189,8 +189,10 @@ export function captureClip(
   const existing = list.find((c) => c.text === input.text);
   if (existing) {
     const moved: Clip = { ...existing, at: input.at };
+    // To the front, not left in place for the sort to move: the sort is stable, so a repeat that shares the
+    // newest clip's millisecond would otherwise stay behind it.
     return {
-      list: bounded(list.map((c) => (c.id === existing.id ? moved : c))),
+      list: bounded([moved, ...list.filter((c) => c.id !== existing.id)]),
       outcome: { kind: "kept", clip: moved },
     };
   }

@@ -3,6 +3,7 @@ import { Check, Copy } from "lucide-react";
 import { parseInline, parseMarkdown, type Block, type Inline, type ListItem } from "../markdown";
 import { linkAction } from "../markdownLinks";
 import { copySchemeText } from "../scheme";
+import { useClipboardRecorder } from "../clipboardContext";
 
 /**
  * Markdown, drawn as React elements and nothing else.
@@ -115,6 +116,7 @@ function CodeBlock({ lang, text }: { lang: string; text: string }): React.ReactE
   const [copied, setCopied] = useState<"idle" | "copied" | "failed">("idle");
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
+  const record = useClipboardRecorder();
 
   const copy = async (): Promise<void> => {
     const clipboard =
@@ -125,6 +127,9 @@ function CodeBlock({ lang, text }: { lang: string; text: string }): React.ReactE
       writeText: clipboard,
       document: typeof document !== "undefined" ? document : undefined,
     });
+    // `writeText` fires no `copy` event, so the clipboard history hears of this one from here, and only once it
+    // worked: a copy that failed is not on the clipboard either.
+    if (outcome !== "failed") record(text, "code");
     setCopied(outcome === "failed" ? "failed" : "copied");
     clearTimeout(timer.current);
     timer.current = setTimeout(() => setCopied("idle"), 1800);

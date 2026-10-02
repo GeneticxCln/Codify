@@ -90,6 +90,24 @@ test("copying what is already there moves it up and keeps its pin, its id and wh
   );
 });
 
+test("a repeat in the same instant as the newest clip still goes to the top", () => {
+  // Two copies can share a millisecond (a button and the event it caused, two records in one tick). The
+  // order is "newest first", and when the clock cannot say which is newer the one just copied is.
+  let list: Clip[] = [];
+  list = keep(list, "x", 7, { id: "cx" }).list;
+  list = keep(list, "y", 7, { id: "cy" }).list;
+  list = keep(list, "x", 7, { id: "cz" }).list;
+  assert.deepEqual(
+    displayOrder(list).map((c) => c.text),
+    ["x", "y"],
+  );
+  assert.deepEqual(
+    list.map((c) => c.text),
+    ["x", "y"],
+    "the list itself is kept newest first, not left for the display to sort",
+  );
+});
+
 test("whitespace alone is not a clip", () => {
   for (const text of ["", "   ", "\n\t\n"]) {
     const out = keep([], text, 1);

@@ -69,6 +69,8 @@ export async function copyText(
   // Off-screen rather than `display: none`: a hidden element cannot be
   // selected, and the copy would then be of nothing.
   field.setAttribute("readonly", "");
+  // Scratch space for the copy, not the person's selection (see `copySchemeText`).
+  field.setAttribute("data-clipboard", "off");
   field.style.position = "fixed";
   field.style.opacity = "0";
   doc.body.appendChild(field);
