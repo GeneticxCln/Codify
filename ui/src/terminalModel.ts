@@ -97,15 +97,19 @@ export function gridChanged(a: Grid | null, b: Grid | null): boolean {
  * gone, and the terminal opens blank — which reads as "this is broken", not "we
  * were slow".
  *
- * So the pane subscribes on mount, *before* xterm exists, and every chunk goes
- * in here keyed by terminal id. The matching id is written straight through
- * (there is no pane for another terminal, and this is the whole point); the rest
- * wait, because a chunk for a terminal this pane has not been told about yet is
- * exactly the one that must not be dropped.
+ * So the pane subscribes on mount, *before* xterm exists, and its own terminal's
+ * chunks go in here (`bufferOwnOutput`) and wait for xterm.
  *
- * Bounded by construction: one entry per terminal this pane has heard of, and a
- * pane is a tab, so this is the output of one shell's warm-up. `drain` empties a
- * terminal's list, so the steady state is empty.
+ * Only its own. This used to keep every terminal's chunks "because a chunk for a
+ * terminal this pane has not been told about yet must not be dropped", but a pane
+ * is keyed by its terminal id and is told it at mount, and nothing ever drained the
+ * rest: a build running in a second shell wrote into a mounted pane's buffer for as
+ * long as that pane was there, and with two panes showing, each would have hoarded
+ * the other's output. A chunk that arrives before any pane exists is the app-level
+ * recorder's (`terminalBuffer.ts`), and the pane that claims the terminal is handed it.
+ *
+ * Bounded by construction now: one entry, this terminal's warm-up, and `drain`
+ * empties it, so the steady state is empty.
  */
 export interface OutputBuffer {
   /** Chunks per terminal id, in arrival order. */
@@ -132,6 +136,17 @@ export function bufferOutput(
   }
   buffer.chunks.set(id, [data]);
   return buffer;
+}
+
+/**
+ * Record a chunk if it belongs to this pane's terminal, and say whether it did.
+ *
+ * Another terminal's chunk is not recorded: this pane will never show it, so keeping it is only a leak.
+ */
+export function bufferOwnOutput(buffer: OutputBuffer, ownId: string, id: string, data: string): boolean {
+  if (id !== ownId) return false;
+  bufferOutput(buffer, id, data);
+  return true;
 }
 
 /**

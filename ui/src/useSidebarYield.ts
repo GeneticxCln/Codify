@@ -14,7 +14,7 @@ const BASE_ROOT_PX = 16;
  * size is the scale itself (`uiScale.ts` sets it as a percentage of 16px), so it is read from there
  * rather than from `getComputedStyle`, which would force a style recalculation on every callback.
  */
-export function useSidebarYield(ref: RefObject<HTMLElement | null>, drawer: Drawer | null): boolean {
+export function useSidebarYield(ref: RefObject<HTMLElement | null>, drawer: Drawer | null, split: boolean = false): boolean {
   const scale = useUiScale();
   const [yields, setYields] = useState(false);
 
@@ -23,18 +23,19 @@ export function useSidebarYield(ref: RefObject<HTMLElement | null>, drawer: Draw
     const el = ref.current;
     if (!el) return;
     const rootPx = (BASE_ROOT_PX * scale) / 100;
-    const read = (): void => setYields(sidebarYields(el.getBoundingClientRect().width, rootPx, drawer));
+    const read = (): void => setYields(sidebarYields(el.getBoundingClientRect().width, rootPx, drawer, split));
     read();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(read);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [ref, drawer, scale]);
+  }, [ref, drawer, split, scale]);
 
   // With nothing open there is nothing to yield to, whatever the last measurement said.
+  const wanted = drawer !== null || split;
   useEffect(() => {
-    if (drawer === null) setYields(false);
-  }, [drawer]);
+    if (!wanted) setYields(false);
+  }, [wanted]);
 
-  return drawer === null ? false : yields;
+  return wanted ? yields : false;
 }

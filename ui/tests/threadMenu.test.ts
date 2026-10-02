@@ -24,6 +24,7 @@ const {
   threadMenuItems,
   newThreadParentId,
   clampMenuPosition,
+  clampPickerLeft,
 } = await import("../src/threadMenu.ts");
 
 /** A window with room in it, and a menu with a known size. */
@@ -255,4 +256,30 @@ test("clamping is idempotent, because it is applied to a measured size too", () 
   // across the screen on the second pass.
   const once = clampMenuPosition({ x: 980, y: 790 }, MENU, WINDOW);
   assert.deepEqual(clampMenuPosition(once, MENU, WINDOW), once);
+});
+
+// ── a picker menu stays inside the window, in whichever pane the composer is ────────────────────────
+
+test("a picker menu opens at its button, when there is room to the right", () => {
+  assert.equal(clampPickerLeft(300, 320, 1440), 300);
+  assert.equal(clampPickerLeft(1112, 320, 1440), 1112, "exactly fitting, margin included, is not moved");
+});
+
+test("a button near the right edge pulls the menu back so it ends a margin inside the window", () => {
+  // The composer in a split's right-hand pane starts half way across: its menus are 320px wide and fixed to the window.
+  assert.equal(clampPickerLeft(1300, 320, 1440), 1440 - 8 - 320);
+  assert.equal(clampPickerLeft(1439, 320, 1440), 1440 - 8 - 320);
+});
+
+test("it never goes past the left margin, and a window narrower than the menu pins to it", () => {
+  assert.equal(clampPickerLeft(-50, 320, 1440), 8);
+  assert.equal(clampPickerLeft(0, 320, 1440), 8);
+  assert.equal(clampPickerLeft(200, 320, 300), 8, "no placement fits: the near edge, and a menu that overflows");
+});
+
+test("an unmeasured menu or window changes nothing but the left margin", () => {
+  assert.equal(clampPickerLeft(300, 0, 1440), 300);
+  assert.equal(clampPickerLeft(3, 0, 1440), 8);
+  assert.equal(clampPickerLeft(300, 320, 0), 300, "a window with no width cannot push anything");
+  assert.equal(clampPickerLeft(Number.NaN, 320, 1440), 8);
 });

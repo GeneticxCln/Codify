@@ -15,11 +15,18 @@
  * jump itself is one `switch` in `App.tsx`.
  */
 
+import { canPair } from "./panes.ts";
 import type { Tab } from "./tabs";
 import type { Conversation, SettingsTab } from "./types";
 
-/** Where an item sends you. Three sources — the strip, the thread list, settings. */
-export type PaletteItemKind = "tab" | "conversation" | "settings";
+/** Where an item sends you. Four sources — the strip, the thread list, settings, and what can be done to the split. */
+export type PaletteItemKind = "tab" | "conversation" | "settings" | "action";
+
+/** What a split action asks the shell to do. Data, like everything here: the jump is one `switch` in `App.tsx`. */
+export type PaletteAction =
+  | { type: "close-split" }
+  | { type: "split-new-terminal" }
+  | { type: "show-beside"; tabId: string };
 
 interface BaseItem {
   /** Unique, stable, and used as the DOM id of its option row. */
@@ -43,6 +50,10 @@ export type PaletteItem =
   | (BaseItem & {
       kind: "settings";
       settingsTab: SettingsTab;
+    })
+  | (BaseItem & {
+      kind: "action";
+      action: PaletteAction;
     });
 
 /** What the palette is choosing from. */
@@ -50,6 +61,11 @@ export interface PaletteSources {
   tabs: Tab[];
   activeId: string | null;
   conversations: Conversation[];
+  /**
+   * Whether a split is showing. Absent means the caller has nothing to say about splits, and the palette lists none:
+   * what it held before is what it still holds.
+   */
+  split?: { showing: boolean };
 }
 
 /**
@@ -75,6 +91,7 @@ const KIND_LABEL: Record<PaletteItemKind, string> = {
   tab: "Open tab",
   conversation: "Conversation",
   settings: "Settings",
+  action: "Split",
 };
 
 /**
@@ -113,7 +130,34 @@ export function buildPaletteItems(sources: PaletteSources): PaletteItem[] {
     title: entry.title,
     settingsTab: entry.settingsTab,
   }));
-  return [...tabs, ...conversations, ...settings];
+  return [...tabs, ...conversations, ...settings, ...splitActions(sources)];
+}
+
+/**
+ * What can be done about the split from here: close it while one is showing; otherwise a new terminal beside this tab, and
+ * each other tab that can sit beside it. Last in the list (they are found by typing "split"), and never offered where the
+ * split could not be made, because a row that did nothing would be the one thing a palette must not hold.
+ */
+function splitActions(sources: PaletteSources): PaletteItem[] {
+  if (!sources.split) return [];
+  const make = (id: string, title: string, action: PaletteAction): PaletteItem => ({
+    id: `action:${id}`,
+    kind: "action",
+    label: KIND_LABEL.action,
+    title,
+    action,
+  });
+  if (sources.split.showing) return [make("close-split", "Close split", { type: "close-split" })];
+
+  const active = sources.tabs.find((t) => t.id === sources.activeId);
+  if (!active || active.kind === "browser") return [];
+  return [
+    make("split-new-terminal", "Split: new terminal beside this one", { type: "split-new-terminal" }),
+    // `canPair` refuses the tab itself ("same"), so the active tab is not offered beside itself.
+    ...sources.tabs
+      .filter((t) => canPair(active, t))
+      .map((t) => make(`show-beside:${t.id}`, `Show beside: ${t.title}`, { type: "show-beside", tabId: t.id })),
+  ];
 }
 
 /** What a token is matched against: the title first, the group label second. */

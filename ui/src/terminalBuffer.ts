@@ -12,9 +12,9 @@
  * pane on return and from the workspace scrollback too, because the
  * scrollback append lived in the same unmounting listener.
  *
- * The fix separates **recording** from **rendering**. Rendering stays
- * active-tab-only (one xterm per pane area, the same decision the browser pane
- * made). Recording moves up to the app: one subscription, mounted for as long
+ * The fix separates **recording** from **rendering**. Rendering stays to
+ * what is on screen (one xterm per pane: the active tab's, or each of a split's
+ * two, `docs/09` §12, the same decision the browser pane made). Recording moves up to the app: one subscription, mounted for as long
  * as the app is, filing each chunk for whichever terminal said it.
  *
  * ## The rule that makes one copy the whole design: ownership
