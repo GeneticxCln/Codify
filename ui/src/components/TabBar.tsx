@@ -1,5 +1,5 @@
 import React from "react";
-import { X, Terminal, Globe, MessageSquareText } from "lucide-react";
+import { X, Terminal, Globe, MessageSquareText, FileCode } from "lucide-react";
 import type { Tab, TabKind } from "../tabs";
 import type { Workspace } from "../types";
 import { threadLabel } from "../threadTitle";
@@ -8,7 +8,7 @@ import { threadLabel } from "../threadTitle";
  * The tab strip: what is open, which one is showing, and how to move between
  * them.
  *
- * One strip for all three kinds, because the user thinks of them the same way —
+ * One strip for all four kinds, because the user thinks of them the same way —
  * "what have I got open" — and a chat tab next to a terminal is a window they
  * want to reach in one click. The kind is told apart by its icon and nothing
  * else: the strip is a list of things, and colouring the whole tab would make
@@ -35,6 +35,7 @@ export const KIND_ICON: Record<TabKind, React.FC<{ className?: string }>> = {
   chat: MessageSquareText,
   terminal: Terminal,
   browser: Globe,
+  editor: FileCode,
 };
 
 /** What the accessible name says, since the icon alone is not a label. */
@@ -42,6 +43,7 @@ export const KIND_NAME: Record<TabKind, string> = {
   chat: "Conversation",
   terminal: "Terminal",
   browser: "Browser",
+  editor: "Editor",
 };
 
 export interface TabBarProps {
@@ -82,6 +84,16 @@ export interface TabBarProps {
    */
   splitIds?: readonly string[];
   /**
+   * Editor tabs whose text has changes nobody has saved. The strip cannot know: the buffer lives above the pane
+   * (`editorBuffers.ts`), and the tab you are not looking at is the one you will close and lose.
+   */
+  unsavedIds?: readonly string[];
+  /**
+   * Editor tabs the assistant has changed since the person last looked: "something in a tab I was not looking at
+   * changed", the same fact family as the terminal's unread dot.
+   */
+  assistantEditedIds?: readonly string[];
+  /**
    * A right-click on a tab, or the Menu key on a focused one (the browser delivers both as `contextmenu`), asks for that
    * tab's menu. Absent, the strip leaves the browser's own menu alone.
    */
@@ -98,6 +110,8 @@ export const TabBar: React.FC<TabBarProps> = ({
   unreadTerminalIds = [],
   workspaces = [],
   splitIds = [],
+  unsavedIds = [],
+  assistantEditedIds = [],
   onMenu,
 }) => {
   return (
@@ -113,6 +127,9 @@ export const TabBar: React.FC<TabBarProps> = ({
           const busy = busyTabIds.includes(tab.id);
           const unread = unreadTerminalIds.includes(tab.id);
           const inSplit = splitIds.includes(tab.id);
+          // Only an editor has text to lose or an assistant to change it, whatever ids a caller passes.
+          const unsaved = tab.kind === "editor" && unsavedIds.includes(tab.id);
+          const assistantEdited = tab.kind === "editor" && assistantEditedIds.includes(tab.id);
           // The folder this tab is in, resolved from the id the tab carries. Not
           // `selectedWs`: with two tabs in two folders, one global name would be
           // wrong for one of them.
@@ -132,8 +149,19 @@ export const TabBar: React.FC<TabBarProps> = ({
               tabIndex={active ? 0 : -1}
               aria-label={`${KIND_NAME[tab.kind]}: ${label}${
                 ws ? ` in ${ws.root_path}` : ""
-              }${unread ? " — new output" : ""}${inSplit ? " — in split view" : ""}`}
-              title={ws ? `${ws.root_path} — ${label}` : label}
+              }${unread ? " — new output" : ""}${unsaved ? " — unsaved changes" : ""}${
+                assistantEdited ? " — changed by the assistant" : ""
+              }${inSplit ? " — in split view" : ""}`}
+              title={
+                // An editor tab is a file, so its tooltip says which one and where: a name alone cannot tell two `index.ts` apart.
+                tab.kind === "editor" && tab.path
+                  ? ws
+                    ? `${ws.root_path}/${tab.path}`
+                    : tab.path
+                  : ws
+                    ? `${ws.root_path} — ${label}`
+                    : label
+              }
               data-in-split={inSplit ? "true" : undefined}
               onClick={() => onFocus(tab.id)}
               onContextMenu={
@@ -194,6 +222,24 @@ export const TabBar: React.FC<TabBarProps> = ({
                   aria-hidden
                   data-testid="terminal-unread-dot"
                   className="w-1.5 h-1.5 rounded-full bg-codify-info flex-shrink-0"
+                />
+              )}
+              {/* Text nobody has saved: a warning-coloured dot, because this is the one mark on the strip that says
+              "closing this loses something". Not the busy accent and not the info blue, which both mean "happening". */}
+              {unsaved && (
+                <span
+                  aria-hidden
+                  data-testid="editor-unsaved-dot"
+                  className="w-1.5 h-1.5 rounded-full bg-codify-warning flex-shrink-0"
+                />
+              )}
+              {/* The assistant changed it: the info blue, as the terminal's unread dot is — look here — and a ring
+              rather than a disc so it cannot be mistaken for the unsaved dot beside it. */}
+              {assistantEdited && (
+                <span
+                  aria-hidden
+                  data-testid="editor-assistant-dot"
+                  className="w-1.5 h-1.5 rounded-full border border-codify-info flex-shrink-0"
                 />
               )}
               <button

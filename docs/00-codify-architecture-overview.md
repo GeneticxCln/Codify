@@ -132,9 +132,11 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
    `mode: "chat"`, and `TurnCreate` carries no pipeline flags, so a client chooses neither
    that a turn exists nor what it becomes — the gate classifies and the conductor disposes.
    See `docs/09` §10.
-9. Only the fixer writes. The `write` move is the single path from a conductor run to the
+9. Only the fixer writes for an agent. The `write` move is the single path from a conductor run to the
    filesystem, it refuses while the goal is unapproved, and no skill, workspace file or
-   conductor reply can widen that. A skill is instructions, never a capability. See `docs/09` §10.14.
+   conductor reply can widen that. A person's own Save in the editor is the one other door,
+   `PUT /workspaces/{id}/file`: it needs the boot token, so no agent, skill or conductor tool
+   can call it. A skill is instructions, never a capability. See `docs/09` §10.14.
 
 Each of the nine is held by a test at the boundary it names (a route, the sandbox, the running app, the
 engine's own source) and not only by a test of a constructor or a table. `tests/test_invariants_at_their_boundary.py`

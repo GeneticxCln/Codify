@@ -31,6 +31,10 @@ import type {
   RoleInfo,
   TraceSummary,
   Workspace,
+  WorkspaceFile,
+  WorkspaceFileList,
+  WorkspaceFileSaved,
+  SurfaceRequest,
 } from "./types.ts";
 
 /**
@@ -739,6 +743,100 @@ export async function setWorkspaceDesignContract(
   });
   if (!res.ok) throw await engineError(res, "Failed to pin the brand contract");
   return res.json();
+}
+
+/**
+ * Every file in a workspace, for the editor's quick-open.
+ *
+ * Paths relative to the root, sorted, with the folders that are not source left out (the engine's `SKIP_DIRS`), and cut
+ * at `limit` with `truncated: true` rather than silently. Searched in the palette, never shown as a list.
+ */
+export async function listWorkspaceFiles(workspace_id: string, limit?: number): Promise<WorkspaceFileList> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const query = limit === undefined ? "" : `?limit=${limit}`;
+  const res = await fetch(`${base}/workspaces/${encodeURIComponent(workspace_id)}/files${query}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to list the workspace's files");
+  return res.json();
+}
+
+/**
+ * One file as the editor holds it: its exact text and the version a save must name.
+ *
+ * A refusal keeps the engine's own code, so the editor can say the right sentence: `file_missing`, `file_binary`,
+ * `file_not_text`, `file_too_large`, `file_escape`.
+ */
+export async function readWorkspaceFile(workspace_id: string, path: string): Promise<WorkspaceFile> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(
+    `${base}/workspaces/${encodeURIComponent(workspace_id)}/file?path=${encodeURIComponent(path)}`,
+    { headers: { Authorization: `Bearer ${currentEngine.token}` } },
+  );
+  if (!res.ok) throw await engineError(res, "Failed to open the file");
+  return res.json();
+}
+
+/**
+ * A person's Save: replace one existing file's text, naming the version it was read at.
+ *
+ * **The one write to the workspace that is not the fixer's** (docs/00 §6.9), and only ever made because a person pressed
+ * Save. A file that is no longer `base_version` is a 409 `file_changed`, and the version it is now is on the error as
+ * `extra.current_version`.
+ */
+export async function saveWorkspaceFile(
+  workspace_id: string,
+  body: { path: string; content: string; base_version: string },
+): Promise<WorkspaceFileSaved> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/workspaces/${encodeURIComponent(workspace_id)}/file`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${currentEngine.token}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to save the file");
+  return res.json();
+}
+
+/**
+ * The next question the engine has for this window, or `null` when `wait` seconds pass with none.
+ *
+ * A long poll, and the window's heartbeat: a poll that arrives is how the engine learns the window is there
+ * (`engine/surfaces.py`). Aborting it is how the loop stops. A refusal throws, so the loop backs off instead of spinning.
+ */
+export async function nextSurfaceRequest(wait: number, signal?: AbortSignal): Promise<SurfaceRequest | null> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/surfaces/next?wait=${wait}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+    signal,
+  });
+  if (!res.ok) throw await engineError(res, "Failed to poll the engine");
+  const body = await res.json();
+  return body && typeof body.id === "string" ? (body as SurfaceRequest) : null;
+}
+
+/** Answer one question. `false` when the engine no longer wanted it: it ran out of patience, or the id was never its own. */
+export async function answerSurface(body: {
+  id: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+}): Promise<boolean> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/surfaces/answer`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${currentEngine.token}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to answer the engine");
+  const reply = await res.json();
+  return reply?.accepted === true;
 }
 
 /**

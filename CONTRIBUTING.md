@@ -310,8 +310,9 @@ python3 -m scripts.drive_a_turn --provider ollama --base-url http://127.0.0.1:11
 ```
 
 The request text picks the scenario: a question gets prose, `[ask]` makes the conductor put a question first,
-`[todo]` makes a step run keep a note, and `[stall]` makes it stop after `write` (the goal pauses with
-`conductor_stopped`). The run exits non-zero unless it completes. `tests/test_fake_conductor.py` and
+`[todo]` makes a step run keep a note, `[stall]` makes it stop after `write` (the goal pauses with
+`conductor_stopped`), and `[editor path=P old=X new=Y]` makes it look at your editor, open `P` and change `X` to `Y`
+in the open text (unsaved: it never writes). The run exits non-zero unless it completes. `tests/test_fake_conductor.py` and
 `tests/test_drive_a_turn_approve.py` run exactly this.
 
 ## Docs

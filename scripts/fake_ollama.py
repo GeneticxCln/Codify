@@ -269,6 +269,8 @@ def fixer_files(prompt: str) -> str:
 #   [ask]                     put one question to the person first (`ask_user`), when it is offered
 #   [todo]                    a step run keeps a note before it writes
 #   [stall]                   a step run stops after `write`: the conductor that cannot finish
+#   [editor path=P old=X new=Y]  look at the person's editor, open P, change X to Y in the open text (no spaces
+#                             inside a value). It edits the open buffer and nothing else: the person saves
 #
 # It never calls a tool it was not offered, which is the property that keeps a scripted run honest: a step
 # move before a plan exists, or `ask_user` during an approved run, is the engine's to refuse, not ours to try.
@@ -322,6 +324,17 @@ def conductor_move(payload: dict[str, Any]) -> tuple[str, dict[str, Any]] | str 
 
     asked = re.findall(TURN_RE, prompt, re.M)
     request = (asked[-1] if asked else prompt).strip()
+    editor = re.search(r"\[editor ([^\]]*)\]", request)
+    fields = dict(re.findall(r"(\w+)=(\S+)", editor.group(1))) if editor else {}
+    if fields.get("path") and "old" in fields and "new" in fields and "read_editor" in offered:
+        name = next_of(["read_editor", "open_in_editor", "edit_editor"])
+        if name == "read_editor":
+            return name, {}
+        if name == "open_in_editor":
+            return name, {"path": fields["path"], "line": 1}
+        if name == "edit_editor":
+            return name, {"path": fields["path"], "old_text": fields["old"], "new_text": fields["new"]}
+        return f"I changed {fields['path']} in your editor. It is not saved: you decide whether to keep it."
     if request.endswith("?"):
         return f"Fake conductor here: with a real model I would answer \u201c{request[:160]}\u201d."
     if "[ask]" in request and "ask_user" in offered and "ask_user" not in called:

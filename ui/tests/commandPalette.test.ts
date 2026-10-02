@@ -346,7 +346,7 @@ test("the split actions come last, under their own heading, and have unique ids"
     split: { showing: false },
   });
   const kinds = items.map((i) => i.kind);
-  assert.deepEqual([...new Set(kinds)], ["tab", "conversation", "settings", "action"]);
+  assert.deepEqual([...new Set(kinds)], ["tab", "conversation", "settings", "action"], "no files were offered, so no file group");
   assert.equal(new Set(items.map((i) => i.id)).size, items.length, "two items share an id");
   assert.ok(items.filter((i) => i.kind === "action").every((i) => i.label === "Split"));
 });
@@ -369,4 +369,110 @@ test("the palette draws the split group under its own heading", () => {
   );
   assert.match(markup, />Split</);
   assert.match(markup, /Close split/);
+});
+
+
+// ── files: "Open file…" ────────────────────────────────────────────────────
+
+const FILES = [
+  "README.md",
+  "src/app/main.py",
+  "src/app/models.py",
+  "src/util/main_helpers.py",
+  "tests/test_main.py",
+  "docs/main.md",
+];
+
+const withFiles = (over: Partial<PaletteSources> = {}): PaletteItem[] =>
+  buildPaletteItems(sources({ tabs: [tab()], activeId: "tab-1", conversations: [convo()], files: FILES, ...over }));
+
+test("files are offered as 'Open file' rows named by their path, after everything else", () => {
+  const items = withFiles();
+  const files = items.filter((i) => i.kind === "file");
+
+  assert.deepEqual(files.map((i) => (i.kind === "file" ? i.path : "")), FILES);
+  assert.ok(files.every((i) => i.label === "Open file" && i.title === (i.kind === "file" ? i.path : "")));
+  assert.equal(items.findIndex((i) => i.kind === "file"), items.length - files.length, "files come last");
+  assert.equal(new Set(items.map((i) => i.id)).size, items.length, "two items share an id");
+});
+
+test("a palette given no files has none", () => {
+  assert.equal(buildPaletteItems(sources({ tabs: [tab()], conversations: [convo()] })).some((i) => i.kind === "file"), false);
+  assert.equal(withFiles({ files: [] }).some((i) => i.kind === "file"), false);
+});
+
+test("an empty query lists no files: thousands of rows are a search, not a menu", () => {
+  const shown = filterPalette(withFiles(), "");
+
+  assert.equal(shown.some((i) => i.kind === "file"), false);
+  assert.equal(shown.length, withFiles().length - FILES.length, "everything else is still there");
+});
+
+test("a query finds files by any part of the path, and every token must match", () => {
+  const titles = (q: string): string[] => filterPalette(withFiles(), q).filter((i) => i.kind === "file").map((i) => i.title);
+
+  assert.deepEqual(titles("models"), ["src/app/models.py"]);
+  assert.deepEqual(titles("app main"), ["src/app/main.py"]);
+  assert.deepEqual(titles("zzz"), []);
+});
+
+test("a file whose name starts with the query beats one that only contains it somewhere in its path", () => {
+  const titles = filterPalette(withFiles(), "main").filter((i) => i.kind === "file").map((i) => i.title);
+
+  assert.equal(titles[0], "src/app/main.py", titles.join(" | "));
+  assert.ok(titles.indexOf("src/app/main.py") < titles.indexOf("docs/main.md") || titles.indexOf("docs/main.md") < titles.indexOf("src/util/main_helpers.py"));
+  assert.equal(titles.at(-1), "tests/test_main.py", "the file that only contains the word, deep in its name, comes last");
+});
+
+test("only the best thirty files are shown, and nothing else is cut", () => {
+  const many = Array.from({ length: 200 }, (_, i) => `src/gen/file${i}.ts`);
+  const shown = filterPalette(withFiles({ files: many }), "file");
+
+  assert.equal(shown.filter((i) => i.kind === "file").length, 30);
+
+  const everything = filterPalette(withFiles({ files: many }), "tab");
+  assert.equal(everything.filter((i) => i.kind === "tab").length, 1, "a tab is never dropped to make room for files");
+});
+
+test("a tab that matches less well than thirty files is still shown after them", () => {
+  const many = Array.from({ length: 60 }, (_, i) => `src/gen/file${i}.ts`);
+  const items = buildPaletteItems(
+    sources({
+      tabs: [tab({ id: "tab-9", title: "my file notes", conversationId: undefined })],
+      activeId: "tab-9",
+      conversations: [convo({ id: "c9", title: "about a file" })],
+      files: many,
+    }),
+  );
+
+  const shown = filterPalette(items, "file");
+
+  assert.equal(shown.filter((i) => i.kind === "file").length, 30);
+  assert.equal(shown.some((i) => i.kind === "tab"), true, "the tab was dropped to make room for files");
+  assert.equal(shown.some((i) => i.kind === "conversation"), true, "the thread was dropped to make room for files");
+});
+
+test("the palette draws the file group under its own heading, once there is a query", async () => {
+  const { withDom } = await import("./dom.ts");
+  await withDom(async (dom) => {
+    await dom.render(
+      React.createElement(CommandPalette, { open: true, items: withFiles(), onClose: () => {}, onSelect: () => {} }),
+    );
+    const input = dom.byLabel("Command palette") as HTMLInputElement;
+
+    assert.equal(dom.container.textContent?.includes("src/app/models.py"), false, "files are not listed before a query");
+    await dom.fill(input, "models");
+
+    assert.match(dom.container.textContent ?? "", /Files/);
+    assert.match(dom.container.textContent ?? "", /src\/app\/models\.py/);
+    assert.equal(dom.container.querySelectorAll('[role="option"]').length, 1);
+  });
+});
+
+test("the search box says it opens files", () => {
+  const markup = renderToStaticMarkup(
+    React.createElement(CommandPalette, { open: true, items: [], onClose: () => {}, onSelect: () => {} }),
+  );
+
+  assert.match(markup, /placeholder="[^"]*file/i);
 });

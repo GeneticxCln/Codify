@@ -337,6 +337,35 @@ class WorkspaceDesignContract(BaseModel):
     path: str = Field("", max_length=400)
 
 
+class WorkspaceFileList(BaseModel):
+    """Every file path in a workspace, for the editor's quick-open (`GET /workspaces/{id}/files`)."""
+    files: list[str]
+    truncated: bool
+    limit: int
+
+
+class WorkspaceFile(BaseModel):
+    """One file as the editor holds it: exact text, and the version a later save must name."""
+    path: str
+    content: str
+    version: str
+    size: int
+
+
+class WorkspaceFileSave(BaseModel):
+    """A person's Save. `extra: "forbid"`: this route replaces one file's text and is not a general file writer."""
+    model_config = {"extra": "forbid"}
+    path: str = Field(..., min_length=1, max_length=4096)
+    content: str
+    base_version: str = Field(..., min_length=1, max_length=128)
+
+
+class WorkspaceFileSaved(BaseModel):
+    path: str
+    version: str
+    size: int
+
+
 class Conversation(BaseModel):
     """A thread of turns in a workspace — the thing a tab points at.
 

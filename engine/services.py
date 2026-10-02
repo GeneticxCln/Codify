@@ -12,11 +12,19 @@ import sqlite3
 from engine.db import dumps, row_to_dict
 from engine.fs import (
     BINARY_SNIFF_BYTES,
+    MAX_EDIT_BYTES,
+    FileAccessError,
+    FileChangedError,
+    FileNotTextError,
     FileSystemService,
+    FileTooLargeError,
+    NotAFileError,
     PathEscapeError,
+    ProtectedRootError,
     looks_binary,
     protected_root_reason,
 )
+from engine.library import LibraryService
 from engine.models import (
     BUILTIN_PROVIDERS,
     PAUSE_CODES,
@@ -39,6 +47,9 @@ from engine.models import (
     ShellTabWrite,
     TurnCreate,
     Workspace,
+    WorkspaceFile,
+    WorkspaceFileList,
+    WorkspaceFileSaved,
     WorkspaceCreate,
 )
 from engine.providers import (
@@ -602,6 +613,68 @@ class WorkspaceService:
         )
         self._db.commit()
         return self.get(workspace_id)
+
+    # ── the editor's files ─────────────────────────────────────────────────────
+    #
+    # Three methods, and the only ones that read a workspace file for a *person* rather than a model. `save_file` is
+    # the person's Save: the one writer besides the fixer (docs/00 §6.9), reached from exactly one route and named by
+    # no agent-side module (`test_invariants_at_their_boundary.TestAPersonsSaveIsTheOneOtherDoor`).
+
+    # They take the `Workspace`, not its id, so the route can look the workspace up on the event loop (the connection is
+    # not shared across threads) and then hand the file work, which can be a walk of ten thousand files or a megabyte
+    # read, to a worker thread without a database call inside it.
+
+    def list_files(self, workspace: Workspace, limit: int) -> WorkspaceFileList:
+        found = LibraryService(workspace.root_path).list_files(limit)
+        return WorkspaceFileList(files=found["files"], truncated=found["truncated"], limit=found["limit"])
+
+    def read_file(self, workspace: Workspace, path: str) -> WorkspaceFile:
+        try:
+            got = FileSystemService(workspace.root_path).read_editable(path)
+        except (PathEscapeError, NotAFileError, FileTooLargeError, FileNotTextError, FileAccessError) as exc:
+            raise self._file_refusal(exc, path) from exc
+        return WorkspaceFile(path=got.path, content=got.content, version=got.version, size=got.size)
+
+    def save_file(self, workspace: Workspace, path: str, content: str, base_version: str) -> WorkspaceFileSaved:
+        try:
+            saved = FileSystemService(workspace.root_path).save_text(path, content, base_version)
+        except (
+            PathEscapeError, NotAFileError, FileTooLargeError, FileNotTextError, FileAccessError, FileChangedError,
+        ) as exc:
+            raise self._file_refusal(exc, path) from exc
+        return WorkspaceFileSaved(path=saved.path, version=saved.version, size=saved.size)
+
+    @staticmethod
+    def _file_refusal(exc: Exception, path: str) -> ApiError:
+        """One sentence and one code per way a file door can say no, so the editor can say the right thing.
+
+        The order matters: `ProtectedRootError` and `GitMetadataError` are kinds of `PathEscapeError`.
+        """
+        label = repr(path) if "\x00" in path else path
+        if isinstance(exc, ProtectedRootError):
+            return ApiError(400, "workspace_protected", f"this workspace is not a place files may be saved: {exc.reason}")
+        if isinstance(exc, PathEscapeError):
+            return ApiError(400, "file_escape", f"{label} is outside this workspace, or is git's own metadata")
+        if isinstance(exc, NotAFileError):
+            return ApiError(404, "file_missing", f"there is no file at {label} in this workspace")
+        if isinstance(exc, FileTooLargeError):
+            return ApiError(
+                422, "file_too_large",
+                f"{label} is {exc.size:,} bytes; the editor opens and saves files up to {MAX_EDIT_BYTES:,} bytes",
+            )
+        if isinstance(exc, FileNotTextError):
+            if exc.reason == "binary":
+                return ApiError(422, "file_binary", f"{label} is binary (it holds a NUL byte), not text an editor can hold")
+            return ApiError(422, "file_not_text", f"{label} is not valid UTF-8 text")
+        if isinstance(exc, FileChangedError):
+            return ApiError(
+                409, "file_changed",
+                f"{label} changed on disk since it was opened. Reload it to see the new version, or save over it.",
+                {"current_version": exc.current_version},
+            )
+        if isinstance(exc, FileAccessError):
+            return ApiError(422, "file_access", f"{label} could not be read or written: {exc.detail}")
+        raise exc
 
     def delete(self, workspace_id: str, *, delete_goals: bool = False) -> dict[str, Any]:
         """Forget a workspace, and optionally the goal history recorded against it.

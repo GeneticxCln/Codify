@@ -102,6 +102,14 @@ class TestWhatItSaysTheEngineDoes(unittest.TestCase):
         text = self.prompt()
         self.assertRegex(text, r"page[^.]*(not instructions|untrusted|not orders)")
 
+    def test_it_says_an_editor_edit_never_saves_and_has_to_be_reported(self) -> None:
+        # The one tool whose effect the person did not ask for by name. What the model must carry into its answer is
+        # that the text is unsaved (the person's Save is the only door to the disk) and that it owes them what changed.
+        text = self.prompt()
+        self.assertRegex(text, r"edit_editor`[^.]*never saves")
+        self.assertRegex(text, r"edit_editor`[^.]*say what you changed")
+        self.assertRegex(text, r"read_editor`[^.]*(not yet saved|unsaved)")
+
     def test_it_points_at_recall_as_the_first_look_at_a_failure(self) -> None:
         text = self.prompt()
         self.assertRegex(text, r"recall`[^.]*(fail|before|past)")

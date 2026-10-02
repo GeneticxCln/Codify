@@ -244,6 +244,10 @@ or 175%, **125% by default**. It is client-side display state, like the theme: i
   menu, the palette, or Ctrl+. (also in the About tab's shortcut list). A browser page and two conversations cannot be paired, and the
   menu says why. The left panel gives way to a split as it does to a drawer, and a window too narrow for two panes draws the focused one.
   Rules and layout: `docs/09` §12. It is never written to storage: only the divider's position is.
+* **An editor is a fourth kind of tab, and has no settings.** Ctrl+K finds a file and opens it; it can sit in a split with a chat, a
+  terminal or another editor. Nothing about it is configured here and nothing about it is stored: it is local like a terminal, so
+  the tab strip's storage and the engine's `/shell/tabs` never see it (`docs/09` §13.2), and no agent setting can grant the assistant
+  more than eyes on it and edits to its open text (`docs/00` §6.9). What it does is `docs/09` §13.
 * **Providers are read by name, not by slug.** The Provider Keys row printed the slug through CSS
   `capitalize` ("Openai", "Nvidia") and the protocol as the raw tag `openai_compat`, and the provider
   select printed every slug in capitals. `ui/src/providerLabels.ts` supplies the words (OpenAI,

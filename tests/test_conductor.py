@@ -396,6 +396,7 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
             {
                 "read_file", "search_code", "git_history", "run_command",
                 "read_page", "navigate_page", "click_page", "type_page",
+                "read_editor", "open_in_editor", "edit_editor",
                 "recall", "recall_threads", "use_skill", "recon", "design",
                 "plan", "write", "verify", "review", "summarize", "todo", "ask_user",
             },

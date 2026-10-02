@@ -4,6 +4,7 @@ import React, {
   useCallback,
   useMemo,
   useRef,
+  useSyncExternalStore,
 } from "react";
 import {
   Workspace,
@@ -73,6 +74,9 @@ import {
   listShellTabs,
   upsertShellTab,
   deleteShellTab,
+  listWorkspaceFiles,
+  nextSurfaceRequest,
+  answerSurface,
 } from "./api";
 import {
   runGoalAction,
@@ -121,6 +125,7 @@ import {
   openBrowserTab,
   openConversation,
   openBlankTab,
+  openEditorTab,
   openTab,
   openTerminalTab,
   renameBrowserTab,
@@ -129,6 +134,7 @@ import {
   setBrowserPageUrl,
   setBrowserUrl,
   tabForConversation,
+  tabForFile,
   closeConversation,
   tabId,
   type Tab,
@@ -139,6 +145,10 @@ import { useSplit } from "./useSplit";
 import { useSplitFits } from "./useSplitFits";
 import { readSplitRatio, writeSplitRatio } from "./splitPref";
 import { SplitPanes } from "./components/SplitPanes";
+import { EditorPane } from "./components/EditorPane";
+import { editorBuffers } from "./editorStore";
+import { createEditorSurface, type EditorHost } from "./editorSurface";
+import { abortableSleep, createSurfaceRegistry, runSurfaceLoop } from "./surfaceLoop";
 import { TabMenu } from "./components/TabMenu";
 import { tabMenuItems, type TabMenuItemId } from "./tabMenu";
 import { threadLabel } from "./threadTitle";
@@ -976,6 +986,13 @@ export const App: React.FC = () => {
     activeTabNow?.kind === "browser" ? activeTabNow : undefined;
   const activeTerminalTab =
     activeTabNow?.kind === "terminal" ? activeTabNow : undefined;
+  const activeEditorTab =
+    activeTabNow?.kind === "editor" ? activeTabNow : undefined;
+  // What the strip says about the editors: text nobody has saved, and text the assistant changed. Read from the store, which
+  // lives above the panes, so a tab that is not on screen still says it.
+  const bufferSnapshot = useSyncExternalStore(editorBuffers.subscribe, editorBuffers.getSnapshot);
+  const unsavedEditorIds = useMemo(() => editorBuffers.unsavedIds(bufferSnapshot), [bufferSnapshot]);
+  const assistantEditedIds = useMemo(() => editorBuffers.assistantEditedIds(bufferSnapshot), [bufferSnapshot]);
   // The terminal a paste would reach: the focused one, else the one beside the chat that has it.
   const terminalInView =
     activeTerminalTab ??
@@ -986,7 +1003,7 @@ export const App: React.FC = () => {
   // terminal tab whose shell is still running.
   const canInsertClip = drawnSplit
     ? [drawnSplit.left, drawnSplit.right].some((t) => t.kind === "chat")
-    : !activeBrowserTab && !activeTerminalTab;
+    : !activeBrowserTab && !activeTerminalTab && !activeEditorTab;
   const canPasteClip = Boolean(terminalInView) && !terminalInView?.exited;
   const [insertRequest, setInsertRequest] = useState<{ seq: number; text: string } | null>(null);
   const [clipNotice, setClipNotice] = useState<string | null>(null);
@@ -1243,6 +1260,25 @@ export const App: React.FC = () => {
 
   const [paletteOpen, setPaletteOpen] = useState(false);
 
+  // "Open file": the selected workspace's files, asked for when the palette opens and searched (never listed) once there
+  // is a query. A refusal is an empty list and not an error: the palette is for jumping, and a request it made for
+  // itself that failed is not the person's problem (an older engine has no such route, and says 404).
+  const [paletteFiles, setPaletteFiles] = useState<readonly string[]>([]);
+  useEffect(() => {
+    if (!paletteOpen || !selectedWs || engineUp !== true) return;
+    let cancelled = false;
+    listWorkspaceFiles(selectedWs.id)
+      .then((listed) => {
+        if (!cancelled) setPaletteFiles(listed.files);
+      })
+      .catch(() => {
+        if (!cancelled) setPaletteFiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [paletteOpen, selectedWs, engineUp]);
+
   const paletteItems = useMemo(
     () =>
       buildPaletteItems({
@@ -1250,8 +1286,9 @@ export const App: React.FC = () => {
         activeId: tabState.activeId,
         conversations,
         split: { showing: Boolean(shownSplit) },
+        files: paletteFiles,
       }),
-    [tabState, conversations, shownSplit],
+    [tabState, conversations, shownSplit, paletteFiles],
   );
 
   // Every close in the shell goes through here — the strip's close button, the
@@ -1268,7 +1305,7 @@ export const App: React.FC = () => {
   // was opened but never given an address has no webview, and `close` refuses
   // a tab that has none — so calling it would put the shell's "no browser tab
   // is open" on screen as an error the user caused by closing an empty tab.
-  const handleCloseTab = useCallback(
+  const closeTabNow = useCallback(
     (id: string) => {
       // Closing a showing pane's tab ends the split and goes to the other pane's tab (`panes.closeInSplit`).
       const inSplit = closeInSplit(tabState, split, id);
@@ -1287,6 +1324,9 @@ export const App: React.FC = () => {
         layoutMirror.current = queueRemoval(layoutMirror.current, tab.key);
         writeLayoutMirror(layoutStorage(), layoutMirror.current);
       }
+      // An editor's text is held by the store, not by its pane, so the pane going does not free it: the buffer goes
+      // with the tab, here and nowhere else.
+      if (tab?.kind === "editor") editorBuffers.close(id);
       if (tab?.kind === "terminal") {
         // A pane that is not mounted never claimed its terminal, so the store
         // still holds what the shell said while this tab sat in the
@@ -1327,6 +1367,19 @@ export const App: React.FC = () => {
       }
     },
     [tabState, split],
+  );
+  // The person closing a tab (the strip's button, Ctrl+W): an editor with text nobody has saved asks first, because
+  // closing it is the one close in this window that throws work away. The assistant closing a tab it opened to no purpose
+  // (`closeFile` below) goes straight to `closeTabNow`: it can only ever close an editor it made and has not changed.
+  const handleCloseTab = useCallback(
+    (id: string) => {
+      const tab = tabState.tabs.find((t) => t.id === id);
+      if (tab?.kind === "editor" && editorBuffers.get(id)?.dirty) {
+        if (!window.confirm(`${tab.title} has changes that are not saved. Close it and lose them?`)) return;
+      }
+      closeTabNow(id);
+    },
+    [tabState, closeTabNow],
   );
 
   // ── the browser pane's four moves ──────────────────────────────────────
@@ -1970,6 +2023,127 @@ export const App: React.FC = () => {
     await startTerminal(selectedWs?.id);
   }, [startTerminal, selectedWs]);
 
+  // ── the editor (`docs/09` §13) ───────────────────────────────────────────────────────────────────────────────
+  //
+  // A file is opened by the person (the palette's "Open file", the path on a diff card) or by the assistant
+  // (`open_in_editor`, `edit_editor`), and both end the same way: an editor tab, and a buffer in the store
+  // (`editorBuffers.ts`). The assistant's handlers run from a poll and not from a render, so they read the tabs and the
+  // split through `liveRef`, which says how things are *now*, and not through the closure they were made in.
+  const liveRef = useRef({ tabState, shownSplit, drawnSplit, splitFitsRow });
+  useEffect(() => {
+    liveRef.current = { tabState, shownSplit, drawnSplit, splitFitsRow };
+  });
+
+  /** Make the tab for a file, or find it, and say which at once: the assistant needs the answer before the state settles. */
+  const placeEditorTab = useCallback(
+    (file: { workspaceId: string; path: string }, show: boolean): { tabId: string; opened: boolean } => {
+      const existing = tabForFile(liveRef.current.tabState, file.workspaceId, file.path);
+      if (existing) {
+        if (show) setTabState((prev) => openEditorTab(prev, file, { show: true }));
+        return { tabId: existing.id, opened: false };
+      }
+      const id = tabId("editor");
+      setTabState((prev) => openEditorTab(prev, file, { show, id }));
+      // The next call in this same breath (an edit right after an open) must find the tab: the ref is a render behind.
+      liveRef.current = { ...liveRef.current, tabState: openEditorTab(liveRef.current.tabState, file, { show, id }) };
+      return { tabId: id, opened: true };
+    },
+    [],
+  );
+
+  /** The person opening a file: it becomes the tab in front, and its text starts to load. */
+  const handleOpenFile = useCallback(
+    (path: string, workspaceId?: string) => {
+      const workspace = workspaceId ?? selectedWs?.id;
+      if (!workspace) {
+        setError("Pick a workspace before opening a file");
+        return;
+      }
+      const placed = placeEditorTab({ workspaceId: workspace, path }, true);
+      void editorBuffers.open(placed.tabId, { workspaceId: workspace, path });
+    },
+    [selectedWs, placeEditorTab],
+  );
+
+  // Every editor tab has a buffer, however the tab came to be: a tab with none would be a pane that says "Opening…" for ever.
+  useEffect(() => {
+    for (const tab of tabState.tabs) {
+      if (tab.kind === "editor" && tab.workspaceId && tab.path && !editorBuffers.get(tab.id)) {
+        void editorBuffers.open(tab.id, { workspaceId: tab.workspaceId, path: tab.path });
+      }
+    }
+  }, [tabState]);
+
+  /**
+   * What the assistant's editor tools may do to the window, and nothing else.
+   *
+   * `show` is the assistant pointing at something. If the person is looking at a conversation and nothing is split, the file
+   * goes beside it, made with **the conversation focused**: the assistant does not take the keyboard from the box the
+   * person is typing in. Otherwise (a split already showing, a terminal or a page in front, no room) the tab opens and is
+   * left, and the strip marks it: the layout the person arranged is not rearranged for them. An edit never moves anything.
+   */
+  const editorHost = useMemo<EditorHost>(
+    () => ({
+      view() {
+        const live = liveRef.current;
+        const active = live.tabState.activeId;
+        const shown = live.drawnSplit ? [live.drawnSplit.left.id, live.drawnSplit.right.id] : active ? [active] : [];
+        return { shown, focused: active };
+      },
+      openFile(file, intent) {
+        const live = liveRef.current;
+        const found = tabForFile(live.tabState, file.workspaceId, file.path);
+        if (found) {
+          if (live.drawnSplit && [live.drawnSplit.left.id, live.drawnSplit.right.id].includes(found.id)) {
+            return { tabId: found.id, opened: false, shown: "beside" };
+          }
+          if (!live.drawnSplit && live.tabState.activeId === found.id) return { tabId: found.id, opened: false, shown: "front" };
+        }
+        const chat = live.tabState.tabs.find((t) => t.id === live.tabState.activeId && t.kind === "chat");
+        if (intent === "show" && chat && !live.shownSplit && live.splitFitsRow) {
+          const placed = placeEditorTab(file, false);
+          setSplit({ panes: [chat.id, placed.tabId], focused: 0 });
+          return { ...placed, shown: "beside" };
+        }
+        return { ...placeEditorTab(file, false), shown: "background" };
+      },
+      closeFile(id) {
+        // Only an editor, and only one with nothing in it that is not saved: the assistant undoes its own open, and
+        // never throws away a person's text.
+        const tab = liveRef.current.tabState.tabs.find((t) => t.id === id);
+        if (tab?.kind === "editor" && !editorBuffers.get(id)?.dirty) closeTabNow(id);
+      },
+    }),
+    [placeEditorTab, setSplit, closeTabNow],
+  );
+  const editorHostRef = useRef(editorHost);
+  useEffect(() => {
+    editorHostRef.current = editorHost;
+  });
+
+  // The window's half of the surface bridge (`engine/surfaces.py`): poll the engine for questions about what is on screen
+  // and answer them from the buffers, for as long as the window and the engine are up. It is on from the start and not
+  // only while an editor is open, because `open_in_editor` is how one gets opened.
+  useEffect(() => {
+    if (engineUp !== true) return;
+    const registry = createSurfaceRegistry();
+    registry.register(
+      "editor",
+      createEditorSurface(editorBuffers, {
+        view: () => editorHostRef.current.view(),
+        openFile: (file, intent) => editorHostRef.current.openFile(file, intent),
+        closeFile: (id) => editorHostRef.current.closeFile(id),
+      }),
+    );
+    const controller = new AbortController();
+    void runSurfaceLoop(
+      { next: nextSurfaceRequest, answer: answerSurface, sleep: abortableSleep, now: Date.now },
+      registry,
+      controller.signal,
+    );
+    return () => controller.abort();
+  }, [engineUp]);
+
   // ── split panes (`panes.ts` has the rules; `docs/09` §12 says what they are for) ─────────────────────────────
   //
   // A refusal is said, in a thin line above the panes, and goes with the next change of tab: a chord that does
@@ -2211,6 +2385,9 @@ export const App: React.FC = () => {
         else if (item.action.type === "split-new-terminal") void splitWithNewTerminal();
         else startSplitWith(item.action.tabId);
         break;
+      case "file":
+        handleOpenFile(item.path);
+        break;
     }
   };
 
@@ -2294,6 +2471,20 @@ export const App: React.FC = () => {
             return { ...msg, events: updatedEvents };
           }),
         );
+
+        // The fixer wrote files: an editor holding one of them reloads if the person has not touched it, and says so if they
+        // have. Only worth asking when an editor is open at all, and only for a write that happened (not a dry run).
+        if (ev.type === "file_change_summary" && editorBuffers.getSnapshot().byTab.size > 0) {
+          const payload = ev.payload as { paths?: unknown; dry_run?: unknown } | undefined;
+          const paths = Array.isArray(payload?.paths)
+            ? payload.paths.filter((p): p is string => typeof p === "string")
+            : [];
+          if (!payload?.dry_run && paths.length > 0) {
+            void getGoal(goalId)
+              .then((owner) => editorBuffers.noteDiskChange(owner.workspace_id, paths))
+              .catch(() => {});
+          }
+        }
 
         if (
           ev.type === "goal_status" ||
@@ -3245,6 +3436,7 @@ export const App: React.FC = () => {
               onPinDesignContract={handleSetDesignContract}
               pinnedContracts={pinnedContracts}
               onOpenLink={handleOpenLink}
+              onOpenFile={(path) => handleOpenFile(path, chatInView?.workspaceId ?? selectedWs?.id)}
               onAnswerQuestion={(text) => void handleSendMessage(text)}
             />
 
@@ -3296,8 +3488,15 @@ export const App: React.FC = () => {
       autoFocus={autoFocus}
     />
   );
+  const renderEditor = (tab: Tab, autoFocus: boolean): React.ReactElement => (
+    <EditorPane key={tab.id} tabId={tab.id} buffers={editorBuffers} autoFocus={autoFocus} />
+  );
   const renderPane = (tab: Tab, side: PaneSide): React.ReactElement =>
-    tab.kind === "terminal" ? renderTerminal(tab, drawnSplit?.focused === side) : renderChat(drawnSplit?.focused === side);
+    tab.kind === "terminal"
+      ? renderTerminal(tab, drawnSplit?.focused === side)
+      : tab.kind === "editor"
+        ? renderEditor(tab, drawnSplit?.focused === side)
+        : renderChat(drawnSplit?.focused === side);
 
   return (
     // select-none REMOVED so text cursor and selection work normally in WebKitGTK
@@ -3379,6 +3578,8 @@ export const App: React.FC = () => {
             });
           }}
           unreadTerminalIds={[...unreadTerminalIds]}
+          unsavedIds={unsavedEditorIds}
+          assistantEditedIds={assistantEditedIds}
           splitIds={shownSplit ? [shownSplit.left.id, shownSplit.right.id] : []}
           onMenu={(tabId, x, y) => setTabMenu({ tabId, x, y })}
           onClose={handleCloseTab}
@@ -3694,6 +3895,8 @@ export const App: React.FC = () => {
                   : null
               }
             />
+          ) : activeEditorTab ? (
+            renderEditor(activeEditorTab, true)
           ) : activeTerminalTab ? (
             renderTerminal(activeTerminalTab, true)
           ) : (

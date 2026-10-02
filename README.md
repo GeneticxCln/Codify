@@ -376,7 +376,7 @@ Details: [docs/09 §11](docs/09-workspace-shell.md) and [docs/03 §1.10](docs/03
 
 ## Split panes
 
-Show a chat beside a terminal, or two terminals side by side. Right-click a tab and choose **Show beside the current tab**
+Show a chat beside a terminal or an editor, or two of those side by side. Right-click a tab and choose **Show beside the current tab**
 (or **Split with a new terminal**), pick **Split** in the command palette (Ctrl+K), or press **Ctrl+.** (again to close).
 Drag the divider, or use its arrow keys. Click in a pane to work in it; the tab strip follows.
 
@@ -387,6 +387,29 @@ Drag the divider, or use its arrow keys. Click in a pane to work in it; the tab 
 - **A split is not remembered across a restart** (terminals are not); the divider's position is.
 
 Details: [docs/09 §12](docs/09-workspace-shell.md).
+
+## Editor
+
+Press **Ctrl+K**, type part of a file's name and pick it: the file opens in its own tab, and **Ctrl+.** puts it beside the
+conversation you are in. It is a plain code editor (syntax colours for JavaScript/TypeScript, Python, JSON, Markdown, CSS and HTML;
+undo; **Ctrl+S** to save). A change in a run's diff card has an **Open** link to the file it touched.
+
+The assistant can **see** it and **use** it, through three tools it can call on any turn:
+
+- **`read_editor`** reports which files you have open, which one is in front, your cursor and selection, and the text **including
+  what you have not saved**.
+- **`open_in_editor`** points at a file and a range. It opens beside the chat you are reading, never takes the keyboard from the message
+  box you are typing in, and never rearranges a split you made: with no room, or a terminal in front, the tab opens in the background and is marked.
+- **`edit_editor`** changes the text in the open buffer, as one undoable step, highlighted until you save.
+
+- **The assistant never saves.** Its edit is unsaved text in your editor, marked as its own; the file on disk changes only when
+  *you* press Save. That is the one other way a file is written besides the fixer's approved step, it needs the engine's boot token,
+  and no agent, skill or conductor tool can reach it ([invariant 9](docs/00-codify-architecture-overview.md)).
+- **It will not overwrite a file that changed under you.** If the fixer or a terminal rewrote it, Save says so and offers *Reload from
+  disk* or *Keep my version*.
+- **Unsaved text is not restored after a restart,** and closing the window (as opposed to the tab) does not ask. Editors are not remembered, as terminals are not.
+
+Details: [docs/09 §13](docs/09-workspace-shell.md), the routes in [docs/04 §3.0.3](docs/04-engine-data-and-runtime.md).
 
 ---
 

@@ -793,6 +793,11 @@ interface ChatTimelineProps {
    */
   onOpenLink?: (url: string) => void;
   /**
+   * Open a file a change touched in the editor, by its workspace-relative path. Optional: without it a diff card is the
+   * diff and nothing else.
+   */
+  onOpenFile?: (path: string) => void;
+  /**
    * Send the words of one of the conductor's options as the person's next message. Optional: without
    * it a question is drawn as words and its options are not buttons.
    */
@@ -815,6 +820,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   onPinDesignContract,
   pinnedContracts,
   onOpenLink,
+  onOpenFile,
   onAnswerQuestion,
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -1839,6 +1845,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                       <DiffViewer
                                         path={ev.payload.path}
                                         diffText={ev.payload.unified_diff}
+                                        onOpen={onOpenFile}
                                       />
                                     )}
 

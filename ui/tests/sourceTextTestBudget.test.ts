@@ -76,6 +76,10 @@ const TEXT_READERS: Record<string, Reason> = {
     kind: "text",
     why: "The terminal pane must not re-type a hex literal; the mapping is tested by calling it, the absence of a literal at the call site can only be read.",
   },
+  "editorTheme.test.ts": {
+    kind: "text",
+    why: "The editor must not re-type a colour: every variable it names must exist in index.css and its source must hold no literal, which can only be read.",
+  },
   "wordmark.test.ts": {
     kind: "text",
     why: "The wordmark's weight and its reading of the theme live in index.css and Wordmark.tsx as written; jsdom paints nothing to measure.",

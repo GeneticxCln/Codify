@@ -8,13 +8,15 @@
  * subtly wrong and impossible to see in markup, so it lives here where
  * `node --test` can reach it directly.
  *
- * Three kinds of tab share one strip because the user thinks of them the same
+ * Four kinds of tab share one strip because the user thinks of them the same
  * way: "what have I got open". **A chat tab is a project with a thread in it**,
  * not a thread: one project per tab, and a project's threads are opened *into*
  * its tab rather than each taking a tab of their own. A terminal and a browser
  * tab own their own state and are bound to no thread — which is why a browser
  * tab's back/forward stack lives *on the tab* (`history`) and dies with it,
- * rather than in a side table App has to remember to prune.
+ * rather than in a side table App has to remember to prune. **An editor tab is a
+ * file in a workspace** (`path`): opening one that is already open focuses it,
+ * and like a terminal it is local to this window — see [`isLocalTab`].
  */
 import type { BrowserHistory } from "./browserHistory";
 import { emptyHistory, hostOf, visit } from "./browserHistory";
@@ -27,7 +29,7 @@ import { UNTITLED_THREAD_TITLE } from "./threadTitle";
 export { UNTITLED_THREAD_TITLE };
 
 /** What a tab is. Named by the strip, resolved by the kind. */
-export type TabKind = "chat" | "terminal" | "browser";
+export type TabKind = "chat" | "terminal" | "browser" | "editor";
 
 export interface Tab {
   id: string;
@@ -102,6 +104,12 @@ export interface Tab {
    * same fact per tab, where it cannot disagree with what it describes.
    */
   workspaceId?: string;
+  /**
+   * An editor tab's file, relative to its workspace's root, and with `workspaceId` the key that makes "open this file"
+   * idempotent (`openEditorTab`). The text itself is not here: an unsaved buffer lives in `editorBuffers.ts`, above the
+   * pane that shows it, for the reason a terminal's scrollback lives above its pane.
+   */
+  path?: string;
 }
 
 export interface TabState {
@@ -181,7 +189,10 @@ export function focusTab(state: TabState, id: string): TabState {
 export function closeTab(state: TabState, id: string): TabState {
   const at = tabIndex(state, id);
   if (at === -1) return state;
-  const tabs = state.tabs.filter((t) => t.id !== id);
+  const closed = state.tabs[at];
+  const remaining = state.tabs.filter((t) => t.id !== id);
+  // A file that was told from another by its folder is just its name again once the other is gone.
+  const tabs = closed.kind === "editor" ? retitleEditors(remaining) : remaining;
   if (state.activeId !== id) return { ...state, tabs };
   if (tabs.length === 0) return emptyTabs;
   // The left neighbour, or the one that slid into this slot when it was the first.
@@ -418,6 +429,84 @@ export function closeConversation(
         : t,
     ),
   };
+}
+
+/**
+ * A tab that belongs to this window alone: never remembered, never keyed, never sent to the engine.
+ *
+ * A terminal is a live process, and an editor holds text a person has not saved. Neither is something to write into
+ * `localStorage` or a shared table, and the engine's `/shell/tabs` closes `kind` to `chat | browser` (a row of any other
+ * kind is a 422 on an older engine and a 500 reading a newer database). The three places that decide what is remembered
+ * (`tabPersistence.persistedTab`, `layoutSync.ensureKeys`, `layoutSync.planChanges`) all ask this one question, because
+ * each of them used to treat "not a terminal, not a chat" as a browser, which would have written an editor down as one.
+ */
+export function isLocalTab(tab: Tab): boolean {
+  return tab.kind === "terminal" || tab.kind === "editor";
+}
+
+/** The editor tab showing a file, if one is already open. */
+export function tabForFile(state: TabState, workspaceId: string, path: string): Tab | undefined {
+  return state.tabs.find((t) => t.kind === "editor" && t.workspaceId === workspaceId && t.path === path);
+}
+
+/**
+ * What each open file is called: its name, or as much of its folder as it takes to tell it from another open file with the
+ * same name. `index.ts` alone is `index.ts`; beside another, `a/index.ts` and `b/index.ts`. The same path in two
+ * workspaces cannot be told apart by path and keeps one title.
+ */
+function retitleEditors(tabs: Tab[]): Tab[] {
+  const editors = tabs.filter((t) => t.kind === "editor" && t.path);
+  if (editors.length === 0) return tabs;
+  const suffix = (path: string, depth: number): string => path.split("/").slice(-depth).join("/");
+  let changed = false;
+  const next = tabs.map((tab) => {
+    if (tab.kind !== "editor" || !tab.path) return tab;
+    const path = tab.path;
+    const parts = path.split("/").length;
+    let depth = 1;
+    while (
+      depth < parts &&
+      editors.some((other) => other !== tab && other.path !== path && suffix(other.path as string, depth) === suffix(path, depth))
+    ) {
+      depth += 1;
+    }
+    const title = suffix(path, depth);
+    if (title === tab.title) return tab;
+    changed = true;
+    return { ...tab, title };
+  });
+  return changed ? next : tabs;
+}
+
+/**
+ * Open a file in an editor tab, or focus the one it already has.
+ *
+ * Idempotent on (workspace, path), for the reason `openConversation` is on a thread: two tabs on one file would be two
+ * buffers that disagree about what it says, and only one of them could be right when it was saved. `show: false` opens
+ * (or leaves) the tab without making it the active one, which is what the assistant's `open_in_editor` does when the
+ * person is not looking at the conversation that asked: it must not take them away from what they are doing. An open
+ * that changes nothing returns the very state it was given. `id` names the tab, for a caller that needs it before the state
+ * settles; opening a file that is already open ignores it.
+ */
+export function openEditorTab(
+  state: TabState,
+  file: { workspaceId: string; path: string },
+  options: { show?: boolean; id?: string } = {},
+): TabState {
+  const show = options.show ?? true;
+  const existing = tabForFile(state, file.workspaceId, file.path);
+  if (existing) return show && state.activeId !== existing.id ? focusTab(state, existing.id) : state;
+  const tab: Tab = {
+    // The caller may name it, so one that has to know the id before the state settles (the assistant opening a file asks
+    // for the tab back at once) and a state updater that makes the same tab later agree on what it is called.
+    id: options.id ?? tabId("editor"),
+    kind: "editor",
+    title: file.path.split("/").pop() || file.path,
+    workspaceId: file.workspaceId,
+    path: file.path,
+  };
+  const tabs = retitleEditors([...state.tabs, tab]);
+  return { tabs, activeId: show ? tab.id : state.activeId };
 }
 
 /** The shell tabs, in strip order. Chat tabs are the default filter. */

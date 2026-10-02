@@ -32,6 +32,7 @@ from pathlib import Path
 from engine.fs import FileSystemService, PathEscapeError
 from engine.sandbox import CommandNotAllowed, SandboxService
 from engine.spawn_guard import guarded_argv, guarded_env
+from collections.abc import Iterator
 from typing import Any
 
 # Per-read cap. Big enough for a real source file, small enough that one read
@@ -381,14 +382,12 @@ class LibraryService:
             "truncated": True,
         }
 
-    def tree(self, depth: int = 2) -> dict[str, Any]:
-        """A shallow listing, so the first librarian call starts from the real tree.
+    def _walk_files(self, depth: int | None) -> Iterator[str]:
+        """Every file under the root as a relative path, directory by directory, skipping what is not source.
 
-        Cheap orientation instead of a dozen blind reads: which top-level dirs
-        exist, where the tests and manifests live.
+        `depth` stops the descent that many directories down (None: all the way). Never descends through a symlink that
+        points outside the workspace, and never into `SKIP_DIRS`.
         """
-        entries: list[str] = []
-        truncated = False
         base_depth = len(Path(self.root).parts)
         root = Path(self.root).resolve()
         for dirpath, dirnames, filenames in os.walk(self.root):
@@ -405,16 +404,40 @@ class LibraryService:
                 kept.append(d)
             dirnames[:] = kept
             here = Path(dirpath)
-            if len(here.parts) - base_depth >= depth:
+            if depth is not None and len(here.parts) - base_depth >= depth:
                 dirnames[:] = []
             for name in sorted(filenames):
-                entries.append(str((here / name).relative_to(self.root)))
-                if len(entries) >= MAX_TREE_ENTRIES:
-                    truncated = True
-                    break
-            if truncated:
+                yield str((here / name).relative_to(self.root))
+
+    def tree(self, depth: int = 2) -> dict[str, Any]:
+        """A shallow listing, so the first librarian call starts from the real tree.
+
+        Cheap orientation instead of a dozen blind reads: which top-level dirs
+        exist, where the tests and manifests live.
+        """
+        entries: list[str] = []
+        truncated = False
+        for rel in self._walk_files(depth):
+            entries.append(rel)
+            if len(entries) >= MAX_TREE_ENTRIES:
+                truncated = True
                 break
         return {"files": entries, "truncated": truncated, "limit": MAX_TREE_ENTRIES}
+
+    def list_files(self, limit: int) -> dict[str, Any]:
+        """Every file path, to the bottom of the tree, for the editor's quick-open.
+
+        Not `tree`: that is orientation for a model (two levels, 120 names). A person looking for `src/a/b/c/handler.py`
+        needs all of them, in an order that does not depend on where the walk stopped, so what is kept is sorted. A tree
+        bigger than `limit` is cut where the walk reaches it and says so.
+        """
+        found: list[str] = []
+        for rel in self._walk_files(None):
+            found.append(rel)
+            if len(found) > limit:
+                break
+        truncated = len(found) > limit
+        return {"files": sorted(found[:limit]), "truncated": truncated, "limit": limit}
 
     # ── searching ──────────────────────────────────────────────────────────────
 

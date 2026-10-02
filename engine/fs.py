@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import os
 import secrets
 from dataclasses import dataclass
@@ -12,6 +13,9 @@ from typing import Any
 MAX_DIFF_BYTES = 1_000_000
 # How much of a file to sniff for a NUL byte before calling it binary.
 BINARY_SNIFF_BYTES = 8192
+# The largest file the editor will open or save. An editor holds the whole text in memory and sends it over HTTP as
+# one JSON string, so this is a limit on what a person is asked to carry, not on what the workspace may contain.
+MAX_EDIT_BYTES = 1_000_000
 
 
 class PathEscapeError(Exception):
@@ -55,6 +59,44 @@ class ProtectedRootError(PathEscapeError):
         Exception.__init__(self, f"workspace root {root} is not a place goals may write: {reason}")
         self.path = root
         self.reason = reason
+
+
+class NotAFileError(Exception):
+    """The path is inside the workspace and is not a file: it is missing, or it is a directory."""
+
+    def __init__(self, path: str):
+        super().__init__(f"no file at {path}")
+        self.path = path
+
+
+class FileTooLargeError(Exception):
+    def __init__(self, size: int):
+        super().__init__(f"{size} bytes is over the {MAX_EDIT_BYTES} an editor will hold")
+        self.size = size
+
+
+class FileNotTextError(Exception):
+    """What the file holds is not editable text. `reason` is `binary` (a NUL byte) or `encoding` (not UTF-8)."""
+
+    def __init__(self, reason: str):
+        super().__init__(f"not editable text: {reason}")
+        self.reason = reason
+
+
+class FileChangedError(Exception):
+    """The file on disk is not the version the caller read. Carries the version it is now."""
+
+    def __init__(self, current_version: str):
+        super().__init__("the file changed since it was read")
+        self.current_version = current_version
+
+
+class FileAccessError(Exception):
+    """The operating system refused: a file the engine may not read, or a directory it may not write into."""
+
+    def __init__(self, detail: str):
+        super().__init__(detail)
+        self.detail = detail
 
 
 # The directories that hold the machine rather than a project. Exact matches only: a project
@@ -115,6 +157,21 @@ def looks_binary(raw: bytes) -> bool:
     return b"\x00" in raw[:BINARY_SNIFF_BYTES]
 
 
+def version_of(raw: bytes) -> str:
+    """The identity of a file's bytes, which is all a save needs to know the file has not moved under it."""
+    return hashlib.sha256(raw).hexdigest()
+
+
+@dataclass(frozen=True)
+class TextFile:
+    """A file as an editor holds it: its text, and the version of the bytes that text came from."""
+
+    path: str
+    content: str
+    version: str
+    size: int
+
+
 def _read_bytes(path: Path) -> bytes | None:
     try:
         return path.read_bytes()
@@ -144,7 +201,9 @@ class FileSystemService:
         self.root = Path(root_path).resolve()
 
     def resolve(self, rel: str) -> Path:
-        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+        # A NUL cannot be part of a path on any filesystem, and `Path.resolve` answers one with a bare ValueError,
+        # which every caller would have to know to catch. It is a path that does not name anything in the workspace.
+        if not rel or "\x00" in rel or rel.startswith("/") or ".." in Path(rel).parts:
             raise PathEscapeError(rel)
         # Anywhere in the path, not just at the root: a submodule or a linked
         # worktree keeps its own `.git` a level or two down.
@@ -167,6 +226,88 @@ class FileSystemService:
         if size > MAX_DIFF_BYTES:
             return path.read_bytes()[:MAX_DIFF_BYTES].decode("utf-8", errors="replace")
         return path.read_text(encoding="utf-8")
+
+    def read_editable(self, rel: str) -> TextFile:
+        """A file as the editor opens it: exact text, plus the version a later save must name.
+
+        Not `read_text`: that translates nothing but truncates and replaces undecodable bytes, which is right for a prompt
+        and wrong for a file a person is about to save back. Here a file is either exactly representable as text or it is
+        refused, in a way that says which, because "open a PNG, save it" is how a file gets corrupted. A NUL byte
+        *anywhere* means binary (not just in the first block, as `looks_binary` sniffs), so what opens is always
+        something `save_text` will accept back.
+        """
+        target = self.resolve(rel)
+        try:
+            if not target.is_file():
+                raise NotAFileError(rel)
+            size = target.stat().st_size
+            if size > MAX_EDIT_BYTES:
+                raise FileTooLargeError(size)
+            raw = target.read_bytes()
+        except OSError as exc:
+            raise FileAccessError(exc.strerror or str(exc)) from exc
+        if len(raw) > MAX_EDIT_BYTES:  # it grew between the stat and the read
+            raise FileTooLargeError(len(raw))
+        if b"\x00" in raw:
+            raise FileNotTextError("binary")
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise FileNotTextError("encoding") from exc
+        return TextFile(rel, content, version_of(raw), len(raw))
+
+    def save_text(self, rel: str, content: str, base_version: str) -> TextFile:
+        """A person's Save: replace one existing file with exactly `content`, if it is still the file they opened.
+
+        **This is the one writer besides `apply`, and it is not an agent's.** `apply` runs for the fixer behind the
+        approved-goal gate; this runs because a person pressed Save in the editor, and nothing in the engine may call it
+        except the one route that carries that press (`docs/00` §6.9, held by `test_invariants_at_their_boundary`).
+
+        It is `apply` with the three things a person's save needs differently:
+
+         - it only **replaces a file that exists**. Save is not a way to create or delete a file or a folder;
+         - it names the version it read, and a file that is no longer that version is a `FileChangedError`, never a
+           silent overwrite of what an agent, a terminal or another editor wrote in the meantime. (The check and the
+           replace are two steps, not one lock; the window is the length of one `os.replace`, and the loser of that race
+           is the same as it would be without the check.)
+         - the text is written *exactly*: no newline translation, no trailing newline added.
+
+        Containment, `.git`, a protected root and the temp-file-and-rename are the same code `apply` uses.
+        """
+        reason = protected_root_reason(self.root)
+        if reason is not None:
+            raise ProtectedRootError(str(self.root), reason)
+        target = self.resolve(rel)
+        try:
+            if not target.is_file():
+                raise NotAFileError(rel)
+            size = target.stat().st_size
+        except OSError as exc:
+            raise FileAccessError(exc.strerror or str(exc)) from exc
+        if "\x00" in content:
+            raise FileNotTextError("binary")
+        try:
+            data = content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise FileNotTextError("encoding") from exc
+        if len(data) > MAX_EDIT_BYTES:
+            raise FileTooLargeError(len(data))
+        if size > MAX_EDIT_BYTES:
+            # Too big to have been opened here, so it is not the file the caller read.
+            raise FileTooLargeError(size)
+        try:
+            current = version_of(target.read_bytes())
+        except OSError as exc:
+            raise FileAccessError(exc.strerror or str(exc)) from exc
+        if current != base_version:
+            raise FileChangedError(current)
+        try:
+            self._write_atomic(target, data)
+        except PathEscapeError:
+            raise
+        except OSError as exc:
+            raise FileAccessError(exc.strerror or str(exc)) from exc
+        return TextFile(rel, content, version_of(data), len(data))
 
     def read_text_or_none(self, rel: str) -> str | None:
         """The file's text, or None when it is not text at all.

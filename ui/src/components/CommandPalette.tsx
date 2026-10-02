@@ -47,6 +47,7 @@ const GROUP_HEADING: Record<PaletteItemKind, string> = {
   conversation: "Conversations",
   settings: "Settings",
   action: "Split",
+  file: "Files",
 };
 
 const optionDomId = (item: PaletteItem): string => `palette-option-${item.id}`;
@@ -167,7 +168,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Jump to a tab, thread or setting…"
+          placeholder="Jump to a tab, thread, setting or file…"
           aria-label="Command palette"
           aria-autocomplete="list"
           aria-controls="command-palette-list"

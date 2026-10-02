@@ -670,6 +670,41 @@ export interface ProviderCatalog {
   custom: string[];
 }
 
+/** `GET /workspaces/{id}/files`: every file path under the root, for the editor's quick-open. */
+export interface WorkspaceFileList {
+  files: string[];
+  /** The tree was bigger than `limit` and was cut. */
+  truncated: boolean;
+  limit: number;
+}
+
+/** `GET /workspaces/{id}/file`: one file as the editor holds it. `version` is what a save must name. */
+export interface WorkspaceFile {
+  path: string;
+  content: string;
+  version: string;
+  size: number;
+}
+
+/** `PUT /workspaces/{id}/file`, a person's Save. */
+export interface WorkspaceFileSaved {
+  path: string;
+  version: string;
+  size: number;
+}
+
+/**
+ * One question the engine puts to the app window (`GET /surfaces/next`): which surface, which of its fixed operations,
+ * which workspace it is about, and the arguments the engine has already checked against that operation's shape.
+ */
+export interface SurfaceRequest {
+  id: string;
+  surface: string;
+  op: string;
+  workspace_id: string;
+  args: Record<string, unknown>;
+}
+
 export interface EngineInfo {
   port: number;
   token: string;

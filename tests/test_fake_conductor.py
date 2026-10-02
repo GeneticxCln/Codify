@@ -14,7 +14,9 @@ conductor is reconstructed from the transcript each time: which calls it already
 * a question gets prose and no tool;
 * `[ask]` makes it put one question to the person first;
 * `[todo]` makes a step run keep a note before writing;
-* `[stall]` makes a step run stop after `write`, which is the conductor that cannot finish.
+* `[stall]` makes a step run stop after `write`, which is the conductor that cannot finish;
+* `[editor path=P old=X new=Y]` makes it look at the person's editor, open `P`, and change `X` to `Y` in the open
+  text, which is the one way to watch the editor's eyes and hands work without a model.
 
 The first block holds the policy; the second runs it live.
 """
@@ -58,6 +60,7 @@ STEP = (
     "You are working on one step only: step {step_id}, 'Add banner'.\ncreate banner.txt\nSuggested paths: banner.txt"
 )
 ALL_TOOLS = ["read_file", "recon", "plan", "ask_user"]
+EDITOR_TOOLS = ["read_editor", "open_in_editor", "edit_editor"]
 STEP_TOOLS = ["read_file", "write", "verify", "review", "summarize", "todo"]
 
 
@@ -113,6 +116,33 @@ class TestThePolicy(unittest.TestCase):
         name, arguments = self.step(user)
         self.assertEqual("ask_user", name)
         self.assertEqual(["banner.txt", "README.md"], arguments["options"])
+
+    def test_editor_marks_a_request_that_looks_opens_and_edits_in_that_order(self) -> None:
+        user = TURN.format(request="tidy the greeting [editor path=hello.txt old=hello new=howdy]")
+        tools = [*ALL_TOOLS, *EDITOR_TOOLS]
+        self.assertEqual(("read_editor", {}), self.step(user, tools=tools))
+        self.assertEqual(
+            ("open_in_editor", {"path": "hello.txt", "line": 1}),
+            self.step(user, _called("read_editor"), _result(), tools=tools),
+        )
+        self.assertEqual(
+            ("edit_editor", {"path": "hello.txt", "old_text": "hello", "new_text": "howdy"}),
+            self.step(user, _called("read_editor"), _result(), _called("open_in_editor"), _result(), tools=tools),
+        )
+        last = self.step(
+            user, _called("read_editor"), _result(), _called("open_in_editor"), _result(), _called("edit_editor"), _result(),
+            tools=tools,
+        )
+        self.assertIsInstance(last, str)
+        self.assertIn("not saved", last)
+
+    def test_it_does_not_touch_the_editor_when_the_editor_is_not_offered(self) -> None:
+        user = TURN.format(request="tidy the greeting [editor path=hello.txt old=hello new=howdy]")
+        self.assertEqual("recon", self.step(user)[0])
+
+    def test_a_marker_without_a_path_is_not_an_editor_request(self) -> None:
+        user = TURN.format(request="tidy the greeting [editor old=hello new=howdy]")
+        self.assertEqual("recon", self.step(user, tools=[*ALL_TOOLS, *EDITOR_TOOLS])[0])
 
     def test_it_does_not_ask_when_asking_is_not_offered(self) -> None:
         user = TURN.format(request="add a banner [ask]")
