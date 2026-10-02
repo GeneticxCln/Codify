@@ -517,3 +517,43 @@ test("the stale-token banner's fallback copy is not read as a selection either",
     await act(async () => root.unmount());
   });
 });
+
+test("a provider's key field is never read, masked or shown", async () => {
+  const { ProviderRow } = await import("../src/components/ProviderRow.tsx");
+  await withDom(async (dom) => {
+    const row = h(ProviderRow, {
+      keyStatus: {
+        provider: "nvidia",
+        protocol: "openai_compat",
+        base_url: "https://integrate.api.nvidia.com/v1",
+        has_key: false,
+        needs_key: true,
+        storage: "keyring",
+        storage_detail: "OS keychain",
+      } as never,
+      models: [],
+      roleProviders: [],
+      onSaveKey: async () => {},
+      onApplyModel: async () => {},
+    });
+    const api = await mountHistory(dom, row);
+    const input = dom.container.querySelector("input") as HTMLInputElement;
+
+    const plain = dom.window.document.createElement("input");
+    dom.window.document.body.appendChild(plain);
+    plain.value = "control";
+    plain.setSelectionRange(0, 7);
+    await fire(plain, clipboardEvent(dom, "copy"));
+    assert.deepEqual(texts(api()), ["control"]);
+
+    await dom.fill(input, "a value that is not shaped like a key");
+    input.setSelectionRange(0, 7);
+    await fire(input, clipboardEvent(dom, "paste", "a value that is not shaped like a key"));
+    await dom.click(dom.byLabel("Show the key"));
+    assert.equal(input.type, "text", "the key was not shown, so this proved nothing about a shown key");
+    input.setSelectionRange(0, 7);
+    await fire(input, clipboardEvent(dom, "copy"));
+    await fire(input, clipboardEvent(dom, "cut"));
+    assert.deepEqual(texts(api()), ["control"], "the key field was read");
+  });
+});

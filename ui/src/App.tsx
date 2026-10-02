@@ -160,6 +160,12 @@ import { useSidebarYield } from "./useSidebarYield";
 import { useEngineNotices, useNotifications } from "./useNotifications";
 import { catalogNotification, goalNotification, pausedNotification, planNotification, type AppNotification } from "./notifications";
 import { NotificationsDrawer } from "./components/NotificationsDrawer";
+import { ClipboardDrawer } from "./components/ClipboardDrawer";
+import { useClipboardHistory } from "./useClipboardHistory";
+import { ClipboardRecorderContext } from "./clipboardContext";
+import { pasteIntoTerminal, PASTE_MESSAGES } from "./terminalPaste";
+import { copySchemeText } from "./scheme";
+import type { Clip } from "./clipboardHistory";
 import {
   BROWSER_PAGE_LOADED,
   BROWSER_PAGE_LOADING,
@@ -205,6 +211,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Bell,
+  ClipboardList,
 } from "lucide-react";
 import { notableStderrLines } from "./engineLog";
 import { RainBackdrop } from "./components/ui/RainBackdrop";
@@ -479,6 +486,9 @@ export const App: React.FC = () => {
   // (`notifications.ts` says what is in it and what is not).
   const inbox = useNotifications();
   const notify = inbox.notify;
+  // What was copied, cut or pasted in this window, kept in this window (`clipboardHistory.ts`, `docs/09` §11).
+  const clipboard = useClipboardHistory();
+  const recordClip = clipboard.record;
   const [engineUp, setEngineUp] = useState<boolean | null>(null); // null = checking
   // The motion store, as React state so a change re-renders the tree and every
   // backdrop's effect re-reads it on the way past (the loops read the store at
@@ -920,6 +930,7 @@ export const App: React.FC = () => {
   const statsOpen = drawer === "stats";
   const historyOpen = drawer === "history";
   const notificationsOpen = drawer === "notifications";
+  const clipboardOpen = drawer === "clipboard";
   // The left panel gives way while a drawer is open and the window cannot hold both. Derived, never
   // stored: `codify.sidebar` is written only by the person's own press of the toggle, so closing the
   // drawer brings the panel back as it was (`docs/09` §8.1).
@@ -940,6 +951,52 @@ export const App: React.FC = () => {
     activeTabNow?.kind === "browser" ? activeTabNow : undefined;
   const activeTerminalTab =
     activeTabNow?.kind === "terminal" ? activeTabNow : undefined;
+
+  // The clipboard drawer's buttons. Which of Insert and Paste can work follows from which tab is in view: the
+  // message box exists only in a chat view (a browser or terminal tab replaces it), and a terminal only in a
+  // terminal tab whose shell is still running.
+  const canInsertClip = !activeBrowserTab && !activeTerminalTab;
+  const canPasteClip = Boolean(activeTerminalTab) && !activeTerminalTab?.exited;
+  const [insertRequest, setInsertRequest] = useState<{ seq: number; text: string } | null>(null);
+  const [clipNotice, setClipNotice] = useState<string | null>(null);
+  useEffect(() => {
+    // A message about a press belongs to the look at the drawer that was open when it was made.
+    if (!clipboardOpen) setClipNotice(null);
+  }, [clipboardOpen]);
+  const handleCopyClip = useCallback(
+    async (clip: Clip): Promise<void> => {
+      const write =
+        typeof navigator !== "undefined" && navigator.clipboard
+          ? navigator.clipboard.writeText.bind(navigator.clipboard)
+          : undefined;
+      const outcome = await copySchemeText(clip.text, {
+        writeText: write,
+        document: typeof document !== "undefined" ? document : undefined,
+      });
+      if (outcome === "failed") {
+        setClipNotice("Could not copy: the system clipboard refused it.");
+        return;
+      }
+      setClipNotice(null);
+      // `writeText` fires no `copy` event, so the history is told: the clip goes back to the top.
+      recordClip(clip.text, clip.source);
+    },
+    [recordClip],
+  );
+  // No guard here for "there is no message box": a request made with none is never replayed, because a
+  // message box ignores the one already pending when it mounts (`BottomCommandBar`), and the drawer
+  // disables the button besides.
+  const handleInsertClip = useCallback((clip: Clip) => {
+    setClipNotice(null);
+    setInsertRequest((prev) => ({ seq: (prev?.seq ?? 0) + 1, text: clip.text }));
+  }, []);
+  const handlePasteClip = useCallback(
+    (clip: Clip) => {
+      const outcome = activeTerminalTab ? pasteIntoTerminal(activeTerminalTab.id, clip.text) : "no-terminal";
+      setClipNotice(outcome === "pasted" ? null : PASTE_MESSAGES[outcome]);
+    },
+    [activeTerminalTab],
+  );
 
   /**
    * The transcript for the visible thread.
@@ -3049,6 +3106,7 @@ export const App: React.FC = () => {
     // `relative` for the rain: the OLED theme's backdrop is a child of this box
     // and needs a positioned ancestor to be the window rather than the viewport's
     // idea of it. See `ui/src/components/ui/RainBackdrop.tsx`.
+    <ClipboardRecorderContext.Provider value={recordClip}>
     <div className="relative flex flex-col h-screen bg-codify-bg text-codify-secondary font-sans">
       {/* The window's weather, under everything and mounted once. It used to be
           inside the idle hero, which is why it showed down the middle and left
@@ -3194,6 +3252,20 @@ export const App: React.FC = () => {
                 {inbox.unread > 99 ? "99+" : inbox.unread}
               </Badge>
             )}
+          </Toggle>
+
+          {/* Clipboard: what was copied, cut or pasted in this window. Icon-only, and immediately after
+              Notifications because it is the same kind of thing: a drawer of what passed, for later. The
+              label is the name, since there is no word beside the icon; the title must not start with
+              Browser, Terminal, Keys or Settings, which is how the panel's own buttons are found. */}
+          <Toggle
+            armed={clipboardOpen}
+            tone="accent"
+            onClick={() => setDrawer((open) => nextDrawer(open, "clipboard"))}
+            title="Clipboard — what you copied, cut or pasted in Codify, to copy again, insert or paste into a terminal"
+            aria-label="Clipboard history"
+          >
+            <ClipboardList className="w-3.5 h-3.5" />
           </Toggle>
 
           <Toggle
@@ -3428,6 +3500,7 @@ export const App: React.FC = () => {
             />
 
             <BottomCommandBar
+              insertRequest={insertRequest}
               workspaces={workspaces}
               selectedWorkspace={selectedWs}
               onSelectWorkspace={setSelectedWs}
@@ -3502,6 +3575,28 @@ export const App: React.FC = () => {
             onClear={inbox.clear}
             onClose={() => setDrawer((open) => closeDrawer(open, "notifications"))}
             onOpenItem={handleOpenNotification}
+          />
+        )}
+
+        {/* Clipboard: the same slot, a flex sibling for the same reason. A press does what its label says
+            (`docs/09` §11); one that cannot work is disabled and says why. */}
+        {clipboardOpen && (
+          <ClipboardDrawer
+            clips={clipboard.clips}
+            lastSkip={clipboard.lastSkip}
+            notice={clipNotice}
+            canInsert={canInsertClip}
+            canPasteToTerminal={canPasteClip}
+            terminalExited={Boolean(activeTerminalTab?.exited)}
+            onCopy={(clip) => void handleCopyClip(clip)}
+            onInsert={handleInsertClip}
+            onPasteToTerminal={handlePasteClip}
+            onPin={clipboard.togglePin}
+            onRemove={clipboard.remove}
+            onClearUnpinned={clipboard.clearUnpinned}
+            onDismissSkip={clipboard.dismissSkip}
+            onDismissNotice={() => setClipNotice(null)}
+            onClose={() => setDrawer((open) => closeDrawer(open, "clipboard"))}
           />
         )}
 
@@ -3593,6 +3688,7 @@ export const App: React.FC = () => {
         onSelect={handlePaletteSelect}
       />
     </div>
+    </ClipboardRecorderContext.Provider>
   );
 };
 export default App;

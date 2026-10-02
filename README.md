@@ -356,6 +356,24 @@ missing, `make doctor` says so as a note, not a failure; everything else runs wi
 [docs/09 §9](docs/09-workspace-shell.md), [docs/04 §3.0.2](docs/04-engine-data-and-runtime.md) and
 [docs/03 §1.9](docs/03-security-and-roadmap.md).
 
+## Clipboard history
+
+An icon beside **Notifications** in the header opens a history of what you copied, cut or pasted *inside Codify*:
+selected text, pastes, a code block's Copy. Each clip can be **copied again**, **inserted into the message box**,
+**pasted into the terminal**, pinned or deleted.
+
+- **Inside Codify only.** It does not watch the system clipboard and asks for no permission, so a copy made in
+  another application, or in a browser tab, is not in it.
+- **Kept in this window, and never sent anywhere.** It is stored in the window's own storage, not the engine or
+  its database, and holds the newest 50 clips plus up to 20 pinned.
+- **Keys and passwords are never kept.** Anything from a password field, and anything shaped like a key or token
+  (`sk-…`, `ghp_…`, a `Bearer` value, a private key block, a long random token), is refused, and the drawer says
+  so. That is a heuristic and not a guarantee: delete anything it should have refused.
+- **A shell does not run what you did not read.** A multi-line clip is only pasted into a terminal that has asked
+  for bracketed paste; otherwise each line would run as soon as it arrived.
+
+Details: [docs/09 §11](docs/09-workspace-shell.md) and [docs/03 §1.10](docs/03-security-and-roadmap.md).
+
 ---
 
 ## 🔒 Security & Invariants

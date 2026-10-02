@@ -235,6 +235,11 @@ or 175%, **125% by default**. It is client-side display state, like the theme: i
   yield rule (`ui/src/drawers.ts`) treats it the same. What it collects, and what it refuses to, is
   `docs/09` §10.18. The button's title does not begin with Browser, Terminal, Keys or Settings, which is
   how the panel's own buttons are found.
+* **The clipboard is a fourth drawer, in the same slot.** An icon-only **Clipboard** button (its name is its
+  `aria-label`) sits immediately after Notifications, so the header reads Stats, Notifications, Clipboard,
+  History. The four drawers are one state, the drawer takes History's width and the left panel's yield rule
+  treats it the same (`ui/src/drawers.ts`). What it keeps, what it refuses and what its buttons do is
+  `docs/09` §11; the rules it is held to are `docs/03` §1.10.
 * **Providers are read by name, not by slug.** The Provider Keys row printed the slug through CSS
   `capitalize` ("Openai", "Nvidia") and the protocol as the raw tag `openai_compat`, and the provider
   select printed every slug in capitals. `ui/src/providerLabels.ts` supplies the words (OpenAI,

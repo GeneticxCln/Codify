@@ -233,6 +233,14 @@ test("the widths the rule assumes are the widths the layout has, and the drawers
     // Both are siblings of the centre column, never overlays: a native browser webview paints above overlays.
     const main = ctx.dom.container.querySelector("main") as Element;
     assert.ok(h.parentElement === main, "the History drawer is not a sibling of the centre column");
+    // The clipboard drawer asks for what History does, and sits where it sits.
+    await ctx.dom.click(ctx.dom.byLabel("Clipboard history"));
+    const c = ctx.dom.container.querySelector('aside[aria-label="Clipboard"]') as Element;
+    assert.ok(c, "the clipboard button opened no drawer");
+    assert.ok(c.classList.contains("w-80") && DRAWER_REM.clipboard === 20, "Clipboard is no longer 20rem");
+    assert.ok(c.classList.contains("max-w-[40%]"), "Clipboard has no cap that keeps the centre column usable");
+    assert.ok(c.parentElement === main, "the Clipboard drawer is not a sibling of the centre column");
+    assert.ok(!history(ctx), "opening Clipboard left History open");
   });
 });
 

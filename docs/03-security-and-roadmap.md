@@ -202,6 +202,30 @@ are written down:
   only. A built-in provider keeps the catalogue's address, so an address saved beside `openai` cannot
   redirect the OpenAI key.
 
+### 1.10 The clipboard history (`built`)
+
+The clipboard history (`09` §11) keeps what was copied, cut or pasted in the window, which can include things
+the person did not mean to keep, so its limits are written down:
+
+- **Only what passes through this window.** It listens to the document's own `copy`, `cut` and `paste` events
+  and to its own Copy buttons. It does not read the system clipboard, run a watcher, ask the webview for a
+  permission (WebKitGTK's permission requests keep their default *no*, as for the microphone, §1.9) or start a
+  process, so there is no new spawn site (`07`). A copy in another application, or inside a browser tab (§1.5,
+  a separate webview), is not seen.
+- **Never kept: a password field, anything marked `data-clipboard="off"`, and anything that looks like a
+  credential.** The shapes mirror `redact_secrets` (invariant 4 is about what the engine returns, and this is not
+  the engine, but the same care applies to what a window stores) and add the common provider prefixes. This is a
+  **heuristic**: a credential in a shape it does not know is kept, and the drawer says what it refuses and offers
+  Delete and Clear unpinned. The stored list is re-checked on every read, so a key put there by hand, or by an
+  older build, is dropped when the window starts.
+- **Kept here and nowhere else.** The window's `localStorage`, under `CODIFY_CLIPBOARD`: never sent to the engine,
+  never in `~/.codify/codify.db` (invariant 7), never sent to a provider. Bounded to 50 unpinned clips, 20 pinned,
+  and 10,000 characters a clip.
+- **Pasting into a terminal cannot run what nobody read.** A clip with a newline in it is refused unless the
+  shell has asked for bracketed paste, because otherwise each line runs as Enter. The history holds text from
+  anywhere, which is why the rule is there. It uses xterm's own `paste`, the path a person's Ctrl+Shift+V takes,
+  and gives the engine nothing: the terminal belongs to the shell layer (`09` §7).
+
 ## 2. Persistence layer
 
 Single file. **No `agents.db`.**

@@ -201,6 +201,8 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
               <div className="relative flex-1 min-w-0">
                 <input
                   type={showKey ? "text" : "password"}
+                  // Shown, it is a text field and no longer private by type; it is still a key.
+                  data-clipboard="off"
                   placeholder={
                     hasKey ? "•••••••• stored — leave blank to keep" : `Paste your ${provider} key`
                   }
