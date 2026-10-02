@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from engine.ask import AskRefused, parse_question
 from engine.conductor import EndTurn
@@ -34,6 +34,15 @@ from engine.recall import (
 )
 from engine.sandbox import CommandNotAllowed, validate_argv
 from engine.skills import SkillSet
+from engine.surface_editor import (
+    EditorEditResult,
+    EditorOpenResult,
+    EditorReadResult,
+    format_edit,
+    format_open,
+)
+from engine.surface_editor import format_read as format_editor_read
+from engine.surfaces import SurfaceRefused, SurfaceUnavailable
 from engine.todo import MAX_MUTATIONS, TodoRefused
 from engine.webview_bridge import BridgeUnavailable, format_action, format_navigation, format_page
 
@@ -50,6 +59,15 @@ _NO_BROWSER = (
     "on. This is the normal answer outside the desktop app — a command-line "
     "engine, a benchmark and a headless test all have no page. Ask the user "
     "to open the page in Codify, or answer from the workspace."
+)
+
+
+#: What an editor tool says when there is no window to ask. One sentence, named, for the reason `_NO_BROWSER` is one: a
+#: missing window is the *normal* answer in a benchmark, a command-line turn and most of the suite.
+_NO_EDITOR = (
+    "There is no editor attached to this engine, so there is nothing to look at or change. This is the normal answer "
+    "outside the desktop app: a command-line engine, a benchmark and a headless test have no window. Answer from the "
+    "workspace, or ask the person to open the file in Codify."
 )
 
 
@@ -188,6 +206,9 @@ class ConductorTools:
         'navigate_page',
         'click_page',
         'type_page',
+        'read_editor',
+        'open_in_editor',
+        'edit_editor',
         'recall',
         'recall_threads',
         'recon',
@@ -426,6 +447,94 @@ class ConductorTools:
         except Exception as exc:  # noqa: BLE001 — a page's behaviour is not our bug
             return f"That page read did not come back. {exc}"
         return format_page(page)
+
+    def _outside(self, path: str) -> str | None:
+        """A sentence when `path` cannot be inside this workspace, else None.
+
+        The same confinement every other file door uses (`FileSystemService.resolve`), asked before the round trip, so the
+        model is told at once and the window is never asked to open somebody else's file. It only resolves: nothing is read.
+        """
+        try:
+            FileSystemService(self.root).resolve(path)
+        except PathEscapeError:
+            return (
+                f"{path!r} is outside this workspace, or is git's own metadata, so it cannot be shown in the editor. "
+                "Paths are relative to the workspace root."
+            )
+        return None
+
+    async def read_editor(self, args: dict[str, Any]) -> str:
+        """What the person's editor holds: the open files, the cursor and selection, and a file's unsaved text.
+
+        Eyes only. The text is the person's, including what they have not saved, which is the whole reason this exists
+        beside `read_file`: the disk is exactly what they are not looking at while they type. It comes back as a quotation
+        of their file, in a fixed shape, never as instructions.
+        """
+        surfaces = self.service.surfaces
+        if surfaces is None:
+            return _NO_EDITOR
+        path = str(args.get("path") or "").strip() or None
+        if path is not None and (refusal := self._outside(path)) is not None:
+            return refusal
+        self.service._log(
+            self.goal_id, None, "info",
+            f"conductor looked at the editor{f' ({path})' if path else ''}",
+        )
+        asked = {"path": path, "from_line": args.get("from_line"), "to_line": args.get("to_line")}
+        try:
+            result = await surfaces.ask("editor", "read", asked, workspace_id=self.goal.workspace_id)
+        except SurfaceUnavailable as exc:
+            return str(exc)
+        except SurfaceRefused as exc:
+            return f"That could not be read from the editor. {exc}"
+        return format_editor_read(cast(EditorReadResult, result))
+
+    async def open_in_editor(self, args: dict[str, Any]) -> str:
+        """Show the person a file, and a line or range in it. Changes what they see and nothing on disk."""
+        surfaces = self.service.surfaces
+        if surfaces is None:
+            return _NO_EDITOR
+        path = str(args.get("path") or "").strip()
+        if path and (refusal := self._outside(path)) is not None:
+            return refusal
+        self.service._log(self.goal_id, None, "info", f"conductor opened {path or '(no path)'} in the editor")
+        asked = {"path": path, "line": args.get("line"), "end_line": args.get("end_line")}
+        try:
+            result = await surfaces.ask("editor", "open", asked, workspace_id=self.goal.workspace_id)
+        except SurfaceUnavailable as exc:
+            return f"That file was not opened. {exc}"
+        except SurfaceRefused as exc:
+            return f"That file was not opened. {exc}"
+        return format_open(cast(EditorOpenResult, result))
+
+    async def edit_editor(self, args: dict[str, Any]) -> str:
+        """Change the text in an open buffer, and nothing else.
+
+        **This never touches a file.** It asks the window to replace text in what the editor holds, as one undoable edit
+        marked as the assistant's; the person's own Save is the only way that text reaches the disk (docs/00 §6.9), and no
+        tool here can press it. So it carries none of the gates `write` does: there is nothing on disk for them to guard,
+        and the person watching the buffer change is the approval. What it returns always says the change is unsaved.
+        """
+        surfaces = self.service.surfaces
+        if surfaces is None:
+            return _NO_EDITOR
+        path = str(args.get("path") or "").strip()
+        if path and (refusal := self._outside(path)) is not None:
+            return refusal
+        self.service._log(self.goal_id, None, "info", f"conductor edited {path or '(no path)'} in the editor")
+        asked = {
+            "path": path,
+            "old_text": args.get("old_text"),
+            "new_text": args.get("new_text"),
+            "count": 1 if args.get("count") is None else args.get("count"),
+        }
+        try:
+            result = await surfaces.ask("editor", "edit", asked, workspace_id=self.goal.workspace_id)
+        except SurfaceUnavailable as exc:
+            return f"That edit was not made. {exc}"
+        except SurfaceRefused as exc:
+            return f"That edit was not made. {exc}"
+        return format_edit(cast(EditorEditResult, result))
 
     async def recall(self, args: dict[str, Any]) -> str:
         """What this workspace has already learned the hard way.

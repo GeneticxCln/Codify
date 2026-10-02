@@ -25,6 +25,7 @@ from engine.recall import distill_observations
 from engine.role_repair import config_problems
 from engine.sandbox import SandboxService
 from engine.services import AgentRegistryService, ApiError, GoalService, WorkspaceService
+from engine.surfaces import SurfaceBridge
 from engine.webview_bridge import WebviewBridge
 
 if TYPE_CHECKING:
@@ -140,6 +141,7 @@ class _ExecutorCore:
         laya: LayaService | None = None,
         tracer: TraceService | None = None,
         bridge: WebviewBridge | None = None,
+        surfaces: SurfaceBridge | None = None,
     ):
         self.goals = goals
         self.workspaces = workspaces
@@ -154,6 +156,9 @@ class _ExecutorCore:
         # shell behind it has no page, and `read_page` says so in a sentence
         # rather than failing the turn.
         self.bridge: WebviewBridge | None = bridge
+        # The bridge to the surfaces the app window owns (engine/surfaces.py): the editor today. Optional for the same
+        # reason: an engine with no window has no editor, and the editor tools say so in a sentence.
+        self.surfaces: SurfaceBridge | None = surfaces
         # Shared-resource locks for parallel goals. asyncio.Lock() is loop-lazy
         # (binds on first acquire), so constructing here — before any loop
         # exists — is safe.

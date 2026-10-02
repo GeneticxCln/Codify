@@ -33,6 +33,7 @@ from engine.role_repair import plan_role_repair
 from engine.spawn_guard import guarded_argv, guarded_env
 from engine.stats import build_overview, normalize_window
 from engine.trace import TraceService
+from engine.surfaces import SurfaceAnswer, SurfaceBridge
 from engine.webview_bridge import BridgeAnswer, WebviewBridge
 from engine.metrics import (
     STAGE_SUCCESS_OUTCOMES,
@@ -233,6 +234,8 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     # instance, shared: the routes and the executor's `read_page` must be
     # looking at the same pending set, or a read waits on a future nobody holds.
     app.state.bridge = WebviewBridge()
+    # The same, for the surfaces the app window itself owns (the editor): the window polls `/surfaces/next`.
+    app.state.surfaces = SurfaceBridge()
     app.state.executor = ExecutorService(
         app.state.goals,
         app.state.workspaces,
@@ -241,6 +244,7 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
         laya=app.state.laya,
         tracer=app.state.traces,
         bridge=app.state.bridge,
+        surfaces=app.state.surfaces,
     )
     app.state.executor.settings = app.state.settings
     app.state.token = BOOT_TOKEN
@@ -588,6 +592,45 @@ def _bridge(request: Request) -> WebviewBridge:
         bridge = WebviewBridge()
         request.app.state.bridge = bridge
     return bridge
+
+
+def _surfaces(request: Request) -> SurfaceBridge:
+    """The one surface bridge, created on first use for the tests that mount the app without booting it."""
+    surfaces: SurfaceBridge | None = getattr(request.app.state, "surfaces", None)
+    if surfaces is None:
+        surfaces = SurfaceBridge()
+        request.app.state.surfaces = surfaces
+    return surfaces
+
+
+@app.get("/surfaces/state")
+async def surfaces_state(request: Request) -> dict[str, Any]:
+    """Whether the app window is polling, what is in flight, and which surfaces and operations exist."""
+    return _surfaces(request).state()
+
+
+@app.get("/surfaces/next")
+async def surfaces_next(
+    request: Request,
+    wait: float = Query(20.0, ge=0.0, le=60.0),
+) -> dict[str, Any]:
+    """The oldest unanswered question for the app window, or `{"id": null}`.
+
+    A long poll for the reason `/bridge/next` is one, and the same liveness signal: a poll that arrives is how the
+    engine learns a window is there, and one that never arrives again is how it learns the window is gone. The window
+    answers with `POST /surfaces/answer`.
+    """
+    pending = await _surfaces(request).next_request(wait_s=wait)
+    if pending is None:
+        return {"id": None}
+    return pending
+
+
+@app.post("/surfaces/answer")
+async def surfaces_answer(request: Request, body: SurfaceAnswer) -> dict[str, Any]:
+    """Land one answer on the question it belongs to. `accepted: false` is the ordinary answer to a late or forged one."""
+    accepted = _surfaces(request).answer(body.id, body.ok, body.result, body.error)
+    return {"accepted": accepted}
 
 
 @app.get("/bridge/state")

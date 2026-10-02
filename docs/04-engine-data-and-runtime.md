@@ -1819,3 +1819,35 @@ The librarian does not browse. Its reply contract is a fixed JSON document (`04`
 network-shaped field to it would be a change to every role's prompt for a capability the conductor
 already has. `read_page` is a conductor tool instead, and evidence it gathered can be quoted in a
 `recon` task like anything else.
+
+### 9.1 The surface bridge: the app window's own surfaces
+
+The browser's pages belong to the Tauri shell, so the shell polls `/bridge/*`. The editor belongs to the UI process,
+and so will whatever surface comes next; for those the **window itself** polls. Same shape, same reasons (a long poll,
+not a socket; a poll is the liveness signal; one in-process queue on `app.state`), and the part that does not change from
+surface to surface is `engine/surfaces.py`:
+
+| Route | Who calls it | What it is |
+|---|---|---|
+| `GET /surfaces/state` | window | `{attached, inflight, timeout_s, surfaces: {name: [ops]}}` |
+| `GET /surfaces/next?wait=<s>` | window | the oldest question not yet handed out, `{id, surface, op, workspace_id, args}`, or `{"id": null}` after `wait` seconds (0–60) |
+| `POST /surfaces/answer` | window | `{id, ok, result? \| error?}` **`extra: forbid`** (the browser bridge's answer ignores extras; this one does not); `{"accepted": false}` for an id nobody issued, a second answer, or one after the timeout |
+
+- **An operation is a fixed string from a table**, `{surface: {op: Op}}`, and an `Op` pairs the shape of what the engine may
+  send with the shape of what may come back. A model cannot name an op. Adding a surface is one table entry and its
+  vocabulary (`engine/surface_editor.py` is the editor's); the bridge does not change.
+- **Arguments are validated on the engine's side before they cross.** A refusal costs no round trip, and a field the op does
+  not name never leaves the engine.
+- **An answer is validated into its result model**: the fields it names and nothing else, everything that can be long
+  capped (a file read is at most 400 lines of 2 000 characters; at most 50 editors; a selection's text 2 000), and a value
+  of the wrong type refused rather than repaired. What the editor holds is workspace text, which is third-party text, so
+  the model is shown it as a quotation, framed before it arrives.
+- **Several questions may be in flight**, unlike the browser's one visible page: an editor answers in milliseconds, and the
+  conductor may ask while a person is typing. They are handed out once each, in the order asked.
+- **No window is a sentence, not a hang.** A window that has not polled in three poll intervals is not attached, and the
+  tool says so at once; a question that goes unanswered for `ASK_TIMEOUT_S` (15 s) says what to do instead.
+- **Questions and answers, never authority.** There is no path from this module to the filesystem, the sandbox, the boot
+  token or a Tauri command. `edit` changes the text in an open buffer; the editor's own Save, a person's, is what writes
+  (`§3.0.3`, docs/00 §6.9), and `test_invariants_at_their_boundary.TestAPersonsSaveIsTheOneOtherDoor` fails if this module or
+  any conductor module names that writer.
+
