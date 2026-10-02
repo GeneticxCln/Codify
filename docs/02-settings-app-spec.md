@@ -227,6 +227,14 @@ or 175%, **125% by default**. It is client-side display state, like the theme: i
   cannot hold both (`docs/09` §8.1); the step header lets its title shrink and its status not, the usage
   header wraps its totals under the label, and the placeholder is short with the long sentence in its
   `title`. `ui/tests/layoutWrapping.test.ts` pins which side may shrink.
+* **Notifications are a third drawer, in the same slot.** A **Notifications** button (a bell, with the
+  unread count as a badge that is absent at zero) sits between Stats and History in the header. The three
+  drawers are one state, so at most one is open and each button is armed only for its own. It is a flex
+  sibling of the centre column and not a popover, for the reason the others are (`docs/09` §8.1: a native
+  browser view paints above any overlay), and it takes the same width as History, so the left panel's
+  yield rule (`ui/src/drawers.ts`) treats it the same. What it collects, and what it refuses to, is
+  `docs/09` §10.18. The button's title does not begin with Browser, Terminal, Keys or Settings, which is
+  how the panel's own buttons are found.
 * **Providers are read by name, not by slug.** The Provider Keys row printed the slug through CSS
   `capitalize` ("Openai", "Nvidia") and the protocol as the raw tag `openai_compat`, and the provider
   select printed every slug in capitals. `ui/src/providerLabels.ts` supplies the words (OpenAI,

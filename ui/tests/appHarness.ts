@@ -118,8 +118,26 @@ export interface EngineTabRow {
   updated_at?: number;
 }
 
+/**
+ * A WebSocket the app opened, as the engine's end of it. Nothing connects by itself: a test opens a socket
+ * and pushes frames into it, which is the only way to say "the engine just told this window X" without a
+ * real engine. `/ws/engine` carries the catalogue frames; `/ws/goals/{id}` carries one goal's events.
+ */
+export interface HarnessSocket {
+  url: string;
+  /** What the app sent on it (the auth handshake, say). */
+  sent: string[];
+  closed: boolean;
+  /** The socket opens, as the engine accepting the connection. */
+  open(): Promise<void>;
+  /** The engine sends one frame (JSON-encoded here, as it is on the wire). */
+  deliver(frame: unknown): Promise<void>;
+}
+
 export interface AppContext {
   dom: Dom;
+  /** Every WebSocket the app opened, in order. Inert until a test opens one or delivers into it. */
+  sockets: HarnessSocket[];
   /** Every shell command the app invoked, in order. */
   shell: { calls: string[]; args: Array<Record<string, unknown>> };
   /** Every engine request the app made, in order. */
@@ -478,8 +496,50 @@ export async function withApp(
 
   const realFetch = globalThis.fetch;
   const realWebSocket = globalThis.WebSocket;
+  const sockets: HarnessSocket[] = [];
+  // React is imported inside `withDom` (it reads `document` when imported), so `act` is fetched when a socket
+  // is driven, which is always after the DOM exists.
+  const actNow = async (fn: () => void): Promise<void> => {
+    const React = (await import("react")).default;
+    await (React.act as (b: () => Promise<void> | void) => Promise<void>)(async () => {
+      fn();
+    });
+  };
+  // Recording rather than inert: the app opens these on its own (the engine's catalogue stream, a goal's
+  // event stream), and what a test needs is to be the engine on the other end. Before this the stub kept
+  // nothing, so no test could deliver a frame. It still does nothing unless a test asks it to.
   (globalThis as Record<string, unknown>).WebSocket = class {
-    close(): void {}
+    // No TypeScript parameter properties: `node --experimental-strip-types` refuses them.
+    onopen: (() => void) | null = null;
+    onmessage: ((e: { data: string }) => void) | null = null;
+    onclose: ((e: { code?: number }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    url: string;
+    sent: string[] = [];
+    closed = false;
+    constructor(url: string) {
+      this.url = url;
+      const self = this;
+      sockets.push({
+        url,
+        sent: this.sent,
+        get closed() {
+          return self.closed;
+        },
+        async open() {
+          await actNow(() => self.onopen?.());
+        },
+        async deliver(frame) {
+          await actNow(() => self.onmessage?.({ data: JSON.stringify(frame) }));
+        },
+      });
+    }
+    send(data: string): void {
+      this.sent.push(data);
+    }
+    close(): void {
+      this.closed = true;
+    }
     addEventListener(): void {}
     removeEventListener(): void {}
   };
@@ -602,6 +662,7 @@ export async function withApp(
       async function runBody(): Promise<void> {
       await body({
         dom,
+        sockets,
         shell: { calls, args },
         engine,
         settle,

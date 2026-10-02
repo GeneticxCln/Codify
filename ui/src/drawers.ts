@@ -22,13 +22,13 @@
  */
 
 /** The drawers there are. A union rather than a boolean each: at most one is open, by construction. */
-export type Drawer = "stats" | "history";
+export type Drawer = "stats" | "notifications" | "history";
 
 /** The left panel's width: `w-60`. `sidebarToggle.test.ts` pins the class, so this cannot drift from it. */
 export const SIDEBAR_REM = 15;
 
-/** What each drawer asks for: `w-[28rem]` and `w-80`. Pinned against the classes in `drawers.test.ts`. */
-export const DRAWER_REM: Readonly<Record<Drawer, number>> = { stats: 28, history: 20 };
+/** What each drawer asks for: `w-[28rem]` for Stats, `w-80` for the other two. Pinned against the classes in `drawerLayout.test.ts`. */
+export const DRAWER_REM: Readonly<Record<Drawer, number>> = { stats: 28, notifications: 20, history: 20 };
 
 /**
  * The least the centre column may be left with before the left panel gives way. Thirty rem is about

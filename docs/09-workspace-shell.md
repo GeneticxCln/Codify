@@ -2761,3 +2761,40 @@ therefore structural rather than defensive:
 the mounted renderer (no live element or attribute, whatever the answer says; link behaviour; copy),
 `deliverableText.test.ts` is the Rendered/Source toggle, and `answerLinks.test.ts` mounts the whole App
 and clicks a link in a real answer through to `codify_browser_open`.
+
+### 10.18 The notification inbox: what happened while you were looking elsewhere
+
+A **Notifications** button in the header, between Stats and History, opens a drawer of what this window
+saw happen. It is in-app only: no desktop notification and no sound. It is kept on the client and nowhere
+else, because each of its four sources is a fact only this window knows. A goal's result is already
+durable in History, and the other three are not facts the engine keeps. The rules live in
+`ui/src/notifications.ts`, pure and DOM-free, so each has a test that needs no renderer.
+
+| Source | When it is news | When it is not |
+|---|---|---|
+| **Goal finished or failed** | The end of a goal stream **this window opened** (`onTerminal`). A failure names the first failed step. | Opening a thread or restoring History opens no stream for a finished goal, so old results are never announced (the `answersToRead` rule, auto-read's). **Cancelled** is silent: the person did it. |
+| **Plan ready for approval** | A `goal_status` that finds the goal `PENDING` and the plan will really wait: plan-only, dry-run, or a composer mode other than Direct Apply. | In Direct Apply the plan starts itself (the poll starts a `PENDING` goal), so "waiting for you" would be false. |
+| **Engine connection** | A change that **held for 4 s**: offline, back, token refused, restored. The engine's last stderr line is the offline detail. | `checking` never settles. The first settled state is only a baseline, so an engine that is up when the window opens says nothing, and a flap that reverses inside the settle time is one that never happened. |
+| **Model list change** | A `model_catalog_changed` frame with something in it, counted per provider (added and removed). docs/06 §6. | An empty diff, `model_catalog_checked`, and a payload that does not read. |
+
+* **No duplicates, because the engine replays.** Every entry has an id that names the event
+  (`goal:<id>:<status>:<updated_at>`, `plan:<id>:<version>`, `models:<fetched_at>:<diff>`), and an id already
+  in the list is dropped. A goal that is retried and fails again is a new entry, because `updated_at` moved.
+* **Opening is reading.** Everything is marked read when the drawer opens, and as entries arrive while it
+  stays open, so the header count clears at once. The dot on a row is for the ones that were new when the
+  drawer opened, and it lasts as long as the drawer does, so the person can still see what they had not seen.
+  The drawer also offers **Mark all read** and **Clear**.
+* **A row goes where the event is.** A goal reopens the way History reopens one (`restoreGoal`); an engine
+  entry opens Settings on About, which holds the engine card, and a model entry opens Provider Keys.
+* **Remembered, and never trusted.** The list (newest first, capped at 100) is stored under
+  `CODIFY_NOTIFICATIONS` and read back through a validator: a bad entry is dropped on its own and never
+  repaired, a list that cannot be read is an empty list, a storage that throws is an empty list on load and
+  a no-op on save, and the target of an entry is a closed set. The first render does not write back what it
+  just read: a storage that failed to read would be overwritten with the empty list it produced.
+* **What it deliberately leaves out.** The error banner (mirroring it would flood), a missing key (a derived
+  state the App cannot see), the motion banner, and anything that is not about something that happened.
+
+`ui/tests/notifications.test.ts` is the rules; `notificationsApp.test.ts` mounts the whole App against
+recorded sockets (the harness's `ctx.sockets`: the test is the engine on the other end) and checks each
+source is actually connected, that the header order is Stats, Notifications, History, that three drawers are
+one at a time, and that the list survives a restart.

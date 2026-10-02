@@ -157,6 +157,9 @@ import { currentUiScale, DEFAULT_UI_SCALE, stepUiScale, writeUiScale } from "./u
 import { readSidebarOpen, writeSidebarOpen } from "./sidebarPref";
 import { closeDrawer, nextDrawer, type Drawer } from "./drawers";
 import { useSidebarYield } from "./useSidebarYield";
+import { useEngineNotices, useNotifications } from "./useNotifications";
+import { catalogNotification, goalNotification, planNotification, type AppNotification } from "./notifications";
+import { NotificationsDrawer } from "./components/NotificationsDrawer";
 import {
   BROWSER_PAGE_LOADED,
   BROWSER_PAGE_LOADING,
@@ -201,6 +204,7 @@ import {
   ScrollText,
   PanelLeftClose,
   PanelLeftOpen,
+  Bell,
 } from "lucide-react";
 import { notableStderrLines } from "./engineLog";
 import { RainBackdrop } from "./components/ui/RainBackdrop";
@@ -255,6 +259,9 @@ export const App: React.FC = () => {
   const [agentConfigs, setAgentConfigs] = useState<AgentConfig[]>([]);
   const [recentRuns, setRecentRuns] = useState<RecentRunModel[]>([]);
   const [mode, setMode] = useState<ExecutionMode>("direct");
+  // The stream callbacks below outlive a render, so what they ask about the composer's mode is read here.
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
   // What the goal is for, orthogonal to how it executes: a design deliverable
   // drafts or revises the workspace's own brand contract.
   const [goalMode, setGoalMode] = useState<GoalMode>("normal");
@@ -467,6 +474,11 @@ export const App: React.FC = () => {
     setIsSettingsOpen(true);
   };
   const [error, setError] = useState<string | null>(null);
+  // What happened while the person was looking elsewhere: goals this window watched ending, plans waiting
+  // for approval, engine connection changes and model list changes. Client-side and in-app only
+  // (`notifications.ts` says what is in it and what is not).
+  const inbox = useNotifications();
+  const notify = inbox.notify;
   const [engineUp, setEngineUp] = useState<boolean | null>(null); // null = checking
   // The motion store, as React state so a change re-renders the tree and every
   // backdrop's effect re-reads it on the way past (the loops read the store at
@@ -504,6 +516,11 @@ export const App: React.FC = () => {
   const [authOk, setAuthOk] = useState<boolean | null>(null);
   /** The connection, as one word: the pill's label, hint and colours all key off it. */
   const engineConnection = engineState(engineUp, authOk);
+  // The outage's own words, for the notice: the last line the engine said on its way out. A ref, because
+  // the notice fires on a timer and must read what is known *then*, not when the effect was set up.
+  const engineStderrRef = useRef<string[]>([]);
+  engineStderrRef.current = engineStderr;
+  useEngineNotices(engineConnection, notify, () => engineStderrRef.current[engineStderrRef.current.length - 1]);
 
   // Live goal streams (one per goal, with reconnect backoff).
   const goalStreams = useRef<Record<string, GoalStreamHandle>>({});
@@ -784,7 +801,11 @@ export const App: React.FC = () => {
   useEffect(() => {
     const everConnected = { current: false };
     const handle = openEngineStream({
-      onFrame: () => {
+      onFrame: (frame) => {
+        // The frame carries the diff, and until the notifications existed it was thrown away. Counted
+        // here, per provider, so the one place that says a model went *away* is the inbox: the "new"
+        // badge on a provider row never shows removals.
+        if (frame.type === "model_catalog_changed") notify(catalogNotification(frame.payload, Date.now()));
         setCatalogTick((n) => n + 1);
         void loadModels(false);
       },
@@ -808,7 +829,7 @@ export const App: React.FC = () => {
       handle.close();
       setCatalogLive(false);
     };
-  }, [loadModels]);
+  }, [loadModels, notify]);
 
   // Whether the "enter a folder path" dialog is open. Owned here rather than by the command bar so a
   // picker that cannot open can open it: on a desktop with no dialog helper the folder button never
@@ -898,6 +919,7 @@ export const App: React.FC = () => {
   const [drawer, setDrawer] = useState<Drawer | null>(null);
   const statsOpen = drawer === "stats";
   const historyOpen = drawer === "history";
+  const notificationsOpen = drawer === "notifications";
   // The left panel gives way while a drawer is open and the window cannot hold both. Derived, never
   // stored: `codify.sidebar` is written only by the person's own press of the toggle, so closing the
   // drawer brings the panel back as it was (`docs/09` §8.1).
@@ -2104,6 +2126,11 @@ export const App: React.FC = () => {
                   msg.id === messageId ? { ...msg, goal: refreshed } : msg,
                 ),
               );
+              // A plan that has come back and will *wait* for the person is news; one that starts itself
+              // (Direct Apply) is not. Only on a goal_status event: a step or plan edit is the person's own.
+              if (ev.type === "goal_status") {
+                notify(planNotification(refreshed, modeRef.current, Date.now()));
+              }
             })
             .catch((err: any) => {
               setError(readRejection(err, "Failed to refresh goal"));
@@ -2148,6 +2175,11 @@ export const App: React.FC = () => {
                     : msg,
                 ),
               );
+              // This stream ended because the goal did, and a stream exists only for a goal this window
+              // watched in flight: opening a thread or restoring History never opens one for a goal that
+              // had already finished. That *is* the watched-only rule, and it needs no bookkeeping of its
+              // own. A cancel is the person's own act and `goalNotification` stays silent for it.
+              notify(goalNotification(refreshed, Date.now()));
             })
             .catch((err: any) => {
               setError(readRejection(err, "Failed to refresh goal"));
@@ -2155,7 +2187,7 @@ export const App: React.FC = () => {
         },
       });
     },
-    [],
+    [notify],
   );
 
   // Goal history: every goal the engine has persisted for the selected
@@ -2286,6 +2318,18 @@ export const App: React.FC = () => {
       }
     },
     [restoring, subscribeToGoal, updateWorkspaceConversations],
+  );
+
+  /** A notification was pressed: go where the event is. A goal reopens the way History reopens one. */
+  const handleOpenNotification = useCallback(
+    (item: AppNotification) => {
+      const target = item.target;
+      if (!target) return;
+      if (target.kind === "goal") void restoreGoal(target.goalId);
+      else openSettings(target.tab);
+    },
+    // `openSettings` is a plain function that only sets two pieces of state, so it is stable in effect.
+    [restoreGoal],
   );
 
   // Goals whose execution we have already kicked off in direct mode. Without
@@ -3127,6 +3171,27 @@ export const App: React.FC = () => {
             <span>Stats</span>
           </Toggle>
 
+          {/* Notifications: goals that finished or failed, plans waiting for approval, engine connection
+              changes and model list changes. Between Stats and History because it is the third of the same
+              thing (a drawer on the right, armed while open); the unread count is the whole of the badge, and
+              it is absent at zero because a "0" is a control-shaped lie. The title must not start with
+              Browser, Terminal, Keys or Settings: those are how the panel's own buttons are found. */}
+          <Toggle
+            armed={notificationsOpen}
+            tone="accent"
+            onClick={() => setDrawer((open) => nextDrawer(open, "notifications"))}
+            title="Notifications — goals finished or failed, plans waiting for approval, engine and model changes"
+            aria-label={inbox.unread > 0 ? `Notifications, ${inbox.unread} unread` : "Notifications"}
+          >
+            <Bell className="w-3.5 h-3.5" />
+            <span>Notifications</span>
+            {inbox.unread > 0 && (
+              <Badge tone="info" icon={false} className="ml-0.5">
+                {inbox.unread > 99 ? "99+" : inbox.unread}
+              </Badge>
+            )}
+          </Toggle>
+
           <Toggle
             armed={historyOpen}
             tone="accent"
@@ -3419,6 +3484,20 @@ export const App: React.FC = () => {
               <StatsPanel />
             </div>
           </aside>
+        )}
+
+        {/* Notifications: the same slot as the other drawers, and a flex sibling for the same reason (the
+            native browser webview paints above any overlay). Opening a row goes where the event is: a goal
+            reopens through the history restore, an engine or model change opens the Settings tab that
+            holds it. */}
+        {notificationsOpen && (
+          <NotificationsDrawer
+            items={inbox.items}
+            onMarkAllRead={inbox.markAllRead}
+            onClear={inbox.clear}
+            onClose={() => setDrawer((open) => closeDrawer(open, "notifications"))}
+            onOpenItem={handleOpenNotification}
+          />
         )}
 
         {/* Goal history drawer. Empty only when this workspace never ran a goal. */}
