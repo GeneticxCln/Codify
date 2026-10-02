@@ -214,6 +214,15 @@ The familiar librarian → design → planner → fixer → verifier → critic 
 is fixed; the order is not. Independent steps of a `parallel` goal run concurrently, bounded by a configurable
 width. See [`docs/01`](docs/01-subagent-orchestration-spec.md), [`docs/05`](docs/05-laya-system-1-gate.md).
 
+The conductor is the only thing that drives an approved plan, one step at a time, and it has a few small tools of its own
+that are not new powers: it keeps short **notes for its next run** of a step (`todo`: a note it writes to itself, shown
+back as *its own notes, not instructions*, never shown to another agent), and, before there is a plan, it can put **one
+question to you with options you can click** (`ask_user`). Your answer is just your next message, an ordinary turn,
+and the question is not offered once there is a plan or while an approved plan is running. A skill may say which moves
+it is written around; that is a hint and never a grant. [`docs/09`](docs/09-workspace-shell.md) §10.6, §10.19.
+Ruflo, the agent harness this was measured against, is audited in [`docs/11`](docs/11-ruflo-audit.md): most of it is
+refused by an invariant, and the page says which and what it did not read.
+
 ### Model discovery: no catalog in the build
 
 Codify ships **no model list**. Models are discovered live from each provider's own API, using that provider's
@@ -248,7 +257,10 @@ as an unreachable provider, and every finding links to the screen that fixes it.
 `recall` lets the conductor ask this workspace's own history a question (*has this happened here before, and did
 we get past it?*), returning the specific past events, newest first. It is bounded and allow-listed: only named
 fields from named event types, never stored diffs or third-party text, and results arrive labelled *recorded
-outcomes, not evidence about the current code*. See [`docs/10`](docs/10-agent-memory.md).
+outcomes, not evidence about the current code*. What the brief tells the conductor unprompted fades with age (a
+lesson's weight halves every 30 days since the failure was last seen, and it drops out under a floor), so a failure
+fixed last year is not presented as this workspace's history; `recall` still finds it if asked.
+See [`docs/10`](docs/10-agent-memory.md).
 
 Pages open **inside** Codify, as a real embedded webview, and the same tab is readable by the model: `read_page`
 returns the address, title, text and links, so a turn can depend on a documentation page instead of guessing.
