@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 
 import {
   bufferOutput,
+  bufferOwnOutput,
   DEFAULT_GRID,
   drainOutput,
   emptyOutputBuffer,
@@ -132,4 +133,36 @@ test("an empty chunk is buffered rather than treated as nothing to say", () => {
   // place deciding what a real chunk looks like.
   const buffer = buffered(["term-1", "a"], ["term-1", ""], ["term-1", "b"]);
   assert.equal(drainOutput(buffer, "term-1"), "ab");
+});
+
+// ── a pane holds its own terminal's output and nobody else's ────────────────
+
+test("a pane holds its own terminal's chunks, and says so", () => {
+  const buffer = emptyOutputBuffer();
+  assert.equal(bufferOwnOutput(buffer, "term-1", "term-1", "a"), true);
+  assert.equal(bufferOwnOutput(buffer, "term-1", "term-1", "b"), true);
+  assert.equal(drainOutput(buffer, "term-1"), "ab");
+});
+
+test("another terminal's chunks are not held, so a pane cannot hoard what it will never show", () => {
+  // A build running in a second shell writes for as long as the first pane is mounted. Nothing ever drains it there.
+  const buffer = emptyOutputBuffer();
+  for (let n = 0; n < 1000; n += 1) {
+    assert.equal(bufferOwnOutput(buffer, "term-1", "term-2", "x".repeat(100)), false);
+  }
+  assert.equal(buffer.chunks.size, 0, "a chunk for another terminal was kept");
+  assert.equal(pendingFor(buffer, "term-2"), 0);
+  assert.equal(drainOutput(buffer, "term-2"), "");
+});
+
+test("with two panes each keeps only its own", () => {
+  const a = emptyOutputBuffer();
+  const b = emptyOutputBuffer();
+  for (const [id, data] of [["term-a", "1"], ["term-b", "2"], ["term-a", "3"], ["term-b", "4"]] as const) {
+    bufferOwnOutput(a, "term-a", id, data);
+    bufferOwnOutput(b, "term-b", id, data);
+  }
+  assert.equal(drainOutput(a, "term-a"), "13");
+  assert.equal(drainOutput(b, "term-b"), "24");
+  assert.equal(a.chunks.size + b.chunks.size, 0, "a pane was left holding the other's output");
 });

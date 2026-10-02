@@ -12,7 +12,7 @@ import {
   TERMINAL_OUTPUT,
 } from "../shellEvents";
 import {
-  bufferOutput,
+  bufferOwnOutput,
   DEFAULT_GRID,
   drainOutput,
   emptyOutputBuffer,
@@ -104,6 +104,12 @@ export interface TerminalPaneProps {
   onResize?: (terminalId: string, grid: Grid) => void;
   /** The shell finished, so the tab can say so too. */
   onExit?: (terminalId: string) => void;
+  /**
+   * Take the keyboard once the terminal is ready. On by default: the tab strip has just taken the focus and a terminal
+   * that cannot be typed into until it is clicked is the classic complaint. A pane that appears *unfocused* beside
+   * another (the second half of a split) says no, so it does not take the keyboard from the pane in use.
+   */
+  autoFocus?: boolean;
 }
 
 export const TerminalPane: React.FC<TerminalPaneProps> = ({
@@ -112,6 +118,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   exited = false,
   onResize,
   onExit,
+  autoFocus = true,
 }) => {
   const hostRef = useRef<HTMLDivElement>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -125,6 +132,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const onExitRef = useRef(onExit);
   const exitedRef = useRef(exited);
   const workspaceIdRef = useRef(workspaceId);
+  const autoFocusRef = useRef(autoFocus);
 
   useEffect(() => {
     terminalIdRef.current = terminalId;
@@ -141,6 +149,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   useEffect(() => {
     exitedRef.current = exited;
   }, [exited]);
+  useEffect(() => {
+    autoFocusRef.current = autoFocus;
+  }, [autoFocus]);
 
   useEffect(() => {
     let disposed = false;
@@ -207,12 +218,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         listenShellEvent<unknown>(TERMINAL_OUTPUT, (payload) => {
           const chunk = readTerminalOutput(payload);
           if (!chunk) return;
-          // Every chunk is buffered, this terminal's or not: the id is how the
-          // right pane knows which of them are its own, and a chunk that
-          // arrives before this pane has even been told its id is the one that
-          // must not be dropped.
-          bufferOutput(outputBuffer, chunk.id, chunk.data);
-          if (chunk.id !== terminalIdRef.current) return;
+          // Only this terminal's chunks are held (`bufferOwnOutput` says why): another
+          // terminal's output is not this pane's to keep, and was never drained.
+          if (!bufferOwnOutput(outputBuffer, terminalIdRef.current, chunk.id, chunk.data)) return;
           // File **this** terminal's bytes, and only its own — the one owner per
           // chunk that `terminalBuffer`'s rules are built on. It used to file
           // every chunk that arrived, before this check, on the theory that
@@ -377,8 +385,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       }
 
       // A terminal the user cannot type into until they click it is the classic
-      // xterm complaint, and the tab bar has just taken the focus.
-      term.focus();
+      // xterm complaint, and the tab bar has just taken the focus. A pane that
+      // appears beside another one in use asks not to (`autoFocus`).
+      if (autoFocusRef.current) term.focus();
     })().catch((err: any) => {
       if (disposed) return;
       setFailed(
