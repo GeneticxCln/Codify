@@ -157,6 +157,13 @@ test("a chat, a terminal or an editor may be split with a browser page, whicheve
   assert.deepEqual(splitPartner(strip([term("a"), page("p"), chat("c")], "a")), { kind: "tab", id: "c" }, "a chat comes before a page for a terminal");
 });
 
+test("an editor is split with the nearest chat, then the nearest live terminal, then a page, never another editor", () => {
+  assert.deepEqual(splitPartner(strip([tab("e", "editor"), page("p"), term("t")], "e")), { kind: "tab", id: "t" }, "a terminal beats a nearer page");
+  assert.deepEqual(splitPartner(strip([tab("e", "editor"), term("t"), chat("c")], "e")), { kind: "tab", id: "c" }, "a chat beats a nearer terminal");
+  assert.deepEqual(splitPartner(strip([tab("e", "editor"), page("p")], "e")), { kind: "tab", id: "p" }, "with nothing else, a page");
+  assert.deepEqual(splitPartner(strip([tab("e", "editor"), tab("e2", "editor")], "e")), { kind: "new-terminal" });
+});
+
 test("a browser page is split with the nearest chat, then the nearest live terminal, then an editor, else a new terminal", () => {
   assert.deepEqual(splitPartner(strip([term("t"), page("p"), chat("c")], "p")), { kind: "tab", id: "c" });
   assert.deepEqual(splitPartner(strip([chat("c"), term("t"), page("p")], "p")), { kind: "tab", id: "c" }, "a chat beats a nearer terminal");
