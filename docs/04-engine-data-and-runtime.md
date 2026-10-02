@@ -498,6 +498,9 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/workspaces` | — | `Workspace[]` |
 | `GET` | `/workspaces/{id}` | — | `Workspace` |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
+| `GET` | `/workspaces/{id}/files?limit=` | `limit` 1–10 000, default 5 000 | `{files, truncated, limit}` — every file path under the root, sorted, skipping `SKIP_DIRS` and links out of the workspace. See §3.0.3 |
+| `GET` | `/workspaces/{id}/file?path=` | — | `{path, content, version, size}`. 400 `file_escape` / `workspace_protected`, 404 `file_missing`, 422 `file_binary` / `file_not_text` / `file_too_large` / `file_access`. See §3.0.3 |
+| `PUT` | `/workspaces/{id}/file` | `{path, content, base_version}` extra=forbid | `{path, version, size}` — **a person's Save, the one writer besides the fixer** (`00` §6.9). Replaces a file that exists; never creates or deletes one. 409 `file_changed` (carries `current_version`) when the file is not the version that was opened; the same 400/404/422 refusals as the read. Refused means untouched. Commits nothing |
 | `DELETE` | `/workspaces/{id}?delete_goals={bool}` | — | forgets the folder; **never touches `root_path`**. 409 `workspace_not_empty` (with the goal count) unless the cascade is requested, 409 `workspace_has_active_goals` if anything is PLANNING/RUNNING |
 | `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, mode?, provider?, model?, trace?}` extra=forbid — `mode` is `"normal"` \| `"design"` (`04` §4.0a.2) \| `"knowledge"` (`04` §4.9); `trace` records the run's model calls (`04` §8) | `Goal` |
 | `GET` | `/goals` | query: `workspace_id?`, `status?`, `limit` (1–200, default 50), `offset` | `Goal[]` — active goals first, then newest |
@@ -656,6 +659,34 @@ well, so a `1` whose stderr mentions the display is a failure, not a cancel. A r
 ends the search. A dialog that has not answered within `PICKER_TIMEOUT_S` is killed with its whole process
 group, so a dialog the engine gave up on does not stay open on the screen. The UI shows the 503's message
 in its error banner; typing a path in the folder menu always works without any dialog.
+
+### 3.0.3 The editor's files
+
+Three routes, for a *person* in the editor tab (`09` §13). They are the only place the engine reads a workspace file for
+someone other than a model, and `PUT` is the only place it writes one for someone other than the fixer.
+
+**What a file is.** UTF-8 text with no NUL byte anywhere in it, at most `MAX_EDIT_BYTES` (1 000 000). Anything else is a
+422 that says which, because opening a PNG in a text editor and saving it back is how a file is corrupted. The read
+translates nothing (CRLF and a byte-order mark come back as they are) and the write stores exactly what was sent, so a
+save never changes a line the person did not touch.
+
+**`version`.** The SHA-256 of the bytes on disk. A save names the version it read in `base_version`; a file that is no
+longer that version is a **409 `file_changed`** carrying `current_version`, never a silent overwrite of what the fixer, a
+terminal or another editor wrote in the meantime. The check and the replace are two steps rather than one lock, so the
+window is the length of one `os.replace`. A client that wants to overwrite anyway saves again, naming `current_version`.
+
+**What Save is not.** It replaces a file that exists. It does not create a file or a folder, delete, rename, `chmod`
+(the mode is kept), commit (that is the scribe's, behind an approved goal) or follow a path out of the workspace or into
+`.git`. A workspace rooted somewhere `protected_root_reason` refuses is a 400 `workspace_protected`.
+
+**Why it is safe to add.** Containment, `.git`, the protected-root check and the temp-file-and-rename are the code
+`apply` uses. The claim that no agent can reach it is held by the engine's own source:
+`test_invariants_at_their_boundary.TestAPersonsSaveIsTheOneOtherDoor` fails if any module but `services.py` names
+`save_text`, any but `app.py` names `save_file`, or any conductor, executor, skill or surface module names either.
+
+The listing is not `LibraryService.tree` (two levels, 120 names, orientation for a model): it walks to the bottom, is
+sorted, and is cut at `limit` with `truncated: true` rather than silently. All three do their file work off the event
+loop, after the workspace is looked up on it.
 
 ### 3.0.2 Voice: dictation and read-aloud
 

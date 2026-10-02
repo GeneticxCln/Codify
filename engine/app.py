@@ -74,6 +74,10 @@ from engine.models import (
     Workspace,
     WorkspaceCreate,
     WorkspaceDesignContract,
+    WorkspaceFile,
+    WorkspaceFileList,
+    WorkspaceFileSave,
+    WorkspaceFileSaved,
 )
 from engine.providers import Keychain, ProviderError, ProviderFactory
 from engine.sandbox import SandboxService
@@ -367,7 +371,7 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
 ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {
         "model": ErrorBody,
-        "description": "Understood and refused — an invalid root, a path that escapes, a refused pin.",
+        "description": "Understood and refused — an invalid root, a path that escapes (`file_escape`), a refused pin.",
     },
     401: {
         "model": ErrorBody,
@@ -375,13 +379,13 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     },
     404: {
         "model": ErrorBody,
-        "description": "No such workspace, goal or step.",
+        "description": "No such workspace, goal, step or (for the editor's routes) file: `file_missing`.",
     },
     409: {
         "model": ErrorBody,
         "description": (
             "The resource moved under the caller, or refuses in its current state: "
-            "`version_conflict`, `illegal_status`, `trace_locked`, `goal_in_progress`."
+            "`version_conflict`, `illegal_status`, `trace_locked`, `goal_in_progress`, `file_changed`."
         ),
     },
     422: {
@@ -389,7 +393,8 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
         "description": (
             "A refused body: a field that failed validation (`code: invalid_request`, "
             "with the field errors under `detail`) or a body the engine understood "
-            "and declined."
+            "and declined (a file the editor cannot hold: `file_binary`, `file_not_text`, "
+            "`file_too_large`, `file_access`)."
         ),
     },
     502: {
@@ -1392,6 +1397,45 @@ async def list_ws(request: Request) -> list[Workspace]:
 async def get_ws(workspace_id: str, request: Request) -> Workspace:
     workspaces: WorkspaceService = request.app.state.workspaces
     return workspaces.get(workspace_id)
+
+
+@app.get("/workspaces/{workspace_id}/files", response_model=WorkspaceFileList)
+async def list_workspace_files(
+    workspace_id: str, request: Request, limit: int = Query(5000, ge=1, le=10_000)
+) -> WorkspaceFileList:
+    """Every file path in the workspace, for the editor's quick-open.
+
+    Skips the folders that are not source (`.git`, `node_modules`, caches, build output) and never follows a link out of
+    the workspace. Cut at `limit` with `truncated: true`, never silently.
+    """
+    workspaces: WorkspaceService = request.app.state.workspaces
+    workspace = workspaces.get(workspace_id)
+    return await asyncio.to_thread(workspaces.list_files, workspace, limit)
+
+
+@app.get("/workspaces/{workspace_id}/file", response_model=WorkspaceFile)
+async def get_workspace_file(workspace_id: str, request: Request, path: str) -> WorkspaceFile:
+    """A file's exact text and its version, for the editor. Text only: binary, non-UTF-8 and over-1 MB files are a 422."""
+    workspaces: WorkspaceService = request.app.state.workspaces
+    workspace = workspaces.get(workspace_id)
+    return await asyncio.to_thread(workspaces.read_file, workspace, path)
+
+
+@app.put("/workspaces/{workspace_id}/file", response_model=WorkspaceFileSaved)
+async def put_workspace_file(
+    workspace_id: str, body: WorkspaceFileSave, request: Request
+) -> WorkspaceFileSaved:
+    """A person's Save: replace one existing file's text, if it is still the version they opened.
+
+    **The one writer besides the fixer, and not an agent's** (docs/00 §6.9). It replaces a file that exists and never
+    creates or deletes one; a file that changed since `base_version` is a 409 `file_changed` carrying the version it is
+    now; nothing is committed. Nothing in the engine but this route may reach `WorkspaceService.save_file`.
+    """
+    workspaces: WorkspaceService = request.app.state.workspaces
+    workspace = workspaces.get(workspace_id)
+    return await asyncio.to_thread(
+        workspaces.save_file, workspace, body.path, body.content, body.base_version
+    )
 
 
 @app.put("/workspaces/{workspace_id}/design-contract", response_model=Workspace)

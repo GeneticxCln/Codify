@@ -610,6 +610,60 @@ class TestOnlyTheFixerWrites(unittest.TestCase):
         self.assertEqual(["executor_steps.py"], appliers)
 
 
+def _modules_naming(attribute: str) -> list[str]:
+    """The engine modules that reach for `.attribute` on anything, by AST rather than by grep."""
+    return sorted(
+        p.name
+        for p in ENGINE_DIR.glob("*.py")
+        if any(isinstance(n, ast.Attribute) and n.attr == attribute for n in ast.walk(ast.parse(p.read_text(encoding="utf-8"))))
+    )
+
+
+def _defines(module: str, function: str) -> bool:
+    tree = ast.parse((ENGINE_DIR / module).read_text(encoding="utf-8"))
+    return any(isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef) and n.name == function for n in ast.walk(tree))
+
+
+class TestAPersonsSaveIsTheOneOtherDoor(unittest.TestCase):
+    """docs/00 section 6.9 names one writer besides the fixer: a person pressing Save in the editor.
+
+    `PUT /workspaces/{id}/file` calls `WorkspaceService.save_file`, which calls `FileSystemService.save_text`. The claim
+    that no agent, skill or conductor tool can reach it is a claim about who may *name* either of those, and it is held
+    here the way the claim about `apply` is: by looking at every engine module, so a new caller fails the build.
+    """
+
+    def test_save_text_is_called_from_exactly_one_place_and_that_place_is_the_workspace_service(self) -> None:
+        self.assertTrue(_defines("fs.py", "save_text"), "the scan below would pass for a function that no longer exists")
+
+        self.assertEqual(["services.py"], _modules_naming("save_text"))
+
+    def test_the_service_method_is_reached_from_exactly_one_place_and_that_place_is_the_route_module(self) -> None:
+        self.assertTrue(_defines("services.py", "save_file"))
+
+        self.assertEqual(["app.py"], _modules_naming("save_file"))
+
+    def test_nothing_an_agent_runs_so_much_as_names_either_of_them(self) -> None:
+        agent_side = [
+            p.name
+            for p in ENGINE_DIR.glob("*.py")
+            if p.name.startswith(("conductor", "executor", "agent_", "skills", "surfaces", "toolcall", "library"))
+        ]
+
+        self.assertGreater(len(agent_side), 8, "the scan found almost none of the agent-side modules")
+        self.assertEqual(
+            [],
+            sorted(set(agent_side) & set(_modules_naming("save_text") + _modules_naming("save_file"))),
+        )
+
+    def test_the_invariant_says_the_door_exists_so_it_cannot_exist_unnamed(self) -> None:
+        text = ARCHITECTURE.read_text(encoding="utf-8")
+        start = text.index("9. Only the fixer writes")
+        paragraph = " ".join(text[start : text.index("\n\n", start)].split())
+
+        self.assertIn("`PUT /workspaces/{id}/file`", paragraph)
+        self.assertIn("boot token", paragraph)
+
+
 # --- 7. one database file ------------------------------------------------------------------------------------
 
 
@@ -687,6 +741,7 @@ LEDGER: dict[int, tuple[str, ...]] = {
     8: (f"{_HERE}.TestATurnHasOneDoor", "tests.test_turns.TestOneDoor"),
     9: (
         f"{_HERE}.TestOnlyTheFixerWrites",
+        f"{_HERE}.TestAPersonsSaveIsTheOneOtherDoor",
         "tests.test_conductor.TestTheToolsAreThePipelinesDoors.test_write_refuses_and_writes_nothing_while_unapproved",
         "tests.test_write_gate_timing.TestTheConductorRoad",
     ),
