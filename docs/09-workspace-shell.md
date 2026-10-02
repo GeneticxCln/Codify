@@ -246,7 +246,7 @@ markup and easy to get subtly wrong. `ui/tests/tabs.test.ts` covers it without a
 DOM.
 
 ```ts
-type TabKind = "chat" | "terminal" | "browser";
+type TabKind = "chat" | "terminal" | "browser" | "editor";
 interface Tab {
   id: string;
   kind: TabKind;
@@ -254,6 +254,7 @@ interface Tab {
   conversationId?: string;   // the thread a chat tab shows; absent on a clean slate
   workspaceId?: string;      // the project this tab belongs to — a chat tab's identity
   url?: string;              // a browser tab's current address
+  path?: string;             // an editor tab's file, relative to its workspace's root (§13)
   // plus `history`, `ptyId` and `exited` for the browser and terminal kinds
 }
 interface TabState { tabs: Tab[]; activeId: string | null }
@@ -3045,7 +3046,7 @@ and not seen. If a terminal selection does not appear in the history, that is th
 
 ## 12. Split panes (built)
 
-The centre column can show two views side by side: **a chat beside a terminal, or two terminals**. A split is made three
+The centre column can show two views side by side: **a chat, a terminal or an editor beside any of those**, but never two chats and never a browser page. A split is made three
 ways: a right-click on a tab (or the Menu key on a focused one), an entry in the command palette (Ctrl+K, type
 "split"), and **Ctrl+.**, which splits and, pressed again, closes. The rules are `ui/src/panes.ts`, pure and DOM-free like
 `tabs.ts`; the divider and the two panes are `ui/src/components/SplitPanes.tsx`; the hook that keeps the split in step
@@ -3063,7 +3064,7 @@ mean what they did.
 
 | | |
 |---|---|
-| Chat + terminal, terminal + terminal | allowed |
+| Chat + terminal, terminal + terminal, **and any of those with an editor** (§13) | allowed. An editor shares nothing a second one would fight over: no message box, no running goal, no `insertRequest`. Two editors are two files. |
 | Anything with a **browser page** | refused. A page is a native child webview seated over one measured rectangle (§7.3): Rust applies one `Bounds` to every page and shows one at a time. Two visible pages, or one in half a column, are shell changes this does not make. It is also what makes a DOM divider safe: no native view is ever in the centre while a split shows. |
 | Chat + chat | refused. There is one message box, one "a goal is running" state and one `insertRequest`. |
 
@@ -3080,8 +3081,9 @@ A split **shows** while the active tab is one of its two. When the active tab is
    tab, and that must not destroy the split it was clicked in.
 
 A pane whose tab has gone ends the split. Closing a showing pane's tab ends it and goes to the *other* pane's tab. Ctrl+. with no
-split picks who to split with by **distance in the strip, a tie going right** (`splitPartner`): a chat takes the nearest live terminal; a terminal takes the
-nearest other live terminal, then the nearest chat; with nobody, a new terminal opens in the same folder. A shell that has exited is never chosen for you.
+split picks who to split with by **distance in the strip, a tie going right** (`splitPartner`): a chat takes the nearest live terminal **or editor**, whichever is nearer; an
+editor takes the nearest chat (the assistant it is being edited with), then the nearest live terminal; a terminal takes the nearest other live terminal, then the nearest
+chat, and never picks an editor for you; with nobody, a new terminal opens in the same folder. A shell that has exited is never chosen for you.
 
 ### 12.4 The chat follows its tab, not the focus
 
@@ -3101,8 +3103,8 @@ The divider is a `role="separator"`: drag it (it holds the pointer), arrow keys,
 The composer's dropdowns are `position: fixed` and open at their button, which was always inside the window while the composer spanned
 it; in the right-hand pane they would run off the screen, so they are pulled back inside it (`clampPickerLeft`, `threadMenu.ts`).
 
-**A split does not come back after a restart.** Both pairings contain a terminal, and terminals are never restored, so the persisted layout cannot hold one.
-Nothing is written for a split.
+**A split does not come back after a restart.** A split is never written (§12.1), and every pairing contains a terminal or an editor, neither of which is restored (§13.2),
+so there would be nothing for it to come back to.
 
 ### 12.6 Terminal panes, two at once
 

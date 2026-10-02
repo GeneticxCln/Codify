@@ -56,6 +56,7 @@ import { hostOf } from "./browserHistory";
 import {
   UNTITLED_THREAD_TITLE,
   focusTab,
+  isLocalTab,
   openTab,
   tabId,
   type Tab,
@@ -315,7 +316,8 @@ export function writeLayout(storage: TabStorage | undefined, layout: PersistedLa
 
 /** A tab worth remembering, and the shape it is remembered in. */
 function persistedTab(tab: Tab): PersistedTab | null {
-  if (tab.kind === "terminal") return null;
+  // Local to this window: a live process, or text nobody has saved. See `isLocalTab`.
+  if (isLocalTab(tab)) return null;
   if (tab.kind === "chat") {
     return {
       key: tab.key,

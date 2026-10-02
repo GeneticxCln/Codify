@@ -19,8 +19,11 @@ import { canPair } from "./panes.ts";
 import type { Tab } from "./tabs";
 import type { Conversation, SettingsTab } from "./types";
 
-/** Where an item sends you. Four sources — the strip, the thread list, settings, and what can be done to the split. */
-export type PaletteItemKind = "tab" | "conversation" | "settings" | "action";
+/**
+ * Where an item sends you. Five sources — the strip, the thread list, settings, what can be done to the split, and the
+ * workspace's files.
+ */
+export type PaletteItemKind = "tab" | "conversation" | "settings" | "action" | "file";
 
 /** What a split action asks the shell to do. Data, like everything here: the jump is one `switch` in `App.tsx`. */
 export type PaletteAction =
@@ -54,6 +57,11 @@ export type PaletteItem =
   | (BaseItem & {
       kind: "action";
       action: PaletteAction;
+    })
+  | (BaseItem & {
+      kind: "file";
+      /** Relative to the workspace root, as the engine listed it. */
+      path: string;
     });
 
 /** What the palette is choosing from. */
@@ -66,7 +74,15 @@ export interface PaletteSources {
    * what it held before is what it still holds.
    */
   split?: { showing: boolean };
+  /**
+   * The paths of the selected workspace's files, as `GET /workspaces/{id}/files` listed them. Absent or empty means there
+   * are none to offer. They are searched, not browsed: see [`filterPalette`].
+   */
+  files?: readonly string[];
 }
+
+/** How many files one query may show. A common word matches thousands of paths, and a list that long is not a result. */
+export const MAX_FILE_RESULTS = 30;
 
 /**
  * The settings destinations, named as `SettingsModal` names its tabs.
@@ -92,6 +108,7 @@ const KIND_LABEL: Record<PaletteItemKind, string> = {
   conversation: "Conversation",
   settings: "Settings",
   action: "Split",
+  file: "Open file",
 };
 
 /**
@@ -130,7 +147,14 @@ export function buildPaletteItems(sources: PaletteSources): PaletteItem[] {
     title: entry.title,
     settingsTab: entry.settingsTab,
   }));
-  return [...tabs, ...conversations, ...settings, ...splitActions(sources)];
+  const files: PaletteItem[] = (sources.files ?? []).map((path) => ({
+    id: `file:${path}`,
+    kind: "file" as const,
+    label: KIND_LABEL.file,
+    title: path,
+    path,
+  }));
+  return [...tabs, ...conversations, ...settings, ...splitActions(sources), ...files];
 }
 
 /**
@@ -172,6 +196,9 @@ function haystack(item: PaletteItem): [string, string] {
 function tokenScore(item: PaletteItem, token: string): number | null {
   const [title, label] = haystack(item);
   if (title.startsWith(token)) return 3;
+  // A file is looked for by its name, and its path is only the folder it is in: `main` is `src/app/main.py`, not
+  // `docs/domain.md`, and a name that *starts* with the word beats a path that merely contains it.
+  if (item.kind === "file" && (title.split("/").pop() ?? "").startsWith(token)) return 3;
   if (title.includes(token)) return 2;
   if (label.includes(token)) return 1;
   return null;
@@ -185,11 +212,13 @@ function tokenScore(item: PaletteItem, token: string): number | null {
  * up, and the sort is stable — equal scores keep source order, so tabs
  * never shuffle under a query that does not care which group a hit is in.
  * An empty query is the whole list, untouched: a palette that shows nothing
- * until you type is a palette that cannot be browsed.
+ * until you type is a palette that cannot be browsed. **Except for files**:
+ * a workspace has thousands, and listing them is not browsing, so they appear
+ * only once there is a query, and then only the best `MAX_FILE_RESULTS`.
  */
 export function filterPalette(items: PaletteItem[], query: string): PaletteItem[] {
   const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return items;
+  if (tokens.length === 0) return items.filter((item) => item.kind !== "file");
 
   const scored: { item: PaletteItem; score: number }[] = [];
   for (const item of items) {
@@ -206,7 +235,11 @@ export function filterPalette(items: PaletteItem[], query: string): PaletteItem[
     if (matched) scored.push({ item, score: total });
   }
   // Stable sort: Array#sort keeps insertion order for equal scores.
-  return scored.sort((a, b) => b.score - a.score).map((entry) => entry.item);
+  let files = 0;
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .map((entry) => entry.item)
+    .filter((item) => item.kind !== "file" || ++files <= MAX_FILE_RESULTS);
 }
 
 /**

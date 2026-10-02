@@ -66,6 +66,7 @@ import {
   UNTITLED_THREAD_TITLE,
   emptyTabs,
   focusTab,
+  isLocalTab,
   tabId,
   type Tab,
   type TabState,
@@ -153,7 +154,7 @@ export function ensureKeys(state: TabState): { state: TabState; minted: string[]
   const minted: string[] = [];
   let changed = false;
   const tabs = state.tabs.map((tab) => {
-    if (tab.kind === "terminal") return tab;
+    if (isLocalTab(tab)) return tab;
     if (isTabKey(tab.key)) return tab;
     changed = true;
     const key = tabKey();
@@ -412,7 +413,7 @@ export function planChanges(
   // sent again: its address changed here and stayed what it was there.
   const held = new Map(engineRows.map((row) => [row.key, row.payload]));
   state.tabs.forEach((tab, index) => {
-    if (tab.kind === "terminal" || !isTabKey(tab.key)) return;
+    if (isLocalTab(tab) || !isTabKey(tab.key)) return;
     const payload = encodeTab(tab);
     if (
       known.has(tab.key) &&
@@ -424,7 +425,9 @@ export function planChanges(
     upserts.push({
       key: tab.key,
       position: index,
-      kind: tab.kind,
+      // Never a local kind: `isLocalTab` returned above, and `Tab` is one interface rather than a union, so the
+      // compiler cannot see what that check ruled out.
+      kind: tab.kind as EngineTab["kind"],
       payload,
     });
   });

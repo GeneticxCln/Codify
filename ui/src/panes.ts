@@ -1,8 +1,8 @@
 /**
  * Split panes: which two tabs may share the centre column, and what happens to the pair as the tab strip moves.
  *
- * The centre column shows one thing, and a split shows two: a chat beside a terminal, or two terminals. The pair
- * is `{ panes, focused }` and lives **beside** the tab state, never in it: `tabs.ts`, `tabPersistence.ts`,
+ * The centre column shows one thing, and a split shows two: a chat, a terminal or an editor beside any of those, but never two
+ * chats and never a browser page. The pair is `{ panes, focused }` and lives **beside** the tab state, never in it: `tabs.ts`, `tabPersistence.ts`,
  * `layoutSync.ts` and the engine's shared strip never see it, so none of their return shapes can quietly drop it, and
  * a split is view state in the sense of `docs/09` §2.1. The active tab stays what it always was, the tab the person
  * is working in, which is now the *focused pane's*; every rule below is about keeping those two in step.
@@ -107,10 +107,12 @@ export type Partner = { kind: "tab"; id: string } | { kind: "new-terminal" } | {
 /**
  * Who the active tab is split with when nobody was named (the shortcut, and "split" in the palette).
  *
- * A chat takes the nearest terminal. A terminal takes the nearest other terminal, then the nearest chat. Nearest is by
- * distance in the strip, and a tie goes to the right. A shell that has exited is never chosen for you: it is not what
- * was meant, and a new terminal is more use than a dead one. With nobody to share with, a new terminal is asked for;
- * a chat is never offered a chat.
+ * A chat takes the nearest terminal or editor, whichever is nearer: the conversation is the thing you want a file or a shell
+ * beside. An editor takes the nearest chat (the assistant it is being edited with), then the nearest terminal. A terminal
+ * takes the nearest other terminal, then the nearest chat; it never picks an editor for you, and neither does an editor pick
+ * another editor. Nearest is by distance in the strip, and a tie goes to the right. A shell that has exited is never chosen
+ * for you: it is not what was meant, and a new terminal is more use than a dead one. With nobody to share with, a new
+ * terminal is asked for; a chat is never offered a chat.
  */
 export function splitPartner(state: TabState): Partner {
   const at = state.tabs.findIndex((t) => t.id === state.activeId);
@@ -128,11 +130,14 @@ export function splitPartner(state: TabState): Partner {
     return undefined;
   };
   const liveTerminal = (t: Tab): boolean => t.kind === "terminal" && !t.exited;
+  const chat = (t: Tab): boolean => t.kind === "chat";
 
   const pick =
     active.kind === "chat"
-      ? nearest(liveTerminal)
-      : (nearest(liveTerminal) ?? nearest((t) => t.kind === "chat"));
+      ? nearest((t) => liveTerminal(t) || t.kind === "editor")
+      : active.kind === "editor"
+        ? (nearest(chat) ?? nearest(liveTerminal))
+        : (nearest(liveTerminal) ?? nearest(chat));
   return pick ? { kind: "tab", id: pick.id } : { kind: "new-terminal" };
 }
 
