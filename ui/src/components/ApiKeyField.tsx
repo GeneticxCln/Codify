@@ -33,6 +33,8 @@ export const ApiKeyField: React.FC<ApiKeyFieldProps> = ({
       <div className="relative">
         <input
           type={show ? "text" : "password"}
+          // Shown, it is a text field and no longer private by type; it is still a key.
+          data-clipboard="off"
           placeholder={
             hasExistingKey
               ? "•••••••••••••••• (Leave blank to keep existing key)"

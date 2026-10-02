@@ -337,6 +337,9 @@ export async function copySchemeText(
   // Off-screen rather than `display: none`: a hidden element cannot be
   // selected, and the copy would then be of nothing.
   field.setAttribute("readonly", "");
+  // This field is the button's own scratch space, not the person's selection: the clipboard history is told
+  // about a copy by the button, once, and must not also read this as something they selected.
+  field.setAttribute("data-clipboard", "off");
   field.style.position = "fixed";
   field.style.opacity = "0";
   doc.body.appendChild(field);

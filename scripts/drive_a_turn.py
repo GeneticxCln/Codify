@@ -26,8 +26,36 @@ import os
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+
+async def press_start(
+    client: Any, goal_id: str, version: Callable[[], int], deadline: float, pause: float = 0.25
+) -> Any:
+    """Press Start on a plan the way a person does: again, while the engine says the turn is still finishing.
+
+    The plan is published (`PENDING`) while the conductor's last model call is still in flight, and the engine
+    refuses a second driver with `409 driver_busy` ("start it once the turn has finished"). A person who presses
+    a moment early presses again; a script that took that first refusal for the run's verdict would report a race
+    as a failed run. The version is read at each press, since finishing the turn can move it. Any other refusal
+    is final, and so is running out of time: the last answer is returned, so the caller says what the engine said.
+    """
+    while True:
+        pressed = await client.post(f"/goals/{goal_id}/start", json={"expected_version": version()})
+        if not _busy(pressed) or time.monotonic() >= deadline:
+            return pressed
+        await asyncio.sleep(pause)
+
+
+def _busy(response: Any) -> bool:
+    if response.status_code != 409:
+        return False
+    try:
+        return bool(response.json().get("code") == "driver_busy")
+    except ValueError:
+        return False
 
 
 def turn_tally(events: list[dict[str, Any]], status: str) -> dict[str, Any]:
@@ -328,9 +356,10 @@ async def main() -> int:
                 # The real route, with the version the plan was made at: the same press a person makes.
                 before = max((e["sequence"] for e in events), default=0)
                 started_at = time.monotonic()
-                pressed = await client.post(
-                    f"/goals/{goal_id}/start", json={"expected_version": goals.get(goal_id).version}
-                )
+                def version_now(gid: str = goal_id) -> int:
+                    return int(goals.get(gid).version)
+
+                pressed = await press_start(client, goal_id, version_now, time.monotonic() + args.timeout)
                 if pressed.status_code != 200:
                     print(f"    Start refused: {pressed.status_code} {pressed.text}")
                     failed = True

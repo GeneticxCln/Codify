@@ -2946,3 +2946,94 @@ history and read-aloud carry it and the window can draw it.
 Proven by `tests/test_ask_user.py` (the rules, the loop stopping, where it is offered, the turn it ends) and
 `ui/tests/askUser.test.ts` (the reading, and the buttons through the whole App sending an ordinary turn).
 
+## 11. The clipboard history (built)
+
+An icon-only **Clipboard** button sits immediately after Notifications in the header and opens a fourth drawer, in
+the same slot as the others, of what was copied, cut or pasted in this window. It is a flex sibling of the centre
+column and not a popover, for the reason the others are (§8.1), and it takes History's width, so the left panel's
+yield rule (`ui/src/drawers.ts`) treats it the same. The rules live in `ui/src/clipboardHistory.ts`, pure and
+DOM-free, the listeners in `ui/src/useClipboardHistory.ts`, the view in `ui/src/components/ClipboardDrawer.tsx`.
+The button has no word on it, so its name is its `aria-label` ("Clipboard history"), and its title begins with
+"Clipboard", not with Browser, Terminal, Keys or Settings, which is how the panel's own buttons are found.
+
+### 11.1 Inside Codify only
+
+It sees what passes through **this window** and nothing else. The document's own `copy`, `cut` and `paste` events
+are given to any page for its own content without asking for anything, so there is no permission to grant, no
+watcher on the system clipboard, nothing in another program and no new process (`docs/03` §1.10, `docs/07`).
+What is outside it is outside it: a copy made in another application, and a copy made inside a browser tab, which
+is a separate webview with a page of its own (§7.3). Taking those would need a system-wide watcher with its own
+permission and its own spawn site, which was weighed and declined.
+
+* **Copy and cut are heard after the handlers beneath them have run**, so text a terminal writes into the event is
+  what is kept (xterm draws its own selection, which the window cannot see). Failing that, the selection: read
+  from the field itself when it is a text field, because `window.getSelection()` reports nothing for one.
+* **Paste is heard before them**, so a handler that stops the event cannot hide it.
+* **A Copy button that writes through `navigator.clipboard` fires no event at all**, so it says what it copied
+  through a context (`ClipboardRecorderContext`): a code block's Copy, and only once the copy has worked. The
+  fallback Copy path uses a scratch field marked `data-clipboard="off"`, so the same copy is not read a second
+  time as the person's selection.
+
+### 11.2 What it never keeps, and says so
+
+The drawer's standing note says what is kept, where, and what never is, because a history that quietly kept a
+password would be worse than none.
+
+* **A password field, and anything inside `data-clipboard="off"`, is never read.** Both key fields (the Provider Keys
+  row's and the agent card's) carry the mark, because once the eye is pressed each is a plain text field and no
+  longer private by type; `clipboardPrivacy.test.ts` reads the source and fails on any input that can be a
+  password field and lacks it.
+* **Anything that looks like a credential is refused** (`looksSecret`): private key blocks, `sk-`, `AIza`,
+  `nvapi-`, GitHub, Slack and AWS token prefixes, JWTs, `Bearer` and `Authorization: Basic|Token` values, a
+  secret-named variable assigned a long literal, and a long mixed-case token run. The shapes mirror the engine's
+  `redact_secrets` (`docs/00` §6.4) and add the common prefixes. It is a **heuristic, not a guarantee**: a
+  credential in a shape it does not know is kept, which is what Delete and Clear unpinned are for. Hashes, UUIDs,
+  paths, URLs and camelCase names are left alone on purpose, or the history would refuse its own contents.
+* **Whitespace alone, and anything over 10,000 characters, are refused, and never cut.** Half a snippet pasted
+  back is a silent corruption.
+* **A refusal that was expected is a sentence.** A key or an over-long clip is explained in the drawer until the
+  next thing is kept or the note is dismissed. An empty selection and a private field say nothing: the first is a
+  Ctrl+C with nothing selected, and the second is private by being one.
+
+### 11.3 Remembered here, and never trusted
+
+The list (newest first, 50 unpinned and up to 20 pinned) is stored in this window's `localStorage` under
+`CODIFY_CLIPBOARD`, never sent to the engine and never in the database, so invariant 7 is untouched. A repeat moves
+the item to the top and keeps its pin, its id and where it first came from. It is read back through a validator that
+drops a bad entry on its own, **re-runs the secret check** on every entry (someone, or an older build, may have put
+a key in the stored list), collapses repeats, demotes pins beyond the ceiling and bounds the whole. A storage that
+throws is an empty list on load and a no-op on save, and the first render does not write back what it just read.
+
+### 11.4 What each button does
+
+| Button | What it does | When it cannot |
+|---|---|---|
+| **Copy again** | Writes the clip to the system clipboard and brings it to the top. | If the system clipboard refuses, the drawer says so and changes nothing. |
+| **Insert into the message box** | Puts the clip in the composer at the caret, replacing the selection, **exactly as it is** (`insertAtCaret`: no space is added where two words would touch, because a clip is code or a path), leaves the caret after it and gives the box the focus. It never sends. | Disabled, with the reason, unless a chat view is showing: a browser or terminal tab replaces the composer. |
+| **Paste into the terminal** | Goes through xterm's own `paste`, so the shell's bracketed-paste mode applies and the text reaches the shell as ordinary input. | Disabled unless a terminal tab with a running shell is showing, and says which. |
+| **Pin** | Keeps the clip first and past the 50 limit. | At 20 pinned the Pin button of every other clip is disabled and says to unpin one first (the model refuses the pin too). |
+| **Delete**, **Clear unpinned** | Remove one clip, or every clip but the pinned. | |
+
+* **A multi-line clip is not pasted into a shell that would run each line.** A terminal that is not in
+  bracketed-paste mode treats every newline as Enter, so "cd build\nmake" would run both before anyone had read
+  either, and the history holds text from anywhere (a page, a model's answer). Any newline counts, a trailing one
+  included: that one is the Enter that runs the command. Once the shell has asked for bracketed paste (a modern
+  bash, zsh or fish does) the text is wrapped and held back, and goes in. The refusal says why.
+  `terminalPaste.ts` holds the rule, and the pane registers itself there for as long as it is mounted.
+* **A request to insert is not replayed.** A message box ignores the request that was already pending when it
+  mounted, so one that is rebuilt (a tab away and back) does not repeat an insert made into the last one.
+* **A message about a press** ("could not copy", "not pasted") belongs to the drawer that was open when it was
+  made: it is cleared by the next copy, insert or paste that works, by being dismissed, and when the drawer closes.
+
+### 11.5 Proven, and not
+
+`ui/tests/clipboardHistory.test.ts` is the rules, `clipboardCapture.test.ts` the listeners (a password field, an
+off region, text a handler wrote into the event, a paste a handler stopped, listeners balanced on unmount),
+`clipboardDrawer.test.ts` the view, `terminalPaste.test.ts` the paste rule and registry, and `clipboardApp.test.ts`
+the whole App: the button's place, four drawers one at a time, a code block's Copy through the real transcript, Insert
+into the real composer, Paste into a real xterm in and out of bracketed mode, and the lifetime of each message.
+
+Not verified: the events in a **real WebKitGTK window**. jsdom has no `ClipboardEvent` and the tests build theirs
+by hand with the one property the code reads, so that the shell's webview delivers `copy`, `cut` and `paste` to
+the document, and that xterm writes its selection into the event's `clipboardData`, is read from the specification
+and not seen. If a terminal selection does not appear in the history, that is the place to look.

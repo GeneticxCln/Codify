@@ -108,6 +108,10 @@ const TEXT_READERS: Record<string, Reason> = {
     kind: "text",
     why: "Lint-style rules over the painters' own files (none runs its own rAF loop, measures the window, assigns shadowBlur, or names a colour the theme does not publish) and the stylesheet and DESIGN.md it cross-checks. They are claims about what is written, over a set of files no mounted test enumerates; where the shell mounts the weather and how the loops behave are held by backdropShell.test.ts, stateReactiveWeather.test.ts and canvasRecovery.test.ts.",
   },
+  "clipboardPrivacy.test.ts": {
+    kind: "text",
+    why: "A rule about what is written, over a set no mounted test can enumerate: every input that can be a password field must say data-clipboard=\"off\", including one a later change adds, which no test has mounted yet. The two key fields that exist are mounted and read in clipboardCapture.test.ts.",
+  },
   "rainBackdrop.test.ts": {
     kind: "text",
     why: "The chrome utility's translucent alpha and the content surface's solid one are written in index.css and nowhere else, and jsdom applies no Tailwind and computes no cascade, so no mounted test could observe them. The rain's position in the tree is held by backdropShell.test.ts.",
