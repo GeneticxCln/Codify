@@ -30,6 +30,7 @@ import {
   openFile,
   openShell,
   openThread,
+  pane,
   panes,
   selectedTab,
   shells,
@@ -75,6 +76,25 @@ test("a question for a surface the window does not have is refused by name", asy
   });
 });
 
+test("the window does not ask the engine for questions while the engine is down", async () => {
+  await withEditorApp({ health: "down" }, async (ctx) => {
+    await beat(300);
+
+    assert.equal(ctx.surface.polls(), 0, "the window polled an engine that is not there");
+  });
+});
+
+test("the window stops asking when the app goes, and leaves no poll hanging", async () => {
+  await withEditorApp({}, async (ctx) => {
+    await beat(80);
+    assert.ok(ctx.surface.waiting() >= 1, "there was no poll to stop");
+
+    await ctx.dom.unmount();
+
+    assert.equal(ctx.surface.waiting(), 0, "a poll outlived the app that made it");
+  });
+});
+
 // ── eyes: what the person is looking at ──────────────────────────────────────
 
 test("asked, it reports the editors that are open, which is on screen, and the text the person has typed and not saved", async () => {
@@ -103,6 +123,58 @@ test("an editor that is open but not in front is reported as not in view", async
     const reply = await ctx.surface.ask({ op: "read" });
 
     assert.deepEqual(reply.result.open.map((e: any) => [e.path, e.in_view, e.focused]), [["src/main.py", false, false]]);
+  });
+});
+
+/** The editor and a conversation side by side, the conversation focused: the person reading a file next to the chat. */
+async function withEditorBesideChat(ctx: Parameters<Parameters<typeof withEditorApp>[1]>[0]): Promise<void> {
+  await openThread(ctx, "c1");
+  await openFile(ctx, "main", "src/main.py");
+  await chord(ctx, ".", "Period");
+  await beat(150);
+  await ctx.settle();
+  assert.equal(panes(ctx).length, 2, "the editor and the chat were not put side by side");
+  assert.equal(focusedSide(ctx), "1", "the conversation was not the focused pane");
+}
+
+test("with the editor beside the chat both are in view, and only the pane with the keyboard is focused", async () => {
+  await withEditorApp({ ...SEEDED }, async (ctx) => {
+    await withEditorBesideChat(ctx);
+
+    const reply = await ctx.surface.ask({ op: "read" });
+
+    assert.deepEqual(
+      reply.result.open.map((e: any) => [e.path, e.in_view, e.focused]),
+      [["src/main.py", true, false]],
+    );
+  });
+});
+
+test("opening a file that is already beside the chat says so, and moves nothing", async () => {
+  await withEditorApp({ ...SEEDED }, async (ctx) => {
+    await withEditorBesideChat(ctx);
+
+    const reply = await ctx.surface.ask({ op: "open", args: { path: "src/main.py" } });
+    await ctx.settle();
+
+    assert.deepEqual([reply.result.opened, reply.result.shown], [false, "beside"]);
+    assert.equal(panes(ctx).length, 2);
+    assert.equal(focusedSide(ctx), "1");
+  });
+});
+
+test("a split showing with the conversation focused is not replaced by the assistant opening another file", async () => {
+  await withEditorApp({ ...SEEDED }, async (ctx) => {
+    await withEditorBesideChat(ctx);
+    assert.match(selectedTab(ctx), /^Conversation:/, "the test needs the conversation to be the active tab");
+
+    const reply = await ctx.surface.ask({ op: "open", args: { path: "src/util.py" } });
+    await ctx.settle();
+
+    assert.equal(reply.result.shown, "background", "the assistant rearranged a split the person had made");
+    assert.equal(panes(ctx).length, 2);
+    assert.match(pane(ctx, 0).textContent ?? "", /def main\(\):/, "the file beside the chat was replaced");
+    assert.equal(editorTabs(ctx).length, 2, "the new file was not opened in the background");
   });
 });
 

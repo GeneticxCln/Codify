@@ -72,6 +72,19 @@ test("opening a file from the palette puts its text in an editor tab in front", 
   });
 });
 
+test("a file the person opens takes the keyboard, because they asked for it", async () => {
+  await withEditorApp({}, async (ctx) => {
+    await openFile(ctx, "main", "src/main.py");
+    await beat(80);
+
+    assert.equal(
+      ctx.dom.window.document.activeElement?.classList.contains("cm-content"),
+      true,
+      "the editor the person just opened does not have the keyboard",
+    );
+  });
+});
+
 test("opening the same file again is the same tab", async () => {
   await withEditorApp({}, async (ctx) => {
     await openFile(ctx, "main", "src/main.py");
@@ -382,11 +395,14 @@ test("a change to a file no editor has open asks nothing of the engine", async (
     await openThread(ctx, "c1");
     const before = ctx.engine.filter((c) => c.path.endsWith("/file")).length;
 
+    const goalReads = (): number => ctx.engine.filter((c) => c.path === "/goals/g1").length;
+    const goalsBefore = goalReads();
     await goalSocket(ctx).deliver(summary(5, ["src/main.py"]));
     await beat(60);
     await ctx.settle();
 
     assert.equal(ctx.engine.filter((c) => c.path.endsWith("/file")).length, before);
+    assert.equal(goalReads(), goalsBefore, "the app asked which workspace a goal was in, for a file no editor has open");
   });
 });
 
