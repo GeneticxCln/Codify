@@ -1,6 +1,7 @@
 ---
 name: ship-a-change
 description: Change the workspace end to end - recon, design, plan, then per step write, verify, review, summarize. Use when the user wants code changed rather than explained.
+moves: recon, design, plan, write, verify, review, summarize
 ---
 
 # Shipping a change

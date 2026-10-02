@@ -292,7 +292,19 @@ class ConductorTools:
                 f"There is no skill called {name!r}. Available:\n{self.skills.menu()}"
             )
         self.service._log(self.goal_id, None, "info", f"conductor loaded the {found.name} skill")
-        return found.body
+        # The moves the skill is written around that are not on the menu right now, said before the model
+        # tries one and is refused. Advisory and nothing more: this reads the menu, it never adds to it, and
+        # only names of moves that exist are spoken of, so a header cannot put its own words in the engine's
+        # note. A skill whose moves are all offered comes back exactly as written.
+        offered = {t.name for t in self.service.conductor_menu(self.goal_id)()}
+        missing = [m for m in found.moves if m in self.NAMES and m not in offered]
+        if not missing:
+            return found.body
+        listed = ", ".join(f"`{m}`" for m in missing)
+        return (
+            f"{found.body}\n\n(Note from the engine: this skill is written around moves that are not on "
+            f"your menu right now: {listed}. A call to one now will be refused; this note does not add them.)"
+        )
 
     async def read_file(self, args: dict[str, Any]) -> str:
         return format_read(

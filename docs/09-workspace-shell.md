@@ -2530,6 +2530,18 @@ reach the write gate — that gate reads the goal's *stored status*, not anythin
 the model was told. The worst a hostile skill can do is argue, and an argument
 cannot open a door. `tests/test_skills.py::TestASkillCannotEmpower` holds it.
 
+**A skill may say which moves it is written around, and that is a hint and never a grant.** A header line
+`moves: recon, plan, write` names them. The names are checked against the moves that exist
+(`ConductorTools.NAMES`, passed into `load_skills` so `engine/skills.py` imports nothing of the conductor); one
+that is not a move is dropped and reported with the skill's other problems, never obeyed, and a header key
+nothing reads is reported too (it used to vanish, which made a misspelt `moves:` look exactly like a skill that
+declared none). Names in a report are clipped, because a header is untrusted text. What `use_skill` does with
+the list is say, after the body, which declared moves are not on the menu *right now* (`write` before there is
+a plan, say), so the model is told before it is refused. It reads the menu and never adds to it, speaks only of
+names that are real moves, and a skill whose moves are all offered comes back exactly as written. `ship-a-change`
+declares its seven. `tests/test_skill_moves.py` holds it, and `TestASkillCannotEmpower` has a hostile skill
+declaring `write, run_command, delete_everything`.
+
 **Links are not followed, at either level.** A skill *file* that is a symlink is refused, and so is a
 skills *directory* that does not resolve to exactly `<workspace>/.codify/skills` — a link at `.codify`
 or at `skills` would otherwise load a far directory's files as instructions and put the first line of

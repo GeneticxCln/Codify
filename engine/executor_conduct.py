@@ -917,7 +917,7 @@ class _Conduct(_Plan):
         fallback = targets[1] if len(targets) > 1 else None
         role = self._conductor_role()
 
-        skills = load_skills(root)
+        skills = load_skills(root, ConductorTools.NAMES)
         for problem in skills.problems:
             self._log(goal_id, None, "warn", problem)
         for shadowed in skills.shadows:
