@@ -93,6 +93,10 @@ const GLOBALS = [
   "MouseEvent",
   "File",
   "fetch",
+  // A text editor (`@codemirror/view`) watches its own DOM and reads the selection.
+  "MutationObserver",
+  "Range",
+  "Selection",
 ] as const;
 
 /** One document, and everything a test can do to it. */
@@ -214,10 +218,33 @@ function installEnvironment(
       }
     });
   }
+  installRangeGeometry(win);
   installCanvas(win);
   installNetwork(fetches);
   installScrolling(win, scrolls);
   void win;
+}
+
+/**
+ * The geometry of a text range, answered as "nowhere".
+ *
+ * jsdom has no layout, so `Range.getClientRects` and `getBoundingClientRect` do not exist at all, and an editor that
+ * asks where a character is — to scroll it into view, or to place the cursor — dies with a `TypeError` that reads as a
+ * broken editor. An empty answer is the honest one for "where is this" in a document with no layout, and it is the
+ * same kind of constant `ResizeObserver` is given above. **Nothing here can be used to assert a position.**
+ */
+function installRangeGeometry(win: Window & typeof globalThis): void {
+  const zero = { x: 0, y: 0, width: 0, height: 0, top: 0, right: 0, bottom: 0, left: 0, toJSON: () => ({}) };
+  Object.defineProperty(win.Range.prototype, "getClientRects", {
+    value: () => [],
+    configurable: true,
+    writable: true,
+  });
+  Object.defineProperty(win.Range.prototype, "getBoundingClientRect", {
+    value: () => zero,
+    configurable: true,
+    writable: true,
+  });
 }
 
 /**
