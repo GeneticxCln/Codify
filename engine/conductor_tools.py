@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from engine.executor_support import (
@@ -100,6 +100,49 @@ class _Conducted:
         return "it used every call it was given without producing a plan"
 
 
+# How much of one file's diff a move result shows the conductor. A diff is how it learns what the fixer
+# actually did, and an unbounded one is how a turn runs out of context describing it.
+_DIFF_EXCERPT_CHARS = 1500
+
+
+@dataclass
+class _StepState:
+    """What one conductor run knows about one step, between the moves that act on it.
+
+    Everything here is *derived from what the moves did in this run* and invalidated the moment it stops
+    being true: a `write` changes the files, so an earlier verdict and an earlier approval no longer describe
+    them and both are cleared. It used to be a bare dict that the last `write` overwrote, which is how a
+    second write replaced the first's files (the commit missed them, the critic reviewed half the change) and
+    how an approval outlived the change it approved.
+    """
+
+    #: Latest summary per path, in first-written order. A step that is written twice has one entry per file,
+    #: not one per write, so the verifier, the critic and the commit all see the whole change.
+    files: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: The verifier's outcome for the files as they are now, or None when nothing has verified them.
+    test: dict[str, Any] | None = None
+    #: The last verification failed. A step in this state is not reviewable.
+    test_failed: bool = False
+    #: The critic approved the files as they are now.
+    reviewed: bool = False
+
+    def summaries(self) -> list[dict[str, Any]]:
+        return list(self.files.values())
+
+    def wrote(self, written: list[dict[str, Any]]) -> None:
+        for entry in written:
+            path = str(entry.get("path"))
+            earlier = self.files.get(path)
+            # A proposal that matches what is already there says nothing changed *this time*, which must not
+            # erase the diff of the write that did change the file.
+            if earlier is not None and earlier.get("changed", True) and not entry.get("changed", True):
+                continue
+            self.files[path] = entry
+        self.test = None
+        self.test_failed = False
+        self.reviewed = False
+
+
 class ConductorTools:
     """The conductor's tools, each bound to the service the pipeline uses.
 
@@ -168,7 +211,10 @@ class ConductorTools:
         # run: the files a write produced, the verdict a verify returned. It is
         # keyed by step so a conductor working through three steps cannot mix
         # one step's diff into another's review.
-        self.state: dict[str, dict[str, Any]] = {}
+        self.state: dict[str, _StepState] = {}
+
+    def _state_of(self, step_id: str) -> _StepState:
+        return self.state.setdefault(step_id, _StepState())
 
     def step_for(self, step_id: str) -> PlanStep | str:
         """The step, or the sentence explaining which ids exist.
@@ -560,21 +606,29 @@ class ConductorTools:
                 "the wrong files. Call `recon` first, then call `plan` again."
             )
         try:
+            # `fail_goal=False`: the recipe's planner ends the goal when it cannot plan, because nothing
+            # after it can run. Here it is one move among several. A failed plan used to mark the goal
+            # FAILED and then return as though it had worked (status FAILED, no steps, "the plan is waiting
+            # for the user to approve it"), and the turn's own final COMPLETED then raised.
             await self.service._plan_steps(
                 self.goal_id, self.goal, self.ws, evidence, self.service._design_for(self.goal_id),
-                task=task or None,
+                task=task or None, fail_goal=False,
             )
         except (AgentOutputInvalid, ProviderError, ValueError) as exc:
             return (
                 f"Planning failed ({getattr(exc, 'code', 'error')}: {exc}). "
-                "Nothing was written and the goal is not planned."
+                "Nothing was written and the goal is not planned. You may call `plan` again with a "
+                "narrower task, or tell the user plainly that it could not be planned."
             )
         refreshed = self.service.goals.get(self.goal_id)
         steps = self.service.goals.steps(self.goal_id)
         return json.dumps({
             "status": refreshed.status,
             "steps": [
-                {"step_id": s.id, "title": s.title, "order": s.ordinal}
+                {
+                    "step_id": s.id, "title": s.title, "order": s.ordinal,
+                    "description": s.description, "suggested_paths": list(s.suggested_paths or []),
+                }
                 for s in steps
             ],
             "note": (
@@ -593,12 +647,24 @@ class ConductorTools:
         allowed, why = self.service._write_allowed(self.goal_id)
         if not allowed:
             return why
+        if step.status == "COMPLETED":
+            return (
+                "That step is already complete and committed. Writing to it again would change files "
+                "its commit already recorded. If something is wrong with it, say so to the user instead."
+            )
         if not instructions:
             return "write needs instructions: what should change."
+        state = self._state_of(step.id)
+        if self.goal.dry_run and state.files:
+            return (
+                "This goal is a dry run, and a dry run keeps one stored proposal per step: a second "
+                "`write` would replace the proposal for the files already written. Call `verify` on what "
+                "you have, or say to the user what else the step needs."
+            )
         fs = FileSystemService(self.ws.root_path)
         try:
             async with self.service._stage(self.goal_id, "fixer", "fixer", step.id) as fix_stage:
-                summaries, _wants_pass = await self.service._fixer(
+                summaries, wants_pass = await self.service._fixer(
                     self.goal_id, step, fs, self.goal.dry_run, self.service._evidence_for(self.goal_id),
                     guidance=instructions,
                 )
@@ -611,20 +677,33 @@ class ConductorTools:
                 f"The fixer failed on that step ({getattr(exc, 'code', 'error')}: "
                 f"{exc}). Nothing further was written for it."
             )
-        self.state.setdefault(step.id, {})["files"] = summaries
+        state.wrote(summaries)
+        if self.goal.dry_run:
+            note = "This was a dry run: the files were proposed, not written. "
+        elif wants_pass:
+            # The recipe grants these passes itself. Here the conductor decides, so it is told instead of
+            # the flag being dropped: running tests against half-written work is a run wasted.
+            note = (
+                "The fixer says this change is not finished: it asked for another pass. Call `write` "
+                "again for the next part before `verify`."
+            )
+        else:
+            note = (
+                "Call `verify` next: a change that has not been run is one "
+                "nobody has seen work."
+            )
         return json.dumps({
             "step_id": step.id,
             "changed": [
-                {"path": s.get("path"), "op": s.get("op", "write")}
+                {
+                    "path": s.get("path"), "op": s.get("op", "write"),
+                    "diff": _excerpt(str(s.get("unified_diff") or "")),
+                }
                 for s in summaries if s.get("changed", True)
             ],
             "dry_run": bool(self.goal.dry_run),
-            "note": (
-                "This was a dry run: the files were proposed, not written. "
-                if self.goal.dry_run else
-                "Call `verify` next: a change that has not been run is one "
-                "nobody has seen work."
-            ),
+            "needs_another_pass": bool(wants_pass),
+            "note": note,
         }, default=str)
 
     async def verify(self, args: dict[str, Any]) -> str:
@@ -632,8 +711,8 @@ class ConductorTools:
         step = self.step_for(step_id)
         if isinstance(step, str):
             return step
-        summaries = self.state.get(step.id, {}).get("files")
-        if summaries is None:
+        state = self._state_of(step.id)
+        if not state.files:
             return (
                 "Nothing has been written for that step in this run. Call "
                 "`write` first — verification is meant to judge a change, "
@@ -642,7 +721,8 @@ class ConductorTools:
         try:
             async with self.service._stage(self.goal_id, "verifier", "verifier", step.id) as v:
                 outcome = await self.service._verifier(
-                    self.goal_id, step, self.ws, self.service._evidence_for(self.goal_id), diffs=summaries,
+                    self.goal_id, step, self.ws, self.service._evidence_for(self.goal_id),
+                    diffs=state.summaries(),
                 )
                 v.record(_verifier_outcome(outcome))
         except TestsFailed as exc:
@@ -651,7 +731,9 @@ class ConductorTools:
             # value, because the conductor is the thing that decides what to
             # do about a failure — retry, re-plan, or report it.
             outcome = self.service._last_test_result(self.goal_id, step.id)
-            self.state.setdefault(step.id, {})["test"] = outcome
+            state.test = outcome
+            state.test_failed = True
+            state.reviewed = False
             return "Verification FAILED. " + json.dumps({
                 "reason": str(exc), "outcome": outcome,
             }, default=str)
@@ -660,7 +742,8 @@ class ConductorTools:
                 f"The verifier could not run ({getattr(exc, 'code', 'error')}: "
                 f"{exc}). This step is unverified."
             )
-        self.state.setdefault(step.id, {})["test"] = outcome
+        state.test = outcome
+        state.test_failed = False
         return json.dumps({"passed": True, "outcome": outcome}, default=str)
 
     async def review(self, args: dict[str, Any]) -> str:
@@ -668,26 +751,32 @@ class ConductorTools:
         step = self.step_for(step_id)
         if isinstance(step, str):
             return step
-        summaries = self.state.get(step.id, {}).get("files")
-        if summaries is None:
+        state = self._state_of(step.id)
+        if not state.files:
             return (
                 "There is nothing to review for that step: it has not been "
                 "written in this run. Call `write` first."
             )
-        outcome = self.state.get(step.id, {}).get("test") or self.service._last_test_result(
-            self.goal_id, step.id
-        )
-        if not outcome:
+        if state.test_failed:
             return (
-                "That step has no test verdict yet, and a review without one "
+                "That step's verification failed, and a review of code whose tests fail is not a review. "
+                "Take the failure back to `write`, then `verify` again."
+            )
+        # Only a verdict reached in this run, for the files as they are *now*. The last `test_result` in the
+        # event log used to stand in when there was none, which is the verdict of whatever was written
+        # before the most recent `write`.
+        verdict = (state.test or {}).get("verdict")
+        if state.test is None or verdict not in ("pass", "skip"):
+            return (
+                "That step has no test verdict for its current files, and a review without one "
                 "cannot tell working code from broken code. Call `verify` first."
             )
         fs = FileSystemService(self.ws.root_path)
         try:
             async with self.service._stage(self.goal_id, "critic", "critic", step.id) as c:
                 await self.service._critic(
-                    self.goal_id, step, fs, summaries, self.service._evidence_for(self.goal_id),
-                    outcome, ws_root=self.ws.root_path,
+                    self.goal_id, step, fs, state.summaries(), self.service._evidence_for(self.goal_id),
+                    state.test, ws_root=self.ws.root_path,
                 )
                 c.record("approve")
         except CriticRejection as exc:
@@ -702,12 +791,16 @@ class ConductorTools:
                     "duration_ms": 0, "tokens": 0, "calls": 0,
                 },
             ))
+            state.reviewed = False
+            reasons = "\n".join(f"{i}. {r}" for i, r in enumerate(exc.reasons, 1))
             return (
-                "The critic asked for changes and did not approve: " + str(exc)
-                + "\nEither act on those reasons with `write`, or tell the user "
-                "plainly that you are not going to and why."
+                "The critic asked for changes and did not approve this step. Its reasons:\n"
+                f"{reasons}\n\n"
+                "The goal is now paused: a critic's request for changes stops the run so the user can read "
+                "it, and only the user resumes it, with Start. `write` will be refused until then. Tell "
+                "the user these reasons, plainly, and stop."
             )
-        self.state.setdefault(step.id, {})["reviewed"] = True
+        state.reviewed = True
         return "The critic approved this step. Call `summarize` to record and commit it."
 
     async def summarize(self, args: dict[str, Any]) -> str:
@@ -715,10 +808,10 @@ class ConductorTools:
         step = self.step_for(step_id)
         if isinstance(step, str):
             return step
-        summaries = self.state.get(step.id, {}).get("files")
-        if summaries is None:
+        state = self._state_of(step.id)
+        if not state.files:
             return "That step was not written in this run, so there is nothing to record."
-        if not self.state.get(step.id, {}).get("reviewed"):
+        if not state.reviewed:
             # Not a formality. The commit is the point of no return for a
             # step, and the review is the only thing standing between a
             # model's opinion of its own work and the user's git history.
@@ -726,17 +819,39 @@ class ConductorTools:
                 "That step has not been reviewed. Call `review` first, and "
                 "commit it only if the critic approved."
             )
-        outcome = self.state.get(step.id, {}).get("test") or self.service._last_test_result(
-            self.goal_id, step.id
-        )
+        scribed = ""
         try:
             async with self.service._stage(self.goal_id, "scribe", "scribe", step.id) as s:
-                s.record(
-                    await self.service._scribe(
-                        self.goal_id, step, summaries, self.ws.root_path, self.goal.dry_run, outcome,
-                    )
+                scribed = await self.service._scribe(
+                    self.goal_id, step, state.summaries(), self.ws.root_path, self.goal.dry_run, state.test,
                 )
+                s.record(scribed)
         except (AgentOutputInvalid, ProviderError) as exc:
             return f"The scribe could not record that step ({exc})."
+        if scribed == "cancelled":
+            # The scribe stopped before committing because the goal was cancelled. The step is not done, and
+            # saying it was recorded and committed would be the one claim here that is false.
+            return (
+                "The goal was cancelled before the commit, so nothing was committed and the step is not "
+                "complete."
+            )
         self.service._set_step(self.goal_id, step, "COMPLETED")
-        return "That step is recorded and committed."
+        return {
+            "committed": "That step is recorded and committed.",
+            "nothing_to_commit": (
+                "That step is recorded, but git had nothing to commit: its files match the last commit, "
+                "or git refused (the log says which)."
+            ),
+            "not_a_repo": (
+                "That step is recorded, but this folder is not a git repository, so nothing was "
+                "committed; the change is on disk."
+            ),
+            "skipped": "That step is recorded as a dry run: nothing was written or committed.",
+        }.get(scribed, f"That step is recorded ({scribed}).")
+
+
+def _excerpt(text: str, limit: int = _DIFF_EXCERPT_CHARS) -> str:
+    """The head of a diff, with a count of what was left out, so a cut is never mistaken for the whole."""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n…[{len(text) - limit} more characters of this diff not shown]"

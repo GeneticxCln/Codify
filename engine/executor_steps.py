@@ -1211,7 +1211,7 @@ class _Steps(_Design):
         # user's own half-finished work under this step's message. The git
         # lock serializes the index: two parallel steps committing at once
         # would otherwise interleave their staged paths.
-        paths = [d["path"] for d in diffs]
+        paths = list(dict.fromkeys(d["path"] for d in diffs))
         async with self._git_lock:
             commit_hash = await asyncio.to_thread(
                 self.git.commit, root_path, commit_message, paths,

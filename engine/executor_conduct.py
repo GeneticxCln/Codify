@@ -300,7 +300,7 @@ class _Conduct(_Plan):
                             "changed. If you wanted this done, ask again and say "
                             "so plainly.",
                         )
-                    self._set_status(goal_id, "COMPLETED", None)
+                    self._complete_turn(goal_id)
                 # With steps, planning already left the goal PENDING and that
                 # stands. "Here is the plan, approve it" is not a finished
                 # goal, and marking it COMPLETED would clear the very state the
@@ -370,7 +370,7 @@ class _Conduct(_Plan):
         self.goals.publish(self._event(
             goal_id, None, "log", {"level": "info", "message": reply, "turn": True},
         ))
-        self._set_status(goal_id, "COMPLETED", None)
+        self._complete_turn(goal_id)
 
     def _conductor_dispatch(
         self, goal_id: str, goal: Goal, root: str, skills: SkillSet
@@ -539,6 +539,22 @@ class _Conduct(_Plan):
 
         return menu
 
+    def _complete_turn(self, goal_id: str) -> None:
+        """Mark a turn finished, unless it already ended some other way.
+
+        A turn ends with COMPLETED once its answer is published. A goal that failed while the conductor was
+        running (a provider that died under a move, a stage that called `_fail`) is FAILED, and FAILED to
+        COMPLETED is not a legal move: the unconditional write raised `illegal_status` out of the turn after
+        the answer had already been shown. A terminal goal stays as it ended.
+        """
+        try:
+            current = self.goals.get(goal_id)
+        except ApiError:
+            return
+        if current.status in ("FAILED", "CANCELLED", "COMPLETED"):
+            return
+        self._set_status(goal_id, "COMPLETED", None)
+
     def _write_allowed(self, goal_id: str) -> tuple[bool, str]:
         """Whether a write may touch the filesystem for this goal (docs/00 §6.9).
 
@@ -556,6 +572,20 @@ class _Conduct(_Plan):
             return False, (
                 "Nothing was written: this goal is plan-only, so execution is "
                 "switched off for it. Say what you would change and stop."
+            )
+        if goal.status == "PAUSED":
+            # Not "unapproved": the plan was approved, and something stopped the run. The critic asking for
+            # changes pauses the goal, and so does the person's own Pause. Saying the plan awaits approval
+            # sent a model that had just been told to act on the critic's reasons to report the wrong thing.
+            return False, (
+                "Nothing was written. This goal is paused: the critic asking for changes pauses it, and so "
+                "does the user's Pause button. Only the user resumes it, with Start, and you will be asked "
+                "again then. Tell them what is waiting for them and stop."
+            )
+        if goal.status in ("FAILED", "CANCELLED", "COMPLETED"):
+            return False, (
+                f"Nothing was written. This goal is {goal.status.lower()}, so there is nothing left to "
+                "write for. Say so plainly and stop."
             )
         if goal.status != "RUNNING":
             return False, (

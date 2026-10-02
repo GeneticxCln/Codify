@@ -502,6 +502,52 @@ neither focus nor answer. And the eighth role is out of reach entirely — the
 gate runs at the top of a turn, before the loop is constructed, so a conductor
 can summon seven of the eight roles and never the gate.
 
+### 5.1b What a move says back, and what a step remembers
+
+A move's result is the only account of it the conductor has, so it has to be
+true and it has to carry what the next decision needs. The state between moves
+is per step and per run (`_StepState` in `engine/conductor_tools.py`), and each
+piece is invalidated the moment it stops being true:
+
+- **`write` accumulates.** A step has one entry per *file*, latest write wins, so
+  `verify`, `review` and the commit all see the whole change. An unchanged
+  proposal never erases the diff of the write that did change the file. It then
+  **clears the step's verdict and its approval**: both describe files that no
+  longer exist. A dry run refuses a second `write` on a step, because a dry run
+  stores one proposal per step and a second would replace the first. A step
+  that is `COMPLETED` refuses a `write` (its commit already recorded the files).
+- **`write` says what it did.** Its result carries a bounded diff per changed
+  file and `needs_another_pass` when the fixer asked for one. The recipe grants
+  that pass itself; here the conductor decides, so it is told rather than the
+  flag being dropped.
+- **`verify` and `review` are ordered by state, not by hope.** `review` needs a
+  verdict reached *in this run, for the current files*, and that verdict must be
+  `pass` or `skip`: a failed `verify` is not reviewable, and the last
+  `test_result` in the event log no longer stands in for a missing one (it was
+  the verdict of whatever was written before the latest `write`).
+- **`review` returns the critic's reasons**, every one, and says the goal is now
+  paused and that only the user resumes it, with Start. A critic's request for
+  changes pauses the goal (`docs/00` §4 flow: "goal PAUSED; STOP. No auto-fix"), and the conductor used to
+  be told only "the critic asked for changes", then refused its next `write` as
+  "not approved".
+- **`summarize` reports what the scribe did** (`committed`, `nothing_to_commit`,
+  `not_a_repo`, dry run) and a cancelled scribe leaves the step incomplete. It
+  used to say "recorded and committed" in every case.
+- **`plan` can fail without failing the goal.** `_plan_steps(fail_goal=False)`
+  re-raises instead of marking the goal FAILED; the move says "Planning failed"
+  and the conductor may plan again. The recipe's planner still fails the goal,
+  because nothing after it can run without a plan. A plan's result carries each
+  step's description and suggested paths.
+- **`_write_allowed` says why.** `PAUSED` is not "unapproved" (the plan was
+  approved and something stopped the run), and a `FAILED`, `CANCELLED` or
+  `COMPLETED` goal says so. Every message still begins "Nothing was written".
+- **A turn never overwrites a terminal status.** `_complete_turn` leaves a goal
+  that failed during the run `FAILED`; the unconditional `COMPLETED` raised
+  `illegal_status` out of the turn after its answer was shown.
+
+Proven by `tests/test_conductor_moves_state.py`, which drives the real moves, the
+real fixer and a real git repository and asserts on files, commits and step rows.
+
 **`delegate` is gone, and its absence is the point.** It ran the whole recipe —
 librarian, design, planner — whether or not the request needed them, which made
 the sequence a property of the code rather than a decision of the decider. The
