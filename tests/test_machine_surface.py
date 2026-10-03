@@ -99,11 +99,11 @@ class TestTheVocabularyIsClosed(unittest.TestCase):
 
 class TestWhatMayBeTyped(unittest.TestCase):
     def test_a_command_is_text_and_only_text(self) -> None:
-        for good in ("ls -la", "python3 -m pytest -q\n", "echo a\n\techo b", "x" * MAX_COMMAND_CHARS):
+        for good in ("ls -la", "python3 -m pytest -q\n", "echo a\necho b", "x" * MAX_COMMAND_CHARS):
             with self.subTest(good=good[:20]):
                 MachineRunArgs.model_validate({"command": good})
         # Each of these is a key being pressed without being named, or nothing at all.
-        for bad in ("", "   \n ", "ls\x03", "\x1b[A", "a\x00b", "a\rb", "a\x7fb", "x" * (MAX_COMMAND_CHARS + 1)):
+        for bad in ("", "   \n ", "ls\x03", "\x1b[A", "a\x00b", "a\rb", "a\x7fb", "ls\t", "x" * (MAX_COMMAND_CHARS + 1)):
             with self.subTest(bad=repr(bad[:20])):
                 with self.assertRaises(ValidationError):
                     MachineRunArgs.model_validate({"command": bad})

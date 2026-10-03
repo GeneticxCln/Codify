@@ -86,10 +86,11 @@ class MachineRunArgs(BaseModel):
     @classmethod
     def _typeable(cls, value: str) -> str:
         """Text, and only text. A control character in a command is a key the assistant is pressing without naming it (Ctrl-C,
-        Escape, a cursor move), and the named keys are the way to press one."""
+        Escape, a cursor move, and a Tab, which a shell takes as "complete this" and not as a character), and the named keys
+        are the way to press one. A newline is the one exception: it is how a command that spans lines is typed."""
         if not value.strip():
             raise ValueError("command is empty")
-        bad = sorted({c for c in value if (ord(c) < 0x20 and c not in "\n\t") or ord(c) == 0x7F})
+        bad = sorted({c for c in value if (ord(c) < 0x20 and c != "\n") or ord(c) == 0x7F})
         if bad:
             raise ValueError("command holds a control character; press keys with `key_in_machine` instead")
         return value
