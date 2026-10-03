@@ -27,9 +27,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from bisect import bisect_left
 from datetime import datetime, timezone
 
-from engine.stats import build_overview
+from engine.stats import ACTIVE_STATUSES as _ACTIVE, build_overview
 from typing import Any
 
 
@@ -56,42 +57,92 @@ def active_days(goals: list[dict[str, Any]], events: list[dict[str, Any]]) -> li
     return sorted({utc_day(bucket * _SECONDS_PER_DAY) for bucket in buckets})
 
 
+def _day_end(day: str) -> float:
+    """The first instant after a UTC day: the exclusive upper bound of what that day's document may see."""
+    start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+    return start + _SECONDS_PER_DAY
+
+
+# How many days one read may freeze. A first read over a long history could owe ninety documents, each a
+# full overview over up to 20,000 events (about 70 ms each); that is six seconds spent inside one request. The
+# newest days go first, so the chart is useful at once, and the rest follow on the next reads.
+MAX_FREEZE_PER_READ = 31
+
+
 class StatsSnapshotService:
     """Freezes one document per UTC day, on the first read after it ends."""
 
     def __init__(self, conn: sqlite3.Connection):
         self._db = conn
 
-    def maybe_snapshot(self, conn: sqlite3.Connection, goals: list[dict[str, Any]], events: list[dict[str, Any]], now: float) -> str | None:
-        """Freeze yesterday's final numbers, the first time anyone looks today.
+    def pending_days(self, goals: list[dict[str, Any]], events: list[dict[str, Any]], now: float, keep: int | None = None) -> list[str]:
+        """The past days with activity that have no frozen row yet, newest first, at most `MAX_FREEZE_PER_READ`.
 
-        Yesterday is judged from its own last activity (a goal or event stamped
-        inside it), not from the wall clock's midnight: a machine that sleeps
-        through the rollover still catches the day on its next read. A day with
-        no activity has nothing to freeze and gets no row — an empty day is
-        already faithfully represented by the days that do exist.
+        With a retention policy (`keep` > 0) only the newest `keep` active days are candidates, which is exactly
+        the set `prune` leaves standing. Without that bound, every read froze every older active day and `prune`
+        deleted them again straight away, so the next read froze them again: with 400 days of history and the
+        default 90 that was about 25 seconds of work thrown away on each Stats open, on the event loop.
         """
-        if not goals and not events:
-            return None
         today = utc_day(now)
-        # Backfill every unfrozen past day with activity, oldest first — the
-        # old single-day version froze only latest_activity's day, so two
-        # missed days left the older one unfrozen forever.
-        frozen: str | None = None
-        for day in active_days(goals, events):
-            if day >= today:
-                continue
-            if self.get_day(day) is not None:
-                continue
-            doc = build_overview(goals, events, window_days=0)
+        past = [day for day in active_days(goals, events) if day < today]
+        if keep is not None and keep > 0:
+            past = past[-keep:]
+        if not past:
+            return []
+        stored = {row["day"] for row in self._db.execute("SELECT day FROM stats_snapshots")}
+        return [day for day in reversed(past) if day not in stored][:MAX_FREEZE_PER_READ]
+
+    @staticmethod
+    def build_documents(goals: list[dict[str, Any]], events: list[dict[str, Any]], days: list[str]) -> list[tuple[str, dict[str, Any]]]:
+        """One overview per day, each seeing only what had happened by the end of that day. Pure; runs on a worker thread.
+
+        A day's document is "the numbers as that day ended", so it is built from the goals created and the
+        events logged before the day was over, anchored at that moment. It used to be built from everything,
+        which put today's activity into yesterday's frozen numbers and, for any day older than the trend's
+        30-day span, left the day's own row out of its document, so the chart read "0 started" for days that
+        had real goals. A goal whose status last changed after the day is shown as still in flight: its
+        outcome had not happened yet, and the log does not keep the status it had then.
+        """
+        ordered_goals = sorted(goals, key=lambda g: g.get("created_at") or 0.0)
+        goal_times = [g.get("created_at") or 0.0 for g in ordered_goals]
+        ordered_events = sorted(events, key=lambda e: e.get("timestamp") or 0.0)
+        event_times = [e.get("timestamp") or 0.0 for e in ordered_events]
+        documents: list[tuple[str, dict[str, Any]]] = []
+        for day in days:
+            end = _day_end(day)
+            seen_goals = []
+            for g in ordered_goals[: bisect_left(goal_times, end)]:
+                changed = g.get("updated_at") or g.get("created_at") or 0.0
+                seen_goals.append({**g, "status": "RUNNING"} if changed >= end and g.get("status") not in _ACTIVE else g)
+            documents.append((day, build_overview(seen_goals, ordered_events[: bisect_left(event_times, end)], window_days=0, now=end)))
+        return documents
+
+    def store(self, documents: list[tuple[str, dict[str, Any]]], now: float) -> str | None:
+        """Write the frozen rows. The newest day written, or None when there was nothing to write."""
+        newest: str | None = None
+        for day, doc in documents:
             self._db.execute(
                 "INSERT OR REPLACE INTO stats_snapshots (day, document, created_at) VALUES (?, ?, ?)",
                 (day, json.dumps(doc), now),
             )
-            frozen = day
-        if frozen is not None:
+            newest = day if newest is None or day > newest else newest
+        if newest is not None:
             self._db.commit()
-        return frozen
+        return newest
+
+    def maybe_snapshot(self, conn: sqlite3.Connection, goals: list[dict[str, Any]], events: list[dict[str, Any]], now: float, keep: int | None = None) -> str | None:
+        """Freeze the past days that have none, the first time anyone looks.
+
+        Judged from each day's own activity (a goal or event stamped inside it), not from the wall clock's
+        midnight: a machine that sleeps through the rollover still catches the day on its next read. A day
+        with no activity has nothing to freeze and gets no row. The whole step in one synchronous call, for
+        tests and for a caller with no loop to protect; the stats route does the same three steps itself
+        (`pending_days`, `build_documents` on a worker thread, `store`) so the arithmetic never runs on the loop.
+        """
+        if not goals and not events:
+            return None
+        due = self.pending_days(goals, events, now, keep)
+        return self.store(self.build_documents(goals, events, due), now) if due else None
 
     def get_day(self, day: str) -> dict[str, Any] | None:
         row = self._db.execute(

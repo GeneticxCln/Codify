@@ -143,6 +143,113 @@ class TestTheReadsLeaveTheLoop(_Stats):
             self.assertNotEqual(loop_thread, thread, f"{name} ran on the event loop's thread")
 
 
+class TestTheFreezeLeavesTheLoopToo(_Stats):
+    """The daily freeze was the part of the overview that still ran on the loop.
+
+    It built one full overview per unfrozen day, synchronously, between the read and the aggregation. With more
+    history than the retention keeps, it also did so again on every read (see `tests/test_stats_history.py`),
+    and `/health` measured 23 seconds late while the Stats drawer opened over 400 days of history.
+    """
+
+    async def test_the_arithmetic_for_the_days_owed_runs_on_a_worker_thread(self) -> None:
+        threads: list[int] = []
+        real = StatsSnapshotService.build_documents
+
+        def spy(goals: Any, events: Any, days: Any) -> Any:
+            threads.append(threading.get_ident())
+            return real(goals, events, days)
+
+        with patch.object(StatsSnapshotService, "build_documents", staticmethod(spy)):
+            await self.get_both()
+
+        self.assertTrue(threads, "no day was owed, so the test proves nothing about where the freeze runs")
+        self.assertNotIn(threading.get_ident(), threads, "the freeze's arithmetic ran on the event loop's thread")
+        self.assertGreaterEqual(self.conn.execute("SELECT COUNT(*) FROM stats_snapshots").fetchone()[0], 1)
+
+    async def test_a_second_read_owes_nothing(self) -> None:
+        builds: list[list[str]] = []
+        real = StatsSnapshotService.build_documents
+
+        def spy(goals: Any, events: Any, days: Any) -> Any:
+            builds.append(list(days))
+            return real(goals, events, days)
+
+        with patch.object(StatsSnapshotService, "build_documents", staticmethod(spy)):
+            await self.get_both()
+            first = len(builds)
+            await self.get_both()
+
+        self.assertEqual(1, first)
+        self.assertEqual(first, len(builds), "the days frozen by the first read were built again by the second")
+
+
+    async def test_a_history_longer_than_the_retention_is_not_frozen_again_on_every_read(self) -> None:
+        """The thrash: with more active days than `stats_retention_days` keeps, each read froze the older days and
+        `prune` deleted them, so the next read froze them again. Measured at 400 days of history and the default 90,
+        that was 25 seconds of discarded work on every open of the Stats drawer."""
+        for day in range(1, 8):
+            _add_events(self.conn, 1, start=100 + day)  # placeholder ids; the timestamp is set below
+            self.conn.execute("UPDATE events SET timestamp = ? WHERE id = ?", (day * 86400.0 + 600.0, f"e{100 + day}"))
+        self.conn.commit()
+        app.state.settings.set_int("stats_retention_days", 2)
+        builds: list[list[str]] = []
+        real = StatsSnapshotService.build_documents
+
+        def spy(goals: Any, events: Any, days: Any) -> Any:
+            builds.append(list(days))
+            return real(goals, events, days)
+
+        with patch.object(StatsSnapshotService, "build_documents", staticmethod(spy)):
+            await self.get_both()
+            self.assertEqual([2], [len(b) for b in builds], "the first read froze more days than the policy keeps")
+            await self.get_both()
+            await self.get_both()
+
+        self.assertEqual(1, len(builds), "a later read froze days again that the policy had just pruned")
+        self.assertEqual(2, self.conn.execute("SELECT COUNT(*) FROM stats_snapshots").fetchone()[0])
+
+
+class TestTheOverviewSaysWhatItCovers(_Stats):
+    async def overview(self) -> dict[str, Any]:
+        response = await self.client.get("/stats/overview?window=0", headers=self.headers)
+        self.assertEqual(200, response.status_code, response.text)
+        body: dict[str, Any] = response.json()
+        return body
+
+    async def test_a_history_inside_the_caps_is_complete(self) -> None:
+        coverage = (await self.overview())["coverage"]
+        self.assertFalse(coverage["truncated"])
+        self.assertIsNone(coverage["since"])
+        self.assertEqual(5, coverage["events"])
+        self.assertEqual(engine_app._STATS_EVENT_LIMIT, coverage["event_cap"])
+        self.assertEqual(engine_app._STATS_GOAL_LIMIT, coverage["goal_cap"])
+
+    async def test_a_history_past_the_event_cap_says_so_and_from_when_it_is_complete(self) -> None:
+        """"All" over 30,000 model calls counted the newest 20,000 and said nothing: 63% of the true total in the
+        large-history measurement. The numbers are right from the oldest event the read kept."""
+        with patch.object(engine_app, "_STATS_EVENT_LIMIT", 3):
+            coverage = (await self.overview())["coverage"]
+        self.assertTrue(coverage["truncated"])
+        self.assertEqual(3, coverage["events"])
+        self.assertEqual(3, coverage["event_cap"])
+        self.assertEqual(2.0, coverage["since"], "events 2, 3 and 4 are the newest three; complete from the oldest of them")
+
+    async def test_a_history_past_the_goal_cap_says_so_too(self) -> None:
+        self.conn.execute("INSERT INTO workspaces (id, name, root_path, created_at) VALUES ('w0', 'w', '/w0', 0.0)")
+        for i in range(4):
+            self.conn.execute(
+                "INSERT INTO goals (id, workspace_id, title, description, status, created_at, updated_at)"
+                " VALUES (?, 'w0', 't', '', 'COMPLETED', ?, ?)",
+                (f"g{i}", 100.0 + i, 100.0 + i),
+            )
+        self.conn.commit()
+        with patch.object(engine_app, "_STATS_GOAL_LIMIT", 2):
+            coverage = (await self.overview())["coverage"]
+        self.assertTrue(coverage["truncated"])
+        self.assertEqual(2, coverage["goals"])
+        self.assertEqual(102.0, coverage["since"], "the two newest goals are 102 and 103; complete from the older of them")
+
+
 class TestTheSecondConnectionIsSafe(_Stats):
     async def test_it_cannot_write(self) -> None:
         outcome: list[str] = []
