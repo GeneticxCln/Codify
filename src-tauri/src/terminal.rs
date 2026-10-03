@@ -29,7 +29,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// What one open terminal holds. The three things a session needs and no two of
 /// which can substitute for each other: somewhere to write, somewhere to read
@@ -242,31 +244,120 @@ impl Utf8Chunker {
     }
 }
 
-/// Read a PTY to its end, handing each piece of decoded text to `on_text`.
+/// How a PTY's output is grouped on its way to the window.
 ///
-/// This is the whole of what the reader thread does, taken out of [`open`] so a
-/// test can drive it with a real PTY and a closure instead of an `AppHandle`:
-/// before, the path from a shell's first byte to the `terminal-output` event
-/// could only be exercised by launching the app. It returns when the child's end
-/// closes (EOF, or the EIO a Linux PTY reports once the shell has gone).
-pub(crate) fn pump_output<R: Read>(mut reader: R, mut on_text: impl FnMut(String)) {
+/// The kernel hands a PTY reader at most about 4 KiB per `read`, so a program that repaints the
+/// whole screen (`cmatrix`, a progress bar, `top`) used to become one event per read: measured on a
+/// full-screen colour repaint, 135 events a second at 80x24, 770 at 200x50 and 30 frames a second,
+/// 1,400 at 60, and 2,400 with the producer unthrottled. Each event is a serialised message into the
+/// webview, a listener call, a history append and an xterm write, all on the one thread that also
+/// draws the page and handles keys. So the reader groups what it reads:
+///
+/// * a gap of [`BATCH_QUIET`] with nothing new ends a batch, so a prompt, an echoed key or the last
+///   line of a command goes out within a couple of milliseconds and is never held for a frame;
+/// * a batch is built for at most [`BATCH_WINDOW`] or [`BATCH_MAX_BYTES`], and two batches are at
+///   least [`BATCH_WINDOW`] apart, which is what bounds a flood to about 125 events a second however
+///   fast the program writes;
+/// * the reader hands text over through a channel that holds [`BACKLOG_PIECES`], so a window that
+///   cannot keep up makes the *shell* wait (the PTY fills and the program blocks on its write)
+///   instead of the app growing without limit.
+const READ_BUF_BYTES: usize = 16 * 1024;
+const BATCH_QUIET: Duration = Duration::from_millis(2);
+const BATCH_WINDOW: Duration = Duration::from_millis(8);
+const BATCH_MAX_BYTES: usize = 128 * 1024;
+const BACKLOG_PIECES: usize = 64;
+
+/// Read a PTY to its end, decoding it, and hand the decoded text to `out` a piece at a time.
+///
+/// Runs on a thread of its own so that waiting for the shell never waits on the window, and the
+/// other way round. Stops early when `out`'s receiver is gone: nobody is listening any more.
+fn read_decoded<R: Read>(mut reader: R, out: mpsc::SyncSender<String>) {
     let mut chunker = Utf8Chunker::default();
-    let mut buf = [0u8; 4096];
+    let mut buf = vec![0u8; READ_BUF_BYTES];
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 let text = chunker.push(&buf[..n]);
-                if !text.is_empty() {
-                    on_text(text);
+                if !text.is_empty() && out.send(text).is_err() {
+                    return;
                 }
             }
         }
     }
     let tail = chunker.finish();
     if !tail.is_empty() {
-        on_text(tail);
+        let _ = out.send(tail);
     }
+}
+
+fn sleep_until(when: Instant) {
+    if let Some(wait) = when.checked_duration_since(Instant::now()) {
+        std::thread::sleep(wait);
+    }
+}
+
+/// Group what `rx` delivers into batches (see [`BATCH_QUIET`]) and give each to `on_text`, in order.
+fn batch_output(rx: &mpsc::Receiver<String>, on_text: &mut impl FnMut(String)) {
+    // The first batch is not made to wait for an interval that has not happened.
+    let mut last_emit = Instant::now()
+        .checked_sub(BATCH_WINDOW)
+        .unwrap_or_else(Instant::now);
+    while let Ok(first) = rx.recv() {
+        let mut batch = first;
+        let started = Instant::now();
+        let mut last_piece = started;
+        let mut gone = false;
+        loop {
+            let earliest = last_emit + BATCH_WINDOW;
+            if batch.len() >= BATCH_MAX_BYTES {
+                // Full: take nothing more (the channel fills, the reader stops, the shell waits)
+                // and go as soon as the interval since the last batch allows.
+                sleep_until(earliest);
+                break;
+            }
+            // A quiet gap ends the batch and the window caps it, and neither is allowed to fire
+            // before the minimum interval since the last one: that is the rate limit.
+            let due = (last_piece + BATCH_QUIET)
+                .min(started + BATCH_WINDOW)
+                .max(earliest);
+            let now = Instant::now();
+            if now >= due {
+                break;
+            }
+            match rx.recv_timeout(due - now) {
+                Ok(more) => {
+                    batch.push_str(&more);
+                    last_piece = Instant::now();
+                }
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    gone = true;
+                    break;
+                }
+            }
+        }
+        last_emit = Instant::now();
+        on_text(batch);
+        if gone {
+            return;
+        }
+    }
+}
+
+/// Read a PTY to its end, handing its decoded text to `on_text` in batches.
+///
+/// This is the whole of what the reader does, taken out of [`open`] so a test can drive it with a
+/// real PTY and a closure instead of an `AppHandle`. It returns when the child's end closes (EOF,
+/// or the EIO a Linux PTY reports once the shell has gone), after the last of the output has been
+/// handed over: the `terminal-exit` that follows is never ahead of the text it ends. The text is
+/// the same as it always was and in the same order; only the size of the pieces changed.
+pub(crate) fn pump_output<R: Read + Send + 'static>(reader: R, mut on_text: impl FnMut(String)) {
+    let (tx, rx) = mpsc::sync_channel::<String>(BACKLOG_PIECES);
+    let reader_thread = std::thread::spawn(move || read_decoded(reader, tx));
+    batch_output(&rx, &mut on_text);
+    drop(rx);
+    let _ = reader_thread.join();
 }
 
 /// Open a terminal in `root_path`, and start feeding its output to the app.
@@ -635,6 +726,235 @@ mod tests {
             seen.push(t)
         });
         assert_eq!(seen.concat(), "x\u{FFFD}");
+    }
+
+    /// A reader that hands out what it is told to, a piece per `read`, and then waits or ends.
+    struct Script {
+        steps: std::collections::VecDeque<(Duration, Vec<u8>)>,
+    }
+
+    impl Read for Script {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Some((wait, bytes)) = self.steps.pop_front() else {
+                return Ok(0);
+            };
+            std::thread::sleep(wait);
+            assert!(
+                bytes.len() <= buf.len(),
+                "a test piece larger than the buffer"
+            );
+            buf[..bytes.len()].copy_from_slice(&bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    /// Run `reader` through `pump_output`, and say when each piece of text was handed over.
+    fn pump_timed(reader: impl Read + Send + 'static) -> (Vec<(Instant, String)>, Instant) {
+        let began = Instant::now();
+        let mut seen = Vec::new();
+        pump_output(reader, |t| seen.push((Instant::now(), t)));
+        (seen, began)
+    }
+
+    #[test]
+    fn a_flood_arrives_whole_and_in_order_in_far_fewer_events_than_reads() {
+        // The defect this pins: one event per 4 KiB read. `cmatrix` repainting a screen was
+        // hundreds of events a second, each a message into the webview, a listener call, a
+        // history append and an xterm write on the one thread that also draws the page.
+        // The text is numbered so a lost, repeated or reordered piece shows.
+        const READS: usize = 2000;
+        let mut all = String::new();
+        let mut steps = std::collections::VecDeque::new();
+        for i in 0..READS {
+            let piece = format!("{i:04} {}\n", "x".repeat(4000));
+            all.push_str(&piece);
+            steps.push_back((Duration::ZERO, piece.into_bytes()));
+        }
+        let (seen, began) = pump_timed(Script { steps });
+        let took = began.elapsed();
+
+        assert_eq!(
+            seen.iter().map(|(_, t)| t.as_str()).collect::<String>(),
+            all,
+            "the flood was changed on the way"
+        );
+        assert!(
+            seen.len() <= READS / 10,
+            "{} events for {READS} reads: nothing was grouped",
+            seen.len()
+        );
+        // The rate limit itself, which does not depend on how fast this machine is: two events are at
+        // least a window apart. The last one is the exception on purpose: it is what the reader had
+        // when the stream ended, and it goes at once so that `terminal-exit` is not made to wait.
+        let apart = seen[..seen.len() - 1]
+            .windows(2)
+            .map(|w| w[1].0.duration_since(w[0].0))
+            .min()
+            .unwrap_or(BATCH_WINDOW);
+        assert!(
+            apart + Duration::from_millis(2) >= BATCH_WINDOW,
+            "two events {apart:?} apart, under the {BATCH_WINDOW:?} floor (flood took {took:?})"
+        );
+    }
+
+    #[test]
+    fn a_trickle_just_slower_than_the_quiet_gap_is_still_held_to_the_rate_limit() {
+        // A piece every 3 ms is a gap longer than `BATCH_QUIET`, so each one would end its own batch
+        // and become its own event, about 330 a second: a spinner, or `cmatrix` on a slow terminal.
+        // The floor between two events is what turns that into one per window. A flood never shows
+        // this, because it fills a batch and waits for the floor on the way out.
+        let steps = (0..40)
+            .map(|i| (Duration::from_millis(3), format!("{i:02}\r\n").into_bytes()))
+            .collect();
+        let (seen, _) = pump_timed(Script { steps });
+        let joined: String = seen.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(joined.matches("\r\n").count(), 40, "a line was lost");
+        let apart = seen[..seen.len() - 1]
+            .windows(2)
+            .map(|w| w[1].0.duration_since(w[0].0))
+            .min()
+            .expect("a 120 ms trickle came out as a single event");
+        assert!(
+            apart + Duration::from_millis(2) >= BATCH_WINDOW,
+            "two events {apart:?} apart, under the {BATCH_WINDOW:?} floor"
+        );
+    }
+
+    #[test]
+    fn no_event_is_larger_than_the_cap_by_more_than_one_read() {
+        // One piece of memory handed to the webview at a time has to stay bounded however much the
+        // program writes: a batch stops growing at the cap, and the most it can overshoot by is the
+        // single piece that carried it over.
+        let piece = "y".repeat(READ_BUF_BYTES);
+        let steps = (0..400)
+            .map(|_| (Duration::ZERO, piece.clone().into_bytes()))
+            .collect();
+        let (seen, _) = pump_timed(Script { steps });
+        let biggest = seen.iter().map(|(_, t)| t.len()).max().unwrap();
+        assert!(
+            biggest < BATCH_MAX_BYTES + READ_BUF_BYTES,
+            "an event of {biggest} bytes"
+        );
+        assert_eq!(
+            seen.iter().map(|(_, t)| t.len()).sum::<usize>(),
+            400 * READ_BUF_BYTES
+        );
+    }
+
+    #[test]
+    fn a_prompt_is_not_held_for_the_output_that_has_not_come() {
+        // What batching must not cost: a prompt, an echoed key, the last line of a command. The
+        // reader below stalls for half a second after the prompt, as a shell does; the prompt has to
+        // be in the window long before that, and alone, not waiting to be grouped with a next piece.
+        let steps = [
+            (Duration::ZERO, b"user@host:~$ ".to_vec()),
+            (Duration::from_millis(500), b"ls\r\n".to_vec()),
+        ]
+        .into();
+        let (seen, began) = pump_timed(Script { steps });
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0].1, "user@host:~$ ");
+        let waited = seen[0].0.duration_since(began);
+        assert!(
+            waited < Duration::from_millis(250),
+            "the prompt was held for {waited:?}"
+        );
+    }
+
+    #[test]
+    fn what_was_read_is_handed_over_before_pump_output_returns() {
+        // `terminal-exit` is sent when this returns, and an exit that overtook the last line would
+        // leave the pane saying the shell had ended with its output still on the way. The text here
+        // ends mid-character, so the replacement for it is part of what must arrive too.
+        let steps = [
+            (Duration::ZERO, b"last line\r\n".to_vec()),
+            (Duration::ZERO, vec![0xe2, 0x82]),
+        ]
+        .into();
+        let (seen, _) = pump_timed(Script { steps });
+        assert_eq!(
+            seen.iter().map(|(_, t)| t.as_str()).collect::<String>(),
+            "last line\r\n\u{FFFD}"
+        );
+    }
+
+    #[test]
+    fn a_window_that_cannot_keep_up_makes_the_shell_wait_and_the_app_does_not_grow() {
+        // The reader hands text to the batcher through a bounded channel. While the listener is stuck
+        // (a webview that is busy), the reader must stop reading: the PTY then fills and the program
+        // blocks in its write, which is the right place for a flood to wait. With an unbounded channel
+        // this reader would have run on to the end of the test, and every piece would be held in memory.
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct Endless {
+            reads: Arc<AtomicUsize>,
+            stop: Arc<AtomicBool>,
+        }
+        impl Read for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.stop.load(Ordering::SeqCst) {
+                    return Ok(0);
+                }
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                buf.fill(b'z');
+                Ok(buf.len())
+            }
+        }
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = Endless {
+            reads: reads.clone(),
+            stop: stop.clone(),
+        };
+        let mut stuck_at = None;
+        let mut first = true;
+        pump_output(reader, |_| {
+            if first {
+                first = false;
+                std::thread::sleep(Duration::from_millis(400));
+                stuck_at = Some(reads.load(Ordering::SeqCst));
+                stop.store(true, Ordering::SeqCst);
+            }
+        });
+        let stuck_at = stuck_at.expect("the listener was never called");
+        // What can be in flight: the channel, the piece the reader is blocked sending, the batch the
+        // listener is holding (it stops growing at the cap), and a little slack for a piece in transit.
+        let limit = BACKLOG_PIECES + BATCH_MAX_BYTES / READ_BUF_BYTES + 4;
+        assert!(
+            stuck_at <= limit,
+            "{stuck_at} reads while the listener was stuck; the most that can be in flight is {limit}"
+        );
+    }
+
+    #[test]
+    fn a_real_pty_flood_is_grouped_too_and_loses_nothing() {
+        // The same property against the kernel's own PTY, which is where the 4 KiB reads come from:
+        // two million bytes through a real terminal, counted at the far end.
+        let (master, mut child) =
+            real_pty("sh", &["-c", "head -c 2000000 /dev/zero | tr '\\000' x"]);
+        let reader = master.try_clone_reader().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (seen, began) = pump_timed(reader);
+            let _ = tx.send((seen, began.elapsed()));
+        });
+        let (seen, took) = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the reader never saw the shell finish");
+        let bytes: usize = seen.iter().map(|(_, t)| t.len()).sum();
+        assert_eq!(bytes, 2_000_000, "bytes were lost or invented");
+        assert!(seen.iter().all(|(_, t)| t.chars().all(|c| c == 'x')));
+        // 2,000,000 bytes is about 500 reads of 4 KiB. Unbatched, that is about 500 events; batched, no
+        // more than one per window plus the first and the last.
+        let allowed = (took.as_millis() / BATCH_WINDOW.as_millis()) as usize + 3;
+        assert!(
+            seen.len() <= allowed,
+            "{} events in {took:?}; the rate limit allows {allowed}",
+            seen.len()
+        );
+        let _ = child.wait();
+        drop(master);
     }
 
     /// Open a real PTY running `program args`, and return what a session holds.
