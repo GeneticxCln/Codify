@@ -414,6 +414,34 @@ The assistant can **see** it and **use** it, through three tools it can call on 
 
 Details: [docs/09 §13](docs/09-workspace-shell.md), the routes in [docs/04 §3.0.3](docs/04-engine-data-and-runtime.md).
 
+## Machine
+
+A **Machine** is a Linux shell in a jail, in a tab of its own. Open one from the **Machine** button in the left panel or from the
+palette (**Ctrl+K**, "machine"); **Ctrl+.** puts it beside the conversation you are in. It needs **`bubblewrap`** (`make doctor` says
+whether it can build a jail on your computer, and how to fix it if not).
+
+It is a jail, **not a virtual machine**: it shares your computer's kernel, and says so.
+
+- **Your project is read-only inside it**, at `/work`. Nothing can write to it, and nothing leaves except text you select and copy by hand.
+- **Its home and `/tmp` are scratch** (size-capped memory), thrown away when the machine closes.
+- **It has no credentials**: not your home folder, not your keys, not Codify's own state, not the engine's token.
+- **It has no network** unless you open it with one (the second row in the palette). That choice is made once and the header says it in words;
+  it cannot be switched on later, and the assistant cannot open a machine or change it. **With the network on it shares your computer's
+  network**, including services listening on `127.0.0.1`.
+- **If a jail cannot be built, nothing starts**: there is no fallback to a plain shell.
+
+The assistant can **see** it and **type into** it, through three tools it can call on any turn:
+
+- **`read_machine`** shows which machines are open, the screen as you see it, and what scrolled off it. It works for a machine in a background tab.
+- **`run_in_machine`** types a command, waits for the output to settle, and brings back what it printed. A command that keeps running is not waited for.
+- **`key_in_machine`** presses one of twelve named keys (Enter, Tab, Escape, the arrows, Backspace, Ctrl-C, -D, -L, -Z).
+
+Inside the jail the assistant is **not held to the command allowlist**; the jail is what contains it, and
+[invariant 6](docs/00-codify-architecture-overview.md) says so in one sentence. A machine is not remembered: a restart reopens none, and closing the tab ends everything running in it.
+
+**Not in this version:** a graphical desktop or a full virtual machine, a seccomp filter, a memory limit, and any way to copy a file out. The limits are listed in
+[docs/09 §14](docs/09-workspace-shell.md), with what was measured in a real jail and what was not, and the claims the jail makes are [docs/03 §1.11](docs/03-security-and-roadmap.md).
+
 ---
 
 ## 🔒 Security & Invariants
@@ -487,7 +515,7 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/06`](docs/06-model-discovery.md) | Live model discovery, and why there is no catalog |
 | [`docs/07`](docs/07-spawn-guard-and-deterministic-tests.md) | The spawn guard and deterministic tests |
 | [`docs/08`](docs/08-benchmarks.md) | Benchmarks: what a number may claim |
-| [`docs/09`](docs/09-workspace-shell.md) | The workspace shell: conversations, tabs, panes, the embedded browser, what a turn is |
+| [`docs/09`](docs/09-workspace-shell.md) | The workspace shell: conversations, tabs, panes, the embedded browser, the editor, the machine, what a turn is |
 | [`docs/10`](docs/10-agent-memory.md) | Agent memory: what was built, what was rejected |
 | [`docs/11`](docs/11-ruflo-audit.md) | The Ruflo audit: which ideas were borrowed, which were refused and why |
 

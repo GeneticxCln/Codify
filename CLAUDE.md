@@ -149,7 +149,7 @@ docs/           00–11, below
 | `docs/06` | Live model discovery — why there is no catalog |
 | `docs/07` | Spawn guard and deterministic tests |
 | `docs/08` | Benchmarks: what a number may claim, and the no-third-party-source policy |
-| `docs/09` | The workspace shell: conversation model, tab rules, both panes, the browser pane's separate-window decision, §10 on what a turn is, §11 clipboard, §12 split panes, §13 the editor and the surface bridge |
+| `docs/09` | The workspace shell: conversation model, tab rules, both panes, the browser pane's separate-window decision, §10 on what a turn is, §11 clipboard, §12 split panes, §13 the editor and the surface bridge, §14 the machine (a jailed shell the assistant may type into) |
 | `docs/10` | Agent memory: the Hindsight audit — what was built (`recall`, `recall_threads`, keyword search, the durable observation store and its fading), and what was rejected |
 | `docs/11` | The Ruflo audit: which ideas were borrowed, which were refused and by which invariant, and what was not read |
 

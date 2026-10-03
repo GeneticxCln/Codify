@@ -3294,3 +3294,96 @@ operations and the no-disk proof) on the engine; `ui/tests/editorBuffers.test.ts
 Not verified: the **real window**. jsdom has no layout, so selection, scrolling, input methods (IME), and the feel of a split with a CodeMirror pane are for a person to check in WebKitGTK under the real compositor; the
 only real renderer that has run this is Chromium. Dirty buffers are lost if the window is killed (§13.2). The window now **polls `/surfaces/next` for as long as the app and the engine are up**, an always-on request that is cheap and is
 the one new thing a reviewer should look at. The conductor prompt has about 180 characters of room under its ceiling, so the next tool must trim wording and not raise it.
+
+## 14. The machine (built)
+
+A fifth kind of tab: **a jailed Linux shell**, in the same xterm pane a terminal uses, that can sit beside a chat, a terminal, an editor or another machine (§12), and that the
+assistant gets **eyes** and **hands** on (`read_machine`, `run_in_machine`, `key_in_machine`; §10.6) through the surface bridge of §13.4. The shell owns the jail
+(`src-tauri/src/machine.rs`), the window holds the screen (`ui/src/machineScreens.ts`) and answers the assistant (`ui/src/machineSurface.ts`), the pane is
+`ui/src/components/MachinePane.tsx`, and the engine's half is `engine/surface_machine.py`.
+
+It is a **jail, not a virtual machine**, and the tab says so. It shares the host's **kernel**. That is the honest cost of the choice, and the reason the
+assistant's operations are written against "a machine" and not "a jail": a graphical desktop (the same jail plus an X server) or a QEMU/KVM guest could be put behind
+the same three operations later without the conductor learning anything (§14.10). Neither is built, and a VM was not the first version because it could not be
+run, tested or shipped here (no `/dev/kvm`, no QEMU, images to fetch) and because what is missing from the world is not an emulator but the layer that makes a machine
+*a tab an assistant can read and type into, safely*.
+
+### 14.1 What is in the jail, and what is not
+
+`bubblewrap` with `--unshare-all` (its own PID, mount, network, IPC, UTS and user namespaces), `--die-with-parent`, `--cap-drop ALL`, and then only what is bound:
+
+- **The system, read-only:** `/usr` (and the merged-usr symlinks, or the real `/bin` and `/lib*` where the host has not merged them), and the few `/etc` entries a shell needs (the dynamic linker's, certificates, `passwd`, `group`, `nsswitch.conf`, and the resolver's configuration), each only if the host has it.
+- **The workspace, read-only, at `/work`**, which is where the shell starts. There is no `--bind` (read-write) anywhere in `jail_argv`, and a test fails if one appears.
+- **Two scratch mounts, writable and thrown away with the machine:** `/tmp` (256 MB) and the home, `/home/machine` (512 MB), both size-capped tmpfs. The assistant copies what it wants to change into them.
+- **A built environment:** `--clearenv`, then a short fixed list (`PATH`, `HOME`, `USER`, `TERM`, `LANG` and a few more). No token, no key, no `CODIFY_*`, nothing the shell was started with, and the boot token is therefore never in it.
+- **Not bound:** the person's `$HOME`, `~/.codify`, the keyring socket, the display, D-Bus, `~/.ssh`. When the shell runs as root the jail maps to uid 1000, so root in the jail is never root outside.
+- **Limits:** a process cap and no core files via `ulimit` (they bound a fork bomb, they are not a resource policy), and at most **four** machines open at once.
+
+A workspace that would hand over the person's secrets is **refused**: `/`, `$HOME` or an ancestor of it, the credential directories, and Codify's own state, the same list the engine applies to a workspace root (`03` §1.4).
+
+### 14.2 No fallback, ever
+
+There is **no path that starts the shell without the jail**: `open` builds exactly one command, for `bwrap`, and nothing in the file can name the user's shell (the spawn freeze, `07`, pins it). If `bwrap` is missing, or unprivileged user namespaces are
+switched off (some distributions do this by default), opening **fails with a sentence that says which** and nothing starts; the window shows it. A "bare shell so it still works" would hand an assistant the person's real account, which is the one outcome this exists to rule out.
+`make doctor` reports both conditions and how to fix them.
+
+### 14.3 The network is the person's, chosen once
+
+A machine is opened **without a network**. A **Machine** button in the left panel opens that one. The palette (Ctrl+K) has two rows, **New machine: a jailed shell, no network** first and
+**New machine with network: it can reach this computer's network** second, so a network is never one Enter away. The choice is made when the machine is opened and **cannot change**: a running jail cannot move between
+network namespaces, so "switch it on" means a new machine, and nothing the assistant can do opens one or changes it (there is no operation for it and no function in the window that would).
+
+The pane's header says it in words, not colour alone (**No network** / **Network on**), and the tab's name and label say it too (`Machine · network`, "has network access"). **With the network on, the jail shares the host's network namespace**,
+so the machine can reach services on `127.0.0.1` and the LAN. The engine still needs its boot token, which the jail never sees; other local services do not. This is measured by a test (§14.11), and stated here and on the pane's hover, because it is the limit a person should know before choosing it.
+
+### 14.4 Free inside the jail
+
+Inside the jail the assistant is **not held to the argv allowlist**: `run_in_machine` types what it likes. That is a deliberate widening of invariant 6's picture of an agent running commands, and it is written into the invariant (`docs/00` §6.6) as one sentence rather than left as an exception:
+the machine tab is the one other place an assistant's keystrokes run commands, **only inside a jail that a person alone can open**, with the workspace read-only, no credentials and no network unless the person opened it with one. It is not `SandboxService`, it does not widen `validate_argv`, and the engine modules that define it
+import nothing that can start a process or write a file (an AST scan fails if they ever do). The containment is the jail, so the jail is what is tested (§14.11).
+
+**Nothing leaves.** The workspace is read-only, the jail has no way out for files, and the one thing a person can do is **select text on the screen and copy it by hand**. There is deliberately no "copy out" or export door: invariant 9 is not amended, a Save from a machine would need a route that creates files and
+the person's Save does not, and that is a separate decision. The clipboard drawer's Insert and Paste are disabled for a machine, as for an editor (a machine is not the person's terminal).
+
+### 14.5 Local only: nothing about a machine is stored or restored
+
+A machine tab is **local, like a terminal and an editor** (`isLocalTab`): no key, not in `CODIFY_TABS`, never in the engine's `/shell/tabs`. A restart reopens no machine and a split that held one is not restored (§12.5). Closing the tab (or Ctrl+W) **ends the jail and everything running in it**, and so does the window closing; the scratch goes with it. A shell that exits on its own leaves its screen on the pane with a line saying so and
+accepts no more input.
+
+### 14.6 The screen lives above the pane
+
+The assistant reads and types into a machine **whether or not a pane is mounted**, so what a machine has said is not in the pane. `machineScreens.ts` keeps a **headless xterm** (`@xterm/headless`, the same 5.5.0 as the visible `@xterm/xterm`, loaded on first use so a window that never opens a machine does not carry it) per machine, above every pane, fed by the shell's own
+`machine-output` event: not the terminal's `terminal-output`, so the scrollback recorder never files a machine's output as a terminal's history. The pane is one way of looking at it: it replays the store's log into its own xterm to arrive at the same screen, then follows the stream, so a pane that comes back after another tab was in front shows everything. The store keeps 2 000 lines of
+scrollback and a 256 KB replay log, says so in the pane when the start was dropped, and remembers a closed id as closed, so output still in flight does not bring a screen back. Output that arrives **before** the open's reply (the shell's reader thread starts at once) is held in order and not lost.
+
+### 14.7 Eyes and hands
+
+Three operations on the `machine` surface (`engine/surface_machine.py` is the only place they are defined), and **no `open`**:
+
+- **`read_machine`** reports which machines are open **in this workspace**, which is in view and which has focus, whether each is alive and has a network, and for one the screen **as drawn** (rows, cursor) and a bounded tail of what scrolled off it. It answers from the store, so a machine in a background tab is read as readily as one in front. With none open it answers with a sentence ("ask the person to open one"), not an error.
+- **`run_in_machine`** types one command and Enter, waits until the output has been quiet for 600 ms (or `wait_s`, at most 30 s), and brings back the lines printed since the one it was typed on. A command still running when the wait ends is **not** waited for: the answer says it is unsettled, and `read_machine` shows it later.
+- **`key_in_machine`** presses **one of twelve named keys** (Enter, Tab, Escape, the four arrows, Backspace, Ctrl-C, -D, -L, -Z). The engine never sends a byte; the window turns a name into the bytes (an arrow is `ESC O A` or `ESC [ A` according to what the program asked for).
+
+What they refuse is as much of the design: a **command is text**, so a control character (a Tab included, which a shell reads as "complete this") is refused and the named keys are the way to press one, with a newline the one exception; another **workspace's machines** are not listed and not reachable; a terminal's id is **not a machine**
+and is refused here as it is refused by the shell's separate id space (`mach-N` against a terminal's, separate commands, separate events); an exited machine is not typed into; and **typing needs a target that is not a guess**: with several machines open and none in view it asks for a name. What a machine prints is program output, which can be anything, so every answer reaches the model framed as a quotation and not as an instruction.
+Results are capped (60 rows, 200 lines of scrollback, 300 lines of new output, 500 characters a line). The conductor's prompt names the three tools within its length ceiling (`test_conductor_prompt`).
+
+### 14.8 Where it sits
+
+It opens in front like a terminal (the button and the palette are the person's act), has the Box icon in the strip, and pairs in a split like a terminal: beside a chat it takes the right pane with the chat on the left and the machine focused, and it is a native-free DOM pane, so it has none of the browser's focus and overlay problems (§12.8). It never takes the keyboard from the other pane of a split. The assistant cannot open one, so nothing moves when it reads or types.
+
+### 14.9 Adding a different backend
+
+The operations are the contract, not the jail. A graphical backend (a jail that also runs an X server, with screenshots and clicks as further `Op`s) or a QEMU/KVM guest would be a second implementation of what `machine.rs` provides (an opened thing with a PTY or a framebuffer, owned by the shell, with its own ids and events) and the same registration of §13.7: an `Op` table, handlers over a store above the panes, a sentence in the prompt. The rule for any of them is the one this section starts from: **what makes it safe to type into is the boundary around it, so that boundary is what is tested for real.**
+
+### 14.10 What this version does not have
+
+No seccomp filter (the namespaces and the empty capability set are real, and the host kernel's whole syscall surface is reachable from inside; a filter is the next hardening step). No cgroup memory limit (that needs systemd or root; only `ulimit` and the tmpfs sizes). No writable overlay of the workspace (the installed `bwrap` has no overlay options, so the assistant copies into scratch). No graphical desktop, QEMU, v86 or Docker backend. No persisted machines or scratch, and no sharing a machine between windows. No way for the assistant to open, close, resize or change the network of a machine.
+
+### 14.11 Proven, and not
+
+Proven, with a **real `bwrap` jail** and not by reading flags (`src-tauri/src/machine/tests.rs`, 22 tests, 10 of which run one and **fail loudly without `bwrap` and user namespaces**): writing under `/work` fails with `Read-only file system` and the host's files are unchanged; the scratch is writable and is not the host's home; the environment holds none of the shell's variables; with no network only loopback exists and the host's loopback is unreachable, and with the network on the host's is reachable (so the limit of §14.3 is measured, not asserted);
+PID 1 is inside the jail, there are no capabilities and the user is unprivileged; Ctrl-C and job control work through the PTY; closing a machine ends everything that was running in it; a machine that exits says so; a cap on machines and on a write; and the argv has no read-write bind and no path to the user's shell. Engine: `tests/test_machine_surface.py` (the op table, fixed shapes and caps, the quotation framing, no `open`, the AST scan that nothing here can spawn or write), `test_surfaces.py`, `test_surface_routes.py`, `test_conductor.py`, `test_conductor_prompt.py`.
+Window: `machineTab.test.ts`, `tabBarMachine.test.ts` (the kind and its exemptions), `machineScreens.test.ts` (the store, replay, markers, resize, held output, closed ids, with a simulated clock), `machineSurface.test.ts` (every handler over a fake shell, including every refusal above), `shellEvents.test.ts`, `commandPalette.test.ts`, and the whole App over a fake shell with **real xterm** in `machineApp.test.ts`. Each of those was mutation-surveyed in scratch copies and the survivors were turned into tests.
+
+Not verified: the **real window**. jsdom has no layout, so xterm in a split under the real compositor, selection, scrolling and input methods are for a person to check in WebKitGTK; and **the jail through the whole stack** (the window's pane over the shell's real PTY over a real jail, driven by a real conductor) is covered in pieces (a real jail under Rust, a real App over a fake shell, the engine over a fake window) and not by one run in a real Tauri window. Not tested on a distribution that **denies unprivileged user namespaces**: the refusal sentence is produced and tested by a pure function, not observed there. Only `bubblewrap` 0.9.0 has been run. The jail is **not a separate kernel**, has **no seccomp**, and with the network on it **shares the host's**, as §14.3 and §14.10 say.
