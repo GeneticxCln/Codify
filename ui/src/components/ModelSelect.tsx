@@ -215,26 +215,26 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 <span className="font-mono truncate flex-1 min-w-0">{m.id}</span>
                 {badges.roles && (
                   <span
-                    className="text-2xs text-codify-knowledge flex-shrink-0 max-w-[9rem] truncate"
+                    className="text-2xs text-codify-knowledge shrink-0 max-w-[9rem] truncate"
                     title={badges.rolesTitle}
                   >
                     {badges.roles}
                   </span>
                 )}
                 {badges.lastRun && (
-                  <span className="text-2xs text-codify-info flex-shrink-0">last run</span>
+                  <span className="text-2xs text-codify-info shrink-0">last run</span>
                 )}
                 {badges.notChat ? (
-                  <span className="text-2xs text-codify-warning flex-shrink-0">not a chat model</span>
+                  <span className="text-2xs text-codify-warning shrink-0">not a chat model</span>
                 ) : (
                   !badges.roles &&
                   m.description && (
-                    <span className="text-2xs text-codify-muted truncate max-w-[6.875rem] flex-shrink-0">
+                    <span className="text-2xs text-codify-muted truncate max-w-[6.875rem] shrink-0">
                       {m.description}
                     </span>
                   )
                 )}
-                {m.id === value && <Check className="w-3 h-3 text-codify-info flex-shrink-0" />}
+                {m.id === value && <Check className="w-3 h-3 text-codify-info shrink-0" />}
               </button>
             );
           })}
@@ -271,7 +271,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 close();
               }
             }}
-            className="flex-1 bg-codify-bg border border-codify-border rounded px-3 py-2 text-sm text-codify-secondary focus:outline-none focus:border-codify-accent font-mono"
+            className="flex-1 bg-codify-bg border border-codify-border rounded-sm px-3 py-2 text-sm text-codify-secondary focus:outline-hidden focus:border-codify-accent font-mono"
           />
           <button
             type="button"
@@ -289,7 +289,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 ? "This provider reported no models"
                 : `Browse ${options.length} discovered models`
             }
-            className="flex items-center gap-1 px-2 py-2 bg-codify-raised border border-codify-border rounded text-codify-secondary hover:bg-codify-border transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
+            className="flex items-center gap-1 px-2 py-2 bg-codify-raised border border-codify-border rounded-sm text-codify-secondary hover:bg-codify-border transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
           >
             <ChevronDown className={open ? "w-3.5 h-3.5 rotate-180" : "w-3.5 h-3.5"} />
           </button>

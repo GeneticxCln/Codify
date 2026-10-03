@@ -191,8 +191,8 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
   if (!draft && !config) {
     return (
       <div className="bg-codify-surface border border-codify-border rounded-lg p-6 animate-pulse">
-        <div className="h-6 w-32 bg-codify-border rounded mb-4" />
-        <div className="h-24 bg-codify-raised rounded" />
+        <div className="h-6 w-32 bg-codify-border rounded-sm mb-4" />
+        <div className="h-24 bg-codify-raised rounded-sm" />
       </div>
     );
   }
@@ -262,14 +262,14 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
 
   return (
     <div
-      className={`bg-codify-surface border rounded-lg p-5 flex flex-col gap-4 shadow-sm transition-colors ${
+      className={`bg-codify-surface border rounded-lg p-5 flex flex-col gap-4 shadow-xs transition-colors ${
         stale ? "border-codify-warning/70" : "border-codify-border hover:border-codify-border-strong"
       }`}
     >
       {/* Header */}
       <div className="flex items-center justify-between border-b border-codify-border pb-3">
         <div className="flex items-center gap-3">
-          <div className="p-2 bg-codify-raised rounded border border-codify-border">
+          <div className="p-2 bg-codify-raised rounded-sm border border-codify-border">
             {ROLE_ICONS[role]}
           </div>
           <div>
@@ -375,7 +375,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
           computed by SettingsPanel, so it matches the panel's summary. */}
       {stale && (
         <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg px-3 py-2">
-          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             {stale.reportedCount > 0 ? (
               <>
@@ -402,7 +402,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
           names that fact and offers the server values in one click. */}
       {externallyUpdated && dirty && (
         <div className="flex items-start gap-2 text-xs text-codify-info-ink bg-codify-info/15 border border-codify-info/60 rounded-lg px-3 py-2">
-          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
           <span className="leading-relaxed flex-1">
             The saved config changed underneath your unsaved edits (a repair or another save).
             Your edits are kept — Save to overwrite, or load the server values.
@@ -417,7 +417,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               setDirty(false);
               setExternallyUpdated(false);
             }}
-            className="flex-shrink-0 text-xs px-2 py-0.5 rounded border border-codify-info/60 hover:bg-codify-info/20 transition-colors"
+            className="shrink-0 text-xs px-2 py-0.5 rounded-sm border border-codify-info/60 hover:bg-codify-info/20 transition-colors"
           >
             Load server values
           </button>
@@ -520,7 +520,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
                 setFallbackOpen(true);
               }
             }}
-            className="text-xs px-2 py-1 rounded border border-codify-border text-codify-secondary hover:text-codify-primary hover:border-codify-border-strong transition-colors"
+            className="text-xs px-2 py-1 rounded-sm border border-codify-border text-codify-secondary hover:text-codify-primary hover:border-codify-border-strong transition-colors"
           >
             {showFallback ? "Remove" : "Add a fallback"}
           </button>
@@ -572,7 +572,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             </div>
             {staleFallback && (
               <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg px-3 py-2">
-                <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                 <span className="leading-relaxed">
                   {staleFallback.reportedCount > 0 ? (
                     <>
@@ -647,7 +647,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             step={256}
             value={active.max_tokens}
             onChange={(e) => updateDraft({ max_tokens: parseInt(e.target.value, 10) || 4096 })}
-            className="bg-codify-bg border border-codify-border rounded px-3 py-1.5 text-sm text-codify-secondary font-mono"
+            className="bg-codify-bg border border-codify-border rounded-sm px-3 py-1.5 text-sm text-codify-secondary font-mono"
           />
         </div>
       </div>
@@ -679,7 +679,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
               const raw = e.target.value.trim();
               updateDraft({ num_ctx: raw === "" ? null : parseInt(raw, 10) || null });
             }}
-            className="bg-codify-bg border border-codify-border rounded px-3 py-1.5 text-sm text-codify-secondary font-mono"
+            className="bg-codify-bg border border-codify-border rounded-sm px-3 py-1.5 text-sm text-codify-secondary font-mono"
           />
           {/* The one warning worth its row: an empty field here is not "smaller
               and cheaper", it is "silently truncates whatever does not fit" —
@@ -718,7 +718,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             placeholder="5m"
             value={active.keep_alive ?? ""}
             onChange={(e) => updateDraft({ keep_alive: e.target.value })}
-            className="bg-codify-bg border border-codify-border rounded px-3 py-1.5 text-sm text-codify-secondary font-mono"
+            className="bg-codify-bg border border-codify-border rounded-sm px-3 py-1.5 text-sm text-codify-secondary font-mono"
           />
           <p className="text-xs leading-relaxed text-codify-muted">
             How long Ollama holds this model loaded after a request finishes — a

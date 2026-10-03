@@ -317,17 +317,17 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
             className="flex items-center gap-2 rounded-lg border border-codify-border p-2.5"
           >
             {s.status === "COMPLETED" ? (
-              <CheckCircle2 className="w-3.5 h-3.5 text-codify-success flex-shrink-0" />
+              <CheckCircle2 className="w-3.5 h-3.5 text-codify-success shrink-0" />
             ) : s.status === "FAILED" ? (
-              <XCircle className="w-3.5 h-3.5 text-codify-danger flex-shrink-0" />
+              <XCircle className="w-3.5 h-3.5 text-codify-danger shrink-0" />
             ) : (
-              <Clock className="w-3.5 h-3.5 text-codify-info flex-shrink-0" />
+              <Clock className="w-3.5 h-3.5 text-codify-info shrink-0" />
             )}
             <span className="text-xs text-codify-secondary truncate">{stepName(s.step)}</span>
             {typeof s.attempts === "number" && s.attempts > 1 && (
               <span className="text-2xs text-codify-warning">×{s.attempts} attempts</span>
             )}
-            <span className="ml-auto flex-shrink-0">
+            <span className="ml-auto shrink-0">
               <StatusPill status={s.status} />
             </span>
           </div>
@@ -349,7 +349,7 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
           <div className="px-3 pb-3 space-y-1">
             {Object.entries(doc.usage.by_role ?? {}).map(([role, b]) => (
               <div key={role} className="flex items-center gap-2 text-xs">
-                <span className="font-semibold text-codify-secondary w-20 flex-shrink-0">{role}</span>
+                <span className="font-semibold text-codify-secondary w-20 shrink-0">{role}</span>
                 <span className="font-mono text-codify-muted">
                   {((b.total_tokens ?? 0)).toLocaleString()} tokens
                 </span>

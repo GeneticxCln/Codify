@@ -19,7 +19,7 @@ export type ButtonTone = "primary" | "subtle" | "ghost" | "danger";
 export type ButtonSize = "sm" | "md";
 
 /*
- * Focus is a visible ring, never `focus:outline-none` on its own. The audit found
+ * Focus is a visible ring, never `focus:outline-hidden` on its own. The audit found
  * controls that could be seen but not tabbed to, and this is the one place a focus
  * ring is specified — so a component that forgets is a component that cannot be
  * reached by keyboard, which is the defect `DESIGN.md` §5 rules out.
@@ -38,14 +38,14 @@ const TONES: Record<ButtonTone, string> = {
   // where white is 3.4:1, and white on ASCII rain's near-white accent would have
   // been a white button with no writing on it.
   primary:
-    "bg-codify-accent text-codify-bg hover:brightness-110 active:brightness-95 shadow",
+    "bg-codify-accent text-codify-bg hover:brightness-110 active:brightness-95 shadow-sm",
   subtle:
     "bg-codify-raised text-codify-secondary border border-codify-border " +
     "hover:bg-codify-border hover:text-codify-primary",
   ghost:
     "bg-transparent text-codify-muted border border-transparent " +
     "hover:bg-codify-raised hover:text-codify-primary",
-  danger: "bg-codify-danger text-codify-bg hover:brightness-110 shadow",
+  danger: "bg-codify-danger text-codify-bg hover:brightness-110 shadow-sm",
 };
 
 const SIZES: Record<ButtonSize, string> = {
@@ -112,7 +112,7 @@ export const Button: React.FC<ButtonProps> = ({
       // these three buttons adopted this primitive.
       "whitespace-nowrap " +
       "transition-colors cursor-pointer select-none " +
-      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-codify-accent " +
+      "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-codify-accent " +
       "focus-visible:ring-offset-1 focus-visible:ring-offset-codify-bg " +
       "disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-inherit " +
       SIZES[size] +

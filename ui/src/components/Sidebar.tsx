@@ -141,7 +141,7 @@ const SidebarRow: React.FC<{
   >
     <MessageSquareText
       className={
-        "w-3 h-3 flex-shrink-0 mt-0.5 " +
+        "w-3 h-3 shrink-0 mt-0.5 " +
         (active ? "text-codify-accent" : "text-codify-muted")
       }
     />
@@ -307,7 +307,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       // `max-w-[35%]`: 15rem is the panel's width, and rem grows with the UI scale. At 175% that is 420px,
       // nearly half of a 900px window, so the panel gives way before the transcript does. Hiding it
       // entirely is the header's toggle.
-      className="flex flex-col gap-1.5 w-60 max-w-[35%] flex-shrink-0 border-r border-codify-border bg-codify-chrome p-1.5"
+      className="flex flex-col gap-1.5 w-60 max-w-[35%] shrink-0 border-r border-codify-border bg-codify-chrome p-1.5"
       onContextMenu={onPanelContextMenu}
     >
       {/* One button, and it adds a *project*.
@@ -334,7 +334,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           title="Add a project folder"
           className="flex-1 min-w-0 rounded-md"
         >
-          <FolderPlus className="w-3 h-3 flex-shrink-0" />
+          <FolderPlus className="w-3 h-3 shrink-0" />
           <span className="truncate">New Project</span>
         </Button>
       </div>
@@ -443,7 +443,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             title="Browser — the page opens in this window"
             className="flex-1 min-w-0 flex-col gap-1"
           >
-            <Globe className="w-3 h-3 flex-shrink-0" />
+            <Globe className="w-3 h-3 shrink-0" />
             <span className="text-2xs truncate">Browser</span>
           </Button>
         )}
@@ -455,7 +455,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             title="Terminal — a shell in this workspace"
             className="flex-1 min-w-0 flex-col gap-1"
           >
-            <TerminalSquare className="w-3 h-3 flex-shrink-0" />
+            <TerminalSquare className="w-3 h-3 shrink-0" />
             <span className="text-2xs truncate">Terminal</span>
           </Button>
         )}
@@ -467,7 +467,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             title="Machine — a jailed shell. Your project is read-only inside it, and it has no network"
             className="flex-1 min-w-0 flex-col gap-1"
           >
-            <Box className="w-3 h-3 flex-shrink-0" />
+            <Box className="w-3 h-3 shrink-0" />
             <span className="text-2xs truncate">Machine</span>
           </Button>
         )}
@@ -479,7 +479,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             title="Keys & Endpoints"
             className="flex-1 min-w-0 flex-col gap-1"
           >
-            <Settings className="w-3 h-3 flex-shrink-0" />
+            <Settings className="w-3 h-3 shrink-0" />
             <span className="text-2xs truncate">Settings</span>
           </Button>
         )}

@@ -193,8 +193,8 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
       }}
       className="z-[60] flex flex-col bg-codify-surface border border-codify-border rounded-xl shadow-2xl overflow-hidden"
     >
-      <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-codify-border flex-shrink-0">
-        <Search className="w-3 h-3 text-codify-muted flex-shrink-0" />
+      <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-codify-border shrink-0">
+        <Search className="w-3 h-3 text-codify-muted shrink-0" />
         <input
           ref={searchRef}
           type="text"
@@ -202,7 +202,7 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search models"
           aria-label={`Search ${name} models`}
-          className="flex-1 min-w-0 bg-transparent text-xs text-codify-secondary placeholder-codify-muted focus:outline-none"
+          className="flex-1 min-w-0 bg-transparent text-xs text-codify-secondary placeholder-codify-muted focus:outline-hidden"
         />
         {onRefresh && (
           <button
@@ -210,7 +210,7 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
             onClick={onRefresh}
             disabled={refreshing}
             title={`Ask ${name} what it serves right now`}
-            className="flex items-center gap-1 text-2xs text-codify-muted hover:text-codify-secondary disabled:opacity-50 cursor-pointer flex-shrink-0"
+            className="flex items-center gap-1 text-2xs text-codify-muted hover:text-codify-secondary disabled:opacity-50 cursor-pointer shrink-0"
           >
             <RefreshCw className={refreshing ? "w-2.5 h-2.5 animate-spin" : "w-2.5 h-2.5"} />
             Refresh
@@ -218,7 +218,7 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
         )}
       </div>
 
-      <div className="px-2 py-1 text-2xs font-semibold uppercase tracking-wider text-codify-muted flex-shrink-0 flex items-center gap-2">
+      <div className="px-2 py-1 text-2xs font-semibold uppercase tracking-wider text-codify-muted shrink-0 flex items-center gap-2">
         <span>{countLabel(matches.length, options.length)}</span>
         {newHere > 0 && (
           <span className="text-codify-design normal-case tracking-normal font-medium">
@@ -251,15 +251,15 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
               {isNew.has(m.id) && (
                 <span
                   title="Not on this provider when you last looked"
-                  className="text-2xs font-medium text-codify-design-ink bg-codify-design/20 border border-codify-design/60 px-1.5 py-px rounded-full flex-shrink-0"
+                  className="text-2xs font-medium text-codify-design-ink bg-codify-design/20 border border-codify-design/60 px-1.5 py-px rounded-full shrink-0"
                 >
                   new
                 </span>
               )}
               {m.supports_chat === false && (
-                <span className="text-2xs text-codify-warning flex-shrink-0">not chat</span>
+                <span className="text-2xs text-codify-warning shrink-0">not chat</span>
               )}
-              {m.id === value && <Check className="w-3 h-3 text-codify-info flex-shrink-0" />}
+              {m.id === value && <Check className="w-3 h-3 text-codify-info shrink-0" />}
             </button>
           ))}
         </div>
@@ -287,7 +287,7 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
           onKeyDown={(e) => {
             if (e.key === "Enter") close();
           }}
-          className="flex-1 min-w-0 bg-codify-surface border border-codify-border rounded-l-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono disabled:opacity-50"
+          className="flex-1 min-w-0 bg-codify-surface border border-codify-border rounded-l-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent font-mono disabled:opacity-50"
         />
         <button
           type="button"
@@ -300,7 +300,7 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
               ? `${name} has not reported any models`
               : `Browse ${options.length} ${name} models`
           }
-          className="flex items-center gap-1 px-2.5 py-1.5 bg-codify-raised border border-l-0 border-codify-border rounded-r-lg text-codify-secondary hover:bg-codify-border transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed flex-shrink-0"
+          className="flex items-center gap-1 px-2.5 py-1.5 bg-codify-raised border border-l-0 border-codify-border rounded-r-lg text-codify-secondary hover:bg-codify-border transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed shrink-0"
         >
           <ChevronDown className={open ? "w-3.5 h-3.5 rotate-180" : "w-3.5 h-3.5"} />
         </button>

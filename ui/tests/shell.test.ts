@@ -334,8 +334,8 @@ test("only a tab with a live run shows the busy dot", () => {
     "c1"
   );
   // Exactly one hidden dot in the busy strip, none in the calm one.
-  assert.equal((busy.match(/bg-codify-accent flex-shrink-0/g) ?? []).length, 1);
-  assert.equal((calm.match(/bg-codify-accent flex-shrink-0/g) ?? []).length, 0);
+  assert.equal((busy.match(/bg-codify-accent shrink-0/g) ?? []).length, 1);
+  assert.equal((calm.match(/bg-codify-accent shrink-0/g) ?? []).length, 0);
 });
 
 test("every tab can be closed, and the button names the one it closes", () => {

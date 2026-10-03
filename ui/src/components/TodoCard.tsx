@@ -4,9 +4,9 @@ import { Check, Circle, CircleDot, ListChecks } from "lucide-react";
 import type { TodoItem, TodoStatus } from "../todoList.ts";
 
 const MARK: Record<TodoStatus, React.ReactNode> = {
-  pending: <Circle className="w-3 h-3 flex-shrink-0 mt-0.5 text-codify-muted" aria-hidden="true" />,
-  doing: <CircleDot className="w-3 h-3 flex-shrink-0 mt-0.5 text-codify-info" aria-hidden="true" />,
-  done: <Check className="w-3 h-3 flex-shrink-0 mt-0.5 text-codify-success" aria-hidden="true" />,
+  pending: <Circle className="w-3 h-3 shrink-0 mt-0.5 text-codify-muted" aria-hidden="true" />,
+  doing: <CircleDot className="w-3 h-3 shrink-0 mt-0.5 text-codify-info" aria-hidden="true" />,
+  done: <Check className="w-3 h-3 shrink-0 mt-0.5 text-codify-success" aria-hidden="true" />,
   dropped: null,
 };
 

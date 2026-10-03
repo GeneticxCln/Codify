@@ -61,7 +61,7 @@ export const Logo: React.FC<LogoProps> = ({
       aria-hidden="true"
       focusable="false"
       data-animated={live ? "true" : "false"}
-      className={`codify-logo flex-shrink-0 ${className}`}
+      className={`codify-logo shrink-0 ${className}`}
     >
       {/* The tile is the app's own background, so the badge reads as a cut-out
           of the surface rather than a sticker on it. `fill` not `background`:

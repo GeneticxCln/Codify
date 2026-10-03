@@ -72,7 +72,7 @@ const LayaGateStatus: React.FC = () => {
   if (!status) {
     return (
       <div className="flex items-start gap-2 text-xs text-codify-muted bg-codify-surface border border-codify-border rounded-lg p-3">
-        <AlertTriangle className="w-4 h-4 text-codify-warning flex-shrink-0 mt-0.5" />
+        <AlertTriangle className="w-4 h-4 text-codify-warning shrink-0 mt-0.5" />
         <span>Gate status unavailable — the engine did not answer /settings/laya.</span>
       </div>
     );
@@ -93,7 +93,7 @@ const LayaGateStatus: React.FC = () => {
         {sdk ? "Laya SDK (in-process, no tokens)" : "fallback model below, or skipped if it is unreachable"}
       </div>
       <p className="text-xs text-codify-muted flex items-start gap-1.5">
-        <Cpu className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+        <Cpu className="w-3.5 h-3.5 shrink-0 mt-0.5" />
         <span>
           Runs before the planner: typed intent / risk / prompt-injection decisions. Injection at or
           above {status.policy.injection_block_threshold} blocks the goal before any model or
@@ -504,21 +504,21 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
       {rolesError && (
         <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
-          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <span className="leading-relaxed">Role descriptions unavailable — {rolesError}</span>
         </div>
       )}
 
       {callStatsError && (
         <div className="flex items-start gap-2 text-xs text-codify-muted bg-codify-surface border border-codify-border rounded-lg p-3">
-          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5 text-codify-muted" />
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-codify-muted" />
           <span className="leading-relaxed">Per-role call stats unavailable — {callStatsError}</span>
         </div>
       )}
 
       {engineSettingsError && (
         <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
-          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <span className="leading-relaxed">Engine settings unavailable — {engineSettingsError}</span>
         </div>
       )}
@@ -547,7 +547,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               setWidthMsg(null);
             }}
             disabled={parallelWidth === null || widthSaving}
-            className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono disabled:opacity-40"
+            className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent font-mono disabled:opacity-40"
           />
           <button
             type="button"
@@ -593,7 +593,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               setRetentionMsg(null);
             }}
             disabled={retention === null || retentionSaving}
-            className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono disabled:opacity-40"
+            className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent font-mono disabled:opacity-40"
           />
           <button
             type="button"
@@ -640,7 +640,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   setTraceRetentionMsg(null);
                 }}
                 disabled={traceRetentionSaving}
-                className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono disabled:opacity-40"
+                className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent font-mono disabled:opacity-40"
               />
               <button
                 type="button"
@@ -781,7 +781,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
             {repairReport.notes.map((note, i) => (
               <span key={i} className="text-xs text-codify-warning flex items-start gap-1.5">
-                <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
                 {note}
               </span>
             ))}
@@ -816,7 +816,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           <select
             value={bulkChoice}
             onChange={(e) => setBulkChoice(e.target.value)}
-            className="flex-1 min-w-[16rem] bg-codify-surface border border-codify-border rounded-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono"
+            className="flex-1 min-w-[16rem] bg-codify-surface border border-codify-border rounded-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent font-mono"
           >
             <option value="">
               {models.length > 0 ? "Choose a discovered model..." : "No models discovered yet"}
@@ -843,7 +843,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           on the fifth of eight cards is invisible without knowing to look. */}
       {staleRoles.length > 0 && (
         <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
-          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             {staleRoles.length} of {orderedRoles.length} roles point at a model their provider no
             longer reports:{" "}
@@ -859,7 +859,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
       {providerListError && (
         <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
-          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             Could not read the engine&apos;s provider list ({providerListError}), so the role
             cards are hidden rather than shown against a guess — a wrong list would offer a

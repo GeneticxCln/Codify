@@ -374,10 +374,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const needsKeyCount = keys.filter((k) => k.needs_key && !k.has_key).length;
 
   return (
-    <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 bg-black/75 backdrop-blur-xs z-50 flex items-center justify-center p-4">
       <div className="bg-codify-surface border border-codify-border rounded-2xl shadow-2xl w-full max-w-6xl h-[90vh] flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="flex items-start justify-between border-b border-codify-border px-6 py-4 flex-shrink-0">
+        <div className="flex items-start justify-between border-b border-codify-border px-6 py-4 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-codify-info/20 border border-codify-info/30 flex items-center justify-center text-codify-info-ink">
               <Key className="w-4 h-4" />
@@ -413,7 +413,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* `flex-wrap`: five tabs are wider than a 900px window once the UI is scaled to 175%, and a
             fixed row clipped the last ones and let the browser scroll the whole modal sideways to
             reach them. Wrapped, every tab is always on screen. */}
-        <div className="flex flex-wrap items-center gap-1 px-6 pt-3 flex-shrink-0">
+        <div className="flex flex-wrap items-center gap-1 px-6 pt-3 shrink-0">
           <button
             type="button"
             onClick={() => setTab("keys")}
@@ -482,13 +482,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div className="space-y-4">
               {error && (
                 <div className="flex items-start gap-2 p-3 bg-codify-danger/20 border border-codify-danger/60 rounded-xl text-xs text-codify-danger-ink">
-                  <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                   <span>{error}</span>
                 </div>
               )}
               {catalogError && (
                 <div className="flex items-start gap-2 p-3 bg-codify-warning/20 border border-codify-warning/60 rounded-xl text-xs text-codify-warning-ink">
-                  <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                   <span>{catalogError}</span>
                 </div>
               )}
@@ -498,9 +498,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {storage && (
                 <div className="flex items-start gap-2 text-xs text-codify-muted bg-codify-bg border border-codify-border rounded-xl px-3.5 py-2.5">
                   {storage === "keyring" ? (
-                    <Lock className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-codify-success" />
+                    <Lock className="w-3.5 h-3.5 shrink-0 mt-0.5 text-codify-success" />
                   ) : (
-                    <HardDrive className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-codify-warning" />
+                    <HardDrive className="w-3.5 h-3.5 shrink-0 mt-0.5 text-codify-warning" />
                   )}
                   <span className="leading-relaxed">
                     {storageReason === "keyring" ? (
@@ -595,7 +595,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="border-t border-codify-border px-6 py-3 flex items-center justify-between flex-shrink-0">
+        <div className="border-t border-codify-border px-6 py-3 flex items-center justify-between shrink-0">
           <span className="flex items-center gap-2 text-xs text-codify-muted">
             {discoveredFooter(models.length, modelStatus.filter((s) => s.ok).length)}
             {/* The list re-discovers on its own now, so it can change while

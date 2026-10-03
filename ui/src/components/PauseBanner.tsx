@@ -16,7 +16,7 @@ export const PauseBanner: React.FC<{ pause: PauseReason }> = ({ pause }) => (
     data-pause-code={pause.code}
     className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3"
   >
-    <PauseCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+    <PauseCircle className="w-4 h-4 shrink-0 mt-0.5" />
     <div className="min-w-0 flex flex-col gap-1">
       <span className="font-semibold">{pause.heading}</span>
       <span className="leading-relaxed break-words">{pause.reason}</span>

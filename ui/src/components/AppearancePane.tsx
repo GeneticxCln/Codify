@@ -349,7 +349,7 @@ const ThemeRow: React.FC<{
     <span className="min-w-0 flex-1">
       <span className="flex items-center gap-1.5">
         <span className="text-sm font-medium text-codify-primary truncate">{theme.label}</span>
-        {isActive && <Check className="w-3 h-3 flex-shrink-0 text-codify-secondary" aria-hidden="true" />}
+        {isActive && <Check className="w-3 h-3 shrink-0 text-codify-secondary" aria-hidden="true" />}
       </span>
       <span className="block font-mono text-2xs text-codify-muted truncate">
         {swatchLine(theme)}
@@ -370,7 +370,7 @@ const ThemeChip: React.FC<{ theme: AppearanceTheme }> = ({ theme }) => {
   const varOf = (name: string): string => theme.tokens[name as keyof typeof theme.tokens] ?? "";
   return (
     <div
-      className="w-11 h-8 rounded-md border flex-shrink-0 overflow-hidden flex items-center gap-0.5 p-1"
+      className="w-11 h-8 rounded-md border shrink-0 overflow-hidden flex items-center gap-0.5 p-1"
       style={{ backgroundColor: varOf("--codify-bg"), borderColor: varOf("--codify-border") }}
       aria-hidden="true"
     >
@@ -481,7 +481,7 @@ const ThemeDetail: React.FC<{
           </p>
         </div>
         {isActive ? (
-          <span className="flex-shrink-0 flex items-center gap-1 text-2xs px-2 py-1 rounded-full bg-codify-raised border border-codify-border text-codify-secondary">
+          <span className="shrink-0 flex items-center gap-1 text-2xs px-2 py-1 rounded-full bg-codify-raised border border-codify-border text-codify-secondary">
             <Check className="w-3 h-3" aria-hidden="true" /> active
           </span>
         ) : (
@@ -491,7 +491,7 @@ const ThemeDetail: React.FC<{
           <button
             type="button"
             onClick={() => onApply(theme)}
-            className="flex-shrink-0 text-2xs font-semibold px-2.5 py-1.5 rounded-lg bg-codify-raised border border-codify-border-strong text-codify-primary hover:bg-codify-surface transition-colors"
+            className="shrink-0 text-2xs font-semibold px-2.5 py-1.5 rounded-lg bg-codify-raised border border-codify-border-strong text-codify-primary hover:bg-codify-surface transition-colors"
           >
             Preview this
           </button>
@@ -583,7 +583,7 @@ const ThemeTints: React.FC<{
             disabled={!undoable}
             title={undoable ? `Undo ${undoLabel}` : "Nothing to undo"}
             aria-label={undoable ? `Undo ${undoLabel}` : "Nothing to undo"}
-            className="flex items-center gap-1 text-2xs px-1.5 py-0.5 rounded border border-codify-border text-codify-secondary hover:bg-codify-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center gap-1 text-2xs px-1.5 py-0.5 rounded-sm border border-codify-border text-codify-secondary hover:bg-codify-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Undo2 className="w-2.5 h-2.5" aria-hidden="true" />
             Undo
@@ -592,7 +592,7 @@ const ThemeTints: React.FC<{
             <button
               type="button"
               onClick={onReset}
-              className="flex items-center gap-1 text-2xs px-1.5 py-0.5 rounded border border-codify-border text-codify-secondary hover:bg-codify-surface transition-colors"
+              className="flex items-center gap-1 text-2xs px-1.5 py-0.5 rounded-sm border border-codify-border text-codify-secondary hover:bg-codify-surface transition-colors"
             >
               <RotateCcw className="w-2.5 h-2.5" aria-hidden="true" />
               Reset all
@@ -651,7 +651,7 @@ const TintRow: React.FC<{
         title={`${label} — ${shown}`}
         value={shown}
         onChange={(event) => onPick(name, event.target.value)}
-        className="w-7 h-7 rounded border border-codify-border bg-transparent p-0 cursor-pointer flex-shrink-0"
+        className="w-7 h-7 rounded-sm border border-codify-border bg-transparent p-0 cursor-pointer shrink-0"
       />
       <span className="min-w-0 flex-1">
         <span className="block text-2xs text-codify-secondary truncate">{label}</span>
@@ -673,7 +673,7 @@ const TintRow: React.FC<{
           onClick={() => onClear(name)}
           title={`Reset ${label}`}
           aria-label={`Reset ${label}`}
-          className="flex-shrink-0 text-2xs px-1.5 py-0.5 rounded border border-codify-border text-codify-muted hover:bg-codify-surface hover:text-codify-secondary transition-colors"
+          className="shrink-0 text-2xs px-1.5 py-0.5 rounded-sm border border-codify-border text-codify-muted hover:bg-codify-surface hover:text-codify-secondary transition-colors"
         >
           Reset
         </button>
@@ -842,7 +842,7 @@ const SchemeBar: React.FC<{
                 }: ${scheme.themes.map((t) => t.label).join(", ")}.`}
           </p>
         </div>
-        <div className="flex items-center gap-1.5 flex-shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
           <SchemeButton icon={Copy} label="Copy scheme" onClick={() => void onCopy()} disabled={empty} />
           <SchemeButton icon={FileDown} label="Download" onClick={onDownload} disabled={empty} />
           <SchemeButton
@@ -876,7 +876,7 @@ const SchemeBar: React.FC<{
               spellCheck={false}
               placeholder='{ "kind": "codify-scheme", ... }'
               aria-describedby={problem ? "scheme-problem" : undefined}
-              className="w-full rounded border border-codify-border bg-codify-bg px-2 py-1.5 font-mono text-2xs text-codify-primary resize-y"
+              className="w-full rounded-sm border border-codify-border bg-codify-bg px-2 py-1.5 font-mono text-2xs text-codify-primary resize-y"
             />
           </label>
           <div className="flex items-center gap-1.5 flex-wrap">

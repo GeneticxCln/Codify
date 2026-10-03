@@ -34,7 +34,7 @@ export const PromptOverrideEditor: React.FC<PromptOverrideEditorProps> = ({
         value={value || ""}
         maxLength={maxLength}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full bg-codify-bg border border-codify-border rounded px-3 py-2 text-sm text-codify-secondary focus:outline-none focus:border-codify-accent font-mono resize-y"
+        className="w-full bg-codify-bg border border-codify-border rounded-sm px-3 py-2 text-sm text-codify-secondary focus:outline-hidden focus:border-codify-accent font-mono resize-y"
       />
     </div>
   );

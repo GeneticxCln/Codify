@@ -45,7 +45,7 @@ export const NewTabButton: React.FC<NewTabButtonProps> = ({ onNewTab, workspaceI
       }
       onClick={onNewTab}
       disabled={!enabled}
-      className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md border border-transparent text-codify-muted transition-colors hover:bg-codify-raised hover:text-codify-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-codify-accent disabled:cursor-not-allowed disabled:opacity-40"
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent text-codify-muted transition-colors hover:bg-codify-raised hover:text-codify-primary focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-codify-accent disabled:cursor-not-allowed disabled:opacity-40"
     >
       <Plus className="w-3.5 h-3.5" />
     </button>

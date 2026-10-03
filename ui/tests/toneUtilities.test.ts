@@ -129,6 +129,80 @@ test("a variant utility is defined at the variant, not only at the base", () => 
   }
 });
 
+test("Tailwind's utilities are emitted unlayered and ahead of every rule that overrides them", () => {
+  // `@import "tailwindcss"` puts the utilities in a cascade layer, and a rule outside every layer beats
+  // a layered one whatever its specificity. This file was written for a flat cascade, and under a layer
+  // the resting `.bg-codify-surface` below would beat `hover:bg-codify-raised` outright: no hover colour
+  // would show. It is also what the file's own header says, and the header is not a test.
+  assert.doesNotMatch(
+    css,
+    /@import\s+["']tailwindcss["']\s*;/,
+    'index.css imports "tailwindcss" whole, which layers the utilities. Import theme.css, preflight.css and utilities.css separately (see the top of the file)',
+  );
+  const utilities = /@import\s+"tailwindcss\/utilities\.css"([^;]*);/.exec(css);
+  assert.ok(utilities, 'index.css does not import "tailwindcss/utilities.css" itself');
+  assert.doesNotMatch(utilities[1], /layer\(/, "the utilities are in a cascade layer; every unlayered rule below now beats them");
+  const firstOverride = /^\.bg-codify-bg\s*\{/m.exec(css);
+  assert.ok(firstOverride && firstOverride.index > utilities.index, "the runtime layer is not after the utilities, so it would lose every tie to them");
+});
+
+test("no selector in index.css repeats a class to outrank Tailwind's", () => {
+  // Under Tailwind 3 the generated variant rules landed *after* this file, and each rule here repeated
+  // its class once to win on specificity instead of position. Tailwind 4 emits them before. The repeat
+  // then ties a themed hover rule (three classes deep) with a compound variant such as
+  // `disabled:hover:bg-inherit` (one class, two pseudo-classes) and, being later, beats it: a disabled
+  // button highlighted on hover. Found by comparing every element of the app under both versions.
+  const repeated = [...css.matchAll(/^(\.[^{\n]+)\{/gm)]
+    .map((m) => m[1].trim())
+    .filter((selector) => /(\.(?:\\.|[\w-])+)\1(?![\w-])/.test(selector));
+  assert.deepEqual(
+    repeated,
+    [],
+    "these selectors repeat a class. The utilities are emitted first, so a plain selector already wins " +
+      "ties by position, and the repeat only makes it beat variants that are meant to beat it:\n  " +
+      repeated.join("\n  "),
+  );
+});
+
+test("a default-palette class the source uses is pinned to the colour Tailwind 3 drew", () => {
+  // Tailwind 4 redrew its default palette in oklch, a little more saturated. The UI uses the default
+  // palette in a handful of places on purpose (hardcodedPalette.test.ts names them), and an upgrade must
+  // not recolour them. Every such class needs its `--color-<hue>-<shade>` pinned in index.css.
+  const palette =
+    /\b(?:bg|text|border|ring|fill|stroke|from|via|to|divide|outline|decoration|accent|caret|shadow|placeholder)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-(\d{2,3})\b/g;
+  const wanted = new Map<string, string>();
+  for (const file of sourceFiles(SRC)) {
+    const code = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    for (const m of code.matchAll(palette)) wanted.set(`--color-${m[1]}-${m[2]}`, path.relative(SRC, file));
+  }
+  assert.ok(wanted.size > 0, "no default-palette class found — the match is wrong, not the UI");
+  const unpinned = [...wanted].filter(([variable]) => !new RegExp(`${variable}\\s*:\\s*#[0-9a-fA-F]{6}\\s*;`).test(css));
+  assert.deepEqual(
+    unpinned,
+    [],
+    "these default-palette colours are not pinned in the @theme block of index.css, so Tailwind 4's " +
+      "redrawn palette decides what they look like:\n" +
+      unpinned.map(([v, f]) => `  ${v}  (${f})`).join("\n"),
+  );
+});
+
+test("the Tailwind 3 defaults this UI relied on are restored", () => {
+  // Each of these was found by rendering the app under both versions and comparing every element.
+  // The reset Tailwind 4 ships drops them, and nothing fails: a button just stops showing a pointer, a
+  // placeholder changes colour, the whole window changes typeface.
+  const restored: ReadonlyArray<[string, RegExp]> = [
+    ["the system UI font as the sans stack", /--font-sans\s*:\s*ui-sans-serif,\s*system-ui/],
+    ["a pointer on enabled buttons", /button:not\(:disabled\)[^{]*\{[^}]*cursor:\s*pointer/],
+    ["the placeholder colour of an input that names none", /input::placeholder[^{]*\{[^}]*color:\s*var\(--color-gray-400\)/],
+    ["the browser's padding on table cells", /\btd,\s*th\s*\{[^}]*padding:\s*1px/],
+    ["the browser's padding on options", /\boption\s*\{[^}]*padding:\s*0 2px 1px/],
+    ["a search field that is a plain text field", /\[type="search"\]\s*\{[^}]*appearance:\s*textfield/],
+  ];
+  for (const [what, pattern] of restored) {
+    assert.match(css, pattern, `index.css no longer restores ${what}, which Tailwind 3's reset gave and 4's does not`);
+  }
+});
+
 test("the default theme publishes every tone the source can ask for", () => {
   // The other half. A class can be defined and still paint nothing if the
   // variable behind it is unset, and `:root` is what a theme that declines to

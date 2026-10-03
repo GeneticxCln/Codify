@@ -63,7 +63,7 @@ export const Toggle: React.FC<ToggleProps> = ({
     className={
       "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs " +
       "font-medium whitespace-nowrap transition-colors cursor-pointer select-none " +
-      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-codify-accent " +
+      "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-codify-accent " +
       "focus-visible:ring-offset-1 focus-visible:ring-offset-codify-bg " +
       "disabled:opacity-40 disabled:cursor-not-allowed " +
       (armed ? ARMED[tone] : REST) +

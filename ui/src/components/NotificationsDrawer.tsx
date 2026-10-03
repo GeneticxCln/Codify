@@ -91,7 +91,7 @@ export const NotificationsDrawer: React.FC<{
             const isNew = fresh.current.has(item.id);
             const body = (
               <>
-                <Icon className={`mt-0.5 h-3.5 w-3.5 flex-shrink-0 ${toneText(item.tone)}`} aria-hidden="true" />
+                <Icon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${toneText(item.tone)}`} aria-hidden="true" />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline gap-2">
                     <span className="min-w-0 break-words text-xs font-semibold text-codify-primary">{item.title}</span>
@@ -99,10 +99,10 @@ export const NotificationsDrawer: React.FC<{
                       <span
                         role="img"
                         aria-label="Unread"
-                        className="h-1.5 w-1.5 flex-shrink-0 self-center rounded-full bg-codify-accent"
+                        className="h-1.5 w-1.5 shrink-0 self-center rounded-full bg-codify-accent"
                       />
                     )}
-                    <span className="ml-auto flex-shrink-0 whitespace-nowrap text-2xs text-codify-muted">
+                    <span className="ml-auto shrink-0 whitespace-nowrap text-2xs text-codify-muted">
                       {relativeTime(item.at, now)}
                     </span>
                   </div>

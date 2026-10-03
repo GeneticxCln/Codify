@@ -73,14 +73,14 @@ const PaneFrame: React.FC<{
       }
     >
       <div className="flex items-center gap-1.5 border-b border-codify-border bg-codify-surface px-2 py-1 text-xs">
-        <Icon className={"h-3 w-3 flex-shrink-0 " + (focused ? "text-codify-accent" : "text-codify-muted")} />
+        <Icon className={"h-3 w-3 shrink-0 " + (focused ? "text-codify-accent" : "text-codify-muted")} />
         <span
           title={title}
           className={"min-w-0 flex-1 truncate " + (focused ? "text-codify-primary" : "text-codify-muted")}
         >
           {title}
         </span>
-        <IconButton label="Close split" title="Close split (Ctrl+.)" onClick={onCloseSplit} className="!h-5 !w-5">
+        <IconButton label="Close split" title="Close split (Ctrl+.)" onClick={onCloseSplit} className="h-5! w-5!">
           <X className="h-3 w-3" />
         </IconButton>
       </div>
