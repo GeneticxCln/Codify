@@ -335,6 +335,62 @@ test("a log that outgrows its cap is cut at the front and says so", async () => 
   assert.ok(data.endsWith(chunk), "the cut took the end and not the front");
 });
 
+test("a reset brings an exited machine back and a machine that did not exit is left alone", async () => {
+  const s = make();
+  s.write("m1", "before\r\n");
+  await s.read("m1", 0);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  let told = 0;
+  s.watch("m1", () => {
+    told += 1;
+  });
+  const quiet = told;
+
+  s.revive("m1");
+  assert.equal(told, quiet, "reviving a machine that never exited told the watchers");
+
+  s.exit("m1");
+  assert.equal(s.replay("m1").exited, true);
+  const afterExit = told;
+  s.revive("m1");
+
+  assert.equal(s.replay("m1").exited, false, "a reset machine is still exited");
+  assert.equal((await s.read("m1", 0))?.exited, false);
+  assert.equal(told, afterExit + 1, "the watchers were not told the machine is running again");
+  s.revive("nope");
+  s.close("m1");
+  s.revive("m1");
+  assert.equal(s.has("m1"), false, "reviving a closed machine brought its screen back");
+});
+
+test("the screen's grid is what a reset gives the new terminal, and an unknown machine has none", async () => {
+  const s = make();
+  s.open("m1", { cols: 100, rows: 30 });
+  assert.deepEqual(s.size("m1"), { cols: 100, rows: 30 });
+
+  s.resize("m1", 140, 45);
+  assert.deepEqual(s.size("m1"), { cols: 140, rows: 45 });
+  s.resize("m1", 0, 10);
+  assert.deepEqual(s.size("m1"), { cols: 140, rows: 45 }, "a grid with no columns replaced a real one");
+
+  assert.equal(s.size("nope"), null);
+  s.close("m1");
+  assert.equal(s.size("m1"), null);
+});
+
+test("a terminal reset in the stream clears the screen and what is written after it is all there is", async () => {
+  const s = make();
+  s.write("m1", nl("[machine] /work $ junk", "more junk", "and more"));
+
+  s.write("m1", "\x1bc[machine reset: a clean project, nothing from before]\r\n[machine] /work $ ");
+  const snap = await s.read("m1", 40);
+
+  assert.ok(snap);
+  assert.deepEqual(snap.rows.slice(0, 2), ["[machine reset: a clean project, nothing from before]", "[machine] /work $"]);
+  assert.equal(snap.rows.filter((r) => r.includes("junk")).length, 0, "what was there before the reset survived it");
+  assert.deepEqual(snap.scrollback, [], "a reset left scrollback behind");
+});
+
 test("a follower hears each live chunk and the exit, and stops when it unsubscribes", async () => {
   const s = make();
   s.open("m1");

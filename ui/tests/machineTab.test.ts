@@ -22,6 +22,7 @@ const {
   closeTab,
   isLocalTab,
   markMachineExited,
+  markMachineReset,
   markTerminalExited,
   openMachineTab,
   tabsOfKind,
@@ -30,6 +31,8 @@ const { layoutFrom, restoreTabs, parseLayout } = await import("../src/tabPersist
 const { ensureKeys, planChanges, newMirror } = await import("../src/layoutSync.ts");
 const { canPair, pairRefusal, splitPartner, startSplit } = await import("../src/panes.ts");
 
+/** The project a machine opened on a host that could make the copy: the usual case. */
+const OWN = { copyOnWrite: true } as const;
 const chat = (id: string, workspaceId = "w1"): Tab => ({ id, kind: "chat", title: id, workspaceId });
 const term = (id: string, over: Partial<Tab> = {}): Tab => ({ id, kind: "terminal", title: id, ...over });
 const mach = (id: string, over: Partial<Tab> = {}): Tab => ({ id, kind: "machine", title: "Machine", workspaceId: "w1", network: false, ...over });
@@ -40,7 +43,7 @@ const strip = (tabs: Tab[], activeId: string | null): TabState => ({ tabs, activ
 // ── opening one ──────────────────────────────────────────────────────────────
 
 test("opening a machine makes a tab named by the shell's id, in its workspace, and shows it", () => {
-  const next = openMachineTab(strip([chat("c")], "c"), "mach-3", "w1", false);
+  const next = openMachineTab(strip([chat("c")], "c"), "mach-3", "w1", false, OWN);
 
   const tab = next.tabs[1];
   assert.equal(tab.kind, "machine");
@@ -51,8 +54,8 @@ test("opening a machine makes a tab named by the shell's id, in its workspace, a
 });
 
 test("whether the jail has a network is on the tab and in its title, and is off unless it was asked for", () => {
-  const off = openMachineTab(strip([], null), "mach-1", "w1", false).tabs[0];
-  const on = openMachineTab(strip([], null), "mach-2", "w1", true).tabs[0];
+  const off = openMachineTab(strip([], null), "mach-1", "w1", false, OWN).tabs[0];
+  const on = openMachineTab(strip([], null), "mach-2", "w1", true, OWN).tabs[0];
 
   assert.equal(off.network, false);
   assert.equal(off.title, "Machine");
@@ -62,7 +65,7 @@ test("whether the jail has a network is on the tab and in its title, and is off 
 });
 
 test("two machines are two tabs: each is its own jail", () => {
-  const two = openMachineTab(openMachineTab(strip([], null), "mach-1", "w1", false), "mach-2", "w1", false);
+  const two = openMachineTab(openMachineTab(strip([], null), "mach-1", "w1", false, OWN), "mach-2", "w1", false, OWN);
 
   assert.equal(tabsOfKind(two, "machine").length, 2);
 });
@@ -80,6 +83,50 @@ test("a machine's shell exiting marks that machine and nothing else, and a termi
   assert.deepEqual(markMachineExited(state, "nope"), state);
 });
 
+test("whether the project is the machine's own copy is on the tab, with the reason when it is not", () => {
+  const own = openMachineTab(strip([], null), "mach-1", "w1", false, { copyOnWrite: true }).tabs[0];
+  const readOnly = openMachineTab(strip([], null), "mach-2", "w1", false, {
+    copyOnWrite: false,
+    note: "this system will not mount an overlay without privilege",
+  }).tabs[0];
+
+  assert.equal(own.copyOnWrite, true);
+  assert.equal(own.projectNote, undefined, "a machine with its own copy has no excuse to give");
+  assert.equal(readOnly.copyOnWrite, false);
+  assert.match(readOnly.projectNote ?? "", /overlay/);
+});
+
+test("a reset starts the same machine again: it is no longer exited, it keeps what the person chose, and the project is the new one's", () => {
+  const exited = markMachineExited(
+    openMachineTab(openMachineTab(strip([], null), "mach-1", "w1", true, OWN), "mach-2", "w1", false, OWN),
+    "mach-1"
+  );
+  assert.equal(exited.tabs[0].exited, true);
+
+  const again = markMachineReset(exited, "mach-1", { copyOnWrite: false, note: "no overlay here" });
+
+  const tab = again.tabs[0];
+  assert.equal(tab.exited, false, "a reset machine still says its shell has ended");
+  assert.equal(tab.id, "mach-1");
+  assert.equal(tab.network, true, "a reset changed the network the person chose");
+  assert.equal(tab.title, "Machine · network");
+  assert.equal(tab.workspaceId, "w1");
+  assert.equal(tab.copyOnWrite, false);
+  assert.equal(tab.projectNote, "no overlay here");
+  assert.deepEqual(again.tabs[1], exited.tabs[1], "another machine was touched");
+  assert.equal(again.activeId, exited.activeId, "a reset moved the focus");
+  // A host that can make the copy this time says so, and the old reason goes.
+  assert.equal(markMachineReset(again, "mach-1", { copyOnWrite: true }).tabs[0].projectNote, undefined);
+});
+
+test("a reset reaches machines and nothing else", () => {
+  const state = strip([term("t", { exited: true }), chat("c"), mach("m")], "m");
+
+  assert.deepEqual(markMachineReset(state, "t", OWN), state, "a terminal was reset");
+  assert.deepEqual(markMachineReset(state, "c", OWN), state, "a chat was reset");
+  assert.deepEqual(markMachineReset(state, "nope", OWN), state);
+});
+
 test("closing a machine lands on its left neighbour like any other tab", () => {
   const next = closeTab(strip([chat("c"), term("t"), mach("m")], "m"), "m");
 
@@ -88,7 +135,7 @@ test("closing a machine lands on its left neighbour like any other tab", () => {
 
 // ── not remembered: the three places that would have written it down as a browser ──
 
-const machineStrip = (): TabState => openMachineTab(strip([chat("c")], "c"), "mach-1", "w1", true);
+const machineStrip = (): TabState => openMachineTab(strip([chat("c")], "c"), "mach-1", "w1", true, OWN);
 
 test("a machine is a local tab, like a terminal and an editor, and a chat and a page are not", () => {
   assert.equal(isLocalTab(mach("m")), true);

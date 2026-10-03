@@ -14,6 +14,9 @@
  *  - **`key` presses one named key.** The names are the window's table from a name to the bytes it stands for, so the
  *    engine never sends a byte, and an arrow is the one the program asked for (a full-screen program that switched to
  *    application cursor keys gets `ESC O A`, not `ESC [ A`).
+ *  - **`reset` starts a machine again from a clean project.** It is recovery for a machine that is wedged, full, or was
+ *    stopped for using too much, and it remakes the machine the person opened: same project, same network. It names a
+ *    machine that is already one of this workspace's tabs and cannot make one.
  *
  * **What it will not do is as much of the point.** Every question is about one workspace, the one the run belongs to: another
  * workspace's machines are not listed and not reachable. It writes to a machine **tab** and to nothing else, so a terminal's
@@ -37,6 +40,8 @@ export interface MachineInfo {
   /** The shell in it has exited. */
   exited: boolean;
   network: boolean;
+  /** The project under `/work` is the machine's own copy: what it changes is kept in the machine and discarded with it. */
+  copyOnWrite: boolean;
 }
 
 export interface MachineHost {
@@ -44,6 +49,11 @@ export interface MachineHost {
   view(): { machines: readonly MachineInfo[]; shown: readonly string[]; focused: string | null };
   /** Type into a machine through the shell (`codify_machine_write`). Rejects with the shell's reason. */
   write(id: string, data: string): Promise<void>;
+  /**
+   * Reset a machine through the shell (`codify_machine_reset`), and bring the window's own record of it into line (the
+   * screen store, the tab). Resolves with whether the new machine's project is its own copy; rejects with the shell's reason.
+   */
+  reset(id: string): Promise<{ copyOnWrite: boolean }>;
   sleep(ms: number): Promise<void>;
   now(): number;
 }
@@ -152,6 +162,7 @@ export function createMachineSurface(
     title: m.title,
     alive: !m.exited,
     network: m.network,
+    copy_on_write: m.copyOnWrite,
     in_view: shown.includes(m.id),
     focused: focused === m.id,
   });
@@ -296,6 +307,39 @@ export function createMachineSurface(
     return done({ id: m.id, key: name, rows: fitted.rows, alive: !(after?.exited ?? false) });
   };
 
+  const reset = async (workspaceId: string, args: Record<string, unknown>): Promise<SurfaceReply> => {
+    // Like typing, this needs a target that is not a guess: it ends whatever is running in the machine it names.
+    const target = pick(workspaceId, args.machine, true);
+    if ("error" in target) return refuse(target.error);
+    const m = target.machine;
+    const before = screens.version(m.id);
+    let project: { copyOnWrite: boolean };
+    try {
+      project = await host.reset(m.id);
+    } catch (error) {
+      return refuse(`The shell would not reset ${m.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    // The new machine's first prompt: output has started (the reset says so on the screen), and then it goes quiet.
+    const started = host.now();
+    let lastVersion = before;
+    let lastChange = started;
+    while (host.now() - started < timing.keyMaxMs) {
+      await host.sleep(timing.pollMs);
+      const now = host.now();
+      const version = screens.version(m.id);
+      if (version !== lastVersion) {
+        lastVersion = version;
+        lastChange = now;
+      } else if (lastVersion !== before && now - lastChange >= timing.keyQuietMs) {
+        break;
+      }
+    }
+    await screens.flushed(m.id);
+    const after = await screens.read(m.id, 0);
+    const fitted = fitRows(after?.rows ?? [], after?.cursorRow ?? 0);
+    return done({ id: m.id, rows: fitted.rows, alive: !(after?.exited ?? false), copy_on_write: project.copyOnWrite });
+  };
+
   return async (request) => {
     try {
       switch (request.op) {
@@ -305,6 +349,8 @@ export function createMachineSurface(
           return await run(request.workspace_id, request.args);
         case "key":
           return await key(request.workspace_id, request.args);
+        case "reset":
+          return await reset(request.workspace_id, request.args);
         default:
           return refuse(`A machine has no operation called ${request.op}.`);
       }

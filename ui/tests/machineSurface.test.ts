@@ -30,12 +30,14 @@ type MachineInfo = import("../src/machineSurface.ts").MachineInfo;
 type SurfaceReply = import("../src/machineSurface.ts").SurfaceReply;
 
 const WS = "w1";
+const nlines = (...lines: string[]): string => lines.join("\r\n");
 const info = (id: string, over: Partial<MachineInfo> = {}): MachineInfo => ({
   id,
   title: "Machine",
   workspaceId: WS,
   exited: false,
   network: false,
+  copyOnWrite: true,
   ...over,
 });
 
@@ -56,6 +58,10 @@ function world(initial: MachineInfo[] = [info("mach-1")]) {
     shown: initial.map((m) => m.id).slice(0, 1),
     focused: (initial[0]?.id ?? null) as string | null,
     failWrites: null as string | null,
+    /** What the shell says about a reset: nothing, a reason, and whether the new machine's project is its own copy. */
+    failReset: null as string | null,
+    resetCopyOnWrite: true,
+    resets: [] as string[],
   };
   const shells = new Map<string, (data: string) => Step[]>();
 
@@ -77,6 +83,16 @@ function world(initial: MachineInfo[] = [info("mach-1")]) {
       written.push({ id, data });
       if (state.failWrites) throw new Error(state.failWrites);
       for (const step of shells.get(id)?.(data) ?? []) due.push({ at: now + step.after, fn: () => screens.write(id, step.out) });
+    },
+    async reset(id: string): Promise<{ copyOnWrite: boolean }> {
+      state.resets.push(id);
+      if (state.failReset) throw new Error(state.failReset);
+      // What the shell does: a full terminal reset and a line, now, and the new shell's prompt a little later. The window
+      // then tells the store the shell is running again.
+      screens.write(id, "\x1bc[machine reset: a clean project, nothing from before]\r\n");
+      due.push({ at: now + 40, fn: () => screens.write(id, "[machine] /work $ ") });
+      screens.revive(id);
+      return { copyOnWrite: state.resetCopyOnWrite };
     },
     async sleep(ms: number): Promise<void> {
       await advance(ms);
@@ -534,6 +550,101 @@ test("an unknown key is refused, and nothing is typed", async () => {
   }
   assert.match(refused(await w.ask("key", {})), /not a key/);
   assert.deepEqual(w.written, []);
+});
+
+// ── reset: recovery, and only of a machine that is already there ────────────
+
+test("a reset names the machine, waits for the new prompt, and says what the screen now reads", async () => {
+  const w = world();
+  w.screens.write("mach-1", nlines("[machine] /work $ rm -rf ~", "[machine] /work $ junk"));
+
+  const result = ok(await w.ask("reset"));
+
+  assert.deepEqual(w.state.resets, ["mach-1"]);
+  assert.equal(result.id, "mach-1");
+  assert.equal(result.alive, true);
+  assert.equal(result.copy_on_write, true);
+  assert.deepEqual(result.rows, ["[machine reset: a clean project, nothing from before]", "[machine] /work $"]);
+  assert.ok(!JSON.stringify(result).includes("junk"), "what the machine did before the reset is still on its screen");
+  assert.deepEqual(w.written, [], "a reset typed something into the machine");
+});
+
+test("a reset brings an exited machine back, and it can then be typed into", async () => {
+  const w = world();
+  w.screens.write("mach-1", "last words\r\n");
+  w.screens.exit("mach-1");
+  w.state.machines = [info("mach-1", { exited: true })];
+  assert.match(refused(await w.ask("run", { command: "ls" })), /has exited/);
+
+  const result = ok(await w.ask("reset"));
+
+  assert.equal(result.alive, true, "a reset machine is still reported as ended");
+  assert.equal(w.screens.replay("mach-1").exited, false);
+  w.state.machines = [info("mach-1")];
+  w.shells.set("mach-1", echoing(["a.py"]));
+  assert.deepEqual(ok(await w.ask("run", { command: "ls" })).output.at(0), "[machine] /work $ ls");
+});
+
+test("whether the new machine's project is its own copy is the new machine's answer, not the old one's", async () => {
+  const w = world([info("mach-1", { copyOnWrite: true })]);
+  w.state.resetCopyOnWrite = false;
+
+  assert.equal(ok(await w.ask("reset")).copy_on_write, false);
+});
+
+test("a read says per machine whether its project is its own copy", async () => {
+  const w = world([info("mach-1"), info("mach-2", { copyOnWrite: false })]);
+
+  const result = ok(await w.ask("read"));
+
+  assert.deepEqual(
+    result.machines.map((m: { id: string; copy_on_write: boolean }) => [m.id, m.copy_on_write]),
+    [["mach-1", true], ["mach-2", false]]
+  );
+});
+
+test("a reset with several machines open and none in view asks for a name rather than choosing, because it ends what is running", async () => {
+  const w = world([info("mach-1"), info("mach-2")]);
+  w.state.shown = [];
+  w.state.focused = null;
+
+  assert.match(refused(await w.ask("reset")), /Name one with `machine`/);
+  assert.deepEqual(w.state.resets, [], "a machine was reset on a guess");
+
+  ok(await w.ask("reset", { machine: "mach-2" }));
+  assert.deepEqual(w.state.resets, ["mach-2"]);
+});
+
+test("a reset reaches only this workspace's machine tabs: not another workspace's, not a terminal, not nothing", async () => {
+  const w = world([info("mach-1"), info("mach-9", { workspaceId: "other" })]);
+
+  assert.match(refused(await w.ask("reset", { machine: "mach-9" })), /no machine mach-9 in this workspace/i);
+  assert.match(refused(await w.ask("reset", { machine: "term-1" })), /no machine term-1/i);
+  assert.match(refused(await w.ask("reset", {}, "empty-workspace")), /No machine is open in this workspace/);
+  assert.match(refused(await w.ask("reset", { machine: "mach-1" }, "other")), /no machine mach-1/i);
+  assert.deepEqual(w.state.resets, [], "something that is not this workspace's machine was reset");
+});
+
+test("when the shell will not reset the machine the reason reaches the model and nothing else happens", async () => {
+  const w = world();
+  w.state.failReset = "this system will not mount an overlay without privilege";
+
+  assert.match(refused(await w.ask("reset")), /would not reset mach-1: this system will not mount an overlay/);
+  assert.deepEqual(w.written, []);
+
+  w.state.failReset = null;
+  w.host.reset = async () => {
+    throw "a string";
+  };
+  assert.match(refused(await w.ask("reset")), /would not reset mach-1: a string/);
+});
+
+test("a reset is not a way to open a machine: there has to be a tab for it to name", async () => {
+  const w = world([]);
+
+  assert.match(refused(await w.ask("reset")), /No machine is open in this workspace/);
+  assert.match(refused(await w.ask("reset", { machine: "mach-1" })), /no machine mach-1/i);
+  assert.deepEqual(w.state.resets, []);
 });
 
 // ── what it never does ───────────────────────────────────────────────────────

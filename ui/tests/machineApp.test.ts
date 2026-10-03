@@ -39,17 +39,29 @@ import { openPalette, paletteOption, queryPalette } from "./editorHarness.ts";
 const STORAGE_KEY = "CODIFY_TABS";
 const WS = "ws-a";
 
+/** What the shell says about a machine's project: its own copy by default, which is what a host that can make one answers. */
+interface Project {
+  copy_on_write: boolean;
+  note: string | null;
+}
+const OWN_COPY: Project = { copy_on_write: true, note: null };
+
 /** A shell that hands out these machine ids in order, and says what each write does through `onWrite`. */
-function shell(ids: string[], onWrite?: (args: Record<string, unknown>) => void): { answers: NonNullable<AppOptions["shellAnswers"]> } {
+function shell(
+  ids: string[],
+  onWrite?: (args: Record<string, unknown>) => void,
+  project: Project = OWN_COPY
+): { answers: NonNullable<AppOptions["shellAnswers"]> } {
   let next = 0;
   return {
     answers: {
-      codify_machine_open: () => ids[Math.min(next++, ids.length - 1)],
+      codify_machine_open: () => ({ id: ids[Math.min(next++, ids.length - 1)], ...project }),
       codify_machine_write: (a: Record<string, unknown>) => {
         onWrite?.(a);
         return null;
       },
       codify_machine_resize: () => null,
+      codify_machine_reset: (a: Record<string, unknown>) => ({ id: String(a.machineId), ...project }),
       codify_machine_close: () => null,
     },
   };
@@ -177,7 +189,7 @@ test("output before the open's reply landed is not lost: the first prompt is the
     // The reader thread starts at once, and the reply naming the machine loses the race with its first prompt.
     codify_machine_open: () => {
       void say(ctxRef as AppContext, "mach-1", "[machine] /work $ first prompt");
-      return "mach-1";
+      return { id: "mach-1", ...OWN_COPY };
     },
     codify_machine_resize: () => null,
   };
@@ -554,6 +566,174 @@ test("the clipboard drawer offers a machine neither the message box nor the term
     assert.equal(button("Paste into the terminal").disabled, true, "a clip can be pasted into a machine as if it were the person's terminal");
     assert.equal(button("Copy again").disabled, false);
   });
+});
+
+// ── the project, and starting again from a clean one ─────────────────────────
+
+const projectLine = (ctx: AppContext): HTMLElement | null => ctx.dom.container.querySelector('[data-testid="machine-project"]');
+const resetButton = (ctx: AppContext): HTMLButtonElement | null =>
+  ctx.dom.container.querySelector('button[aria-label="Reset machine"]');
+
+test("the header says the project is the machine's own copy, or read-only and why when this host could not make one", async () => {
+  const own = shell(["mach-1"]);
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: own.answers }, async (ctx) => {
+    await openMachine(ctx);
+
+    assert.match(projectLine(ctx)?.textContent ?? "", /your changes stay in this machine/);
+    assert.match(projectLine(ctx)?.getAttribute("title") ?? "", /discarded when the machine closes or is reset/);
+    assert.equal((await look(ctx)).result.machines[0].copy_on_write, true);
+  });
+
+  const none = shell(["mach-1"], undefined, { copy_on_write: false, note: "this system will not mount an overlay without privilege" });
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: none.answers }, async (ctx) => {
+    await openMachine(ctx);
+
+    assert.match(projectLine(ctx)?.textContent ?? "", /read-only/);
+    assert.doesNotMatch(projectLine(ctx)?.textContent ?? "", /your changes stay/);
+    assert.match(projectLine(ctx)?.getAttribute("title") ?? "", /will not mount an overlay/, "the person is not told why");
+    assert.equal((await look(ctx)).result.machines[0].copy_on_write, false);
+  });
+});
+
+test("Reset asks first, and a no does nothing at all", async () => {
+  const s = shell(["mach-1"]);
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: s.answers }, async (ctx) => {
+    await openMachine(ctx);
+    const asked: string[] = [];
+    ctx.dom.window.confirm = (message?: string) => {
+      asked.push(String(message));
+      return false;
+    };
+
+    await click(ctx, resetButton(ctx) as HTMLElement);
+
+    assert.equal(asked.length, 1);
+    assert.match(asked[0], /everything running in it stops/i);
+    assert.match(asked[0], /not touched/i, "the question does not say the person's own project is safe");
+    assert.equal(commands(ctx, "codify_machine_reset").length, 0, "a declined reset went ahead");
+  });
+});
+
+test("an accepted Reset starts that machine again at the pane's own size and keeps what the person chose", async () => {
+  const s = shell(["mach-1"]);
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: s.answers }, async (ctx) => {
+    await openPalette(ctx);
+    await queryPalette(ctx, "with network");
+    await ctx.dom.click(paletteOption(ctx, "New machine with network") as HTMLElement);
+    await ctx.settle();
+    await beat(60);
+    ctx.dom.window.confirm = () => true;
+    await say(ctx, "mach-1", "[machine] /work $ rm -rf *\r\njunk everywhere");
+    const measured = commands(ctx, "codify_machine_resize").at(-1) as { cols: number; rows: number };
+    assert.ok(measured.cols > 80, "the pane did not measure itself, so this cannot tell a size from the default");
+
+    await click(ctx, resetButton(ctx) as HTMLElement);
+    await ctx.settle();
+    await say(ctx, "mach-1", "\x1bc[machine reset: a clean project, nothing from before]\r\n[machine] /work $ ");
+    await beat(60);
+
+    assert.deepEqual(commands(ctx, "codify_machine_reset"), [{ machineId: "mach-1", cols: measured.cols, rows: measured.rows }]);
+    assert.doesNotMatch(screenOf(ctx, "mach-1"), /junk everywhere/, "what was on the screen before the reset is still there");
+    assert.match(screenOf(ctx, "mach-1"), /machine reset/);
+    // Everything the person chose is as it was: same tab, same network, same jail's workspace.
+    assert.match(selectedTab(ctx), /Machine: Machine · network.*has network access/);
+    assert.equal(networkBadge(ctx), "Network on");
+    assert.equal(commands(ctx, "codify_machine_open").length, 1, "a reset opened a second machine");
+  });
+});
+
+test("Reset brings an exited machine back: the banner goes, typing reaches the shell again, and the assistant can use it", async () => {
+  const s = shell(["mach-1"]);
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: s.answers }, async (ctx) => {
+    await openMachine(ctx);
+    await say(ctx, "mach-1", "[machine] /work $ ");
+    await ctx.emit("machine-exit", { id: "mach-1" });
+    await beat(40);
+    assert.match(machinePane(ctx, "mach-1")?.textContent ?? "", /shell has exited/);
+    assert.equal((await run(ctx, { command: "ls" })).ok, false);
+    ctx.dom.window.confirm = () => true;
+
+    await click(ctx, resetButton(ctx) as HTMLElement);
+    await ctx.settle();
+    await say(ctx, "mach-1", "\x1bc[machine reset: a clean project, nothing from before]\r\n[machine] /work $ ");
+    await beat(60);
+
+    assert.doesNotMatch(machinePane(ctx, "mach-1")?.textContent ?? "", /shell has exited/, "a reset machine still says it ended");
+    typeInto(ctx, "mach-1", "l");
+    await beat(40);
+    assert.equal(commands(ctx, "codify_machine_write").map((w) => w.data).join(""), "l", "a reset machine will not take typing");
+    const read = await look(ctx);
+    assert.equal(read.result.machines[0].alive, true);
+    assert.equal(read.result.screen.alive, true);
+  });
+});
+
+test("the assistant resets a machine through the surface, with no question asked, and gets the new screen", async () => {
+  let ctxRef: AppContext | null = null;
+  const s = shell(["mach-1"]);
+  s.answers!.codify_machine_reset = (a: Record<string, unknown>) => {
+    setTimeout(
+      () => void say(ctxRef as AppContext, String(a.machineId), "\x1bc[machine reset: a clean project, nothing from before]\r\n[machine] /work $ "),
+      20
+    );
+    return { id: String(a.machineId), ...OWN_COPY };
+  };
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: s.answers }, async (ctx) => {
+    ctxRef = ctx;
+    await openMachine(ctx);
+    await say(ctx, "mach-1", "[machine] /work $ junk");
+    let asked = 0;
+    ctx.dom.window.confirm = () => {
+      asked += 1;
+      return true;
+    };
+
+    const reply = await ctx.surface.ask({ surface: "machine", op: "reset", workspace_id: WS, args: {} });
+
+    assert.equal(reply.ok, true, reply.error ?? "");
+    assert.equal(commands(ctx, "codify_machine_reset").length, 1);
+    assert.equal(asked, 0, "the assistant's reset put a question to the person: it is the person's button that asks");
+    assert.deepEqual(reply.result.rows, ["[machine reset: a clean project, nothing from before]", "[machine] /work $"]);
+    assert.equal(reply.result.alive, true);
+    assert.equal(reply.result.copy_on_write, true);
+  });
+});
+
+test("the assistant cannot reset a machine that is not open, or a terminal, or another workspace's", async () => {
+  const s = shell(["mach-1"]);
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: { ...s.answers, codify_terminal_open: () => id("term-1") } }, async (ctx) => {
+    const none = await ctx.surface.ask({ surface: "machine", op: "reset", workspace_id: WS, args: {} });
+    assert.equal(none.ok, false);
+    assert.match(none.error ?? "", /No machine is open in this workspace/);
+
+    await click(ctx, ctx.dom.container.querySelector('button[title^="Terminal"]') as HTMLElement);
+    await ctx.settle();
+    await openMachine(ctx);
+    const terminal = await ctx.surface.ask({ surface: "machine", op: "reset", workspace_id: WS, args: { machine: id("term-1") } });
+    assert.equal(terminal.ok, false);
+    const other = await ctx.surface.ask({ surface: "machine", op: "reset", workspace_id: "ws-other", args: { machine: "mach-1" } });
+    assert.equal(other.ok, false);
+
+    assert.equal(commands(ctx, "codify_machine_reset").length, 0, "a reset reached the shell for something that is not a machine here");
+  });
+});
+
+test("a reset the shell cannot carry out says why on the window, and the machine's tab is not lost", async () => {
+  const s = shell(["mach-1"]);
+  await withApp(
+    { viewport: WIDE, ...SEEDED, shellAnswers: s.answers, shellFails: { codify_machine_reset: "this system will not mount an overlay without privilege" } },
+    async (ctx) => {
+      await openMachine(ctx);
+      ctx.dom.window.confirm = () => true;
+
+      await click(ctx, resetButton(ctx) as HTMLElement);
+      await ctx.settle();
+
+      const alert = [...ctx.dom.container.querySelectorAll('[role="alert"]')].map((a) => a.textContent).join(" ");
+      assert.match(alert, /will not mount an overlay/);
+      assert.match(selectedTab(ctx), /^Machine: Machine/, "the failed reset closed the tab");
+    }
+  );
 });
 
 // ── beside a chat, and never written down ────────────────────────────────────
