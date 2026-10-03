@@ -610,6 +610,22 @@ It used to be purple in one and blue in another, which made "which one am I on?"
 a per-component question. Arming is a state, not an identity: a tool that is armed is
 tinted with **its own** tone, and only because it is armed.
 
+The mode picker keeps a colour per mode, but on the *icon* (green writes to your files, amber
+only simulates, blue stops at a plan), where it says what the mode does. Which mode is current
+is the accent tint and a tick, like every other list. The model menu had drifted to the `design`
+hue for its selection, its icons and its "Set" button; that hue is reserved (above) for the
+DESIGN.md deliverable, so model rows use `accent` and nothing in a picker borrows `design` or
+`knowledge`.
+
+### The text cursor
+
+A native field's caret is `--codify-accent`, set once for `input` and `textarea` in the base
+layer of `ui/src/index.css`. Left to itself a caret takes the text's own colour, which in every
+theme is the near-white ink: one more thin letter, in the one place that has to say where you
+are. The accent follows a custom accent too. A caret is a graphic, so the bar is WCAG 1.4.11's
+3:1, held against `bg`, `surface` and `raised` in every theme by `ui/tests/contrast.test.ts`. The
+code editor and the terminal draw their own cursors and are not part of this rule.
+
 ## 3. Type
 
 A dense ramp, roughly a step tighter than Tailwind's defaults. The reason is
@@ -690,6 +706,12 @@ a shortcut.
 | `Badge` | one of the five status tones, at `2xs`, in the tone's ink; success, warning and danger carry a glyph (`icon={false}` for a count or a tag) |
 | `Panel` | surface, border, heading row, body padding |
 | `Field` | label, control, hint and error, and the spacing between all three |
+
+`ModelBadges` is not a primitive but the one place the model rows' three facts are drawn, for the
+composer's model menu and the model field in Settings alike: the roles a model is configured on
+are a `neutral` tag, "last run" is `info`, "not a chat model" is `warning` with its triangle. They
+were bare coloured words (the roles in the reserved `knowledge` hue), and the one warning in the
+row was told apart by colour alone.
 
 `Toggle` is the one that earns its place by fixing a bug rather than tidying: it is
 the control the amber collision lived in, and a rule stated in a document cannot

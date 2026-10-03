@@ -3,6 +3,7 @@ import { Check, ChevronDown, RefreshCw } from "lucide-react";
 import type { ModelOption, ProviderModelStatus } from "../types.ts";
 import { EMPTY_SIGNALS, ModelSignals, modelBadges, orderProviderModels } from "../modelSignals";
 import { MENU_EDGE, MenuPlacement, menuPlacement } from "../modelMenu";
+import { ModelBadges } from "./ModelBadges";
 
 /**
  * Re-exported so the role field and the provider picker open the *same* menu.
@@ -208,33 +209,18 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                 className={
                   "w-full text-left px-2 py-1 rounded-lg flex items-center gap-2 text-xs transition-colors cursor-pointer " +
                   (m.id === value
-                    ? "bg-codify-info/20 text-codify-info-ink font-medium"
+                    ? "bg-codify-accent/20 text-codify-accent-ink font-medium"
                     : "text-codify-secondary hover:bg-codify-raised")
                 }
               >
                 <span className="font-mono truncate flex-1 min-w-0">{m.id}</span>
-                {badges.roles && (
-                  <span
-                    className="text-2xs text-codify-knowledge shrink-0 max-w-[9rem] truncate"
-                    title={badges.rolesTitle}
-                  >
-                    {badges.roles}
+                <ModelBadges badges={badges} />
+                {!badges.notChat && !badges.roles && m.description && (
+                  <span className="text-2xs text-codify-muted truncate max-w-[6.875rem] shrink-0">
+                    {m.description}
                   </span>
                 )}
-                {badges.lastRun && (
-                  <span className="text-2xs text-codify-info shrink-0">last run</span>
-                )}
-                {badges.notChat ? (
-                  <span className="text-2xs text-codify-warning shrink-0">not a chat model</span>
-                ) : (
-                  !badges.roles &&
-                  m.description && (
-                    <span className="text-2xs text-codify-muted truncate max-w-[6.875rem] shrink-0">
-                      {m.description}
-                    </span>
-                  )
-                )}
-                {m.id === value && <Check className="w-3 h-3 text-codify-info shrink-0" />}
+                {m.id === value && <Check className="w-3 h-3 text-codify-accent shrink-0" />}
               </button>
             );
           })}

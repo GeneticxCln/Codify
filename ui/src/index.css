@@ -76,6 +76,24 @@
   }
 }
 
+/* The text cursor is the theme's accent.
+
+   Left alone a caret takes the text's own colour (`caret-color: auto`), which in every theme is the
+   near-white ink: it reads as one more thin letter, and it is the one mark in the prompt that says
+   *where you are*. The accent is the colour the app already uses for "this is the live thing" (the
+   border that lights around the prompt while it has focus, the send button), and it follows a custom
+   accent too, since both read `--codify-accent`. A caret is a graphic, so it is held to WCAG 1.4.11's
+   3:1 against every surface a field sits on, in every theme, by `ui/tests/contrast.test.ts`.
+
+   In the base layer so a utility can still say otherwise. Only native fields: the code editor and the
+   terminal draw their own cursors (`editorTheme.ts`, `terminalTheme.ts`) and are not touched here. */
+@layer base {
+  input,
+  textarea {
+    caret-color: var(--codify-accent);
+  }
+}
+
 /* The palette, once, for the handful of places CSS rather than a utility needs a
    colour: the body, the scrollbars, the audit-flash keyframes below. Tailwind reads
    the same values from `tailwind.config.js`, and `DESIGN.md` at the repository root
