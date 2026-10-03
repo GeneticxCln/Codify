@@ -422,8 +422,9 @@ whether it can build a jail on your computer, and how to fix it if not).
 
 It is a jail, **not a virtual machine**: it shares your computer's kernel, and says so.
 
-- **Your project is read-only inside it**, at `/work`. Nothing can write to it, and nothing leaves except text you select and copy by hand.
+- **Your project is there as the machine's own copy**, at `/work`. It can edit, build and run tests in it freely, and **your files are never written**: the copy is kept in memory, capped in size, and thrown away with the machine. Nothing leaves except text you select and copy by hand. (Where your computer cannot make the copy, `/work` is read-only instead, and the header says why.)
 - **Its home and `/tmp` are scratch** (size-capped memory), thrown away when the machine closes.
+- **It cannot run away with your computer.** One process that spins for half an hour of CPU is ended by the kernel; a file past a gigabyte cannot be written; and if everything in the machine adds up to more than its share of your memory (half of it, never more than 4 GB) the machine is stopped, with a line on the screen saying why. That check looks twice a second, so a program that allocates faster than that can overshoot first. Nothing here can stop a bug in the kernel itself: a machine shares your kernel.
 - **It has no credentials**: not your home folder, not your keys, not Codify's own state, not the engine's token.
 - **It has no network** unless you open it with one (the second row in the palette). That choice is made once and the header says it in words;
   it cannot be switched on later, and the assistant cannot open a machine or change it. **With the network on it shares your computer's
@@ -435,11 +436,12 @@ The assistant can **see** it and **type into** it, through three tools it can ca
 - **`read_machine`** shows which machines are open, the screen as you see it, and what scrolled off it. It works for a machine in a background tab.
 - **`run_in_machine`** types a command, waits for the output to settle, and brings back what it printed. A command that keeps running is not waited for.
 - **`key_in_machine`** presses one of twelve named keys (Enter, Tab, Escape, the arrows, Backspace, Ctrl-C, -D, -L, -Z).
+- **`reset_machine`** starts the machine again from a clean project, for a machine that is wedged, full, or was stopped. It keeps the network you chose and cannot open a machine. You have the same thing as a **Reset** button in the machine's header, which asks first.
 
 Inside the jail the assistant is **not held to the command allowlist**; the jail is what contains it, and
-[invariant 6](docs/00-codify-architecture-overview.md) says so in one sentence. A machine is not remembered: a restart reopens none, and closing the tab ends everything running in it.
+[invariant 6](docs/00-codify-architecture-overview.md) says so in one sentence. A machine is not remembered: a restart reopens none, and closing the tab ends everything running in it, its copy of your project with it.
 
-**Not in this version:** a graphical desktop or a full virtual machine, a seccomp filter, a memory limit, and any way to copy a file out. The limits are listed in
+**Not in this version:** a graphical desktop or a full virtual machine, a seccomp filter, a kernel-enforced memory limit (it is watched, not capped), snapshots beyond "clean", and any way to copy a file out. The limits are listed in
 [docs/09 §14](docs/09-workspace-shell.md), with what was measured in a real jail and what was not, and the claims the jail makes are [docs/03 §1.11](docs/03-security-and-roadmap.md).
 
 ---

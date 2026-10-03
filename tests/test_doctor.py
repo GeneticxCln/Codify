@@ -59,6 +59,13 @@ STUBS: dict[str, str] = {
         '[ -n "$DOCTOR_STUB_BWRAP_CANNOT_JAIL" ] && { echo "bwrap: No permissions to create new namespace" >&2; exit 1; }\n'
         'exit 0\n'
     ),
+    # `unshare` is what the machine's own copy of the project is mounted behind; it fails when
+    # DOCTOR_STUB_NO_OVERLAY is set: a kernel or a tmpfs that will not mount an overlay without privilege.
+    "unshare": (
+        '#!/bin/sh\n'
+        '[ -n "$DOCTOR_STUB_NO_OVERLAY" ] && { echo "mount: permission denied" >&2; exit 1; }\n'
+        'exit 0\n'
+    ),
 }
 
 
@@ -219,6 +226,31 @@ class TestEveryMissingPieceIsNamedAndFixable(DoctorCase):
 
         self.assertMissing(done, "bwrap is installed but cannot build a jail", "max_user_namespaces", "apparmor_restrict_unprivileged_userns")
         self.assertIn("ok       bwrap (bubblewrap 0.9.0)", done.stdout)
+
+    def test_a_host_that_can_make_the_machines_own_copy_says_so(self) -> None:
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertIn("ok       an unprivileged overlay mount works here", done.stdout)
+
+    def test_a_host_that_cannot_is_a_note_and_not_a_failure_because_the_machine_is_then_read_only(self) -> None:
+        # The project layer is a feature and not a requirement (docs/09 section 14.1a): without it the machine is the
+        # read-only machine it always was, so the gate does not need it and the doctor does not fail for it.
+        done = self.doctor(DISPLAY=":0", DOCTOR_STUB_NO_OVERLAY="1")
+
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertIn("note     an unprivileged overlay mount does not work here", done.stdout)
+        self.assertIn("project will be read-only", done.stdout)
+        self.assertNotIn("MISSING", done.stdout)
+
+    def test_no_unshare_is_a_note_too(self) -> None:
+        self.remove("unshare")
+
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertIn("note     unshare (util-linux) not found", done.stdout)
+        self.assertNotIn("MISSING", done.stdout)
 
     def test_no_git_is_missing(self) -> None:
         self.remove("git")

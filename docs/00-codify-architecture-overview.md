@@ -127,9 +127,10 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
    `run_command` is `read_only`. The librarian's requests use `read_only` mode and cannot change
    the workspace or run its code. The conductor proposes argv through either move, it does not
    widen the allowlist — see `docs/01` §5. The machine tab is the one other place an assistant's
-   keystrokes run commands, and only inside a jail that a person alone can open: workspace
-   read-only, no credentials, no network unless the person opened it with one; it is not
-   `SandboxService` and widens nothing here — see `docs/09` §14.
+   keystrokes run commands, and only inside a jail that a person alone can open: the person's
+   files are never written (the machine edits its own copy of the project, or sees it read-only
+   where a copy cannot be made), no credentials, no network unless the person opened it with
+   one; it is not `SandboxService` and widens nothing here — see `docs/09` §14.
 7. Single SQLite file: `~/.codify/codify.db`. There is no `agents.db`.
 8. A turn is created only by `POST /conversations/{id}/turns`. `POST /goals` refuses
    `mode: "chat"`, and `TurnCreate` carries no pipeline flags, so a client chooses neither
