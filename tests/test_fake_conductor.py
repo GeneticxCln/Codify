@@ -16,7 +16,9 @@ conductor is reconstructed from the transcript each time: which calls it already
 * `[todo]` makes a step run keep a note before writing;
 * `[stall]` makes a step run stop after `write`, which is the conductor that cannot finish;
 * `[editor path=P old=X new=Y]` makes it look at the person's editor, open `P`, and change `X` to `Y` in the open
-  text, which is the one way to watch the editor's eyes and hands work without a model.
+  text, which is the one way to watch the editor's eyes and hands work without a model;
+* `[machine run=CMD]` makes it look at the person's machine, type `CMD` into it and read what it printed, and
+  `[machine run=CMD key=Ctrl-C]` then presses that key. It is never offered a way to open one.
 
 The first block holds the policy; the second runs it live.
 """
@@ -61,6 +63,7 @@ STEP = (
 )
 ALL_TOOLS = ["read_file", "recon", "plan", "ask_user"]
 EDITOR_TOOLS = ["read_editor", "open_in_editor", "edit_editor"]
+MACHINE_TOOLS = ["read_machine", "run_in_machine", "key_in_machine"]
 STEP_TOOLS = ["read_file", "write", "verify", "review", "summarize", "todo"]
 
 
@@ -143,6 +146,46 @@ class TestThePolicy(unittest.TestCase):
     def test_a_marker_without_a_path_is_not_an_editor_request(self) -> None:
         user = TURN.format(request="tidy the greeting [editor old=hello new=howdy]")
         self.assertEqual("recon", self.step(user, tools=[*ALL_TOOLS, *EDITOR_TOOLS])[0])
+
+    def test_machine_marks_a_request_that_looks_and_types_in_that_order(self) -> None:
+        user = TURN.format(request="list the files [machine run=ls -la]")
+        tools = [*ALL_TOOLS, *MACHINE_TOOLS]
+        self.assertEqual(("read_machine", {}), self.step(user, tools=tools))
+        self.assertEqual(
+            ("run_in_machine", {"command": "ls -la"}),
+            self.step(user, _called("read_machine"), _result(), tools=tools),
+        )
+        last = self.step(user, _called("read_machine"), _result(), _called("run_in_machine"), _result(), tools=tools)
+        self.assertIsInstance(last, str)
+        self.assertIn("`ls -la`", last)
+
+    def test_machine_with_a_key_presses_it_after_the_command(self) -> None:
+        user = TURN.format(request="stop it [machine run=sleep 100 key=Ctrl-C]")
+        tools = [*ALL_TOOLS, *MACHINE_TOOLS]
+        history = [_called("read_machine"), _result(), _called("run_in_machine"), _result()]
+        self.assertEqual(("run_in_machine", {"command": "sleep 100"}), self.step(user, *history[:2], tools=tools))
+        self.assertEqual(("key_in_machine", {"key": "Ctrl-C"}), self.step(user, *history, tools=tools))
+        done = self.step(user, *history, _called("key_in_machine"), _result(), tools=tools)
+        self.assertIsInstance(done, str)
+
+    def test_it_does_not_touch_a_machine_when_none_is_offered(self) -> None:
+        user = TURN.format(request="list the files [machine run=ls -la]")
+        self.assertEqual("recon", self.step(user)[0])
+
+    def test_a_machine_marker_with_no_command_is_not_a_machine_request(self) -> None:
+        user = TURN.format(request="list the files [machine run=]")
+        self.assertEqual("recon", self.step(user, tools=[*ALL_TOOLS, *MACHINE_TOOLS])[0])
+
+    def test_no_scenario_ever_names_a_tool_that_opens_a_machine(self) -> None:
+        user = TURN.format(request="open one [machine run=ls key=Enter]")
+        tools = [*ALL_TOOLS, *MACHINE_TOOLS, "open_machine", "new_machine"]
+        history: list[dict[str, Any]] = []
+        for _ in range(8):
+            move = self.step(user, *history, tools=tools)
+            if isinstance(move, str):
+                break
+            self.assertIn(move[0], MACHINE_TOOLS)
+            history += [_called(move[0]), _result()]
 
     def test_it_does_not_ask_when_asking_is_not_offered(self) -> None:
         user = TURN.format(request="add a banner [ask]")

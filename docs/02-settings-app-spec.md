@@ -248,6 +248,10 @@ or 175%, **125% by default**. It is client-side display state, like the theme: i
   terminal or another editor. Nothing about it is configured here and nothing about it is stored: it is local like a terminal, so
   the tab strip's storage and the engine's `/shell/tabs` never see it (`docs/09` §13.2), and no agent setting can grant the assistant
   more than eyes on it and edits to its open text (`docs/00` §6.9). What it does is `docs/09` §13.
+* **A machine is a fifth kind of tab, and has no settings.** A **Machine** button in the left panel (its title begins "Machine", which is how the panel's own
+  buttons are found) opens a jailed shell with no network; the palette has a second row that opens one with a network, and the choice cannot be changed afterwards. Like a
+  terminal and an editor it is local: the strip's storage and `/shell/tabs` never see it (`docs/09` §14.5), and no agent setting grants the assistant more than eyes on it and
+  keystrokes into it. Nothing here opens, closes or reconfigures one for it. What it is, and what it is not, is `docs/09` §14; the claims its jail makes are `docs/03` §1.11.
 * **Providers are read by name, not by slug.** The Provider Keys row printed the slug through CSS
   `capitalize` ("Openai", "Nvidia") and the protocol as the raw tag `openai_compat`, and the provider
   select printed every slug in capitals. `ui/src/providerLabels.ts` supplies the words (OpenAI,

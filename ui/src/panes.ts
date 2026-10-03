@@ -1,7 +1,7 @@
 /**
  * Split panes: which two tabs may share the centre column, and what happens to the pair as the tab strip moves.
  *
- * The centre column shows one thing, and a split shows two: a chat, a terminal, an editor or a browser page beside any of those,
+ * The centre column shows one thing, and a split shows two: a chat, a terminal, a machine, an editor or a browser page beside any of those,
  * but never two chats and never two pages. The pair is `{ panes, focused }` and lives **beside** the tab state, never in it: `tabs.ts`, `tabPersistence.ts`,
  * `layoutSync.ts` and the engine's shared strip never see it, so none of their return shapes can quietly drop it, and
  * a split is view state in the sense of `docs/09` §2.1. The active tab stays what it always was, the tab the person
@@ -108,11 +108,13 @@ export type Partner = { kind: "tab"; id: string } | { kind: "new-terminal" } | {
 /**
  * Who the active tab is split with when nobody was named (the shortcut, and "split" in the palette).
  *
- * A chat takes the nearest terminal, editor or browser page, whichever is nearer: the conversation is the thing you want a
- * file, a shell or a page beside. An editor takes the nearest chat (the assistant it is being edited with), then the nearest
- * terminal, then a page. A terminal takes the nearest other terminal, then the nearest chat, then a page; it never picks an
- * editor for you, and neither does an editor pick another editor. A page takes the nearest chat (what it is being read
- * for), then the nearest terminal, then an editor, and never another page. Nearest is by distance in the strip, and a tie
+ * A chat takes the nearest terminal, machine, editor or browser page, whichever is nearer: the conversation is the thing you
+ * want a file, a shell or a page beside. An editor takes the nearest chat (the assistant it is being edited with), then the
+ * nearest terminal, then a machine, then a page. A terminal takes the nearest other terminal, then the nearest chat, then a
+ * page; it never picks an editor or a machine for you, and neither does an editor pick another editor. A machine takes the
+ * nearest chat (the assistant working in it), then an editor (the files it is looking at), then a page, and never another
+ * machine or a terminal: a jail beside the person's own shell is a choice, not a default. A page takes the nearest chat (what
+ * it is being read for), then the nearest terminal, then a machine, then an editor, and never another page. Nearest is by distance in the strip, and a tie
  * goes to the right. A shell that has exited is never chosen for you: it is not what was meant, and a new terminal is more
  * use than a dead one. With nobody to share with, a new terminal is asked for; a chat is never offered a chat.
  */
@@ -131,18 +133,21 @@ export function splitPartner(state: TabState): Partner {
     return undefined;
   };
   const liveTerminal = (t: Tab): boolean => t.kind === "terminal" && !t.exited;
+  const liveMachine = (t: Tab): boolean => t.kind === "machine" && !t.exited;
   const chat = (t: Tab): boolean => t.kind === "chat";
   const editor = (t: Tab): boolean => t.kind === "editor";
   const page = (t: Tab): boolean => t.kind === "browser";
 
   const pick =
     active.kind === "chat"
-      ? nearest((t) => liveTerminal(t) || editor(t) || page(t))
+      ? nearest((t) => liveTerminal(t) || liveMachine(t) || editor(t) || page(t))
       : active.kind === "editor"
-        ? (nearest(chat) ?? nearest(liveTerminal) ?? nearest(page))
+        ? (nearest(chat) ?? nearest(liveTerminal) ?? nearest(liveMachine) ?? nearest(page))
         : active.kind === "browser"
-          ? (nearest(chat) ?? nearest(liveTerminal) ?? nearest(editor))
-          : (nearest(liveTerminal) ?? nearest(chat) ?? nearest(page));
+          ? (nearest(chat) ?? nearest(liveTerminal) ?? nearest(liveMachine) ?? nearest(editor))
+          : active.kind === "machine"
+            ? (nearest(chat) ?? nearest(editor) ?? nearest(page))
+            : (nearest(liveTerminal) ?? nearest(chat) ?? nearest(page));
   return pick ? { kind: "tab", id: pick.id } : { kind: "new-terminal" };
 }
 

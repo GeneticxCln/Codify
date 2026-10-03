@@ -94,6 +94,10 @@ const TEXT_READERS: Record<string, Reason> = {
     kind: "text",
     why: "The argument names api.ts sends must match the Rust command parameters; the two languages share nothing but text.",
   },
+  "machineSurface.test.ts": {
+    kind: "text",
+    why: "One test reads engine/surface_machine.py: the twelve key names the window can press must equal the engine's `KEYS` table, and the two languages share nothing but text. Every other test in the file calls the handlers over a fake shell.",
+  },
   "motionPreference.test.ts": {
     kind: "text",
     why: "One test reads src-tauri/src/lib.rs: the Rust event constant must equal the TypeScript one. The App half of the contract is mounted.",

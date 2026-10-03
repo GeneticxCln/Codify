@@ -71,6 +71,7 @@ its own table beside it (`RUST_GUARDED_SPAWN_SITES`) — see §2.1:
 | `scripts/check_history.py` | git worktree/rev-list/diff, and the gate's own leg binaries, at each commit in a range | argv lists with `capture_output`, no shell; each commit gets its own detached worktree outside the repository, torn down on every path out including SIGINT | `tests/test_check_history.py` |
 | `src-tauri/src/lib.rs` | `python3 -m engine`, and a login-shell PATH probe | the shell owns the engine's lifecycle; `RunEvent::Exit` kills it unconditionally. The interpreter is the checkout's own `.venv/bin/python3` when there is one, and the PATH-resolved `python3` otherwise, so the app and `make test` run the same environment instead of two that hold different installs | `cargo test` in `src-tauri/`, and the launch itself |
 | `src-tauri/src/terminal.rs` | the user's shell behind a terminal pane | `pin_cwd` pins cwd to a registered workspace root; `$SHELL` supplies argv, never a request; the pane's close and the app's exit both kill, escalate past an ignored SIGHUP, and reap | `terminal::tests`, 9 of them |
+| `src-tauri/src/machine.rs` | `bwrap`, the jail behind a machine tab, and nothing else | the one `CommandBuilder` in the file, with the shell's own environment cleared and the jailed process's built by `--clearenv`; **no path starts the shell without the jail** (a missing `bwrap` or refused user namespaces is a sentence and no process); the workspace is read-only and a root or home workspace is refused; close and the app's exit kill the whole tree and reap | `machine::tests`, 22 of them, 10 of which run a real jail |
 
 The benchmark site is deliberately **not** routed through `SandboxService`. That
 allowlist is a security boundary for model-proposed argv; widening it to let a
@@ -147,6 +148,13 @@ and `09` §7, and it is a boundary rather than a preference: `SandboxService` is
 the agent's privileged path (docs/00 §6.6, only verifier-proposed argv reaches it)
 and a user typing at a prompt is a different authority. Nothing in that module
 reads an argv from a request.
+
+The machine (`src-tauri/src/machine.rs`, `09` §14) is the same decision from the other side, and it is in the same
+file's neighbourhood on purpose: it shares `terminal::spawn_pty` and nothing else. A terminal is a person's own shell and
+a machine is the one place an assistant's keystrokes run commands without `validate_argv` (docs/00 §6.6), so the thing
+that makes the second acceptable, the jail, is what the freeze pins: one builder, `bwrap`, and a test that the user's
+shell is not nameable from that file. The jail's claims are measured in a real `bwrap` and not read off its flags
+(`09` §14.11), which is why those tests need `bwrap` and fail loudly without it, as the rest of the suite does.
 
 The review conversation for a new spawn is written where the change happens:
 route it through an existing choke point, or add a justified entry and give it a

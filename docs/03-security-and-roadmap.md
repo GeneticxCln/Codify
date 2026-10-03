@@ -226,6 +226,23 @@ the person did not mean to keep, so its limits are written down:
   anywhere, which is why the rule is there. It uses xterm's own `paste`, the path a person's Ctrl+Shift+V takes,
   and gives the engine nothing: the terminal belongs to the shell layer (`09` §7).
 
+### 1.11 The machine: an assistant that may type, inside a jail (`built`)
+
+The machine tab (`09` §14) is the one place an assistant's keystrokes run commands **without** `validate_argv` (`00` §6.6), so everything that makes that acceptable is a claim about the
+jail, and each one is written here with how it is held:
+
+- **The workspace is read-only and nothing else is writable except two memory-backed scratch mounts.** No read-write bind exists in the argv, and a real jail is asked to write under `/work` and refuses.
+- **No credentials.** The environment is built (`--clearenv` and a short list), not inherited, so no boot token, provider key or `CODIFY_*` is in it; the person's `$HOME`, `~/.ssh`, `~/.codify`, the keyring socket, the display and D-Bus are not bound.
+  A workspace that is `/`, `$HOME` or an ancestor of it, or a credential directory, is refused (§1.4's list).
+- **No capabilities, and not root.** `--cap-drop ALL`; a shell that is root maps to uid 1000 in the jail.
+- **No network unless the person opened it with one**, chosen once. **With the network on the jail shares the host's network namespace**, so it can reach `127.0.0.1` and the LAN. The engine's boot token (§1.3) is what protects the engine there; other local services have nothing. This is measured and stated on the tab, not hidden.
+- **No fallback.** If `bwrap` is missing or user namespaces are refused, nothing starts and the person is told which. There is no code path that starts the shell without the jail.
+- **A person alone opens one.** There is no operation, in the engine's table or the window's, that opens, closes or reconfigures a machine for the assistant, and what the model reads of one is framed as program output and not instruction.
+- **Nothing leaves.** The jail has no write path to the workspace and there is no copy-out door; a person can select and copy text on the screen by hand (§1.10 keeps what passes through the window). Invariant 9 is unchanged.
+
+**What this does not claim.** It is a jail on the **host's kernel**, not a virtual machine: there is **no seccomp filter**, so the host kernel's whole syscall surface is reachable from inside it, and a kernel vulnerability that can be reached from an unprivileged
+user namespace is not contained by anything here. There is no cgroup memory limit (only `ulimit` and the scratch sizes). Some distributions switch unprivileged user namespaces off, and then a machine cannot be opened at all (`make doctor` says so). A seccomp filter is the next hardening step and a VM backend the stronger one (`09` §14.9).
+
 ## 2. Persistence layer
 
 Single file. **No `agents.db`.**

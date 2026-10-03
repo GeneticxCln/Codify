@@ -282,7 +282,11 @@ async function fallbackHttpInvoke<T>(cmd: string, args?: Record<string, any>): P
     case "codify_terminal_open":
     case "codify_terminal_write":
     case "codify_terminal_resize":
-    case "codify_terminal_close": {
+    case "codify_terminal_close":
+    case "codify_machine_open":
+    case "codify_machine_write":
+    case "codify_machine_resize":
+    case "codify_machine_close": {
       throw new Error(NEEDS_DESKTOP_SHELL);
     }
     default:
@@ -1169,6 +1173,44 @@ export async function resizeTerminal(
  */
 export async function closeTerminal(terminalId: string): Promise<void> {
   return tauriInvoke<void>("codify_terminal_close", { terminalId });
+}
+
+/**
+ * Start a machine in a workspace: a shell in a jail, at a character grid.
+ *
+ * The id comes back from the shell and becomes the tab's id, as a terminal's does. `network` is the person's choice and
+ * is made **here, once**: the jail is built with or without the host's network and nothing afterwards can change it, so
+ * "switch it on" is a new machine (`docs/09` §14). There is no fallback: where the shell cannot make a jail (no
+ * `bwrap`, user namespaces refused) this rejects with the reason, and nothing starts. A workspace that would show a
+ * machine the person's secrets is refused by the shell, not here.
+ */
+export async function openMachine(
+  workspaceId: string,
+  cols: number,
+  rows: number,
+  network: boolean
+): Promise<string> {
+  return tauriInvoke<string>("codify_machine_open", {
+    workspaceId,
+    cols,
+    rows,
+    network,
+  });
+}
+
+/** Type into a machine. Called once per batch of keystrokes, and by the assistant's `run` and `key` through the same door. */
+export async function writeMachine(machineId: string, data: string): Promise<void> {
+  return tauriInvoke<void>("codify_machine_write", { machineId, data });
+}
+
+/** Tell a machine's PTY its window changed size, so what it has drawn re-wraps. */
+export async function resizeMachine(machineId: string, cols: number, rows: number): Promise<void> {
+  return tauriInvoke<void>("codify_machine_resize", { machineId, cols, rows });
+}
+
+/** End a machine and everything running in its jail. Safe for an id that is already gone. */
+export async function closeMachine(machineId: string): Promise<void> {
+  return tauriInvoke<void>("codify_machine_close", { machineId });
 }
 
 /**

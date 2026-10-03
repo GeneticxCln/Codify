@@ -139,6 +139,9 @@ RUST_GUARDED_SPAWN_SITES: dict[str, dict[str, str]] = {
         ".spawn()": "the engine child process: spawned into its own process group so the exit handler can kill it, and killed unconditionally when the app goes — a silently-skipped kill leaks a stray engine holding the port and the DB",
         ".output()": "the login shell's own output, to inherit the user's PATH rather than guessing one: short-lived, bounded by a timeout, and it changes nothing on disk",
     },
+    "src-tauri/src/machine.rs": {
+        "CommandBuilder::new": "`bwrap`, the jail a machine tab runs in, and nothing else: the one builder in the file, with the shell's environment cleared (`env_clear`) and the jailed process's own built by `--clearenv`. A machine is the one place an assistant's keystrokes run commands without the argv allowlist (docs/00 §6.6), which is acceptable only because of the jail, so a second builder here would be a way around it. The PTY itself still goes through `terminal.rs`'s `native_pty_system()` and `spawn_command()` below. `src-tauri/src/machine/tests.rs` pins that this is the only one and that the user's shell is not reachable from this file",
+    },
     "src-tauri/src/terminal.rs": {
         "CommandBuilder::new": "the user's own shell for a terminal pane. Deliberately NOT routed through the engine's SandboxService: that is the agent's privileged path (docs/00 §6.6, only verifier-proposed argv reaches it) and a user typing at a prompt is a different authority. argv comes from $SHELL, never from a request; cwd is pinned by pin_cwd to a registered workspace root",
         "native_pty_system()": "the pty a terminal pane runs in: the choke point every PTY spawn passes through, and the reason a terminal is a terminal rather than a pipe",

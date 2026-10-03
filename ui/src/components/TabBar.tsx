@@ -1,5 +1,5 @@
 import React from "react";
-import { X, Terminal, Globe, MessageSquareText, FileCode } from "lucide-react";
+import { X, Terminal, Globe, MessageSquareText, FileCode, Box } from "lucide-react";
 import type { Tab, TabKind } from "../tabs";
 import type { Workspace } from "../types";
 import { threadLabel } from "../threadTitle";
@@ -8,7 +8,7 @@ import { threadLabel } from "../threadTitle";
  * The tab strip: what is open, which one is showing, and how to move between
  * them.
  *
- * One strip for all four kinds, because the user thinks of them the same way —
+ * One strip for all five kinds, because the user thinks of them the same way —
  * "what have I got open" — and a chat tab next to a terminal is a window they
  * want to reach in one click. The kind is told apart by its icon and nothing
  * else: the strip is a list of things, and colouring the whole tab would make
@@ -36,6 +36,8 @@ export const KIND_ICON: Record<TabKind, React.FC<{ className?: string }>> = {
   terminal: Terminal,
   browser: Globe,
   editor: FileCode,
+  // A box is a jail, and is not a terminal's prompt: the two are both shells and must not be taken for each other.
+  machine: Box,
 };
 
 /** What the accessible name says, since the icon alone is not a label. */
@@ -44,6 +46,7 @@ export const KIND_NAME: Record<TabKind, string> = {
   terminal: "Terminal",
   browser: "Browser",
   editor: "Editor",
+  machine: "Machine",
 };
 
 export interface TabBarProps {
@@ -151,7 +154,7 @@ export const TabBar: React.FC<TabBarProps> = ({
                 ws ? ` in ${ws.root_path}` : ""
               }${unread ? " — new output" : ""}${unsaved ? " — unsaved changes" : ""}${
                 assistantEdited ? " — changed by the assistant" : ""
-              }${inSplit ? " — in split view" : ""}`}
+              }${tab.kind === "machine" && tab.network ? " — has network access" : ""}${inSplit ? " — in split view" : ""}`}
               title={
                 // An editor tab is a file, so its tooltip says which one and where: a name alone cannot tell two `index.ts` apart.
                 tab.kind === "editor" && tab.path

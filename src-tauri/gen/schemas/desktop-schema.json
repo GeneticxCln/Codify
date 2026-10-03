@@ -177,10 +177,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Every command this app defines, as twenty named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser/ fails the build's test leg if the two lists ever differ. Permissions are not where a webview is decided: this set is referenced only by capabilities/default.json, whose `webviews` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.\n#### This permission set includes:\n\n- `allow-codify-get-engine-info`\n- `allow-codify-engine-status`\n- `allow-codify-engine-log`\n- `allow-codify-list-agent-configs`\n- `allow-codify-update-agent-config`\n- `allow-codify-repair-agent-configs`\n- `allow-codify-test-agent-connection`\n- `allow-codify-terminal-open`\n- `allow-codify-terminal-write`\n- `allow-codify-terminal-resize`\n- `allow-codify-terminal-close`\n- `allow-codify-browser-open`\n- `allow-codify-browser-navigate`\n- `allow-codify-browser-focus`\n- `allow-codify-browser-resize`\n- `allow-codify-browser-close`\n- `allow-codify-browser-devtools-open`\n- `allow-codify-browser-devtools-close`\n- `allow-codify-browser-devtools-available`\n- `allow-codify-browser-devtools-state`",
+          "description": "Every command this app defines, as twenty-four named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser/ fails the build's test leg if the two lists ever differ. Permissions are not where a webview is decided: this set is referenced only by capabilities/default.json, whose `webviews` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.\n#### This permission set includes:\n\n- `allow-codify-get-engine-info`\n- `allow-codify-engine-status`\n- `allow-codify-engine-log`\n- `allow-codify-list-agent-configs`\n- `allow-codify-update-agent-config`\n- `allow-codify-repair-agent-configs`\n- `allow-codify-test-agent-connection`\n- `allow-codify-terminal-open`\n- `allow-codify-terminal-write`\n- `allow-codify-terminal-resize`\n- `allow-codify-terminal-close`\n- `allow-codify-machine-open`\n- `allow-codify-machine-write`\n- `allow-codify-machine-resize`\n- `allow-codify-machine-close`\n- `allow-codify-browser-open`\n- `allow-codify-browser-navigate`\n- `allow-codify-browser-focus`\n- `allow-codify-browser-resize`\n- `allow-codify-browser-close`\n- `allow-codify-browser-devtools-open`\n- `allow-codify-browser-devtools-close`\n- `allow-codify-browser-devtools-available`\n- `allow-codify-browser-devtools-state`",
           "type": "string",
           "const": "shell",
-          "markdownDescription": "Every command this app defines, as twenty named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser/ fails the build's test leg if the two lists ever differ. Permissions are not where a webview is decided: this set is referenced only by capabilities/default.json, whose `webviews` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.\n#### This permission set includes:\n\n- `allow-codify-get-engine-info`\n- `allow-codify-engine-status`\n- `allow-codify-engine-log`\n- `allow-codify-list-agent-configs`\n- `allow-codify-update-agent-config`\n- `allow-codify-repair-agent-configs`\n- `allow-codify-test-agent-connection`\n- `allow-codify-terminal-open`\n- `allow-codify-terminal-write`\n- `allow-codify-terminal-resize`\n- `allow-codify-terminal-close`\n- `allow-codify-browser-open`\n- `allow-codify-browser-navigate`\n- `allow-codify-browser-focus`\n- `allow-codify-browser-resize`\n- `allow-codify-browser-close`\n- `allow-codify-browser-devtools-open`\n- `allow-codify-browser-devtools-close`\n- `allow-codify-browser-devtools-available`\n- `allow-codify-browser-devtools-state`"
+          "markdownDescription": "Every command this app defines, as twenty-four named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser/ fails the build's test leg if the two lists ever differ. Permissions are not where a webview is decided: this set is referenced only by capabilities/default.json, whose `webviews` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.\n#### This permission set includes:\n\n- `allow-codify-get-engine-info`\n- `allow-codify-engine-status`\n- `allow-codify-engine-log`\n- `allow-codify-list-agent-configs`\n- `allow-codify-update-agent-config`\n- `allow-codify-repair-agent-configs`\n- `allow-codify-test-agent-connection`\n- `allow-codify-terminal-open`\n- `allow-codify-terminal-write`\n- `allow-codify-terminal-resize`\n- `allow-codify-terminal-close`\n- `allow-codify-machine-open`\n- `allow-codify-machine-write`\n- `allow-codify-machine-resize`\n- `allow-codify-machine-close`\n- `allow-codify-browser-open`\n- `allow-codify-browser-navigate`\n- `allow-codify-browser-focus`\n- `allow-codify-browser-resize`\n- `allow-codify-browser-close`\n- `allow-codify-browser-devtools-open`\n- `allow-codify-browser-devtools-close`\n- `allow-codify-browser-devtools-available`\n- `allow-codify-browser-devtools-state`"
         },
         {
           "description": "Closes a browser webview by tab id.",
@@ -259,6 +259,30 @@
           "type": "string",
           "const": "allow-codify-list-agent-configs",
           "markdownDescription": "Lists the eight role slots and their per-role configuration, with API keys redacted (docs/00 §6.4)."
+        },
+        {
+          "description": "Closes a machine and ends everything running in its jail.",
+          "type": "string",
+          "const": "allow-codify-machine-close",
+          "markdownDescription": "Closes a machine and ends everything running in its jail."
+        },
+        {
+          "description": "Opens a machine: a jailed shell on a registered workspace, which the assistant may also type into. The window chooses whether it has a network, once, here; nothing afterwards can change it, and there is no fallback to an unjailed shell.",
+          "type": "string",
+          "const": "allow-codify-machine-open",
+          "markdownDescription": "Opens a machine: a jailed shell on a registered workspace, which the assistant may also type into. The window chooses whether it has a network, once, here; nothing afterwards can change it, and there is no fallback to an unjailed shell."
+        },
+        {
+          "description": "Resizes one machine's pseudo-terminal so output wraps at its pane's width.",
+          "type": "string",
+          "const": "allow-codify-machine-resize",
+          "markdownDescription": "Resizes one machine's pseudo-terminal so output wraps at its pane's width."
+        },
+        {
+          "description": "Types into one machine, by its own id. A terminal's id is refused: machines are a separate registry.",
+          "type": "string",
+          "const": "allow-codify-machine-write",
+          "markdownDescription": "Types into one machine, by its own id. A terminal's id is refused: machines are a separate registry."
         },
         {
           "description": "Restores missing or malformed role slots to their defaults. Destructive to local state by design, so it is granted explicitly rather than swept in by a wildcard.",

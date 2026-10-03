@@ -1,6 +1,7 @@
 mod browser;
 mod engine_log;
 mod engine_protocol;
+mod machine;
 mod terminal;
 mod webview_bridge;
 
@@ -53,6 +54,7 @@ type SharedEngineState = Arc<Mutex<EngineState>>;
 /// a short synchronous section and none of it is held across an await, so a
 /// `tokio` lock would only add a scheduler dependency.
 type SharedTerminals = Arc<std::sync::Mutex<terminal::Terminals>>;
+type SharedMachines = Arc<std::sync::Mutex<machine::Machines>>;
 
 // ── Ending the app, whichever way it is asked to ─────────────────────────────
 
@@ -122,6 +124,7 @@ async fn release_children(app: &AppHandle) {
     // It runs before the lock dance on purpose: the engine lock may never be
     // acquired, and a shell leak must not depend on that.
     terminal::close_all(&app.state::<SharedTerminals>());
+    machine::close_all(&app.state::<SharedMachines>());
     match stop_engine(&app.state::<SharedEngineState>()).await {
         EngineStop::Graceful => println!("[Codify] Engine stopped inside its own bound"),
         EngineStop::Killed => println!(
@@ -688,6 +691,53 @@ async fn codify_terminal_close(
     terminal_id: String,
 ) -> Result<(), String> {
     terminal::close(&terminals, &terminal_id)
+}
+
+/// Open a machine on a registered workspace: a jailed shell the assistant may also type into.
+///
+/// Opening is the person's, and so is the network: `network` is chosen here and cannot be changed by
+/// anything afterwards (`docs/09` §14). The workspace is resolved through the engine like a terminal's,
+/// then refused if it would show a machine the person's secrets ([`machine::pin_workspace`]). There is
+/// no fallback to an unjailed shell: if the jail cannot be made, this is an error with a reason.
+#[tauri::command]
+async fn codify_machine_open(
+    engine: State<'_, SharedEngineState>,
+    machines: State<'_, SharedMachines>,
+    app: tauri::AppHandle,
+    workspace_id: String,
+    cols: u16,
+    rows: u16,
+    network: bool,
+) -> Result<String, String> {
+    let root = workspace_root_for(&engine, &workspace_id).await?;
+    machine::open(app, &machines, Some(&root), cols, rows, network)
+}
+
+#[tauri::command]
+async fn codify_machine_write(
+    machines: State<'_, SharedMachines>,
+    machine_id: String,
+    data: String,
+) -> Result<(), String> {
+    machine::write(&machines, &machine_id, &data)
+}
+
+#[tauri::command]
+async fn codify_machine_resize(
+    machines: State<'_, SharedMachines>,
+    machine_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    machine::resize(&machines, &machine_id, cols, rows)
+}
+
+#[tauri::command]
+async fn codify_machine_close(
+    machines: State<'_, SharedMachines>,
+    machine_id: String,
+) -> Result<(), String> {
+    machine::close(&machines, &machine_id)
 }
 
 /// Open (embed) a browser page for a tab, or navigate the one that exists.
@@ -1818,6 +1868,9 @@ pub fn run() {
         .manage(SharedTerminals::new(std::sync::Mutex::new(
             terminal::Terminals::default(),
         )))
+        .manage(SharedMachines::new(std::sync::Mutex::new(
+            machine::Machines::default(),
+        )))
         // The one channel a `browser-*` webview may speak on. A page needs no
         // capability to reach it — which is the point: it is not a Tauri
         // command, it carries text only, and `webview_bridge::deliver` drops
@@ -1966,6 +2019,10 @@ pub fn run() {
             codify_terminal_write,
             codify_terminal_resize,
             codify_terminal_close,
+            codify_machine_open,
+            codify_machine_write,
+            codify_machine_resize,
+            codify_machine_close,
             codify_browser_open,
             codify_browser_navigate,
             codify_browser_focus,

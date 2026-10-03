@@ -1,6 +1,7 @@
 import React from "react";
 import {
   Archive,
+  Box,
   FolderPlus,
   Globe,
   MessageSquareText,
@@ -67,6 +68,8 @@ export interface SidebarProps {
   /** These shell actions remain available at the foot of the panel. */
   onOpenBrowser?: () => void;
   onOpenTerminal?: () => void;
+  /** Open a machine with no network. The one with a network is opened from the command palette, on purpose. */
+  onOpenMachine?: () => void;
   onOpenSettings?: () => void;
   /** Set by the shell when the engine is unreachable, so the list can say so. */
   loading?: boolean;
@@ -226,6 +229,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onArchive,
   onOpenBrowser,
   onOpenTerminal,
+  onOpenMachine,
   onOpenSettings,
   loading = false,
 }) => {
@@ -453,6 +457,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <TerminalSquare className="w-3 h-3 flex-shrink-0" />
             <span className="text-2xs truncate">Terminal</span>
+          </Button>
+        )}
+        {onOpenMachine && (
+          <Button
+            tone="subtle"
+            size="sm"
+            onClick={onOpenMachine}
+            title="Machine — a jailed shell. Your project is read-only inside it, and it has no network"
+            className="flex-1 min-w-0 flex-col gap-1"
+          >
+            <Box className="w-3 h-3 flex-shrink-0" />
+            <span className="text-2xs truncate">Machine</span>
           </Button>
         )}
         {onOpenSettings && (

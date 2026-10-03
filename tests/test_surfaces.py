@@ -274,8 +274,13 @@ class TestState(BridgeCase):
 
 
 class TestTheDefaultTable(unittest.TestCase):
-    def test_the_editor_is_the_one_surface_and_has_exactly_the_three_ops_the_tools_use(self) -> None:
-        self.assertEqual({"editor": ["edit", "open", "read"]}, {k: sorted(v) for k, v in SurfaceBridge().state()["surfaces"].items()})
+    def test_the_editor_and_the_machine_are_the_surfaces_and_each_has_exactly_the_ops_its_tools_use(self) -> None:
+        # Pinned on purpose: a surface or an op added to the default table is a new thing the assistant can ask the window to
+        # do, and it should take an edit here (and in `tests/test_machine_surface.py`, which says why the machine has no `open`).
+        self.assertEqual(
+            {"editor": ["edit", "open", "read"], "machine": ["key", "read", "run"]},
+            {k: sorted(v) for k, v in SurfaceBridge().state()["surfaces"].items()},
+        )
 
 
 if __name__ == "__main__":

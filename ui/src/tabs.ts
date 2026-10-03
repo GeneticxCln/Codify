@@ -8,7 +8,7 @@
  * subtly wrong and impossible to see in markup, so it lives here where
  * `node --test` can reach it directly.
  *
- * Four kinds of tab share one strip because the user thinks of them the same
+ * Five kinds of tab share one strip because the user thinks of them the same
  * way: "what have I got open". **A chat tab is a project with a thread in it**,
  * not a thread: one project per tab, and a project's threads are opened *into*
  * its tab rather than each taking a tab of their own. A terminal and a browser
@@ -16,7 +16,9 @@
  * tab's back/forward stack lives *on the tab* (`history`) and dies with it,
  * rather than in a side table App has to remember to prune. **An editor tab is a
  * file in a workspace** (`path`): opening one that is already open focuses it,
- * and like a terminal it is local to this window — see [`isLocalTab`].
+ * and like a terminal it is local to this window — see [`isLocalTab`]. **A machine tab is a jailed shell**
+ * (`src-tauri/src/machine.rs`): local too, and bound to nothing else — its id is the shell's own, and whether it
+ * has a network is fixed on the tab when a person opens it (`network`).
  */
 import type { BrowserHistory } from "./browserHistory";
 import { emptyHistory, hostOf, visit } from "./browserHistory";
@@ -29,7 +31,7 @@ import { UNTITLED_THREAD_TITLE } from "./threadTitle";
 export { UNTITLED_THREAD_TITLE };
 
 /** What a tab is. Named by the strip, resolved by the kind. */
-export type TabKind = "chat" | "terminal" | "browser" | "editor";
+export type TabKind = "chat" | "terminal" | "browser" | "editor" | "machine";
 
 export interface Tab {
   id: string;
@@ -86,7 +88,7 @@ export interface Tab {
    * reach the shell: `terminal::close` is a no-op for an id it does not know.
    */
   ptyId?: string;
-  /** A terminal tab whose shell has finished. The scrollback stays. */
+  /** A terminal or machine tab whose shell has finished. The scrollback (or the screen) stays. */
   exited?: boolean;
   /**
    * The folder this tab belongs to — the workspace it was opened in.
@@ -110,6 +112,12 @@ export interface Tab {
    * pane that shows it, for the reason a terminal's scrollback lives above its pane.
    */
   path?: string;
+  /**
+   * Whether a machine tab's jail shares the host's network. Chosen by the person when they open the machine and **never
+   * changed after**: a running jail cannot be moved between network namespaces, so "switch it on" is a new machine. It is
+   * on the tab, and in the tab's title, because it is the one fact about a machine a person must not have to look for.
+   */
+  network?: boolean;
 }
 
 export interface TabState {
@@ -434,14 +442,14 @@ export function closeConversation(
 /**
  * A tab that belongs to this window alone: never remembered, never keyed, never sent to the engine.
  *
- * A terminal is a live process, and an editor holds text a person has not saved. Neither is something to write into
+ * A terminal and a machine are live processes, and an editor holds text a person has not saved. None is something to write into
  * `localStorage` or a shared table, and the engine's `/shell/tabs` closes `kind` to `chat | browser` (a row of any other
  * kind is a 422 on an older engine and a 500 reading a newer database). The three places that decide what is remembered
  * (`tabPersistence.persistedTab`, `layoutSync.ensureKeys`, `layoutSync.planChanges`) all ask this one question, because
  * each of them used to treat "not a terminal, not a chat" as a browser, which would have written an editor down as one.
  */
 export function isLocalTab(tab: Tab): boolean {
-  return tab.kind === "terminal" || tab.kind === "editor";
+  return tab.kind === "terminal" || tab.kind === "editor" || tab.kind === "machine";
 }
 
 /** The editor tab showing a file, if one is already open. */
@@ -588,6 +596,37 @@ export function openTerminalTab(
     ptyId,
     workspaceId,
   });
+}
+
+/**
+ * A machine tab, named by the shell.
+ *
+ * The id is the machine's own (`mach-N`), for the reason a terminal's is the PTY's: the pane needs that string for every
+ * write, resize and close, and a second id beside it would be a mapping with no payoff. The title says whether the jail
+ * has a network, because that is the fact a person has to see at a glance and cannot afford to forget.
+ */
+export function openMachineTab(
+  state: TabState,
+  machineId: string,
+  workspaceId: string,
+  network: boolean
+): TabState {
+  return openTab(state, {
+    id: machineId,
+    kind: "machine",
+    title: network ? "Machine · network" : "Machine",
+    workspaceId,
+    network,
+  });
+}
+
+/** Mark a machine tab's shell as finished, leaving its screen alone. */
+export function markMachineExited(state: TabState, id: string): TabState {
+  if (!state.tabs.some((t) => t.id === id && t.kind === "machine")) return state;
+  return {
+    ...state,
+    tabs: state.tabs.map((t) => (t.id === id ? { ...t, exited: true } : t)),
+  };
 }
 
 /** Mark a terminal tab's shell as finished, leaving its scrollback alone. */
