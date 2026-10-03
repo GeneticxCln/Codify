@@ -69,6 +69,11 @@ test("the payload scan actually found the pane commands", () => {
     "codify_terminal_write",
     "codify_terminal_resize",
     "codify_terminal_close",
+    "codify_machine_open",
+    "codify_machine_write",
+    "codify_machine_resize",
+    "codify_machine_reset",
+    "codify_machine_close",
   ]) {
     assert.ok(
       commands.includes(expected),
@@ -105,6 +110,11 @@ test("the pane commands send the keys their Rust signatures name", () => {
     codify_terminal_write: ["terminalId", "data"],
     codify_terminal_resize: ["terminalId", "cols", "rows"],
     codify_terminal_close: ["terminalId"],
+    codify_machine_open: ["workspaceId", "cols", "rows", "network"],
+    codify_machine_write: ["machineId", "data"],
+    codify_machine_resize: ["machineId", "cols", "rows"],
+    codify_machine_reset: ["machineId", "cols", "rows"],
+    codify_machine_close: ["machineId"],
   };
   for (const [command, keys] of Object.entries(expected)) {
     const found = payloads.find((p) => p.command === command);
@@ -135,6 +145,11 @@ test("the Rust signatures are the snake_case half of the same names", () => {
     ["codify_terminal_write", "terminal_id"],
     ["codify_terminal_resize", "terminal_id"],
     ["codify_terminal_close", "terminal_id"],
+    ["codify_machine_open", "workspace_id"],
+    ["codify_machine_write", "machine_id"],
+    ["codify_machine_resize", "machine_id"],
+    ["codify_machine_reset", "machine_id"],
+    ["codify_machine_close", "machine_id"],
   ];
   for (const [command, rustParam] of pairs) {
     const body = rust

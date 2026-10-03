@@ -1848,10 +1848,12 @@ surface to surface is `engine/surfaces.py`:
   tool says so at once; a question that goes unanswered for `ASK_TIMEOUT_S` (15 s) says what to do instead. An op may name
   a timeout of its own (`Op.timeout_s`, read when the question is asked): the machine's `run` types a command and waits for
   its output to settle, so it is given 45 s against a wait of at most 30.
-- **The `machine` surface** (`engine/surface_machine.py`) has three ops, `read`, `run` and `key`, and **no `open`**: opening
+- **The `machine` surface** (`engine/surface_machine.py`) has four ops, `read`, `run`, `key` and `reset`, and **no `open`**: opening
   a machine is a person's act, as it is for a terminal, and a table with no entry for it is how that is true. `run` refuses a
   command with a control character (that is a key pressed without a name; `key` takes one of twelve fixed names and the
-  engine never sends bytes). What a machine prints is program output, so every answer is framed as a quotation before it
+  engine never sends bytes). `reset` takes a machine's id and nothing else and remakes that machine from the recipe the person
+  opened it with (it has a timeout of its own: it ends a jail, makes one and waits for its prompt); every machine the engine is
+  told about says whether its project is the machine's own copy. What a machine prints is program output, so every answer is framed as a quotation before it
   arrives. `tests/test_machine_surface.py` holds all of it, including that the modules which define this door import nothing
   that can start a process or write a file (docs/00 §6.6).
 - **Questions and answers, never authority.** There is no path from this module to the filesystem, the sandbox, the boot

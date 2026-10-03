@@ -61,6 +61,7 @@ import {
   attachGoalToConversation,
   closeBrowserWebview,
   closeMachine,
+  resetMachine,
   writeMachine,
   closeTerminal,
   navigateBrowserWebview,
@@ -125,6 +126,7 @@ import {
   emptyTabs,
   focusTab,
   markMachineExited,
+  markMachineReset,
   markTerminalExited,
   openBrowserTab,
   openConversation,
@@ -2090,9 +2092,12 @@ export const App: React.FC = () => {
         return null;
       }
       try {
-        const id = await openMachine(workspaceId, DEFAULT_GRID.cols, DEFAULT_GRID.rows, network);
+        const opened = await openMachine(workspaceId, DEFAULT_GRID.cols, DEFAULT_GRID.rows, network);
+        const { id } = opened;
         machineScreens.open(id, { cols: DEFAULT_GRID.cols, rows: DEFAULT_GRID.rows });
-        setTabState((prev) => openMachineTab(prev, id, workspaceId, network));
+        setTabState((prev) =>
+          openMachineTab(prev, id, workspaceId, network, { copyOnWrite: opened.copy_on_write, note: opened.note })
+        );
         return id;
       } catch (err: any) {
         setError(readRejection(err, "Could not open a machine"));
@@ -2100,6 +2105,39 @@ export const App: React.FC = () => {
       }
     },
     [machineScreens],
+  );
+  // Start a machine again from a clean project (`docs/09` §14). It remakes the machine from the recipe the person opened it
+  // with, so the network and the project are theirs and are not touched; the screen is cleared by the shell's own output, the
+  // store and the tab are told the shell is running again, and the new PTY is given the size the pane last announced (the
+  // pane remembers what it told the old one and would not say it twice). Used by the pane's button, after a confirm, and by
+  // the assistant's surface, which is logged on the engine's side.
+  const resetMachineTab = useCallback(
+    async (id: string): Promise<{ copyOnWrite: boolean }> => {
+      const size = machineScreens.size(id) ?? { cols: DEFAULT_GRID.cols, rows: DEFAULT_GRID.rows };
+      const opened = await resetMachine(id, size.cols, size.rows);
+      machineScreens.revive(id);
+      setTabState((prev) => markMachineReset(prev, id, { copyOnWrite: opened.copy_on_write, note: opened.note }));
+      return { copyOnWrite: opened.copy_on_write };
+    },
+    [machineScreens],
+  );
+  const handleResetMachine = useCallback(
+    async (id: string) => {
+      if (
+        !window.confirm(
+          "Reset this machine?\n\nEverything running in it stops and everything it changed in the project is discarded. " +
+            "The project on your computer is not touched.",
+        )
+      ) {
+        return;
+      }
+      try {
+        await resetMachineTab(id);
+      } catch (err: any) {
+        setError(readRejection(err, "Could not reset that machine"));
+      }
+    },
+    [resetMachineTab],
   );
   const handleOpenMachine = useCallback(
     async (network: boolean) => {
@@ -2225,6 +2263,7 @@ export const App: React.FC = () => {
             workspaceId: t.workspaceId as string,
             exited: Boolean(t.exited),
             network: Boolean(t.network),
+            copyOnWrite: Boolean(t.copyOnWrite),
           }));
         const split = live.drawnSplit;
         const shown = split ? [split.left.id, split.right.id] : active ? [active] : [];
@@ -2232,10 +2271,11 @@ export const App: React.FC = () => {
         return { machines, shown, focused };
       },
       write: (id, data) => writeMachine(id, data),
+      reset: (id) => resetMachineTab(id),
       sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
       now: Date.now,
     }),
-    [],
+    [resetMachineTab],
   );
 
   // The window's half of the surface bridge (`engine/surfaces.py`): poll the engine for questions about what is on screen
@@ -3669,6 +3709,9 @@ export const App: React.FC = () => {
       machineId={tab.id}
       network={Boolean(tab.network)}
       exited={tab.exited}
+      copyOnWrite={Boolean(tab.copyOnWrite)}
+      projectNote={tab.projectNote}
+      onReset={() => void handleResetMachine(tab.id)}
       screens={machineScreens}
       autoFocus={autoFocus}
     />

@@ -45,8 +45,10 @@ from engine.surface_editor import format_read as format_editor_read
 from engine.surface_machine import (
     MachineKeyResult,
     MachineReadResult,
+    MachineResetResult,
     MachineRunResult,
     format_key,
+    format_reset,
     format_run,
 )
 from engine.surface_machine import format_read as format_machine_read
@@ -232,6 +234,7 @@ class ConductorTools:
         'read_machine',
         'run_in_machine',
         'key_in_machine',
+        'reset_machine',
         'recall',
         'recall_threads',
         'recon',
@@ -587,10 +590,10 @@ class ConductorTools:
         """Type one command into the person's machine and bring back what it printed.
 
         **This is the one place a command runs without `validate_argv`**, on purpose and only because of where it runs: a
-        jail that shows the workspace read-only, holds no credentials, has no capabilities and has no network unless the
-        person opened it with one (`src-tauri/src/machine.rs`, docs/00 §6.6). It is never `SandboxService`, it cannot open
-        a machine, and nothing it types reaches the person's files. So it carries none of the gates `run_command` does: the
-        jail is the containment. The command is logged, capped, because this is the door with no allowlist and the log is
+        jail whose view of the project is copy-on-write (the person's files are never written), holds no credentials, has
+        no capabilities and has no network unless the person opened it with one (`src-tauri/src/machine.rs`, docs/00
+        §6.6). It is never `SandboxService`, it cannot open a machine, and nothing it types reaches the person's files.
+        So it carries none of the gates `run_command` does: the jail is the containment. The command is logged, capped, because this is the door with no allowlist and the log is
         how a person finds out what went through it.
         """
         surfaces = self.service.surfaces
@@ -622,6 +625,26 @@ class ConductorTools:
         except SurfaceRefused as exc:
             return f"That key was not pressed in the machine. {exc}"
         return format_key(cast(MachineKeyResult, result))
+
+    async def reset_machine(self, args: dict[str, Any]) -> str:
+        """Throw away what the person's machine has done and start it again from a clean project.
+
+        Recovery, and the only thing here that ends something the person may be using, so it is logged. It remakes the
+        machine from the recipe it was opened with (the same project, the same network), so it cannot widen anything and
+        cannot open a machine that is not there: the window refuses an id it does not hold.
+        """
+        surfaces = self.service.surfaces
+        if surfaces is None:
+            return _NO_MACHINE
+        self.service._log(self.goal_id, None, "info", "conductor reset the machine")
+        asked = {"machine": args.get("machine")}
+        try:
+            result = await surfaces.ask("machine", "reset", asked, workspace_id=self.goal.workspace_id)
+        except SurfaceUnavailable as exc:
+            return f"The machine was not reset. {exc}"
+        except SurfaceRefused as exc:
+            return f"The machine was not reset. {exc}"
+        return format_reset(cast(MachineResetResult, result))
 
     async def recall(self, args: dict[str, Any]) -> str:
         """What this workspace has already learned the hard way.

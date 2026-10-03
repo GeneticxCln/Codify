@@ -1,8 +1,9 @@
 //! A machine: a jailed Linux shell the assistant may type into, and the boundary around it.
 //!
 //! **What this is.** A disposable userland in a `bubblewrap` jail — its own PID, mount, network, IPC,
-//! UTS and user namespaces, a read-only view of the system, a read-only view of the workspace at
-//! `/work`, and a scratch home that is a size-capped tmpfs thrown away with the machine. The window
+//! UTS and user namespaces, a read-only view of the system, a *copy-on-write* view of the workspace at
+//! `/work` (the person's files are the lower layer and are never written: [`layer`]), and a scratch home
+//! that is a size-capped tmpfs thrown away with the machine. The window
 //! shows it in the same xterm pane a terminal uses, and the assistant gets eyes and hands on it through
 //! the surface bridge (`docs/09` §14). It shares the host's **kernel**: it is not a separate machine,
 //! and nothing here says otherwise.
@@ -26,9 +27,14 @@
 //!   account, which is the one outcome this exists to rule out.
 //! * **The environment is built, not inherited.** `--clearenv`, then a short fixed list. No token, no key,
 //!   no `CODIFY_*`, nothing the shell was started with.
-//! * **The workspace is read-only, and so is everything else that is bound.** There is no `--bind`
-//!   (read-write) anywhere in [`jail_argv`]. The writable places are two tmpfs mounts that die with the
-//!   machine. Nothing leaves the jail except as text on the screen: invariant 9 is not amended.
+//! * **The person's files are never written, and nothing else that is bound can be.** The system and the
+//!   workspace are bound read-only. What the machine changes under `/work` goes to an overlay's upper layer,
+//!   a size-capped tmpfs in the machine's own mount namespace ([`layer`]), so it is the *machine's* copy of
+//!   the project that changes and it is gone when the machine is. The one writable bind in [`jail_argv`] is
+//!   that overlay's merged directory, and the tests do not read that off the flags: they write through it in
+//!   a real jail and then look at the host's files. Where this host cannot make the layer the workspace is
+//!   bound read-only, as it was before, and the machine says so. Nothing leaves the jail except as text on the
+//!   screen: invariant 9 is not amended.
 //! * **No capabilities, and not root.** `--cap-drop ALL`; when the shell runs as uid 0 the jail maps to
 //!   uid 1000 instead, so "root in the jail" is never host root.
 //! * **A workspace that would expose the person's secrets is refused.** `/`, `$HOME` or an ancestor of
@@ -45,13 +51,20 @@
 //!   machine.
 //! * **No seccomp filter.** The namespaces and the empty capability set are real; the host kernel's
 //!   whole syscall surface is still reachable from inside. A filter is the next hardening step.
-//! * **No memory limit.** `ulimit` bounds processes and core files; a cgroup needs systemd or root.
-//!   The tmpfs sizes bound what the machine can keep, not what it can run.
+//! * **Memory is watched, not capped by the kernel.** `ulimit` bounds processes, CPU per process, file size
+//!   and core files, the tmpfs sizes bound what the machine can keep, and [`guard`] ends a machine whose
+//!   processes add up to more than its share, by polling. A cgroup would be stronger and needs systemd or
+//!   root. A kernel bug is not contained by any of this: the jail has no kernel of its own to fail.
 //! * **No `--new-session`.** It would detach the jail from the PTY this module owns, and with it job
 //!   control and Ctrl-C. The terminal-injection it guards against (`TIOCSTI`) reaches only this PTY's
 //!   own input queue, which belongs to the jail already.
 
+mod guard;
+mod layer;
+
 use crate::terminal::{self, Session};
+use guard::Limits;
+use layer::{ProjectNote, Stage};
 use portable_pty::CommandBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -112,7 +125,7 @@ const JAIL_ENV: [(&str, &str); 8] = [
     ("LANG", "C.UTF-8"),
     // A prompt the assistant can recognise on the screen: where a command ends and the next can begin.
     ("PS1", "[machine] \\w \\$ "),
-    // The workspace is read-only, so a bytecode write would only fail quietly.
+    // Bytecode written next to the code would only fill the project layer, which is memory.
     ("PYTHONDONTWRITEBYTECODE", "1"),
 ];
 
@@ -138,12 +151,26 @@ const ETC_READ_ONLY: [&str; 13] = [
 /// What a jail is built from, once the person's choices and the workspace are settled.
 #[derive(Debug, Clone)]
 pub(crate) struct JailSpec {
-    /// The workspace, absolute and already resolved. It is bound read-only at [`WORK`].
+    /// The workspace, absolute and already resolved. It is what [`WORK`] shows, one way or the other.
     pub workspace: PathBuf,
     /// Whether the machine shares the host's network. Off unless the person opened it with network.
     pub network: bool,
     /// The effective uid of the shell, to decide whether the jail may map to it.
     pub uid: u32,
+    /// How the workspace is shown at [`WORK`].
+    pub project: ProjectView,
+    /// What the shell inside is allowed to use. The kernel-enforced part goes into the jail's own argv.
+    pub limits: Limits,
+}
+
+/// How the project appears at `/work`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProjectView {
+    /// The workspace itself, bound read-only.
+    ReadOnly,
+    /// The merged directory of an overlay the launcher mounted in front of the jail: the workspace is its
+    /// read-only lower layer, so what is written lands in the machine's own layer ([`layer`]).
+    CopyOnWrite { merged: PathBuf },
 }
 
 /// One top-level system directory, as the host has it.
@@ -197,7 +224,8 @@ impl HostLayout {
 
 /// The arguments to `bwrap`, in full. A pure function: no spawning, no filesystem, no environment.
 ///
-/// Read it as the jail's whole definition. There is no `--bind` (read-write) in it, no bind of
+/// Read it as the jail's whole definition. The only `--bind` (read-write) in it is the project layer's
+/// merged directory, when there is one, and it is bound at `/work` and nowhere else. There is no bind of
 /// `$HOME`, the keyring, the display, D-Bus or Codify's state, and `--share-net` appears only for a
 /// machine the person opened with network.
 pub(crate) fn jail_argv(spec: &JailSpec, host: &HostLayout) -> Vec<String> {
@@ -210,8 +238,11 @@ pub(crate) fn jail_argv(spec: &JailSpec, host: &HostLayout) -> Vec<String> {
         push(&["--share-net"]);
     }
     push(&["--die-with-parent", "--cap-drop", "ALL"]);
-    if spec.uid == 0 {
+    let layered = matches!(spec.project, ProjectView::CopyOnWrite { .. });
+    if spec.uid == 0 || layered {
         // Root in a user namespace that maps to host root is still host root for any file it can reach.
+        // Behind the project layer the launcher's namespace maps the person to root, so the jail is told
+        // what to be rather than left to inherit it.
         let id = UNPRIVILEGED_ID.to_string();
         push(&["--uid", &id, "--gid", &id]);
     }
@@ -240,14 +271,22 @@ pub(crate) fn jail_argv(spec: &JailSpec, host: &HostLayout) -> Vec<String> {
     let home = HOME_BYTES.to_string();
     push(&["--size", &tmp, "--tmpfs", "/tmp"]);
     push(&["--size", &home, "--tmpfs", HOME]);
-    push(&["--ro-bind", &spec.workspace.to_string_lossy(), WORK]);
+    match &spec.project {
+        ProjectView::ReadOnly => push(&["--ro-bind", &spec.workspace.to_string_lossy(), WORK]),
+        ProjectView::CopyOnWrite { merged } => push(&["--bind", &merged.to_string_lossy(), WORK]),
+    }
     push(&["--chdir", WORK]);
 
-    // The shell, behind the two limits `bwrap` has no flag for. `bash` where the host has it (its
-    // readline is what a person expects), `sh` where it does not.
+    // The shell, behind the limits `bwrap` has no flag for: no core files, no fork bomb, no one process
+    // that burns CPU for ever, no single huge file. `ulimit -f` counts 1024-byte blocks in bash and
+    // 512-byte blocks in dash, so the cap is a gigabyte or half of one, and either is the point.
+    // `bash` where the host has it (its readline is what a person expects), `sh` where it does not.
     let wrapper = format!(
         "ulimit -c 0 2>/dev/null; ulimit -u {NPROC} 2>/dev/null; \
-         b=$(command -v bash) && exec \"$b\"; exec sh"
+         ulimit -t {cpu} 2>/dev/null; ulimit -f {blocks} 2>/dev/null; \
+         b=$(command -v bash) && exec \"$b\"; exec sh",
+        cpu = spec.limits.cpu_secs,
+        blocks = spec.limits.file_bytes / 1024,
     );
     push(&["/bin/sh", "-c", &wrapper]);
     a
@@ -366,12 +405,53 @@ pub(crate) fn pin_workspace(root_path: Option<&str>) -> Result<PathBuf, String> 
     Ok(resolved)
 }
 
+/// What was chosen before a machine existed, and so everything needed to make the same one again. A reset
+/// is `prepare` over the same recipe: the same project, the same network, the same limits, a new jail.
+#[derive(Debug, Clone)]
+pub(crate) struct Recipe {
+    pub root_path: Option<String>,
+    pub network: bool,
+    pub path_var: String,
+    /// The effective uid, or `None` to ask the OS. A parameter so a test can be any user.
+    pub uid: Option<u32>,
+    pub limits: Limits,
+    /// Where the project layer's empty mount point is made, or `None` for a read-only project by request.
+    /// A host that cannot make the layer is read-only whatever this says.
+    pub layer_base: Option<PathBuf>,
+}
+
+/// A machine that is running: its PTY, what made it, and which generation of it this is.
+struct Entry {
+    session: Session,
+    recipe: Recipe,
+    stage: Option<Stage>,
+    /// Which start this is. A reset replaces an entry with the next generation, and the end of the old
+    /// one's output is not the machine exiting.
+    epoch: u64,
+}
+
 /// The machines the shell holds. Its own type, so Tauri's state lookup cannot hand a terminal's
 /// registry to a machine's command.
 #[derive(Default)]
 pub struct Machines {
-    sessions: HashMap<String, Session>,
+    entries: HashMap<String, Entry>,
     seq: u64,
+    epoch: u64,
+}
+
+/// Where a machine's text goes, and who hears that it ended. Shared by the thread that reads the PTY and
+/// the one that watches memory, so both can say something to the pane.
+pub(crate) type TextSink = Arc<dyn Fn(&str, String) + Send + Sync>;
+pub(crate) type ExitSink = Arc<dyn Fn(String) + Send + Sync>;
+
+/// What opening a machine tells the window: its id, and whether the project under `/work` is its own copy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenedMachine {
+    pub id: String,
+    /// Changes under `/work` stay in this machine and are discarded with it.
+    pub copy_on_write: bool,
+    /// When they are not: why this host could not make the layer.
+    pub note: Option<String>,
 }
 
 fn missing_bwrap() -> String {
@@ -385,70 +465,282 @@ fn read_sysctl(path: &str) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+/// A machine, ready to start: the program, and the layer's mount point if there is one.
+pub(crate) struct Launch {
+    pub cmd: CommandBuilder,
+    pub stage: Option<Stage>,
+    pub project: ProjectNote,
+}
+
+/// The layer, or the reason there is none. Every step that can fail says what it was, because the person
+/// is told: a read-only project is a decision the host made, and it should not be a mystery.
+fn make_layer(base: &Path, workspace: &Path, path_var: &str) -> Result<(Stage, PathBuf), String> {
+    layer::overlay_safe(workspace)
+        .map_err(|why| format!("this project's {}", why.replacen("its ", "", 1)))?;
+    let unshare = layer::find_on_path("unshare", path_var)
+        .ok_or_else(|| "unshare (util-linux) is not installed".to_string())?;
+    if !Path::new("/bin/sh").exists() {
+        return Err("there is no /bin/sh to run the layer's mount step".to_string());
+    }
+    layer::probe(base, &unshare, path_var)?;
+    let stage = Stage::create(base)?;
+    Ok((stage, unshare))
+}
+
 /// Everything about a machine that is settled before a process exists: the program, the jail and what
 /// refuses it. Split from [`open`] so a test can drive the real jail with a closure instead of an
 /// `AppHandle`, the way `terminal::pump_output` is driven.
-pub(crate) fn prepare(
-    root_path: Option<&str>,
-    network: bool,
-    path_var: &str,
-    uid: Option<u32>,
-) -> Result<CommandBuilder, String> {
-    let workspace = pin_workspace(root_path)?;
-    let bwrap = find_bwrap(path_var).ok_or_else(missing_bwrap)?;
-    // `uid` is a parameter so a test can be any user; production passes `None` and asks the OS.
+pub(crate) fn prepare(recipe: &Recipe) -> Result<Launch, String> {
+    let workspace = pin_workspace(recipe.root_path.as_deref())?;
+    let bwrap = find_bwrap(&recipe.path_var).ok_or_else(missing_bwrap)?;
     // SAFETY: `geteuid` takes no arguments, cannot fail and touches no memory.
-    let uid = uid.unwrap_or_else(|| unsafe { libc::geteuid() });
+    let uid = recipe.uid.unwrap_or_else(|| unsafe { libc::geteuid() });
     if let Some(why) = userns_refusal(uid == 0, read_sysctl) {
         return Err(why);
     }
+
+    let (view, stage, project, unshare) = match &recipe.layer_base {
+        None => (
+            ProjectView::ReadOnly,
+            None,
+            ProjectNote::read_only("a read-only project was asked for"),
+            None,
+        ),
+        Some(base) => match make_layer(base, &workspace, &recipe.path_var) {
+            Ok((stage, unshare)) => (
+                ProjectView::CopyOnWrite {
+                    merged: stage.merged(),
+                },
+                Some(stage),
+                ProjectNote::layered(),
+                Some(unshare),
+            ),
+            Err(why) => (
+                ProjectView::ReadOnly,
+                None,
+                ProjectNote::read_only(why),
+                None,
+            ),
+        },
+    };
     let spec = JailSpec {
-        workspace,
-        network,
+        workspace: workspace.clone(),
+        network: recipe.network,
         uid,
+        project: view,
+        limits: recipe.limits.clone(),
     };
     let argv = jail_argv(&spec, &HostLayout::detect());
-    // The one `CommandBuilder` in this module, and it is `bwrap`'s. The shell it starts is named in the
-    // jail's own argv, inside the namespaces; nothing here can start one outside them.
-    let mut cmd = CommandBuilder::new(bwrap);
-    cmd.args(argv);
-    // `bwrap` itself needs nothing from the shell's environment; the jailed process gets its own.
+
+    // The one `CommandBuilder` in this module. It starts `bwrap`, or, behind the project layer, `unshare`
+    // running the fixed mount script that then `exec`s `bwrap` with this same argv. The shell it starts is
+    // named in the jail's own argv, inside the namespaces; nothing here can start one outside them.
+    let (program, args): (PathBuf, Vec<String>) = match (&stage, &unshare) {
+        (Some(stage), Some(unshare)) => (
+            unshare.clone(),
+            layer::launch_args(
+                stage.dir(),
+                recipe.limits.layer_bytes,
+                &workspace,
+                &bwrap,
+                &argv,
+            ),
+        ),
+        _ => (bwrap, argv),
+    };
+    let mut cmd = CommandBuilder::new(program);
+    cmd.args(args);
+    // Neither program needs anything from the shell's environment; the jailed process gets its own.
     cmd.env_clear();
-    cmd.env("PATH", path_var);
-    Ok(cmd)
+    cmd.env("PATH", &recipe.path_var);
+    Ok(Launch {
+        cmd,
+        stage,
+        project,
+    })
+}
+
+/// Start a machine's process under `id` and the threads that serve it, with `guard` held. The one place a
+/// machine's process is started, for a machine that is opening and for one that is being reset.
+fn start(
+    guard: &mut Machines,
+    machines: &Arc<Mutex<Machines>>,
+    id: &str,
+    recipe: &Recipe,
+    cols: u16,
+    rows: u16,
+    on_text: &TextSink,
+    on_exit: &ExitSink,
+) -> Result<ProjectNote, String> {
+    let Launch {
+        cmd,
+        stage,
+        project,
+    } = prepare(recipe)?;
+    let (session, reader) = match terminal::spawn_pty(cmd, cols, rows) {
+        Ok(started) => started,
+        Err(why) => {
+            if let Some(stage) = stage {
+                stage.release();
+            }
+            return Err(why);
+        }
+    };
+    let pid = session.child.process_id();
+    guard.epoch += 1;
+    let epoch = guard.epoch;
+    guard.entries.insert(
+        id.to_string(),
+        Entry {
+            session,
+            recipe: recipe.clone(),
+            stage,
+            epoch,
+        },
+    );
+
+    let current = {
+        let (machines, id) = (machines.clone(), id.to_string());
+        move || {
+            machines
+                .lock()
+                .map(|m| m.entries.get(&id).map(|e| e.epoch))
+                .unwrap_or(None)
+        }
+    };
+    let (text, exit) = (on_text.clone(), on_exit.clone());
+    let (read_id, read_current) = (id.to_string(), current.clone());
+    std::thread::spawn(move || {
+        terminal::pump_output(reader, |chunk| text(&read_id, chunk));
+        // A machine that was reset did not exit: its replacement is already there with a later epoch.
+        // One that was closed has no entry at all, and that has always been reported as an exit.
+        match read_current() {
+            Some(now) if now != epoch => {}
+            _ => exit(read_id),
+        }
+    });
+    if let Some(pid) = pid {
+        let (watch_id, say) = (id.to_string(), on_text.clone());
+        let limits = recipe.limits.clone();
+        std::thread::spawn(move || {
+            guard::watch(
+                pid,
+                &limits,
+                || current() == Some(epoch),
+                |line| say(&watch_id, line),
+            );
+        });
+    }
+    Ok(project)
 }
 
 /// A machine, started and registered; its output goes to `on_text` and its end to `on_exit`.
 pub(crate) fn open_with_sink(
     machines: &Arc<Mutex<Machines>>,
-    cmd: CommandBuilder,
+    recipe: &Recipe,
     cols: u16,
     rows: u16,
-    mut on_text: impl FnMut(&str, String) + Send + 'static,
-    on_exit: impl FnOnce(String) + Send + 'static,
-) -> Result<String, String> {
-    {
-        let guard = machines.lock().map_err(|_| "machine state poisoned")?;
-        if guard.sessions.len() >= MAX_MACHINES {
-            return Err(format!(
-                "{MAX_MACHINES} machines are already open — close one first"
-            ));
+    on_text: TextSink,
+    on_exit: ExitSink,
+) -> Result<OpenedMachine, String> {
+    let mut guard = machines.lock().map_err(|_| "machine state poisoned")?;
+    if guard.entries.len() >= MAX_MACHINES {
+        return Err(format!(
+            "{MAX_MACHINES} machines are already open — close one first"
+        ));
+    }
+    guard.seq += 1;
+    let id = format!("mach-{}", guard.seq);
+    let project = start(
+        &mut guard, machines, &id, recipe, cols, rows, &on_text, &on_exit,
+    )?;
+    Ok(OpenedMachine {
+        id,
+        copy_on_write: project.copy_on_write,
+        note: project.reason,
+    })
+}
+
+/// Throw away everything a machine has done and start it again from a clean project: the same project, network and limits, a new jail and a new layer.
+///
+/// This is what "recover" means for a machine that is wedged, filled, or was stopped for using too
+/// much: nothing is repaired, it is replaced. It changes nothing a person chose (not the network, not the
+/// project) because it starts from the recipe the machine was made from. The old process tree is ended,
+/// its layer goes with it, and the screen is cleared and says so.
+pub(crate) fn reset_with_sink(
+    machines: &Arc<Mutex<Machines>>,
+    id: &str,
+    cols: u16,
+    rows: u16,
+    on_text: TextSink,
+    on_exit: ExitSink,
+) -> Result<OpenedMachine, String> {
+    // The lock is held from the old machine's end to the new one's start. The old reader thread, when it
+    // sees its machine end, asks who is current, and has to find the new one and not an empty place.
+    let mut guard = machines.lock().map_err(|_| "machine state poisoned")?;
+    let old = guard
+        .entries
+        .remove(id)
+        .ok_or_else(|| format!("no such machine: {id}"))?;
+    let recipe = old.recipe.clone();
+    terminal::kill_and_reap(old.session.child);
+    if let Some(stage) = old.stage {
+        stage.release();
+    }
+    // A full reset of the terminal (RIS), then a line that says what happened.
+    on_text(
+        id,
+        "\x1bc[machine reset: a clean project, nothing from before]\r\n".to_string(),
+    );
+    match start(
+        &mut guard, machines, id, &recipe, cols, rows, &on_text, &on_exit,
+    ) {
+        Ok(project) => Ok(OpenedMachine {
+            id: id.to_string(),
+            copy_on_write: project.copy_on_write,
+            note: project.reason,
+        }),
+        Err(why) => {
+            // The machine is gone and could not be remade: say so the way an exit does.
+            on_exit(id.to_string());
+            Err(why)
         }
     }
-    let (session, reader) = terminal::spawn_pty(cmd, cols, rows)?;
-    let id = {
-        let mut guard = machines.lock().map_err(|_| "machine state poisoned")?;
-        guard.seq += 1;
-        let id = format!("mach-{}", guard.seq);
-        guard.sessions.insert(id.clone(), session);
-        id
-    };
-    let for_thread = id.clone();
-    std::thread::spawn(move || {
-        terminal::pump_output(reader, |text| on_text(&for_thread, text));
-        on_exit(for_thread);
-    });
-    Ok(id)
+}
+
+fn sinks(app: &tauri::AppHandle) -> (TextSink, ExitSink) {
+    use tauri::Emitter;
+    let (out, gone) = (app.clone(), app.clone());
+    (
+        Arc::new(move |id, text| {
+            let _ = out.emit(
+                MACHINE_OUTPUT_EVENT,
+                MachineOutput {
+                    id: id.to_string(),
+                    data: text,
+                },
+            );
+        }),
+        Arc::new(move |id| {
+            let _ = gone.emit(MACHINE_EXIT_EVENT, MachineExit { id });
+        }),
+    )
+}
+
+/// The directory a machine's project layer is mounted over: the system's temporary directory.
+fn layer_base() -> PathBuf {
+    std::env::temp_dir()
+}
+
+fn recipe_for(root_path: Option<&str>, network: bool) -> Recipe {
+    Recipe {
+        root_path: root_path.map(str::to_string),
+        network,
+        path_var: std::env::var("PATH").unwrap_or_default(),
+        uid: None,
+        limits: Limits::default(),
+        layer_base: Some(layer_base()),
+    }
 }
 
 /// Open a machine on a registered workspace, and start feeding its output to the app.
@@ -462,33 +754,28 @@ pub fn open(
     cols: u16,
     rows: u16,
     network: bool,
-) -> Result<String, String> {
-    use tauri::Emitter;
-    let cmd = prepare(
-        root_path,
-        network,
-        &std::env::var("PATH").unwrap_or_default(),
-        None,
-    )?;
-    let sink = app.clone();
+) -> Result<OpenedMachine, String> {
+    let (on_text, on_exit) = sinks(&app);
     open_with_sink(
         machines,
-        cmd,
+        &recipe_for(root_path, network),
         cols,
         rows,
-        move |id, text| {
-            let _ = sink.emit(
-                MACHINE_OUTPUT_EVENT,
-                MachineOutput {
-                    id: id.to_string(),
-                    data: text,
-                },
-            );
-        },
-        move |id| {
-            let _ = app.emit(MACHINE_EXIT_EVENT, MachineExit { id });
-        },
+        on_text,
+        on_exit,
     )
+}
+
+/// Reset a machine to a clean project. See [`reset_with_sink`].
+pub fn reset(
+    app: tauri::AppHandle,
+    machines: &Arc<Mutex<Machines>>,
+    id: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<OpenedMachine, String> {
+    let (on_text, on_exit) = sinks(&app);
+    reset_with_sink(machines, id, cols, rows, on_text, on_exit)
 }
 
 /// Send keystrokes to a machine. An unknown id is an error, and so is a write too large to be typing.
@@ -500,11 +787,11 @@ pub fn write(machines: &Arc<Mutex<Machines>>, id: &str, data: &str) -> Result<()
         ));
     }
     let mut guard = machines.lock().map_err(|_| "machine state poisoned")?;
-    let session = guard
-        .sessions
+    let entry = guard
+        .entries
         .get_mut(id)
         .ok_or_else(|| format!("no such machine: {id}"))?;
-    session.send(data)
+    entry.session.send(data)
 }
 
 /// Resize the machine's PTY, so a command wraps at the pane's width.
@@ -515,34 +802,40 @@ pub fn resize(
     rows: u16,
 ) -> Result<(), String> {
     let guard = machines.lock().map_err(|_| "machine state poisoned")?;
-    let session = guard
-        .sessions
+    let entry = guard
+        .entries
         .get(id)
         .ok_or_else(|| format!("no such machine: {id}"))?;
-    session.resize(cols, rows)
+    entry.session.resize(cols, rows)
 }
 
 /// Close a machine and reap what runs in it. A second close is a clean no-op.
 pub fn close(machines: &Arc<Mutex<Machines>>, id: &str) -> Result<(), String> {
-    let session = {
+    let entry = {
         let mut guard = machines.lock().map_err(|_| "machine state poisoned")?;
-        guard.sessions.remove(id)
+        guard.entries.remove(id)
     };
-    if let Some(session) = session {
-        terminal::kill_and_reap(session.child);
+    if let Some(entry) = entry {
+        terminal::kill_and_reap(entry.session.child);
+        if let Some(stage) = entry.stage {
+            stage.release();
+        }
     }
     Ok(())
 }
 
 /// Close every machine. Called when the app exits, so a quit does not leave a jail running.
 pub fn close_all(machines: &Arc<Mutex<Machines>>) {
-    let children: Vec<_> = if let Ok(mut guard) = machines.lock() {
-        guard.sessions.drain().map(|(_, s)| s.child).collect()
+    let entries: Vec<Entry> = if let Ok(mut guard) = machines.lock() {
+        guard.entries.drain().map(|(_, e)| e).collect()
     } else {
         return;
     };
-    for child in children {
-        terminal::kill_and_reap(child);
+    for entry in entries {
+        terminal::kill_and_reap(entry.session.child);
+        if let Some(stage) = entry.stage {
+            stage.release();
+        }
     }
 }
 

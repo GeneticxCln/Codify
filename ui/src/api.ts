@@ -286,6 +286,7 @@ async function fallbackHttpInvoke<T>(cmd: string, args?: Record<string, any>): P
     case "codify_machine_open":
     case "codify_machine_write":
     case "codify_machine_resize":
+    case "codify_machine_reset":
     case "codify_machine_close": {
       throw new Error(NEEDS_DESKTOP_SHELL);
     }
@@ -1178,7 +1179,8 @@ export async function closeTerminal(terminalId: string): Promise<void> {
 /**
  * Start a machine in a workspace: a shell in a jail, at a character grid.
  *
- * The id comes back from the shell and becomes the tab's id, as a terminal's does. `network` is the person's choice and
+ * The shell answers with the machine's id, which becomes the tab's id as a terminal's does, and with whether the project
+ * under `/work` is the machine's own copy. `network` is the person's choice and
  * is made **here, once**: the jail is built with or without the host's network and nothing afterwards can change it, so
  * "switch it on" is a new machine (`docs/09` §14). There is no fallback: where the shell cannot make a jail (no
  * `bwrap`, user namespaces refused) this rejects with the reason, and nothing starts. A workspace that would show a
@@ -1189,13 +1191,32 @@ export async function openMachine(
   cols: number,
   rows: number,
   network: boolean
-): Promise<string> {
-  return tauriInvoke<string>("codify_machine_open", {
+): Promise<OpenedMachine> {
+  return tauriInvoke<OpenedMachine>("codify_machine_open", {
     workspaceId,
     cols,
     rows,
     network,
   });
+}
+
+/**
+ * What opening or resetting a machine tells the window: its id, and whether the project under `/work` is the machine's own
+ * copy (changes stay in the machine and go with it) or, where this host could not make one, read-only, with the reason.
+ */
+export interface OpenedMachine {
+  id: string;
+  copy_on_write: boolean;
+  note: string | null;
+}
+
+/**
+ * Throw away what a machine has done and start it again from a clean project. It remakes the machine from the recipe it was
+ * opened with, so the network and the project are the ones the person chose and this cannot change either. Rejects with the
+ * shell's reason if the new jail could not be made, in which case the machine is gone and the window is told it ended.
+ */
+export async function resetMachine(machineId: string, cols: number, rows: number): Promise<OpenedMachine> {
+  return tauriInvoke<OpenedMachine>("codify_machine_reset", { machineId, cols, rows });
 }
 
 /** Type into a machine. Called once per batch of keystrokes, and by the assistant's `run` and `key` through the same door. */

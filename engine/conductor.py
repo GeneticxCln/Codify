@@ -36,8 +36,9 @@ validation:
 | `open_in_editor` | the same, `open` | hands that only point: show a file and a range; changes nothing on disk |
 | `edit_editor` | the same, `edit` | hands that change **the open buffer only**: one undoable edit, marked as the assistant's, never saved. The person's Save is the only door to the disk (docs/00 §6.9) |
 | `read_machine` | `SurfaceBridge`, the `machine` surface (`engine/surface_machine.py`) | eyes on a jailed shell the person opened: its screen and a bounded tail, quoted as program output, never instructions |
-| `run_in_machine` | the same, `run` | hands that type one command and bring back its output. **The one place a command runs without `validate_argv`** (docs/00 §6.6), acceptable only because of the jail: workspace read-only, no credentials, no capabilities, no network unless the person opened it with one |
+| `run_in_machine` | the same, `run` | hands that type one command and bring back its output. **The one place a command runs without `validate_argv`** (docs/00 §6.6), acceptable only because of the jail: the person's files are never written (the machine edits its own copy of the project), no credentials, no capabilities, no network unless the person opened it with one |
 | `key_in_machine` | the same, `key` | hands that press one *named* key from a fixed list; the engine never sends bytes. Neither this nor `run_in_machine` can open, close or change the network of a machine |
+| `reset_machine` | the same, `reset` | recovery: start a machine again from a clean project, remade from the recipe the person opened it with; it cannot make or reconfigure one |
 | `recon` | `ExecutorService._librarian` | read-only, bounded rounds |
 | `design` | `ExecutorService._design` | no tools at all; decides from evidence |
 | `plan` | the planner | refuses without evidence; writes steps, never files |
@@ -884,11 +885,13 @@ RUN_IN_MACHINE = ToolSpec(
     name="run_in_machine",
     description=(
         "Type one command into the person's machine and press Enter, wait for its output to settle, and get back what it "
-        "printed. The machine is a jail: the project is there read-only at /work, so you cannot change their files from it "
-        "(copy what you want to try into your home, `cp -r /work ~/w`, and work there); it holds no credentials, its home "
-        "is thrown away with it, and it has no network unless the person opened it with one. So run what you need to find "
-        "out: build, test, reproduce, try. Say what you ran and what you learned in your answer. A command still going "
-        "when the wait ends keeps going: look again with `read_machine`. To change the project, use `plan` and `write`."
+        "printed. The machine is a jail: the project is there at /work as the machine's own copy, so you can edit, build "
+        "and test in it freely and none of it reaches their files (`read_machine` says if this host could only make it "
+        "read-only, in which case copy what you want to try into your home, `cp -r /work ~/w`); it holds no credentials, "
+        "everything it changes is thrown away with it, and it has no network unless the person opened it with one. So run "
+        "what you need to find out: build, test, reproduce, try. Say what you ran and what you learned in your answer. A "
+        "command still going when the wait ends keeps going: look again with `read_machine`. Nothing done here changes "
+        "their project: to change it, use `plan` and `write`."
     ),
     parameters={
         "type": "object",
@@ -920,6 +923,25 @@ KEY_IN_MACHINE = ToolSpec(
             "machine": {"type": "string", "description": "which machine, by id; omit for the one in view"},
         },
         "required": ["key"],
+    },
+)
+
+
+RESET_MACHINE = ToolSpec(
+    name="reset_machine",
+    description=(
+        "Start the person's machine again from a clean project: everything running in it stops and everything it changed "
+        "is discarded, then a new shell opens in a fresh copy of the project. Use it when the machine is wedged, full, or "
+        "was stopped for using too much memory, or when you want to rule out your own earlier mess. It keeps what the "
+        "person chose (the same project, the same network setting) and cannot change either, and it cannot open a machine "
+        "that is not open. It also ends anything the person was running there, so do not use it to tidy up. It returns "
+        "the new screen."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "machine": {"type": "string", "description": "which machine, by id; omit for the one in view"},
+        },
     },
 )
 
@@ -1228,7 +1250,7 @@ ASK_USER = ToolSpec(
 # that produce a plan. Nothing here can change a file.
 BASE_TOOLS: tuple[ToolSpec, ...] = (
     READ_FILE, SEARCH_CODE, GIT_HISTORY, RUN_COMMAND, READ_PAGE, NAVIGATE_PAGE,
-    CLICK_PAGE, TYPE_PAGE, READ_EDITOR, OPEN_IN_EDITOR, EDIT_EDITOR, READ_MACHINE, RUN_IN_MACHINE, KEY_IN_MACHINE,
+    CLICK_PAGE, TYPE_PAGE, READ_EDITOR, OPEN_IN_EDITOR, EDIT_EDITOR, READ_MACHINE, RUN_IN_MACHINE, KEY_IN_MACHINE, RESET_MACHINE,
     RECALL, RECALL_THREADS, USE_SKILL, RECON,
     DESIGN, PLAN,
 )

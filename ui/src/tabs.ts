@@ -118,6 +118,13 @@ export interface Tab {
    * on the tab, and in the tab's title, because it is the one fact about a machine a person must not have to look for.
    */
   network?: boolean;
+  /**
+   * Whether a machine tab's project, at `/work`, is the machine's own copy: what it changes is kept in the machine and
+   * discarded with it, and the person's files are never written. False is a read-only project, because this host could
+   * not make the copy; `projectNote` says why. Like the network, fixed when the machine is opened.
+   */
+  copyOnWrite?: boolean;
+  projectNote?: string;
 }
 
 export interface TabState {
@@ -609,7 +616,8 @@ export function openMachineTab(
   state: TabState,
   machineId: string,
   workspaceId: string,
-  network: boolean
+  network: boolean,
+  project: { copyOnWrite: boolean; note?: string | null }
 ): TabState {
   return openTab(state, {
     id: machineId,
@@ -617,7 +625,35 @@ export function openMachineTab(
     title: network ? "Machine · network" : "Machine",
     workspaceId,
     network,
+    copyOnWrite: project.copyOnWrite,
+    ...(project.note ? { projectNote: project.note } : {}),
   });
+}
+
+/**
+ * A machine was reset: its shell is running again from a clean project. The tab stays the tab (same id, same network, same
+ * workspace: a reset remakes what the person chose and cannot change it), `exited` clears, and the project's state is the
+ * new machine's, which a host may answer differently from the old one.
+ */
+export function markMachineReset(
+  state: TabState,
+  id: string,
+  project: { copyOnWrite: boolean; note?: string | null }
+): TabState {
+  if (!state.tabs.some((t) => t.id === id && t.kind === "machine")) return state;
+  return {
+    ...state,
+    tabs: state.tabs.map((t) => {
+      if (t.id !== id) return t;
+      const { projectNote: _gone, ...rest } = t;
+      return {
+        ...rest,
+        exited: false,
+        copyOnWrite: project.copyOnWrite,
+        ...(project.note ? { projectNote: project.note } : {}),
+      };
+    }),
+  };
 }
 
 /** Mark a machine tab's shell as finished, leaving its screen alone. */

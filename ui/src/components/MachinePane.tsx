@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Box } from "lucide-react";
+import { Box, RotateCcw } from "lucide-react";
 import { resizeMachine, writeMachine } from "../api";
 import { THEME_CHANGE_EVENT } from "../appearance";
 import { readRejection } from "../rejection.ts";
@@ -19,8 +19,9 @@ import { terminalFontSize } from "./TerminalPane";
  *
  * It is `TerminalPane` for the person's own shell in everything it can share, and nothing in what it cannot: no scrollback
  * history filed per workspace (a jail's screen is not a terminal's history), no clipboard-drawer paste target (that is the
- * person's own shell's), and a header that says the three things a person must be able to see at a glance about a jail:
- * that it is one, whether it can reach the network, and where the project is.
+ * person's own shell's), and a header that says the things a person must be able to see at a glance about a jail: that it
+ * is one, whether it can reach the network, whether the project in it is the machine's own copy, and a way to start it again
+ * from a clean one.
  *
  * xterm is imported inside the effect for the reason `TerminalPane` gives: it needs a real DOM, a module-scope import would
  * make this file unimportable by `node --test`, and a window that never opens a machine should not carry the renderer.
@@ -31,6 +32,14 @@ export interface MachinePaneProps {
   network: boolean;
   /** The shell in it has finished. The screen stays; the input does not. */
   exited?: boolean;
+  /**
+   * The project under `/work` is the machine's own copy: what it changes is kept in the machine and discarded with it, and the
+   * person's files are never written. False is a read-only project (this host could not make the copy), which `projectNote` explains.
+   */
+  copyOnWrite?: boolean;
+  projectNote?: string;
+  /** Start the machine again from a clean project. The pane asks nothing: whoever owns the machine decides whether to ask. */
+  onReset?: () => void;
   /** Where the screen is held. */
   screens: MachineScreens;
   /** Take the keyboard once the terminal is ready; off for the second half of a split, which must not take it from the first. */
@@ -45,7 +54,26 @@ const NETWORK_ON_DETAIL =
   "This machine shares this computer's network, so it can reach the internet and services running on this computer. " +
   "It cannot be switched off while the machine runs: open a new machine without a network.";
 
-export const MachinePane: React.FC<MachinePaneProps> = ({ machineId, network, exited = false, screens, autoFocus = true }) => {
+/** What the header says about the project, and what a hover adds. */
+const PROJECT_OWN_COPY = "Project at /work: your changes stay in this machine";
+const PROJECT_OWN_COPY_DETAIL =
+  "Your project is at /work, and this machine edits its own copy: nothing it changes reaches your files, and all of it " +
+  "is discarded when the machine closes or is reset.";
+const PROJECT_READ_ONLY = "Project at /work, read-only";
+const projectReadOnlyDetail = (note?: string): string =>
+  "Your project is mounted at /work and cannot be changed from here. This machine's home is thrown away when it closes." +
+  (note ? ` A private copy could not be made on this computer: ${note}.` : "");
+
+export const MachinePane: React.FC<MachinePaneProps> = ({
+  machineId,
+  network,
+  exited = false,
+  copyOnWrite = false,
+  projectNote,
+  onReset,
+  screens,
+  autoFocus = true,
+}) => {
   const hostRef = useRef<HTMLDivElement>(null);
   const [failed, setFailed] = useState<string | null>(null);
 
@@ -173,9 +201,25 @@ export const MachinePane: React.FC<MachinePaneProps> = ({ machineId, network, ex
         >
           {network ? NETWORK_ON : NETWORK_OFF}
         </span>
-        <span className="min-w-0 truncate text-2xs text-codify-muted" title="Your project is mounted at /work and cannot be changed from here. This machine's home is thrown away when it closes.">
-          Project at /work, read-only
+        <span
+          data-testid="machine-project"
+          className="min-w-0 truncate text-2xs text-codify-muted"
+          title={copyOnWrite ? PROJECT_OWN_COPY_DETAIL : projectReadOnlyDetail(projectNote)}
+        >
+          {copyOnWrite ? PROJECT_OWN_COPY : PROJECT_READ_ONLY}
         </span>
+        {onReset && (
+          <button
+            type="button"
+            aria-label="Reset machine"
+            title="Start this machine again from a clean project: everything running in it stops and everything it changed is discarded"
+            onClick={onReset}
+            className="ml-auto flex flex-shrink-0 items-center gap-1 rounded border border-codify-border px-1.5 py-0.5 text-2xs text-codify-secondary hover:bg-codify-raised/60"
+          >
+            <RotateCcw className="h-3 w-3" aria-hidden />
+            Reset
+          </button>
+        )}
       </div>
       {failed && (
         <div
@@ -187,7 +231,7 @@ export const MachinePane: React.FC<MachinePaneProps> = ({ machineId, network, ex
       )}
       {exited && (
         <p role="status" className="mx-3 mt-2 text-xs text-codify-muted">
-          This machine's shell has exited. Its screen is still here.
+          This machine's shell has exited. Its screen is still here. Reset it to start again from a clean project.
         </p>
       )}
       <div

@@ -77,6 +77,13 @@ export interface MachineScreens {
   write(id: string, chunk: string): void;
   /** The shell in a machine ended. */
   exit(id: string): void;
+  /** The machine was reset and its shell is running again, from a clean screen. The opposite of `exit`. */
+  revive(id: string): void;
+  /**
+   * The grid the screen has now. A reset must give the new PTY the size the pane already told the old one, because the pane
+   * remembers what it announced and will not announce the same size twice.
+   */
+  size(id: string): { cols: number; rows: number } | null;
   /** The tab is gone. The screen is disposed and the id is remembered as closed. */
   close(id: string): void;
   /** The pane measured itself, and told the PTY: the screen must have the same grid or it will wrap differently. */
@@ -244,6 +251,18 @@ export function createMachineScreens(loadHeadless: () => Promise<TerminalCtor>):
       entry.exited = true;
       entry.followers.forEach((f) => f.onExit?.());
       entry.watchers.forEach((w) => w());
+    },
+
+    revive(id) {
+      const entry = entries.get(id);
+      if (!entry || !entry.exited) return;
+      entry.exited = false;
+      entry.watchers.forEach((w) => w());
+    },
+
+    size(id) {
+      const entry = entries.get(id);
+      return entry ? { cols: entry.cols, rows: entry.rows } : null;
     },
 
     close(id) {

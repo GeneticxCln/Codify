@@ -170,6 +170,31 @@ else
   bad "bwrap (bubblewrap) is not installed, and the machine tab cannot be isolated without it" \
     "Arch/CachyOS: sudo pacman -S bubblewrap   Debian/Ubuntu: sudo apt install bubblewrap   Fedora: sudo dnf install bubblewrap  (WebKitGTK's own sandbox uses it too)"
 fi
+# A machine's own copy of the project needs an unprivileged overlay mount (docs/09 section 14.1a). It is a feature and not a
+# requirement: where it cannot be made the machine is read-only and says so, so this is a note and never a failure. The
+# asking is the same as the app's: a throwaway project, a tmpfs and an overlay in a user namespace of its own, and a
+# directory deleted and made again, which is the part a filesystem without user.* attributes (a tmpfs before Linux 6.6) cannot do.
+if have unshare; then
+  layer_dir="$(mktemp -d 2>/dev/null)" || layer_dir=""
+  layer_ok=""
+  if [ -n "$layer_dir" ] && mkdir "$layer_dir/lower" "$layer_dir/stage" && mkdir "$layer_dir/lower/d"; then
+    if run unshare --user --map-root-user --mount -- sh -c \
+      'mount -t tmpfs tmpfs "$1" && mkdir "$1/u" "$1/w" "$1/m" && mount -t overlay overlay -o "userxattr,lowerdir=$2,upperdir=$1/u,workdir=$1/w" "$1/m" && rm -r "$1/m/d" && mkdir "$1/m/d"' \
+      sh "$layer_dir/stage" "$layer_dir/lower" >/dev/null 2>&1; then
+      layer_ok=1
+    fi
+  fi
+  [ -n "$layer_dir" ] && { rmdir "$layer_dir/lower/d" "$layer_dir/lower" "$layer_dir/stage" "$layer_dir" 2>/dev/null || true; }
+  if [ -n "$layer_ok" ]; then
+    ok "an unprivileged overlay mount works here: a machine edits its own copy of the project"
+  else
+    note "an unprivileged overlay mount does not work here, so a machine's project will be read-only" \
+      "Not a failure. It needs a kernel that allows an overlay in a user namespace (Linux 5.11+) and, on a tmpfs, Linux 6.6+ (user.* attributes)."
+  fi
+else
+  note "unshare (util-linux) not found, so a machine's project will be read-only" \
+    "Not a failure. Arch/CachyOS: util-linux   Debian/Ubuntu: util-linux   Fedora: util-linux"
+fi
 echo
 
 echo "Git"

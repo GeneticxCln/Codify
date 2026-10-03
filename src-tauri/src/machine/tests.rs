@@ -18,6 +18,16 @@ fn production_source() -> &'static str {
         .0
 }
 
+/// Every file of the machine's production code: the jail, its project layer and its guard.
+fn all_production_source() -> String {
+    [
+        production_source(),
+        include_str!("layer.rs"),
+        include_str!("guard.rs"),
+    ]
+    .join("\n")
+}
+
 fn layout() -> HostLayout {
     HostLayout {
         top: vec![
@@ -37,6 +47,29 @@ fn spec(network: bool, uid: u32) -> JailSpec {
         workspace: PathBuf::from("/srv/project"),
         network,
         uid,
+        project: ProjectView::ReadOnly,
+        limits: Limits::default(),
+    }
+}
+
+fn layered_spec(uid: u32) -> JailSpec {
+    JailSpec {
+        project: ProjectView::CopyOnWrite {
+            merged: PathBuf::from("/tmp/codify-machine-1-0/merged"),
+        },
+        ..spec(false, uid)
+    }
+}
+
+/// A recipe for a real machine on `workspace`, with its layer made under `layers`.
+fn recipe(workspace: &Path, network: bool, layers: Option<&Path>) -> Recipe {
+    Recipe {
+        root_path: Some(workspace.to_string_lossy().into_owned()),
+        network,
+        path_var: std::env::var("PATH").unwrap_or_default(),
+        uid: None,
+        limits: Limits::default(),
+        layer_base: layers.map(Path::to_path_buf),
     }
 }
 
@@ -119,6 +152,72 @@ fn the_jail_is_defined_as_much_by_what_it_leaves_out_as_by_what_it_has() {
         got, expected,
         "the jail's environment is not exactly JAIL_ENV"
     );
+}
+
+#[test]
+fn behind_the_layer_the_only_writable_bind_is_the_layers_merged_directory_at_work() {
+    let argv = jail_argv(&layered_spec(1000), &layout());
+
+    // Exactly one writable bind, from the overlay's merged directory, to /work, and nothing else writable.
+    let binds: Vec<&[String]> = argv
+        .windows(3)
+        .filter(|w| w[0] == "--bind" || w[0] == "--dev-bind")
+        .collect();
+    assert_eq!(
+        binds.len(),
+        1,
+        "the layered jail has {} writable binds",
+        binds.len()
+    );
+    assert_eq!(binds[0][0], "--bind");
+    assert_eq!(binds[0][1], "/tmp/codify-machine-1-0/merged");
+    assert_eq!(binds[0][2], WORK);
+
+    // The person's own directory is not bound into the jail at all: it is the overlay's lower layer, and the
+    // launcher's script is the only thing that names it.
+    assert!(
+        !argv.iter().any(|a| a == "/srv/project"),
+        "the workspace itself is bound into a layered jail"
+    );
+    assert!(!has_triple(&argv, "--ro-bind", "/srv/project", WORK));
+
+    // The launcher's namespace makes the person root, so the jail is told what to be, whoever started it.
+    let id = UNPRIVILEGED_ID.to_string();
+    assert!(has_triple(&argv, "--uid", &id, "--gid") && has_pair(&argv, "--gid", &id));
+    // Everything else about the jail is unchanged: no capabilities, no network, nothing inherited.
+    for needed in ["--unshare-all", "--die-with-parent", "--clearenv"] {
+        assert!(
+            argv.iter().any(|a| a == needed),
+            "the layered jail lost {needed}"
+        );
+    }
+    assert!(has_pair(&argv, "--cap-drop", "ALL"));
+    assert!(!argv.iter().any(|a| a == "--share-net"));
+}
+
+#[test]
+fn the_shell_starts_behind_every_limit_the_kernel_can_enforce() {
+    let mut limited = spec(false, 1000);
+    limited.limits = Limits {
+        cpu_secs: 90,
+        file_bytes: 8 * 1024 * 1024,
+        ..Limits::default()
+    };
+    let argv = jail_argv(&limited, &layout());
+    let wrapper = argv.last().expect("the jail ends in the shell's wrapper");
+    for expected in [
+        "ulimit -c 0".to_string(),
+        format!("ulimit -u {NPROC}"),
+        "ulimit -t 90".to_string(),
+        "ulimit -f 8192".to_string(),
+    ] {
+        assert!(
+            wrapper.contains(&expected),
+            "the wrapper lacks `{expected}`: {wrapper}"
+        );
+    }
+    // The limits are set before the shell starts, and the shell is the last thing the wrapper does.
+    assert!(wrapper.find("ulimit -t").unwrap() < wrapper.find("exec").unwrap());
 }
 
 #[test]
@@ -297,8 +396,10 @@ fn a_machine_opens_only_on_a_real_absolute_directory() {
 #[test]
 fn nothing_here_can_start_the_users_shell() {
     let src = production_source();
-    // One builder, and it is bwrap's. The jail's shell is named in the jail's own argv. (The needle is
-    // assembled at run time: `tests/test_no_unguarded_spawns.py` reads this file too, and a literal
+    let everything = all_production_source();
+    // One builder in the jail's module. Its program is `bwrap`, or `unshare` running the fixed mount script
+    // that then execs `bwrap`: never anything else. The jail's shell is named in the jail's own argv. (The
+    // needle is assembled at run time: `tests/test_no_unguarded_spawns.py` reads this file too, and a literal
     // would be a spawn site of its own.)
     let builder = format!("{}::new(", "CommandBuilder");
     assert_eq!(
@@ -306,23 +407,47 @@ fn nothing_here_can_start_the_users_shell() {
         1,
         "machine.rs builds a second command; every one of them has to be inside the jail"
     );
-    assert!(src.contains(&format!("{builder}bwrap)")));
+    assert!(src.contains(&format!("{builder}program)")));
+    let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("unshare.clone(), layer::launch_args(")
+            && flat.contains("_ => (bwrap, argv)"),
+        "the program is no longer exactly one of bwrap and the layer's launcher"
+    );
     for banned in ["shell_command", "terminal::open", "\"SHELL\"", "$SHELL"] {
         assert!(
-            !src.contains(banned),
-            "machine.rs mentions {banned}: a machine must have no way to start the person's own shell"
+            !everything.contains(banned),
+            "the machine's code mentions {banned}: a machine must have no way to start the person's own shell"
         );
     }
-    // The shell's own environment does not reach bwrap either.
-    assert!(src.contains("cmd.env_clear()"));
-    // No writable bind, anywhere in the source (the argv test above asserts it on the result).
-    assert!(!src.contains("\"--bind\"") && !src.contains("\"--dev-bind\""));
+    // The probe is the only other process the machine's code starts, and it is `unshare` over the same fixed
+    // script and a program of its own, never the person's shell and never a request's text.
+    let probe = format!("{}::new(", "Command");
+    let layer_src = include_str!("layer.rs");
+    assert_eq!(layer_src.matches(&probe).count(), 1);
+    assert!(layer_src.contains(&format!("{probe}unshare)")));
+    assert_eq!(src.matches(&probe).count(), 0);
+    assert_eq!(include_str!("guard.rs").matches(&probe).count(), 0);
+    // The shell's own environment does not reach `bwrap` or `unshare` either.
+    assert!(src.contains("cmd.env_clear()") && layer_src.contains(".env_clear()"));
+    // The one writable bind in the source is the layer's merged directory, at /work; there is no device
+    // bind. (The argv tests assert the same on the result.)
+    assert_eq!(src.matches("\"--bind\"").count(), 1);
+    assert!(src.contains(
+        "ProjectView::CopyOnWrite { merged } => push(&[\"--bind\", &merged.to_string_lossy(), WORK])"
+    ));
+    assert!(!everything.contains("\"--dev-bind\""));
 }
 
 #[test]
 fn without_bwrap_there_is_a_sentence_and_no_process() {
     let dir = tempfile_dir("no-bwrap");
-    let err = prepare(Some(&dir.to_string_lossy()), false, "", Some(1000))
+    let bare = |root: &str| Recipe {
+        path_var: String::new(),
+        uid: Some(1000),
+        ..recipe(Path::new(root), false, None)
+    };
+    let err = prepare(&bare(&dir.to_string_lossy()))
         .map(|_| ())
         .unwrap_err();
     assert!(
@@ -330,9 +455,7 @@ fn without_bwrap_there_is_a_sentence_and_no_process() {
         "the failure does not say what is missing: {err}"
     );
     // And a workspace that is refused is refused before bwrap is even looked for.
-    let err = prepare(Some("/"), false, "", Some(1000))
-        .map(|_| ())
-        .unwrap_err();
+    let err = prepare(&bare("/")).map(|_| ()).unwrap_err();
     assert!(err.contains("filesystem root"), "{err}");
 }
 
@@ -405,46 +528,68 @@ fn tempfile_dir(tag: &str) -> Scratch {
 struct Jail {
     machines: Arc<Mutex<Machines>>,
     id: String,
+    /// Whether this host gave the machine a project layer, and why not if it did not.
+    opened: OpenedMachine,
     out: Arc<Mutex<String>>,
     exited: Arc<AtomicBool>,
+    on_text: TextSink,
+    on_exit: ExitSink,
     /// How much of the transcript has been read past.
     seen: Mutex<usize>,
 }
 
 impl Jail {
+    /// A machine with the project layer, as the shell opens one.
     fn open(workspace: &Path, network: bool) -> Jail {
+        Jail::start(recipe(workspace, network, Some(&std::env::temp_dir())))
+    }
+
+    /// A machine whose project is bound read-only, which is what a host that cannot make the layer gets.
+    fn read_only(workspace: &Path) -> Jail {
+        Jail::start(recipe(workspace, false, None))
+    }
+
+    fn start(recipe: Recipe) -> Jail {
         let machines = Arc::new(Mutex::new(Machines::default()));
-        let cmd = prepare(
-            Some(&workspace.to_string_lossy()),
-            network,
-            &std::env::var("PATH").unwrap_or_default(),
-            None,
+        let out = Arc::new(Mutex::new(String::new()));
+        let exited = Arc::new(AtomicBool::new(false));
+        let (sink, flag) = (out.clone(), exited.clone());
+        let on_text: TextSink = Arc::new(move |_, text| sink.lock().unwrap().push_str(&text));
+        let on_exit: ExitSink = Arc::new(move |_| flag.store(true, Ordering::SeqCst));
+        let opened = open_with_sink(
+            &machines,
+            &recipe,
+            200,
+            50,
+            on_text.clone(),
+            on_exit.clone(),
         )
         .expect(
             "these tests build a real jail and need bwrap and user namespaces — run `make doctor`",
         );
-        let out = Arc::new(Mutex::new(String::new()));
-        let exited = Arc::new(AtomicBool::new(false));
-        let (sink, flag) = (out.clone(), exited.clone());
-        let id = open_with_sink(
-            &machines,
-            cmd,
-            200,
-            50,
-            move |_, text| sink.lock().unwrap().push_str(&text),
-            move |_| flag.store(true, Ordering::SeqCst),
-        )
-        .expect("the jail did not start");
         let jail = Jail {
             machines,
-            id,
+            id: opened.id.clone(),
+            opened,
             out,
             exited,
+            on_text,
+            on_exit,
             seen: Mutex::new(0),
         };
         // The first prompt: the machine is up and reading.
         jail.until("[machine]", 15);
         jail
+    }
+
+    /// The host pid of the machine's first process, whose tree is everything in it.
+    fn root_pid(&self) -> u32 {
+        let guard = self.machines.lock().unwrap();
+        guard.entries[&self.id]
+            .session
+            .child
+            .process_id()
+            .expect("the machine has a pid")
     }
 
     fn transcript(&self) -> String {
@@ -492,10 +637,14 @@ impl Drop for Jail {
 const DONE: &str = "echo DONE-$((6*7))";
 
 #[test]
-fn the_workspace_is_read_only_and_the_hosts_files_are_untouched() {
+fn a_read_only_project_is_read_only_and_the_hosts_files_are_untouched() {
     let ws = tempfile_dir("ro-workspace");
     std::fs::write(ws.join("a.txt"), "original\n").unwrap();
-    let jail = Jail::open(&ws, false);
+    let jail = Jail::read_only(&ws);
+    assert!(
+        !jail.opened.copy_on_write && jail.opened.note.is_some(),
+        "a machine with no layer does not say why"
+    );
 
     let said = jail.run(&format!("cat /work/a.txt; {DONE}"));
     assert!(
@@ -715,7 +864,8 @@ fn the_jail_has_its_own_pid_namespace_no_capabilities_and_an_unprivileged_user()
     );
 
     let host_uid = unsafe { libc::geteuid() };
-    let want = if host_uid == 0 {
+    // Behind the project layer the jail is always told its uid; without it, a person keeps their own.
+    let want = if host_uid == 0 || jail.opened.copy_on_write {
         UNPRIVILEGED_ID
     } else {
         host_uid
@@ -800,31 +950,27 @@ fn a_machine_that_exits_says_so() {
 #[test]
 fn only_so_many_machines_may_be_open_and_a_write_has_a_size() {
     let ws = tempfile_dir("cap");
+    let layers = tempfile_dir("cap-layers");
     let machines = Arc::new(Mutex::new(Machines::default()));
+    let open_one = |machines: &Arc<Mutex<Machines>>| {
+        open_with_sink(
+            machines,
+            &recipe(&ws, false, Some(&layers)),
+            80,
+            24,
+            Arc::new(|_, _| {}),
+            Arc::new(|_| {}),
+        )
+    };
     let mut ids = Vec::new();
     for _ in 0..MAX_MACHINES {
-        let cmd = prepare(
-            Some(&ws.to_string_lossy()),
-            false,
-            &std::env::var("PATH").unwrap_or_default(),
-            None,
-        )
-        .expect(
-            "these tests build a real jail and need bwrap and user namespaces — run `make doctor`",
-        );
         ids.push(
-            open_with_sink(&machines, cmd, 80, 24, |_, _| {}, |_| {})
-                .expect("a machine under the cap did not open"),
+            open_one(&machines)
+                .expect("a machine under the cap did not open")
+                .id,
         );
     }
-    let cmd = prepare(
-        Some(&ws.to_string_lossy()),
-        false,
-        &std::env::var("PATH").unwrap_or_default(),
-        None,
-    )
-    .unwrap();
-    let err = open_with_sink(&machines, cmd, 80, 24, |_, _| {}, |_| {}).unwrap_err();
+    let err = open_one(&machines).unwrap_err();
     assert!(err.contains("already open"), "the cap said: {err}");
 
     let big = "x".repeat(MAX_WRITE_BYTES + 1);
@@ -834,17 +980,19 @@ fn only_so_many_machines_may_be_open_and_a_write_has_a_size() {
     assert!(write(&machines, &ids[0], "echo fine\n").is_ok());
 
     close(&machines, &ids[0]).unwrap();
-    let cmd = prepare(
-        Some(&ws.to_string_lossy()),
-        false,
-        &std::env::var("PATH").unwrap_or_default(),
-        None,
-    )
-    .unwrap();
-    let again = open_with_sink(&machines, cmd, 80, 24, |_, _| {}, |_| {})
-        .expect("closing one did not make room");
-    ids.push(again);
+    let again = open_one(&machines).expect("closing one did not make room");
+    ids.push(again.id);
+    assert_eq!(
+        std::fs::read_dir(&*layers).unwrap().count(),
+        MAX_MACHINES,
+        "one layer mount point per open machine, and closing one released its own"
+    );
     close_all(&machines);
+    assert_eq!(
+        std::fs::read_dir(&*layers).unwrap().count(),
+        0,
+        "close_all left layer mount points behind"
+    );
     assert!(
         write(&machines, &ids[1], "x")
             .unwrap_err()
@@ -852,3 +1000,6 @@ fn only_so_many_machines_may_be_open_and_a_write_has_a_size() {
         "close_all left a machine open"
     );
 }
+
+mod guard_facts;
+mod layer_facts;
