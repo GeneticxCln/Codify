@@ -202,12 +202,13 @@ pub(crate) fn human(bytes: u64) -> String {
     }
 }
 
-/// The line the pane shows when the guard has ended a machine.
-pub(crate) fn notice(used: u64, limit: u64) -> String {
+/// The line the pane shows when the guard has ended a machine. It names the limit and not the amount seen:
+/// that is one sample of a machine still growing, and a machine only just over says "4.0 GB … may use 4.0 GB",
+/// which reads as a mistake.
+pub(crate) fn notice(limit: u64) -> String {
     format!(
-        "\r\n[machine stopped: it was using {} of memory and a machine may use {}. \
+        "\r\n[machine stopped: it used more than the {} of memory a machine may use. \
          Reset it to start again from a clean project.]\r\n",
-        human(used),
         human(limit)
     )
 }
@@ -254,8 +255,8 @@ pub(crate) fn watch(
         if pids.is_empty() {
             return;
         }
-        if let Verdict::Over(used) = verdict {
-            say(notice(used, limits.memory_bytes));
+        if let Verdict::Over(_) = verdict {
+            say(notice(limits.memory_bytes));
             kill_all(&pids);
             return;
         }
