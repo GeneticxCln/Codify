@@ -186,11 +186,13 @@ import { pasteIntoTerminal, PASTE_MESSAGES } from "./terminalPaste";
 import { copySchemeText } from "./scheme";
 import type { Clip } from "./clipboardHistory";
 import {
+  BROWSER_PAGE_FOCUSED,
   BROWSER_PAGE_LOADED,
   BROWSER_PAGE_LOADING,
   BROWSER_PAGE_TITLED,
   BROWSER_POPUP_REQUESTED,
   listenShellEvent,
+  readBrowserPageFocused,
   readBrowserPopupRequested,
   readTerminalExit,
   readTerminalOutput,
@@ -2215,6 +2217,38 @@ export const App: React.FC = () => {
     },
     [shownSplit],
   );
+  // The keyboard went into a page. The page is a native view, so the DOM never sees the press that put it there, and the
+  // coloured edge would stay on the chat while typing went to the page; the shell reports the toolkit's focus instead
+  // (`browser-page-focused`, `docs/09` §12.8). It is acted on only for a page the split is **drawing** — the report is a
+  // fact that was true when the toolkit said it, and a page that has since been put away (another tab, a split with no
+  // room, an overlay) must not pull the strip back to it. A page that fills the column is the active tab already. It reads
+  // the split through `liveRef`, the way the assistant's handlers do: subscribing once means no gap in which a report
+  // arrives while the listener is being swapped for a newer closure.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listenShellEvent<unknown>(BROWSER_PAGE_FOCUSED, (payload) => {
+      const tabId = readBrowserPageFocused(payload);
+      const drawn = liveRef.current.drawnSplit;
+      if (!tabId || !drawn) return;
+      const tab = [drawn.left, drawn.right].find((t) => t.kind === "browser" && t.id === tabId);
+      if (!tab) return;
+      setTabState((prev) => (prev.activeId === tab.id ? prev : focusTab(prev, tab.id)));
+    })
+      .then((off) => {
+        if (cancelled) off();
+        else unlisten = off;
+      })
+      .catch((err: any) => {
+        // A shell that cannot deliver events leaves the edge where the DOM put it: say so rather than leaving a listener
+        // that silently never fires.
+        if (!cancelled) setError(readRejection(err, "Could not listen for a browser page taking the keyboard"));
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
   const handleRatioChange = useCallback((ratio: number, commit: boolean) => {
     setSplitRatio(ratio);
     if (commit) writeSplitRatio(ratio);

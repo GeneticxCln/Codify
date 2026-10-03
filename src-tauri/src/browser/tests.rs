@@ -738,6 +738,20 @@ fn a_popup_is_denied_and_announced_with_its_target() {
     assert_eq!(POPUP_REQUESTED_EVENT, "browser-popup-requested");
 }
 
+/// The focus announcement is a name and a tab id, and nothing a page chose.
+///
+/// The tab id is what the UI acts on (it moves the split's focus to that pane),
+/// so the wire is exactly that: no url, no title, nothing read from the page.
+#[test]
+fn a_page_focus_announcement_carries_only_the_tab() {
+    assert_eq!(PAGE_FOCUSED_EVENT, "browser-page-focused");
+    let wire = serde_json::to_value(BrowserPageFocused {
+        tab_id: "tab-1".to_string(),
+    })
+    .unwrap();
+    assert_eq!(wire, serde_json::json!({ "tab_id": "tab-1" }));
+}
+
 /// The two user escapes are wired, and the module still spawns nothing
 /// The inspector is the one escape left, and it stays a shell-side surface
 /// rather than a process. The system-browser hand-off this file used to
@@ -1034,6 +1048,7 @@ fn the_ui_listens_for_the_events_this_module_emits() {
         PAGE_LOADING_EVENT,
         PAGE_LOADED_EVENT,
         PAGE_TITLED_EVENT,
+        PAGE_FOCUSED_EVENT,
     ] {
         assert!(
             text.contains(&format!("\"{event}\"")),
@@ -1948,17 +1963,28 @@ fn the_page_layer_is_the_container_that_can_overlap() {
     );
 }
 
+/// The one test that builds real GTK widgets, and the reason there is only one.
+///
+/// GTK may be initialised from a single thread per process and `cargo test` gives
+/// every test a thread of its own, so a second test calling `gtk::init` panics
+/// ("Attempted to initialize GTK from two different threads"). The real-widget
+/// checks are functions, and this runs them in order: a failure names which. Needs
+/// a display, and says so rather than passing without one.
+#[test]
+fn the_page_layer_holds_up_on_real_widgets() {
+    gtk::init().expect("this test builds real GTK widgets and needs a display");
+    the_layer_lets_input_through_to_the_app_beneath_it();
+    a_page_taking_the_focus_is_reported_and_nothing_else_is();
+}
+
 /// The layer must not take the app's input.
 ///
 /// The tests around it read this file's source, which is how a layer that
 /// painted perfectly and answered nothing shipped: every string they look
 /// for was there. This builds the real widgets and asks GDK — the thing that
 /// routes a click — whether the layer's input window lets it through.
-/// Needs a display, and says so rather than passing without one.
-#[test]
-fn the_page_layer_lets_input_through_to_the_app_beneath_it() {
+fn the_layer_lets_input_through_to_the_app_beneath_it() {
     use gtk::prelude::*;
-    gtk::init().expect("this test builds real GTK widgets and needs a display");
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
     vbox.pack_start(&gtk::Button::with_label("the app"), true, true, 0);
     let (overlay, fixed) = page_layer::assemble(&vbox);
@@ -1993,6 +2019,85 @@ fn the_page_layer_lets_input_through_to_the_app_beneath_it() {
         1,
         "exactly one full-size window may take input — the app's; a second \
              is the layer sitting over it"
+    );
+}
+
+/// The window is told when a page takes the keyboard, and only then.
+///
+/// Real widgets and a real window, no app: [`page_layer::watch_focus`] takes the
+/// sink as a closure for exactly this. The page's widget is renamed to its label
+/// by `adopt` and the toolkit's focus is always a leaf, so both shapes are here —
+/// the focus *is* the named widget, and the focus is something inside it.
+fn a_page_taking_the_focus_is_reported_and_nothing_else_is() {
+    use gtk::prelude::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let app = gtk::Entry::new();
+    // A page whose widget is a wrapper, with the focusable thing inside it.
+    let wrapper = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    wrapper.set_widget_name(&format!("{LABEL_PREFIX}tab-7"));
+    let inside = gtk::Entry::new();
+    wrapper.pack_start(&inside, true, true, 0);
+    // A page whose widget is itself what takes the focus.
+    let direct = gtk::Entry::new();
+    direct.set_widget_name(&format!("{LABEL_PREFIX}tab-8"));
+    // Something that is neither the app nor a page, with a name that merely
+    // contains the prefix: only a *prefix* is a page.
+    let lookalike = gtk::Entry::new();
+    lookalike.set_widget_name(&format!("not-a-{LABEL_PREFIX}tab-9"));
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    for child in [
+        app.upcast_ref::<gtk::Widget>(),
+        wrapper.upcast_ref(),
+        direct.upcast_ref(),
+        lookalike.upcast_ref(),
+    ] {
+        vbox.pack_start(child, true, true, 0);
+    }
+    let window = gtk::OffscreenWindow::new();
+    window.set_default_size(400, 300);
+    window.add(&vbox);
+    let told: Rc<RefCell<Vec<String>>> = Rc::default();
+    let sink = told.clone();
+    page_layer::watch_focus(&window, move |tab_id| sink.borrow_mut().push(tab_id));
+    window.show_all();
+    while gtk::events_pending() {
+        gtk::main_iteration();
+    }
+
+    app.grab_focus();
+    assert!(
+        told.borrow().is_empty(),
+        "the app's own widget taking the focus was announced as a page: {:?}",
+        told.borrow()
+    );
+    inside.grab_focus();
+    assert_eq!(
+        *told.borrow(),
+        ["tab-7"],
+        "a widget inside a page took the focus and the page was not named — the \
+         toolkit's focus is a leaf, so the label has to be looked for in its ancestry"
+    );
+    app.grab_focus();
+    assert_eq!(
+        told.borrow().len(),
+        1,
+        "the focus leaving a page was announced — that fact belongs to the app's \
+         own events, and a second voice about it is a second opinion"
+    );
+    direct.grab_focus();
+    assert_eq!(
+        *told.borrow(),
+        ["tab-7", "tab-8"],
+        "the page's own widget took the focus and was not named"
+    );
+    lookalike.grab_focus();
+    assert_eq!(
+        told.borrow().len(),
+        2,
+        "a widget whose name only *contains* the page prefix was taken for a page"
     );
 }
 
@@ -2121,7 +2226,14 @@ fn the_layer_touches_gtk_only_from_the_thread_gtk_allows() {
     );
     // Each door, taken from its own `fn` to the next one, so a door that
     // stopped hopping is named rather than averaged away.
-    for door in ["prepare", "adopt", "place", "release", "geometry"] {
+    for door in [
+        "prepare",
+        "adopt",
+        "place",
+        "release",
+        "geometry",
+        "take_focus",
+    ] {
         let rest = linux_half
             .split_once(&format!("pub fn {door}("))
             .unwrap_or_else(|| panic!("the layer still has a `{door}` door"))
@@ -2137,6 +2249,50 @@ fn the_layer_touches_gtk_only_from_the_thread_gtk_allows() {
                  worker, where GTK panics and the page never exists"
         );
     }
+}
+
+/// The announcement has to be wired, and the keyboard has to stay the person's.
+///
+/// `watch_focus` working on real widgets is proved above; what that cannot see
+/// is a layer that never connects it, and a shell that starts taking the focus
+/// for itself — which would pull the keyboard out of the composer every time a
+/// page was shown.
+#[test]
+fn the_layer_reports_a_page_taking_the_keyboard_and_never_takes_it() {
+    let layer = page_layer_source();
+    let built = layer
+        .split_once("let built = assemble(&vbox);")
+        .expect("`layer` builds the layer with `assemble`")
+        .1
+        .split_once("Ok(built)")
+        .expect("`layer` returns what it built")
+        .0;
+    for needed in ["watch_focus(", "PAGE_FOCUSED_EVENT", "BrowserPageFocused"] {
+        assert!(
+            built.contains(needed),
+            "`layer` no longer wires {needed:?} when it builds the layer — a click inside \
+             a page would again leave the split's focus marker where it was"
+        );
+    }
+    // The one place a page is handed the focus is the smoke, which has no
+    // person to click. `grab_focus` anywhere else is the app taking the
+    // keyboard from whoever has it.
+    for (name, text) in [
+        ("mod.rs", include_str!("mod.rs")),
+        ("../lib.rs", include_str!("../lib.rs")),
+    ] {
+        assert!(
+            !text.contains("take_focus") && !text.contains("grab_focus"),
+            "{name} gives a page the keyboard — only the smoke does that, because it has \
+             nobody to click, and the app taking the focus would pull it out of the composer"
+        );
+    }
+    let smoke = include_str!("smoke.rs");
+    assert!(
+        smoke.contains("focus_leg(&geometry_sink)")
+            && smoke.contains("embed-smoke: FAILED a page was given the keyboard"),
+        "the smoke no longer gives its page the focus and fails when the window is not told"
+    );
 }
 
 /// A page that is not in the layer is a fault, and a smoke that read it as "nothing to

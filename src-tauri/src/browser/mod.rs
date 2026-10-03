@@ -863,6 +863,24 @@ pub struct BrowserPopupRequested {
     pub url: String,
 }
 
+/// The event a page taking the keyboard is announced on.
+///
+/// A page is a native view, and the DOM of the app never sees a press inside
+/// it: nothing the UI listens to moves when a person clicks into a page that
+/// sits beside a chat. Typing goes where the toolkit's focus is, so what was
+/// wrong was only the coloured edge saying where — and the UI's rule is that
+/// the edge follows the keyboard. This is the toolkit's fact, said once per
+/// change of focus; it is *not* a request, and the UI is free to ignore it
+/// for a tab it is not drawing.
+pub const PAGE_FOCUSED_EVENT: &str = "browser-page-focused";
+
+/// Sent on [`PAGE_FOCUSED_EVENT`] when the keyboard went into a page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserPageFocused {
+    /// The tab whose page now holds the toolkit's focus.
+    pub tab_id: String,
+}
+
 // Popup announcements need no static sink: `open` holds the `AppHandle`,
 // and every handler captures its own clone. A module-level `OnceLock` was
 // the shape the first pass reached for, and it was a second channel where a

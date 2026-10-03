@@ -383,7 +383,7 @@ Drag the divider, or use its arrow keys. Click in a pane to work in it; the tab 
 - **A browser page can be one of the two,** beside a chat, a terminal or an editor. A link in an answer opens beside the answer when there is room.
   Not two pages (each is a native view the shell seats over one rectangle), and not two conversations (they would share one message box); the menu says
   so instead of doing nothing. While you drag the divider, or have the palette or a menu open, the page steps out of the way, because a native view paints
-  over everything else. Clicking inside a page does not move the split's focus marker; clicking its address bar does.
+  over everything else. Clicking inside a page moves the split's focus marker to it, like clicking anywhere else in a pane.
 - **A narrow window draws one pane.** The left panel gives way first; if two panes still do not fit, the focused one is drawn and the other
   returns when there is room.
 - **A split is not remembered across a restart** (terminals are not); the divider's position is.

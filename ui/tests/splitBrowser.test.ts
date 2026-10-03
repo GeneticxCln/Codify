@@ -340,6 +340,138 @@ test("a page picked out of the strip while a split shows does not take a pane: t
   });
 });
 
+// ── a press inside the page ──────────────────────────────────────────────────
+//
+// The page is a native view: the DOM never sees a press inside it, so nothing the window listens to moves the split's focus
+// marker. The shell says so instead (`browser-page-focused`, from the toolkit's own focus change), and the marker follows it.
+
+const pageFocused = (ctx: AppContext, tabId: string): Promise<void> => ctx.emit("browser-page-focused", { tab_id: tabId });
+
+test("a press inside the page gives its pane the focus, and a press in the chat takes it back", async () => {
+  await withApp({ viewport: WIDE, ...SEEDED }, async (ctx) => {
+    await openThread(ctx, "c1");
+    const pageId = await seatAPage(ctx, "https://example.com/a");
+    await click(ctx, tabNamed(ctx, "Conversation:"));
+    await split(ctx);
+    await pressIn(ctx, pane(ctx, 0));
+    await ctx.settle();
+    assert.equal(focusedSide(ctx), "0");
+
+    await pageFocused(ctx, pageId);
+    await ctx.settle();
+
+    assert.equal(focusedSide(ctx), "1", "the coloured edge stayed on the chat while the keyboard went to the page");
+    assert.match(selectedTab(ctx), /^Browser:/, "the strip does not say the page is the one in use");
+    assert.equal(shown(ctx), pageId, "the page left the screen when it took the focus");
+
+    await pressIn(ctx, pane(ctx, 0));
+    await ctx.settle();
+    assert.equal(focusedSide(ctx), "0", "the chat could not take the focus back from the page");
+    assert.equal(shown(ctx), pageId);
+  });
+});
+
+test("a page that already has the focus is not told again that it does", async () => {
+  await withApp({ viewport: WIDE, ...SEEDED }, async (ctx) => {
+    await openThread(ctx, "c1");
+    const pageId = await seatAPage(ctx, "https://example.com/a");
+    await click(ctx, tabNamed(ctx, "Conversation:"));
+    await split(ctx);
+    await pageFocused(ctx, pageId);
+    await ctx.settle();
+    const told = commands(ctx, "codify_browser_focus").length;
+
+    await pageFocused(ctx, pageId);
+    await pageFocused(ctx, pageId);
+    await ctx.settle();
+
+    assert.equal(focusedSide(ctx), "1");
+    assert.equal(commands(ctx, "codify_browser_focus").length, told, "the same fact was acted on again");
+  });
+});
+
+test("a page that is not one of the two panes on screen is not given the focus", async () => {
+  await withChatAndShell(async (ctx) => {
+    const pageId = await seatAPage(ctx, "https://example.com/a");
+    // The chat and the terminal, with the page behind them in the strip.
+    await click(ctx, tabNamed(ctx, "Conversation:"));
+    await rightClick(ctx, tabNamed(ctx, "Terminal:"));
+    await click(ctx, menuItems(ctx)[0]!);
+    await ctx.settle();
+    assert.equal(panes(ctx).length, 2);
+    assert.equal(shown(ctx), "", "a page that is not drawn was left on screen");
+    const side = focusedSide(ctx);
+    const tab = selectedTab(ctx);
+
+    await pageFocused(ctx, pageId);
+    await ctx.settle();
+
+    assert.equal(selectedTab(ctx), tab, "a page behind the split took the strip");
+    assert.equal(focusedSide(ctx), side, "a page behind the split moved the focus");
+    assert.equal(panes(ctx).length, 2, "a page behind the split replaced the split");
+    assert.equal(shown(ctx), "", "a page behind the split was put on screen");
+  });
+});
+
+test("the focus is not moved to a page of a split that is not being drawn", async () => {
+  // 800px at 125% is 40rem, under the 44 two panes need: the split is kept, and only the chat is on screen.
+  await withApp(
+    { viewport: { width: 800, height: 700 }, localStorage: { "codify.uiScale": "125" }, ...SEEDED },
+    async (ctx) => {
+      await openThread(ctx, "c1");
+      const pageId = await seatAPage(ctx, "https://example.com/a");
+      await click(ctx, tabNamed(ctx, "Conversation:"));
+      await split(ctx);
+      await click(ctx, tabNamed(ctx, "Conversation:"));
+      assert.equal(panes(ctx).length, 0, "two panes were drawn without room for them");
+      assert.match(selectedTab(ctx), /^Conversation:/);
+
+      await pageFocused(ctx, pageId);
+      await ctx.settle();
+
+      assert.match(selectedTab(ctx), /^Conversation:/, "a page that is not on screen took the strip");
+      assert.equal(shown(ctx), "", "a page that is not on screen was put there");
+    },
+  );
+});
+
+test("a focus report that names a tab that is not a page moves nothing, even one in the split", async () => {
+  await withApp({ viewport: WIDE, shellAnswers: shells(id("b")) }, async (ctx) => {
+    const pageId = await seatAPage(ctx, "https://example.com/a");
+    await split(ctx); // the page, and a terminal opened beside it
+    assert.equal(terminalIn(pane(ctx, 1)), id("b"));
+    await pageFocused(ctx, pageId);
+    await ctx.settle();
+    assert.equal(focusedSide(ctx), "0");
+    assert.match(selectedTab(ctx), /^Browser:/);
+
+    // Only the shell's pages report this; a terminal's id arriving on it is a payload that is wrong, not a request.
+    await pageFocused(ctx, id("b"));
+    await ctx.settle();
+
+    assert.equal(focusedSide(ctx), "0", "a report naming the terminal moved the focus to it");
+    assert.match(selectedTab(ctx), /^Browser:/);
+  });
+});
+
+test("a focus report that names nothing on screen moves nothing", async () => {
+  await withApp({ viewport: WIDE, ...SEEDED }, async (ctx) => {
+    await openThread(ctx, "c1");
+    await seatAPage(ctx, "https://example.com/a");
+    await click(ctx, tabNamed(ctx, "Conversation:"));
+    await split(ctx);
+    await pressIn(ctx, pane(ctx, 0));
+    await ctx.settle();
+
+    for (const payload of [null, "tab", 7, {}, { tab_id: "" }, { tab_id: 3 }, { tab_id: "no-such-tab" }]) {
+      await ctx.emit("browser-page-focused", payload);
+      await ctx.settle();
+      assert.equal(focusedSide(ctx), "0", `a report of ${JSON.stringify(payload)} moved the focus`);
+      assert.match(selectedTab(ctx), /^Conversation:/);
+    }
+  });
+});
+
 // ── closing ──────────────────────────────────────────────────────────────────
 
 test("closing the page's tab ends the split, and goes to the chat, and no page is shown", async () => {

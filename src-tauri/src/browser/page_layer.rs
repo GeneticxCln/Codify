@@ -92,14 +92,77 @@ fn layer(window: &tauri::Window) -> Result<(gtk::Overlay, gtk::Fixed), String> {
     if let Some(found) = find(&vbox) {
         return Ok(found);
     }
-    Ok(assemble(&vbox))
+    let built = assemble(&vbox);
+    // Once, with the layer: the signal belongs to the window, and a window
+    // has one layer. The layer works without it — a page that cannot report
+    // taking the keyboard is a coloured edge in the wrong place, not a page
+    // that cannot be used — so a window that will not hand over its toplevel
+    // costs the report and nothing else.
+    if let Ok(top) = window.gtk_window() {
+        let sink = window.app_handle().clone();
+        watch_focus(&top, move |tab_id| {
+            // A shell that cannot deliver the event cannot be asked what to do
+            // about it, and this runs inside the toolkit's own signal: nothing
+            // here may panic or block.
+            let _ = sink.emit(PAGE_FOCUSED_EVENT, BrowserPageFocused { tab_id });
+        });
+    }
+    Ok(built)
+}
+
+/// The tab whose page holds `widget`, when `widget` is a page or sits inside
+/// one.
+///
+/// Walks **up**, looking for the label [`adopt`] renamed the page's widget to.
+/// The toolkit's focus is always a leaf — the webview itself, or something
+/// inside it — and which widget `adopt` found for a page is a fact about how
+/// Tauri builds its views that this module has been wrong about before, so the
+/// question is asked of the whole ancestry instead of being bet on one level.
+/// The app's own webview, the tab strip's window and the layer's containers
+/// carry the toolkit's class names, which never start with the label prefix.
+fn page_of(widget: &gtk::Widget) -> Option<String> {
+    let mut at = Some(widget.clone());
+    while let Some(here) = at {
+        if let Some(tab_id) = here.widget_name().as_str().strip_prefix(LABEL_PREFIX) {
+            return Some(tab_id.to_string());
+        }
+        at = here.parent();
+    }
+    None
+}
+
+/// Tell `announce` which page the toolkit just gave the keyboard to.
+///
+/// `set-focus` on the **window**, not `focus-in-event` on a page. A press in a
+/// native view makes WebKit grab the toolkit's focus for it, and that is the
+/// moment this wants — but `focus-in-event` is delivered to the one widget that
+/// is the focus, which is a leaf this module does not own, and is also repeated
+/// whenever the window is merely re-activated with a page still holding the
+/// focus (nothing moved, so there is nothing to say). `set-focus` is the
+/// toolkit announcing that *the focus changed*, and it carries the widget it
+/// changed to. The signal runs before the class handler, so the argument is the
+/// new focus and `window.focus()` would still be the old one; only the argument
+/// is read.
+///
+/// Focus moving **off** a page says nothing: the UI's own DOM events say where
+/// the keyboard went when it went into the app, and a second voice about the
+/// same fact would be a second opinion.
+///
+/// Generic over the window and the sink so that a test can drive it with real
+/// widgets and no app: [`layer`] is the one production caller.
+pub(super) fn watch_focus<W: IsA<gtk::Window>>(top: &W, announce: impl Fn(String) + 'static) {
+    top.connect_set_focus(move |_, focused| {
+        if let Some(tab_id) = focused.and_then(page_of) {
+            announce(tab_id);
+        }
+    });
 }
 
 /// Restructure `vbox` into the layer: what it holds becomes the overlay's
 /// main child, and a fixed sits above it for the pages.
 ///
 /// Split from [`layer`] so it can be built and inspected without a window;
-/// `the_page_layer_lets_input_through_to_the_app_beneath_it` does exactly that.
+/// `the_page_layer_holds_up_on_real_widgets` does exactly that.
 pub(super) fn assemble(vbox: &gtk::Box) -> (gtk::Overlay, gtk::Fixed) {
     let overlay = gtk::Overlay::new();
     overlay.set_widget_name(LAYER_NAME);
@@ -188,6 +251,24 @@ pub fn adopt(window: &tauri::Window, page: &tauri::Webview, bounds: &Bounds) -> 
             // through one branch, and no caller has to know which.
             SeatVisibility::Hidden => widget.hide(),
         }
+        Ok(())
+    })
+}
+
+/// Give a page the toolkit's keyboard focus, the way a press inside it does.
+///
+/// For the smoke, which has no person to click: it is the only way to make
+/// the focus report happen under a display with nobody at it. The app never
+/// calls this — the UI marks a pane focused and leaves the keyboard where the
+/// person put it.
+pub fn take_focus(window: &tauri::Window, label: &str) -> Result<(), String> {
+    let here = window.clone();
+    let label = label.to_string();
+    on_main(window, move || {
+        let (_overlay, fixed) = layer(&here)?;
+        let widget = widget(&fixed, &label)
+            .ok_or_else(|| format!("browser page {label:?} is not in the page layer"))?;
+        widget.grab_focus();
         Ok(())
     })
 }

@@ -25,8 +25,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  BROWSER_PAGE_FOCUSED,
   BROWSER_POPUP_REQUESTED,
   listenShellEvent,
+  readBrowserPageFocused,
   readBrowserPopupRequested,
 } from "../src/shellEvents.ts";
 
@@ -73,6 +75,18 @@ test("anything that is not that payload opens no tab at all", () => {
       null,
       `${JSON.stringify(payload)} must not open anything`,
     );
+  }
+});
+
+test("a page taking the keyboard names the tab, and only a tab", () => {
+  assert.equal(BROWSER_PAGE_FOCUSED, "browser-page-focused");
+  assert.equal(readBrowserPageFocused({ tab_id: "tab-1" }), "tab-1");
+  // Extra fields are a future Rust struct, not a reason to refuse the payload.
+  assert.equal(readBrowserPageFocused({ tab_id: "tab-2", url: "https://a.example" }), "tab-2");
+  // Each of these reaches a handler that moves the split's focus: a payload that
+  // is not a tab id must move it nowhere.
+  for (const payload of [null, undefined, "tab-1", 42, [], {}, { tab_id: "" }, { tab_id: 5 }, { tab_id: null }]) {
+    assert.equal(readBrowserPageFocused(payload), null, `${JSON.stringify(payload)} was read as a tab`);
   }
 });
 
