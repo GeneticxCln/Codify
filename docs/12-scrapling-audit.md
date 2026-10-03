@@ -52,7 +52,9 @@ One conductor tool, **`fetch_page(url, selector?, max_chars?)`**, in `engine/web
   bare word) is a `422` naming the entries, never a quiet repair. Settings → Web pages is the card (`docs/02`).
 * **Off means off, and unreadable means off.** A store that cannot answer, a value outside 1 and 2, or a list
   that parses to nothing is the default. The tool is **not on the menu** while it cannot act: a model choosing
-  from the tools it is shown should not spend a call learning one only refuses.
+  from the tools it is shown should not spend a call learning one only refuses. A list entry in another script is
+  stored as its ASCII form, and the list's 200-character limit is applied to the stored form (a list too long once
+  written out is refused, never cut).
 * **Every attempt is announced before it is made** (`conductor is fetching <address>`), and an address the rules
   then refuse is announced too: the person sees what was tried. One run may make at most `MAX_FETCHES_PER_RUN` (8);
   the ninth is told so and is not announced, because it never reaches the fetch.
@@ -87,6 +89,10 @@ One conductor tool, **`fetch_page(url, selector?, max_chars?)`**, in `engine/web
   machine for what the turn has read.
 * **With the list, the destination is a site a person named. With "any public site" it is anywhere.** The card
   says so in those words; the second state is a decision, not a convenience.
+* **It is on the menu while an approved plan runs, too.** The tool is offered whenever the setting allows it, and
+  an approved step runs with nobody necessarily watching the transcript as it happens. The announcement is still
+  made before each request and is there to read afterwards, but it is not a prompt. A person who wants no fetching
+  without them present should leave the setting off while a plan runs.
 * **A proxy is not used.** `trust_env=False` makes the address check the only check. A person who can reach the
   web only through a proxy cannot use this tool, and that is the cost of the check meaning something.
 * **Hidden text is still text.** `display:none` and off-screen text are returned, because the parser reads the

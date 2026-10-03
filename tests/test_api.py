@@ -2507,6 +2507,35 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
             r = await self.client.put("/settings/engine", headers=self.headers, json={"web_fetch": bad})
             self.assertEqual(r.status_code, 422, bad)
 
+    async def test_a_site_list_too_long_once_written_out_is_refused_and_not_cut(self) -> None:
+        """What is stored is longer than what was typed, and the store keeps 200 characters.
+
+        Eleven names of 17 characters typed with bare commas are 197 characters, which passes a check on the
+        text as typed; written out in the one spelling the fetch parses (`", "` between names) they are 207.
+        `set_str` would have cut that at 200 and chopped the last site into a name that matches nothing, a list
+        that quietly allowed less than the person was shown. It is refused, and nothing is stored.
+        """
+        await self.client.put("/settings/engine", headers=self.headers, json={"web_fetch_hosts": "docs.python.org"})
+        raw = ",".join(f"host{i:02d}.exampl.com" for i in range(11))
+        self.assertLessEqual(len(raw), 200)
+        self.assertGreater(len(", ".join(raw.split(","))), 200)
+        r = await self.client.put("/settings/engine", headers=self.headers, json={"web_fetch_hosts": raw})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertEqual(r.json()["code"], "invalid_value")
+        self.assertIn("once written out", r.json()["message"])
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual(r.json()["web_fetch_hosts"]["value"], "docs.python.org")
+        # One fewer fits, and is stored whole, last name included.
+        fits = ",".join(raw.split(",")[:10])
+        r = await self.client.put("/settings/engine", headers=self.headers, json={"web_fetch_hosts": fits})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["saved"]["web_fetch_hosts"].endswith("host09.exampl.com"))
+
+    async def test_a_site_name_in_another_script_is_stored_as_the_ascii_the_fetch_compares(self) -> None:
+        r = await self.client.put("/settings/engine", headers=self.headers, json={"web_fetch_hosts": "münchen.de"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["saved"]["web_fetch_hosts"], "xn--mnchen-3ya.de")
+
     async def test_a_site_list_that_is_not_site_names_is_refused_and_changes_nothing(self) -> None:
         await self.client.put(
             "/settings/engine", headers=self.headers, json={"web_fetch_hosts": "docs.python.org"}

@@ -165,6 +165,17 @@ class TestTheSiteList(unittest.TestCase):
         self.assertEqual(hosts, ())
         self.assertEqual(len(rejected), 7, rejected)
 
+    def test_a_name_with_non_ascii_letters_is_kept_as_the_ascii_an_address_is_compared_in(self) -> None:
+        hosts, rejected = parse_hosts("münchen.de, *.Bücher.example")
+        self.assertEqual(hosts, ("xn--mnchen-3ya.de", "xn--bcher-kva.example"))
+        self.assertEqual(rejected, [])
+        # The same name in an address, and in the list, is one name: the fetch compares the ASCII form of both.
+        policy = FetchPolicy(MODE_LISTED, hosts)
+        self.assertEqual(check_url("https://münchen.de/x", policy).host, "xn--mnchen-3ya.de")
+        self.assertEqual(check_url("https://shop.bücher.example/", policy).host, "shop.xn--bcher-kva.example")
+        # A label that cannot be written in ASCII at all is refused, not stored as something else.
+        self.assertEqual(parse_hosts("a" * 64 + ".example")[1], ["a" * 64 + ".example"])
+
     def test_an_entry_covers_its_subdomains_and_not_a_longer_name(self) -> None:
         hosts = ("python.org",)
         self.assertTrue(host_listed("python.org", hosts))
@@ -371,6 +382,29 @@ class TestWhatComesBack(unittest.IsolatedAsyncioTestCase):
         # reject, so it is the one that cost a request.
         self.assertEqual(len(calls), 1)
 
+    async def test_a_document_with_nothing_to_parse_is_no_text_and_not_a_crash(self) -> None:
+        # Only a comment, or only an XML declaration: lxml builds no root element, and the parser fails on its
+        # first question. The page has no text, and that is what the model is told.
+        for body in ("<!-- nothing here -->", '<?xml version="1.0"?>'):
+            with self.subTest(body=body):
+                page = await get("https://docs.example/", lambda r, b=body: html(b))  # type: ignore[misc]
+                self.assertEqual((page.status, page.text, page.links), (200, "", []))
+                self.assertIn("no readable text", format_fetch(page))
+                narrowed = await get("https://docs.example/", lambda r, b=body: html(b), selector="main")  # type: ignore[misc]
+                self.assertEqual((narrowed.text, narrowed.matched), ("", 0))
+
+    async def test_a_long_address_is_not_listed_so_the_links_cannot_outweigh_the_text(self) -> None:
+        # A literal 600, not the constant plus something: a test sized from the cap passes whatever the cap is.
+        long_path = "/" + "a" * 600
+        body = f'<html><body><p>text</p><a href="{long_path}">long</a><a href="/short">short</a></body></html>'
+        page = await get("https://docs.example/", lambda r: html(body))
+        self.assertEqual(page.links, [("short", "https://docs.example/short")])
+        # And the total a page can add is bounded by construction: forty links, each at most the cap.
+        many = "".join(f'<a href="/{i}/{"b" * 440}">{i}</a>' for i in range(100))
+        crowded = await get("https://docs.example/", lambda r: html(f"<html><body>{many}</body></html>"))
+        self.assertEqual(len(crowded.links), web_fetch.MAX_LINKS)
+        self.assertLess(len(format_fetch(crowded)), web_fetch.MAX_LINKS * (web_fetch.MAX_LINK_URL_CHARS + 120) + 2_000)
+
     async def test_text_is_capped_and_says_so(self) -> None:
         body = "<html><body>" + "".join(f"<p>line {i} of the page</p>" for i in range(2_000)) + "</body></html>"
         page = await get("https://docs.example/", lambda r: html(body), max_chars=500)
@@ -421,6 +455,14 @@ class TestWhatComesBack(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FetchRefused) as caught:
             await get("https://docs.example/", refuse)
         self.assertEqual(str(caught.exception), "docs.example could not be reached (ConnectError).")
+
+    async def test_an_address_the_client_cannot_build_is_the_same_sentence(self) -> None:
+        def invalid(request: httpx.Request) -> httpx.Response:
+            raise httpx.InvalidURL("not a URL httpx can send")
+
+        with self.assertRaises(FetchRefused) as caught:
+            await get("https://docs.example/", invalid)
+        self.assertEqual(str(caught.exception), "docs.example could not be reached (InvalidURL).")
 
     async def test_the_model_is_told_it_is_reading_a_website_and_not_being_instructed(self) -> None:
         text = format_fetch(await get("https://docs.example/start"))

@@ -1308,7 +1308,17 @@ def _clean_engine_string(key: str, value: Any) -> str:
                 f"{key} takes site names such as docs.python.org, not addresses, URLs or bare words: "
                 + ", ".join(rejected[:5]),
             )
-        return ", ".join(hosts)
+        written = ", ".join(hosts)
+        # Bounded after normalising, not only before: the stored form is longer than what was typed (one space per
+        # separator, and an IDN name is longer as punycode), and `set_str` would cut it at 200 characters, which
+        # would chop the last site to a name that matches nothing. Refused instead, so the list that was saved is
+        # the list that was shown.
+        if len(written) > limit:
+            raise ApiError(
+                422, "invalid_value",
+                f"{key} is {len(written)} characters once written out ({limit} allowed); list fewer sites",
+            )
+        return written
     return text
 
 

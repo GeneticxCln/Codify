@@ -748,7 +748,11 @@ and every rule's reason, is `docs/12`). It is a conductor tool and has no route 
 sites in `web_fetch_hosts`, 2 any public site; default 0; clamped to 0–2; a boolean is `422`) and
 `web_fetch_hosts` (site names, comma-separated, each covering its subdomains; at most 200 characters, which is
 what `SettingsService.set_str` stores). The list is stored in the one spelling the fetch parses (`parse_hosts`:
-lower-cased, `*.` and a leading or trailing dot dropped, each name once, joined with `, `). An entry that is not a
+lower-cased, `*.` and a leading or trailing dot dropped, a name in another script written as its ASCII form
+(`münchen.de` is stored `xn--mnchen-3ya.de`, which is what an address's host is compared in), each name once,
+joined with `, `). The 200 applies to that stored form, not to what was typed, which is shorter: a list that is
+too long once written out is `422` and nothing is stored, because the store would otherwise cut it and chop the
+last site to a name that matches nothing. An entry that is not a
 site name (an address, a URL, a path, a single label such as `intranet`) is `422 invalid_value` naming up to five
 of them, and **nothing is stored**: a list that quietly allowed less than it was shown would be a bug nobody
 could see. `POST /goals` and a turn cannot carry either key (`tests/test_invariants_at_their_boundary.py`).
@@ -760,7 +764,7 @@ the address that was checked; each redirect (at most 5) passes every rule again;
 text content types only; the address is logged (`conductor is fetching <address>`) before the request, and a run
 makes at most 8. What comes back is `Fetched`: the final address, status, content type, title, text (default
 12,000 characters, 200–40,000 as asked), whether it was truncated or its body capped, the redirect route and up
-to 40 links, formatted as a quotation of the website (`format_fetch`).
+to 40 links (each address at most 500 characters, so the links cannot outweigh the text), formatted as a quotation of the website (`format_fetch`).
 
 **Errors the model is told in a sentence** (`FetchRefused`, as `That page was not fetched: <reason>`): off, a
 scheme, user-info, a port, a length, an address that resolves to a non-public one (naming it), a host not on
