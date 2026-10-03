@@ -30,7 +30,7 @@ runs everything in one pass:
 | `make test` | full Python suite (411 tests today — the number moves, so trust the run) |
 | `make test-streams` | the concurrency/stream-isolation tests, **by name** (not just via discovery) |
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |
-| `make check-tauri` | `cargo check` + `cargo fmt --check` on the desktop shell |
+| `make check-tauri` | `cargo check` + `cargo test` (under Xvfb when there is no display; the machine tab's tests run a real `bwrap` jail) + `cargo fmt --check` on the desktop shell |
 | `make check-history` | every commit in `HISTORY_RANGE` (default `origin/<branch>..HEAD`) builds, not just the tip |
 
 The Python suite must run on **3.10 and 3.14** — 3.10 because `pyproject.toml`
@@ -50,9 +50,10 @@ which runs everything above and then the same Python targets again on the declar
 minimum, bringing that interpreter up on demand (it downloads one with `uv`, or uses a
 `python3.10` you already have). The floor leg never skips: if it cannot be provisioned,
 `make ci` fails and says what to install. `.github/workflows/check.yml` describes the
-same targets split by toolchain. That workflow is manual-only (its header says why
-and what the earlier billing lock was): start it by hand for a second opinion from
-GitHub's own runners. **`make ci` is the gate.**
+same targets split by toolchain. That workflow runs on every pull request and every
+push to `master` (its header says what the earlier billing lock was, and why a status
+from `make ci-report` is still worth having): a second opinion from GitHub's own
+runners, on a machine that is not yours. **`make ci` is the gate.**
 
 ### Getting the verdict onto a pull request
 

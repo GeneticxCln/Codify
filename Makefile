@@ -116,7 +116,7 @@ test-streams:
 # (session bus, WebKit sandbox, DMABUF, display backend), and passes only on
 # the paint line the page emits after two composited animation frames.
 # Deliberately a local target, not part of `check`: it needs a display, and
-# the Actions workflow is manual-only anyway (see check.yml).
+# the Actions workflow does not run it (see check.yml).
 # SMOKE_EMBED_ARGS passes the script's own flags through, because a target
 # that cannot take `--rebuild` or `--url` is a target people work around:
 #   make smoke-embed SMOKE_EMBED_ARGS=--rebuild
@@ -292,17 +292,18 @@ ci-python-floor:
 
 # The whole gate, locally, in one command: every leg CI covered — the host interpreter,
 # the declared minimum, the UI and the Rust shell — with the floor provisioned on demand
-# instead of assumed. The Actions workflow is manual-only (see the note in check.yml), so this
-# is the gate; run it before calling a change done.
+# instead of assumed. The Actions workflow (check.yml) is a second opinion on a clean
+# machine, not this gate; run this before calling a change done.
 ci: ci-python-floor check
 	@echo ""
 	@echo "CI gate passed locally: python $(PY_MIN) (provisioned) + host + ui + rust."
 
-# `make ci`, then say so on the commit. With the Actions workflow manual-only there is no check on a
-# pull request unless someone starts it; this publishes the local verdict as a commit status (context
-# local/make-ci) using the GitHub CLI, which is free because a status is an API call and
-# not a workflow run. It refuses a dirty tree and needs the commit pushed — see the
-# header of scripts/ci-report.sh for why each is a rule and not a courtesy.
+# `make ci`, then say so on the commit. Actions gives a pull request its own check; this
+# publishes the local verdict next to it as a commit status (context local/make-ci) using
+# the GitHub CLI, which is free because a status is an API call and not a workflow run,
+# and is the only mark there is when Actions cannot run. It refuses a dirty tree and needs
+# the commit pushed — see the header of scripts/ci-report.sh for why each is a rule and
+# not a courtesy.
 ci-report:
 	scripts/ci-report.sh
 

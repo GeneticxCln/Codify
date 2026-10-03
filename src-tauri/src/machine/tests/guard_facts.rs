@@ -78,11 +78,14 @@ fn a_machine_may_use_half_the_computer_and_never_more_than_four_gigabytes() {
 }
 
 #[test]
-fn what_the_pane_is_told_names_both_numbers() {
+fn what_the_pane_is_told_names_the_limit_and_never_contradicts_itself() {
     assert_eq!(guard::human(300 * 1024 * 1024), "300 MB");
     assert_eq!(guard::human(3_968 * 1024 * 1024), "3.9 GB");
-    let said = guard::notice(3_968 * 1024 * 1024, 2 * 1024 * 1024 * 1024);
-    assert!(said.contains("machine stopped") && said.contains("3.9 GB") && said.contains("2.0 GB"));
+    let said = guard::notice(2 * 1024 * 1024 * 1024);
+    assert!(
+        said.contains("machine stopped: it used more than the 2.0 GB of memory a machine may use"),
+        "the notice does not name the limit it was stopped at: {said}"
+    );
     assert!(
         said.contains("Reset"),
         "the notice does not say what to do: {said}"
@@ -208,8 +211,7 @@ fn a_program_that_takes_too_much_memory_stops_the_machine_and_the_pane_says_why(
 
     let said = jail.transcript();
     assert!(
-        said.contains("[machine stopped: it was using")
-            && said.contains("a machine may use 200 MB"),
+        said.contains("[machine stopped: it used more than the 200 MB of memory a machine may use"),
         "the pane was not told why: {said}"
     );
     // Nothing of it is left running on the host.

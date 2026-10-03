@@ -1939,8 +1939,8 @@ failure. Both are "this run measured nothing", and the difference is a
 `cargo build` versus stopping another instance.
 
 `make smoke-embed` is a local target, deliberately not part of `check` or `ci`:
-it needs a display, and the Actions workflow is manual-only
-anyway (see `check.yml`). The unit tests keep the wiring honest; this keeps the
+it needs a display, and the Actions workflow does not run
+it (see `check.yml`). The unit tests keep the wiring honest; this keeps the
 claim honest.
 
 #### The strip comes back: `make smoke-tabs`
