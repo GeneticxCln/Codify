@@ -22,6 +22,7 @@ import {
   validateStatsHistoryDocument,
   type MergedDay,
 } from "../statsHistory";
+import { DAYS_SHOWN, LANES_SHOWN, coverageNotice, newestDays, topLanes } from "../statsView";
 import {
   describeOutcomes,
   failureEmptyMessage,
@@ -106,37 +107,36 @@ const StatCard: React.FC<{
   </div>
 );
 
-/** The per-role / per-model table: one row per lane, spend and calls. */
+/** The per-role / per-model table: one row per lane, spend and calls. Long lists show the biggest spenders and
+ * say what is behind "show more", so a table of 40 models does not push every other card off the screen. */
 const UsageTable: React.FC<{
   title: string;
   lanes: Record<string, UsageLane>;
-}> = ({ title, lanes }) => {
-  const entries = Object.entries(lanes).sort(
-    (a, b) => b[1].total_tokens - a[1].total_tokens,
-  );
-  if (entries.length === 0) return null;
+  /** How many rows before "show more". The roles are eight at most and need no limit. */
+  limit?: number;
+}> = ({ title, lanes, limit = LANES_SHOWN }) => {
+  const [expanded, setExpanded] = useState(false);
+  const { shown, hidden, hiddenTokens } = topLanes(lanes, expanded, limit);
+  if (shown.length === 0) return null;
+  const biggest = Math.max(...shown.map(([, l]) => l.total_tokens));
   return (
     <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
       <div className="text-xs font-semibold uppercase tracking-wider text-codify-muted mb-2">
         {title}
+        {(hidden > 0 || expanded) && (
+          <span className="normal-case font-normal text-codify-muted"> · {Object.keys(lanes).length} in all</span>
+        )}
       </div>
       <div className="flex flex-col gap-1.5">
-        {entries.map(([name, lane]) => (
+        {shown.map(([name, lane]) => (
           <div key={name} className="flex items-center gap-2 text-xs">
-            <span className="font-mono text-codify-secondary truncate min-w-0 flex-1">
+            <span className="font-mono text-codify-secondary truncate min-w-0 flex-1" title={name}>
               {name}
             </span>
             <div className="h-1.5 w-24 bg-codify-surface rounded-full overflow-hidden shrink-0">
               <div
                 className="h-full bg-codify-accent rounded-full"
-                style={{
-                  width: `${Math.max(
-                    2,
-                    (lane.total_tokens /
-                      Math.max(...entries.map(([, l]) => l.total_tokens))) *
-                      100,
-                  )}%`,
-                }}
+                style={{ width: `${Math.max(2, (lane.total_tokens / Math.max(1, biggest)) * 100)}%` }}
               />
             </div>
             <span className="font-mono text-codify-muted w-14 text-right shrink-0">
@@ -149,6 +149,16 @@ const UsageTable: React.FC<{
           </div>
         ))}
       </div>
+      {(hidden > 0 || expanded) && (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((open) => !open)}
+          className="mt-2 text-2xs text-codify-info hover:underline cursor-pointer"
+        >
+          {expanded ? "Show fewer" : `Show ${hidden} more · ${fmtTokens(hiddenTokens)} tokens`}
+        </button>
+      )}
     </div>
   );
 };
@@ -160,68 +170,87 @@ const UsageTable: React.FC<{
  * carries the detail. A dot marks today — the one bar that is still moving.
  */
 const SuccessRateChart: React.FC<{ days: MergedDay[] }> = ({ days }) => {
+  const [expanded, setExpanded] = useState(false);
   if (days.length === 0) return null;
+  const { shown, hidden } = newestDays(days, expanded);
   const today = new Date().toISOString().slice(0, 10);
   return (
     <div className="bg-codify-bg border border-codify-border rounded-xl p-3">
       <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-codify-muted mb-2">
         <TrendingUp className="w-3.5 h-3.5 text-codify-info" />
         Day by day
+        {days.length > DAYS_SHOWN && (
+          <span className="normal-case font-normal text-codify-muted">· {days.length} days</span>
+        )}
         {days.some((d) => d.source === "snapshot") && (
           <span className="normal-case font-normal text-codify-muted">
             · saved days survive restarts
           </span>
         )}
       </div>
-      <div className="flex flex-col gap-1">
-        {days.map((d) => {
+      <div className="flex flex-col gap-2">
+        {shown.map((d) => {
           const terminal = d.succeeded + d.failed + d.cancelled;
           const rate =
             terminal > 0 ? Math.round((100 * d.succeeded) / terminal) : null;
           const isToday = d.date === today;
           return (
-            <div key={d.date} className="flex items-center gap-2 text-xs">
-              <span className="font-mono text-codify-muted w-20 shrink-0">
-                {isToday ? "today" : d.date.slice(5)}
-              </span>
-              <div className="flex-1 h-2 bg-codify-surface rounded-full overflow-hidden min-w-0">
-                <div
-                  className={`h-full rounded-full ${
-                    rate == null
-                      ? "bg-codify-neutral/60"
-                      : rate < 50
-                        ? "bg-codify-warning/80"
-                        : "bg-codify-success/70"
-                  }`}
-                  style={{ width: `${rate == null ? 2 : Math.max(4, rate)}%` }}
-                />
+            <div key={d.date} className="flex flex-col gap-0.5">
+              {/* Two lines, as the stage table does: the bar and the rate on the first, and on the second
+                  everything else about the day, free to wrap. It was one line with a 14rem caption that
+                  cut off the tokens and the calls on any day that also had failures or cancellations. */}
+              <div className="flex items-center gap-2 text-xs">
+                <span className="font-mono text-codify-muted w-20 shrink-0">
+                  {isToday ? "today" : d.date.slice(5)}
+                </span>
+                <div className="flex-1 h-2 bg-codify-surface rounded-full overflow-hidden min-w-0">
+                  <div
+                    className={`h-full rounded-full ${
+                      rate == null
+                        ? "bg-codify-neutral/60"
+                        : rate < 50
+                          ? "bg-codify-warning/80"
+                          : "bg-codify-success/70"
+                    }`}
+                    style={{ width: `${rate == null ? 2 : Math.max(4, rate)}%` }}
+                  />
+                </div>
+                <span className="text-codify-muted w-12 text-right shrink-0">
+                  {rate == null ? "—" : `${rate}%`}
+                </span>
               </div>
-              <span className="text-codify-muted w-56 text-right shrink-0 truncate">
+              <div className="text-2xs text-codify-muted pl-[5.5rem]">
                 {isToday && <span className="text-codify-info mr-1">●</span>}
-                {rate == null ? "no terminal goals" : `${rate}% ok`}
-                {" · "}
+                {rate == null && "no terminal goals · "}
                 {d.created} started
                 {d.failed > 0 && (
                   <span className="text-codify-danger"> · {d.failed} failed</span>
                 )}
                 {d.cancelled > 0 && (
-                  <span className="text-codify-warning">
-                    {" "}
-                    · {d.cancelled} cancelled
-                  </span>
+                  <span className="text-codify-warning"> · {d.cancelled} cancelled</span>
                 )}
                 {d.total_tokens > 0 && (
-                  <span className="text-codify-muted">
+                  <span>
                     {" "}
                     · {fmtTokens(d.total_tokens)} tok · {d.calls} call
                     {d.calls === 1 ? "" : "s"}
                   </span>
                 )}
-              </span>
+              </div>
             </div>
           );
         })}
       </div>
+      {(hidden > 0 || expanded) && (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((open) => !open)}
+          className="mt-2 text-2xs text-codify-info hover:underline cursor-pointer"
+        >
+          {expanded ? `Show the latest ${DAYS_SHOWN} days` : `Show ${hidden} earlier day${hidden === 1 ? "" : "s"}`}
+        </button>
+      )}
     </div>
   );
 };
@@ -487,6 +516,7 @@ export const StatsPanel: React.FC = () => {
     [...importedHistory, ...history],
     stats?.daily ?? [],
   );
+  const notice = stats ? coverageNotice(stats.coverage, windowDays, Date.now()) : null;
   const importSummary = summarizeStatsHistoryImport(importedHistory, history);
   const matchedLocalDays = importSummary.matchedLocal;
   const addedHistoryDays = importSummary.added;
@@ -597,6 +627,12 @@ export const StatsPanel: React.FC = () => {
         </p>
       )}
 
+      {notice && (
+        <p className="text-2xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-2.5 leading-relaxed">
+          {notice}
+        </p>
+      )}
+
       {!failed && !stats && (
         <p className="text-xs text-codify-muted px-1 py-2">Loading statistics…</p>
       )}
@@ -702,7 +738,7 @@ export const StatsPanel: React.FC = () => {
           </p>
 
           {/* Where the tokens went */}
-          <UsageTable title="By role" lanes={stats.usage.by_role} />
+          <UsageTable title="By role" lanes={stats.usage.by_role} limit={Infinity} />
           <UsageTable title="By model" lanes={stats.usage.by_model} />
           {stats.by_stage && <StageTable rows={stats.by_stage} />}
           {stats.by_role_outcome && (

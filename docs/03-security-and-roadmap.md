@@ -324,6 +324,17 @@ Three items, in this order, because each makes the next one safe. Every number b
 
 The overview was worse than the 145 ms first estimated: it sweeps twice, and its snapshot check (`maybe_snapshot`, which runs on every read to see whether a past day is unfrozen) formatted a date for every one of 20,000 events on every call — 40 to 100 ms for nothing once a day was frozen. `active_days` now buckets timestamps to whole UTC days first and formats only the distinct days. What is left is not a stall: the two threads share the interpreter's lock, so the loop sometimes waits a few milliseconds for its turn while a worker parses (median lateness 0.2 ms, 99th percentile about 26 ms). A process pool would remove even that and was not worth its weight. `tests/test_stats_off_the_loop.py` asserts where the work runs and that a blocked read leaves the loop free, rather than a timing. Event retention is deliberately not part of this: `events` is the audit trail, and deleting it is a product decision.
 
+**4.3a The daily freeze was still on the loop, and redid itself on every read.** The measurement above had every past day already frozen. With more days of activity than `stats_retention_days` keeps (the default is 90), `maybe_snapshot` froze every older day on the loop, `prune` deleted them in the same request, and the next read froze them again. On a scratch install with 400 days of history (2,400 goals, 224,000 events, 242 MB) each open of the Statistics drawer cost about 25 s, and `/health` polled during it answered 23 s late: the whole engine stood still while a panel loaded. It also froze every backfilled day from the whole history, so any day older than the trend's 30-day span had no row of its own in its document and the chart read "0 started" for days that had real goals (6 of the 10 days sampled out of the 60 shown, against the database). Now `pending_days` asks only for the newest `stats_retention_days` active days that have no row (the set `prune` leaves standing), one read owes at most 31 of them, newest first, each document is built from what had happened by the end of that day, and the arithmetic runs on a worker thread; only the writes come back to the loop. Same install, same machine:
+
+| | before | after |
+|---|---|---|
+| Statistics open, steady state | 24-25 s | 1.0-1.1 s |
+| `/health` during it, slowest | 23,338 ms | 148 ms |
+| first open over 400 unfrozen days | 30 s | 3 reads of about 3 s, `/health` 116 ms at worst, then 0.84 s |
+| frozen days whose "started" differs from the database | 6 of 10 sampled | 0 of 60 |
+
+What is left of the 1 s is the two sweeps (`_load_stats`, `_load_metrics`, about 0.3 s each at the caps) and a third for `/stats/failures`; a cache keyed on the newest event would remove it and was left out because a stale number in a statistics panel is worse than a slow one. The overview also reports `coverage` now (§4 of `04`): "All" over 30,000 model calls counted the newest 20,000 (63% of the true total) without saying so. Tests: `tests/test_stats_history.py` (a day is frozen as it ended; retention does not cause rework; the per-read cap) and `tests/test_stats_off_the_loop.py` (the freeze arithmetic runs off the loop, a second read owes nothing, coverage).
+
 ## 4. Settled defaults
 
 | Topic | Decision |

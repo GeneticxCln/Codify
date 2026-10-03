@@ -452,6 +452,8 @@ export interface StatsOverview {
   by_stage?: StageCost[];
   /** Per-role success and cost, keyed by role. */
   by_role_outcome?: Record<string, RoleOutcome>;
+  /** How much of the history this read covered. Absent on an engine too old to say. */
+  coverage?: StatsCoverage;
   /** Sparse UTC days (only days with activity), oldest first. */
   daily: {
     date: string;
@@ -462,6 +464,20 @@ export interface StatsOverview {
     total_tokens: number;
     calls: number;
   }[];
+}
+
+/**
+ * What a stats read looked at. The engine reads the newest goals and the newest model-call events only, up to
+ * a cap on each, so a long history is counted from `since`, not from the beginning. `since` is epoch seconds,
+ * and null when no cap cut anything off.
+ */
+export interface StatsCoverage {
+  goals: number;
+  goal_cap: number;
+  events: number;
+  event_cap: number;
+  truncated: boolean;
+  since: number | null;
 }
 
 /** The outcome lane of any stats document (live overview or frozen day). */

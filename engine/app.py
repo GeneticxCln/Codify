@@ -2065,15 +2065,27 @@ async def get_goal_audit(goal_id: str, request: Request) -> dict[str, Any]:
     }
 
 
-def _load_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The synchronous read behind `_sweep_stats`; it runs on a worker thread, never the loop's."""
+# Upper bounds on what one overview request reads. A window that reaches past them is answered from the
+# newest rows only, and `coverage` in the response says so, rather than letting "All" mean "the newest 20,000".
+_STATS_GOAL_LIMIT = 5000
+_STATS_EVENT_LIMIT = 20000
+
+
+def _load_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """The synchronous read behind `_sweep_stats`; it runs on a worker thread, never the loop's.
+
+    The third value is how much of the history this read covers: the rows it took, the caps, whether a cap
+    cut anything off, and the instant from which the numbers are complete (None when nothing was cut).
+    """
     goal_rows = conn.execute(
-        "SELECT id, status, created_at, updated_at FROM goals ORDER BY created_at DESC LIMIT 5000"
+        "SELECT id, status, created_at, updated_at FROM goals ORDER BY created_at DESC LIMIT ?",
+        (_STATS_GOAL_LIMIT,),
     ).fetchall()
     events = conn.execute(
         """SELECT type, payload, timestamp FROM events
            WHERE type IN ('usage', 'agent_call_failed')
-           ORDER BY timestamp DESC LIMIT 20000"""
+           ORDER BY timestamp DESC LIMIT ?""",
+        (_STATS_EVENT_LIMIT,),
     ).fetchall()
     parsed = []
     for row in events:
@@ -2082,10 +2094,27 @@ def _load_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[di
         except (TypeError, ValueError):
             continue
         parsed.append({"type": row["type"], "payload": payload, "timestamp": row["timestamp"]})
-    return [dict(r) for r in goal_rows], parsed
+    goals_cut = len(goal_rows) >= _STATS_GOAL_LIMIT
+    events_cut = len(events) >= _STATS_EVENT_LIMIT
+    # Both reads are newest-first, so the last row of each is the oldest one it kept. When a read was cut,
+    # nothing before that row is counted by it; the numbers are complete only from the later of the two.
+    starts = []
+    if goals_cut:
+        starts.append(goal_rows[-1]["created_at"])
+    if events_cut:
+        starts.append(events[-1]["timestamp"])
+    coverage = {
+        "goals": len(goal_rows),
+        "goal_cap": _STATS_GOAL_LIMIT,
+        "events": len(events),
+        "event_cap": _STATS_EVENT_LIMIT,
+        "truncated": goals_cut or events_cut,
+        "since": max(starts) if starts else None,
+    }
+    return [dict(r) for r in goal_rows], parsed, coverage
 
 
-async def _sweep_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+async def _sweep_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """The raw material the stats views aggregate: goal rows and parsed call
     events. One loader for both the live overview and the snapshot writer, so
     the two can never read different worlds."""
@@ -2224,19 +2253,25 @@ async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, 
     erroring, because a stats view has no broken state to refuse.
     """
     conn = request.app.state.conn
-    goals, parsed = await _sweep_stats(conn)
+    goals, parsed, coverage = await _sweep_stats(conn)
     now = time.time()
 
-    # Freeze yesterday, once, then enforce retention. The service owns the day
-    # boundary and the "already frozen" check; this only decides that a
-    # failure to maintain history is not worth failing the present. Deliberately
-    # silent: log events live in the per-goal stream, and a snapshot has no
-    # goal to attribute itself to. Pruning on read (not only on freeze) is what
-    # makes a lowered policy take effect without waiting for tomorrow.
+    # Freeze the past days that have no row, then enforce retention. The service owns the day boundary and
+    # the "already frozen" check; this only decides that a failure to maintain history is not worth failing
+    # the present. The arithmetic (one overview per day owed) runs on a worker thread, because it was the
+    # one part of this route that still ran on the loop: with more history than the retention keeps it was
+    # tens of seconds in which nothing else in the engine moved. Only the writes come back to the loop, and
+    # `pending_days` asks for no more days than `prune` will leave standing, so a pruned day is not frozen
+    # again on the next read. Deliberately silent: log events live in the per-goal stream, and a snapshot
+    # has no goal to attribute itself to. Pruning on read (not only on freeze) is what makes a lowered
+    # policy take effect without waiting for tomorrow.
     try:
         snapshots: StatsSnapshotService = request.app.state.stats_snapshots
-        snapshots.maybe_snapshot(conn, goals, parsed, now)
         retention = request.app.state.settings.get_int("stats_retention_days")
+        due = snapshots.pending_days(goals, parsed, now, retention)
+        if due:
+            documents = await asyncio.to_thread(snapshots.build_documents, goals, parsed, due)
+            snapshots.store(documents, now)
         snapshots.prune(retention)
     except Exception:
         pass
@@ -2271,6 +2306,7 @@ async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, 
         **overview,
         "by_stage": stages,
         "by_role_outcome": roles,
+        "coverage": coverage,
         "generated_at": now,
     }
 

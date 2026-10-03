@@ -205,10 +205,12 @@ class TestHistory(StatsHistoryTestCase):
         self.assertEqual(days, sorted(days))
         history = self.snap.history()
         self.assertEqual([h["day"] for h in history], days)
-        # Each fixture spans two UTC days frozen with the same document.
-        self.assertEqual(history[0]["document"]["usage"]["total_tokens"], 45)
+        # Each fixture spans two UTC days, and each day's document is the numbers as *that day* ended: the
+        # first day of a pair has its goal and no model call yet, the second has the call. They used to be
+        # one document frozen twice, which gave the first day spend that had not happened.
+        self.assertEqual(history[0]["document"]["usage"]["total_tokens"], 0)
         self.assertEqual(history[1]["document"]["usage"]["total_tokens"], 45)
-        self.assertEqual(history[2]["document"]["usage"]["total_tokens"], 75)
+        self.assertEqual(history[2]["document"]["usage"]["total_tokens"], 0)
         self.assertEqual(history[3]["document"]["usage"]["total_tokens"], 75)
 
     def test_a_corrupt_document_is_skipped_not_fatal(self) -> None:
@@ -266,3 +268,100 @@ class TestPrune(StatsHistoryTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Real UTC midnights. `BASE` above is not one (it sits at 21:30 UTC the evening before, which is why its
+# fixtures straddle two days), and the tests below are about which side of a day's end things fall on.
+MIDNIGHT = 1_789_948_800.0  # 2026-09-21 00:00:00 UTC
+
+
+def noon(day: int) -> float:
+    return MIDNIGHT + day * 86400.0 + 12 * 3600.0
+
+
+class TestADayIsFrozenAsItEnded(StatsHistoryTestCase):
+    def test_the_fixture_clock_is_a_midnight(self) -> None:
+        self.assertEqual(utc_day(MIDNIGHT), "2026-09-21")
+        self.assertEqual(utc_day(MIDNIGHT - 1), "2026-09-20")
+
+    def test_a_day_older_than_the_trend_span_still_has_its_own_row(self) -> None:
+        """A backfilled day's document came from everything, and the trend only carries the newest 30 days, so a
+        day older than that was frozen without its own row and the chart read "0 started" for real goals."""
+        goals = [goal("COMPLETED", noon(0) + i) for i in range(3)] + [goal("COMPLETED", noon(50))]
+        events = [usage_ev(noon(0) + 5), usage_ev(noon(50))]
+        self.snap.maybe_snapshot(self.conn, goals, events, now=noon(51))
+        first = self.snap.history()[0]
+        self.assertEqual(first["day"], utc_day(noon(0)))
+        row = next((r for r in first["document"]["daily"] if r["date"] == first["day"]), None)
+        assert row is not None, "the day's own row is missing from its own document"
+        self.assertEqual(row["created"], 3)
+        self.assertEqual(row["calls"], 1)
+
+    def test_yesterdays_document_does_not_hold_what_happened_today(self) -> None:
+        goals = [goal("COMPLETED", noon(0)), goal("RUNNING", noon(1))]
+        events = [usage_ev(noon(0), tokens=20), usage_ev(noon(1), tokens=200)]
+        frozen = self.snap.maybe_snapshot(self.conn, goals, events, now=noon(1) + 600)
+        assert frozen is not None, "yesterday had activity, so it freezes"
+        self.assertEqual(frozen, utc_day(noon(0)))
+        doc = self.snap.get_day(frozen)
+        assert doc is not None
+        self.assertEqual(doc["goals"]["goals"], 1, "today's goal is in yesterday's frozen numbers")
+        self.assertEqual(doc["usage"]["calls"], 1, "today's model call is in yesterday's frozen numbers")
+
+    def test_a_goal_that_finished_after_the_day_is_still_in_flight_in_that_days_document(self) -> None:
+        """The log keeps a goal's last status, not the one it had that evening, so a goal that ended on day 2 is not
+        counted as a success in day 0's numbers."""
+        goals = [goal("COMPLETED", noon(0), updated=noon(2))]
+        events = [usage_ev(noon(0)), usage_ev(noon(2))]  # a goal is placed by its last change, so day 0 needs a call
+        self.snap.maybe_snapshot(self.conn, goals, events, now=noon(3))
+        by_day = {h["day"]: h["document"] for h in self.snap.history()}
+        first = by_day[utc_day(noon(0))]["goals"]
+        self.assertEqual((first["succeeded"], first["active"]), (0, 1))
+        last = by_day[utc_day(noon(2))]["goals"]
+        self.assertEqual((last["succeeded"], last["active"]), (1, 0))
+
+
+class TestRetentionDoesNotCauseRework(StatsHistoryTestCase):
+    def history_for(self, days: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        return (
+            [goal("COMPLETED", noon(d)) for d in range(days)],
+            [usage_ev(noon(d)) for d in range(days)],
+        )
+
+    def test_a_day_the_policy_would_prune_is_not_frozen_to_be_pruned(self) -> None:
+        """With more active days than the retention keeps, every read froze the older ones and `prune` deleted them
+        again, so the next read froze them again: about 25 seconds of thrown-away work per Stats open at 400 days."""
+        goals, events = self.history_for(10)
+        now = noon(10)
+        self.assertEqual(len(self.snap.pending_days(goals, events, now, keep=3)), 3, "only the newest 3 are candidates")
+        self.snap.maybe_snapshot(self.conn, goals, events, now, keep=3)
+        self.snap.prune(3)
+        self.assertEqual(len(self.snap.list_days()), 3)
+        self.assertEqual(self.snap.pending_days(goals, events, now, keep=3), [], "the second read has nothing to redo")
+
+    def test_a_lowered_policy_prunes_once_and_nothing_comes_back(self) -> None:
+        goals, events = self.history_for(8)
+        now = noon(8)
+        self.snap.maybe_snapshot(self.conn, goals, events, now)  # kept everything so far
+        self.assertEqual(len(self.snap.list_days()), 8)
+        self.snap.prune(3)
+        self.assertEqual(len(self.snap.list_days()), 3)
+        self.assertEqual(self.snap.pending_days(goals, events, now, keep=3), [], "the 5 pruned days are asked for again")
+
+    def test_no_policy_keeps_asking_for_every_unfrozen_day(self) -> None:
+        goals, events = self.history_for(5)
+        self.assertEqual(len(self.snap.pending_days(goals, events, noon(5), keep=0)), 5)
+        self.assertEqual(len(self.snap.pending_days(goals, events, noon(5), keep=None)), 5)
+
+    def test_the_newest_days_go_first_and_a_read_owes_at_most_a_month(self) -> None:
+        goals, events = self.history_for(40)
+        now = noon(40)
+        first = self.snap.pending_days(goals, events, now)
+        self.assertEqual(len(first), stats_history.MAX_FREEZE_PER_READ)
+        self.assertEqual(first[0], utc_day(noon(39)), "the newest day is first, so the chart is useful at once")
+        self.snap.maybe_snapshot(self.conn, goals, events, now)
+        rest = self.snap.pending_days(goals, events, now)
+        self.assertEqual(len(rest), 40 - stats_history.MAX_FREEZE_PER_READ)
+        self.snap.maybe_snapshot(self.conn, goals, events, now)
+        self.assertEqual(self.snap.pending_days(goals, events, now), [])
+        self.assertEqual(len(self.snap.list_days()), 40)

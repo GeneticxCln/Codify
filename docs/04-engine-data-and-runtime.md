@@ -450,8 +450,12 @@ CREATE TABLE engine_settings (
   updated_at REAL NOT NULL
 );
 
--- A day THIS engine froze from its own goals and events. Subject to the
--- count-based retention policy (`stats_retention_days`).
+-- A day THIS engine froze from its own goals and events: the numbers as that day
+-- ENDED (only the goals created and the calls logged before it was over; a goal
+-- whose status last changed after it counts as still in flight). Subject to the
+-- count-based retention policy (`stats_retention_days`); only the newest
+-- `stats_retention_days` active days are ever frozen, so a pruned day is not
+-- frozen again on the next read, and one read freezes at most 31 days, newest first.
 CREATE TABLE stats_snapshots (
   day TEXT PRIMARY KEY,
   document TEXT NOT NULL, -- the full overview document, JSON
@@ -519,7 +523,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/goals/{id}/trace` | — | the recording's summary: `calls`, `by_role`, `prompts_kept`, `recording_error`, and `recorded[]` (`seq`, `role`, `model`, `prompt_hash`, tokens, `duration_ms`). Never the prompt text — that is a deliberate second step, not something a panel opens on load (`04` §8). 404 `unknown_goal` |
 | `PUT` | `/goals/{id}/trace` | `{enabled}` extra=forbid | `Goal`. 409 `trace_locked` when enabling a goal that is no longer PLANNING — a recording that starts halfway is a trace of half a run. Disabling is always allowed |
 | `DELETE` | `/goals/{id}/trace` | — | `{deleted}`. Idempotent and never refused on status: deleting a copy of your own run is the user's call |
-| `GET` | `/stats/overview?window={1\|7\|30\|0}` | — | cross-goal outcomes, success rate, spend, daily trend (`engine/stats.py`), plus `by_stage` and `by_role_outcome` from the `stage_result` events (`engine/metrics.py`, §4.7). Bounded windows are anchored to the request's wall clock, so an idle install sees an empty window rather than its last run relabelled as recent. Both stage blocks are optional and their absence degrades the view rather than failing the read |
+| `GET` | `/stats/overview?window={1\|7\|30\|0}` | — | cross-goal outcomes, success rate, spend, daily trend (`engine/stats.py`), plus `by_stage` and `by_role_outcome` from the `stage_result` events (`engine/metrics.py`, §4.7). Bounded windows are anchored to the request's wall clock, so an idle install sees an empty window rather than its last run relabelled as recent. Both stage blocks are optional and their absence degrades the view rather than failing the read. `coverage` says how much of the history the read covered: `{goals, goal_cap, events, event_cap, truncated, since}`. The read takes the newest 5,000 goals and the newest 20,000 model-call events, so past that an "All" window counts from `since` (epoch seconds, null when nothing was cut) and `truncated` is true; the Statistics drawer says so |
 | `GET` | `/stats/failures?window={1\|7\|30\|0}` | — | what went wrong: `by_code`, `by_role`, `by_stage`, the ranked `causes` with their most recent message, and how many `fix_retry` steps the loop then got past (`recovery_rate` is `null` with no retries — no retries is not a perfect record). An install that has never failed reads `total: 0` with no rows, never a table of zeros |
 | `GET` | `/stats/history?limit={0..730}` | — | frozen daily stats documents, oldest first; `limit=0` returns every stored day for JSON export |
 | `GET` | `/stats/import` | — | the currently-imported history document (`{imported: false, days: []}` when none — a normal state, not a 404) |
