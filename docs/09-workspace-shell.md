@@ -2356,6 +2356,9 @@ the pipeline already makes, through the same service:
 | `read_editor` | `SurfaceBridge`, the `editor` surface (`04` §9.1) | eyes on the person's editor, **unsaved text included**; quoted file text, in a fixed shape with caps |
 | `open_in_editor` | the same, `open` | hands that only point: show a file and a range; nothing on disk changes |
 | `edit_editor` | the same, `edit` | hands that change **the open buffer only**: one undoable edit marked as the assistant's, never saved. The person's own Save is the only door to the disk (docs/00 §6.9) |
+| `read_machine` | `SurfaceBridge`, the `machine` surface (`04` §9.1) | eyes on a jailed shell the person opened: its screen and a bounded tail; program output, quoted, in a fixed shape with caps |
+| `run_in_machine` | the same, `run` | hands that type one command and bring back its output. **The one place a command runs without `validate_argv`** (docs/00 §6.6), and acceptable only because of the jail (§14); it cannot open or close a machine or change its network |
+| `key_in_machine` | the same, `key` | hands that press one *named* key from a fixed list; the engine never sends bytes |
 | `recon` | `ExecutorService._librarian` | read-only, bounded rounds |
 | `design` | `ExecutorService._design` | no tools at all; decides from the evidence |
 | `plan` | the planner | refuses without evidence; writes steps, never files |

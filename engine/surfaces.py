@@ -85,6 +85,10 @@ class Op:
     name: str
     args: type[BaseModel]
     result: type[BaseModel]
+    #: How long the engine waits for the window's answer to this op. None is `ASK_TIMEOUT_S`, which is right for every question
+    #: that is answered from state the window already holds; an op that has the window *do* something slow (type a command and
+    #: wait for it) names its own, read when the question is asked so that the module's constant stays the one to patch.
+    timeout_s: float | None = None
 
 
 @dataclass
@@ -100,8 +104,9 @@ class _Pending:
 def default_surfaces() -> dict[str, dict[str, Op]]:
     """Every surface the engine knows. Imported late, because each surface's vocabulary imports `Op` from here."""
     from engine.surface_editor import EDITOR_OPS
+    from engine.surface_machine import MACHINE_OPS
 
-    return {"editor": dict(EDITOR_OPS)}
+    return {"editor": dict(EDITOR_OPS), "machine": dict(MACHINE_OPS)}
 
 
 class SurfaceBridge:
@@ -152,11 +157,12 @@ class SurfaceBridge:
         )
         self._pending[pending.id] = pending
         self._wake.set()
+        wait_s = spec.timeout_s if spec.timeout_s is not None else ASK_TIMEOUT_S
         try:
-            return await asyncio.wait_for(pending.future, ASK_TIMEOUT_S)
+            return await asyncio.wait_for(pending.future, wait_s)
         except asyncio.TimeoutError:
             raise SurfaceRefused(
-                f"The app window did not answer {surface} {op} within {ASK_TIMEOUT_S:.0f}s. It may be closed, or busy; "
+                f"The app window did not answer {surface} {op} within {wait_s:.0f}s. It may be closed, or busy; "
                 "do not ask again straight away. Say what you wanted and let the person do it."
             ) from None
         finally:

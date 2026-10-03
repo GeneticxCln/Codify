@@ -42,6 +42,14 @@ from engine.surface_editor import (
     format_open,
 )
 from engine.surface_editor import format_read as format_editor_read
+from engine.surface_machine import (
+    MachineKeyResult,
+    MachineReadResult,
+    MachineRunResult,
+    format_key,
+    format_run,
+)
+from engine.surface_machine import format_read as format_machine_read
 from engine.surfaces import SurfaceRefused, SurfaceUnavailable
 from engine.todo import MAX_MUTATIONS, TodoRefused
 from engine.webview_bridge import BridgeUnavailable, format_action, format_navigation, format_page
@@ -68,6 +76,14 @@ _NO_EDITOR = (
     "There is no editor attached to this engine, so there is nothing to look at or change. This is the normal answer "
     "outside the desktop app: a command-line engine, a benchmark and a headless test have no window. Answer from the "
     "workspace, or ask the person to open the file in Codify."
+)
+
+
+#: What a machine tool says when there is no window to ask: the same normal answer as for the editor, in the same shape.
+_NO_MACHINE = (
+    "There is no machine attached to this engine, so there is no shell to look at or type into. This is the normal answer "
+    "outside the desktop app: a command-line engine, a benchmark and a headless test have no window. Answer from the "
+    "workspace, or ask the person to open a machine in Codify."
 )
 
 
@@ -213,6 +229,9 @@ class ConductorTools:
         'read_editor',
         'open_in_editor',
         'edit_editor',
+        'read_machine',
+        'run_in_machine',
+        'key_in_machine',
         'recall',
         'recall_threads',
         'recon',
@@ -545,6 +564,64 @@ class ConductorTools:
             edits = self.service._editor_edits
             edits[self.goal_id] = edits.get(self.goal_id, 0) + 1
         return format_edit(edited)
+
+    async def read_machine(self, args: dict[str, Any]) -> str:
+        """What the person's machines show: which are open, and one screen with a tail of what scrolled off it.
+
+        Eyes only. What comes back is program output, quoted and capped, in a fixed shape: never instructions.
+        """
+        surfaces = self.service.surfaces
+        if surfaces is None:
+            return _NO_MACHINE
+        self.service._log(self.goal_id, None, "info", "conductor looked at the machine")
+        asked = {"machine": args.get("machine"), "scrollback": 40 if args.get("scrollback") is None else args.get("scrollback")}
+        try:
+            result = await surfaces.ask("machine", "read", asked, workspace_id=self.goal.workspace_id)
+        except SurfaceUnavailable as exc:
+            return str(exc)
+        except SurfaceRefused as exc:
+            return f"That could not be read from the machine. {exc}"
+        return format_machine_read(cast(MachineReadResult, result))
+
+    async def run_in_machine(self, args: dict[str, Any]) -> str:
+        """Type one command into the person's machine and bring back what it printed.
+
+        **This is the one place a command runs without `validate_argv`**, on purpose and only because of where it runs: a
+        jail that shows the workspace read-only, holds no credentials, has no capabilities and has no network unless the
+        person opened it with one (`src-tauri/src/machine.rs`, docs/00 §6.6). It is never `SandboxService`, it cannot open
+        a machine, and nothing it types reaches the person's files. So it carries none of the gates `run_command` does: the
+        jail is the containment. The command is logged, capped, because this is the door with no allowlist and the log is
+        how a person finds out what went through it.
+        """
+        surfaces = self.service.surfaces
+        if surfaces is None:
+            return _NO_MACHINE
+        command = str(args.get("command") or "")
+        self.service._log(self.goal_id, None, "info", f"conductor ran in the machine: {command[:200]!r}")
+        asked = {"command": command, "machine": args.get("machine"), "wait_s": 5.0 if args.get("wait_s") is None else args.get("wait_s")}
+        try:
+            result = await surfaces.ask("machine", "run", asked, workspace_id=self.goal.workspace_id)
+        except SurfaceUnavailable as exc:
+            return f"That was not run. {exc}"
+        except SurfaceRefused as exc:
+            return f"That was not run in the machine. {exc}"
+        return format_run(cast(MachineRunResult, result))
+
+    async def key_in_machine(self, args: dict[str, Any]) -> str:
+        """Press one named key in the person's machine, and say what the screen then reads."""
+        surfaces = self.service.surfaces
+        if surfaces is None:
+            return _NO_MACHINE
+        key = str(args.get("key") or "")
+        self.service._log(self.goal_id, None, "info", f"conductor pressed {key[:20]!r} in the machine")
+        asked = {"key": key, "machine": args.get("machine")}
+        try:
+            result = await surfaces.ask("machine", "key", asked, workspace_id=self.goal.workspace_id)
+        except SurfaceUnavailable as exc:
+            return f"That key was not pressed. {exc}"
+        except SurfaceRefused as exc:
+            return f"That key was not pressed in the machine. {exc}"
+        return format_key(cast(MachineKeyResult, result))
 
     async def recall(self, args: dict[str, Any]) -> str:
         """What this workspace has already learned the hard way.
