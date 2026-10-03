@@ -299,9 +299,13 @@ fn a_reset_ends_everything_the_old_machine_was_running_and_changes_nothing_a_per
             .filter_map(|e| std::fs::read(e.path().join("cmdline")).ok())
             .any(|c| String::from_utf8_lossy(&c).contains(&needle))
     };
-    assert!(
-        running(),
-        "the background process never started, so this proves nothing"
+    // Not a single look: between fork and exec the child's /proc cmdline is its parent's, and `jail.run`
+    // can return inside that gap (the same race as `closing_a_machine_ends_everything_that_was_running_in_it`).
+    wait_for(
+        &jail,
+        "the background process never started, so this proves nothing",
+        5,
+        &running,
     );
     let old_root = jail.root_pid();
 
