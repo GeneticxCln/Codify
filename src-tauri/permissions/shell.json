@@ -72,6 +72,11 @@
       "commands": { "allow": ["codify_machine_resize"] }
     },
     {
+      "identifier": "allow-codify-machine-reset",
+      "description": "Throws away what one machine has done and starts it again from a clean project, by its own id. It remakes the machine from the recipe it was made from, so it cannot change the network or the project the person chose, and it is the one recovery for a machine that is wedged or was stopped for using too much.",
+      "commands": { "allow": ["codify_machine_reset"] }
+    },
+    {
       "identifier": "allow-codify-machine-close",
       "description": "Closes a machine and ends everything running in its jail.",
       "commands": { "allow": ["codify_machine_close"] }
@@ -141,6 +146,7 @@
         "allow-codify-machine-open",
         "allow-codify-machine-write",
         "allow-codify-machine-resize",
+        "allow-codify-machine-reset",
         "allow-codify-machine-close",
         "allow-codify-browser-open",
         "allow-codify-browser-navigate",

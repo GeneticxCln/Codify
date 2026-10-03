@@ -708,9 +708,24 @@ async fn codify_machine_open(
     cols: u16,
     rows: u16,
     network: bool,
-) -> Result<String, String> {
+) -> Result<machine::OpenedMachine, String> {
     let root = workspace_root_for(&engine, &workspace_id).await?;
     machine::open(app, &machines, Some(&root), cols, rows, network)
+}
+
+/// Throw away what a machine has done and start it again from a clean project: the same project, the same
+/// network, a new jail. It is the recovery for a machine that is wedged or was stopped for using too much,
+/// and it can change nothing a person chose, because it remakes the machine from the recipe it was made
+/// from (`docs/09` §14). The assistant reaches it through the window, as it reaches `codify_machine_write`.
+#[tauri::command]
+async fn codify_machine_reset(
+    machines: State<'_, SharedMachines>,
+    app: tauri::AppHandle,
+    machine_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<machine::OpenedMachine, String> {
+    machine::reset(app, &machines, &machine_id, cols, rows)
 }
 
 #[tauri::command]
@@ -2022,6 +2037,7 @@ pub fn run() {
             codify_machine_open,
             codify_machine_write,
             codify_machine_resize,
+            codify_machine_reset,
             codify_machine_close,
             codify_browser_open,
             codify_browser_navigate,
