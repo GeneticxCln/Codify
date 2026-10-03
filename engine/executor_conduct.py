@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from engine.chat_prompts import CHAT_SYSTEM_PROMPT, CONDUCTOR_SYSTEM_PROMPT
-from engine.conductor import ASK_USER, BASE_TOOLS, Conductor, DEFAULT_MAX_MOVES, DEFAULT_MAX_TURNS, STEP_TOOLS
+from engine.conductor import ASK_USER, BASE_TOOLS, Conductor, DEFAULT_MAX_MOVES, DEFAULT_MAX_TURNS, FETCH_PAGE, STEP_TOOLS
 from engine.conductor_tools import ConductorTools, _Conducted
 from engine.executor_support import AgentNotConfigured
 from engine.laya import LayaDecision, build_state
@@ -23,6 +23,7 @@ from engine.services import ApiError, custom_provider_address
 from engine.skills import SkillSet, load_skills
 from engine.todo import TodoList
 from engine.toolcall import ToolSpec
+from engine.web_fetch import MODE_LISTED, MODE_ANY, MODE_OFF, FetchPolicy, parse_hosts
 from engine.executor_plan import _Plan
 
 
@@ -435,6 +436,24 @@ class _Conduct(_Plan):
         return {name: getattr(tools, name) for name in ConductorTools.NAMES}
 
 
+    def _web_policy(self) -> FetchPolicy:
+        """What the person allowed `fetch_page` to do, read fresh each time and never wider than stored.
+
+        Best-effort the way `_settings_int` is, with the opposite default: a store that cannot answer, a
+        value that is not 1 or 2 and a list that parses to nothing are all *off*. A fetch is the one setting
+        where "I could not read it" must not mean "yes".
+        """
+        mode = self._settings_int("web_fetch", MODE_OFF)
+        settings = getattr(self, "settings", None)
+        raw = ""
+        if settings is not None:
+            try:
+                raw = str(settings.get_str("web_fetch_hosts"))
+            except Exception:
+                raw = ""
+        hosts, _ = parse_hosts(raw)
+        return FetchPolicy(mode=mode if mode in (MODE_LISTED, MODE_ANY) else MODE_OFF, hosts=hosts)
+
     def _settings_int(self, key: str, default: int) -> int:
         """One engine setting, or the default.
 
@@ -581,6 +600,9 @@ class _Conduct(_Plan):
         def menu() -> list[ToolSpec]:
             planned = bool(self.goals.steps(goal_id))
             offered = [*BASE_TOOLS, *(STEP_TOOLS if planned else ())]
+            # A tool that can only say "turned off" is a slot a small model spends a call finding that out.
+            if not self._web_policy().offered:
+                offered = [t for t in offered if t.name != FETCH_PAGE.name]
             # A question needs somebody to answer it, and a place to be seen. An approved plan that is
             # running has nobody sitting at it (a step ends finished, or paused with a reason, never parked
             # on a question), and once a plan exists the plan is what the person is looking at: they

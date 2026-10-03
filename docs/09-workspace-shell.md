@@ -2353,6 +2353,7 @@ the pipeline already makes, through the same service:
 | `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` → `engine/git_readonly.py`: subcommands, their exact options, and every positional, one owner; 60 s bound, no credentials in the child's environment |
 | `run_command` | `SandboxService.run_command` | `validate_argv`, `test` mode (docs/00 §6.6) once the goal is approved; `read_only` before that, so a turn cannot start the repository's code |
 | `read_page`, `navigate_page`, `click_page`, `type_page` | `WebviewBridge` (`§7.3`, `§7.5`) | the page is text from the web, quoted as untrusted; every navigation meets the shell's guard; typing submits nothing |
+| `fetch_page` | `engine/web_fetch.py` (`docs/12`) | the engine fetches one public page itself, with no tab involved: off unless a person allowed it in Settings → Web pages, public addresses only, bounded, announced before it is made; the page is text from the web, quoted as untrusted |
 | `read_editor` | `SurfaceBridge`, the `editor` surface (`04` §9.1) | eyes on the person's editor, **unsaved text included**; quoted file text, in a fixed shape with caps |
 | `open_in_editor` | the same, `open` | hands that only point: show a file and a range; nothing on disk changes |
 | `edit_editor` | the same, `edit` | hands that change **the open buffer only**: one undoable edit marked as the assistant's, never saved. The person's own Save is the only door to the disk (docs/00 §6.9) |

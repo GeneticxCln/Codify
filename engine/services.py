@@ -122,6 +122,11 @@ class SettingsService:
         "conductor_drives_execution": (1, lambda v: 1 if v else 0),
         # Read each answer aloud as it arrives (Settings → Audio). Off unless asked for.
         "tts_auto_read": (0, lambda v: 1 if v else 0),
+        # Whether the conductor's `fetch_page` may read the web: 0 not at all, 1 only the sites in
+        # `web_fetch_hosts`, 2 any public site. Off by default, because it is the one tool whose address
+        # leaves the machine from the engine itself (engine/web_fetch.py, docs/12), and a person opens
+        # that, never a goal or a turn (docs/00 §6.2).
+        "web_fetch": (0, lambda v: max(0, min(v, 2))),
     }
 
     # The conductor's model, and why it is here rather than in `agent_configs`:
@@ -153,6 +158,10 @@ class SettingsService:
         "audio_input": "",
         "stt_base_url": "",
         "tts_base_url": "",
+        # The sites `fetch_page` may read when `web_fetch` is 1: site names, comma-separated, each one
+        # covering its subdomains. Normalised on the way in (engine/web_fetch.py `parse_hosts`), so what
+        # is stored is what the fetch reads.
+        "web_fetch_hosts": "",
     }
 
     def get_str(self, key: str) -> str:

@@ -54,6 +54,7 @@ from engine.surface_machine import (
 from engine.surface_machine import format_read as format_machine_read
 from engine.surfaces import SurfaceRefused, SurfaceUnavailable
 from engine.todo import MAX_MUTATIONS, TodoRefused
+from engine.web_fetch import MAX_FETCHES_PER_RUN, MODE_OFF, FetchRefused, fetch, format_fetch
 from engine.webview_bridge import BridgeUnavailable, format_action, format_navigation, format_page
 
 if TYPE_CHECKING:
@@ -228,6 +229,7 @@ class ConductorTools:
         'navigate_page',
         'click_page',
         'type_page',
+        'fetch_page',
         'read_editor',
         'open_in_editor',
         'edit_editor',
@@ -273,6 +275,9 @@ class ConductorTools:
         # How many times this run has changed the todo list. A count of *this run*, so it lives here and not
         # on the goal: the list outlives the run, the limit on how much one run may fiddle with it does not.
         self.todo_edits = 0
+        # How many pages this run has asked the web for, refused or not. Per run for the reason `todo_edits` is: the
+        # limit is on how much one run may send out, and a refused attempt has already put its address in the log.
+        self.fetches = 0
 
     def _state_of(self, step_id: str) -> _StepState:
         state = self.state.get(step_id)
@@ -816,6 +821,48 @@ class ConductorTools:
         except Exception as exc:  # noqa: BLE001 — a page's behaviour is not our bug
             return f"That text was not typed. {exc}"
         return format_action(done, "type")
+
+    async def fetch_page(self, args: dict[str, Any]) -> str:
+        """Read one public web page the model named, under what the person allowed.
+
+        The engine's own request, unlike the page verbs above, which ask the shell's webview: so the rules are
+        `engine/web_fetch.py`'s, not a guard in another process, and they are those rules and no copy of them
+        (policy, public addresses only, the connection pinned to the address that was checked, every redirect
+        checked again, bounded in time and bytes). This method decides only whether to ask, and says so in
+        the transcript first.
+
+        **What it does not prevent.** The address is sent to the site, and a model that has read the workspace
+        can put what it read in it. With the setting on, that is a way out of the machine that needs no
+        approval, which is the same limit `navigate_page` documents; the list setting is what narrows it to
+        sites a person named, and `MAX_FETCHES_PER_RUN` is what bounds how often. The page that comes back is
+        a quotation, not instructions, and nothing in it reaches a tool, a path or argv.
+        """
+        policy = self.service._web_policy()
+        if policy.mode == MODE_OFF:
+            return (
+                "Fetching web pages is turned off. The person can allow it in Settings; it is not something "
+                "a conductor can change. Answer from the workspace, or give them the address to open."
+            )
+        url = str(args.get("url") or "").strip()
+        if self.fetches >= MAX_FETCHES_PER_RUN:
+            return (
+                f"This run has already fetched {MAX_FETCHES_PER_RUN} pages, which is as many as one run may. "
+                "Answer with what you have, and say what you did not get to."
+            )
+        self.fetches += 1
+        # Logged before the request, not after: the address is the one thing that leaves the machine, and a
+        # transcript line is the only place the person finds out it was asked for.
+        self.service._log(self.goal_id, None, "info", f"conductor is fetching {url[:200]}")
+        max_chars = args.get("max_chars")
+        try:
+            page = await fetch(
+                url, policy,
+                selector=str(args.get("selector") or "") or None,
+                max_chars=max_chars if isinstance(max_chars, int) else None,
+            )
+        except FetchRefused as exc:
+            return f"That page was not fetched: {exc}"
+        return format_fetch(page)
 
         # ── the stage moves ────────────────────────────────────────────────
     async def recon(self, args: dict[str, Any]) -> str:

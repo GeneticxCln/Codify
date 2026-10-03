@@ -184,6 +184,23 @@ the pane holds no audio state of its own.
 * **An engine without the keys is told so.** An engine that predates voice answers without them.
   The pane then says the engine needs updating and offers nothing to save, because a save it
   offered would be refused.
+
+## Web pages card
+
+A card of its own, under the Conductor's: whether the assistant may fetch web pages (`web_fetch`, `web_fetch_hosts`,
+`docs/12`). It is not part of the Conductor card because it is a different decision, what may leave the machine and
+not which model thinks, and it should be findable by someone who has never opened the conductor's budgets. Like
+the Conductor and Audio it is `engine_settings` keys written through `PUT /settings/engine` and nothing else.
+
+* **Three choices, off first:** Off, Only the sites I list, Any public site. The site field appears only for the
+  list. **The sentence under the picker is the consent** (`webAccessStatus`): both on-states say that each
+  address is sent to the site and can carry anything the assistant has read in the person's files, and that every
+  fetch is shown in the transcript before it is made; "any public site" says so more plainly, and an empty list
+  says it allows nothing and that the tool is not offered.
+* **The engine owns what a site name is.** The card sends what is typed and shows the engine's refusal sentence
+  (`refusalSentence`, reading the `{code, message}` body); it keeps no copy of the rule and keeps the person's draft
+  so the entry can be fixed. After a save it shows what the engine kept, which is the list in the engine's spelling.
+* **An engine without the keys shows no card**, because a save it offered would be refused.
 * **No model or voice lists of its own.** The model fields browse the same discovered models as a
   role card, with free text allowed. The voice is free text, because the provider owns its voice
   names.

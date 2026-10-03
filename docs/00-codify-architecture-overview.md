@@ -112,6 +112,7 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
 | `09-workspace-shell.md` | Conversations, tabs, terminal, browser — and §10, what a turn is |
 | `10-agent-memory.md` | The agent-memory model: the Hindsight audit, what was built (`recall`, `recall_threads`, keyword search, the durable observation store and its fading), and what was rejected |
 | `11-ruflo-audit.md` | The Ruflo audit: which of its ideas were borrowed, which were refused and by which invariant, and what was not read |
+| `12-scrapling-audit.md` | The Scrapling audit: the one tool built on its parser (`fetch_page`), the engine's rules for a request it makes to an address a model chose, and which of its fetchers, spiders, browsers and MCP server were refused and why |
 
 ## 6. Invariants (non-negotiable)
 

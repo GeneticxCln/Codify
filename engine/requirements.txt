@@ -6,3 +6,5 @@ websockets>=13,<18
 pydantic>=2.10,<3
 httpx>=0.28,<1
 keyring>=25.0,<26
+# The HTML parser behind fetch_page, and only the parser (see pyproject.toml).
+scrapling>=0.4.15,<0.5

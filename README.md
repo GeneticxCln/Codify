@@ -268,6 +268,13 @@ returns the address, title, text and links, so a turn can depend on a documentat
 Loopback stays blocked, and a model-proposed URL meets the same guard your click goes through. See
 [`docs/09`](docs/09-workspace-shell.md).
 
+The conductor can also **fetch a public page itself** (`fetch_page`), without moving your tab, but only if you turn it on
+in Settings → Web pages: off by default, then either only the sites you list or any public site. It reads the page with
+[Scrapling](https://github.com/D4Vinci/Scrapling)'s parser and nothing else of Scrapling: the request is Codify's own,
+public addresses only, bounded, and announced in the transcript before it is made. The address is sent to the site and
+can carry whatever the assistant has read, which no rule can prevent, so the list is the safer setting. See
+[`docs/12`](docs/12-scrapling-audit.md).
+
 ---
 
 ## 🎨 Appearance
@@ -531,7 +538,7 @@ src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the emb
             the render-starvation watchdog
 tests/      Python suite; hermetic.py is the shared isolation bootstrap
 scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py
-docs/       00–11, the specifications this README summarises
+docs/       00–12, the specifications this README summarises
 ```
 
 ## 📄 License

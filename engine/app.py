@@ -34,6 +34,7 @@ from engine.spawn_guard import guarded_argv, guarded_env
 from engine.stats import build_overview, normalize_window
 from engine.trace import TraceService
 from engine.surfaces import SurfaceAnswer, SurfaceBridge
+from engine.web_fetch import MAX_HOSTS_CHARS, parse_hosts
 from engine.webview_bridge import BridgeAnswer, WebviewBridge
 from engine.metrics import (
     STAGE_SUCCESS_OUTCOMES,
@@ -1201,6 +1202,10 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     # Read each answer aloud as it arrives (Settings → Audio). Off by default: a
     # voice that starts talking unasked is not something a fresh install does.
     "tts_auto_read": (0, 1),
+    # Whether the conductor may fetch web pages: 0 never, 1 only the sites in `web_fetch_hosts`, 2 any
+    # public site. Three states, so not a switch: a checkbox's `true` is refused here like any other
+    # number a person is choosing.
+    "web_fetch": (0, 2),
 }
 
 # The integer settings that are really switches, so a checkbox's `true` is a 1
@@ -1231,6 +1236,8 @@ ENGINE_STRING_SETTINGS: dict[str, int] = {
     # needs no agent role to define it. Built-in providers ignore it.
     "stt_base_url": 500,
     "tts_base_url": 500,
+    # The sites `fetch_page` may read when `web_fetch` is 1. 200 is what `SettingsService.set_str` stores.
+    "web_fetch_hosts": MAX_HOSTS_CHARS,
 }
 
 # The slug shape `AgentConfigUpdate` enforces, so a conductor pointed at a
@@ -1290,6 +1297,18 @@ def _clean_engine_string(key: str, value: Any) -> str:
         parsed = urlparse(text)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             raise ApiError(422, "invalid_value", f"{key} must be an http(s) address, such as http://127.0.0.1:8000/v1")
+    if key == "web_fetch_hosts":
+        # Stored in the one spelling the fetch reads, and refused rather than repaired when an entry is not a
+        # site name: a list that quietly dropped `http://docs.python.org/` would allow less than it was
+        # shown to, and one that kept an IP address would look like it allowed what it never can.
+        hosts, rejected = parse_hosts(text)
+        if rejected:
+            raise ApiError(
+                422, "invalid_value",
+                f"{key} takes site names such as docs.python.org, not addresses, URLs or bare words: "
+                + ", ".join(rejected[:5]),
+            )
+        return ", ".join(hosts)
     return text
 
 

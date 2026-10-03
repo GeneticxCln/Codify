@@ -603,6 +603,12 @@ export interface EngineSettings {
   tts_base_url?: EngineStringSettingValue;
   /** 1 = read each answer aloud as it arrives. Off by default. */
   tts_auto_read?: EngineSettingValue;
+  /** Whether the conductor's `fetch_page` may read the web: 0 never, 1 only the sites in `web_fetch_hosts`, 2 any
+   * public site (docs/12). Off by default, and optional like the others: an engine that predates it answers
+   * without it and the card is simply absent. */
+  web_fetch?: EngineSettingValue;
+  /** The sites `fetch_page` may read when `web_fetch` is 1: site names, each covering its subdomains. */
+  web_fetch_hosts?: EngineStringSettingValue;
 }
 
 /** The Settings screen's tabs, in the order they are shown. One definition, so a new tab is one edit. */
