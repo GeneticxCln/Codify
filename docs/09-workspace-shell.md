@@ -1896,6 +1896,11 @@ engine, relays the output, and passes only on a paint:
   thread a user's click arrives on and not only the one that already worked. The
   geometry *is* the variable now: it used to be 800×600 at the
   origin, which a discarded request imitates perfectly (§7.3).
+- Once the geometry is right, the run **gives the page the toolkit's focus** and
+  fails if the window is not told (`browser-page-focused`, §12.8): the signal the
+  split's focus marker follows a click into a page by. It stands in for the click
+  (it calls `grab_focus`, as WebKit does on a press), so it proves the report and
+  not that a person's press causes it; §12.8 says what was checked by hand.
 - `SMOKE_PAINT_SCRIPT` is injected at document start and asks for **two**
   `requestAnimationFrame`s. The second callback is the one that proves the
   compositor consumed a frame; "the document loaded" is weaker again, which is
@@ -3154,13 +3159,27 @@ What a native view costs, and where each cost is paid:
   overlay that overlapped the page would be under it. This applies to a page that fills the column as well, where it was an omission.
 - **A link in an answer opens beside the answer** when the tab it was clicked in is alone in the column and the pair fits (`splitFits`), with the page focused:
   it is what was just asked for. With a split already showing, or no room, it opens a full-column tab as before and the split waits (§12.3).
-- **Clicking inside the page does not move the pane focus.** The page is a native view and the DOM never sees the press; the address bar and the pane's
-  header are DOM and do. So the coloured edge can stay on the chat while the keyboard is in the page. Keystrokes go where the toolkit's focus is, so typing is
-  right, and Ctrl+W (a DOM shortcut) does not fire from inside a page; what the edge says is the thing that can be wrong. Closing it would need the shell to
-  report a focus change on the page's own widget, which is a Rust change.
+- **Clicking inside the page moves the pane focus, because the shell says so.** The page is a native view and the DOM never sees the press, so the shell
+  reports the toolkit's own focus change instead: `page_layer::watch_focus` listens for `set-focus` on the **window** and emits `browser-page-focused {tab_id}`,
+  the tab id found by walking up from the focused widget to the widget `adopt` renamed to the page's label. It is `set-focus` and not `focus-in-event` on the
+  page, because the toolkit's focus is always a leaf this module does not own (the webview, or something inside it), and `focus-in-event` is repeated whenever the
+  window is merely re-activated with a page still holding the focus, when nothing has moved. The window acts on the report only for a page the split is
+  **drawing**: it was true when the toolkit said it, and a page that has since been put away (another tab, a split with no room, no split at all) must not pull the
+  strip back to it. A page that fills the column is the active tab already. Focus *leaving* a page is not reported; the app's own events say where the keyboard went
+  when it came back. The address bar and the pane's header are DOM and moved the focus already. Ctrl+W (a DOM shortcut) still does not fire from inside a page.
 
 Not made, and listed so it is a choice: **two pages at once** (a rectangle per page in `browser::resize`, a visibility call that names a set, `note_active` and the
-assistant's "page in view" made a set), and **the pane focus following a click in the page**.
+assistant's "page in view" made a set), and **the keyboard following the pane focus**. The edge now follows the keyboard into a page; it does not carry the keyboard
+there. Marking the page's pane focused (its tab, the chord, a link opened beside an answer) leaves the toolkit's focus where it was, and a person clicks in to type.
+The shell never takes the focus for itself (`page_layer::take_focus` is the smoke's, which has nobody to click), because it would pull the keyboard out of the composer
+every time a page was shown.
+
+**What shows the focus report works.** Three things, of different strength. `the_page_layer_holds_up_on_real_widgets` (Rust) builds real GTK widgets in a real window
+and checks that the report names a page when the focus is the page's own widget or something inside it, and says nothing for the app's widgets, for the focus leaving a
+page, or for a widget whose name merely contains the prefix. The embed smoke's focus leg (`make smoke-embed`) gives its real page the toolkit's focus and fails the run if
+the window is not told. And **once, by hand**, under Xvfb: a press injected through XTest inside the embedded page was reported, and no press, and a press outside the
+page, were not. That last check is not in the gate (it needs libXtst and an X server, and a binary built to wait for the press), and it is the only one that has a
+press in it. In the UI, `splitBrowser.test.ts` asserts what the window does with the report, and `shellEvents.test.ts` what it refuses to read as one.
 
 ## 13. The editor (built)
 
