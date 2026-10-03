@@ -70,7 +70,7 @@ export const KnowledgeDeliverableCard: React.FC<{
       {body ? (
         <>
           <div className="flex items-start gap-1.5 text-2xs text-codify-muted">
-            <ShieldCheck className="w-3 h-3 flex-shrink-0 mt-0.5 text-codify-knowledge" />
+            <ShieldCheck className="w-3 h-3 shrink-0 mt-0.5 text-codify-knowledge" />
             <span>{readiness.note}</span>
           </div>
           <details className="text-xs text-codify-muted" open>
@@ -104,7 +104,7 @@ export const KnowledgeDeliverableCard: React.FC<{
                     chars the drafter read
                   </div>
                 )}
-                <pre className="p-2 rounded bg-codify-surface border border-codify-raised text-2xs text-codify-muted whitespace-pre-wrap max-h-48 overflow-auto">
+                <pre className="p-2 rounded-sm bg-codify-surface border border-codify-raised text-2xs text-codify-muted whitespace-pre-wrap max-h-48 overflow-auto">
                   {previous.text}
                 </pre>
               </div>

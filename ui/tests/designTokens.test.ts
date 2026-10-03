@@ -193,7 +193,10 @@ test("the CSS custom properties agree with the config too", () => {
   // real third copy, and leaving it unpinned would have moved the drift rather than
   // removed it — the hexes would simply live somewhere a test never looked.
   const css = readFileSync(join(UI_DIR, "src", "index.css"), "utf8");
-  const root = css.slice(css.indexOf(":root"), css.indexOf("}"));
+  // The first `}` *after* `:root` closes it. (Not the first `}` in the file: a block ahead of `:root`,
+  // such as the `@theme` that pins Tailwind 4 defaults, has one of its own.)
+  const rootStart = css.indexOf(":root");
+  const root = css.slice(rootStart, css.indexOf("}", rootStart));
   const declared = new Map<string, string>();
   for (const match of root.matchAll(/--codify-([\w-]+)\s*:\s*(#[0-9a-fA-F]{6})/g)) {
     // The inks are *derived* from the palette (`ui/src/toneInk.ts`), not palette tokens: the config

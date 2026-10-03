@@ -36,7 +36,7 @@ interface LinkProps {
 }
 
 const INLINE_CODE =
-  "rounded bg-codify-raised px-1 py-px font-mono text-[0.9em] text-codify-primary";
+  "rounded-sm bg-codify-raised px-1 py-px font-mono text-[0.9em] text-codify-primary";
 
 function InlineNodes({ nodes, onOpenLink }: { nodes: readonly Inline[] } & LinkProps): React.ReactElement {
   return (
@@ -143,7 +143,7 @@ function CodeBlock({ lang, text }: { lang: string; text: string }): React.ReactE
           type="button"
           onClick={() => void copy()}
           aria-label="Copy code"
-          className="flex flex-shrink-0 items-center gap-1 rounded px-1 text-codify-muted transition-colors hover:text-codify-primary"
+          className="flex shrink-0 items-center gap-1 rounded-sm px-1 text-codify-muted transition-colors hover:text-codify-primary"
         >
           {copied === "copied" ? (
             <Check aria-hidden="true" className="h-3 w-3" />

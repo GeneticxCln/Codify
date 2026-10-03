@@ -32,13 +32,13 @@ export const IconButton: React.FC<IconButtonProps> = ({
     aria-label={label}
     title={rest.title ?? label}
     className={
-      // `!p-0`, with the important modifier, and it has to be: `Button` already carries `px-2.5`
+      // `p-0!`, with the important modifier, and it has to be: `Button` already carries `px-2.5`
       // for its size, and Tailwind emits `px-*` after `p-*` in the stylesheet, so a plain `p-0`
       // lost. A 28px button was left a 8px content box, the icon inside it flex-shrank to match,
       // and every small icon button in the app drew a sliver (found by measuring the running
       // app: a `w-4` icon was 8px wide). The svg is also kept from shrinking, so a squeezed
       // button crops its icon rather than squashing it.
-      "!p-0 shrink-0 [&>svg]:shrink-0 " +
+      "p-0! shrink-0 [&>svg]:shrink-0 " +
       (size === "sm" ? "w-7 h-7 justify-center" : "w-9 h-9 justify-center") +
       (className ? " " + className : "")
     }

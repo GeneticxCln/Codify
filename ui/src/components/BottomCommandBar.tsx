@@ -61,7 +61,7 @@ const Divider: React.FC<{ title: string }> = ({ title }) => (
     role="separator"
     aria-orientation="vertical"
     title={title}
-    className="w-px self-stretch min-h-[1.25rem] my-0.5 bg-codify-border flex-shrink-0"
+    className="w-px self-stretch min-h-[1.25rem] my-0.5 bg-codify-border shrink-0"
   />
 );
 
@@ -628,7 +628,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                     <button
                       type="button"
                       onClick={handleNativeBrowse}
-                      className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-codify-accent text-codify-bg hover:brightness-110 rounded-lg text-xs font-semibold transition-colors shadow"
+                      className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-codify-accent text-codify-bg hover:brightness-110 rounded-lg text-xs font-semibold transition-colors shadow-sm"
                     >
                       <FolderOpen className="w-4 h-4" /> Open Folder in File
                       Manager...
@@ -675,12 +675,12 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                             </div>
                           </button>
                           {selectedWorkspace?.id === ws.id && (
-                            <Check className="w-3.5 h-3.5 text-codify-info flex-shrink-0" />
+                            <Check className="w-3.5 h-3.5 text-codify-info shrink-0" />
                           )}
                           <button
                             type="button"
                             onClick={() => openContractDialog(ws)}
-                            className={`p-1 rounded-lg transition-colors flex-shrink-0 ${
+                            className={`p-1 rounded-lg transition-colors shrink-0 ${
                               ws.design_contract_path
                                 ? "text-codify-design hover:text-codify-design"
                                 : "text-codify-muted hover:text-codify-secondary"
@@ -697,7 +697,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                           <button
                             type="button"
                             onClick={() => onDeleteWorkspace(ws.id, ws.name)}
-                            className="p-1 mr-1.5 text-codify-muted hover:text-codify-danger rounded-lg transition-colors flex-shrink-0"
+                            className="p-1 mr-1.5 text-codify-muted hover:text-codify-danger rounded-lg transition-colors shrink-0"
                             title={`Remove ${ws.name} from Codify (your files are not deleted)`}
                             aria-label={`Remove workspace ${ws.name}`}
                           >
@@ -799,7 +799,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                         value={modelFilter}
                         onChange={(e) => setModelFilter(e.target.value)}
                         placeholder={`Filter ${availableModels.length} models…`}
-                        className="w-full bg-codify-bg border border-codify-border rounded-lg px-2.5 py-1 text-xs text-codify-secondary focus:outline-none focus:border-codify-design"
+                        className="w-full bg-codify-bg border border-codify-border rounded-lg px-2.5 py-1 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-design"
                       />
                     </div>
                   )}
@@ -877,31 +877,31 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                               </span>
                               {badges.roles && (
                                 <span
-                                  className="text-2xs text-codify-knowledge flex-shrink-0 max-w-[9rem] truncate"
+                                  className="text-2xs text-codify-knowledge shrink-0 max-w-[9rem] truncate"
                                   title={badges.rolesTitle}
                                 >
                                   {badges.roles}
                                 </span>
                               )}
                               {badges.lastRun && (
-                                <span className="text-2xs text-codify-info flex-shrink-0">
+                                <span className="text-2xs text-codify-info shrink-0">
                                   last run
                                 </span>
                               )}
                               {badges.notChat ? (
-                                <span className="text-2xs text-codify-warning flex-shrink-0">
+                                <span className="text-2xs text-codify-warning shrink-0">
                                   not a chat model
                                 </span>
                               ) : (
                                 !badges.roles &&
                                 m.description && (
-                                  <span className="text-2xs text-codify-muted truncate max-w-[6.875rem] flex-shrink-0">
+                                  <span className="text-2xs text-codify-muted truncate max-w-[6.875rem] shrink-0">
                                     {m.description}
                                   </span>
                                 )
                               )}
                               {isCurrent && (
-                                <Check className="w-3 h-3 text-codify-design flex-shrink-0" />
+                                <Check className="w-3 h-3 text-codify-design shrink-0" />
                               )}
                             </button>
                           );
@@ -918,7 +918,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                           key={"status:" + p.provider}
                           className="flex items-start gap-1.5 px-2.5 py-1 text-2xs text-codify-warning"
                         >
-                          <AlertCircle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                          <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
                           <span className="truncate">
                             <span className="font-semibold">{p.provider}</span>{" "}
                             — {p.error}
@@ -945,7 +945,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                           setCustomModelError(null);
                         }}
                         aria-label="Custom model in provider/model form"
-                        className="flex-1 bg-codify-bg border border-codify-border rounded-lg px-2.5 py-1 text-xs text-codify-secondary focus:outline-none focus:border-codify-design font-mono"
+                        className="flex-1 bg-codify-bg border border-codify-border rounded-lg px-2.5 py-1 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-design font-mono"
                       />
                       <button
                         type="submit"
@@ -1209,7 +1209,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
             placeholder="Ask Codify to build, fix or refactor…"
             title="Ask Codify to build, edit files, fix tests, or refactor code"
             aria-label="Chat prompt"
-            className="flex-1 min-w-0 bg-transparent text-codify-primary placeholder-codify-muted text-sm resize-none focus:outline-none leading-relaxed cursor-text"
+            className="flex-1 min-w-0 bg-transparent text-codify-primary placeholder-codify-muted text-sm resize-none focus:outline-hidden leading-relaxed cursor-text"
           />
 
           {/* Right Action: Send, or Stop when a goal is in flight.
@@ -1226,7 +1226,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
               second chance to lose the run, not a safety. The goal card keeps a
               quieter Cancel for when the user is looking at the goal rather than the
               bar. */}
-          <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
             {/* Dictation, left of the send slot: it fills the prompt, it never sends it. */}
             <MicButton disabled={isLoading} onTranscript={insertTranscript} onNeedsSetup={onOpenAudioSettings} />
             {/* The shortcut hint appears only when there is a destructive action to
@@ -1267,7 +1267,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 size="md"
                 onClick={handleSubmit}
                 disabled={!prompt.trim() || isLoading}
-                className="w-8 h-8 shadow"
+                className="w-8 h-8 shadow-sm"
               >
                 {isLoading ? (
                   /* The spinner sits *on* the accent fill, so it is drawn in the
@@ -1289,7 +1289,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
 
       {/* Manual Workspace Path Modal */}
       {isManualWsModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-xs z-50 flex items-center justify-center p-4">
           <div
             role="dialog"
             aria-modal="true"
@@ -1309,7 +1309,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   placeholder="e.g. My Next.js App"
                   value={wsName}
                   onChange={(e) => setWsName(e.target.value)}
-                  className="w-full bg-codify-bg border border-codify-border rounded-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-info"
+                  className="w-full bg-codify-bg border border-codify-border rounded-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-info"
                   required
                 />
               </div>
@@ -1322,7 +1322,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   placeholder="/home/you/Projects/my-app"
                   value={wsPath}
                   onChange={(e) => setWsPath(e.target.value)}
-                  className="w-full bg-codify-bg border border-codify-border rounded-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-info font-mono"
+                  className="w-full bg-codify-bg border border-codify-border rounded-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-info font-mono"
                   required
                 />
               </div>
@@ -1351,7 +1351,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
           answer — it means "only the conventional DESIGN.md, if the repo has one"
           — so it is offered as its own action rather than a cleared text field. */}
       {contractWs && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-xs z-50 flex items-center justify-center p-4">
           <div
             role="dialog"
             aria-modal="true"
@@ -1378,7 +1378,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   placeholder="docs/DESIGN.md"
                   value={contractDraft}
                   onChange={(e) => setContractDraft(e.target.value)}
-                  className="w-full bg-codify-bg border border-codify-border rounded-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-info font-mono"
+                  className="w-full bg-codify-bg border border-codify-border rounded-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-info font-mono"
                   aria-label="Brand contract path"
                 />
               </div>

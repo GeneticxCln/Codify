@@ -221,7 +221,7 @@ export const ThreadMenu: React.FC<ThreadMenuProps> = ({
                 (item.caution ? "text-codify-warning" : "")
               }
             >
-              <Icon className="w-3 h-3 flex-shrink-0" />
+              <Icon className="w-3 h-3 shrink-0" />
               {item.label}
             </Button>
           );

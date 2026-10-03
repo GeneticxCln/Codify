@@ -126,7 +126,7 @@ const UsageTable: React.FC<{
             <span className="font-mono text-codify-secondary truncate min-w-0 flex-1">
               {name}
             </span>
-            <div className="h-1.5 w-24 bg-codify-surface rounded-full overflow-hidden flex-shrink-0">
+            <div className="h-1.5 w-24 bg-codify-surface rounded-full overflow-hidden shrink-0">
               <div
                 className="h-full bg-codify-accent rounded-full"
                 style={{
@@ -139,10 +139,10 @@ const UsageTable: React.FC<{
                 }}
               />
             </div>
-            <span className="font-mono text-codify-muted w-14 text-right flex-shrink-0">
+            <span className="font-mono text-codify-muted w-14 text-right shrink-0">
               {fmtTokens(lane.total_tokens)}
             </span>
-            <span className="text-codify-muted w-20 text-right flex-shrink-0">
+            <span className="text-codify-muted w-20 text-right shrink-0">
               {lane.calls} call{lane.calls === 1 ? "" : "s"} ·{" "}
               {fmtDuration(lane.avg_duration_ms)}
             </span>
@@ -181,7 +181,7 @@ const SuccessRateChart: React.FC<{ days: MergedDay[] }> = ({ days }) => {
           const isToday = d.date === today;
           return (
             <div key={d.date} className="flex items-center gap-2 text-xs">
-              <span className="font-mono text-codify-muted w-20 flex-shrink-0">
+              <span className="font-mono text-codify-muted w-20 shrink-0">
                 {isToday ? "today" : d.date.slice(5)}
               </span>
               <div className="flex-1 h-2 bg-codify-surface rounded-full overflow-hidden min-w-0">
@@ -196,7 +196,7 @@ const SuccessRateChart: React.FC<{ days: MergedDay[] }> = ({ days }) => {
                   style={{ width: `${rate == null ? 2 : Math.max(4, rate)}%` }}
                 />
               </div>
-              <span className="text-codify-muted w-56 text-right flex-shrink-0 truncate">
+              <span className="text-codify-muted w-56 text-right shrink-0 truncate">
                 {isToday && <span className="text-codify-info mr-1">●</span>}
                 {rate == null ? "no terminal goals" : `${rate}% ok`}
                 {" · "}
@@ -270,21 +270,21 @@ const StageTable: React.FC<{ rows: StageCost[] }> = ({ rows }) => {
           <div key={row.stage} className="flex flex-col gap-0.5">
             <div className="flex items-center gap-2 text-xs">
               <span
-                className="text-codify-primary w-28 flex-shrink-0 truncate"
+                className="text-codify-primary w-28 shrink-0 truncate"
                 title={describeOutcomes(row.outcomes)}
               >
                 {STAGE_LABELS[row.stage] ?? row.stage}
               </span>
-              <div className="h-1.5 w-20 bg-codify-surface rounded-full overflow-hidden flex-shrink-0">
+              <div className="h-1.5 w-20 bg-codify-surface rounded-full overflow-hidden shrink-0">
                 <div
                   className="h-full bg-codify-success rounded-full"
                   style={{ width: shareWidth(row.token_share) }}
                 />
               </div>
-              <span className="font-mono text-codify-muted w-14 text-right flex-shrink-0">
+              <span className="font-mono text-codify-muted w-14 text-right shrink-0">
                 {row.token_share}%
               </span>
-              <span className="font-mono text-codify-muted w-16 text-right flex-shrink-0">
+              <span className="font-mono text-codify-muted w-16 text-right shrink-0">
                 {fmtTokens(row.tokens)}
               </span>
             </div>
@@ -377,10 +377,10 @@ const FailureView: React.FC<{ breakdown: FailureBreakdown | null }> = ({
         <div className="flex flex-col gap-1.5">
           {breakdown.causes.slice(0, 6).map((cause) => (
             <div key={cause.code} className="flex items-center gap-2 text-xs">
-              <span className="font-mono text-codify-danger w-44 flex-shrink-0 truncate">
+              <span className="font-mono text-codify-danger w-44 shrink-0 truncate">
                 {cause.code}
               </span>
-              <span className="font-mono text-codify-muted w-8 text-right flex-shrink-0">
+              <span className="font-mono text-codify-muted w-8 text-right shrink-0">
                 {cause.count}
               </span>
               <span

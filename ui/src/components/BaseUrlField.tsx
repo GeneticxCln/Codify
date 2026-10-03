@@ -48,7 +48,7 @@ export const BaseUrlField: React.FC<BaseUrlFieldProps> = ({
         placeholder={localOnly ? "http://127.0.0.1:11434" : "https://api.example.com/v1"}
         value={value}
         onChange={handleChange}
-        className={`bg-codify-bg border rounded px-3 py-2 text-sm text-codify-secondary focus:outline-none font-mono ${
+        className={`bg-codify-bg border rounded px-3 py-2 text-sm text-codify-secondary focus:outline-hidden font-mono ${
           // The warning state already *is* the focus colour, so the old
           // `focus:border-codify-warning` on top of `border-codify-warning` changed
           // nothing. One token says it once.
@@ -57,7 +57,7 @@ export const BaseUrlField: React.FC<BaseUrlFieldProps> = ({
       />
       {warning && (
         <div className="flex items-center gap-1.5 text-xs text-codify-warning mt-0.5">
-          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
           <span>{warning}</span>
         </div>
       )}

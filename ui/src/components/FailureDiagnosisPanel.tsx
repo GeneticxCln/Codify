@@ -30,15 +30,15 @@ interface FailureDiagnosisPanelProps {
 const LEVEL_STYLE: Record<Verdict["level"], { wrap: string; icon: React.ReactNode }> = {
   blocker: {
     wrap: "bg-codify-danger/15 border-codify-danger/60 text-codify-danger-ink",
-    icon: <ShieldAlert className="w-4 h-4 text-codify-danger flex-shrink-0 mt-0.5" />,
+    icon: <ShieldAlert className="w-4 h-4 text-codify-danger shrink-0 mt-0.5" />,
   },
   warning: {
     wrap: "bg-codify-warning/15 border-codify-warning/60 text-codify-warning-ink",
-    icon: <AlertTriangle className="w-4 h-4 text-codify-warning flex-shrink-0 mt-0.5" />,
+    icon: <AlertTriangle className="w-4 h-4 text-codify-warning shrink-0 mt-0.5" />,
   },
   info: {
     wrap: "bg-codify-bg border-codify-border text-codify-secondary",
-    icon: <Info className="w-4 h-4 text-codify-info flex-shrink-0 mt-0.5" />,
+    icon: <Info className="w-4 h-4 text-codify-info shrink-0 mt-0.5" />,
   },
 };
 
@@ -108,7 +108,7 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
   });
 
   return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-xs z-50 flex items-center justify-center p-4">
       <div
         role="dialog"
         aria-modal="true"

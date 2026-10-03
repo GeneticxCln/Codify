@@ -120,14 +120,14 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ tabId, buffers, autoFocu
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-codify-bg" data-editor-tab={tabId}>
-      <div className="flex flex-shrink-0 items-center gap-2 border-b border-codify-border bg-codify-surface px-3 py-1.5">
-        <FileCode className="h-3.5 w-3.5 flex-shrink-0 text-codify-info" aria-hidden />
+      <div className="flex shrink-0 items-center gap-2 border-b border-codify-border bg-codify-surface px-3 py-1.5">
+        <FileCode className="h-3.5 w-3.5 shrink-0 text-codify-info" aria-hidden />
         <span className="min-w-0 truncate font-mono text-xs text-codify-secondary" title={buffer.path}>
           {buffer.path}
         </span>
-        {buffer.dirty && <span className="flex-shrink-0 text-2xs text-codify-warning-ink">Unsaved</span>}
-        {buffer.aiChanged && <span className="flex-shrink-0 text-2xs text-codify-info-ink">Changed by the assistant</span>}
-        <div className="ml-auto flex flex-shrink-0 items-center gap-1.5">
+        {buffer.dirty && <span className="shrink-0 text-2xs text-codify-warning-ink">Unsaved</span>}
+        {buffer.aiChanged && <span className="shrink-0 text-2xs text-codify-info-ink">Changed by the assistant</span>}
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
           {confirmingRevert ? (
             <>
               <span className="text-2xs text-codify-muted">Throw away your changes?</span>
@@ -161,7 +161,7 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ tabId, buffers, autoFocu
       {conflict?.kind === "changed" && (
         <div
           role="alert"
-          className="flex flex-shrink-0 items-center gap-2 border-b border-codify-warning/60 bg-codify-warning/20 px-3 py-2 text-xs text-codify-warning-ink"
+          className="flex shrink-0 items-center gap-2 border-b border-codify-warning/60 bg-codify-warning/20 px-3 py-2 text-xs text-codify-warning-ink"
         >
           <span className="min-w-0 flex-1">
             {buffer.path} changed on disk after you opened it. Saving would overwrite that.
@@ -173,7 +173,7 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ tabId, buffers, autoFocu
       {conflict?.kind === "deleted" && (
         <div
           role="alert"
-          className="flex-shrink-0 border-b border-codify-warning/60 bg-codify-warning/20 px-3 py-2 text-xs text-codify-warning-ink"
+          className="shrink-0 border-b border-codify-warning/60 bg-codify-warning/20 px-3 py-2 text-xs text-codify-warning-ink"
         >
           {buffer.path} was deleted from disk, and saving cannot bring it back. The text here is still yours: copy it
           somewhere before you close this tab.
@@ -182,7 +182,7 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ tabId, buffers, autoFocu
       {buffer.saveError && (
         <div
           role="alert"
-          className="flex-shrink-0 border-b border-codify-danger/30 bg-codify-danger/10 px-3 py-2 text-xs text-codify-danger-ink"
+          className="shrink-0 border-b border-codify-danger/30 bg-codify-danger/10 px-3 py-2 text-xs text-codify-danger-ink"
         >
           Could not save: {buffer.saveError}
         </div>
@@ -192,7 +192,7 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ tabId, buffers, autoFocu
 
       <div
         data-testid="editor-status"
-        className="flex flex-shrink-0 items-center gap-3 border-t border-codify-border bg-codify-surface px-3 py-1 text-2xs text-codify-muted"
+        className="flex shrink-0 items-center gap-3 border-t border-codify-border bg-codify-surface px-3 py-1 text-2xs text-codify-muted"
       >
         <span>
           Ln {line}, Col {column}

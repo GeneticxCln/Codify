@@ -1,6 +1,80 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind 4, assembled from its parts instead of `@import "tailwindcss"`, for the cascade.
+
+   The one-line import puts the utilities in a cascade layer, and a rule outside every layer
+   beats a rule inside one whatever its specificity or its place in the file. Everything below was
+   written for a flat cascade ("same specificity, later in source order"), and one block below exists
+   *because* a variant utility out-specifies a base class. Layered, the resting `.bg-codify-surface`
+   would beat `hover:bg-codify-raised` outright and no hover colour would ever show, and the `body`
+   rule would beat the utilities on `<body>`. So the theme and the reset keep their layers, nothing
+   below competes with them, and the utilities do not get one: they are emitted here, unlayered,
+   ahead of everything below, which is the order Tailwind 3 gave them.
+
+   `source(none)` and `@config`: the files Tailwind reads for class names are the `content` globs in
+   `tailwind.config.js`, as they were. Left alone, v4 reads every file under `ui/` — tests included,
+   which name classes in strings — and emits a rule for each. The tokens (palette, type ramp, radii)
+   stay in that file too, because `DESIGN.md` and `ui/tests/designTokens.test.ts` are bound to it. */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css" source(none);
+@config "../tailwind.config.js";
+
+/* Values Tailwind 3 shipped and Tailwind 4 changed, pinned to what this UI has always shown.
+
+   `font-sans` is on the app's root element, so a different default stack is a different typeface
+   for the whole window: v4 starts its stack with `-apple-system, "Segoe UI", Roboto`, where v3's was
+   `ui-sans-serif, system-ui`, which on Linux is the desktop's own UI font. The eight role icons on
+   the agent cards and the colour swatch in Appearance are the only places the default palette is
+   used on purpose (`ui/tests/hardcodedPalette.test.ts` names them), and v4 redrew that palette in
+   oklch, a little more saturated. `gray-400` is the placeholder colour restored below. Pinned, an
+   upgrade of Tailwind cannot recolour or retype any of them; `toneUtilities.test.ts` fails on a
+   default-palette class the source uses that is not pinned here. */
+@theme {
+  --font-sans: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
+    "Segoe UI Symbol", "Noto Color Emoji";
+  --color-amber-400: #fbbf24;
+  --color-blue-400: #60a5fa;
+  --color-cyan-400: #22d3ee;
+  --color-emerald-400: #34d399;
+  --color-green-400: #4ade80;
+  --color-gray-400: #9ca3af;
+  --color-green-500: #22c55e;
+  --color-indigo-400: #818cf8;
+  --color-pink-400: #f472b6;
+  --color-purple-400: #c084fc;
+}
+
+/* Defaults Tailwind 3's reset gave and Tailwind 4's does not, and that something here relied on.
+   Each was found by rendering the app under both and comparing every element, not by reading the
+   upgrade guide; the guide also lists the default border colour (grey-200 became `currentcolor`),
+   which nothing here relies on: every bordered element names its colour. In the base layer, so any
+   utility (`cursor-not-allowed`, `placeholder-codify-muted`) still wins.
+
+   - `cursor: pointer` on buttons: 500-odd buttons in the app's own screens have no `cursor-pointer`.
+   - The placeholder colour of an input or textarea that does not name one.
+   - The browser's own padding on table cells (`TracePanel` sets `pr-2 py-0.5`, never the left), and on
+     `<option>`: v4 zeroes the padding of every element.
+   - `type="search"`: v3 reset its appearance to a plain text field. */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-gray-400);
+  }
+  td,
+  th {
+    padding: 1px;
+  }
+  option {
+    padding: 0 2px 1px;
+  }
+  [type="search"] {
+    appearance: textfield;
+    outline-offset: -2px;
+  }
+}
 
 /* The palette, once, for the handful of places CSS rather than a utility needs a
    colour: the body, the scrollbars, the audit-flash keyframes below. Tailwind reads
@@ -378,49 +452,51 @@ body {
    app that had been carefully themed everywhere else. The ring was measured at
    `rgb(47, 129, 247)` while the theme's accent was `rgb(0, 230, 118)`.
 
-   Two things had to be dealt with, and both were checked rather than assumed:
+   Two things have to hold, and both were checked rather than assumed:
 
    1. **Specificity.** Tailwind compiles the variant to
       `.focus-within\:border-codify-accent:focus-within` — one class and one
       pseudo-class. The rule in the layer above is `.border-codify-accent`: one
       class, no pseudo-class. A base rule cannot out-specify a variant, so
       `border-codify-accent` being correct proved nothing about
-      `focus-within:border-codify-accent`.
+      `focus-within:border-codify-accent`. Hence the rules below: one per
+      variant, spelled the way Tailwind spells it.
 
-   2. **Source order does not favour this file.** The layer's own argument is
-      "same specificity, later in source order", and it is not true here: in the
-      dev server *and* in `make build-ui`'s output, Tailwind's baked rule for
-      `focus-within:border-codify-accent` lands *after* these. (Checked in the
-      built stylesheet: the baked rule is at a higher offset than the layer's.
-      There are no cascade layers in the output, so "unlayered beats layered" is
-      not the explanation either.) The layer above wins its base classes
-      regardless, but a rule that depends on winning a tie it does not win is not
-      a rule worth keeping.
+   2. **Source order.** A rule below and Tailwind's baked rule for the same
+      variant have the same specificity, so the later one wins, and that is
+      this file: the utilities are emitted first (see the top of the file).
 
-   Hence the class repeated once below: one class of specificity more than
-   Tailwind gives itself, which wins by being more specific rather than by being
-   later, and so holds in the dev server and the build alike. It reads as a typo,
-   which is why this paragraph exists.
+   **What this block used to do, and why it does not any more.** Under
+   Tailwind 3 the baked variant rules landed *after* this file, so each rule
+   below repeated its class once (`.hover\:bg-X.hover\:bg-X:hover`) to win on
+   specificity instead of on position. Tailwind 4 emits them before, and the
+   repeat went from unnecessary to wrong: three classes deep, it tied with a
+   compound variant such as `disabled:hover:bg-inherit` (one class, two
+   pseudo-classes) and, being later, beat it — a disabled button highlighted on
+   hover. That was found by rendering the app under both versions and comparing
+   every element with its hover state forced, and it is why the selectors below
+   carry no repeat: a variant with *more* pseudo-classes than a rule here is
+   supposed to win, and now does.
 
    `ui/tests/toneUtilities.test.ts` fails if the source asks for a variant the
    layer does not carry — the check the plain layer never had.
 
-   A variant that only *filters* needs nothing here. `hover:brightness-110` on
-   the send button derives from whatever the theme published, so it is correct
-   in every theme with no rule at all; that is why the button tones use it
-   rather than naming a second colour. */
-.focus-within\:border-codify-accent.focus-within\:border-codify-accent:focus-within { border-color: rgb(var(--codify-accent-rgb) / 1); }
-.focus\:border-codify-accent.focus\:border-codify-accent:focus { border-color: rgb(var(--codify-accent-rgb) / 1); }
-.group:hover .group-hover\:text-codify-accent.group-hover\:text-codify-accent { color: rgb(var(--codify-accent-rgb) / 1); }
-.hover\:bg-codify-border.hover\:bg-codify-border:hover { background-color: rgb(var(--codify-border-rgb) / 1); }
-.hover\:bg-codify-raised.hover\:bg-codify-raised:hover { background-color: rgb(var(--codify-raised-rgb) / 1); }
-.hover\:bg-codify-raised\/60.hover\:bg-codify-raised\/60:hover { background-color: rgb(var(--codify-raised-rgb) / 0.60); }
-.hover\:bg-codify-surface.hover\:bg-codify-surface:hover { background-color: rgb(var(--codify-surface-rgb) / 1); }
-.hover\:border-codify-accent.hover\:border-codify-accent:hover { border-color: rgb(var(--codify-accent-rgb) / 1); }
-.hover\:border-codify-border-strong.hover\:border-codify-border-strong:hover { border-color: rgb(var(--codify-border-strong-rgb) / 1); }
-.hover\:text-codify-accent.hover\:text-codify-accent:hover { color: rgb(var(--codify-accent-rgb) / 1); }
-.hover\:text-codify-primary.hover\:text-codify-primary:hover { color: rgb(var(--codify-primary-rgb) / 1); }
-.hover\:text-codify-secondary.hover\:text-codify-secondary:hover { color: rgb(var(--codify-secondary-rgb) / 1); }
+   A variant that only *filters* needs nothing here. `hover:brightness-110`
+   on the send button derives from whatever the theme published, so it is
+   correct in every theme with no rule at all; that is why the button tones use
+   it rather than naming a second colour. */
+.focus-within\:border-codify-accent:focus-within { border-color: rgb(var(--codify-accent-rgb) / 1); }
+.focus\:border-codify-accent:focus { border-color: rgb(var(--codify-accent-rgb) / 1); }
+.group:hover .group-hover\:text-codify-accent { color: rgb(var(--codify-accent-rgb) / 1); }
+.hover\:bg-codify-border:hover { background-color: rgb(var(--codify-border-rgb) / 1); }
+.hover\:bg-codify-raised:hover { background-color: rgb(var(--codify-raised-rgb) / 1); }
+.hover\:bg-codify-raised\/60:hover { background-color: rgb(var(--codify-raised-rgb) / 0.60); }
+.hover\:bg-codify-surface:hover { background-color: rgb(var(--codify-surface-rgb) / 1); }
+.hover\:border-codify-accent:hover { border-color: rgb(var(--codify-accent-rgb) / 1); }
+.hover\:border-codify-border-strong:hover { border-color: rgb(var(--codify-border-strong-rgb) / 1); }
+.hover\:text-codify-accent:hover { color: rgb(var(--codify-accent-rgb) / 1); }
+.hover\:text-codify-primary:hover { color: rgb(var(--codify-primary-rgb) / 1); }
+.hover\:text-codify-secondary:hover { color: rgb(var(--codify-secondary-rgb) / 1); }
 
 /* ── the settings, stats and audit panels ───────────────────────────────────
    Everything below arrived with the migration that took those panels off
@@ -449,7 +525,7 @@ body {
 .border-codify-warning\/60 { border-color: rgb(var(--codify-warning-rgb) / 0.60); }
 .bg-codify-info\/15 { background-color: rgb(var(--codify-info-rgb) / 0.15); }
 .border-codify-info\/60 { border-color: rgb(var(--codify-info-rgb) / 0.60); }
-.hover\:bg-codify-info\/20.hover\:bg-codify-info\/20:hover { background-color: rgb(var(--codify-info-rgb) / 0.20); }
+.hover\:bg-codify-info\/20:hover { background-color: rgb(var(--codify-info-rgb) / 0.20); }
 .text-codify-knowledge { color: rgb(var(--codify-knowledge-rgb) / 1); }
 .border-codify-success\/30 { border-color: rgb(var(--codify-success-rgb) / 0.30); }
 .bg-codify-success\/10 { background-color: rgb(var(--codify-success-rgb) / 0.10); }
@@ -483,10 +559,10 @@ body {
 .bg-codify-neutral\/60 { background-color: rgb(var(--codify-neutral-rgb) / 0.60); }
 .bg-codify-warning\/80 { background-color: rgb(var(--codify-warning-rgb) / 0.80); }
 .bg-codify-success\/70 { background-color: rgb(var(--codify-success-rgb) / 0.70); }
-.hover\:text-codify-info.hover\:text-codify-info:hover { color: rgb(var(--codify-info-rgb) / 1); }
-.hover\:border-codify-info\/40.hover\:border-codify-info\/40:hover { border-color: rgb(var(--codify-info-rgb) / 0.40); }
-.hover\:text-codify-danger.hover\:text-codify-danger:hover { color: rgb(var(--codify-danger-rgb) / 1); }
-.hover\:border-codify-danger\/40.hover\:border-codify-danger\/40:hover { border-color: rgb(var(--codify-danger-rgb) / 0.40); }
+.hover\:text-codify-info:hover { color: rgb(var(--codify-info-rgb) / 1); }
+.hover\:border-codify-info\/40:hover { border-color: rgb(var(--codify-info-rgb) / 0.40); }
+.hover\:text-codify-danger:hover { color: rgb(var(--codify-danger-rgb) / 1); }
+.hover\:border-codify-danger\/40:hover { border-color: rgb(var(--codify-danger-rgb) / 0.40); }
 .text-codify-info\/80 { color: rgb(var(--codify-info-rgb) / 0.80); }
 
 /* ── the wordmark ────────────────────────────────────────────────────────────
@@ -604,50 +680,48 @@ body {
    exceptions, and `ui/tests/hardcodedPalette.test.ts` now holds the whole of
    `ui/src` at zero rather than a chosen subset.
 
-   The compound variant below is the one this block adds that the block above it
+   The compound variant below is the one this block adds that the block above
    could not express. `disabled:hover:bg-codify-design/20` compiles to *two*
-   pseudo-classes, so a `.hover\:…` rule cannot reach it and a rule carrying only
-   the class would lose to Tailwind's baked value on specificity. The selector
-   therefore repeats the class once per pseudo-class — three classes deep, which
-   is what it takes.
+   pseudo-classes, so a `.hover\:…` rule cannot reach it; the rule below spells
+   the same two.
 
    The two `focus:` rules below are the empty state's skip link. It is a link that
    is invisible until a keyboard lands on it, and everything that makes it
    legible once it is — the raised background, the primary text — is a focus
-   variant of a themed colour, so the same doubling is what keeps it themed
-   rather than painting the first colour the default theme happened to bake.
+   variant of a themed colour, so a rule here is what keeps it themed rather than
+   painting the first colour the default theme happened to bake.
 
    Generated, for the reason the block above gives. */
-.bg-codify-accent\/70.bg-codify-accent\/70 { background-color: rgb(var(--codify-accent-rgb) / 0.70); }
-.bg-codify-design\/10.bg-codify-design\/10 { background-color: rgb(var(--codify-design-rgb) / 0.10); }
-.bg-codify-info\/25.bg-codify-info\/25 { background-color: rgb(var(--codify-info-rgb) / 0.25); }
-.bg-codify-knowledge\/20.bg-codify-knowledge\/20 { background-color: rgb(var(--codify-knowledge-rgb) / 0.20); }
-.bg-codify-success\/15.bg-codify-success\/15 { background-color: rgb(var(--codify-success-rgb) / 0.15); }
-.bg-codify-warning\/30.bg-codify-warning\/30 { background-color: rgb(var(--codify-warning-rgb) / 0.30); }
-.border-codify-accent\/50.border-codify-accent\/50 { border-color: rgb(var(--codify-accent-rgb) / 0.50); }
-.border-codify-design\/30.border-codify-design\/30 { border-color: rgb(var(--codify-design-rgb) / 0.30); }
-.border-codify-design\/50.border-codify-design\/50 { border-color: rgb(var(--codify-design-rgb) / 0.50); }
-.border-codify-info\/50.border-codify-info\/50 { border-color: rgb(var(--codify-info-rgb) / 0.50); }
-.border-codify-knowledge\/50.border-codify-knowledge\/50 { border-color: rgb(var(--codify-knowledge-rgb) / 0.50); }
-.border-codify-knowledge\/60.border-codify-knowledge\/60 { border-color: rgb(var(--codify-knowledge-rgb) / 0.60); }
-.border-codify-warning\/40.border-codify-warning\/40 { border-color: rgb(var(--codify-warning-rgb) / 0.40); }
-.border-codify-warning\/50.border-codify-warning\/50 { border-color: rgb(var(--codify-warning-rgb) / 0.50); }
-.disabled\:hover\:bg-codify-design\/20.disabled\:hover\:bg-codify-design\/20:disabled:hover { background-color: rgb(var(--codify-design-rgb) / 0.20); }
-.focus\:bg-codify-raised.focus\:bg-codify-raised:focus { background-color: rgb(var(--codify-raised-rgb) / 1); }
-.focus\:border-codify-design.focus\:border-codify-design:focus { border-color: rgb(var(--codify-design-rgb) / 1); }
-.focus\:border-codify-info.focus\:border-codify-info:focus { border-color: rgb(var(--codify-info-rgb) / 1); }
-.focus\:border-codify-info\/60.focus\:border-codify-info\/60:focus { border-color: rgb(var(--codify-info-rgb) / 0.60); }
-.focus\:text-codify-primary.focus\:text-codify-primary:focus { color: rgb(var(--codify-primary-rgb) / 1); }
-.hover\:bg-codify-accent\/30.hover\:bg-codify-accent\/30:hover { background-color: rgb(var(--codify-accent-rgb) / 0.30); }
-.hover\:bg-codify-danger\/30.hover\:bg-codify-danger\/30:hover { background-color: rgb(var(--codify-danger-rgb) / 0.30); }
-.hover\:bg-codify-design\/30.hover\:bg-codify-design\/30:hover { background-color: rgb(var(--codify-design-rgb) / 0.30); }
-.hover\:bg-codify-info\/40.hover\:bg-codify-info\/40:hover { background-color: rgb(var(--codify-info-rgb) / 0.40); }
-.hover\:bg-codify-knowledge\/30.hover\:bg-codify-knowledge\/30:hover { background-color: rgb(var(--codify-knowledge-rgb) / 0.30); }
-.hover\:bg-codify-warning\/30.hover\:bg-codify-warning\/30:hover { background-color: rgb(var(--codify-warning-rgb) / 0.30); }
-.hover\:bg-codify-warning\/40.hover\:bg-codify-warning\/40:hover { background-color: rgb(var(--codify-warning-rgb) / 0.40); }
-.hover\:text-codify-design.hover\:text-codify-design:hover { color: rgb(var(--codify-design-rgb) / 1); }
-.hover\:text-codify-warning.hover\:text-codify-warning:hover { color: rgb(var(--codify-warning-rgb) / 1); }
-.text-codify-design\/80.text-codify-design\/80 { color: rgb(var(--codify-design-rgb) / 0.80); }
-.text-codify-design\/90.text-codify-design\/90 { color: rgb(var(--codify-design-rgb) / 0.90); }
-.text-codify-knowledge\/80.text-codify-knowledge\/80 { color: rgb(var(--codify-knowledge-rgb) / 0.80); }
-.text-codify-warning\/70.text-codify-warning\/70 { color: rgb(var(--codify-warning-rgb) / 0.70); }
+.bg-codify-accent\/70 { background-color: rgb(var(--codify-accent-rgb) / 0.70); }
+.bg-codify-design\/10 { background-color: rgb(var(--codify-design-rgb) / 0.10); }
+.bg-codify-info\/25 { background-color: rgb(var(--codify-info-rgb) / 0.25); }
+.bg-codify-knowledge\/20 { background-color: rgb(var(--codify-knowledge-rgb) / 0.20); }
+.bg-codify-success\/15 { background-color: rgb(var(--codify-success-rgb) / 0.15); }
+.bg-codify-warning\/30 { background-color: rgb(var(--codify-warning-rgb) / 0.30); }
+.border-codify-accent\/50 { border-color: rgb(var(--codify-accent-rgb) / 0.50); }
+.border-codify-design\/30 { border-color: rgb(var(--codify-design-rgb) / 0.30); }
+.border-codify-design\/50 { border-color: rgb(var(--codify-design-rgb) / 0.50); }
+.border-codify-info\/50 { border-color: rgb(var(--codify-info-rgb) / 0.50); }
+.border-codify-knowledge\/50 { border-color: rgb(var(--codify-knowledge-rgb) / 0.50); }
+.border-codify-knowledge\/60 { border-color: rgb(var(--codify-knowledge-rgb) / 0.60); }
+.border-codify-warning\/40 { border-color: rgb(var(--codify-warning-rgb) / 0.40); }
+.border-codify-warning\/50 { border-color: rgb(var(--codify-warning-rgb) / 0.50); }
+.disabled\:hover\:bg-codify-design\/20:disabled:hover { background-color: rgb(var(--codify-design-rgb) / 0.20); }
+.focus\:bg-codify-raised:focus { background-color: rgb(var(--codify-raised-rgb) / 1); }
+.focus\:border-codify-design:focus { border-color: rgb(var(--codify-design-rgb) / 1); }
+.focus\:border-codify-info:focus { border-color: rgb(var(--codify-info-rgb) / 1); }
+.focus\:border-codify-info\/60:focus { border-color: rgb(var(--codify-info-rgb) / 0.60); }
+.focus\:text-codify-primary:focus { color: rgb(var(--codify-primary-rgb) / 1); }
+.hover\:bg-codify-accent\/30:hover { background-color: rgb(var(--codify-accent-rgb) / 0.30); }
+.hover\:bg-codify-danger\/30:hover { background-color: rgb(var(--codify-danger-rgb) / 0.30); }
+.hover\:bg-codify-design\/30:hover { background-color: rgb(var(--codify-design-rgb) / 0.30); }
+.hover\:bg-codify-info\/40:hover { background-color: rgb(var(--codify-info-rgb) / 0.40); }
+.hover\:bg-codify-knowledge\/30:hover { background-color: rgb(var(--codify-knowledge-rgb) / 0.30); }
+.hover\:bg-codify-warning\/30:hover { background-color: rgb(var(--codify-warning-rgb) / 0.30); }
+.hover\:bg-codify-warning\/40:hover { background-color: rgb(var(--codify-warning-rgb) / 0.40); }
+.hover\:text-codify-design:hover { color: rgb(var(--codify-design-rgb) / 1); }
+.hover\:text-codify-warning:hover { color: rgb(var(--codify-warning-rgb) / 1); }
+.text-codify-design\/80 { color: rgb(var(--codify-design-rgb) / 0.80); }
+.text-codify-design\/90 { color: rgb(var(--codify-design-rgb) / 0.90); }
+.text-codify-knowledge\/80 { color: rgb(var(--codify-knowledge-rgb) / 0.80); }
+.text-codify-warning\/70 { color: rgb(var(--codify-warning-rgb) / 0.70); }

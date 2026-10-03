@@ -3781,8 +3781,8 @@ export const App: React.FC = () => {
           decoration, and the two are not the same thing. */}
       <WeatherBackdrop active={canStop} />
       {/* Top Header Bar */}
-      <header className="relative bg-codify-chrome border-b border-codify-border px-4 py-2.5 flex items-center gap-3 z-10 flex-shrink-0">
-        <div className="flex items-center gap-3 flex-shrink-0">
+      <header className="relative bg-codify-chrome border-b border-codify-border px-4 py-2.5 flex items-center gap-3 z-10 shrink-0">
+        <div className="flex items-center gap-3 shrink-0">
           {/* Hide or show the left panel. At the left edge, above the panel it controls, and in the
               header because the header is the one bar that is always there: a toggle inside the panel
               could not bring the panel back. `aria-pressed` is true while it is *hidden*, the state
@@ -3843,7 +3843,7 @@ export const App: React.FC = () => {
           workspaces={workspaces}
         />
 
-        <div className="flex items-center gap-3 flex-shrink-0">
+        <div className="flex items-center gap-3 shrink-0">
           {/* The engine connection, as four words: Live, Checking, Auth stale,
               Offline. It used to answer with the port number when healthy, which
               made the number the headline and the state the decoration; the port
@@ -3992,7 +3992,7 @@ export const App: React.FC = () => {
                 role="alert"
                 className="flex items-start gap-2 p-2.5 rounded-xl bg-codify-danger/40 border border-codify-danger text-xs text-codify-danger-ink"
               >
-                <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-codify-danger" />
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-codify-danger" />
                 <span className="leading-relaxed flex-1">{error}</span>
                 <IconButton
                   label="Dismiss error"
@@ -4074,7 +4074,7 @@ export const App: React.FC = () => {
             <div className="mx-auto mt-2 mb-1 w-full max-w-4xl px-4">
               <div className="rounded-xl border border-codify-warning/40 bg-codify-warning/10 p-2.5 text-xs">
                 <div className="mb-1.5 flex items-center gap-1.5 text-codify-warning">
-                  <ScrollText className="h-3.5 w-3.5 flex-shrink-0" />
+                  <ScrollText className="h-3.5 w-3.5 shrink-0" />
                   <span>What the engine said before it stopped</span>
                 </div>
                 <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-codify-warning">
@@ -4104,7 +4104,7 @@ export const App: React.FC = () => {
               className="mx-3 mt-2 flex items-start gap-2 rounded-lg border border-codify-warning bg-codify-warning/10 px-2.5 py-1.5 text-xs text-codify-secondary"
             >
               <span className="min-w-0 flex-1">{paneNotice}</span>
-              <IconButton label="Dismiss message" onClick={() => setPaneNotice(null)} className="!h-5 !w-5">
+              <IconButton label="Dismiss message" onClick={() => setPaneNotice(null)} className="h-5! w-5!">
                 <X className="h-3 w-3" />
               </IconButton>
             </div>

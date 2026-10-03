@@ -144,7 +144,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-start justify-center pt-[12vh] p-4"
+      className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-start justify-center pt-[12vh] p-4"
       onMouseDown={onClose}
       role="presentation"
     >
@@ -172,7 +172,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           aria-label="Command palette"
           aria-autocomplete="list"
           aria-controls="command-palette-list"
-          className="w-full bg-transparent px-4 py-3 text-sm text-codify-primary outline-none border-b border-codify-border placeholder:text-codify-muted"
+          className="w-full bg-transparent px-4 py-3 text-sm text-codify-primary outline-hidden border-b border-codify-border placeholder:text-codify-muted"
         />
         <ul
           id="command-palette-list"
@@ -213,7 +213,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                   }
                 >
                   <span className="truncate">{item.title}</span>
-                  <span className="text-2xs text-codify-muted flex-shrink-0">
+                  <span className="text-2xs text-codify-muted shrink-0">
                     {item.kind === "tab" && item.active
                       ? "current"
                       : item.label}

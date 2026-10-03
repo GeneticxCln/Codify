@@ -84,7 +84,7 @@ function fromSettings(s: EngineSettings): VoiceDraft | null {
 
 const inputClass =
   "w-full bg-codify-bg border border-codify-border rounded-lg px-3 py-2 text-xs text-codify-primary " +
-  "placeholder-codify-muted focus:outline-none focus:border-codify-accent";
+  "placeholder-codify-muted focus:outline-hidden focus:border-codify-accent";
 
 /**
  * Where a custom speech provider lives: a local speech server, typically. Only for a custom slug,
@@ -113,7 +113,7 @@ const Readiness: React.FC<{ what: string; state: SpeechReadiness | null }> = ({ 
     </p>
   ) : (
     <p className="flex items-start gap-1.5 text-2xs text-codify-warning" role="status">
-      <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-px" />
+      <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-px" />
       <span>{state.reason}</span>
     </p>
   );
@@ -239,7 +239,7 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
   if (loadError) {
     return (
       <div className="flex items-start gap-2 p-3 bg-codify-danger/20 border border-codify-danger/60 rounded-xl text-xs text-codify-danger-ink">
-        <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
         <span>{loadError}</span>
       </div>
     );

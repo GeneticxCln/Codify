@@ -139,20 +139,20 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
   const badge = (() => {
     if (hasKey) {
       return (
-        <span className="flex items-center gap-1 text-2xs font-medium text-codify-success-ink bg-codify-success/20 border border-codify-success/60 px-2 py-0.5 rounded-full flex-shrink-0">
+        <span className="flex items-center gap-1 text-2xs font-medium text-codify-success-ink bg-codify-success/20 border border-codify-success/60 px-2 py-0.5 rounded-full shrink-0">
           <ShieldCheck className="w-3 h-3" /> Configured
         </span>
       );
     }
     if (needsKey) {
       return (
-        <span className="text-2xs text-codify-muted bg-codify-surface px-2 py-0.5 rounded-full border border-codify-border flex-shrink-0">
+        <span className="text-2xs text-codify-muted bg-codify-surface px-2 py-0.5 rounded-full border border-codify-border shrink-0">
           Missing key
         </span>
       );
     }
     return (
-      <span className="text-2xs text-codify-info-ink bg-codify-info/20 border border-codify-info/60 px-2 py-0.5 rounded-full flex-shrink-0">
+      <span className="text-2xs text-codify-info-ink bg-codify-info/20 border border-codify-info/60 px-2 py-0.5 rounded-full shrink-0">
         Local / no key
       </span>
     );
@@ -162,7 +162,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
     <div className="bg-codify-bg border border-codify-border rounded-xl p-3.5 space-y-3">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
-          <Cpu className="w-4 h-4 text-codify-design flex-shrink-0" />
+          <Cpu className="w-4 h-4 text-codify-design shrink-0" />
           {/* The slug stays the identifier everywhere; this is only how it is read (`providerLabels.ts`). */}
           <span className="font-semibold text-sm text-codify-primary truncate" title={provider}>
             {providerLabel(provider)}
@@ -171,12 +171,12 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
             {protocolLabel(keyStatus.protocol)}
           </span>
           {status?.ok && (
-            <span className="text-2xs text-codify-muted flex-shrink-0">{status.count} models</span>
+            <span className="text-2xs text-codify-muted shrink-0">{status.count} models</span>
           )}
           {newHere > 0 && (
             <span
               title={newCountTitle(provider, newHere)}
-              className="text-2xs font-medium text-codify-design-ink bg-codify-design/20 border border-codify-design/60 px-1.5 py-px rounded-full flex-shrink-0"
+              className="text-2xs font-medium text-codify-design-ink bg-codify-design/20 border border-codify-design/60 px-1.5 py-px rounded-full shrink-0"
             >
               {newCountLabel(newHere)}
             </span>
@@ -213,7 +213,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
                   }}
                   autoComplete="off"
                   spellCheck={false}
-                  className="w-full bg-codify-surface border border-codify-border rounded-l-lg px-3 py-1.5 pr-8 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono"
+                  className="w-full bg-codify-surface border border-codify-border rounded-l-lg px-3 py-1.5 pr-8 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent font-mono"
                 />
                 <button
                   type="button"
@@ -229,7 +229,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
                 onClick={save}
                 disabled={savingKey || !key.trim()}
                 className={
-                  "flex items-center gap-1 px-3 rounded-r-lg text-xs font-semibold transition-colors flex-shrink-0 border border-l-0 border-codify-border " +
+                  "flex items-center gap-1 px-3 rounded-r-lg text-xs font-semibold transition-colors shrink-0 border border-l-0 border-codify-border " +
                   (keySaved
                     ? "bg-codify-success text-codify-bg"
                     : "bg-codify-accent text-codify-bg hover:brightness-110 disabled:opacity-40")
@@ -245,7 +245,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
             </div>
           ) : (
             <p className="text-2xs text-codify-muted flex items-center gap-1.5">
-              <HardDrive className="w-3 h-3 flex-shrink-0" />
+              <HardDrive className="w-3 h-3 shrink-0" />
               Runs on your own machine at <span className="font-mono">{keyStatus.base_url}</span> — no
               key to paste.
             </p>
@@ -302,7 +302,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
 
       {error && (
         <p className="flex items-start gap-1.5 text-2xs text-codify-danger">
-          <TriangleAlert className="w-3 h-3 flex-shrink-0 mt-0.5" />
+          <TriangleAlert className="w-3 h-3 shrink-0 mt-0.5" />
           {error}
         </p>
       )}

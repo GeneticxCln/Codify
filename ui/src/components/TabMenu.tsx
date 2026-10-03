@@ -120,7 +120,7 @@ export const TabMenu: React.FC<TabMenuProps> = ({ items, x, y, onChoose, onClose
                 }}
                 className={"w-full rounded-md px-2.5 text-left " + (blocked ? "opacity-60 cursor-not-allowed" : "")}
               >
-                <Icon className="h-3 w-3 flex-shrink-0" />
+                <Icon className="h-3 w-3 shrink-0" />
                 {item.label}
               </Button>
               {blocked && (

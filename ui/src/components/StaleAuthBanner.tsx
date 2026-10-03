@@ -126,7 +126,7 @@ export const StaleAuthBanner: React.FC<{
         className="rounded-xl border border-codify-warning bg-codify-warning/10 p-2.5 text-xs"
       >
         <div className="mb-1 flex items-center gap-1.5 text-codify-warning">
-          <ClipboardCopy className="h-3.5 w-3.5 flex-shrink-0" />
+          <ClipboardCopy className="h-3.5 w-3.5 shrink-0" />
           <span className="font-medium">{STALE_AUTH_FIX.heading}</span>
         </div>
         <p className="mb-2 leading-relaxed text-codify-secondary">{STALE_AUTH_FIX.body}</p>

@@ -25,7 +25,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ path, diffText, onOpen }
             onClick={() => onOpen(path)}
             aria-label={`Open ${path} in the editor`}
             title="Open in the editor"
-            className="ml-auto flex-shrink-0 rounded px-2 py-0.5 text-2xs text-codify-info-ink hover:bg-codify-raised focus:outline-none focus-visible:ring-2 focus-visible:ring-codify-info"
+            className="ml-auto shrink-0 rounded-sm px-2 py-0.5 text-2xs text-codify-info-ink hover:bg-codify-raised focus:outline-hidden focus-visible:ring-2 focus-visible:ring-codify-info"
           >
             Open
           </button>
@@ -47,7 +47,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ path, diffText, onOpen }
           }
 
           return (
-            <div key={idx} className={`px-2 py-0.5 rounded ${color} ${bg} whitespace-pre`}>
+            <div key={idx} className={`px-2 py-0.5 rounded-sm ${color} ${bg} whitespace-pre`}>
               {line || " "}
             </div>
           );

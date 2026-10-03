@@ -73,7 +73,7 @@ test("a step's title may shrink and wrap, and its status may not", async () => {
     const pill = spanWithText(ctx, "COMPLETED");
     assert.ok(pill, "the step's status is not on screen");
     assert.ok(classesOf(pill!).includes("whitespace-nowrap"), "the status pill can be broken a letter to a line");
-    assert.ok(classesOf(pill!.parentElement).includes("flex-shrink-0"), "the status cluster can be squeezed by the title");
+    assert.ok(classesOf(pill!.parentElement).includes("shrink-0"), "the status cluster can be squeezed by the title");
   });
 });
 

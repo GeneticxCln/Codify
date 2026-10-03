@@ -187,16 +187,16 @@ export const MachinePane: React.FC<MachinePaneProps> = ({
 
   return (
     <section aria-label="Machine" data-machine-id={machineId} className="flex min-h-0 flex-1 flex-col bg-codify-bg">
-      <div className="flex flex-shrink-0 items-center gap-2 border-b border-codify-border bg-codify-surface px-3 py-1.5">
-        <Box className="h-3.5 w-3.5 flex-shrink-0 text-codify-info" aria-hidden />
-        <span className="flex-shrink-0 text-xs text-codify-secondary">Jailed shell</span>
+      <div className="flex shrink-0 items-center gap-2 border-b border-codify-border bg-codify-surface px-3 py-1.5">
+        <Box className="h-3.5 w-3.5 shrink-0 text-codify-info" aria-hidden />
+        <span className="shrink-0 text-xs text-codify-secondary">Jailed shell</span>
         <span
           data-testid="machine-network"
           title={network ? NETWORK_ON_DETAIL : NETWORK_OFF_DETAIL}
           className={
             network
-              ? "flex-shrink-0 rounded border border-codify-warning/60 bg-codify-warning/20 px-1.5 py-0.5 text-2xs text-codify-warning-ink"
-              : "flex-shrink-0 rounded border border-codify-border px-1.5 py-0.5 text-2xs text-codify-muted"
+              ? "shrink-0 rounded-sm border border-codify-warning/60 bg-codify-warning/20 px-1.5 py-0.5 text-2xs text-codify-warning-ink"
+              : "shrink-0 rounded-sm border border-codify-border px-1.5 py-0.5 text-2xs text-codify-muted"
           }
         >
           {network ? NETWORK_ON : NETWORK_OFF}
@@ -214,7 +214,7 @@ export const MachinePane: React.FC<MachinePaneProps> = ({
             aria-label="Reset machine"
             title="Start this machine again from a clean project: everything running in it stops and everything it changed is discarded"
             onClick={onReset}
-            className="ml-auto flex flex-shrink-0 items-center gap-1 rounded border border-codify-border px-1.5 py-0.5 text-2xs text-codify-secondary hover:bg-codify-raised/60"
+            className="ml-auto flex shrink-0 items-center gap-1 rounded-sm border border-codify-border px-1.5 py-0.5 text-2xs text-codify-secondary hover:bg-codify-raised/60"
           >
             <RotateCcw className="h-3 w-3" aria-hidden />
             Reset

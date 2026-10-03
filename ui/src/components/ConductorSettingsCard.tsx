@@ -90,7 +90,7 @@ const NumberSetting: React.FC<{
             setMsg(null);
           }}
           disabled={value === null || saving}
-          className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent font-mono disabled:opacity-40"
+          className="w-20 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent font-mono disabled:opacity-40"
         />
         <button
           type="button"
@@ -253,7 +253,7 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
   if (stored === null) {
     return loadError ? (
       <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
-        <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
         <span className="leading-relaxed">Conductor settings unavailable — {loadError}</span>
       </div>
     ) : null;
@@ -426,7 +426,7 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
       </p>
       {stale && (
         <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
-          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <span className="leading-relaxed">
             {stale.provider} no longer reports <span className="font-mono">{stale.model}</span> (
             {stale.reportedCount} model{stale.reportedCount === 1 ? "" : "s"} in the last discovery).
@@ -494,7 +494,7 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
         </p>
         {staleFallback && (
           <div className="flex items-start gap-2 text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-lg p-3">
-            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
             <span className="leading-relaxed">
               {staleFallback.provider} no longer reports{" "}
               <span className="font-mono">{staleFallback.model}</span>, so saving it would store a

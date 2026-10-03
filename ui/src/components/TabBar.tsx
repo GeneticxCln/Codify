@@ -186,7 +186,7 @@ export const TabBar: React.FC<TabBarProps> = ({
             >
               <Icon
                 className={
-                  "w-3 h-3 flex-shrink-0 " +
+                  "w-3 h-3 shrink-0 " +
                   (active ? "text-codify-info" : "")
                 }
               />
@@ -201,7 +201,7 @@ export const TabBar: React.FC<TabBarProps> = ({
               {busy && (
                 <span
                   aria-hidden
-                  className="w-1.5 h-1.5 rounded-full bg-codify-accent flex-shrink-0"
+                  className="w-1.5 h-1.5 rounded-full bg-codify-accent shrink-0"
                 />
               )}
               {/* A page on the wire: motion, not a percentage — the runtime
@@ -212,7 +212,7 @@ export const TabBar: React.FC<TabBarProps> = ({
                 <span
                   aria-hidden
                   data-loading="true"
-                  className="w-1.5 h-1.5 rounded-full bg-codify-info flex-shrink-0 animate-pulse"
+                  className="w-1.5 h-1.5 rounded-full bg-codify-info shrink-0 animate-pulse"
                 />
               )}
               {/* Unread output: same fact family as the busy dot — something
@@ -224,7 +224,7 @@ export const TabBar: React.FC<TabBarProps> = ({
                 <span
                   aria-hidden
                   data-testid="terminal-unread-dot"
-                  className="w-1.5 h-1.5 rounded-full bg-codify-info flex-shrink-0"
+                  className="w-1.5 h-1.5 rounded-full bg-codify-info shrink-0"
                 />
               )}
               {/* Text nobody has saved: a warning-coloured dot, because this is the one mark on the strip that says
@@ -233,7 +233,7 @@ export const TabBar: React.FC<TabBarProps> = ({
                 <span
                   aria-hidden
                   data-testid="editor-unsaved-dot"
-                  className="w-1.5 h-1.5 rounded-full bg-codify-warning flex-shrink-0"
+                  className="w-1.5 h-1.5 rounded-full bg-codify-warning shrink-0"
                 />
               )}
               {/* The assistant changed it: the info blue, as the terminal's unread dot is — look here — and a ring
@@ -242,7 +242,7 @@ export const TabBar: React.FC<TabBarProps> = ({
                 <span
                   aria-hidden
                   data-testid="editor-assistant-dot"
-                  className="w-1.5 h-1.5 rounded-full border border-codify-info flex-shrink-0"
+                  className="w-1.5 h-1.5 rounded-full border border-codify-info shrink-0"
                 />
               )}
               <button
@@ -260,7 +260,7 @@ export const TabBar: React.FC<TabBarProps> = ({
                   // however well the click behind it works. The strip is
                   // already a row of truncated labels a hundred wide; hover is
                   // not a thing a person can find their way to on purpose.
-                  "ml-1 rounded p-0.5 flex-shrink-0 hover:bg-codify-raised"
+                  "ml-1 rounded-sm p-0.5 shrink-0 hover:bg-codify-raised"
                 }
               >
                 <X className="w-3 h-3" />

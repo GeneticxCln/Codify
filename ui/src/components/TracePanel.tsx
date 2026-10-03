@@ -181,7 +181,7 @@ export const TracePanel: React.FC<{
             {traceRoles(summary).map(([role, n]) => (
               <span
                 key={role}
-                className="text-2xs font-mono px-1.5 py-0.5 rounded bg-codify-surface border border-codify-border text-codify-secondary"
+                className="text-2xs font-mono px-1.5 py-0.5 rounded-sm bg-codify-surface border border-codify-border text-codify-secondary"
                 title={`${n} call${n === 1 ? "" : "s"} from the ${role}`}
               >
                 {role} × {n}

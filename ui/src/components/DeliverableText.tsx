@@ -27,7 +27,7 @@ export const DeliverableText: React.FC<{
       aria-pressed={view === id}
       onClick={() => setView(id)}
       className={
-        "rounded border px-1.5 py-0.5 text-2xs transition-colors " +
+        "rounded-sm border px-1.5 py-0.5 text-2xs transition-colors " +
         (view === id
           ? "border-codify-border-strong bg-codify-raised text-codify-primary"
           : "border-transparent text-codify-muted hover:text-codify-secondary")
@@ -45,7 +45,7 @@ export const DeliverableText: React.FC<{
       {view === "rendered" ? (
         <div
           className={
-            "rounded border border-codify-raised bg-codify-surface p-2 text-xs text-codify-secondary overflow-auto " +
+            "rounded-sm border border-codify-raised bg-codify-surface p-2 text-xs text-codify-secondary overflow-auto " +
             boxClassName
           }
         >
@@ -54,7 +54,7 @@ export const DeliverableText: React.FC<{
       ) : (
         <pre
           className={
-            "whitespace-pre-wrap rounded border border-codify-raised bg-codify-surface p-2 text-2xs text-codify-secondary overflow-auto " +
+            "whitespace-pre-wrap rounded-sm border border-codify-raised bg-codify-surface p-2 text-2xs text-codify-secondary overflow-auto " +
             boxClassName
           }
         >

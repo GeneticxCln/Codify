@@ -217,7 +217,7 @@ export const BrowserPane: React.FC<BrowserPaneProps> = ({
           aria-label="Address"
           spellCheck={false}
           autoComplete="off"
-          className="flex-1 min-w-0 h-7 px-2 rounded-md text-xs font-mono bg-codify-bg border border-codify-border text-codify-primary placeholder:text-codify-muted focus:outline-none focus:border-codify-accent"
+          className="flex-1 min-w-0 h-7 px-2 rounded-md text-xs font-mono bg-codify-bg border border-codify-border text-codify-primary placeholder:text-codify-muted focus:outline-hidden focus:border-codify-accent"
         />
       </div>
 

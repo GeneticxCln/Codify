@@ -16,7 +16,7 @@ export const ProtocolSelect: React.FC<ProtocolSelectProps> = ({ value, onChange 
       <select
         value={value}
         onChange={(e) => onChange(e.target.value as ProviderProtocol)}
-        className="bg-codify-bg border border-codify-border rounded px-3 py-2 text-sm text-codify-secondary focus:outline-none focus:border-codify-accent"
+        className="bg-codify-bg border border-codify-border rounded-sm px-3 py-2 text-sm text-codify-secondary focus:outline-hidden focus:border-codify-accent"
       >
         {(Object.keys(PROTOCOL_LABELS) as ProviderProtocol[]).map((p) => (
           <option key={p} value={p}>

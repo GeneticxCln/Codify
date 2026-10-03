@@ -57,7 +57,7 @@ export const EngineRuntimeCard: React.FC = () => {
   if (failed) {
     return (
       <div className="flex items-start gap-2 text-xs text-codify-muted bg-codify-surface border border-codify-border rounded-lg p-3">
-        <AlertTriangle className="w-4 h-4 text-codify-warning flex-shrink-0 mt-0.5" />
+        <AlertTriangle className="w-4 h-4 text-codify-warning shrink-0 mt-0.5" />
         <span>Engine runtime unavailable — the engine did not answer /settings/runtime.</span>
       </div>
     );
@@ -83,7 +83,7 @@ export const EngineRuntimeCard: React.FC = () => {
       </div>
       {lines.map((line) => (
         <div key={line.label} className="text-xs flex items-start gap-1.5">
-          <Cpu className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-codify-muted" />
+          <Cpu className="w-3.5 h-3.5 shrink-0 mt-0.5 text-codify-muted" />
           <span className="min-w-0 break-all">
             <span className="text-codify-muted">{line.label}: </span>
             <span className={TONE_CLASS[line.tone]}>{line.value}</span>
@@ -93,7 +93,7 @@ export const EngineRuntimeCard: React.FC = () => {
       {warnings.map((warning) => (
         <p
           key={warning}
-          className="text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded p-2"
+          className="text-xs text-codify-warning-ink bg-codify-warning/20 border border-codify-warning/60 rounded-sm p-2"
         >
           {warning}
         </p>

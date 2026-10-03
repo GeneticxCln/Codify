@@ -61,7 +61,7 @@ const Note: React.FC<{ text: string; label: string; onDismiss: () => void }> = (
     className="mx-2 mt-2 flex items-start gap-2 rounded-lg border border-codify-warning bg-codify-warning/10 px-2.5 py-2 text-2xs leading-relaxed text-codify-secondary"
   >
     <span className="min-w-0 flex-1 break-words">{text}</span>
-    <IconButton label={label} onClick={onDismiss} className="!w-5 !h-5">
+    <IconButton label={label} onClick={onDismiss} className="w-5! h-5!">
       <X className="w-3 h-3" />
     </IconButton>
   </div>
@@ -139,7 +139,7 @@ export const ClipboardDrawer: React.FC<ClipboardDrawerProps> = ({
           data-clipboard="off"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          className="w-full bg-codify-bg border border-codify-border rounded px-2.5 py-1.5 text-xs text-codify-secondary placeholder:text-codify-muted focus:outline-none focus:border-codify-accent"
+          className="w-full bg-codify-bg border border-codify-border rounded-sm px-2.5 py-1.5 text-xs text-codify-secondary placeholder:text-codify-muted focus:outline-hidden focus:border-codify-accent"
         />
       </div>
 
