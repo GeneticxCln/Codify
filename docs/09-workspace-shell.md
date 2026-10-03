@@ -833,8 +833,8 @@ the module's own docs:
 
 Commands: `codify_terminal_open`, `codify_terminal_write`,
 `codify_terminal_resize`, `codify_terminal_close`. Events: `terminal-output`,
-`terminal-exit`. Thirteen Rust tests pin the refusals, the reaping and the read
-path; the freeze is mutation-tested — a rogue `Command::new(...).spawn()` in
+`terminal-exit`. Twenty Rust tests pin the refusals, the reaping, the read path and
+the batching below; the freeze is mutation-tested — a rogue `Command::new(...).spawn()` in
 `src-tauri/src/` fails `tests/test_no_unguarded_spawns.py`.
 
 The reader thread is `pump_output`, taken out of `open` so it needs no
@@ -846,6 +846,60 @@ ends wherever it ends, and a character whose bytes straddle two reads used to
 arrive as two replacement characters. The unfinished tail is held for the next
 read; bytes that are actually invalid are replaced at once so garbage cannot
 stall the stream.
+
+#### Output is batched before it reaches the window
+
+A PTY hands its reader at most about 4 KiB per `read`, and the reader used to emit
+one `terminal-output` event per read. A program that repaints the screen
+(`cmatrix`, `top`, a progress bar) turned that into a flood: measured on a
+full-screen colour repaint, **135 events a second at 80x24, 770 at 200x50 and 30
+frames a second, 1,400 at 60, 2,400 with the producer unthrottled**. Each event is
+a message into the webview, a listener call, a history append and an `xterm.write`,
+all on the one thread that also paints the window and handles keys. That, plus the
+renderer below, was the lag in `cmatrix`.
+
+`pump_output` now decodes on a reader thread and **batches** on the caller's, which
+is the thread that emits:
+
+- **A gap of 2 ms with nothing new ends a batch**, so a prompt, an echoed key or the
+  last line of a command goes out within a couple of milliseconds and is never held
+  for a frame.
+- **A batch is built for at most 8 ms or 128 KiB, and two batches are at least 8 ms
+  apart**: about 125 events a second however fast the program writes.
+- **The last batch at end of stream goes at once**, ahead of the `terminal-exit` that
+  follows it, so an exit is never in front of the text it ends.
+- **The hand-off to the batcher is bounded (64 pieces).** A window that cannot keep up
+  makes the *shell* wait (the PTY fills and the program blocks in its write), where a
+  flood belongs, and the app does not grow without limit.
+
+The text and its order are unchanged; only the size of the pieces is. A machine's
+reader is the same function, wrapped in `machine::run_reader`, which adds one
+rule: a reader whose machine has been **replaced by a reset** drops what it still
+holds. The reset puts its own line on a cleared screen the moment it ends the old
+machine, and the old reader still has a batch waiting for its turn, a backlog
+behind it and whatever the PTY had buffered; delivered, that text would land
+*after* the line, on the new machine's clean screen. The reader asks the registry
+for its machine's epoch before each delivery (the epoch the exit event already
+used; a reset holds the registry's lock from the old machine's end to the new
+one's start, so a chunk is delivered before the line or dropped after it, never in
+between), and a machine that was *closed* has no entry, so it still delivers its
+last output and reports its exit as it always did.
+
+Seven Rust tests cover the batching: six drive it with scripted readers (a flood
+arrives whole and in order in far fewer events than reads; no event exceeds the cap
+by more than one read; a prompt is not held for output that has not come; the last
+batch is handed over before the function returns; a stuck listener stops the
+reader; a trickle just slower than the quiet gap is still held to the floor) and
+one a real PTY (two million bytes counted at the far end). Three more cover
+`run_reader` (replaced, still current, closed). **Each was shown to fail without
+what it guards**: the batching by seven deliberate breaks of it, run in a
+standalone crate against `portable-pty` 0.9 (the minimum-interval break was missed
+until the trickle test was added), and `run_reader` by three breaks run in the
+real crate. A real-jail test of a reset in the middle of a flood was also written
+and **discarded**: it passed with the check removed, because the batcher keeps up
+with a shell loop and little is in flight at reset time, so it proved nothing.
+The whole crate (`cargo check`, `cargo test` under Xvfb, `cargo fmt --check`) was
+built and run on a machine with `webkit2gtk`, the jail tests included.
 
 #### The pane
 
@@ -869,6 +923,7 @@ Decisions, and why:
 | **Keystrokes are not intercepted** | Every key belongs to whatever the shell drew — Ctrl-C, arrows, a bracketed-paste sequence, a tmux prefix. xterm turns a key into exactly the bytes a real terminal would send. The keys the *window* claims are handled one layer up, in `App.tsx`, before they reach the pane. |
 | **An exited shell is written into the scrollback, not only into a banner** | Scrolling up after a command fails is the normal way to read a failure, and a banner outside the terminal is not in that scrollback. The tab stays open for the same reason; closing it reaps what is left. |
 | **A terminal tab is named by the shell** | `terminal.rs` numbers its own sessions `term-1`, `term-2`, and the pane needs that exact string for every write, resize and close. One id, not a tab id with the PTY's beside it. |
+| **The canvas renderer, with the DOM renderer as the fallback** | xterm's default renderer is the DOM, which rewrites most of its elements every frame a screen-repainting program draws, on the thread that also handles keys. On the same repaint the canvas renderer took roughly an eighth to a tenth of the main-thread time **in Chromium** (indicative: the app runs in WebKitGTK, which is not Chromium). `ui/src/terminalRenderer.ts` attaches `@xterm/addon-canvas` after `open`, **not awaited** (the replay and the live subscription must follow with no yield between them), and re-fits once it has switched, because the two measure a cell a little differently. Any failure to load or start it leaves the DOM renderer the pane already had, and `attachRenderer` never throws. `localStorage["codify.terminalRenderer"] = "dom"` pins the DOM renderer. **WebGL is not shipped**: a context can be refused or lost under a software-composited WebKitGTK, and it could not be tested on that stack. |
 | **A resize carries the pane's own id** | The pane is the only party that knows which PTY it is drawing. `App.handleTerminalResize` used to read the id out of `pendingTerminal`, which held the *most recently opened* terminal — so with two shells up, dragging the window resized the other one, and a terminal restored from scrollback was never resized at all. |
 
 Two asymmetries with the browser pane worth naming, because they look like
@@ -880,6 +935,26 @@ inconsistencies and are not:
   path. `codify_browser_close` *refuses* a tab with no window, so the guard is
   there to keep that refusal off the user's screen.
 - **The terminal is drawn in the main window; the browser is not.** §7.3.
+
+#### What the assistant can see and do here: nothing, and in the machine tab, both
+
+This pane is **the person's own shell**, with their environment, credentials and
+network. Invariant 6 (`docs/00` §6.6) says an assistant's commands run only through
+`validate_argv` into the sandbox, or inside the machine tab's jail that a person
+alone can open. So this terminal has **no eyes and no hands for the assistant**: no
+conductor tool reads its screen, none types into it, and the surface bridge has no
+operation for it (`surface_machine.py` has `read_machine`, `run_in_machine`,
+`key_in_machine` and `reset_machine`, and they address a machine, never a terminal).
+
+The **machine tab** has both, on purpose and inside the jail (§14): its eyes are a
+headless xterm screen per machine, fed by the same stream the pane draws
+(`ui/src/machineScreens.ts`), and its hands are `run_in_machine` and `key_in_machine`.
+
+*Read-only* eyes on this terminal would be a smaller step than hands, and it is a
+policy decision, not a technical one, so it is **not built**: whatever a person
+types or pastes at their own prompt (a token, an environment dump) would go in front
+of a model. If it is wanted it should be a per-terminal switch the person turns on,
+shown on the tab while it is on, and it still gives an assistant no way to type.
 
 `terminalModel.test.ts` covers the grid, the de-dupe and the buffer;
 `terminalHistory.test.ts` covers the scrollback below; `terminalBuffer.test.ts`

@@ -1010,3 +1010,80 @@ fn only_so_many_machines_may_be_open_and_a_write_has_a_size() {
 
 mod guard_facts;
 mod layer_facts;
+
+// ── the reader thread ─────────────────────────────────────────────────────────────────────────────
+
+/// A reader that hands out `left` short lines, one per `read`, far enough apart (more than a batch window) that
+/// each reaches the listener as a piece of its own.
+struct Lines {
+    left: usize,
+}
+
+impl std::io::Read for Lines {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.left == 0 {
+            return Ok(0);
+        }
+        self.left -= 1;
+        std::thread::sleep(Duration::from_millis(30));
+        let line = b"old output\n";
+        buf[..line.len()].copy_from_slice(line);
+        Ok(line.len())
+    }
+}
+
+/// What `run_reader` delivered, and whether it reported an exit, for a machine whose epoch in the registry is
+/// whatever `epoch_after(delivered_so_far)` says.
+fn run_lines(
+    lines: usize,
+    started_for: u64,
+    epoch_after: impl Fn(usize) -> Option<u64> + Send + 'static,
+) -> (usize, bool) {
+    use std::sync::atomic::AtomicUsize;
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let exited = Arc::new(AtomicBool::new(false));
+    let (seen, count, flag) = (delivered.clone(), delivered.clone(), exited.clone());
+    run_reader(
+        Lines { left: lines },
+        started_for,
+        move || epoch_after(seen.load(Ordering::SeqCst)),
+        move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        },
+        move || flag.store(true, Ordering::SeqCst),
+    );
+    (
+        delivered.load(Ordering::SeqCst),
+        exited.load(Ordering::SeqCst),
+    )
+}
+
+#[test]
+fn a_reader_whose_machine_was_replaced_drops_what_it_still_holds_and_reports_no_exit() {
+    // The registry holds this reader's epoch (1) until three pieces have been delivered, and then a
+    // replacement's (2): a reset happened in the middle of the stream. What the old reader still held
+    // would land after the reset's own line, on the clean screen of the new machine. Without the check all
+    // ten arrive, and the end of the stream is reported as an exit the window would show as a dead machine.
+    let (delivered, exited) = run_lines(10, 1, |so_far| Some(if so_far >= 3 { 2 } else { 1 }));
+    assert_eq!(
+        delivered, 3,
+        "a replaced machine's reader kept delivering after the reset"
+    );
+    assert!(!exited, "a reset was reported as an exit");
+}
+
+#[test]
+fn a_reader_whose_machine_is_still_current_delivers_everything_and_reports_the_exit() {
+    let (delivered, exited) = run_lines(5, 1, |_| Some(1));
+    assert_eq!(delivered, 5, "output of a live machine was dropped");
+    assert!(exited, "a machine that ended was not reported as ended");
+}
+
+#[test]
+fn a_reader_whose_machine_was_closed_delivers_its_last_output_and_reports_the_exit() {
+    // A closed machine has no entry at all, which is not the same as a replaced one: it has always been
+    // reported as an exit, and what it said last is still shown.
+    let (delivered, exited) = run_lines(5, 1, |_| None);
+    assert_eq!(delivered, 5, "a closed machine's output was dropped");
+    assert!(exited, "a closed machine was not reported as ended");
+}

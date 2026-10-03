@@ -60,6 +60,7 @@
  */
 import type React from "react";
 import { withoutHooks } from "./tsxLoader.ts";
+import { TERMINAL_RENDERER_KEY } from "../src/terminalRenderer.ts";
 
 /** The globals a jsdom window owns that `src/` may read. */
 const GLOBALS = [
@@ -433,6 +434,11 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
     }
   }
   installEnvironment(win, fetches, scrolls);
+  // Tests read what xterm shows from its DOM renderer (its rows, its style sheet). The canvas renderer
+  // replaces those with pixels, and the stub 2D context above lets the real addon activate and draw
+  // nothing, which is a blank terminal to every test that reads one. A test that wants the real default
+  // says so with `win.localStorage.setItem(TERMINAL_RENDERER_KEY, "canvas")` (`terminalRendererPanes.test.ts`).
+  win.localStorage.setItem(TERMINAL_RENDERER_KEY, "dom");
 
   const React = await import("react");
   const { createRoot } = await import("react-dom/client");

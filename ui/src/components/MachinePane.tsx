@@ -5,6 +5,7 @@ import { THEME_CHANGE_EVENT } from "../appearance";
 import { readRejection } from "../rejection.ts";
 import { UI_SCALE_CHANGED } from "../uiScale";
 import { xtermThemeFromDocument } from "../terminalTheme";
+import { attachRenderer } from "../terminalRenderer";
 import { usableGrid } from "../terminalModel";
 import type { MachineScreens } from "../machineScreens";
 import { terminalFontSize } from "./TerminalPane";
@@ -117,6 +118,12 @@ export const MachinePane: React.FC<MachinePaneProps> = ({
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(hostRef.current);
+      // Not awaited: the replay and the follow below must not be separated by a yield. The canvas renderer
+      // measures a cell a little differently from the DOM one, so a switch re-fits (`settle`, below, tells the
+      // machine only if the grid moved). See `terminalRenderer.ts`.
+      void attachRenderer(term, { isDisposed: () => disposed }).then((outcome) => {
+        if (outcome.kind === "canvas") settle();
+      });
 
       const onThemeChange = (): void => {
         if (!disposed && term) term.options.theme = xtermThemeFromDocument();
