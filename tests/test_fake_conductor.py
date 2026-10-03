@@ -18,7 +18,8 @@ conductor is reconstructed from the transcript each time: which calls it already
 * `[editor path=P old=X new=Y]` makes it look at the person's editor, open `P`, and change `X` to `Y` in the open
   text, which is the one way to watch the editor's eyes and hands work without a model;
 * `[machine run=CMD]` makes it look at the person's machine, type `CMD` into it and read what it printed, and
-  `[machine run=CMD key=Ctrl-C]` then presses that key. It is never offered a way to open one.
+  `[machine run=CMD key=Ctrl-C]` then presses that key, and a trailing ` reset` starts the machine again from a clean
+  project. It is never offered a way to open one.
 
 The first block holds the policy; the second runs it live.
 """
@@ -63,7 +64,7 @@ STEP = (
 )
 ALL_TOOLS = ["read_file", "recon", "plan", "ask_user"]
 EDITOR_TOOLS = ["read_editor", "open_in_editor", "edit_editor"]
-MACHINE_TOOLS = ["read_machine", "run_in_machine", "key_in_machine"]
+MACHINE_TOOLS = ["read_machine", "run_in_machine", "key_in_machine", "reset_machine"]
 STEP_TOOLS = ["read_file", "write", "verify", "review", "summarize", "todo"]
 
 
@@ -167,6 +168,28 @@ class TestThePolicy(unittest.TestCase):
         self.assertEqual(("key_in_machine", {"key": "Ctrl-C"}), self.step(user, *history, tools=tools))
         done = self.step(user, *history, _called("key_in_machine"), _result(), tools=tools)
         self.assertIsInstance(done, str)
+
+    def test_a_trailing_reset_starts_the_machine_again_last_of_all(self) -> None:
+        user = TURN.format(request="mess it up and start over [machine run=rm -rf /work/x reset]")
+        tools = [*ALL_TOOLS, *MACHINE_TOOLS]
+        history = [_called("read_machine"), _result(), _called("run_in_machine"), _result()]
+        self.assertEqual(("run_in_machine", {"command": "rm -rf /work/x"}), self.step(user, *history[:2], tools=tools))
+        self.assertEqual(("reset_machine", {}), self.step(user, *history, tools=tools))
+        done = self.step(user, *history, _called("reset_machine"), _result(), tools=tools)
+        self.assertIsInstance(done, str)
+
+    def test_without_the_reset_marker_it_never_resets(self) -> None:
+        user = TURN.format(request="list the files [machine run=ls key=Enter]")
+        tools = [*ALL_TOOLS, *MACHINE_TOOLS]
+        history: list[dict[str, Any]] = []
+        seen: list[str] = []
+        for _ in range(8):
+            move = self.step(user, *history, tools=tools)
+            if isinstance(move, str):
+                break
+            seen.append(move[0])
+            history += [_called(move[0]), _result()]
+        self.assertEqual(["read_machine", "run_in_machine", "key_in_machine"], seen)
 
     def test_it_does_not_touch_a_machine_when_none_is_offered(self) -> None:
         user = TURN.format(request="list the files [machine run=ls -la]")

@@ -64,7 +64,7 @@ class TestPolling(RouteCase):
         body = r.json()
         self.assertFalse(body["attached"])
         self.assertEqual(0, body["inflight"])
-        self.assertEqual({"editor": ["edit", "open", "read"], "machine": ["key", "read", "run"]}, body["surfaces"])
+        self.assertEqual({"editor": ["edit", "open", "read"], "machine": ["key", "read", "reset", "run"]}, body["surfaces"])
 
     async def test_an_empty_poll_is_a_null_id_and_it_is_what_makes_the_window_attached(self) -> None:
         r = await self.next()

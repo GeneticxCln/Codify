@@ -1,6 +1,6 @@
 """The machine surface: what the engine may ask of the person's machine tab, what may come back, and how it is told to the model.
 
-Three operations, and this file is the only place they are defined (`docs/09` §14):
+Four operations, and this file is the only place they are defined (`docs/09` §14):
 
   * `read`: **eyes.** Which machines are open in the window, which is in view and which has focus, whether each has a
     network, and (for one) the screen as it is drawn and a bounded tail of what scrolled off it. The screen is the
@@ -9,11 +9,16 @@ Three operations, and this file is the only place they are defined (`docs/09` §
     bring back what it printed.
   * `key`: **hands.** Press one named key: Enter, Tab, Escape, an arrow, Backspace, or Ctrl-C, -D, -L, -Z. The list is
     fixed and the engine never sends bytes; the window turns a name into the key it stands for.
+  * `reset`: **recovery.** Throw away everything the machine has done and start it again from a clean project: the
+    same project, the same network, a new jail. It is what an assistant does when a machine is wedged, full, or was
+    stopped for using too much. It remakes the machine from the recipe the person opened it with, so it cannot change
+    the network or the project, and it is not a way to open one: a machine that is not open cannot be reset.
 
-What a machine is, and why an assistant may type into one, is `src-tauri/src/machine.rs`'s to say: a jail with the
-workspace read-only, no capabilities, no credentials in its environment and no network unless the person opened it with
-one. This module adds nothing to that and takes nothing from it. In particular **nothing here is a way to open, close,
-resize or change the network of a machine**: opening is the person's, as it is for a terminal, so there is no `open` op.
+What a machine is, and why an assistant may type into one, is `src-tauri/src/machine.rs`'s to say: a jail whose view of
+the project is copy-on-write (the person's files are never written), no capabilities, no credentials in its environment
+and no network unless the person opened it with one. This module adds nothing to that and takes nothing from it. In
+particular **nothing here is a way to open, close, resize or change the network of a machine**: opening is the person's,
+as it is for a terminal, so there is no `open` op, and `reset` remakes what is there and cannot make what is not.
 
 It is also not `SandboxService`. A command typed here never meets `validate_argv`, on purpose, and that is acceptable
 only because of the jail (`docs/00` §6.6). So this file imports nothing that can start a process or write a file, and
@@ -47,6 +52,9 @@ MAX_COMMAND_CHARS = 4_000
 #: first, or a command that uses its whole wait would be reported as an app window that never answered.
 MAX_WAIT_S = 30.0
 RUN_TIMEOUT_S = 45.0
+#: A reset ends the old jail (up to a second), makes a new one and waits for its prompt. Generous, and still under the
+#: bridge's patience for a window that has stopped answering.
+RESET_TIMEOUT_S = 30.0
 
 #: The keys the assistant may press. A name, never a byte: `machineSurface.ts` holds the table from name to key.
 KEYS = ("Enter", "Tab", "Escape", "Up", "Down", "Left", "Right", "Backspace", "Ctrl-C", "Ctrl-D", "Ctrl-L", "Ctrl-Z")
@@ -101,6 +109,10 @@ class MachineKeyArgs(BaseModel):
     machine: str | None = Field(None, min_length=1, max_length=MAX_ID_CHARS)
 
 
+class MachineResetArgs(BaseModel):
+    machine: str | None = Field(None, min_length=1, max_length=MAX_ID_CHARS)
+
+
 # ── what may come back: strict, capped, and only the fields named ─────────────
 
 
@@ -114,6 +126,9 @@ class OpenMachine(_Answer):
     #: The shell in it is still running. False once it has exited: the screen stays, the input does not.
     alive: bool
     network: bool
+    #: What the machine changes under `/work` is its own copy and is discarded with it. False is a read-only project:
+    #: this host could not make the copy, and the machine is no weaker a jail for that.
+    copy_on_write: bool
     in_view: bool
     focused: bool
 
@@ -152,10 +167,19 @@ class MachineKeyResult(_Answer):
     alive: bool
 
 
+class MachineResetResult(_Answer):
+    id: MachineId
+    #: The new machine's screen once it was ready: the prompt, normally.
+    rows: Annotated[list[Line], _cap_list(MAX_ROWS)]
+    alive: bool
+    copy_on_write: bool
+
+
 MACHINE_OPS: dict[str, Op] = {
     "read": Op("read", MachineReadArgs, MachineReadResult),
     "run": Op("run", MachineRunArgs, MachineRunResult, timeout_s=RUN_TIMEOUT_S),
     "key": Op("key", MachineKeyArgs, MachineKeyResult),
+    "reset": Op("reset", MachineResetArgs, MachineResetResult, timeout_s=RESET_TIMEOUT_S),
 }
 
 
@@ -169,6 +193,9 @@ _QUOTE = (
 
 def _describe(machine: OpenMachine) -> str:
     facts = ["network on" if machine.network else "no network"]
+    facts.append(
+        "project is its own copy (edits stay here)" if machine.copy_on_write else "project is read-only"
+    )
     facts.append("running" if machine.alive else "its shell has exited")
     facts.append("in view" if machine.in_view else "not in view")
     if machine.focused:
@@ -231,6 +258,22 @@ def format_key(result: MachineKeyResult) -> str:
     out = [f"Pressed {result.key} in {result.id}. The screen now reads. {_QUOTE}"]
     rows = _screen_text(result.rows)
     out.extend(rows if rows else ["(nothing on the screen)"])
+    if not result.alive:
+        out.append("The shell in this machine has exited.")
+    return "\n".join(out)
+
+
+def format_reset(result: MachineResetResult) -> str:
+    """What a reset left, as the tool result the model reads."""
+    project = (
+        "The project under /work is a fresh copy: nothing from before is in it."
+        if result.copy_on_write
+        else "The project under /work is read-only."
+    )
+    out = [f"{result.id} was reset: everything running in it stopped and everything it had changed is gone. {project}"]
+    rows = _screen_text(result.rows)
+    out.append(f"The screen now reads. {_QUOTE}")
+    out.extend(rows if rows else ["(nothing on the screen yet)"])
     if not result.alive:
         out.append("The shell in this machine has exited.")
     return "\n".join(out)

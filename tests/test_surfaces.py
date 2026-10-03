@@ -278,7 +278,7 @@ class TestTheDefaultTable(unittest.TestCase):
         # Pinned on purpose: a surface or an op added to the default table is a new thing the assistant can ask the window to
         # do, and it should take an edit here (and in `tests/test_machine_surface.py`, which says why the machine has no `open`).
         self.assertEqual(
-            {"editor": ["edit", "open", "read"], "machine": ["key", "read", "run"]},
+            {"editor": ["edit", "open", "read"], "machine": ["key", "read", "reset", "run"]},
             {k: sorted(v) for k, v in SurfaceBridge().state()["surfaces"].items()},
         )
 
