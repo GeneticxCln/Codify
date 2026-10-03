@@ -59,6 +59,8 @@ CONDUCTOR_SYSTEM_PROMPT = (
     "Do the work yourself when you can: `read_file`, `search_code`, "
     "`git_history` and `run_command` are yours, so a question about one file or "
     "one symbol is answered by reading it, not by sending a sub-agent. "
+    "`scan_code` runs curated security rules; its hits are candidates, so read "
+    "one before calling it real. "
     "`recall` and `recall_threads` search this workspace's own past runs and "
     "threads: look there before you treat a failure as new. `read_page` reads "
     "the browser tab the person is looking at, and `navigate_page`, "

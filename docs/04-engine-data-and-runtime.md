@@ -772,6 +772,50 @@ the list, too many redirects, a non-text content type, a site that cannot be rea
 rejects, the 20 s budget. None is a traceback, and text that came from the far side (a content type, a host in a
 redirect) is bounded before it is put in a sentence.
 
+### 3.0.5 Code scanning: `scan_code`
+
+A conductor tool with no route and no setting (`engine/scan.py`; the audit and every limit's reason is `docs/13`). It is
+`search_code` with curated patterns, held to what `search_code` is: read-only, confined to the workspace (the same
+walk, the same `SKIP_DIRS`, the same symlink rule), bounded, honest about what it skipped.
+
+**The call.** `scan_code(profile?, glob?, include_tests?, include_comments?)`. No `profile` returns the list of
+profiles (name, source, rule count, description, any workspace shadowing, any problems reading a profile). A name, or
+`all`, scans. A name that does not exist is the refusal `there is no profile called 'x'` with the names that do.
+
+**A profile** is a JSON file: `{"name", "description", "rules": [...]}`. The built-ins are
+`engine/builtin_profiles/*.json`; a workspace's are `.codify/profiles/*.json`, and one named like a built-in replaces
+it (reported). A rule:
+
+| Field | |
+|---|---|
+| `id` | `[a-z0-9][a-z0-9_.-]{0,63}`, unique across profiles for the built-ins |
+| `severity` | `high`, `medium`, `low`, `info` |
+| `pattern`, `flags` | a Python regex of at most 200 characters; flags from `i`, `m`, `s` |
+| `languages` | file extensions (at most 20), or `[]` for every text file |
+| `where` | `code` (comments and string contents blanked), `strings` (comments blanked), `raw` |
+| `title`, `why`, `fix`, `cwe` | prose for the report (clipped to 120 / 240 / 240), and `CWE-123` |
+| `examples` | `{"match": [...], "clean": [...]}`; required of the built-ins by a test, ignored in a scan |
+
+A rule that does not parse or compile is dropped and named in the problems; it never raises, and one bad rule does
+not take its profile. At most 200 rules per profile, 20 profile files per workspace, 128,000 bytes per file; a
+symlinked profile file is not read. A profile can name nothing else: the worker is handed `id`, `pattern`, `flags`,
+`languages` and `where`.
+
+**The scan** runs in `engine/regex_worker.py` with `op: "scan"`, started by `library._run_regex_worker` (no new spawn
+site) and killed at the request's `budget_s` (15 s) plus the margin a search has. It walks in sorted order, skips test
+files (`is_test_path`; `include_tests` brings them back), generated and minified files, binary files, files over 2 MB
+and symlinks that leave the workspace, and stops, with the reason, at 800 files or the time budget. Comments (and, for
+`code` rules, string contents) are blanked by a heuristic tokenizer per language family, keeping newlines and columns.
+A line is scanned to 2,000 characters. A rule applies to the whole text and a hit is reported at the line it starts on;
+several on one line are one hit. At most 8 hits are kept per rule and 60 in a report; the rest are counted, up to 500
+per rule.
+
+**The result** is text: the caveat first (candidates, not vulnerabilities, and the quoted text is workspace text), a
+label if a workspace profile was used, the counts by severity, each rule's group (severity, CWE, title, why, fix, then
+`path:line  excerpt`), and the **coverage** line: files scanned and a number for each skip, files read in part, lines
+cut, the file types it cannot read comments in, and why it stopped early. Errors the model is told in a sentence:
+`That scan did not run: <reason>`.
+
 ### 3.1.1 The same rule at the start of every goal
 
 `POST /settings/agents/repair` is an action, and an action nobody thinks to take

@@ -1,0 +1,412 @@
+{
+  "name": "injection",
+  "description": "Where untrusted text can become code, a SQL statement, a shell command or markup.",
+  "rules": [
+    {
+      "id": "py-eval-exec",
+      "title": "eval or exec of a dynamic string",
+      "severity": "high",
+      "cwe": "CWE-95",
+      "languages": [
+        "py"
+      ],
+      "where": "code",
+      "pattern": "\\b(?:eval|exec)\\s*\\(",
+      "why": "eval and exec run whatever text they are given; if any part of it comes from outside, that is code execution.",
+      "fix": "Parse instead (`ast.literal_eval`, `json`), or look the value up in a table.",
+      "examples": {
+        "match": [
+          "result = eval(user_input)",
+          "exec(code)"
+        ],
+        "clean": [
+          "ast.literal_eval(text)",
+          "cursor.execute(query)",
+          "# eval(x) is never used",
+          "print(\"do not eval(x)\")"
+        ]
+      }
+    },
+    {
+      "id": "py-os-system",
+      "title": "A shell command through os.system or os.popen",
+      "severity": "high",
+      "cwe": "CWE-78",
+      "languages": [
+        "py"
+      ],
+      "where": "code",
+      "pattern": "\\bos\\.(?:system|popen)\\s*\\(",
+      "why": "The command goes through a shell, so any part of it that came from outside can add commands.",
+      "fix": "Use `subprocess.run([...])` with a list and no shell.",
+      "examples": {
+        "match": [
+          "os.system(\"ls \" + name)",
+          "os.popen(cmd)"
+        ],
+        "clean": [
+          "os.path.join(a, b)",
+          "subprocess.run([\"ls\"])"
+        ]
+      }
+    },
+    {
+      "id": "py-subprocess-shell",
+      "title": "subprocess with shell=True",
+      "severity": "high",
+      "cwe": "CWE-78",
+      "languages": [
+        "py"
+      ],
+      "where": "code",
+      "pattern": "\\bsubprocess\\.(?:run|call|check_call|check_output|Popen)\\s*\\([^)]*\\bshell\\s*=\\s*True",
+      "why": "A string run with shell=True is parsed by a shell, so interpolated input can add commands.",
+      "fix": "Pass the arguments as a list and drop shell=True.",
+      "examples": {
+        "match": [
+          "subprocess.run(cmd, shell=True)",
+          "subprocess.Popen(f\"ls {d}\", shell=True, stdout=PIPE)"
+        ],
+        "clean": [
+          "subprocess.run([\"ls\", d])",
+          "subprocess.run(cmd, shell=False)"
+        ]
+      }
+    },
+    {
+      "id": "py-sql-format",
+      "title": "A SQL statement built by formatting or concatenation",
+      "severity": "high",
+      "cwe": "CWE-89",
+      "languages": [
+        "py"
+      ],
+      "where": "strings",
+      "pattern": "\\.execute(?:many)?\\s*\\(\\s*(?:f[\\\"']|[\\\"'][^\\\"']*[\\\"']\\s*(?:%|\\+|\\.format\\())",
+      "why": "Values spliced into the text of a statement are parsed as SQL, which is how injection works.",
+      "fix": "Pass values as parameters: `cur.execute(\"... WHERE id = %s\", (value,))`.",
+      "examples": {
+        "match": [
+          "cur.execute(f\"SELECT * FROM t WHERE id={uid}\")",
+          "cur.execute(\"SELECT * FROM t WHERE id=%s\" % uid)",
+          "cur.execute(\"SELECT * FROM t WHERE id=\" + uid)",
+          "cur.execute(\"DELETE FROM t WHERE id={}\".format(uid))"
+        ],
+        "clean": [
+          "cur.execute(\"SELECT * FROM t WHERE id=%s\", (uid,))",
+          "cur.execute(query, params)",
+          "cur.execute(\"SELECT 1\")"
+        ]
+      }
+    },
+    {
+      "id": "py-render-template-string",
+      "title": "A template rendered from a string",
+      "severity": "medium",
+      "cwe": "CWE-1336",
+      "languages": [
+        "py"
+      ],
+      "where": "code",
+      "pattern": "\\brender_template_string\\s*\\(",
+      "why": "If any part of the template text comes from outside, the template engine evaluates it.",
+      "fix": "Render a file template and pass values as variables.",
+      "examples": {
+        "match": [
+          "return render_template_string(page)"
+        ],
+        "clean": [
+          "return render_template(\"page.html\")"
+        ]
+      }
+    },
+    {
+      "id": "js-eval",
+      "title": "eval or new Function on a dynamic string",
+      "severity": "high",
+      "cwe": "CWE-95",
+      "languages": [
+        "js",
+        "jsx",
+        "ts",
+        "tsx",
+        "mjs",
+        "cjs"
+      ],
+      "where": "code",
+      "pattern": "\\beval\\s*\\(|\\bnew\\s+Function\\s*\\(",
+      "why": "Both run whatever text they are given; if any part of it comes from outside, that is code execution.",
+      "fix": "Parse the data (`JSON.parse`) or dispatch on a known name.",
+      "examples": {
+        "match": [
+          "const r = eval(input)",
+          "const f = new Function(\"a\", body)"
+        ],
+        "clean": [
+          "const r = evaluate(input)",
+          "// eval(input)",
+          "console.log(\"eval(x)\")",
+          "const F = Function.prototype"
+        ]
+      }
+    },
+    {
+      "id": "js-child-process-exec",
+      "title": "A shell command through child_process.exec",
+      "severity": "high",
+      "cwe": "CWE-78",
+      "languages": [
+        "js",
+        "jsx",
+        "ts",
+        "tsx",
+        "mjs",
+        "cjs"
+      ],
+      "where": "code",
+      "pattern": "\\b(?:child_process\\.exec|execSync)\\s*\\(",
+      "why": "exec runs its string in a shell, so a value spliced into it can add commands.",
+      "fix": "Use `execFile` or `spawn` with an argument array.",
+      "examples": {
+        "match": [
+          "child_process.exec(\"ls \" + dir)",
+          "execSync(cmd)"
+        ],
+        "clean": [
+          "execFile(\"ls\", [dir])",
+          "const m = re.exec(text)",
+          "spawnSync(\"ls\", [dir])"
+        ]
+      }
+    },
+    {
+      "id": "js-inner-html",
+      "title": "Markup assigned from a string",
+      "severity": "medium",
+      "cwe": "CWE-79",
+      "languages": [
+        "js",
+        "jsx",
+        "ts",
+        "tsx",
+        "mjs",
+        "cjs"
+      ],
+      "where": "code",
+      "pattern": "\\.(?:innerHTML|outerHTML)\\s*\\+?=(?!=)|\\bdocument\\.write(?:ln)?\\s*\\(|\\binsertAdjacentHTML\\s*\\(",
+      "why": "Markup built from outside text is parsed as markup, so it can carry script.",
+      "fix": "Set `textContent`, or build nodes, or sanitise with a vetted library.",
+      "examples": {
+        "match": [
+          "el.innerHTML = html",
+          "el.innerHTML += chunk",
+          "document.write(x)",
+          "el.insertAdjacentHTML(\"beforeend\", h)"
+        ],
+        "clean": [
+          "el.textContent = text",
+          "if (a.innerHTML === b) {}",
+          "const h = el.innerHTML"
+        ]
+      }
+    },
+    {
+      "id": "react-dangerous-html",
+      "title": "dangerouslySetInnerHTML",
+      "severity": "medium",
+      "cwe": "CWE-79",
+      "languages": [
+        "js",
+        "jsx",
+        "ts",
+        "tsx",
+        "mjs",
+        "cjs"
+      ],
+      "where": "code",
+      "pattern": "\\bdangerouslySetInnerHTML\\b",
+      "why": "It renders a string as markup, bypassing React's escaping.",
+      "fix": "Render the text as a child, or sanitise it first with a vetted library.",
+      "examples": {
+        "match": [
+          "<div dangerouslySetInnerHTML={{ __html: html }} />"
+        ],
+        "clean": [
+          "<div>{text}</div>"
+        ]
+      }
+    },
+    {
+      "id": "js-sql-template",
+      "title": "A SQL statement built from a template or concatenation",
+      "severity": "high",
+      "cwe": "CWE-89",
+      "languages": [
+        "js",
+        "jsx",
+        "ts",
+        "tsx",
+        "mjs",
+        "cjs"
+      ],
+      "where": "strings",
+      "pattern": "\\.(?:query|execute|raw)\\s*\\(\\s*(?:`[^`]*\\$\\{|[\\\"'][^\\\"']*[\\\"']\\s*\\+)",
+      "why": "Values spliced into the text of a statement are parsed as SQL.",
+      "fix": "Use placeholders and pass the values separately.",
+      "examples": {
+        "match": [
+          "db.query(`SELECT * FROM t WHERE id=${id}`)",
+          "db.query(\"SELECT * FROM t WHERE id=\" + id)"
+        ],
+        "clean": [
+          "db.query(\"SELECT * FROM t WHERE id=$1\", [id])",
+          "db.query(sql, params)"
+        ]
+      }
+    },
+    {
+      "id": "go-exec-shell",
+      "title": "A command run through a shell",
+      "severity": "high",
+      "cwe": "CWE-78",
+      "languages": [
+        "go"
+      ],
+      "where": "strings",
+      "pattern": "\\bexec\\.Command(?:Context)?\\s*\\((?:\\s*ctx\\s*,)?\\s*\\\"(?:sh|bash|zsh|cmd(?:\\.exe)?|powershell)\\\"\\s*,\\s*\\\"(?:-c|/c|-Command)\\\"",
+      "why": "A string given to `sh -c` is parsed by a shell, so interpolated input can add commands.",
+      "fix": "Call the program directly with its arguments as separate strings.",
+      "examples": {
+        "match": [
+          "exec.Command(\"sh\", \"-c\", cmd)",
+          "exec.CommandContext(ctx, \"bash\", \"-c\", script)"
+        ],
+        "clean": [
+          "exec.Command(\"ls\", dir)",
+          "exec.Command(\"sh\", \"script.sh\")"
+        ]
+      }
+    },
+    {
+      "id": "go-sql-sprintf",
+      "title": "A SQL statement built with fmt.Sprintf",
+      "severity": "high",
+      "cwe": "CWE-89",
+      "languages": [
+        "go"
+      ],
+      "where": "strings",
+      "pattern": "\\.(?:Query|QueryRow|Exec)(?:Context)?\\s*\\([^)]*\\bfmt\\.Sprintf\\s*\\(",
+      "why": "Values formatted into the statement are parsed as SQL.",
+      "fix": "Use placeholders and pass the values as arguments.",
+      "examples": {
+        "match": [
+          "rows, err := db.Query(fmt.Sprintf(\"SELECT * FROM t WHERE id=%d\", id))",
+          "db.ExecContext(ctx, fmt.Sprintf(\"DELETE FROM t WHERE id=%d\", id))"
+        ],
+        "clean": [
+          "db.Query(\"SELECT * FROM t WHERE id=$1\", id)",
+          "log.Println(fmt.Sprintf(\"%d\", n))"
+        ]
+      }
+    },
+    {
+      "id": "java-sql-concat",
+      "title": "A SQL statement built by concatenation",
+      "severity": "high",
+      "cwe": "CWE-89",
+      "languages": [
+        "java"
+      ],
+      "where": "strings",
+      "pattern": "\\b(?:executeQuery|executeUpdate|execute|prepareStatement|createQuery|createNativeQuery)\\s*\\(\\s*\\\"[^\\\"]*\\\"\\s*\\+",
+      "why": "Values concatenated into the statement are parsed as SQL, even through prepareStatement.",
+      "fix": "Use `?` placeholders and bind the values.",
+      "examples": {
+        "match": [
+          "stmt.executeQuery(\"SELECT * FROM t WHERE id=\" + id)",
+          "em.createQuery(\"FROM User WHERE name=\" + name)"
+        ],
+        "clean": [
+          "conn.prepareStatement(\"SELECT * FROM t WHERE id=?\")",
+          "stmt.executeQuery(sql)"
+        ]
+      }
+    },
+    {
+      "id": "java-runtime-exec",
+      "title": "A command run through Runtime.exec",
+      "severity": "high",
+      "cwe": "CWE-78",
+      "languages": [
+        "java",
+        "kt",
+        "scala"
+      ],
+      "where": "code",
+      "pattern": "\\bRuntime\\.getRuntime\\(\\)\\.exec\\s*\\(",
+      "why": "A single string is split and run, so interpolated input can change the command.",
+      "fix": "Use ProcessBuilder with an argument list, and validate what goes into it.",
+      "examples": {
+        "match": [
+          "Runtime.getRuntime().exec(cmd)"
+        ],
+        "clean": [
+          "int n = Runtime.getRuntime().availableProcessors();"
+        ]
+      }
+    },
+    {
+      "id": "php-dangerous-calls",
+      "title": "A call that runs code or a shell command",
+      "severity": "high",
+      "cwe": "CWE-78",
+      "languages": [
+        "php"
+      ],
+      "where": "code",
+      "pattern": "(?<![\\w>:$])(?:eval|system|passthru|shell_exec|popen|proc_open)\\s*\\(",
+      "why": "Each runs its argument as code or as a shell command, so outside input in it is execution.",
+      "fix": "Avoid them; if a program must run, pass escaped arguments through a fixed command.",
+      "examples": {
+        "match": [
+          "system($_GET[\"c\"]);",
+          "eval($code);",
+          "$out = shell_exec($cmd);"
+        ],
+        "clean": [
+          "$x->system($cmd);",
+          "Foo::eval($code);",
+          "function system_info() {}"
+        ]
+      }
+    },
+    {
+      "id": "sh-eval",
+      "title": "eval in a shell script",
+      "severity": "medium",
+      "cwe": "CWE-95",
+      "languages": [
+        "sh",
+        "bash",
+        "zsh"
+      ],
+      "where": "code",
+      "pattern": "^\\s*eval\\s+",
+      "why": "eval re-parses its argument as shell code, so a value spliced into it can add commands.",
+      "fix": "Use arrays and direct invocation instead of building a command string.",
+      "examples": {
+        "match": [
+          "eval \"$cmd\"",
+          "  eval $(ssh-agent)"
+        ],
+        "clean": [
+          "# eval \"$cmd\"",
+          "evaluate_thing",
+          "echo eval"
+        ]
+      },
+      "flags": "m"
+    }
+  ]
+}

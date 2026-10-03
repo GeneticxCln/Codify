@@ -275,6 +275,13 @@ public addresses only, bounded, and announced in the transcript before it is mad
 can carry whatever the assistant has read, which no rule can prevent, so the list is the safer setting. See
 [`docs/12`](docs/12-scrapling-audit.md).
 
+For a security review, the conductor has a scanner of its own, `scan_code`: curated rule profiles (secrets, injection,
+crypto, deserialization, unsafe C, web) run over the workspace with comments and test files skipped, returning ranked
+**candidates** at `path:line`, with what it did not look at stated. A workspace can add its own profiles in
+`.codify/profiles/`, as data and never as a capability. The built-in `security-review` skill has the model read each hit
+before it calls it real, and fixes still go through a plan you approve. It is the idea of NCC Group's Grepify built
+natively, with none of its code. See [`docs/13`](docs/13-grepify-audit.md).
+
 ---
 
 ## 🎨 Appearance
@@ -538,7 +545,7 @@ src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the emb
             the render-starvation watchdog
 tests/      Python suite; hermetic.py is the shared isolation bootstrap
 scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py
-docs/       00–12, the specifications this README summarises
+docs/       00–13, the specifications this README summarises
 ```
 
 ## 📄 License

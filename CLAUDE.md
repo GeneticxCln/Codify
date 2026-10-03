@@ -1,7 +1,7 @@
 # CLAUDE.md — working rules for this repository
 
 **This file is a distillation, not a second source of truth.** Everything below is
-sourced from `CONTRIBUTING.md` and `docs/00`–`12`; where this file and either of
+sourced from `CONTRIBUTING.md` and `docs/00`–`13`; where this file and either of
 those disagree, **they win and this file is the bug**. `tests/test_claude_md_contracts.py`
 fails if the invariants quoted here drift from `docs/00` §6, so that is enforced, not
 merely intended.
@@ -18,7 +18,7 @@ and knowing which one you are in tells you what you may touch:
 |---|---|---|
 | Desktop shell | Rust / Tauri v2 | App lifecycle, owns the engine process, boot token |
 | UI | React 19 / TypeScript / Vite / Tailwind | Settings screen, goal chat, stats |
-| Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |The engine runs 8 fixed roles. `laya` (pre-flight gate) guards every request; the **conductor** — a loop, not a ninth role — then decides which of the other seven run and in what order, through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`) and *skills* it can load. The recipe that used to be compiled in — `librarian` → `design` → `planner` → `fixer` → `verifier` → `critic` → `scribe` — is now the built-in skill `ship-a-change` (`engine/builtin_skills/`), and a workspace can replace it. The directory's other built-in, `context-transfer`, is a recipe for packaging a degraded thread into one pasteable block for a new thread — load it when the thread is long enough that the model is losing track. `fixer` is still the only writer and `verifier` still the only role that runs a command.
+| Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |The engine runs 8 fixed roles. `laya` (pre-flight gate) guards every request; the **conductor** — a loop, not a ninth role — then decides which of the other seven run and in what order, through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`) and *skills* it can load. The recipe that used to be compiled in — `librarian` → `design` → `planner` → `fixer` → `verifier` → `critic` → `scribe` — is now the built-in skill `ship-a-change` (`engine/builtin_skills/`), and a workspace can replace it. The directory's other built-ins are `context-transfer`, a recipe for packaging a degraded thread into one pasteable block for a new thread (load it when the thread is long enough that the model is losing track), and `security-review`, which sequences `scan_code` and `read_file` for a security review of the workspace. `fixer` is still the only writer and `verifier` still the only role that runs a command.
 
 ## The gate is `make check` / `make ci`
 
@@ -91,7 +91,7 @@ scripts/        fake_ollama.py (drive a goal with no API keys; FAKE_CONDUCTOR=1 
                  drive_a_turn.py (drive a turn against a real local model; --approve presses Start),
                  make_logo.py, check_history.py (does every commit in a range build)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–12, below
+docs/           00–13, below
 .githooks/      versioned pre-commit / pre-push
 ```
 
@@ -153,6 +153,7 @@ docs/           00–12, below
 | `docs/09` | The workspace shell: conversation model, tab rules, both panes, the browser pane's separate-window decision, §10 on what a turn is, §11 clipboard, §12 split panes, §13 the editor and the surface bridge, §14 the machine (a jailed shell the assistant may type into) |
 | `docs/10` | Agent memory: the Hindsight audit — what was built (`recall`, `recall_threads`, keyword search, the durable observation store and its fading), and what was rejected |
 | `docs/11` | The Ruflo audit: which ideas were borrowed, which were refused and by which invariant, and what was not read |
+| `docs/13` | The Grepify audit: `scan_code`, the built-in scanner for code review (curated profiles, masking, workspace profiles as data), and what of Grepify was taken |
 | `docs/12` | The Scrapling audit: `fetch_page` (a request the engine makes to an address a model chose), its rules, and what of Scrapling was refused |
 
 If your change alters a documented contract, update the matching doc in the same

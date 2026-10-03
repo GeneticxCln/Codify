@@ -34,8 +34,9 @@ NOT_TOOLS = {"task"}
 # raising it is a decision to spend every conductor call's context on more prompt. Raised from 2900 to 3100 for
 # the one sentence `fetch_page` needs (docs/12): it is the first tool whose address leaves the machine from the
 # engine itself, and the instruction not to put the workspace in it belongs in the prompt and not only in a
-# description a model may not reread.
-CEILING = 3100
+# description a model may not reread. Then to 3200 for `scan_code` (docs/13): one clause saying its hits are
+# candidates, because a model that reports a scanner's output unread is the failure the tool most invites.
+CEILING = 3200
 
 
 class TestTheToolsAreNamed(unittest.TestCase):

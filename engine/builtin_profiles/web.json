@@ -1,0 +1,181 @@
+{
+  "name": "web",
+  "description": "Web application settings and calls that widen the attack surface: debug on, open CORS, no CSRF, markup trusted.",
+  "rules": [
+    {
+      "id": "py-debug-on",
+      "title": "Debug mode switched on",
+      "severity": "medium",
+      "cwe": "CWE-489",
+      "languages": [
+        "py"
+      ],
+      "where": "code",
+      "pattern": "\\bapp\\.run\\s*\\([^)]*\\bdebug\\s*=\\s*True|^\\s*DEBUG\\s*=\\s*True\\b",
+      "why": "Debug mode can expose a console that runs code, and detailed errors.",
+      "fix": "Turn it off outside development, from configuration.",
+      "examples": {
+        "match": [
+          "app.run(host=\"0.0.0.0\", debug=True)",
+          "DEBUG = True"
+        ],
+        "clean": [
+          "DEBUG = False",
+          "app.run(debug=settings.debug)"
+        ]
+      },
+      "flags": "m"
+    },
+    {
+      "id": "cors-wildcard",
+      "title": "Any origin allowed by CORS",
+      "severity": "medium",
+      "cwe": "CWE-942",
+      "languages": [],
+      "where": "strings",
+      "pattern": "Access-Control-Allow-Origin[\\\"']?[\\]\\s:,=)]*[\\\"']\\*[\\\"']",
+      "why": "Any website may read responses from this server in a visitor's browser.",
+      "fix": "Allow a list of known origins, and never combine a wildcard with credentials.",
+      "examples": {
+        "match": [
+          "res.setHeader(\"Access-Control-Allow-Origin\", \"*\")",
+          "resp.headers[\"Access-Control-Allow-Origin\"] = \"*\""
+        ],
+        "clean": [
+          "res.setHeader(\"Access-Control-Allow-Origin\", origin)"
+        ]
+      }
+    },
+    {
+      "id": "bind-all-interfaces",
+      "title": "Bound to every network interface",
+      "severity": "low",
+      "cwe": "CWE-1327",
+      "languages": [],
+      "where": "strings",
+      "pattern": "[\\\"']0\\.0\\.0\\.0[\\\"']",
+      "why": "A service bound to 0.0.0.0 is reachable from the whole network, not only this machine.",
+      "fix": "Bind to 127.0.0.1 unless it has to be reachable, and then put authentication in front of it.",
+      "examples": {
+        "match": [
+          "app.run(host=\"0.0.0.0\")",
+          "server.listen(8080, '0.0.0.0')"
+        ],
+        "clean": [
+          "app.run(host=\"127.0.0.1\")"
+        ]
+      }
+    },
+    {
+      "id": "csrf-disabled",
+      "title": "CSRF protection switched off",
+      "severity": "medium",
+      "cwe": "CWE-352",
+      "languages": [],
+      "where": "code",
+      "pattern": "@csrf_exempt\\b|\\bWTF_CSRF_ENABLED\\s*=\\s*False\\b|\\bcsrf\\(\\)\\s*\\.disable\\(\\)|\\bcsrf\\s*:\\s*false\\b",
+      "why": "A site that does not check for forged requests lets any page act as a logged-in visitor.",
+      "fix": "Leave CSRF protection on; exempt a route only when it is authenticated some other way.",
+      "examples": {
+        "match": [
+          "@csrf_exempt",
+          "WTF_CSRF_ENABLED = False",
+          "http.csrf().disable();",
+          "csrf: false"
+        ],
+        "clean": [
+          "@login_required",
+          "WTF_CSRF_ENABLED = True"
+        ]
+      }
+    },
+    {
+      "id": "cookie-insecure",
+      "title": "A session cookie without Secure or HttpOnly",
+      "severity": "low",
+      "cwe": "CWE-614",
+      "languages": [],
+      "where": "code",
+      "pattern": "\\b(?:SESSION_COOKIE_SECURE|CSRF_COOKIE_SECURE|SESSION_COOKIE_HTTPONLY)\\s*=\\s*False\\b|\\bsecure\\s*:\\s*false\\b|\\bhttpOnly\\s*:\\s*false\\b",
+      "why": "Without Secure the cookie travels over plain HTTP; without HttpOnly script can read it.",
+      "fix": "Set both, and SameSite.",
+      "examples": {
+        "match": [
+          "SESSION_COOKIE_SECURE = False",
+          "cookie: { secure: false }"
+        ],
+        "clean": [
+          "SESSION_COOKIE_SECURE = True",
+          "cookie: { secure: true }"
+        ]
+      }
+    },
+    {
+      "id": "open-redirect-param",
+      "title": "A redirect to an address from the request",
+      "severity": "medium",
+      "cwe": "CWE-601",
+      "languages": [
+        "py"
+      ],
+      "where": "code",
+      "pattern": "\\bredirect\\s*\\(\\s*request\\.(?:args|GET|POST|form|values)\\b",
+      "why": "An attacker can send a victim to a trusted address that bounces them anywhere.",
+      "fix": "Redirect only to a path on this site, or to an allow-listed address.",
+      "examples": {
+        "match": [
+          "return redirect(request.args.get(\"next\"))"
+        ],
+        "clean": [
+          "return redirect(url_for(\"index\"))"
+        ]
+      }
+    },
+    {
+      "id": "django-mark-safe",
+      "title": "mark_safe",
+      "severity": "medium",
+      "cwe": "CWE-79",
+      "languages": [
+        "py"
+      ],
+      "where": "code",
+      "pattern": "\\bmark_safe\\s*\\(",
+      "why": "It tells the template engine not to escape the text, so outside text in it is markup.",
+      "fix": "Use `format_html`, which escapes its arguments.",
+      "examples": {
+        "match": [
+          "return mark_safe(html)"
+        ],
+        "clean": [
+          "return format_html(\"<b>{}</b>\", name)"
+        ]
+      }
+    },
+    {
+      "id": "template-safe-filter",
+      "title": "The safe filter in a template",
+      "severity": "medium",
+      "cwe": "CWE-79",
+      "languages": [
+        "html",
+        "htm",
+        "jinja",
+        "j2"
+      ],
+      "where": "code",
+      "pattern": "\\|\\s*safe\\b",
+      "why": "The safe filter switches off escaping for that value.",
+      "fix": "Drop the filter, or sanitise the value before it reaches the template.",
+      "examples": {
+        "match": [
+          "<p>{{ comment|safe }}</p>"
+        ],
+        "clean": [
+          "<p>{{ comment }}</p>",
+          "<p>{{ x|e }}</p>"
+        ]
+      }
+    }
+  ]
+}

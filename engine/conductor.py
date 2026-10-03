@@ -609,6 +609,32 @@ SEARCH_CODE = ToolSpec(
     },
 )
 
+SCAN_CODE = ToolSpec(
+    name="scan_code",
+    description=(
+        "Run a curated security-review rule set (a profile) over the workspace and get back ranked candidates "
+        "with file and line: injection sinks, weak crypto, committed secrets, unsafe deserialization, unsafe C "
+        "calls, risky web settings. Comments and test files are skipped. Call it with no profile to list the "
+        "profiles. The hits are CANDIDATES, not vulnerabilities: a pattern cannot see where a value came from, "
+        "so read each hit with `read_file` before you call it real. Use `search_code` for your own pattern."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "profile": {
+                "type": "string",
+                "description": "a profile name, or `all`; omit it to list the profiles",
+            },
+            "glob": {"type": "string", "description": "restrict to e.g. src/**/*.py"},
+            "include_tests": {"type": "boolean", "description": "also scan test files (skipped by default)"},
+            "include_comments": {
+                "type": "boolean",
+                "description": "also match inside comments (masked by default)",
+            },
+        },
+    },
+)
+
 GIT_HISTORY = ToolSpec(
     name="git_history",
     description=(
@@ -1279,7 +1305,7 @@ ASK_USER = ToolSpec(
 # The menu before a plan exists: the read tools, the skills, and the three moves
 # that produce a plan. Nothing here can change a file.
 BASE_TOOLS: tuple[ToolSpec, ...] = (
-    READ_FILE, SEARCH_CODE, GIT_HISTORY, RUN_COMMAND, READ_PAGE, NAVIGATE_PAGE,
+    READ_FILE, SEARCH_CODE, SCAN_CODE, GIT_HISTORY, RUN_COMMAND, READ_PAGE, NAVIGATE_PAGE,
     CLICK_PAGE, TYPE_PAGE, FETCH_PAGE, READ_EDITOR, OPEN_IN_EDITOR, EDIT_EDITOR, READ_MACHINE, RUN_IN_MACHINE, KEY_IN_MACHINE, RESET_MACHINE,
     RECALL, RECALL_THREADS, USE_SKILL, RECON,
     DESIGN, PLAN,

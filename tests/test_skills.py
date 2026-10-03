@@ -122,7 +122,7 @@ class TestWhatShipsWithCodify(unittest.TestCase):
         self.assertEqual(found.problems, ())
         self.assertEqual(
             found.names(),
-            ["context-transfer", "ship-a-change"],
+            ["context-transfer", "security-review", "ship-a-change"],
             "built-ins always load",
         )
 
@@ -301,7 +301,7 @@ class TestDiscovery(SkillCase):
         (directory / "subdir.md").mkdir()
         found = load_skills(str(self.root))
         self.assertEqual(found.problems, ())
-        self.assertEqual(found.names(), ["context-transfer", "ship-a-change"])
+        self.assertEqual(found.names(), ["context-transfer", "security-review", "ship-a-change"])
 
     def test_a_huge_directory_is_capped_and_says_so(self) -> None:
         directory = self.root / SKILLS_DIRNAME
@@ -540,7 +540,7 @@ class TestTheMenuTheConductorIsOffered(SkillCase):
         # from what it reads, and cutting those too would leave it mute.
         for kept in ("read_file", "search_code", "use_skill"):
             self.assertIn(kept, narrowed)
-        self.assertEqual(skills.names(), ["context-transfer", "ship-a-change"])
+        self.assertEqual(skills.names(), ["context-transfer", "security-review", "ship-a-change"])
 
     def test_the_body_handed_back_is_the_loaded_text(self) -> None:
         # `use_skill` returns `Skill.body` unchanged, so the property worth

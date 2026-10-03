@@ -1,0 +1,203 @@
+{
+  "name": "unsafe-c",
+  "description": "C and C++ calls that overflow a buffer, run a shell or take a format string from data.",
+  "rules": [
+    {
+      "id": "c-gets",
+      "title": "gets",
+      "severity": "high",
+      "cwe": "CWE-242",
+      "languages": [
+        "c",
+        "h",
+        "cc",
+        "cpp",
+        "cxx",
+        "hpp",
+        "hh"
+      ],
+      "where": "code",
+      "pattern": "\\bgets\\s*\\(",
+      "why": "gets cannot be told how big the buffer is, so any long enough line overflows it. It was removed from the language.",
+      "fix": "Use `fgets(buf, sizeof buf, stdin)`.",
+      "examples": {
+        "match": [
+          "gets(buf);"
+        ],
+        "clean": [
+          "fgets(buf, sizeof buf, stdin);"
+        ]
+      }
+    },
+    {
+      "id": "c-unbounded-copy",
+      "title": "strcpy, strcat and relatives",
+      "severity": "high",
+      "cwe": "CWE-120",
+      "languages": [
+        "c",
+        "h",
+        "cc",
+        "cpp",
+        "cxx",
+        "hpp",
+        "hh"
+      ],
+      "where": "code",
+      "pattern": "\\b(?:strcpy|strcat|wcscpy|wcscat|stpcpy)\\s*\\(",
+      "why": "They copy until a terminator without knowing the destination's size.",
+      "fix": "Use a bounded copy that reports truncation (`snprintf`, `strlcpy`) and check its result.",
+      "examples": {
+        "match": [
+          "strcpy(dst, src);",
+          "strcat(path, name);"
+        ],
+        "clean": [
+          "strncpy(dst, src, n);",
+          "strlcpy(dst, src, n);"
+        ]
+      }
+    },
+    {
+      "id": "c-sprintf",
+      "title": "sprintf and vsprintf",
+      "severity": "high",
+      "cwe": "CWE-120",
+      "languages": [
+        "c",
+        "h",
+        "cc",
+        "cpp",
+        "cxx",
+        "hpp",
+        "hh"
+      ],
+      "where": "code",
+      "pattern": "\\b(?:sprintf|vsprintf)\\s*\\(",
+      "why": "They write a formatted result into a buffer without a size.",
+      "fix": "Use `snprintf` or `vsnprintf` and check the return value.",
+      "examples": {
+        "match": [
+          "sprintf(buf, \"%s\", name);"
+        ],
+        "clean": [
+          "snprintf(buf, n, \"%s\", name);"
+        ]
+      }
+    },
+    {
+      "id": "c-scanf-unbounded",
+      "title": "scanf of %s without a width",
+      "severity": "high",
+      "cwe": "CWE-120",
+      "languages": [
+        "c",
+        "h",
+        "cc",
+        "cpp",
+        "cxx",
+        "hpp",
+        "hh"
+      ],
+      "where": "strings",
+      "pattern": "\\b[fs]?scanf\\s*\\([^;]*%s",
+      "why": "A %s with no width reads as much as the input has.",
+      "fix": "Give a width (`%9s`), or read a line with `fgets` and parse it.",
+      "examples": {
+        "match": [
+          "scanf(\"%s\", buf);",
+          "sscanf(line, \"%s\", out);"
+        ],
+        "clean": [
+          "scanf(\"%9s\", buf);",
+          "scanf(\"%d\", &n);"
+        ]
+      }
+    },
+    {
+      "id": "c-system-popen",
+      "title": "system or popen",
+      "severity": "high",
+      "cwe": "CWE-78",
+      "languages": [
+        "c",
+        "h",
+        "cc",
+        "cpp",
+        "cxx",
+        "hpp",
+        "hh"
+      ],
+      "where": "code",
+      "pattern": "(?<![\\w.>:])(?:system|popen)\\s*\\(",
+      "why": "The command goes through a shell, so a value spliced into it can add commands.",
+      "fix": "Use `execve` and friends with an argument vector.",
+      "examples": {
+        "match": [
+          "system(cmd);",
+          "FILE *p = popen(cmd, \"r\");"
+        ],
+        "clean": [
+          "obj.system(x);",
+          "ecosystem(1);"
+        ]
+      }
+    },
+    {
+      "id": "c-format-string",
+      "title": "A format string taken from a variable",
+      "severity": "medium",
+      "cwe": "CWE-134",
+      "languages": [
+        "c",
+        "h",
+        "cc",
+        "cpp",
+        "cxx",
+        "hpp",
+        "hh"
+      ],
+      "where": "strings",
+      "pattern": "\\bprintf\\s*\\(\\s*[A-Za-z_]\\w*\\s*\\)|\\bfprintf\\s*\\(\\s*\\w+\\s*,\\s*[A-Za-z_]\\w*\\s*\\)|\\bsyslog\\s*\\(\\s*\\w+\\s*,\\s*[A-Za-z_]\\w*\\s*\\)",
+      "why": "If the variable holds outside text, `%n` and friends read and write memory.",
+      "fix": "Pass a literal format: `printf(\"%s\", msg)`.",
+      "examples": {
+        "match": [
+          "printf(msg);",
+          "fprintf(stderr, msg);"
+        ],
+        "clean": [
+          "printf(\"%s\", msg);",
+          "printf(\"hello\\n\");"
+        ]
+      }
+    },
+    {
+      "id": "c-temp-name",
+      "title": "A temporary file name chosen before the file is made",
+      "severity": "medium",
+      "cwe": "CWE-377",
+      "languages": [
+        "c",
+        "h",
+        "cc",
+        "cpp",
+        "cxx",
+        "hpp",
+        "hh"
+      ],
+      "where": "code",
+      "pattern": "\\b(?:mktemp|tmpnam|tempnam)\\s*\\(",
+      "why": "Between choosing the name and creating the file another process can create it first.",
+      "fix": "Use `mkstemp`, which creates the file and returns it open.",
+      "examples": {
+        "match": [
+          "char *n = tmpnam(NULL);"
+        ],
+        "clean": [
+          "int fd = mkstemp(tmpl);"
+        ]
+      }
+    }
+  ]
+}

@@ -33,6 +33,7 @@ from engine.recall import (
     search_threads,
 )
 from engine.sandbox import CommandNotAllowed, validate_argv
+from engine.scan import list_profiles, run_scan
 from engine.skills import SkillSet
 from engine.surface_editor import (
     EditorEditResult,
@@ -223,6 +224,7 @@ class ConductorTools:
     NAMES: tuple[str, ...] = (
         'read_file',
         'search_code',
+        'scan_code',
         'git_history',
         'run_command',
         'read_page',
@@ -378,6 +380,31 @@ class ConductorTools:
             mode=str(args["mode"]) if args.get("mode") else None,
         )
         return format_search(result)
+
+    async def scan_code(self, args: dict[str, Any]) -> str:
+        """Curated review rules over the workspace: candidates with file and line, or the list of profiles.
+
+        `search_code` with patterns somebody already wrote, so it is held to what `search_code` is: read-only,
+        confined to this workspace, bounded, and honest about what it did not look at (`engine/scan.py`, `docs/13`).
+        The patterns run in the regex worker, killed at a hard limit, because a profile can come from a cloned
+        repository and its regexes are as untrusted as the model's. A hit is a line that matches and nothing more,
+        and the result says so first. A profile is data and never a capability: it can add a rule, never a path to
+        read, a command to run or a file to write.
+        """
+        profile = str(args.get("profile") or "").strip()
+        if not profile:
+            return await asyncio.to_thread(list_profiles, self.root)
+        try:
+            return await asyncio.to_thread(
+                run_scan,
+                self.root,
+                profile=profile,
+                glob=str(args.get("glob") or "").strip() or None,
+                include_tests=bool(args.get("include_tests")),
+                include_comments=bool(args.get("include_comments")),
+            )
+        except ValueError as exc:
+            return f"That scan did not run: {exc}."
 
     async def git_history(self, args: dict[str, Any]) -> str:
         # `GitService.read_only` owns the subcommand allowlist. The
