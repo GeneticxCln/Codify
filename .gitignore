@@ -77,3 +77,8 @@ coverage/
 
 # Never commit credentials or their fallback store
 secrets.json
+# ...except the built-in scan profile of that name: a file of regexes for `scan_code`, with no credential in it
+# (every rule's example is a made-up string). The line above matched it and it went unnoticed until a clean checkout
+# lacked it; `tests/test_builtin_data_is_committed.py` is what keeps that from happening again. The exemption is
+# this one path on purpose: any other secrets.json, anywhere, is still ignored.
+!engine/builtin_profiles/secrets.json

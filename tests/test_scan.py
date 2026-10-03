@@ -98,7 +98,13 @@ class TestTheBuiltInProfilesAreGood(unittest.TestCase):
 
     def test_they_load_without_a_single_problem(self) -> None:
         self.assertEqual(self.profiles.problems, ())
-        self.assertGreaterEqual(len(self.profiles.profiles), 6)
+        # The names, not a count: `>= 6` passed on the one machine that still had a profile the repository did not
+        # (`secrets.json` was matched by .gitignore and never committed), and failed only on a clean checkout.
+        # Adding a profile means adding its name here, which is the point.
+        self.assertEqual(
+            {p.name for p in self.profiles.profiles},
+            {"secrets", "injection", "crypto", "deserialization", "unsafe-c", "web"},
+        )
         self.assertGreaterEqual(sum(len(p.rules) for p in self.profiles.profiles), 50)
         self.assertEqual({p.source for p in self.profiles.profiles}, {"built-in"})
 

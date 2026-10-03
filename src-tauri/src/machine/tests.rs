@@ -914,10 +914,17 @@ fn closing_a_machine_ends_everything_that_was_running_in_it() {
             .filter_map(|e| std::fs::read(e.path().join("cmdline")).ok())
             .any(|c| String::from_utf8_lossy(&c).contains(&needle))
     };
-    assert!(
-        running(),
-        "the background process never started, so this proves nothing"
-    );
+    // `sleep N &` forks, and until the child has exec'd its /proc cmdline is still its parent's. `jail.run`
+    // returns as soon as the marker is printed, which can be before that, so one look at /proc is a race
+    // (it failed once on CI with "never started"). Look until it shows, for as long as a slow runner needs.
+    let started_by = Instant::now() + Duration::from_secs(5);
+    while !running() {
+        assert!(
+            Instant::now() < started_by,
+            "the background process never started, so this proves nothing"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 
     let machines = jail.machines.clone();
     let id = jail.id.clone();
