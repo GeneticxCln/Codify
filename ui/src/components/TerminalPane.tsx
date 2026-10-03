@@ -4,6 +4,7 @@ import { writeTerminal } from "../api";
 import { THEME_CHANGE_EVENT } from "../appearance";
 import { UI_SCALE_CHANGED, uiScaleFactor } from "../uiScale";
 import { xtermThemeFromDocument } from "../terminalTheme";
+import { attachRenderer } from "../terminalRenderer";
 import {
   listenShellEvent,
   readTerminalExit,
@@ -289,6 +290,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(hostRef.current);
+      // Not awaited, on purpose: the replay and the live subscription below must follow with no
+      // yield between them. The terminal draws through the DOM renderer until the canvas one is in,
+      // and stays on it if that cannot be had. The two measure a cell a little differently, so a
+      // renderer that did switch re-fits (`settle`, below, which tells the shell if the grid moved).
+      // See `terminalRenderer.ts`.
+      void attachRenderer(term, { isDisposed: () => disposed }).then((outcome) => {
+        if (outcome.kind === "canvas") settle();
+      });
 
       // …and re-read on every change, because a terminal that was themed on
       // open and stale after a switch is the same defect one moment later.

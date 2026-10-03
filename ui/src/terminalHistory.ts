@@ -120,8 +120,9 @@ export function appendScrollback(
 /**
  * What a reopened pane should write: the tail, with the seam in front of it.
  *
- * A partial trailing line is **not** replayed. `terminal.rs` reads in 4 KiB
- * chunks and emits whatever it read, so a record almost always stops mid-line;
+ * A partial trailing line is **not** replayed. `terminal.rs` emits what it has
+ * read in batches (a few milliseconds' worth, see `BATCH_WINDOW` there) and a
+ * batch ends wherever the output happened to be, so a record almost always stops mid-line;
  * putting half a command on screen above the new prompt reads as corruption
  * rather than as a boundary. The bytes stay in the record — they are this
  * session's, and the next line that arrives completes them — and it is the
@@ -151,11 +152,12 @@ export function readTerminalHistory(workspaceId: string): string {
 /**
  * Record what a terminal said.
  *
- * Mutating the stored string in place rather than replacing the map entry is
- * deliberate: this is called once per PTY chunk, and a pane showing a live build
- * is thousands of times a second for minutes. A `set` per call would put a
- * megabyte of garbage through the generational young collection to avoid
- * replacing one reference.
+ * Each call replaces the stored string (JavaScript strings are immutable, so there is no
+ * appending in place to be had): it builds `tail + chunk` and trims it to `limit`, which costs up to
+ * about `limit` bytes of copying per call, whatever the size of the chunk. What keeps that cheap
+ * is how often this is called, so the number to watch is calls per second, and `terminal.rs`
+ * is what bounds it (about 125 batches a second at most; before it batched, one call per 4 KiB
+ * the PTY read, measured at 135 to 2,400 a second on a full-screen colour repaint).
  */
 export function appendTerminalHistory(
   workspaceId: string,

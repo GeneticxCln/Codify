@@ -444,6 +444,37 @@ pub struct Machines {
 pub(crate) type TextSink = Arc<dyn Fn(&str, String) + Send + Sync>;
 pub(crate) type ExitSink = Arc<dyn Fn(String) + Send + Sync>;
 
+/// What a machine's reader thread does: pass the machine's output on, then say it ended.
+///
+/// `current` is the epoch the registry holds for this machine's id now (`None` once it is gone), and
+/// `epoch` is the one this reader was started for. A reset puts its own line on the screen the moment
+/// it has ended the old machine, and this reader still holds what it had read: a batch waiting for its
+/// turn (`terminal::BATCH_WINDOW`), a backlog queued behind it, and whatever the PTY had buffered. Left
+/// alone that text would land after the reset line, on a screen that had just been cleared, so a reader
+/// whose machine has been **replaced** (an entry with a different epoch) drops what it still holds.
+/// `current` takes the registry's lock, which a reset holds from the old machine's end to the new one's
+/// start, so a chunk is either delivered before the reset line or dropped after it, never in between.
+///
+/// A machine that was reset did not exit: its replacement is already there. One that was *closed* has
+/// no entry at all, and that has always been reported as an exit (and its last output delivered).
+pub(crate) fn run_reader<R: std::io::Read + Send + 'static>(
+    reader: R,
+    epoch: u64,
+    current: impl Fn() -> Option<u64>,
+    mut text: impl FnMut(String),
+    exit: impl FnOnce(),
+) {
+    let replaced = || matches!(current(), Some(now) if now != epoch);
+    terminal::pump_output(reader, |chunk| {
+        if !replaced() {
+            text(chunk);
+        }
+    });
+    if !replaced() {
+        exit();
+    }
+}
+
 /// What opening a machine tells the window: its id, and whether the project under `/work` is its own copy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenedMachine {
@@ -609,15 +640,15 @@ fn start(
         }
     };
     let (text, exit) = (on_text.clone(), on_exit.clone());
-    let (read_id, read_current) = (id.to_string(), current.clone());
+    let (read_id, exit_id, read_current) = (id.to_string(), id.to_string(), current.clone());
     std::thread::spawn(move || {
-        terminal::pump_output(reader, |chunk| text(&read_id, chunk));
-        // A machine that was reset did not exit: its replacement is already there with a later epoch.
-        // One that was closed has no entry at all, and that has always been reported as an exit.
-        match read_current() {
-            Some(now) if now != epoch => {}
-            _ => exit(read_id),
-        }
+        run_reader(
+            reader,
+            epoch,
+            read_current,
+            |chunk| text(&read_id, chunk),
+            || exit(exit_id),
+        );
     });
     if let Some(pid) = pid {
         let (watch_id, say) = (id.to_string(), on_text.clone());

@@ -76,6 +76,10 @@ const TEXT_READERS: Record<string, Reason> = {
     kind: "text",
     why: "The terminal pane must not re-type a hex literal; the mapping is tested by calling it, the absence of a literal at the call site can only be read.",
   },
+  "terminalRenderer.test.ts": {
+    kind: "text",
+    why: "Three claims about how the panes are written that a mounted pane cannot show: the renderer is attached without an await between open and the replay (a yield there is invisible to any test that only sees the finished screen), it is re-fitted after a switch, and the addon is imported on first use rather than at module scope (a module-graph fact: a mounted test imports the pane successfully either way). What the panes do with it is held by terminalRendererPanes.test.ts, mounted.",
+  },
   "editorTheme.test.ts": {
     kind: "text",
     why: "The editor must not re-type a colour: every variable it names must exist in index.css and its source must hold no literal, which can only be read.",
