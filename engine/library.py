@@ -132,6 +132,10 @@ class ReadResult(dict[str, Any]):
 _TOO_EXPENSIVE = "regex took over {seconds:.1f}s — pattern too expensive"
 
 
+class RegexWorkerTimeout(ValueError):
+    """The worker was killed at its hard limit. A `ValueError`, as it always was, so every caller that refuses on one still does."""
+
+
 def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) -> dict[str, Any]:
     """The regex walk itself: every file under `root_path`, every line, the model's pattern.
 
@@ -214,11 +218,14 @@ def _run_regex_worker(request: dict[str, Any]) -> dict[str, Any]:
         start_new_session=True,
     )
     try:
-        out, err = proc.communicate(json.dumps(request), timeout=REGEX_HARD_LIMIT_S)
+        # The hard limit is the request's own soft budget plus the same margin for start-up and the reply that a
+        # regex search has always had, so a longer job (a scan) is not killed at a search's two and a half seconds.
+        hard_limit = float(request["budget_s"]) + (REGEX_HARD_LIMIT_S - REGEX_BUDGET_S)
+        out, err = proc.communicate(json.dumps(request), timeout=hard_limit)
     except subprocess.TimeoutExpired:
         SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
         proc.communicate()
-        raise ValueError(_TOO_EXPENSIVE.format(seconds=request["budget_s"])) from None
+        raise RegexWorkerTimeout(_TOO_EXPENSIVE.format(seconds=request["budget_s"])) from None
     except BaseException:
         SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
         proc.communicate()

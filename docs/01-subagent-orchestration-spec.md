@@ -445,6 +445,7 @@ switch credits the turn's answer to a model that never produced it.
 |---|---|---|
 | `read_file` | `LibraryService.read` | `FileSystemService` refuses a path escape |
 | `search_code` | `LibraryService.search` | same |
+| `scan_code` | `engine/scan.py` `run_scan`, in the regex worker (`op: scan`) | read-only like `search_code`: the same walk, skips and symlink rule, bounded, and honest about what it did not look at (`docs/13`). The patterns run in the guarded worker, killed at a hard limit, because a workspace profile is untrusted data (never a capability: the worker is handed only `id`, `pattern`, `flags`, `languages`, `where`). Hits are candidates, said first |
 | `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` — the librarian's own validator (`engine/git_readonly.py`'s exact-match table), so the subcommand list and its option rules have one owner (`04` §5) |
 | `run_command` | `SandboxService.run_command` | `validate_argv` in `test` mode (docs/00 §6.6) **once the goal is approved** — the same stored-status gate as `write` (`_write_allowed`). Before that the mode is `read_only` (`ls`, `wc`, git history), because the test allowlist admits the repository's own code and a turn has no approval step; a command that would run once approved is refused with that reason, not deferred |
 | `read_page` | `WebviewBridge.read_page` | read-only; the page is the user's, the model cannot choose or change the URL, and the text returns quoted as untrusted (docs/03 §1.6) |
@@ -576,8 +577,9 @@ librarian, design, planner — whether or not the request needed them, which mad
 the sequence a property of the code rather than a decision of the decider. The
 seven stage moves replaced it, and the sequence they are used in is a *skill*
 (`engine/builtin_skills/ship-a-change.md`) rather than control flow. It is one
-of two built-ins in that directory, beside `context-transfer.md`, which is a
-recipe for handing a degraded thread to a new one. See docs/09
+of three built-ins in that directory, beside `context-transfer.md`, which is a
+recipe for handing a degraded thread to a new one, and `security-review.md`, which
+sequences `scan_code` and `read_file` for a security review (docs/13). See docs/09
 §10.14.
 
 ### 5.2 Why `complete_with_tools` is a separate method

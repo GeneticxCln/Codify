@@ -394,7 +394,7 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
         self.assertEqual(
             names,
             {
-                "read_file", "search_code", "git_history", "run_command",
+                "read_file", "search_code", "scan_code", "git_history", "run_command",
                 "read_page", "navigate_page", "click_page", "type_page", "fetch_page",
                 "read_editor", "open_in_editor", "edit_editor",
                 "read_machine", "run_in_machine", "key_in_machine", "reset_machine",

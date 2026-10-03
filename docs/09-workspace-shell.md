@@ -2350,6 +2350,7 @@ the pipeline already makes, through the same service:
 |---|---|---|
 | `read_file` | `LibraryService.read` | path escape refused by `FileSystemService` |
 | `search_code` | `LibraryService.search` | same |
+| `scan_code` | `engine/scan.py` (`docs/13`) | curated review rules over the workspace in the regex worker: read-only, bounded, hits are candidates at `path:line`, a workspace's own profile is data and its wording is labelled as the repository's |
 | `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` → `engine/git_readonly.py`: subcommands, their exact options, and every positional, one owner; 60 s bound, no credentials in the child's environment |
 | `run_command` | `SandboxService.run_command` | `validate_argv`, `test` mode (docs/00 §6.6) once the goal is approved; `read_only` before that, so a turn cannot start the repository's code |
 | `read_page`, `navigate_page`, `click_page`, `type_page` | `WebviewBridge` (`§7.3`, `§7.5`) | the page is text from the web, quoted as untrusted; every navigation meets the shell's guard; typing submits nothing |
@@ -2559,8 +2560,8 @@ instructions. It is discovered by name and one-line description, its body is
 fetched with `use_skill` only when it is wanted, and a
 `<workspace>/.codify/skills/*.md` file of the same name replaces it — with the
 replacement announced in the transcript, because a silently shadowed recipe is
-worse than an obvious one. `context-transfer.md` is the directory's other
-built-in and the proof that the set is not a pipeline with one entry.
+worse than an obvious one. `context-transfer.md` and `security-review.md` (docs/13)
+are the directory's other built-ins and the proof that the set is not a pipeline with one entry.
 
 **A skill is data, not a capability.** `.codify/skills/` arrives with a cloned
 repository, which makes it untrusted input. A skill can sequence moves that
@@ -2589,7 +2590,7 @@ silence, and the built-ins still load. A workspace that is itself opened through
 comparison is against the workspace's own resolved path.
 
 **A second built-in, for handing the thread over.**
-`engine/builtin_skills/context-transfer.md` is the other one: when a
+`engine/builtin_skills/context-transfer.md` is another: when a
 conversation is long enough that the model has started losing track, load it and
 package the thread into a single pasteable block for a new thread. It is a
 recipe for prose, not for the workspace — it changes nothing and reaches no

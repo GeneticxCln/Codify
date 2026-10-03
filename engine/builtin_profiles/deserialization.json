@@ -1,0 +1,144 @@
+{
+  "name": "deserialization",
+  "description": "Loading objects from data that may not be trusted, which can run code.",
+  "rules": [
+    {
+      "id": "py-pickle-load",
+      "title": "pickle, marshal or shelve loading",
+      "severity": "high",
+      "cwe": "CWE-502",
+      "languages": [
+        "py"
+      ],
+      "where": "code",
+      "pattern": "\\b(?:pickle|cPickle|_pickle|dill|shelve)\\.(?:loads?|Unpickler|open)\\b|\\bmarshal\\.loads?\\b",
+      "why": "Unpickling runs code chosen by whoever wrote the data.",
+      "fix": "Use a data format (JSON) for anything from outside, and sign or authenticate what you must pickle.",
+      "examples": {
+        "match": [
+          "obj = pickle.loads(blob)",
+          "data = pickle.load(f)",
+          "marshal.load(f)",
+          "shelve.open(path)"
+        ],
+        "clean": [
+          "json.loads(blob)",
+          "pickle.dumps(obj)"
+        ]
+      }
+    },
+    {
+      "id": "py-yaml-load",
+      "title": "yaml.load without a safe loader",
+      "severity": "high",
+      "cwe": "CWE-502",
+      "languages": [
+        "py"
+      ],
+      "where": "code",
+      "pattern": "\\byaml\\.(?:load|load_all|unsafe_load|unsafe_load_all)\\s*\\((?![^)]*\\bLoader\\s*=\\s*(?:yaml\\.)?C?SafeLoader)",
+      "why": "The default and full loaders can construct arbitrary objects from the document.",
+      "fix": "Use `yaml.safe_load`.",
+      "examples": {
+        "match": [
+          "cfg = yaml.load(text)",
+          "yaml.unsafe_load(f)",
+          "yaml.load(text, Loader=yaml.FullLoader)"
+        ],
+        "clean": [
+          "cfg = yaml.safe_load(text)",
+          "yaml.load(text, Loader=yaml.SafeLoader)",
+          "yaml.load(text, Loader=SafeLoader)"
+        ]
+      }
+    },
+    {
+      "id": "java-object-input-stream",
+      "title": "Java object deserialization",
+      "severity": "high",
+      "cwe": "CWE-502",
+      "languages": [
+        "java",
+        "kt",
+        "scala"
+      ],
+      "where": "code",
+      "pattern": "\\bnew\\s+ObjectInputStream\\s*\\(",
+      "why": "Deserializing untrusted bytes can run code through gadget chains in the classpath.",
+      "fix": "Use a data format (JSON), or a deserialization filter that allows only known classes.",
+      "examples": {
+        "match": [
+          "ObjectInputStream in = new ObjectInputStream(socket.getInputStream());"
+        ],
+        "clean": [
+          "new ObjectOutputStream(out)"
+        ]
+      }
+    },
+    {
+      "id": "php-unserialize",
+      "title": "unserialize",
+      "severity": "high",
+      "cwe": "CWE-502",
+      "languages": [
+        "php"
+      ],
+      "where": "code",
+      "pattern": "(?<![\\w>:$])unserialize\\s*\\(",
+      "why": "Unserializing untrusted data can instantiate objects and run their magic methods.",
+      "fix": "Use `json_decode`.",
+      "examples": {
+        "match": [
+          "$o = unserialize($_COOKIE[\"d\"]);"
+        ],
+        "clean": [
+          "$o = json_decode($s);",
+          "$this->unserialize($x)"
+        ]
+      }
+    },
+    {
+      "id": "rb-marshal-yaml",
+      "title": "Marshal or YAML loading",
+      "severity": "high",
+      "cwe": "CWE-502",
+      "languages": [
+        "rb"
+      ],
+      "where": "code",
+      "pattern": "\\b(?:Marshal\\.load|YAML\\.load|Psych\\.load)\\s*\\(",
+      "why": "Both can construct arbitrary objects from the data.",
+      "fix": "Use `YAML.safe_load` or JSON.",
+      "examples": {
+        "match": [
+          "obj = Marshal.load(data)",
+          "YAML.load(File.read(path))"
+        ],
+        "clean": [
+          "YAML.safe_load(data)"
+        ]
+      }
+    },
+    {
+      "id": "dotnet-binaryformatter",
+      "title": "BinaryFormatter",
+      "severity": "high",
+      "cwe": "CWE-502",
+      "languages": [
+        "cs"
+      ],
+      "where": "code",
+      "pattern": "\\bBinaryFormatter\\b",
+      "why": "BinaryFormatter is unsafe to use on untrusted data and is obsolete.",
+      "fix": "Use System.Text.Json or another data serializer.",
+      "examples": {
+        "match": [
+          "var f = new BinaryFormatter();"
+        ],
+        "clean": [
+          "JsonSerializer.Deserialize<T>(s)"
+        ]
+      }
+    }
+  ]
+}

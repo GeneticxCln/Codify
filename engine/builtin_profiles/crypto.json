@@ -1,0 +1,290 @@
+{
+  "name": "crypto",
+  "description": "Weak or misused cryptography: broken hashes and ciphers, switched-off certificate checks, guessable tokens.",
+  "rules": [
+    {
+      "id": "py-weak-hash",
+      "title": "MD5 or SHA-1",
+      "severity": "medium",
+      "cwe": "CWE-328",
+      "languages": [
+        "py"
+      ],
+      "where": "code",
+      "pattern": "\\bhashlib\\.(?:md5|sha1)\\s*\\(",
+      "why": "Both are broken for anything an attacker can influence (signatures, password hashes, integrity).",
+      "fix": "Use SHA-256 or better, and a password hash (argon2, scrypt, bcrypt) for passwords.",
+      "examples": {
+        "match": [
+          "digest = hashlib.md5(data).hexdigest()",
+          "hashlib.sha1(x)"
+        ],
+        "clean": [
+          "hashlib.sha256(data)"
+        ]
+      }
+    },
+    {
+      "id": "js-weak-hash",
+      "title": "MD5 or SHA-1",
+      "severity": "medium",
+      "cwe": "CWE-328",
+      "languages": [
+        "js",
+        "jsx",
+        "ts",
+        "tsx",
+        "mjs",
+        "cjs"
+      ],
+      "where": "strings",
+      "pattern": "\\bcreateHash\\s*\\(\\s*[\\\"'](?:md5|sha1)[\\\"']",
+      "why": "Both are broken for anything an attacker can influence.",
+      "fix": "Use SHA-256 or better, and a password hash for passwords.",
+      "examples": {
+        "match": [
+          "crypto.createHash('md5')",
+          "createHash(\"sha1\")"
+        ],
+        "clean": [
+          "crypto.createHash(\"sha256\")"
+        ]
+      }
+    },
+    {
+      "id": "java-weak-hash",
+      "title": "MD5 or SHA-1",
+      "severity": "medium",
+      "cwe": "CWE-328",
+      "languages": [
+        "java",
+        "kt",
+        "scala"
+      ],
+      "where": "strings",
+      "pattern": "\\bMessageDigest\\.getInstance\\s*\\(\\s*\\\"(?:MD5|SHA-?1)\\\"",
+      "why": "Both are broken for anything an attacker can influence.",
+      "fix": "Use SHA-256 or better, and a password hash for passwords.",
+      "examples": {
+        "match": [
+          "MessageDigest.getInstance(\"MD5\")",
+          "MessageDigest.getInstance(\"SHA-1\")"
+        ],
+        "clean": [
+          "MessageDigest.getInstance(\"SHA-256\")"
+        ]
+      }
+    },
+    {
+      "id": "go-weak-hash",
+      "title": "MD5 or SHA-1",
+      "severity": "medium",
+      "cwe": "CWE-328",
+      "languages": [
+        "go"
+      ],
+      "where": "code",
+      "pattern": "\\b(?:md5|sha1)\\.(?:New|Sum)\\s*\\(",
+      "why": "Both are broken for anything an attacker can influence.",
+      "fix": "Use crypto/sha256 or better, and a password hash for passwords.",
+      "examples": {
+        "match": [
+          "h := md5.New()",
+          "sum := sha1.Sum(data)"
+        ],
+        "clean": [
+          "h := sha256.New()"
+        ]
+      }
+    },
+    {
+      "id": "ecb-mode",
+      "title": "A block cipher in ECB mode",
+      "severity": "high",
+      "cwe": "CWE-327",
+      "languages": [],
+      "where": "strings",
+      "pattern": "\\bAES\\.MODE_ECB\\b|[\\\"']AES/ECB/|\\bcreateCipher(?:iv)?\\s*\\(\\s*[\\\"']aes-\\d+-ecb[\\\"']|\\bCipher\\.getInstance\\(\\s*\\\"AES\\\"\\s*\\)",
+      "why": "ECB encrypts equal blocks to equal ciphertext, leaking structure; `Cipher.getInstance(\"AES\")` defaults to it.",
+      "fix": "Use an authenticated mode such as GCM, with a fresh nonce per message.",
+      "examples": {
+        "match": [
+          "cipher = AES.new(key, AES.MODE_ECB)",
+          "Cipher.getInstance(\"AES/ECB/PKCS5Padding\")",
+          "Cipher.getInstance(\"AES\")",
+          "crypto.createCipheriv('aes-128-ecb', key, null)"
+        ],
+        "clean": [
+          "cipher = AES.new(key, AES.MODE_GCM)",
+          "Cipher.getInstance(\"AES/GCM/NoPadding\")"
+        ]
+      },
+      "flags": "i"
+    },
+    {
+      "id": "weak-cipher",
+      "title": "DES, 3DES-era or RC4/RC2 ciphers",
+      "severity": "medium",
+      "cwe": "CWE-327",
+      "languages": [],
+      "where": "strings",
+      "pattern": "[\\\"'](?:DES(?:ede)?|RC[24]|ARCFOUR)(?:[\\\"']|/)",
+      "why": "These ciphers are broken or too weak for current use.",
+      "fix": "Use AES-GCM or ChaCha20-Poly1305.",
+      "examples": {
+        "match": [
+          "Cipher.getInstance(\"DES/CBC/PKCS5Padding\")",
+          "crypto.createCipheriv('rc4', key, iv)"
+        ],
+        "clean": [
+          "Cipher.getInstance(\"AES/GCM/NoPadding\")",
+          "x = \"described\""
+        ]
+      },
+      "flags": "i"
+    },
+    {
+      "id": "py-verify-false",
+      "title": "Certificate verification turned off",
+      "severity": "high",
+      "cwe": "CWE-295",
+      "languages": [
+        "py"
+      ],
+      "where": "code",
+      "pattern": "\\bverify\\s*=\\s*False\\b",
+      "why": "Without verification any party on the path can impersonate the server.",
+      "fix": "Leave verification on; to trust a private CA, pass its bundle as `verify=\"/path/ca.pem\"`.",
+      "examples": {
+        "match": [
+          "requests.get(url, verify=False)"
+        ],
+        "clean": [
+          "requests.get(url, verify=True)",
+          "verify = verify_signature(x)"
+        ]
+      }
+    },
+    {
+      "id": "node-reject-unauthorized",
+      "title": "Certificate verification turned off",
+      "severity": "high",
+      "cwe": "CWE-295",
+      "languages": [
+        "js",
+        "jsx",
+        "ts",
+        "tsx",
+        "mjs",
+        "cjs"
+      ],
+      "where": "strings",
+      "pattern": "\\brejectUnauthorized\\s*:\\s*false\\b|\\bNODE_TLS_REJECT_UNAUTHORIZED\\b\\s*=\\s*[\\\"']?0",
+      "why": "Without verification any party on the path can impersonate the server.",
+      "fix": "Leave verification on, and add a private CA with the `ca` option.",
+      "examples": {
+        "match": [
+          "https.request({ rejectUnauthorized: false })",
+          "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'"
+        ],
+        "clean": [
+          "https.request({ rejectUnauthorized: true })"
+        ]
+      }
+    },
+    {
+      "id": "go-insecure-skip-verify",
+      "title": "Certificate verification turned off",
+      "severity": "high",
+      "cwe": "CWE-295",
+      "languages": [
+        "go"
+      ],
+      "where": "code",
+      "pattern": "\\bInsecureSkipVerify\\s*:\\s*true\\b",
+      "why": "Without verification any party on the path can impersonate the server.",
+      "fix": "Leave verification on, and add a private CA to `RootCAs`.",
+      "examples": {
+        "match": [
+          "&tls.Config{InsecureSkipVerify: true}"
+        ],
+        "clean": [
+          "&tls.Config{InsecureSkipVerify: false}"
+        ]
+      }
+    },
+    {
+      "id": "weak-token-random",
+      "title": "A secret made from the random module",
+      "severity": "medium",
+      "cwe": "CWE-338",
+      "languages": [
+        "py"
+      ],
+      "where": "code",
+      "pattern": "\\b(?:token|secret|password|nonce|session|salt|otp)\\w*\\s*=\\s*.*\\brandom\\.(?:random|randint|choice|choices|randrange|getrandbits)\\s*\\(",
+      "why": "`random` is predictable; a value an attacker must not guess needs a cryptographic source.",
+      "fix": "Use the `secrets` module.",
+      "examples": {
+        "match": [
+          "session_token = \"\".join(random.choice(chars) for _ in range(16))",
+          "otp = random.randint(100000, 999999)"
+        ],
+        "clean": [
+          "token = secrets.token_hex(16)",
+          "jitter = random.random()"
+        ]
+      },
+      "flags": "i"
+    },
+    {
+      "id": "weak-token-math-random",
+      "title": "A secret made from Math.random",
+      "severity": "medium",
+      "cwe": "CWE-338",
+      "languages": [
+        "js",
+        "jsx",
+        "ts",
+        "tsx",
+        "mjs",
+        "cjs"
+      ],
+      "where": "code",
+      "pattern": "\\b(?:token|secret|password|nonce|session|salt|otp)\\w*\\s*=\\s*.*\\bMath\\.random\\s*\\(",
+      "why": "Math.random is predictable; a value an attacker must not guess needs a cryptographic source.",
+      "fix": "Use `crypto.randomBytes` or `crypto.randomUUID`.",
+      "examples": {
+        "match": [
+          "const sessionToken = Math.random().toString(36)"
+        ],
+        "clean": [
+          "const jitter = Math.random() * 100"
+        ]
+      },
+      "flags": "i"
+    },
+    {
+      "id": "jwt-verification-off",
+      "title": "A token accepted without checking its signature",
+      "severity": "high",
+      "cwe": "CWE-347",
+      "languages": [
+        "py"
+      ],
+      "where": "strings",
+      "pattern": "algorithms\\s*=\\s*\\[[^\\]]*[\\\"']none[\\\"']|[\\\"']verify_signature[\\\"']\\s*:\\s*False",
+      "why": "A token that is not verified can be written by anyone.",
+      "fix": "Pin the expected algorithm and always verify.",
+      "examples": {
+        "match": [
+          "jwt.decode(t, key, algorithms=[\"none\"])",
+          "jwt.decode(t, options={\"verify_signature\": False})"
+        ],
+        "clean": [
+          "jwt.decode(t, key, algorithms=[\"HS256\"])"
+        ]
+      }
+    }
+  ]
+}
