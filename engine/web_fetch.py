@@ -88,9 +88,11 @@ DEFAULT_TEXT_CHARS = 12_000
 MIN_TEXT_CHARS = 200
 MAX_TEXT_CHARS = 40_000
 
-#: Links listed, and the longest label kept for each.
+#: Links listed, the longest label kept for each, and the longest address listed. The text has its own cap, so a
+#: links block of forty 2,000-character addresses would be most of what a fetch hands back and none of what was asked.
 MAX_LINKS = 40
 MAX_LINK_LABEL_CHARS = 100
+MAX_LINK_URL_CHARS = 500
 
 #: A CSS selector is a handle on one part of a page, not a program.
 MAX_SELECTOR_CHARS = 200
@@ -213,6 +215,12 @@ def parse_hosts(raw: str) -> tuple[tuple[str, ...], list[str]]:
         if not token:
             continue
         name = (token[2:] if token.startswith("*.") else token.lstrip(".")).rstrip(".")
+        try:
+            # The spelling `check_url` compares against, so `münchen.de` in the list and in an address agree.
+            name = name.encode("idna").decode("ascii")
+        except UnicodeError:
+            rejected.append(token)
+            continue
         if len(name) <= 253 and _HOST.match(name) and _ip(name) is None:
             if name not in hosts:
                 hosts.append(name)
@@ -383,7 +391,15 @@ def extract(markup: str, url: str, selector: str | None, budget: int) -> Fetched
     the reason to have it. `adaptive` stays off (its default), which is what keeps it from writing a database.
     """
     page = Selector(markup, url=url)
-    title = _clean(str(page.css("title::text").get() or ""))
+    try:
+        title = _clean(str(page.css("title::text").get() or ""))
+    except AttributeError:
+        # A document with no root element (only a comment, or only an XML declaration): the parser builds
+        # nothing to query and fails on the first question. There is no text to give, and that is the answer.
+        return Fetched(
+            url=url, status=0, content_type="text/html", title="", text="", chars=0, truncated=False,
+            links=[], redirects=[], matched=0 if selector is not None else None,
+        )
     matched: int | None = None
     scopes = [page]
     if selector is not None:
@@ -403,10 +419,10 @@ def extract(markup: str, url: str, selector: str | None, budget: int) -> Fetched
     for scope in scopes:
         for anchor in scope.css("a[href]"):
             href = str(anchor.attrib.get("href") or "").strip()
-            if not href or href.startswith("#") or len(href) > MAX_URL_CHARS:
+            if not href or href.startswith("#") or len(href) > MAX_LINK_URL_CHARS:
                 continue
             absolute = urljoin(url, href).split("#", 1)[0]
-            if not absolute.startswith(("http://", "https://")) or absolute in seen:
+            if not absolute.startswith(("http://", "https://")) or absolute in seen or len(absolute) > MAX_LINK_URL_CHARS:
                 continue
             seen.add(absolute)
             label = _clean(str(anchor.get_all_text(separator=" ", strip=True)))
@@ -528,7 +544,7 @@ async def _fetch(
         address = await public_address(target.host, target.port, resolve)
         try:
             reply = await _once(target, address, transport, verify)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             raise FetchRefused(f"{_shown(target.host)} could not be reached ({type(exc).__name__}).") from exc
         if reply.location is not None:
             hops.append(target.url)
