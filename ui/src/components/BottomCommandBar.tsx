@@ -30,6 +30,7 @@ import {
   BookOpen,
   Palette,
   Square,
+  type LucideIcon,
 } from "lucide-react";
 import { COMPOSER_ANCHOR_ID } from "../composerAnchor";
 
@@ -37,6 +38,7 @@ import { Toggle } from "./ui/Toggle";
 import { Button } from "./ui/Button";
 import { IconButton } from "./ui/IconButton";
 import { MicButton } from "./MicButton";
+import { ModelBadges } from "./ModelBadges";
 import { readRejection } from "../rejection.ts";
 import { insertDictation } from "../speech.ts";
 import { insertAtCaret } from "../clipboardHistory";
@@ -64,6 +66,26 @@ const Divider: React.FC<{ title: string }> = ({ title }) => (
     className="w-px self-stretch min-h-[1.25rem] my-0.5 bg-codify-border shrink-0"
   />
 );
+
+/**
+ * The three ways a run may treat the files, once. The trigger and the menu both draw from this, so
+ * the name on the button is the name in the list (the button said "Review Diffs" and the list said
+ * "Review Diffs (Dry Run)"), and so is the icon. The icon's colour says what the mode *does* to your
+ * files (green writes, amber only simulates, blue stops at a plan); *which one is current* is the
+ * accent tint and the tick, as in every other list in the app (`DESIGN.md` §4, "Armed, selected, and
+ * at rest").
+ */
+const MODES: ReadonlyArray<{
+  id: ExecutionMode;
+  label: string;
+  hint: string;
+  Icon: LucideIcon;
+  iconClass: string;
+}> = [
+  { id: "direct", label: "Direct Apply", hint: "Edit files and run tests automatically", Icon: Sparkles, iconClass: "text-codify-success" },
+  { id: "dry_run", label: "Review Diffs", hint: "Dry run: shows the changes, writes nothing", Icon: Shield, iconClass: "text-codify-warning" },
+  { id: "plan_only", label: "Plan Only", hint: "Show the plan; you approve execution", Icon: Layers, iconClass: "text-codify-info" },
+];
 
 // Ordering and badges come from `modelSignals`, which is pure and shared with the
 // Settings field — so an id sits in the same place in both pickers.
@@ -675,7 +697,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                             </div>
                           </button>
                           {selectedWorkspace?.id === ws.id && (
-                            <Check className="w-3.5 h-3.5 text-codify-info shrink-0" />
+                            <Check className="w-3.5 h-3.5 text-codify-accent shrink-0" />
                           )}
                           <button
                             type="button"
@@ -735,7 +757,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 }}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-codify-raised border border-codify-border text-codify-secondary hover:bg-codify-border transition-colors cursor-pointer"
               >
-                <Cpu className="w-3.5 h-3.5 text-codify-design" />
+                <Cpu className="w-3.5 h-3.5 text-codify-accent" />
                 <span className="font-medium truncate max-w-[9.375rem]">
                   {selectedModel ? selectedModel.name : "No model"}
                 </span>
@@ -799,7 +821,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                         value={modelFilter}
                         onChange={(e) => setModelFilter(e.target.value)}
                         placeholder={`Filter ${availableModels.length} models…`}
-                        className="w-full bg-codify-bg border border-codify-border rounded-lg px-2.5 py-1 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-design"
+                        className="w-full bg-codify-bg border border-codify-border rounded-lg px-2.5 py-1 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent"
                       />
                     </div>
                   )}
@@ -835,7 +857,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                           className={
                             "px-2.5 pt-1.5 pb-0.5 text-2xs font-semibold uppercase tracking-wider " +
                             (section.pinned
-                              ? "text-codify-design"
+                              ? "text-codify-accent"
                               : "text-codify-muted")
                           }
                         >
@@ -866,42 +888,29 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                                 setIsModelOpen(false);
                               }}
                               className={
-                                "w-full text-left px-2.5 py-1 rounded-lg flex items-center gap-2 text-xs transition-colors cursor-pointer " +
+                                "w-full text-left px-2.5 py-1.5 rounded-lg border text-xs transition-colors cursor-pointer " +
                                 (isCurrent
-                                  ? "bg-codify-design/20 text-codify-design-ink border border-codify-design/30 font-medium"
-                                  : "text-codify-secondary hover:bg-codify-raised")
+                                  ? "bg-codify-accent/20 text-codify-accent-ink border-codify-accent/30 font-medium"
+                                  : "border-transparent text-codify-secondary hover:bg-codify-raised")
                               }
                             >
-                              <span className="font-semibold truncate flex-1 min-w-0">
-                                {m.name}
+                              {/* Line one is the name and what is true of it, as badges; line two is
+                                  the provider's own description. The description used to sit beside
+                                  the name and was cut to "Local Ollama model…", and was dropped
+                                  altogether whenever a row had a role badge. */}
+                              <span className="flex items-center gap-2">
+                                <span className="font-semibold truncate flex-1 min-w-0">
+                                  {m.name}
+                                </span>
+                                <ModelBadges badges={badges} />
+                                {isCurrent && (
+                                  <Check className="w-3 h-3 text-codify-accent shrink-0" />
+                                )}
                               </span>
-                              {badges.roles && (
-                                <span
-                                  className="text-2xs text-codify-knowledge shrink-0 max-w-[9rem] truncate"
-                                  title={badges.rolesTitle}
-                                >
-                                  {badges.roles}
+                              {m.description && (
+                                <span className="mt-0.5 block truncate text-2xs font-normal text-codify-muted">
+                                  {m.description}
                                 </span>
-                              )}
-                              {badges.lastRun && (
-                                <span className="text-2xs text-codify-info shrink-0">
-                                  last run
-                                </span>
-                              )}
-                              {badges.notChat ? (
-                                <span className="text-2xs text-codify-warning shrink-0">
-                                  not a chat model
-                                </span>
-                              ) : (
-                                !badges.roles &&
-                                m.description && (
-                                  <span className="text-2xs text-codify-muted truncate max-w-[6.875rem] shrink-0">
-                                    {m.description}
-                                  </span>
-                                )
-                              )}
-                              {isCurrent && (
-                                <Check className="w-3 h-3 text-codify-design shrink-0" />
                               )}
                             </button>
                           );
@@ -919,7 +928,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                           className="flex items-start gap-1.5 px-2.5 py-1 text-2xs text-codify-warning"
                         >
                           <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
-                          <span className="truncate">
+                          <span className="truncate" title={`${p.provider} — ${p.error}`}>
                             <span className="font-semibold">{p.provider}</span>{" "}
                             — {p.error}
                           </span>
@@ -945,15 +954,16 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                           setCustomModelError(null);
                         }}
                         aria-label="Custom model in provider/model form"
-                        className="flex-1 bg-codify-bg border border-codify-border rounded-lg px-2.5 py-1 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-design font-mono"
+                        className="flex-1 bg-codify-bg border border-codify-border rounded-lg px-2.5 py-1 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent font-mono"
                       />
-                      <button
+                      <Button
                         type="submit"
+                        tone="primary"
+                        size="sm"
                         disabled={!customModelId.trim()}
-                        className="px-2.5 py-1 bg-codify-design text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
                       >
                         Set
-                      </button>
+                      </Button>
                     </div>
                     {customModelError && (
                       <p className="text-2xs text-codify-danger px-1 mt-1">
@@ -976,20 +986,15 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                 }}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-codify-raised border border-codify-border text-codify-secondary hover:bg-codify-border transition-colors cursor-pointer"
               >
-                {mode === "direct" && (
-                  <Sparkles className="w-3.5 h-3.5 text-codify-success" />
-                )}
-                {mode === "dry_run" && (
-                  <Shield className="w-3.5 h-3.5 text-codify-warning" />
-                )}
-                {mode === "plan_only" && (
-                  <Layers className="w-3.5 h-3.5 text-codify-info" />
-                )}
-                <span>
-                  {mode === "direct" && "Direct Apply"}
-                  {mode === "dry_run" && "Review Diffs"}
-                  {mode === "plan_only" && "Plan Only"}
-                </span>
+                {(() => {
+                  const current = MODES.find((m) => m.id === mode) ?? MODES[0]!;
+                  return (
+                    <>
+                      <current.Icon className={`w-3.5 h-3.5 ${current.iconClass}`} />
+                      <span>{current.label}</span>
+                    </>
+                  );
+                })()}
                 <ChevronDown className="w-3 h-3 text-codify-muted" />
               </button>
 
@@ -1005,78 +1010,36 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                         }
                       : undefined
                   }
-                  className="absolute left-0 bottom-full mb-2 w-56 bg-codify-surface border border-codify-border rounded-xl shadow-2xl p-1.5 z-50"
+                  className="absolute left-0 bottom-full mb-2 w-72 bg-codify-surface border border-codify-border rounded-xl shadow-2xl p-1.5 z-50 space-y-0.5"
                 >
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onChangeMode("direct");
-                      setIsModeOpen(false);
-                    }}
-                    className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between cursor-pointer ${
-                      mode === "direct"
-                        ? "bg-codify-success/20 text-codify-success-ink font-medium"
-                        : "text-codify-secondary hover:bg-codify-raised"
-                    }`}
-                  >
-                    <div>
-                      <div className="font-semibold">Direct Apply</div>
-                      <div className="text-2xs text-codify-muted">
-                        Edit files & run tests automatically
-                      </div>
-                    </div>
-                    {mode === "direct" && (
-                      <Check className="w-3.5 h-3.5 text-codify-success" />
-                    )}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onChangeMode("dry_run");
-                      setIsModeOpen(false);
-                    }}
-                    className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between mt-1 cursor-pointer ${
-                      mode === "dry_run"
-                        ? "bg-codify-warning/20 text-codify-warning-ink font-medium"
-                        : "text-codify-secondary hover:bg-codify-raised"
-                    }`}
-                  >
-                    <div>
-                      <div className="font-semibold">
-                        Review Diffs (Dry Run)
-                      </div>
-                      <div className="text-2xs text-codify-muted">
-                        Simulate changes without writing disk
-                      </div>
-                    </div>
-                    {mode === "dry_run" && (
-                      <Check className="w-3.5 h-3.5 text-codify-warning" />
-                    )}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onChangeMode("plan_only");
-                      setIsModeOpen(false);
-                    }}
-                    className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between mt-1 cursor-pointer ${
-                      mode === "plan_only"
-                        ? "bg-codify-info/20 text-codify-info-ink font-medium"
-                        : "text-codify-secondary hover:bg-codify-raised"
-                    }`}
-                  >
-                    <div>
-                      <div className="font-semibold">Plan Only</div>
-                      <div className="text-2xs text-codify-muted">
-                        Show the plan; you approve execution
-                      </div>
-                    </div>
-                    {mode === "plan_only" && (
-                      <Check className="w-3.5 h-3.5 text-codify-info" />
-                    )}
-                  </button>
+                  {MODES.map((m) => {
+                    const isCurrent = m.id === mode;
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => {
+                          onChangeMode(m.id);
+                          setIsModeOpen(false);
+                        }}
+                        className={
+                          "w-full text-left px-2.5 py-1.5 rounded-lg border text-xs flex items-start gap-2 cursor-pointer " +
+                          (isCurrent
+                            ? "bg-codify-accent/20 text-codify-accent-ink border-codify-accent/30"
+                            : "border-transparent text-codify-secondary hover:bg-codify-raised")
+                        }
+                      >
+                        <m.Icon className={`mt-0.5 w-3.5 h-3.5 shrink-0 ${m.iconClass}`} />
+                        <span className="flex-1 min-w-0">
+                          <span className="block font-semibold">{m.label}</span>
+                          <span className="block text-2xs font-normal text-codify-muted">{m.hint}</span>
+                        </span>
+                        {isCurrent && (
+                          <Check className="mt-0.5 w-3.5 h-3.5 text-codify-accent shrink-0" />
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>

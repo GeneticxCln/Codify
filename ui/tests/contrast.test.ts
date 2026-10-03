@@ -640,3 +640,27 @@ test("a theme that republishes a token below AA cannot slip past the audit", () 
       "so this audit is not actually reading theme tokens",
   );
 });
+
+// ── the text cursor ─────────────────────────────────────────────────────────
+
+test("the text cursor is the accent, and it clears 3:1 on every surface a field sits on, in every theme", () => {
+  // The rule lives in index.css: `input, textarea { caret-color: var(--codify-accent) }`, in the base
+  // layer. A caret is a graphic, not text, so the bar is WCAG 1.4.11's 3:1 and not 4.5:1. The surfaces
+  // are the three a field is ever filled with (the prompt card is `surface`, the filters in a menu are
+  // `bg`, a settings field is `raised`); a theme whose accent is too close to any of them has a caret
+  // you lose in the box.
+  const rule = css.match(/@layer base\s*\{\s*input,\s*textarea\s*\{([^}]*)\}/);
+  assert.ok(rule, "index.css has no `input, textarea` rule in the base layer, so the caret is not themed");
+  assert.match(rule[1]!, /caret-color:\s*var\(--codify-accent\)\s*;/, "the cursor is not read from --codify-accent");
+  for (const theme of THEMES) {
+    const accent = rendered(theme, "accent");
+    assert.ok(accent, `${theme.id} publishes no --codify-accent, so its cursor has no colour`);
+    for (const surface of SURFACE_TOKENS) {
+      const ratio = contrastRatio(accent, rendered(theme, surface)!);
+      assert.ok(
+        ratio >= 3,
+        `${theme.id}: the accent cursor is ${ratio.toFixed(2)}:1 on --codify-${surface} (${accent} on ${rendered(theme, surface)}), under 3:1`,
+      );
+    }
+  }
+});
