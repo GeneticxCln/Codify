@@ -1,7 +1,8 @@
 """`scripts/ci-report.sh` only ever says something true about a commit.
 
-The GitHub Actions workflow is manual-only, so the local gate's verdict is
-published as a commit status instead. A status is a claim about *a commit*, which
+The local gate's verdict is published on the commit as a status, beside the check the
+GitHub Actions workflow reports and as the only mark there is when Actions cannot run.
+A status is a claim about *a commit*, which
 is why most of this file is about the cases where the script must say nothing:
 a working tree that is not the commit, a `gh` that is not there, a gate that
 rewrote the tree it was testing. A CI mark that can go green on unsaved work is

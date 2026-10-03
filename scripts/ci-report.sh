@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Run the local gate and publish its verdict on the commit as a GitHub status.
 #
-# The GitHub Actions workflow is manual-only (see the header of
-# .github/workflows/check.yml), so a pull request carries no check unless someone starts one. The gate
-# is `make ci`, and it runs where the code is written. This script is the missing
-# half: it runs that gate and then says so on the commit, so a PR shows a green or a
-# red mark that came from a machine that actually ran the suite. It costs nothing —
+# The GitHub Actions workflow (.github/workflows/check.yml) gives a pull request its own
+# check, from a clean runner, and it needs a runner and an account in good standing (it
+# was billing-locked once). The gate is `make ci`, and it runs where the code is written.
+# This script is the other half: it runs that gate and then says so on the commit, so a PR
+# shows a green or a red mark that came from a machine that actually ran the suite. It costs nothing —
 # a commit status is a plain API call, not a workflow run, so it needs no runner and
 # no billing.
 #

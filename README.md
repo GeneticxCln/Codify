@@ -485,7 +485,7 @@ make ci        # the same Python legs again on the declared minimum (3.10)
 `make check` only ever runs the interpreter you have installed. `make ci` runs the Python legs again on **3.10**,
 fetching that interpreter on demand rather than skipping the leg. 3.10 matters: a construct only 3.12+ parses is
 invisible on a modern interpreter and fatal on the declared minimum. `.github/workflows/check.yml` runs the same
-targets on GitHub's runners, started by hand when a second opinion is worth its minutes.
+targets on GitHub's runners for every pull request and every push to `master`: a second opinion from a clean machine.
 
 `make hooks` installs the versioned hooks: the cheap checks at commit time, the full gate before every push. The
 suite is **hermetic by construction**: `tests/hermetic.py` points every test at a throwaway state directory and

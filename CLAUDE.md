@@ -37,14 +37,15 @@ mean the change is shippable.
 | `make test-ui` | `ui/tests/` through `node --test` (needs Node 22.22.2+, 24.15+ or 26+; checked before it runs) |
 | `make typecheck-ui-tests` | `tsc --noEmit` over `ui/src` **and** `ui/tests` — config `ui/tsconfig.test.json` |
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |
-| `make check-tauri` | `cargo check` + `cargo fmt --check` |
+| `make check-tauri` | `cargo check` + `cargo test` (under Xvfb when there is no display; includes the machine tab's real-jail tests, which need `bwrap` and user namespaces) + `cargo fmt --check` |
 | `make ci-python-floor` | Only the 3.10 leg; never skips — it fails with install instructions |
-| `make ci-report` | `make ci`, then publishes its verdict on the commit as a GitHub status (context local/make-ci) via `gh`. Not a second gate: it runs the one gate and reports it, and refuses a dirty tree — the Actions workflow is manual-only, so this is how a PR shows a result without one |
+| `make ci-report` | `make ci`, then publishes its verdict on the commit as a GitHub status (context local/make-ci) via `gh`. Not a second gate: it runs the one gate and reports it, and refuses a dirty tree — the mark a PR still carries when Actions cannot give one (it was billing-locked once) |
 | `make check-history` | Every commit in `HISTORY_RANGE` (default `origin/<branch>..HEAD`), not just the tip. Separate from the gate on purpose: `make ci` asks about the tree you are about to share, this asks about the commits on the way to it. Pre-push runs it second, and it declines a one-commit range — that has no middle |
 
 `make ci` is the real gate. `.github/workflows/check.yml` describes the same targets
-split by toolchain and is manual-only (`workflow_dispatch`): start it by hand for a
-second opinion from GitHub's runners; `make ci` in the Makefile is what gates a push.
+split by toolchain and runs on every pull request and every push to `master` (and by
+hand, `workflow_dispatch`): a second opinion from GitHub's runners, on a clean machine;
+`make ci` in the Makefile is what gates a push.
 
 `make hooks` installs the versioned hooks in `.githooks/` (`pre-commit` runs
 `make lint typecheck`; `pre-push` runs `make ci`). Do not add a second gate mechanism

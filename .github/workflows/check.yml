@@ -13,10 +13,13 @@ name: check
 # and a WebSocket isolation test that skipped itself (passing) whenever an
 # undeclared `websockets` package was missing.
 #
-# NOTE: this workflow is manual (`workflow_dispatch`), and the gate is `make ci` in the
-# Makefile, which runs these same targets locally on the host toolchain and on the
-# declared-minimum Python (provisioning it rather than skipping it). Keep the two in
-# step, or fold this file into `make ci` and drop the duplicate definition.
+# NOTE: this workflow runs on every pull request, on every push to master, and by hand
+# (`workflow_dispatch`). The gate is still `make ci` in the Makefile (the pre-push hook,
+# `make hooks`), which runs these same targets on the developer's machine, on the host
+# toolchain and on the declared-minimum Python (provisioning it rather than skipping it).
+# This is the second opinion from a machine that is not theirs: a clean Ubuntu image with
+# nothing left over in a `.venv` or `~/.cargo`. Keep the two in step, or fold this file
+# into `make ci` and drop the duplicate definition.
 #
 # History, so nobody has to rediscover it. Until 2026-09-30 every run of this workflow,
 # from the first (#1) to #14, failed within 3-6 seconds with no log at all: the jobs
@@ -31,13 +34,21 @@ name: check
 # Python, which is what it is for: a second opinion from a machine that is not the
 # developer's.
 #
-# It stays manual on purpose. `make ci` (pre-push hook, `make hooks`) is the verdict
-# that gates a push, and `make ci-report` publishes it on the commit as a status. Start
-# this by hand when a second opinion is worth its runner minutes: a change to the
-# interpreter matrix, to a system package the Rust job installs, or before a release.
-# To run it on every push and pull request, add `push:` and `pull_request:` under `on:`.
+# From 2026-09-30 to 2026-10-03 it was started by hand only, so a pull request carried a
+# result only if someone asked for one. It now runs on its own. `make ci-report` still
+# publishes the local gate's verdict on the commit as a status, which needs no runner: it
+# is the mark a pull request carries if Actions is ever locked again (that failure looks
+# like the runs above, over in seconds with no log).
+#
+# `push` is limited to master: a pull request's own pushes already arrive as
+# `pull_request`, so an unrestricted `push:` would run every pull request twice. There is
+# no path filter, because the docs are under test (tests/test_claude_md_contracts.py reads
+# them) and a documentation-only change can turn the suite red.
 
 on:
+  pull_request:
+  push:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -130,7 +141,7 @@ jobs:
         run: make build-ui
 
   rust:
-    name: rust — cargo check, fmt
+    name: rust — cargo check, tests, fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -152,7 +163,19 @@ jobs:
             libsoup-3.0-dev \
             libssl-dev \
             pkg-config \
-            build-essential
+            build-essential \
+            bubblewrap \
+            xvfb
+
+      # `make check-tauri` runs `cargo test`, and the machine tab's tests (docs/09 §14) run
+      # a real bubblewrap jail and the `unshare` that mounts its project layer: they fail
+      # loudly rather than skip when the machine cannot make one. Ubuntu 24.04 restricts
+      # unprivileged user namespaces through AppArmor, which is what both need, so lift
+      # that for this job. `bubblewrap` and `xvfb` above are for the same tests and for the
+      # one GTK test, which needs a display (the Makefile finds `xvfb-run` by itself). If an
+      # image has no such sysctl the tests that follow say what is missing.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -160,5 +183,5 @@ jobs:
 
       # `cargo check` compiles without the frontend bundle, so this job needs no
       # Node toolchain — verified by running it with ui/dist removed.
-      - name: Check
+      - name: Check, test and format
         run: make check-tauri
