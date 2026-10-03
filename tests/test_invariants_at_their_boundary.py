@@ -165,6 +165,10 @@ class BoundaryCase(unittest.IsolatedAsyncioTestCase):
             "model": "evil",
             "model_name": "evil",
             "conductor_model": "evil",
+            # The setting that lets the engine reach the web for a model (docs/12): only `PUT /settings/engine`
+            # may write it, so no goal, turn or other route may carry it in.
+            "web_fetch": 2,
+            "web_fetch_hosts": "evil.example",
             "expected_version": 0,
             "prompt": "hello",
             "title": "t",

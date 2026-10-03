@@ -425,6 +425,8 @@ export async function saveEngineSettings(
     stt_base_url?: string;
     tts_base_url?: string;
     tts_auto_read?: boolean;
+    web_fetch?: number;
+    web_fetch_hosts?: string;
   }
 ): Promise<{ saved: Record<string, number | string> }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;

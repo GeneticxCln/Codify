@@ -365,7 +365,8 @@ ninth `AgentRole`, and that is a structural decision rather than a naming one:
 - So its prompt lives in `engine/chat_prompts.py` (with the turn's), and its
   configuration lives in `engine_settings` — `conductor_provider`,
   `conductor_model`, `conductor_fallback_provider`, `conductor_fallback_model`,
-  `conductor_max_turns`, `conductor_max_moves`, `conductor_drives_execution` —
+  `conductor_max_turns`, `conductor_max_moves`, `conductor_drives_execution`,
+  `web_fetch`, `web_fetch_hosts` (whether `fetch_page` may read the web, `docs/12`) —
   not in `agent_configs`. When those are unset a turn borrows the `scribe` row,
   which is the one role whose job is already writing prose for a person.
 - Those keys are the conductor's **only** mutator, and it is `GET`/`PUT
@@ -450,6 +451,7 @@ switch credits the turn's answer to a model that never produced it.
 | `navigate_page` | `WebviewBridge.navigate`, over `browser::navigate` | the model proposes a URL and the shell's `parse_navigation` decides: the *same call the user's click makes* (docs/03 §1.5). Changes what someone is looking at, so no approval, but no egress guard either (docs/03 §1.6) |
 | `click_page` | `WebviewBridge.click` | the page's own event does the work; every navigation it causes meets the same guard |
 | `type_page` | `WebviewBridge.type_text` | the one page verb that writes, so the one whose answer says nothing was submitted |
+| `fetch_page` | `engine/web_fetch.py` `fetch`, parsed by Scrapling's `Selector` | the engine's own request, so the rules are its own (`docs/12` §3): off unless a person set `web_fetch` (`PUT /settings/engine` only), GET only, public addresses only with the connection pinned to the address that was checked, every redirect re-checked, bounded in time and bytes, announced in the transcript before it is made, at most 8 a run. The text returns quoted as untrusted. Not an egress guard: the address is the payload (`docs/03` §1.6). Not on the menu while it cannot act |
 | `read_editor` | `SurfaceBridge.ask("editor", "read")` | eyes on the person's editor, **unsaved text included** (`read_file` reads the disk, which is what they are not looking at). Quoted file text, not instructions; a fixed shape with caps (`04` §9.1) |
 | `open_in_editor` | `SurfaceBridge.ask("editor", "open")` | hands that only point: show a file and a range. Paths are checked against the workspace root before the round trip. Changes nothing on disk |
 | `edit_editor` | `SurfaceBridge.ask("editor", "edit")` | hands that change **the open buffer only**: one undoable edit, marked as the assistant's, never saved. It touches no file, so it has none of `write`'s gates and needs none: the person's own Save is the only door to the disk (docs/00 §6.9), and no conductor tool can reach it |

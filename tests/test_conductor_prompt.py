@@ -31,8 +31,11 @@ from tests.test_conductor import ConductorTestCase, _ToolProvider
 NOT_TOOLS = {"task"}
 
 # Measured when this was written (about 2.5k characters, about 600 tokens) with room for a sentence or two;
-# raising it is a decision to spend every conductor call's context on more prompt.
-CEILING = 2900
+# raising it is a decision to spend every conductor call's context on more prompt. Raised from 2900 to 3100 for
+# the one sentence `fetch_page` needs (docs/12): it is the first tool whose address leaves the machine from the
+# engine itself, and the instruction not to put the workspace in it belongs in the prompt and not only in a
+# description a model may not reread.
+CEILING = 3100
 
 
 class TestTheToolsAreNamed(unittest.TestCase):

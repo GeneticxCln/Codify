@@ -148,8 +148,13 @@ class TestATurnCanPlanThroughTheConductor(ConductorTestCase):
         # approval gate reads.
         self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
         # The base menu, and the question a turn may put to the person (`ask_user`, last: it is offered
-        # whenever somebody is there to answer, which is on a turn and never during an approved run).
-        self.assertEqual(provider.seen_tools[0], [*(t.name for t in BASE_TOOLS), "ask_user"])
+        # whenever somebody is there to answer, which is on a turn and never during an approved run). Without
+        # `fetch_page`: it is offered only once a person has allowed it in Settings (docs/12), and a fresh
+        # install has not, so a tool that could only say "turned off" is not a slot the model is shown.
+        self.assertEqual(
+            provider.seen_tools[0],
+            [*(t.name for t in BASE_TOOLS if t.name != "fetch_page"), "ask_user"],
+        )
         # And the run was measured as the pipeline's own stages, not as some
         # new kind of thing the stats screen would have to learn about.
         stages = {
