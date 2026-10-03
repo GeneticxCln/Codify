@@ -233,6 +233,123 @@ test("a machine whose shell exits says so, and the pane no longer sends what is 
   });
 });
 
+test("the pane tells its machine the size it measured, and the screen the assistant reads is that size", async () => {
+  const s = shell(["mach-1"]);
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: s.answers }, async (ctx) => {
+    await openMachine(ctx);
+
+    const sizes = commands(ctx, "codify_machine_resize");
+    assert.ok(sizes.length >= 1, "the shell was never told how big the pane is, so the shell in the jail keeps wrapping at 80");
+    assert.equal(sizes[0].machineId, "mach-1");
+    const cols = sizes[0].cols as number;
+    assert.ok(cols > 80, `the pane measured ${cols} columns, which is no more than the default`);
+
+    // One line that is longer than the default width and shorter than the measured one is one row, if the screen the
+    // assistant reads was resized with the PTY, and three if it kept the 80 columns it was opened with.
+    await say(ctx, "mach-1", "x".repeat(200));
+    await beat(40);
+    const read = await look(ctx);
+    assert.deepEqual(read.result.screen.rows, ["x".repeat(200)], "the store's screen was not resized with the machine");
+  });
+});
+
+test("a shell that refuses what is typed is said on the pane, not swallowed", async () => {
+  const s = shell(["mach-1"]);
+  await withApp(
+    { viewport: WIDE, ...SEEDED, shellAnswers: s.answers, shellFails: { codify_machine_write: "no machine mach-1 is open" } },
+    async (ctx) => {
+      await openMachine(ctx);
+
+      await ctx.act(async () => {
+        typeInto(ctx, "mach-1", "l");
+        await beat(60);
+      });
+
+      const alert = machinePane(ctx, "mach-1")?.querySelector('[role="alert"]')?.textContent ?? "";
+      assert.match(alert, /no machine mach-1 is open/);
+    },
+  );
+});
+
+test("with no workspace there is nothing to mount, so no machine is opened and the person is told", async () => {
+  const s = shell(["mach-1"]);
+  await withApp({ viewport: WIDE, workspaces: [], shellAnswers: s.answers }, async (ctx) => {
+    await click(ctx, machineButton(ctx));
+    await ctx.settle();
+
+    assert.equal(commands(ctx, "codify_machine_open").length, 0, "a machine was opened with no project to put at /work");
+    const alert = [...ctx.dom.container.querySelectorAll('[role="alert"]')].map((a) => a.textContent).join(" ");
+    assert.match(alert, /Pick a workspace/);
+  });
+});
+
+/**
+ * Which machine panes asked for the keyboard, by machine id, while `body` ran. `term.focus()` ends in the textarea's own
+ * `focus()`, and that call is the one thing a pane does to take the keyboard that jsdom lets a test count.
+ */
+async function whoTookTheKeyboard(ctx: AppContext, body: () => Promise<void>): Promise<string[]> {
+  const proto = ctx.dom.window.HTMLElement.prototype;
+  const focus = proto.focus;
+  const took: string[] = [];
+  proto.focus = function (this: HTMLElement, ...rest: Parameters<HTMLElement["focus"]>) {
+    const owner = this.closest("[data-machine-id]")?.getAttribute("data-machine-id");
+    if (owner && this.tagName === "TEXTAREA") took.push(owner);
+    return focus.apply(this, rest);
+  };
+  try {
+    await body();
+  } finally {
+    proto.focus = focus;
+  }
+  return took;
+}
+
+test("a machine opened in front takes the keyboard, so what the person types next goes to it", async () => {
+  const s = shell(["mach-1"]);
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: s.answers }, async (ctx) => {
+    const took = await whoTookTheKeyboard(ctx, () => openMachine(ctx));
+
+    assert.ok(took.includes("mach-1"), "a machine that opened in front did not take the keyboard");
+  });
+});
+
+test("the machine in the half of a split that is not focused does not take the keyboard from the other half", async () => {
+  const s = shell(["mach-1", "mach-2"]);
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: s.answers }, async (ctx) => {
+    await openMachine(ctx);
+    await openMachine(ctx);
+    // mach-2 is in front; the palette offers mach-1 to sit beside it.
+    await openPalette(ctx);
+    await queryPalette(ctx, "beside");
+    await ctx.dom.click(paletteOption(ctx, "Show beside: Machine") as HTMLElement);
+    await ctx.settle();
+    await beat(80);
+    assert.equal(panes(ctx).length, 2, "the split was not made");
+    const inPane = (side: 0 | 1) => pane(ctx, side).querySelector("[data-machine-id]")?.getAttribute("data-machine-id");
+    const focusedSideNow = focusedSide(ctx) === "1" ? 1 : 0;
+    const focused = inPane(focusedSideNow);
+    const other = inPane(focusedSideNow === 1 ? 0 : 1);
+    assert.ok(focused && other && focused !== other, `two machines are not side by side: ${focused} / ${other}`);
+
+    // Close the split (the machine that was beside is now in front, and rightly takes the keyboard), then make it again
+    // and count only that: each half is mounted afresh, and only the focused one may ask for the keyboard.
+    await split(ctx);
+    assert.equal(panes(ctx).length, 0);
+    const took = await whoTookTheKeyboard(ctx, async () => {
+      await openPalette(ctx);
+      await queryPalette(ctx, "beside");
+      await ctx.dom.click(paletteOption(ctx, "Show beside: Machine") as HTMLElement);
+      await ctx.settle();
+      await beat(80);
+    });
+
+    assert.ok(took.length >= 1, "no pane asked for the keyboard when the split was drawn, so this test cannot tell");
+    const nowFocused = pane(ctx, focusedSide(ctx) === "1" ? 1 : 0).querySelector("[data-machine-id]")?.getAttribute("data-machine-id");
+    const nowOther = pane(ctx, focusedSide(ctx) === "1" ? 0 : 1).querySelector("[data-machine-id]")?.getAttribute("data-machine-id");
+    assert.ok(!took.includes(nowOther as string), `the machine in the unfocused half (${nowOther}) took the keyboard from ${nowFocused} (${took.join(", ")})`);
+  });
+});
+
 // ── its keyboard ─────────────────────────────────────────────────────────────
 
 test("what a person types in a machine's pane goes to that machine, by its own id", async () => {
