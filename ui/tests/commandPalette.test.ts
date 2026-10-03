@@ -87,7 +87,12 @@ test("items come in strip order: tabs, then conversations, then settings", () =>
   );
   assert.deepEqual(
     items.map((i) => i.id),
-    ["tab:tab-1", "tab:tab-2", "conversation:c9", "settings:keys", "settings:agents", "settings:audio", "settings:appearance", "settings:about"]
+    [
+      "tab:tab-1", "tab:tab-2", "conversation:c9",
+      "settings:keys", "settings:agents", "settings:audio", "settings:appearance", "settings:about",
+      // Opening a machine is always on offer, and sits after settings and before anything about a split.
+      "action:new-machine", "action:new-machine-network",
+    ]
   );
 });
 
@@ -287,8 +292,10 @@ const chatTab = (id: string): Tab => ({ id, kind: "chat", title: `Chat ${id}`, c
 const termTab = (id: string): Tab => ({ id, kind: "terminal", title: `Shell ${id}` });
 const pageTab = (id: string): Tab => ({ id, kind: "browser", title: `Page ${id}`, url: "https://example.com" });
 
-const actionItems = (sources: PaletteSources): PaletteItem[] => buildPaletteItems(sources).filter((i) => i.kind === "action");
 const actionOf = (item: PaletteItem) => (item.kind === "action" ? item.action : null);
+/** What the palette offers about the split: every action except opening a machine, which is not about the split. */
+const actionItems = (sources: PaletteSources): PaletteItem[] =>
+  buildPaletteItems(sources).filter((i) => i.kind === "action" && actionOf(i)?.type !== "new-machine");
 
 test("with no word about splits, the palette has no split actions: what it listed before is what it lists", () => {
   const sources: PaletteSources = { tabs: [chatTab("c"), termTab("t")], activeId: "c", conversations: [] };
@@ -366,7 +373,56 @@ test("the split actions come last, under their own heading, and have unique ids"
   const kinds = items.map((i) => i.kind);
   assert.deepEqual([...new Set(kinds)], ["tab", "conversation", "settings", "action"], "no files were offered, so no file group");
   assert.equal(new Set(items.map((i) => i.id)).size, items.length, "two items share an id");
-  assert.ok(items.filter((i) => i.kind === "action").every((i) => i.label === "Split"));
+  assert.ok(actionItems({ tabs: [chatTab("c"), termTab("t")], activeId: "c", conversations: [], split: { showing: false } }).every((i) => i.label === "Split"));
+  const lastMachine = items.map((i) => actionOf(i)?.type).lastIndexOf("new-machine");
+  const firstSplit = items.findIndex((i) => ["split-new-terminal", "show-beside", "close-split"].includes(actionOf(i)?.type ?? ""));
+  assert.ok(lastMachine < firstSplit, "a machine row came after a split row");
+});
+
+// ── opening a machine ───────────────────────────────────────────────────────
+
+const machineItems = (sources: PaletteSources): PaletteItem[] =>
+  buildPaletteItems(sources).filter((i) => actionOf(i)?.type === "new-machine");
+
+test("opening a machine is always offered: with nothing open, with a split showing, and with no word about splits at all", () => {
+  for (const sources of [
+    { tabs: [], activeId: null, conversations: [] } as PaletteSources,
+    { tabs: [chatTab("c")], activeId: "c", conversations: [], split: { showing: true } } as PaletteSources,
+    { tabs: [chatTab("c")], activeId: "c", conversations: [] } as PaletteSources,
+  ]) {
+    assert.equal(machineItems(sources).length, 2);
+  }
+});
+
+test("the network is a row of its own, so it cannot be had by pressing Enter on the first", () => {
+  const [plain, withNetwork] = machineItems({ tabs: [], activeId: null, conversations: [] });
+
+  assert.deepEqual(actionOf(plain), { type: "new-machine", network: false });
+  assert.deepEqual(actionOf(withNetwork), { type: "new-machine", network: true });
+  assert.match(plain.title, /no network/i);
+  assert.doesNotMatch(plain.title, /with network/i);
+  assert.match(withNetwork.title, /with network/i, "the row that gives a machine a network does not say so");
+  assert.notEqual(plain.id, withNetwork.id);
+});
+
+test("the machine rows are under their own heading, and not under the split's", () => {
+  const items = machineItems({ tabs: [], activeId: null, conversations: [] });
+
+  assert.ok(items.every((i) => i.label === "Machine"), "a heading that said Split sat over a row that is not about the split");
+  const markup = renderToStaticMarkup(
+    React.createElement(CommandPalette, { open: true, items: buildPaletteItems({ tabs: [], activeId: null, conversations: [] }), onClose: noop, onSelect: noop }),
+  );
+  assert.match(markup, />Machine</);
+});
+
+test("typing 'machine' finds both rows, and 'network' finds the one that has one", () => {
+  const items = buildPaletteItems({ tabs: [chatTab("c")], activeId: "c", conversations: [], split: { showing: false } });
+
+  assert.deepEqual(filterPalette(items, "machine").map((i) => actionOf(i)), [
+    { type: "new-machine", network: false },
+    { type: "new-machine", network: true },
+  ]);
+  assert.deepEqual(filterPalette(items, "with network").map((i) => actionOf(i)), [{ type: "new-machine", network: true }]);
 });
 
 test("typing 'split' finds the split actions", () => {

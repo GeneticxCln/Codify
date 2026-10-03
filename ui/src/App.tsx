@@ -60,6 +60,8 @@ import {
   archiveConversation,
   attachGoalToConversation,
   closeBrowserWebview,
+  closeMachine,
+  writeMachine,
   closeTerminal,
   navigateBrowserWebview,
   openBrowserWebview,
@@ -69,6 +71,7 @@ import {
   focusBrowserWebview,
   resizeBrowserWebviews,
   type BrowserBounds,
+  openMachine,
   openTerminal,
   resizeTerminal,
   listShellTabs,
@@ -121,11 +124,13 @@ import {
   closeTab,
   emptyTabs,
   focusTab,
+  markMachineExited,
   markTerminalExited,
   openBrowserTab,
   openConversation,
   openBlankTab,
   openEditorTab,
+  openMachineTab,
   openTab,
   openTerminalTab,
   renameBrowserTab,
@@ -146,6 +151,9 @@ import { useSplitFits } from "./useSplitFits";
 import { readSplitRatio, writeSplitRatio } from "./splitPref";
 import { SplitPanes } from "./components/SplitPanes";
 import { EditorPane } from "./components/EditorPane";
+import { MachinePane } from "./components/MachinePane";
+import { createMachineScreens, loadHeadless } from "./machineScreens";
+import { createMachineSurface, type MachineHost } from "./machineSurface";
 import { editorBuffers } from "./editorStore";
 import { createEditorSurface, type EditorHost } from "./editorSurface";
 import { abortableSleep, createSurfaceRegistry, runSurfaceLoop } from "./surfaceLoop";
@@ -192,8 +200,12 @@ import {
   BROWSER_PAGE_TITLED,
   BROWSER_POPUP_REQUESTED,
   listenShellEvent,
+  MACHINE_EXIT,
+  MACHINE_OUTPUT,
   readBrowserPageFocused,
   readBrowserPopupRequested,
+  readMachineExit,
+  readMachineOutput,
   readTerminalExit,
   readTerminalOutput,
   TERMINAL_EXIT,
@@ -320,6 +332,9 @@ export const App: React.FC = () => {
   // would have painted. The engine's copy of the strip is folded in underneath
   // this one by the effect below, which is also where a tab that only the
   // engine knows about arrives.
+  // What every machine's screen shows, held above every pane so the assistant can read one that no pane is showing
+  // (`machineScreens.ts`). One per window, made once.
+  const machineScreens = useMemo(() => createMachineScreens(loadHeadless), []);
   const [tabState, setTabState] = useState<TabState>(() =>
     ensureKeys(
       restoreTabs(
@@ -450,6 +465,37 @@ export const App: React.FC = () => {
       for (const off of offs) off();
     };
   }, []);
+  // A machine's output goes to one place, whether or not a pane is showing it: the screen store, which the pane replays and
+  // follows and the assistant reads (`machineScreens.ts`). It is not the terminal recorder above, on purpose: what a jail
+  // printed is not a terminal's history, and a separate event keeps the two from ever being filed as one.
+  useEffect(() => {
+    let disposed = false;
+    const offs: Array<() => void> = [];
+    const track = (pending: Promise<() => void>): void => {
+      void pending.then((off) => {
+        if (disposed) off();
+        else offs.push(off);
+      });
+    };
+    track(
+      listenShellEvent<unknown>(MACHINE_OUTPUT, (payload) => {
+        const chunk = readMachineOutput(payload);
+        if (chunk) machineScreens.write(chunk.id, chunk.data);
+      }),
+    );
+    track(
+      listenShellEvent<unknown>(MACHINE_EXIT, (payload) => {
+        const id = readMachineExit(payload);
+        if (!id) return;
+        machineScreens.exit(id);
+        setTabState((prev) => markMachineExited(prev, id));
+      }),
+    );
+    return () => {
+      disposed = true;
+      for (const off of offs) off();
+    };
+  }, [machineScreens]);
   // Threads are cached by workspace so switching projects changes only the
   // side-panel list, never the global set of open tabs. A late response for one
   // project cannot replace the list belonging to another.
@@ -990,6 +1036,8 @@ export const App: React.FC = () => {
     activeTabNow?.kind === "terminal" ? activeTabNow : undefined;
   const activeEditorTab =
     activeTabNow?.kind === "editor" ? activeTabNow : undefined;
+  const activeMachineTab =
+    activeTabNow?.kind === "machine" ? activeTabNow : undefined;
   // What the strip says about the editors: text nobody has saved, and text the assistant changed. Read from the store, which
   // lives above the panes, so a tab that is not on screen still says it.
   const bufferSnapshot = useSyncExternalStore(editorBuffers.subscribe, editorBuffers.getSnapshot);
@@ -1005,7 +1053,7 @@ export const App: React.FC = () => {
   // terminal tab whose shell is still running.
   const canInsertClip = drawnSplit
     ? [drawnSplit.left, drawnSplit.right].some((t) => t.kind === "chat")
-    : !activeBrowserTab && !activeTerminalTab && !activeEditorTab;
+    : !activeBrowserTab && !activeTerminalTab && !activeEditorTab && !activeMachineTab;
   const canPasteClip = Boolean(terminalInView) && !terminalInView?.exited;
   const [insertRequest, setInsertRequest] = useState<{ seq: number; text: string } | null>(null);
   const [clipNotice, setClipNotice] = useState<string | null>(null);
@@ -1329,6 +1377,12 @@ export const App: React.FC = () => {
       // An editor's text is held by the store, not by its pane, so the pane going does not free it: the buffer goes
       // with the tab, here and nowhere else.
       if (tab?.kind === "editor") editorBuffers.close(id);
+      // A machine's screen goes with its tab, and so does its jail: everything running in it ends. A closed id stays
+      // closed in the store, so output still in flight does not bring the screen back.
+      if (tab?.kind === "machine") {
+        machineScreens.close(id);
+        void closeMachine(id).catch((err: any) => setError(readRejection(err, "Could not close that machine")));
+      }
       if (tab?.kind === "terminal") {
         // A pane that is not mounted never claimed its terminal, so the store
         // still holds what the shell said while this tab sat in the
@@ -2025,6 +2079,35 @@ export const App: React.FC = () => {
     await startTerminal(selectedWs?.id);
   }, [startTerminal, selectedWs]);
 
+  // A machine is a jailed shell the assistant may also type into (`docs/09` §14). Opening one is the person's act and so is
+  // its network, chosen here, once: nothing the assistant can do opens one or changes that, and there is no function in
+  // this file that would. The shell says why when it cannot make a jail (no `bwrap`, user namespaces refused) and nothing
+  // starts: there is no fallback to an unjailed shell.
+  const startMachine = useCallback(
+    async (workspaceId: string | undefined, network: boolean): Promise<string | null> => {
+      if (!workspaceId) {
+        setError("Pick a workspace before opening a machine");
+        return null;
+      }
+      try {
+        const id = await openMachine(workspaceId, DEFAULT_GRID.cols, DEFAULT_GRID.rows, network);
+        machineScreens.open(id, { cols: DEFAULT_GRID.cols, rows: DEFAULT_GRID.rows });
+        setTabState((prev) => openMachineTab(prev, id, workspaceId, network));
+        return id;
+      } catch (err: any) {
+        setError(readRejection(err, "Could not open a machine"));
+        return null;
+      }
+    },
+    [machineScreens],
+  );
+  const handleOpenMachine = useCallback(
+    async (network: boolean) => {
+      await startMachine(selectedWs?.id, network);
+    },
+    [startMachine, selectedWs],
+  );
+
   // ── the editor (`docs/09` §13) ───────────────────────────────────────────────────────────────────────────────
   //
   // A file is opened by the person (the palette's "Open file", the path on a diff card) or by the assistant
@@ -2123,6 +2206,38 @@ export const App: React.FC = () => {
     editorHostRef.current = editorHost;
   });
 
+  /**
+   * What the assistant's machine tools may see of the window, and the one thing they may do to it: type into a machine tab.
+   * It reads the tabs and the split through `liveRef`, as the editor's host does, because it is called from a poll and not
+   * from a render. It cannot open, close or resize a machine, and writes only through `writeMachine`, which is a Tauri
+   * command with its own id space: a terminal's id is not one it can reach.
+   */
+  const machineHost = useMemo<MachineHost>(
+    () => ({
+      view() {
+        const live = liveRef.current;
+        const active = live.tabState.activeId;
+        const machines = live.tabState.tabs
+          .filter((t) => t.kind === "machine" && t.workspaceId)
+          .map((t) => ({
+            id: t.id,
+            title: t.title,
+            workspaceId: t.workspaceId as string,
+            exited: Boolean(t.exited),
+            network: Boolean(t.network),
+          }));
+        const split = live.drawnSplit;
+        const shown = split ? [split.left.id, split.right.id] : active ? [active] : [];
+        const focused = split ? (split.focused === 0 ? split.left.id : split.right.id) : active;
+        return { machines, shown, focused };
+      },
+      write: (id, data) => writeMachine(id, data),
+      sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+      now: Date.now,
+    }),
+    [],
+  );
+
   // The window's half of the surface bridge (`engine/surfaces.py`): poll the engine for questions about what is on screen
   // and answer them from the buffers, for as long as the window and the engine are up. It is on from the start and not
   // only while an editor is open, because `open_in_editor` is how one gets opened.
@@ -2137,6 +2252,7 @@ export const App: React.FC = () => {
         closeFile: (id) => editorHostRef.current.closeFile(id),
       }),
     );
+    registry.register("machine", createMachineSurface(machineScreens, machineHost));
     const controller = new AbortController();
     void runSurfaceLoop(
       { next: nextSurfaceRequest, answer: answerSurface, sleep: abortableSleep, now: Date.now },
@@ -2144,7 +2260,7 @@ export const App: React.FC = () => {
       controller.signal,
     );
     return () => controller.abort();
-  }, [engineUp]);
+  }, [engineUp, machineScreens, machineHost]);
 
   // ── split panes (`panes.ts` has the rules; `docs/09` §12 says what they are for) ─────────────────────────────
   //
@@ -2440,6 +2556,7 @@ export const App: React.FC = () => {
         break;
       case "action":
         if (item.action.type === "close-split") closeSplit();
+        else if (item.action.type === "new-machine") void handleOpenMachine(item.action.network);
         else if (item.action.type === "split-new-terminal") void splitWithNewTerminal();
         else startSplitWith(item.action.tabId);
         break;
@@ -3546,6 +3663,16 @@ export const App: React.FC = () => {
       autoFocus={autoFocus}
     />
   );
+  const renderMachine = (tab: Tab, autoFocus: boolean): React.ReactElement => (
+    <MachinePane
+      key={tab.id}
+      machineId={tab.id}
+      network={Boolean(tab.network)}
+      exited={tab.exited}
+      screens={machineScreens}
+      autoFocus={autoFocus}
+    />
+  );
   const renderEditor = (tab: Tab, autoFocus: boolean): React.ReactElement => (
     <EditorPane key={tab.id} tabId={tab.id} buffers={editorBuffers} autoFocus={autoFocus} />
   );
@@ -3575,9 +3702,11 @@ export const App: React.FC = () => {
       ? renderTerminal(tab, drawnSplit?.focused === side)
       : tab.kind === "editor"
         ? renderEditor(tab, drawnSplit?.focused === side)
-        : tab.kind === "browser"
-          ? renderBrowser(tab)
-          : renderChat(drawnSplit?.focused === side);
+        : tab.kind === "machine"
+          ? renderMachine(tab, drawnSplit?.focused === side)
+          : tab.kind === "browser"
+            ? renderBrowser(tab)
+            : renderChat(drawnSplit?.focused === side);
 
   return (
     // select-none REMOVED so text cursor and selection work normally in WebKitGTK
@@ -3797,6 +3926,7 @@ export const App: React.FC = () => {
             onArchive={(id) => void handleArchiveConversation(id)}
             onOpenBrowser={handleNewBrowserTab}
             onOpenTerminal={() => void handleOpenTerminal()}
+            onOpenMachine={() => void handleOpenMachine(false)}
             onOpenSettings={() => setIsSettingsOpen(true)}
             loading={conversationsLoading}
           />
@@ -3955,6 +4085,8 @@ export const App: React.FC = () => {
             renderBrowser(activeBrowserTab)
           ) : activeEditorTab ? (
             renderEditor(activeEditorTab, true)
+          ) : activeMachineTab ? (
+            renderMachine(activeMachineTab, true)
           ) : activeTerminalTab ? (
             renderTerminal(activeTerminalTab, true)
           ) : (

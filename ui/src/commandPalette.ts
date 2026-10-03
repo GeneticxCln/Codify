@@ -28,6 +28,7 @@ export type PaletteItemKind = "tab" | "conversation" | "settings" | "action" | "
 /** What a split action asks the shell to do. Data, like everything here: the jump is one `switch` in `App.tsx`. */
 export type PaletteAction =
   | { type: "close-split" }
+  | { type: "new-machine"; network: boolean }
   | { type: "split-new-terminal" }
   | { type: "show-beside"; tabId: string };
 
@@ -154,7 +155,27 @@ export function buildPaletteItems(sources: PaletteSources): PaletteItem[] {
     title: path,
     path,
   }));
-  return [...tabs, ...conversations, ...settings, ...splitActions(sources), ...files];
+  return [...tabs, ...conversations, ...settings, ...machineActions(), ...splitActions(sources), ...files];
+}
+
+/**
+ * Opening a machine: always on offer, and in two rows rather than one with a switch, because the network is the one fact about
+ * a jail that must be chosen on purpose and cannot be changed afterwards. The row that gives it one says so in its title, and
+ * is a different row, so there is no way to get a network by pressing Enter on the first.
+ */
+function machineActions(): PaletteItem[] {
+  const make = (id: string, title: string, network: boolean): PaletteItem => ({
+    id: `action:${id}`,
+    kind: "action",
+    // Its own group: these are not about the split, and a heading that said "Split" over them would be a lie.
+    label: "Machine",
+    title,
+    action: { type: "new-machine", network },
+  });
+  return [
+    make("new-machine", "New machine: a jailed shell, no network", false),
+    make("new-machine-network", "New machine with network: it can reach this computer's network", true),
+  ];
 }
 
 /**
