@@ -159,7 +159,8 @@ pub fn smoke_mode(url: &str, app: &tauri::AppHandle) -> Result<(), String> {
         };
         match found {
             Some(found) if found == asked => {
-                println!("embed-smoke: page geometry {found:?} — the page is where the pane asked")
+                println!("embed-smoke: page geometry {found:?} — the page is where the pane asked");
+                focus_leg(&geometry_sink).await;
             }
             Some(found) => {
                 // A failed run, immediately and in words: this is a
@@ -179,6 +180,68 @@ pub fn smoke_mode(url: &str, app: &tauri::AppHandle) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+/// The page taking the keyboard is heard, with nobody at the display to click.
+///
+/// A press inside a page is the toolkit's business, and the window learns of
+/// it only through [`PAGE_FOCUSED_EVENT`]. This subscribes the way the window
+/// does, gives the page the focus the way a press does
+/// ([`page_layer::take_focus`]), and fails the run if the window is not told:
+/// a coloured edge that cannot follow the keyboard is a feature the shell
+/// cannot deliver, not an environment fact.
+///
+/// What it does **not** prove is that a *person's* click makes WebKit take the
+/// focus — that is the toolkit's behaviour and this leg stands in for it. It
+/// was checked once by hand, with the event injected through XTest into an
+/// Xvfb display (a press inside the page was reported; no press, and a press
+/// outside it, were not), and that check is not part of this run.
+async fn focus_leg(app: &tauri::AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tauri::Listener;
+    let heard = Arc::new(AtomicBool::new(false));
+    let seen = heard.clone();
+    // The tab id is what the UI acts on, so it is what is checked: the label
+    // is `browser-` and the id, and the smoke's page is `browser-smoke`.
+    let wanted = SMOKE_PAGE_LABEL
+        .trim_start_matches(LABEL_PREFIX)
+        .to_string();
+    let listener = app.listen(PAGE_FOCUSED_EVENT, move |event| {
+        if let Ok(fact) = serde_json::from_str::<BrowserPageFocused>(event.payload()) {
+            if fact.tab_id == wanted {
+                seen.store(true, Ordering::SeqCst);
+            }
+        }
+    });
+    let asked = app
+        .get_window("main")
+        .ok_or_else(|| "the main window does not exist".to_string())
+        .and_then(|window| page_layer::take_focus(&window, SMOKE_PAGE_LABEL));
+    if let Err(why) = asked {
+        println!("embed-smoke: FAILED the page could not be given the focus ({why})");
+        std::process::exit(1);
+    }
+    // The signal is synchronous and the event is queued behind it: a second
+    // is generous, and a run that needs more is a run that should say so.
+    for _ in 0..20 {
+        if heard.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    app.unlisten(listener);
+    if heard.load(Ordering::SeqCst) {
+        println!(
+            "embed-smoke: page focus reported — the window is told which page took the keyboard"
+        );
+    } else {
+        println!(
+            "embed-smoke: FAILED a page was given the keyboard and the window was not told \
+             ({PAGE_FOCUSED_EVENT}) — the split's focus marker would stay where it was"
+        );
+        std::process::exit(1);
+    }
 }
 
 /// The script the smoke page runs: two animation frames, then the mark.

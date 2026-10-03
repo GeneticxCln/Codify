@@ -67,6 +67,32 @@ export const BROWSER_PAGE_LOADING = "browser-page-loading";
 export const BROWSER_PAGE_LOADED = "browser-page-loaded";
 export const BROWSER_PAGE_TITLED = "browser-page-titled";
 
+/**
+ * The keyboard went into a browser page: the toolkit's own focus changed to it.
+ *
+ * A page is a native view, so the app's DOM never sees a press inside one and
+ * nothing in the window moves when a person clicks into a page that sits beside
+ * a chat. The shell reports the toolkit's focus instead, and the split's focus
+ * marker follows it. A report, not a request: the window acts on it only for a
+ * page it is drawing.
+ */
+export const BROWSER_PAGE_FOCUSED = "browser-page-focused";
+
+/**
+ * The tab id in a `browser-page-focused` payload, or null when the payload is
+ * not one.
+ *
+ * Validated for the reason every reader here is: the payload crosses a process
+ * boundary and feeds a handler that moves the focus, so anything that is not
+ * an id must move it nowhere. The id is *not* checked against the open tabs
+ * here — which tabs exist is the window's to know, and it asks.
+ */
+export function readBrowserPageFocused(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const tab_id = (payload as { tab_id?: unknown }).tab_id;
+  return typeof tab_id === "string" && tab_id.length > 0 ? tab_id : null;
+}
+
 /** A terminal's output, as it arrives. */
 export const TERMINAL_OUTPUT = "terminal-output";
 
