@@ -271,6 +271,9 @@ def fixer_files(prompt: str) -> str:
 #   [stall]                   a step run stops after `write`: the conductor that cannot finish
 #   [editor path=P old=X new=Y]  look at the person's editor, open P, change X to Y in the open text (no spaces
 #                             inside a value). It edits the open buffer and nothing else: the person saves
+#   [machine run=CMD]         look at the person's machine, type CMD into it (everything up to the closing bracket,
+#                             spaces and all) and read what it printed; `[machine run=CMD key=Ctrl-C]` then presses
+#                             that named key. It never opens a machine: only a person can, and it is not offered a way
 #
 # It never calls a tool it was not offered, which is the property that keeps a scripted run honest: a step
 # move before a plan exists, or `ask_user` during an approved run, is the engine's to refuse, not ours to try.
@@ -335,6 +338,16 @@ def conductor_move(payload: dict[str, Any]) -> tuple[str, dict[str, Any]] | str 
         if name == "edit_editor":
             return name, {"path": fields["path"], "old_text": fields["old"], "new_text": fields["new"]}
         return f"I changed {fields['path']} in your editor. It is not saved: you decide whether to keep it."
+    machine = re.search(r"\[machine run=([^\]]*?)(?: key=(\S+))?\]", request)
+    if machine and machine.group(1).strip() and "read_machine" in offered:
+        name = next_of(["read_machine", "run_in_machine", *(["key_in_machine"] if machine.group(2) else [])])
+        if name == "read_machine":
+            return name, {}
+        if name == "run_in_machine":
+            return name, {"command": machine.group(1).strip()}
+        if name == "key_in_machine":
+            return name, {"key": machine.group(2)}
+        return f"I ran `{machine.group(1).strip()}` in your machine, and read what it printed."
     if request.endswith("?"):
         return f"Fake conductor here: with a real model I would answer \u201c{request[:160]}\u201d."
     if "[ask]" in request and "ask_user" in offered and "ask_user" not in called:
