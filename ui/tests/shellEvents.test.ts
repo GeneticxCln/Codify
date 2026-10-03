@@ -28,7 +28,11 @@ import {
   BROWSER_PAGE_FOCUSED,
   BROWSER_POPUP_REQUESTED,
   listenShellEvent,
+  MACHINE_EXIT,
+  MACHINE_OUTPUT,
   readBrowserPageFocused,
+  readMachineExit,
+  readMachineOutput,
   readBrowserPopupRequested,
 } from "../src/shellEvents.ts";
 
@@ -87,6 +91,21 @@ test("a page taking the keyboard names the tab, and only a tab", () => {
   // is not a tab id must move it nowhere.
   for (const payload of [null, undefined, "tab-1", 42, [], {}, { tab_id: "" }, { tab_id: 5 }, { tab_id: null }]) {
     assert.equal(readBrowserPageFocused(payload), null, `${JSON.stringify(payload)} was read as a tab`);
+  }
+});
+
+test("a machine's output and exit are their own events, and are read as strictly as a terminal's", () => {
+  assert.equal(MACHINE_OUTPUT, "machine-output");
+  assert.equal(MACHINE_EXIT, "machine-exit");
+  assert.deepEqual(readMachineOutput({ id: "mach-1", data: "ls\r\n" }), { id: "mach-1", data: "ls\r\n" });
+  // An empty chunk is a real thing the reader thread can emit, and is not refused.
+  assert.deepEqual(readMachineOutput({ id: "mach-1", data: "" }), { id: "mach-1", data: "" });
+  for (const payload of [null, undefined, "x", 4, [], {}, { id: "", data: "x" }, { id: 1, data: "x" }, { id: "mach-1" }, { id: "mach-1", data: 5 }]) {
+    assert.equal(readMachineOutput(payload), null, `${JSON.stringify(payload)} was read as output`);
+  }
+  assert.equal(readMachineExit({ id: "mach-1" }), "mach-1");
+  for (const payload of [null, undefined, "mach-1", 4, [], {}, { id: "" }, { id: 7 }]) {
+    assert.equal(readMachineExit(payload), null, `${JSON.stringify(payload)} was read as an exit`);
   }
 });
 

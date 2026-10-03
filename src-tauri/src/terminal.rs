@@ -36,9 +36,81 @@ use std::sync::{Arc, Mutex};
 /// from, and the child itself — kept whole rather than as a bare signaller, so
 /// close can reap it and escalate past a SIGHUP the shell chose to ignore.
 pub struct Session {
-    writer: Box<dyn Write + Send>,
-    master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    pub(crate) writer: Box<dyn Write + Send>,
+    pub(crate) master: Box<dyn MasterPty + Send>,
+    pub(crate) child: Box<dyn Child + Send + Sync>,
+}
+
+impl Session {
+    /// Send bytes to the process on the PTY's slave end.
+    pub(crate) fn send(&mut self, data: &str) -> Result<(), String> {
+        self.writer
+            .write_all(data.as_bytes())
+            .map_err(|e| format!("write failed: {e}"))?;
+        self.writer
+            .flush()
+            .map_err(|e| format!("flush failed: {e}"))
+    }
+
+    /// Resize the PTY, which is what makes `ls` wrap at the pane's width.
+    pub(crate) fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
+        self.master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| format!("resize failed: {e}"))
+    }
+}
+
+/// Open a PTY and start `cmd` on its slave end: the one place a pane's process is
+/// spawned, for the user's terminal and for a machine alike.
+///
+/// It is shared **plumbing**, not shared authority. What differs between the two
+/// callers is the `CommandBuilder` they hand in — the user's own shell here in
+/// [`open`], a `bwrap` jail in `machine.rs` — and each keeps its own registry and
+/// its own ids, so a terminal id can never be written through a machine's commands
+/// or the reverse. Keeping `native_pty_system()` and `spawn_command()` in this one
+/// function is what keeps the spawn freeze's table short and honest.
+pub(crate) fn spawn_pty(
+    cmd: CommandBuilder,
+    cols: u16,
+    rows: u16,
+) -> Result<(Session, Box<dyn Read + Send>), String> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("failed to open a pty: {e}"))?;
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| format!("failed to start the process: {e}"))?;
+    // The slave is the child's end; the parent keeps the master. Dropping the
+    // slave here is what makes the PTY behave like a terminal rather than a pipe.
+    drop(pair.slave);
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| format!("failed to read the pty: {e}"))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| format!("no pty writer: {e}"))?;
+    Ok((
+        Session {
+            writer,
+            master: pair.master,
+            child,
+        },
+        reader,
+    ))
 }
 
 /// The terminal backend the shell hands around.
@@ -213,45 +285,13 @@ pub fn open(
     rows: u16,
 ) -> Result<String, String> {
     let cwd = pin_cwd(root_path)?;
-
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("failed to open a pty: {e}"))?;
-
-    let cmd = shell_command(cwd);
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("failed to start the shell: {e}"))?;
-    // The slave is the child's end; the parent keeps the master. Dropping the
-    // slave here is what makes the PTY behave like a terminal rather than a pipe.
-    drop(pair.slave);
+    let (session, reader) = spawn_pty(shell_command(cwd), cols, rows)?;
 
     let id = {
         let mut guard = sessions.lock().map_err(|_| "terminal state poisoned")?;
         guard.seq += 1;
         let id = format!("term-{}", guard.seq);
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| format!("failed to read the pty: {e}"))?;
-        guard.sessions.insert(
-            id.clone(),
-            Session {
-                writer: pair
-                    .master
-                    .take_writer()
-                    .map_err(|e| format!("no pty writer: {e}"))?,
-                master: pair.master,
-                child,
-            },
-        );
+        guard.sessions.insert(id.clone(), session);
 
         // The reader thread holds no lock and no session reference: it owns the
         // reader and reports by id, so a terminal can be closed while its thread
@@ -287,15 +327,7 @@ pub fn write(sessions: &Arc<Mutex<Terminals>>, id: &str, data: &str) -> Result<(
         .sessions
         .get_mut(id)
         .ok_or_else(|| format!("no such terminal: {id}"))?;
-    session
-        .writer
-        .write_all(data.as_bytes())
-        .map_err(|e| format!("write failed: {e}"))?;
-    session
-        .writer
-        .flush()
-        .map_err(|e| format!("flush failed: {e}"))?;
-    Ok(())
+    session.send(data)
 }
 
 /// Resize the PTY, which is what makes `ls` wrap at the pane's width.
@@ -310,15 +342,7 @@ pub fn resize(
         .sessions
         .get_mut(id)
         .ok_or_else(|| format!("no such terminal: {id}"))?;
-    session
-        .master
-        .resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("resize failed: {e}"))
+    session.resize(cols, rows)
 }
 
 /// Close a terminal and reap the shell behind it.
@@ -360,7 +384,7 @@ pub fn close(sessions: &Arc<Mutex<Terminals>>, id: &str) -> Result<(), String> {
 /// stuck in uninterruptible IO — is handed to a detached thread that waits for
 /// as long as it takes, so the entry is reaped eventually and close never
 /// hangs the window that asked for it.
-fn kill_and_reap(mut child: Box<dyn Child + Send + Sync>) {
+pub(crate) fn kill_and_reap(mut child: Box<dyn Child + Send + Sync>) {
     // An error here is ESRCH — the shell is already gone — which is success,
     // the same reading `SandboxService._signal_alone` gives a vanished pid.
     let _ = child.kill();

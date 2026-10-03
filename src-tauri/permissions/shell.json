@@ -57,6 +57,26 @@
       "commands": { "allow": ["codify_terminal_close"] }
     },
     {
+      "identifier": "allow-codify-machine-open",
+      "description": "Opens a machine: a jailed shell on a registered workspace, which the assistant may also type into. The window chooses whether it has a network, once, here; nothing afterwards can change it, and there is no fallback to an unjailed shell.",
+      "commands": { "allow": ["codify_machine_open"] }
+    },
+    {
+      "identifier": "allow-codify-machine-write",
+      "description": "Types into one machine, by its own id. A terminal's id is refused: machines are a separate registry.",
+      "commands": { "allow": ["codify_machine_write"] }
+    },
+    {
+      "identifier": "allow-codify-machine-resize",
+      "description": "Resizes one machine's pseudo-terminal so output wraps at its pane's width.",
+      "commands": { "allow": ["codify_machine_resize"] }
+    },
+    {
+      "identifier": "allow-codify-machine-close",
+      "description": "Closes a machine and ends everything running in its jail.",
+      "commands": { "allow": ["codify_machine_close"] }
+    },
+    {
       "identifier": "allow-codify-browser-open",
       "description": "Opens a browser webview. The webview itself holds no permission (capabilities/browser.json is empty), so this grants the *main window* the ability to open one — it does not grant that page anything.",
       "commands": { "allow": ["codify_browser_open"] }
@@ -105,7 +125,7 @@
   "set": [
     {
       "identifier": "shell",
-      "description": "Every command this app defines, as twenty named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser/ fails the build's test leg if the two lists ever differ. Permissions are not where a webview is decided: this set is referenced only by capabilities/default.json, whose `webviews` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.",
+      "description": "Every command this app defines, as twenty-four named permissions and no wildcard. The point of listing them one by one is that a command added to `invoke_handler!` without a line here does not become reachable — it is stripped from the handler at compile time, and src-tauri/src/browser/ fails the build's test leg if the two lists ever differ. Permissions are not where a webview is decided: this set is referenced only by capabilities/default.json, whose `webviews` is `[\"main\"]`, and capabilities/browser.json keeps an empty list for `browser-*`.",
       "permissions": [
         "allow-codify-get-engine-info",
         "allow-codify-engine-status",
@@ -118,6 +138,10 @@
         "allow-codify-terminal-write",
         "allow-codify-terminal-resize",
         "allow-codify-terminal-close",
+        "allow-codify-machine-open",
+        "allow-codify-machine-write",
+        "allow-codify-machine-resize",
+        "allow-codify-machine-close",
         "allow-codify-browser-open",
         "allow-codify-browser-navigate",
         "allow-codify-browser-focus",

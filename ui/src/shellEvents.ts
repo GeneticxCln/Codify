@@ -139,6 +139,36 @@ export function readTerminalExit(payload: unknown): string | null {
 }
 
 /**
+ * A machine's output, as it arrives. A different event from `terminal-output` on purpose: the app's terminal
+ * recorder files every chunk of that one into the workspace scrollback, and what a jail printed is not a
+ * terminal's history (`docs/09` §14).
+ */
+export const MACHINE_OUTPUT = "machine-output";
+
+/** A machine's shell finished. The screen stays; the input does not. */
+export const MACHINE_EXIT = "machine-exit";
+
+/**
+ * The one chunk of `machine-output`, or null when the payload is not one. Validated like
+ * [`readTerminalOutput`], for the same reason: `data` is written straight into a screen, so a payload with the
+ * right shape and the wrong field types would reach it as `"undefined"`.
+ */
+export function readMachineOutput(payload: unknown): { id: string; data: string } | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const { id, data } = payload as { id?: unknown; data?: unknown };
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (typeof data !== "string") return null;
+  return { id, data };
+}
+
+/** The machine id in a `machine-exit` payload, or null when the payload is not one. */
+export function readMachineExit(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const id = (payload as { id?: unknown }).id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+/**
  * Subscribe to a shell event; resolves to the unsubscribe function.
  *
  * Resolving to a function even when there is nothing to subscribe to is the

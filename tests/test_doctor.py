@@ -51,6 +51,14 @@ STUBS: dict[str, str] = {
     ),
     "uv": "#!/bin/sh\nexit 0\n",
     "xvfb-run": "#!/bin/sh\nexit 0\n",
+    # `bwrap --version` answers; building a jail (anything else) fails when DOCTOR_STUB_BWRAP_CANNOT_JAIL is
+    # set: bubblewrap installed on a kernel or an AppArmor policy that refuses it user namespaces.
+    "bwrap": (
+        '#!/bin/sh\n'
+        'if [ "$1" = --version ]; then echo "bubblewrap 0.9.0"; exit 0; fi\n'
+        '[ -n "$DOCTOR_STUB_BWRAP_CANNOT_JAIL" ] && { echo "bwrap: No permissions to create new namespace" >&2; exit 1; }\n'
+        'exit 0\n'
+    ),
 }
 
 
@@ -198,6 +206,19 @@ class TestEveryMissingPieceIsNamedAndFixable(DoctorCase):
         )
 
         self.assertMissing(self.doctor(DISPLAY=":0"), "cannot create a virtual environment", "python3-venv")
+
+    def test_no_bubblewrap_is_missing_because_the_machine_cannot_be_isolated_without_it(self) -> None:
+        self.remove("bwrap")
+
+        self.assertMissing(self.doctor(DISPLAY=":0"), "bwrap (bubblewrap) is not installed", "pacman -S bubblewrap")
+
+    def test_bubblewrap_that_cannot_build_a_jail_is_named_with_where_to_look(self) -> None:
+        # Installed is not enough: user namespaces are a kernel switch and an AppArmor policy, and only
+        # asking tells. The machine's containment tests build a real jail and would fail without one.
+        done = self.doctor(DISPLAY=":0", DOCTOR_STUB_BWRAP_CANNOT_JAIL="1")
+
+        self.assertMissing(done, "bwrap is installed but cannot build a jail", "max_user_namespaces", "apparmor_restrict_unprivileged_userns")
+        self.assertIn("ok       bwrap (bubblewrap 0.9.0)", done.stdout)
 
     def test_no_git_is_missing(self) -> None:
         self.remove("git")

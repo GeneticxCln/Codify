@@ -153,6 +153,25 @@ else
 fi
 echo
 
+echo "Machine tab (bubblewrap: 'make ci' needs it, because the machine's containment tests build a real jail)"
+if have bwrap; then
+  ok "bwrap ($(run bwrap --version 2>/dev/null))"
+  # Asking is the only honest test: a kernel switch (kernel.unprivileged_userns_clone, user.max_user_namespaces)
+  # or an AppArmor policy decides whether a jail can be made, and the sysctls cannot see the second.
+  if run bwrap --unshare-all --ro-bind / / --dev /dev --proc /proc true >/dev/null 2>&1; then
+    ok "bwrap can build a jail here (user namespaces are available to it)"
+  else
+    bad "bwrap is installed but cannot build a jail here" \
+"User namespaces are refused to it. Check 'sysctl user.max_user_namespaces' (0 disables them), Debian's
+  'sysctl kernel.unprivileged_userns_clone' (0 disables them for non-root), and on Ubuntu 24.04+ the AppArmor
+  restriction 'sysctl kernel.apparmor_restrict_unprivileged_userns'. Run: bwrap --unshare-all --ro-bind / / true   to see its own message."
+  fi
+else
+  bad "bwrap (bubblewrap) is not installed, and the machine tab cannot be isolated without it" \
+    "Arch/CachyOS: sudo pacman -S bubblewrap   Debian/Ubuntu: sudo apt install bubblewrap   Fedora: sudo dnf install bubblewrap  (WebKitGTK's own sandbox uses it too)"
+fi
+echo
+
 echo "Git"
 if have git; then ok "$(run git --version)"; else bad "git is not installed" "Install git."; fi
 echo
