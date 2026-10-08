@@ -29,7 +29,7 @@ Two design consequences follow:
 
 | Protocol | Endpoint | Credential | Notes |
 |---|---|---|---|
-| `ollama` | `GET {base}/api/tags` | none | reports size/parameter count; **no capability metadata** |
+| `ollama` | `GET {base}/api/tags`, then `POST {base}/api/show` per model for its window (§2.1) | none | reports size/parameter count; **no capability metadata** |
 | `openai_compat` | `GET {base}/models` | `Authorization: Bearer <key>` | OpenAI, DeepSeek, Groq, OpenRouter, any compatible endpoint |
 | `anthropic` | `GET {base}/v1/models?limit=…` | `x-api-key` + `anthropic-version` | uses `display_name`; the default page size is small, so `limit` is set explicitly |
 | `google` | `GET {base}/models?key=…` | query key | follows `nextPageToken` (≤5 pages) and **strips the `models/` resource prefix** |
@@ -49,6 +49,36 @@ Rules that hold for every provider:
 4. **Isolate failures.** One provider's 401 or unreachable host must not empty the picker. Each
    provider returns its own `ok`/`count`/`error`; 401/403 is reported as "check the API key".
 5. **Bound the work.** 8 s per provider, 500 models per provider, all providers queried concurrently.
+
+### 2.1 The context window
+
+Every entry carries `context_tokens`: how many tokens the provider says the model can hold, or `null`.
+The picker shows it as a badge (§6). It is **copied from the provider's own response and never derived**:
+
+| Protocol | Read from | Notes |
+|---|---|---|
+| `anthropic` | `max_input_tokens` | the input window; the output cap (`max_tokens`) is a different number and is not read |
+| `google` | `inputTokenLimit` | |
+| `openai_compat` | the first present of `context_length`, `context_window`, `max_context_length`, `max_model_len` | OpenAI itself reports none; OpenRouter, Groq, Mistral and vLLM each use one of these. A provider that uses another name gives `null`, which is the honest answer |
+| `ollama` | `POST /api/show`, `model_info["<architecture>.context_length"]` | `/api/tags` carries no window, so this is one extra request per model (below) |
+
+A value is accepted only if it is a positive whole number no larger than `MAX_CONTEXT_TOKENS` (100 million):
+a boolean, a string, zero, a fraction or a nonsense figure is dropped to `null`. **Unknown stays unknown**: no
+number is taken from a model's name (`...-128k`), and no model is given a default.
+
+Ollama's window costs a request per model, so it is bounded like everything else here and **can never fail
+or slow the list**: only the newest 64 models are asked (`OLLAMA_SHOW_MAX_MODELS`), 8 at a time
+(`OLLAMA_SHOW_CONCURRENCY`), inside one 3 s budget for the whole batch (`OLLAMA_SHOW_BUDGET_S`); a request
+still running when the budget ends is cancelled and awaited, and the model keeps `context_tokens: null`. A
+success is cached by `(base_url, name, digest)`, so a re-pulled model is asked again and an unchanged one
+never is; a failure is **not** cached, so a slow first look does not hide the number for good.
+
+**A model's maximum is not what a request gets.** Ollama gives a request the `num_ctx` it is asked for, not the
+model's trained window. `GET /models` therefore also carries a `conductor` block, computed on every request
+and never cached: `{provider, model, source, num_ctx}`: the model the conversation runs on when nothing is
+picked (Settings' conductor model, else the scribe row it borrows; `source` says which), and the `num_ctx` that
+row asks Ollama for (`null` when none is set, so Ollama's own default applies). `null` for the whole block
+means no conductor model is configured yet.
 
 ## 3. Ordering
 
@@ -109,7 +139,7 @@ is therefore visible in the already-open app, with no restart and no reinstall.
   "models": [
     {"id": "just-released-model", "name": "just-released-model", "provider": "deepseek",
      "protocol": "openai_compat", "description": "deepseek · owned by fake",
-     "created": 1900000000.0, "supports_chat": null}
+     "created": 1900000000.0, "supports_chat": null, "context_tokens": 128000}
   ],
   "providers": [
     {"provider": "deepseek", "protocol": "openai_compat", "ok": true, "count": 2, "error": null},
@@ -117,15 +147,26 @@ is therefore visible in the already-open app, with no restart and no reinstall.
      "error": "no API key configured for this provider"}
   ],
   "fetched_at": 1774000000.0,
-  "cached": false
+  "cached": false,
+  "conductor": {"provider": "ollama", "model": "qwen3:8b", "source": "scribe", "num_ctx": 8192}
 }
 ```
+
+`context_tokens` is `null` when the provider did not say (§2.1). `conductor` is added after the cache (§2.1).
 
 An id is not unique across providers (the same model can be served locally and by an API), so the UI
 keys selections on the `(provider, id)` pair.
 
 ## 6. UI contract
 
+* **Each row says how much it can hold** (`contextBadge`, `ui/src/modelSignals.ts`): `128K ctx` for the provider's
+  figure (131,072 and 128,000 both read "128K"; the exact number is in the badge's tooltip). An **Ollama** row
+  says what a request will actually get, because that is what matters: `8K of 128K` when the conversation's row
+  asks for 8,192 of a model that supports 131,072; `up to 128K` when it sets no `num_ctx` (Ollama's own
+  default window applies, so claiming the maximum would be false). A surface that does not know the conductor's
+  `num_ctx` (an older engine) claims only the model's own maximum. A model nobody described has no badge.
+* **The model marked `default`** is the one the conversation runs on when nothing is picked (§2.1, `conductor`).
+  Picking it again clears the pick; the full rules are `docs/09` §10.20.
 * The command-bar menu leads with "In use by roles" and "Ran recently", then groups what is left by
   provider with each provider's count; providers that answered nothing are listed **with their
   reason**, because a silently absent provider reads as a Codify bug rather than a configuration gap.

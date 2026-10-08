@@ -336,16 +336,24 @@ class AgentOrchestrator:
         failure.role = role
         return failure
 
-    def _targets(self, role: AgentRole) -> tuple[AgentConfig, list[tuple[str, AgentConfig]]]:
+    def _targets(
+        self, role: AgentRole, primary: AgentConfig | None = None
+    ) -> tuple[AgentConfig, list[tuple[str, AgentConfig]]]:
         """The targets this role may be called on, primary first.
 
         The fallback is optional and configured per role (Settings → Agent Roles):
         a local model is a fine fallback for the scribe and a bad one for the
         fixer, so the choice cannot be a global setting.
+
+        `primary` replaces the role's own row as the *first* target for one call, and nothing else: the
+        fallback is still the role row's (a pick does not carry its own), and nothing is written. It exists
+        for a turn's plain reply on the model the person picked in the command bar; no role's `run_agent`
+        passes one.
         """
-        cfg = self.registry.get_config(role)
+        base = self.registry.get_config(role)
+        cfg = primary if primary is not None else base
         targets: list[tuple[str, Any]] = [("primary", cfg)]
-        fallback = self.registry.fallback_config_for(cfg)
+        fallback = self.registry.fallback_config_for(base)
         if fallback is not None:
             targets.append(("fallback", fallback))
         return cfg, targets
@@ -461,15 +469,18 @@ class AgentOrchestrator:
         self, role: AgentRole, goal_id: str, step_id: str | None, user_prompt: str,
         system: str | None = None, raw_output: bool = False,
         accept: Callable[[Any], None] | None = None,
+        primary: AgentConfig | None = None,
     ) -> Any:
         """Run one sub-agent call, on its primary target or its fallback.
 
         Per-role registry config (Settings → Agents) is the single source of
         truth: model, temperature, max_tokens, and system-prompt override all
         come from the role's AgentConfig. The command-bar model selection does
-        not override roles here, and nothing writes it onto them either: it is
-        recorded on the goal (`goals.provider/model`) and a role runs on its own
-        configuration (docs/00 §6.2).
+        not override *roles*, and nothing writes it onto them: a role runs on its
+        own configuration (docs/00 §6.2). The one exception is a turn's own reply,
+        which passes `primary` (the person's pick, built from the borrowed row by
+        `ExecutorService._picked_config`) so that the call is made on the model
+        they chose; the row is not changed and the fallback is still the row's.
 
         The fallback exists so a goal keeps running when the primary cannot be
         used — no key stored, the endpoint down, the model retired, or a reply the
@@ -502,7 +513,7 @@ class AgentOrchestrator:
         """
         goal = self.goals.get(goal_id)
         _ = goal  # kept for interface symmetry; config comes from the registry
-        cfg, targets = self._targets(role)
+        cfg, targets = self._targets(role, primary)
         system = system or cfg.system_prompt_override or DEFAULT_PROMPTS[role]
         failures: list[tuple[str, str, ProviderError | AgentOutputInvalid]] = []
 

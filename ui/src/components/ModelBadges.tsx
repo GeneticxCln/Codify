@@ -19,12 +19,23 @@ import type { modelBadges } from "../modelSignals";
  * - **last run** is `info`, no glyph: it is news, not a severity.
  * - **not a chat model** is `warning`, and `Badge` puts the triangle beside it, so the one badge
  *   that means "this will probably not work" is also the one with a shape.
+ * - **default** and the **context window** are tags too: where the conversation runs unless you pick,
+ *   and how much it can hold (`contextBadge` says which of two different numbers it is showing).
  *
  * Shared by the composer's model menu and by the model field in Settings: both draw the same list
  * from the same signals, and two copies of the markup is how the two menus drifted apart.
  */
 export const ModelBadges: React.FC<{ badges: ReturnType<typeof modelBadges> }> = ({ badges }) => (
   <>
+    {badges.isDefault ? (
+      <Badge
+        tone="neutral"
+        icon={false}
+        title="The model Settings gives the conversation. It answers unless you pick another here."
+      >
+        default
+      </Badge>
+    ) : null}
     {badges.roles ? (
       <Badge tone="neutral" icon={false} title={badges.rolesTitle} className="max-w-[11rem]">
         <span className="truncate">{badges.roles}</span>
@@ -38,6 +49,11 @@ export const ModelBadges: React.FC<{ badges: ReturnType<typeof modelBadges> }> =
     {badges.notChat ? (
       <Badge tone="warning" title="The provider says this model does not support chat">
         not a chat model
+      </Badge>
+    ) : null}
+    {badges.context ? (
+      <Badge tone="neutral" icon={false} title={badges.context.title}>
+        {badges.context.label}
       </Badge>
     ) : null}
   </>

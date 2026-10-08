@@ -13,7 +13,6 @@ import {
   EngineInfo,
   Event,
   Goal,
-  GoalMode,
   ModelCatalog,
   ModelOption,
   AgentConfig,
@@ -22,6 +21,7 @@ import {
   ShellTabRow,
 } from "./types";
 import { buildModelSignals } from "./modelSignals";
+import { keepPick, pickFromMenu, resolveModelChoice } from "./modelChoice";
 import { openEngineStream } from "./engineStream";
 import {
   listWorkspaces,
@@ -294,7 +294,10 @@ export const App: React.FC = () => {
     fetched_at: 0,
     cached: false,
   });
-  const [selectedModel, setSelectedModel] = useState<ModelOption | undefined>();
+  // What the person *picked* in the command bar, and nothing else. What is shown and what runs is
+  // `modelChoice` below: a pick, else the model Settings gives the conversation, else (nothing configured)
+  // a local model. Kept apart so a default is never mistaken for a choice and sent as one.
+  const [pickedModel, setPickedModel] = useState<ModelOption | undefined>();
   const [modelsLoading, setModelsLoading] = useState(false);
   // Signals the model menu orders by. Both are things the engine already records:
   // which model each role is configured with, and which models actually answered.
@@ -304,11 +307,6 @@ export const App: React.FC = () => {
   // The stream callbacks below outlive a render, so what they ask about the composer's mode is read here.
   const modeRef = useRef(mode);
   modeRef.current = mode;
-  // What the goal is for, orthogonal to how it executes: a design deliverable
-  // drafts or revises the workspace's own brand contract.
-  const [goalMode, setGoalMode] = useState<GoalMode>("normal");
-  // Opt-in parallelism: independent (path-disjoint) steps of a goal run concurrently.
-  const [parallel, setParallel] = useState(false);
   // Opt-in recording: keep every model call this next goal makes so the run can
   // be replayed without a provider. Off by default and disarmed once sent — a
   // recording is a copy of the model's output about the user's code, and a
@@ -799,24 +797,11 @@ export const App: React.FC = () => {
     try {
       const catalog = await fetchModelCatalog(refresh);
       setModelCatalog(catalog);
-      setSelectedModel((prev) => {
-        // Keep the user's pick while it still exists. Ids repeat across
-        // providers (e.g. a model served both locally and via an API), so the
-        // pair is what identifies a choice.
-        if (
-          prev &&
-          catalog.models.some(
-            (m) => m.id === prev.id && m.provider === prev.provider,
-          )
-        ) {
-          return prev;
-        }
-        // Otherwise prefer a local model: no tokens, no latency, no surprise.
-        return (
-          catalog.models.find((m) => m.protocol === "ollama") ??
-          catalog.models[0]
-        );
-      });
+      // Keep the person's pick while it still exists (ids repeat across providers, so the pair identifies
+      // it) and keep one they typed by hand whatever the catalog says: it routes the next turn, so dropping
+      // it here would answer that turn on a model other than the one on screen. What is shown when nothing
+      // is picked is `modelChoice`, not state.
+      setPickedModel((prev) => keepPick(prev, catalog.models));
     } catch (err: any) {
       // Discovery failure must not wedge the picker: keep the last catalog
       // and say why the list may be stale.
@@ -845,6 +830,13 @@ export const App: React.FC = () => {
 
   // Derived, not stored: the same configs and runs already drive the settings
   // screen, so a second copy would only be a way for the two pickers to disagree.
+  // What the bar shows and what a turn runs on: the person's pick, else the model Settings names, else a local
+  // model. Derived and not stored, so it follows Settings the moment the catalog (which carries the conductor)
+  // is read again. See `modelChoice.ts` for the rules and why a default is never sent as if it were a choice.
+  const modelChoice = useMemo(
+    () => resolveModelChoice({ catalog: modelCatalog.models, picked: pickedModel, conductor: modelCatalog.conductor }),
+    [modelCatalog, pickedModel],
+  );
   const modelSignals = useMemo(
     () => buildModelSignals(agentConfigs, recentRuns),
     [agentConfigs, recentRuns],
@@ -3148,7 +3140,7 @@ export const App: React.FC = () => {
       );
       return false;
     }
-    if (!selectedModel) {
+    if (!modelChoice.shown) {
       setError(
         "No model available. Add an API key in Settings → Provider Keys (or start Ollama) " +
           "and the provider's models will load automatically.",
@@ -3239,21 +3231,20 @@ export const App: React.FC = () => {
       // A turn, not a goal. The gate classifies what was said and the engine
       // decides the shape — a question is answered from one model call, and
       // anything else runs the full pipeline. The composer's run flags (dry
-      // run, plan-only, parallel, the design/knowledge modes) deliberately do
-      // NOT come along: sending them would be asking the client to make the
-      // decision, which is the thing that produced a plan for "hi".
+      // run, plan-only, mode) deliberately do NOT come along: sending them
+      // would be asking the client to make the decision, which is the thing
+      // that produced a plan for "hi". The model is the one choice that does:
+      // a pick routes the turn's own calls (the conversation and its tool
+      // loop), and with nothing picked the engine uses the model Settings
+      // names, so nothing is sent for it (`resolveModelChoice`).
       const goal = await createTurn(
         threadId,
         promptText,
-        selectedModel.provider,
-        selectedModel.id,
+        modelChoice.override?.provider,
+        modelChoice.override?.id,
         record,
       );
-      // Cleared once dispatched: a design deliverable is what THIS goal is for,
-      // not a standing preference — leaving it armed would quietly draft a
-      // DESIGN.md for the next prompt the user only meant to be code.
-      setGoalMode("normal");
-      // Same reasoning, with the user's own data at stake: recording arms one
+      // Recording arms one
       // run the way it was asked for, and stays off until asked again.
       setRecord(false);
 
@@ -3668,18 +3659,16 @@ export const App: React.FC = () => {
               onDeleteWorkspace={handleDeleteWorkspace}
               onSetDesignContract={handleSetDesignContract}
               availableModels={modelCatalog.models}
-              selectedModel={selectedModel}
-              onSelectModel={setSelectedModel}
+              selectedModel={modelChoice.shown}
+              defaultModel={modelChoice.configured}
+              conductorNumCtx={modelCatalog.conductor ? modelCatalog.conductor.num_ctx : undefined}
+              onSelectModel={(chosen) => setPickedModel(pickFromMenu(chosen, modelChoice.configured))}
               modelStatus={modelCatalog.providers}
               modelSignals={modelSignals}
               modelsLoading={modelsLoading}
               onRefreshModels={() => loadModels(true)}
               mode={mode}
               onChangeMode={setMode}
-              goalMode={goalMode}
-              onChangeGoalMode={setGoalMode}
-              parallel={parallel}
-              onToggleParallel={setParallel}
               record={record}
               onToggleRecord={setRecord}
               onSubmit={handleSendMessage}

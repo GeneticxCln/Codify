@@ -1165,7 +1165,13 @@ async def list_available_models(request: Request, refresh: bool = False) -> dict
         request.app.state.registry,
         getattr(request.app.state, "keychain", None) or Keychain(),
     )
-    return await catalog.get(refresh=refresh)
+    payload = await catalog.get(refresh=refresh)
+    # Added here and not to the cached catalog: which model a turn runs on follows Settings, which can change
+    # a second after a discovery, and this is a read of two rows. It is what the command bar shows as the
+    # model that will answer (docs/09 §10), next to the person's own pick, if they made one.
+    executor = getattr(request.app.state, "executor", None)
+    conductor = executor.conductor_summary() if executor is not None else None
+    return {**payload, "conductor": conductor}
 
 
 @app.get("/models/recent")

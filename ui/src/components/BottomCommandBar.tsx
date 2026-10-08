@@ -3,7 +3,6 @@ import {
   Workspace,
   ModelOption,
   ProviderModelStatus,
-  GoalMode,
 } from "../types";
 import {
   EMPTY_SIGNALS,
@@ -24,10 +23,8 @@ import {
   Cpu,
   RefreshCw,
   AlertCircle,
-  Workflow,
   Radio,
   Trash2,
-  BookOpen,
   Palette,
   Square,
   type LucideIcon,
@@ -43,6 +40,7 @@ import { readRejection } from "../rejection.ts";
 import { insertDictation } from "../speech.ts";
 import { insertAtCaret } from "../clipboardHistory";
 import { clampPickerLeft } from "../threadMenu";
+import { CUSTOM_MODEL_DESCRIPTION } from "../modelChoice";
 import { uiScaleFactor, useUiScale } from "../uiScale";
 
 export type ExecutionMode = "direct" | "dry_run" | "plan_only";
@@ -50,13 +48,15 @@ export type ExecutionMode = "direct" | "dry_run" | "plan_only";
 /**
  * A hairline between clusters of controls, carrying the cluster's meaning on hover.
  *
- * The toolbar sets seven controls in one row at identical weight, which read as seven
- * independent knobs. They are not peers: there is one orchestrator, and these differ
- * in *kind* — what to work on (workspace, model), what the fixer may do (mode), how
- * work is scheduled (`Parallel`, the only one that changes the executor's topology),
- * and what the run keeps or produces (Record, the two deliverables). A divider is the
- * cheapest thing that says "these are not the same kind of thing", and it costs no
- * width, which a caption in a toolbar this size would.
+ * The toolbar sets its controls in one row at identical weight, which reads as independent knobs. They
+ * are not peers: these differ in *kind* — what to work on and with (workspace, model), when the plan
+ * starts (mode), and what the run keeps (Record). A divider is the cheapest thing that says "these are
+ * not the same kind of thing", and it costs no width, which a caption in a toolbar this size would.
+ *
+ * There used to be three more controls here: Parallel, Design and Knowledge. A turn does not carry them
+ * (`TurnCreate` has no run flags, docs/00 §6.8), so each armed a switch that nothing read. They were
+ * removed rather than wired: whether steps run concurrently is the engine's call, and a deliverable is
+ * something a person asks for in words.
  */
 const Divider: React.FC<{ title: string }> = ({ title }) => (
   <span
@@ -109,7 +109,15 @@ interface BottomCommandBarProps {
    */
   onSetDesignContract: (workspaceId: string, path: string) => Promise<void>;
   availableModels: ModelOption[];
+  /** The model the conversation will run on, as `resolveModelChoice` decided: a pick, else the configured one. */
   selectedModel?: ModelOption;
+  /** The model Settings gives the conversation, marked "default" in the menu. Absent when none is configured. */
+  defaultModel?: ModelOption;
+  /**
+   * The window Codify asks Ollama for on the row that runs the conversation: `null` when none is set,
+   * `undefined` when the engine did not say. Only an Ollama model's badge uses it (`contextBadge`).
+   */
+  conductorNumCtx?: number | null;
   onSelectModel: (model: ModelOption) => void;
   /** Per-provider discovery outcome, including failures. */
   modelStatus?: ProviderModelStatus[];
@@ -119,12 +127,6 @@ interface BottomCommandBarProps {
   onRefreshModels: () => void;
   mode: ExecutionMode;
   onChangeMode: (mode: ExecutionMode) => void;
-  /** What the goal is *for* — orthogonal to how it executes. */
-  goalMode: GoalMode;
-  onChangeGoalMode: (mode: GoalMode) => void;
-  /** Opt-in: independent (path-disjoint) steps of the goal run concurrently. */
-  parallel?: boolean;
-  onToggleParallel?: (on: boolean) => void;
   /** Opt-in: record this goal's model calls so the run can be replayed. */
   record?: boolean;
   onToggleRecord?: (on: boolean) => void;
@@ -171,6 +173,8 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   onSetDesignContract,
   availableModels,
   selectedModel,
+  defaultModel,
+  conductorNumCtx,
   onSelectModel,
   modelStatus = [],
   modelSignals = EMPTY_SIGNALS,
@@ -178,10 +182,6 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   onRefreshModels,
   mode,
   onChangeMode,
-  goalMode,
-  onChangeGoalMode,
-  parallel = false,
-  onToggleParallel,
   record = false,
   onToggleRecord,
   onSubmit,
@@ -575,7 +575,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
       id,
       name: raw,
       provider,
-      description: "User-defined custom model",
+      description: CUSTOM_MODEL_DESCRIPTION,
     };
     onSelectModel(custom);
     setCustomModelId("");
@@ -756,6 +756,11 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                   setIsModeOpen(false);
                 }}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-codify-raised border border-codify-border text-codify-secondary hover:bg-codify-border transition-colors cursor-pointer"
+                title={
+                  selectedModel
+                    ? `${selectedModel.provider}/${selectedModel.id}\nAnswers this conversation and runs its tool loop. The planner, fixer and other roles keep the models set in Settings → Agents.`
+                    : "No model"
+                }
               >
                 <Cpu className="w-3.5 h-3.5 text-codify-accent" />
                 <span className="font-medium truncate max-w-[9.375rem]">
@@ -814,6 +819,11 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                     </div>
                   </div>
 
+                  <p className="px-2 pb-1.5 text-2xs leading-snug text-codify-muted">
+                    Answers this conversation and runs its tool loop. The planner, fixer and other roles keep the
+                    models set in Settings → Agents.
+                  </p>
+
                   {availableModels.length > 0 && (
                     <div className="px-1 pb-1">
                       <input
@@ -868,7 +878,11 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
                             !!selectedModel &&
                             selectedModel.id === m.id &&
                             selectedModel.provider === m.provider;
-                          const badges = modelBadges(m, modelSignals);
+                          const badges = modelBadges(m, modelSignals, 3, {
+                            numCtx: conductorNumCtx,
+                            isDefault:
+                              !!defaultModel && defaultModel.id === m.id && defaultModel.provider === m.provider,
+                          });
                           return (
                             <button
                               key={m.provider + ":" + m.id}
@@ -1044,28 +1058,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
               )}
             </div>
 
-            <Divider title="Execution policy — whether the fixer may write, and whether steps run concurrently" />
-
-            {/* Parallel toggle: independent (path-disjoint) steps run concurrently.
-                Safe by construction — steps that touch the same files still go
-                in order, and the sandbox/git stay serialized inside the engine.
-
-                This is the one control here that changes the *orchestration topology*
-                rather than a setting of it: the executor switches from a sequential
-                walk to `asyncio.gather` over path-disjoint steps, with sandbox
-                commands and git commits serialized behind locks. That is why it sits
-                on its own rather than in the cluster of flags beside it. */}
-            <Toggle
-              armed={parallel}
-              onClick={() => onToggleParallel?.(!parallel)}
-              disabled={!onToggleParallel}
-              title="Run independent steps concurrently — steps that touch the same files still go in order"
-            >
-              <Workflow className="w-3.5 h-3.5" />
-              <span>Parallel</span>
-            </Toggle>
-
-            <Divider title="What this run keeps, and what it produces" />
+            <Divider title="What this run keeps" />
 
             {/* Recording: keep a copy of every model call this run makes, so the
                 run can be replayed later with no provider in the loop. Off by
@@ -1082,66 +1075,6 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
               <Radio className="w-3.5 h-3.5" />
               <span>Record</span>
             </Toggle>
-
-            {/* Design and Knowledge are ONE choice, not two switches.
-
-                `goalMode` is a single value — `normal | design | knowledge` — and both
-                buttons write to it, so arming one disarms the other. They were drawn
-                as two independent toggles, which promised a combination the state
-                cannot hold: a user could read two armed pills as "this run produces
-                both files", and the engine would only ever write one.
-
-                So they share a container. The border between them is a seam, not a
-                gap, so the pair reads as one segmented control with a single armed
-                position — which is what it is. `role="radiogroup"` says the same thing
-                to a screen reader, and each button keeps `aria-pressed` from `Toggle`
-                because that is the honest state: neither is "selected" in a group
-                whose value may legitimately be neither. */}
-            <div
-              role="radiogroup"
-              aria-label="Deliverable"
-              title="This run produces one deliverable file, or none"
-              className="flex items-center rounded-lg border border-codify-border bg-codify-raised overflow-hidden"
-            >
-              <Toggle
-                armed={goalMode === "design"}
-                tone="design"
-                onClick={() =>
-                  onChangeGoalMode(goalMode === "design" ? "normal" : "design")
-                }
-                title="Design deliverable — draft or revise this workspace's DESIGN.md, reviewed by the critic before you pin it"
-                className="rounded-none border-0 border-r border-codify-border"
-              >
-                <Palette className="w-3.5 h-3.5" />
-                <span>Design</span>
-              </Toggle>
-
-              <Toggle
-                armed={goalMode === "knowledge"}
-                tone="knowledge"
-                onClick={() =>
-                  onChangeGoalMode(
-                    goalMode === "knowledge" ? "normal" : "knowledge",
-                  )
-                }
-                title="Knowledge deliverable — draft or revise this workspace's CODIFY.md, which later runs read as a prior"
-                className="rounded-none border-0"
-              >
-                <BookOpen className="w-3.5 h-3.5" />
-                <span>Knowledge</span>
-              </Toggle>
-            </div>
-
-            {/* Knowledge deliverable: the same shape pointed at a different
-                file. CODIFY.md is what every later run's librarian reads first
-                — as a prior, never as evidence — so the reviewer here is
-                approving a description of the repository that will aim every
-                future run at files. A goal-mode toggle rather than a workspace
-                setting because it is a one-off rewrite, not a standing one.
-
-                Knowledge's own hue, not Record's amber. The two were byte-identical
-                here, which meant two unrelated features armed the same colour in the
-                same toolbar. See `Toggle`. */}
           </div>
         </div>
 

@@ -778,6 +778,12 @@ export interface ModelOption {
   created?: number | null;
   /** false when the provider marks it as non-chat (e.g. an embeddings model). */
   supports_chat?: boolean | null;
+  /**
+   * What the provider *reports* as the model's context window, in tokens: its maximum, not what a request
+   * will be given (an Ollama model gets the `num_ctx` it is asked for). null or absent is "not reported",
+   * and is never filled in from the model's name.
+   */
+  context_tokens?: number | null;
 }
 
 /**
@@ -840,6 +846,19 @@ export interface ProviderModelStatus {
   error?: string | null;
 }
 
+/**
+ * The model a turn runs on when the person picks nothing, as `GET /models` reports it. Empty strings mean
+ * none is configured. Names and one number: no key and no endpoint ever travel here.
+ */
+export interface ConductorModel {
+  provider: string;
+  model: string;
+  /** "settings" when Settings → Engine names it, otherwise the role row it borrows ("scribe"). */
+  source: string;
+  /** The borrowed row's `num_ctx`: the window an Ollama model is asked for, whichever model runs. */
+  num_ctx: number | null;
+}
+
 export interface ModelCatalog {
   models: ModelOption[];
   providers: ProviderModelStatus[];
@@ -847,6 +866,8 @@ export interface ModelCatalog {
   fetched_at: number;
   /** True when served from the engine's short-lived cache. */
   cached: boolean;
+  /** Absent from an engine that predates it; the command bar then shows what it always did. */
+  conductor?: ConductorModel | null;
 }
 
 /** The stats-history document the engine currently holds (GET /stats/import).

@@ -260,11 +260,105 @@ export function orderProviderModels(
   );
 }
 
-/** The badge text for one row: roles first, then recency, then chat support. */
+const isPowerOfTwo = (k: number): boolean => Number.isInteger(k) && k >= 1 && (k & (k - 1)) === 0;
+
+/** `1.5` as "1.5" and `2` as "2": one decimal when there is one, none when there is not. */
+const trimmed = (n: number): string => String(Math.round(n * 10) / 10);
+
+/**
+ * A token count as a person writes it: 131,072 and 128,000 are both "128K", 8,192 is "8K", 1,048,576 and
+ * 1,000,000 are both "1M". Binary when the number is a power of two times 1,024 (what a trained or requested
+ * window usually is), decimal otherwise (what a provider's marketing number usually is), because "125K" for
+ * 128,000 would be correct arithmetic and a number nobody has ever seen on a model card. The exact figure is
+ * always in the badge's title.
+ */
+export function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const K = 1024;
+  const M = K * K;
+  if (n >= 1_000_000) {
+    return n % M === 0 && isPowerOfTwo(n / M) ? `${n / M}M` : `${trimmed(n / 1_000_000)}M`;
+  }
+  if (n >= 1000) {
+    return n % K === 0 && isPowerOfTwo(n / K) ? `${n / K}K` : `${n < 10_000 ? trimmed(n / 1000) : Math.round(n / 1000)}K`;
+  }
+  return String(Math.round(n));
+}
+
+const grouped = (n: number): string => n.toLocaleString("en-US");
+
+export interface ContextBadge {
+  /** Short, because the row also carries a name and up to three other badges. */
+  label: string;
+  /** The exact numbers, and where each came from. */
+  title: string;
+}
+
+/**
+ * What a model row says about memory: the window, in tokens.
+ *
+ * Two facts, and the row must not blur them. `context_tokens` is what the *provider reports* the model can
+ * hold. For a hosted model that is also what a request gets. For an **Ollama** model it is not: Ollama gives a
+ * request the `num_ctx` it is asked for, which is why `numCtx` exists. It is the window Codify asks for on the
+ * row the conversation borrows, so it is passed only where that is the window the model will run with (the
+ * command bar); a surface that does not know it passes `undefined`, and the badge then claims only the
+ * model's own maximum. `null` means "known, and not set": Ollama's own default applies.
+ *
+ * Unknown stays unknown: no number from the model's name, none for a model the provider did not describe.
+ */
+export function contextBadge(model: ModelOption, numCtx?: number | null): ContextBadge | null {
+  const max = typeof model.context_tokens === "number" && model.context_tokens > 0 ? model.context_tokens : null;
+  const asked = typeof numCtx === "number" && numCtx > 0 ? numCtx : null;
+  if (model.protocol === "ollama" && numCtx !== undefined) {
+    if (asked !== null && max !== null) {
+      return asked >= max
+        ? {
+            label: `${formatTokens(max)} ctx`,
+            title: `${grouped(max)} tokens: the model's full window (Codify asks Ollama for ${grouped(asked)}).`,
+          }
+        : {
+            label: `${formatTokens(asked)} of ${formatTokens(max)}`,
+            title:
+              `Codify asks Ollama for ${grouped(asked)} tokens (num_ctx, Settings → Agents); ` +
+              `this model supports up to ${grouped(max)}.`,
+          };
+    }
+    if (asked !== null) {
+      return {
+        label: `${formatTokens(asked)} ctx`,
+        title: `Codify asks Ollama for ${grouped(asked)} tokens (num_ctx, Settings → Agents). The model's own maximum is not reported.`,
+      };
+    }
+    if (max !== null) {
+      return {
+        label: `up to ${formatTokens(max)}`,
+        title:
+          `This model supports up to ${grouped(max)} tokens. Codify sets no num_ctx on the row that runs the ` +
+          "conversation, so Ollama uses its own default window; set one under Settings → Agents to use more.",
+      };
+    }
+    return null;
+  }
+  if (max === null) return null;
+  return {
+    label: `${formatTokens(max)} ctx`,
+    title: `${grouped(max)} tokens, as the provider reports this model's context window.`,
+  };
+}
+
+export interface BadgeOptions {
+  /** See `contextBadge`: the window an Ollama model is asked for here, `null` if none is set, `undefined` if unknown. */
+  numCtx?: number | null;
+  /** This is the model the conversation runs on when nothing is picked. */
+  isDefault?: boolean;
+}
+
+/** The badge text for one row: roles first, then recency, then chat support, then the window. */
 export function modelBadges(
   model: ModelOption,
   signals: ModelSignals = EMPTY_SIGNALS,
   maxRoles = 3,
+  options: BadgeOptions = {},
 ): {
   roles: string;
   rolesTitle: string;
@@ -272,6 +366,10 @@ export function modelBadges(
   /** Tooltip for the recency chip, naming the role that actually ran it. */
   lastRunTitle: string;
   notChat: boolean;
+  /** The model's context window, or null when nothing reports one. */
+  context: ContextBadge | null;
+  /** The model a conversation runs on when the person picks nothing. */
+  isDefault: boolean;
 } {
   const u = signals.usage[modelKey(model.provider, model.id)];
   const roles = u?.roles ?? [];
@@ -288,5 +386,7 @@ export function modelBadges(
         ? `Last run by the ${u.ranRole}`
         : "The last model a goal ran",
     notChat: model.supports_chat === false,
+    context: contextBadge(model, options.numCtx),
+    isDefault: options.isDefault === true,
   };
 }
