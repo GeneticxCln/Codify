@@ -332,14 +332,18 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         first = (await self.client.get("/models", headers=self.headers)).json()
         self.assertEqual([m["id"] for m in first["models"]], ["local-a"])
         self.assertFalse(first["cached"])
+        # The list, and an `/api/show` for the local model's context length: how many requests a discovery
+        # makes is not this test's business, that the second open makes none is.
+        asked = len(calls)
+        self.assertGreaterEqual(asked, 1)
 
         second = (await self.client.get("/models", headers=self.headers)).json()
         self.assertTrue(second["cached"], "a second open should not re-query every provider")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), asked, "a cached answer made a request")
 
         refreshed = (await self.client.get("/models?refresh=true", headers=self.headers)).json()
         self.assertFalse(refreshed["cached"])
-        self.assertGreater(len(calls), 1, "refresh must re-query")
+        self.assertGreater(len(calls), asked, "refresh must re-query")
 
     async def test_saving_a_key_invalidates_the_catalog_cache(self) -> None:
         """Adding a provider key must surface its models immediately."""

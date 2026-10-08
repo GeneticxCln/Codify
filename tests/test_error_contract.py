@@ -374,6 +374,12 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
             "POST", "/goals",
             lambda ws: {"workspace_id": ws, "title": "t", "description": "d", "mode": "chat"},
         ),
+        # Half a pair names nothing to call. FastAPI validates the body before the handler looks the
+        # conversation up, so the id need not exist for the refusal to be seen.
+        "TurnCreate._a_pair_or_nothing": (
+            "POST", "/conversations/c-none/turns",
+            lambda ws: {"prompt": "hi", "provider": "openai"},
+        ),
     }
 
     async def _a_workspace(self) -> str:

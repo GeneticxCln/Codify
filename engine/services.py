@@ -1376,7 +1376,9 @@ class GoalService:
         Read from `agent_assigned` events rather than from `goals.provider/model`,
         which record what the command bar asked for. Since per-role configs became
         authoritative (see `01` §2.2), those two are not the same thing: a goal can
-        name one model and be executed by four others. Ordering a menu by "the last
+        name one model and be executed by four others. (A *turn's* pick does route
+        the turn's own calls, `docs/09` §10.20, but not the roles it may start.)
+        Ordering a menu by "the last
         one you ran" while reading the intent would label a model the engine never
         called — the exact shape of false claim this file keeps removing.
 

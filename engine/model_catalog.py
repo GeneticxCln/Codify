@@ -35,6 +35,15 @@ from engine.providers import ProviderError, key_destination_problem, validate_lo
 
 DISCOVERY_TIMEOUT_S = 8.0
 MAX_MODELS_PER_PROVIDER = 500
+# Ollama's `/api/tags` says nothing about a model's context length; `/api/show` does, one model at a time. So
+# it is asked for the newest models only, a few at once, inside a budget of its own that is well under the
+# whole provider's `DISCOVERY_TIMEOUT_S`: a slow answer costs a missing number, never the provider's list.
+OLLAMA_SHOW_BUDGET_S = 3.0
+OLLAMA_SHOW_CONCURRENCY = 8
+OLLAMA_SHOW_MAX_MODELS = 64
+_OLLAMA_WINDOW_CACHE_MAX = 2048
+# The most a context length is believed to be. A provider that reports more is reporting something else.
+MAX_CONTEXT_TOKENS = 100_000_000
 DEFAULT_TTL_S = 60.0
 ANTHROPIC_VERSION = "2023-06-01"
 GOOGLE_MAX_PAGES = 5
@@ -111,6 +120,31 @@ def _iso_day(value: Any) -> float | None:
         return None
 
 
+def _positive_int(value: Any) -> int | None:
+    """A context length a provider reported, or None for anything that is not plainly one.
+
+    An integer, or a float that is one. Not a bool (`True` is an `int` to Python and means nothing here), not
+    a string, zero, a negative, or something above `MAX_CONTEXT_TOKENS`: an unknown stays unknown, and is never
+    guessed from a name, the way `supports_chat` is never guessed (see `discover_ollama`).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None
+        value = int(value)
+    if not isinstance(value, int) or not 0 < value <= MAX_CONTEXT_TOKENS:
+        return None
+    return value
+
+
+# The field names OpenAI-compatible `GET /models` answers use for a context length, first one present wins.
+# OpenAI's own answer has none. These are the ones gateways and servers are known to add (OpenRouter, Together
+# and Fireworks `context_length`; Groq `context_window`; Mistral `max_context_length`; vLLM `max_model_len`).
+# They are field names, not a list of models, and a provider that uses another simply shows no number.
+_OPENAI_COMPAT_CONTEXT_KEYS = ("context_length", "context_window", "max_context_length", "max_model_len")
+
+
 def _entry(
     *,
     model_id: str,
@@ -118,6 +152,7 @@ def _entry(
     description: str = "",
     created: float | None = None,
     supports_chat: bool | None = None,
+    context_tokens: int | None = None,
 ) -> dict[str, Any]:
     return {
         "id": model_id,
@@ -125,17 +160,107 @@ def _entry(
         "description": description,
         "created": created,
         "supports_chat": supports_chat,
+        # What the *provider reports* as the model's context length, in tokens: its maximum, not what a
+        # request will get (an Ollama model gets the `num_ctx` it is asked for). None is "not reported".
+        "context_tokens": context_tokens,
     }
 
 
 # ── per-protocol discovery ──────────────────────────────────────────────────
 
 
+# (base_url, model, digest) -> the context length `/api/show` reported. Only answers are kept: a model whose
+# show failed is asked again next time, inside the same budget. Bounded, and emptied when it fills.
+_OLLAMA_WINDOWS: dict[tuple[str, str, str], int] = {}
+
+
+def reset_ollama_windows() -> None:
+    """Forget what Ollama said about its models (for tests, which share this module's memory)."""
+    _OLLAMA_WINDOWS.clear()
+
+
+def _ollama_context_from(show: Any) -> int | None:
+    """The context length in an `/api/show` answer: `model_info["<architecture>.context_length"]`."""
+    info = show.get("model_info") if isinstance(show, dict) else None
+    if not isinstance(info, dict):
+        return None
+    for key, value in info.items():
+        if isinstance(key, str) and (key == "context_length" or key.endswith(".context_length")):
+            found = _positive_int(value)
+            if found is not None:
+                return found
+    return None
+
+
+async def _ollama_windows(
+    base_url: str, client: httpx.AsyncClient, rows: list[dict[str, Any]]
+) -> dict[str, int]:
+    """Model name -> context length, for as many of `rows` as Ollama answers in time. Never raises.
+
+    The newest `OLLAMA_SHOW_MAX_MODELS` are asked about (a library of hundreds is not asked hundreds of
+    times on every refresh), `OLLAMA_SHOW_CONCURRENCY` at a time, and whatever has not answered when
+    `OLLAMA_SHOW_BUDGET_S` runs out is cancelled and simply has no number. Answers are remembered by
+    `(endpoint, name, digest)`, so a refresh asks only about what is new or changed.
+    """
+    found: dict[str, int] = {}
+    wanted: list[tuple[str, tuple[str, str, str]]] = []
+    ranked = sorted(rows, key=lambda m: -(_iso_day(m.get("modified_at")) or 0.0))
+    for row in ranked[:OLLAMA_SHOW_MAX_MODELS]:
+        name = row.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        key = (base_url, name, str(row.get("digest") or row.get("modified_at") or ""))
+        if key in _OLLAMA_WINDOWS:
+            found[name] = _OLLAMA_WINDOWS[key]
+        else:
+            wanted.append((name, key))
+    if not wanted:
+        return found
+
+    gate = asyncio.Semaphore(OLLAMA_SHOW_CONCURRENCY)
+
+    async def ask(name: str) -> int | None:
+        async with gate:
+            try:
+                reply = await client.post(f"{base_url}/api/show", json={"model": name, "name": name})
+                reply.raise_for_status()
+                return _ollama_context_from(reply.json())
+            except Exception:
+                return None
+
+    tasks = {key: asyncio.ensure_future(ask(name)) for name, key in wanted}
+    try:
+        _, pending = await asyncio.wait(tasks.values(), timeout=OLLAMA_SHOW_BUDGET_S)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+    except asyncio.CancelledError:
+        for task in tasks.values():
+            task.cancel()
+        raise
+    for (name, key) in wanted:
+        task = tasks[key]
+        if task.cancelled() or not task.done() or task.exception() is not None:
+            continue
+        window = task.result()
+        if window is None:
+            continue
+        found[name] = window
+        if len(_OLLAMA_WINDOWS) >= _OLLAMA_WINDOW_CACHE_MAX:
+            _OLLAMA_WINDOWS.clear()
+        _OLLAMA_WINDOWS[key] = window
+    return found
+
+
 async def discover_ollama(target: ProviderTarget, client: httpx.AsyncClient) -> list[dict[str, Any]]:
-    r = await client.get(f"{target.base_url.rstrip('/')}/api/tags")
+    base_url = target.base_url.rstrip("/")
+    r = await client.get(f"{base_url}/api/tags")
     r.raise_for_status()
+    rows = [m for m in (r.json().get("models") or [])[:MAX_MODELS_PER_PROVIDER] if isinstance(m, dict)]
+    windows = await _ollama_windows(base_url, client, rows)
     out = []
-    for m in (r.json().get("models") or [])[:MAX_MODELS_PER_PROVIDER]:
+    for m in rows:
         name = m.get("name")
         if not name:
             continue
@@ -150,6 +275,7 @@ async def discover_ollama(target: ProviderTarget, client: httpx.AsyncClient) -> 
                 # an embedding model as chat-capable, which is exactly the kind
                 # of invented metadata this module exists to avoid.
                 supports_chat=None,
+                context_tokens=windows.get(name),
             )
         )
     return out
@@ -185,6 +311,10 @@ async def discover_openai_compat(
                 model_id=model_id,
                 description=f"{target.provider} · owned by {owner}" if owner else f"{target.provider} API model",
                 created=_iso_day(m.get("created")),
+                context_tokens=next(
+                    (n for n in (_positive_int(m.get(k)) for k in _OPENAI_COMPAT_CONTEXT_KEYS) if n is not None),
+                    None,
+                ),
             )
         )
     return out
@@ -212,6 +342,8 @@ async def discover_anthropic(
                 description="Anthropic model",
                 created=_iso_day(m.get("created_at")),
                 supports_chat=True,
+                # The Models API reports `max_input_tokens` (the context window) per model.
+                context_tokens=_positive_int(m.get("max_input_tokens")),
             )
         )
     return out
@@ -262,6 +394,7 @@ async def discover_google(target: ProviderTarget, client: httpx.AsyncClient) -> 
                         else "Google model"
                     ),
                     supports_chat=("generateContent" in methods) if methods else None,
+                    context_tokens=_positive_int(limit),
                 )
             )
         page_token = body.get("nextPageToken")

@@ -469,7 +469,52 @@ class _Conduct(_Plan):
         except Exception:
             return default
 
-    def _conductor_target(self) -> tuple[Any, str, Any] | None:
+    def conductor_summary(self) -> dict[str, Any]:
+        """Which model a turn runs on when the person picks nothing, and the window it would be given.
+
+        For the command bar, which shows what will run instead of guessing: the provider and model the
+        engine settings name, or the scribe's row when they name none (`source` says which), and that row's
+        `num_ctx`. The window is the borrowed row's whichever model runs, because `_config_for_pair` keeps it,
+        so it is also what a model the person *picks* is given if it is an Ollama one. Only names and a number:
+        no key, no endpoint (docs/00 §6.4).
+        """
+        try:
+            base = self.orchestrator.registry.get_config(self._conductor_role())
+        except Exception:
+            return {"provider": "", "model": "", "source": "none", "num_ctx": None}
+        configured = self._conductor_config(base)
+        return {
+            "provider": configured.provider if (configured.model_name or "").strip() else "",
+            "model": (configured.model_name or "").strip(),
+            "source": "settings" if configured is not base else self._conductor_role(),
+            "num_ctx": base.num_ctx,
+        }
+
+    def _picked_pair(self, goal: Goal | None) -> tuple[str, str] | None:
+        """The provider and model the person picked in the command bar for this turn, or None.
+
+        Read from the goal row, which is where `POST /conversations/{id}/turns` recorded it, so it holds for
+        everything the turn goes on to do: the conductor's loop, its plain reply, and the run that resumes
+        after a plan is approved. A *turn* only (`mode == "chat"`): a goal made by `POST /goals` records the
+        same two columns as "what was asked for" and keeps running on the settings, as it always did.
+
+        Both halves or None, for the reason `conductor_provider`/`conductor_model` need both. Nothing here
+        writes: the pick is an input to one run, not configuration (docs/00 §6.2).
+        """
+        if goal is None or goal.mode != "chat":
+            return None
+        provider = (goal.provider or "").strip()
+        model = (goal.model or "").strip()
+        return (provider, model) if provider and model else None
+
+    def _picked_config(self, base: AgentConfig, goal: Goal | None) -> AgentConfig | None:
+        """The borrowed row moved onto the person's pick, or None when they picked nothing."""
+        picked = self._picked_pair(goal)
+        if picked is None:
+            return None
+        return self._with_address(self._config_for_pair(base, *picked))
+
+    def _conductor_target(self, picked: tuple[str, str] | None = None) -> tuple[Any, str, Any] | None:
         """What a conductor would run on, or None when this install has none.
 
         None is the documented degradation (docs/09 §10.9): a provider with no
@@ -477,10 +522,10 @@ class _Conduct(_Plan):
         cannot be read. The conductor is an upgrade and never a prerequisite, so
         every caller has to be able to proceed without it.
         """
-        targets = self._conductor_targets()
+        targets = self._conductor_targets(picked)
         return targets[0] if targets else None
 
-    def _conductor_targets(self) -> list[tuple[Any, str, Any]]:
+    def _conductor_targets(self, picked: tuple[str, str] | None = None) -> list[tuple[Any, str, Any]]:
         """Every target this conductor may be called on, in order, best first.
 
         A role's chain is one row with a fallback column; the conductor's is two
@@ -497,28 +542,38 @@ class _Conduct(_Plan):
         a conductor at all; keeping it would only move the failure later and make
         it harder to read.
         """
-        return self._resolve_conductor_targets()[0]
+        return self._resolve_conductor_targets(picked)[0]
 
-    def _resolve_conductor_targets(self) -> tuple[list[tuple[Any, str, Any]], list[str]]:
+    def _resolve_conductor_targets(
+        self, picked: tuple[str, str] | None = None
+    ) -> tuple[list[tuple[Any, str, Any]], list[str]]:
         """`_conductor_targets`, plus why each candidate the *settings named* was dropped.
 
-        The reasons are only for a target a person chose (the conductor's own pair, or its own fallback
-        pair). A conductor that borrows the scribe's row and cannot call tools is the documented quiet
-        degradation to a plain answer; a conductor someone pointed at a provider and then silently
-        ignored is a setting that appears to do nothing, so `_conduct` says why in the goal's log.
+        The reasons are only for a target a person chose (the conductor's own pair, its own fallback
+        pair, or the model they picked for this turn). A conductor that borrows the scribe's row and
+        cannot call tools is the documented quiet degradation to a plain answer; a conductor someone
+        pointed at a provider and then silently ignored is a setting that appears to do nothing, so
+        `_conduct` says why in the goal's log.
+
+        `picked` is the person's choice in the command bar for this turn. It replaces the *primary*
+        and nothing else: the fallback is whichever the settings would have given (the scribe's own while
+        the conductor borrows its row, the conductor's pair otherwise), so a pick that cannot be reached
+        still ends on a model that can, and says so, as every other fallback does.
         """
         role = self._conductor_role()
         try:
             base = self.orchestrator.registry.get_config(role)
         except Exception:
             return [], []
-        primary_cfg = self._conductor_config(base)
+        configured_cfg = self._conductor_config(base)
+        borrowed = configured_cfg is base
+        picked_cfg = self._config_for_pair(base, *picked) if picked is not None else None
+        primary_cfg = picked_cfg if picked_cfg is not None else configured_cfg
         candidates = [primary_cfg]
-        borrowed = primary_cfg is base
         fallback_cfg = (
             self.orchestrator.registry.fallback_config_for(base)
             if borrowed
-            else self._conductor_fallback_config(primary_cfg)
+            else self._conductor_fallback_config(configured_cfg)
         )
         if fallback_cfg is not None:
             candidates.append(fallback_cfg)
@@ -526,7 +581,10 @@ class _Conduct(_Plan):
         targets: list[tuple[Any, str, Any]] = []
         problems: list[str] = []
         for cfg in candidates:
-            chosen = not borrowed and (cfg is primary_cfg or cfg is fallback_cfg)
+            primary_named = picked_cfg is not None or not borrowed
+            chosen = (primary_named and cfg is primary_cfg) or (not borrowed and cfg is fallback_cfg)
+            # Before `_with_address` below rebinds `cfg`: the sentence for a dropped target names who chose it.
+            is_pick = picked_cfg is not None and cfg is picked_cfg
             model = (cfg.model_name or "").strip()
             if not model:
                 continue
@@ -538,7 +596,8 @@ class _Conduct(_Plan):
                 # misconfiguration it is.
                 if chosen:
                     problems.append(
-                        f"the conductor is set to provider {cfg.provider!r}, but no role defines a provider by "
+                        f"the conductor is {'on the model you picked, provider' if is_pick else 'set to provider'} "
+                        f"{cfg.provider!r}, but no role defines a provider by "
                         "that name (a custom provider's address lives on the role that introduces it), so it "
                         "was skipped"
                     )
@@ -548,14 +607,15 @@ class _Conduct(_Plan):
             except ProviderError as exc:
                 if chosen:
                     problems.append(
-                        f"the conductor's provider {cfg.provider!r} could not be built "
-                        f"({exc.code}: {exc.message}), so it was skipped"
+                        f"the {'model you picked' if is_pick else 'conductor'}'s provider {cfg.provider!r} "
+                        f"could not be built ({exc.code}: {exc.message}), so it was skipped"
                     )
                 continue
             if not getattr(provider, "supports_tools", False):
                 if chosen:
                     problems.append(
-                        f"the conductor's provider {cfg.provider!r} cannot call tools, so it was skipped"
+                        f"the {'model you picked' if is_pick else 'conductor'}'s provider {cfg.provider!r} "
+                        "cannot call tools, so it was skipped"
                     )
                 continue
             targets.append((provider, model, cfg))
@@ -682,13 +742,14 @@ class _Conduct(_Plan):
         if self._settings_int("conductor_drives_execution", 1) == 0:
             return False
         try:
-            if self.goals.get(goal_id).parallel:
+            goal = self.goals.get(goal_id)
+            if goal.parallel:
                 # The engine's batcher proves which steps touch disjoint paths and runs them together; a
                 # conductor works one step at a time and has no such proof. A parallel goal keeps its driver.
                 return False
         except ApiError:
             return False
-        return self._conductor_target() is not None
+        return self._conductor_target(self._picked_pair(goal)) is not None
 
     async def run_conductor_resume(self, goal_id: str, focus_step_id: str | None = None) -> None:
         """Drive an approved plan to the end, one step at a time. The conductor owns every step it is given.
@@ -932,7 +993,7 @@ class _Conduct(_Plan):
         decided, and re-planning over the top of it would make the brain a
         suggestion.
         """
-        targets, problems = self._resolve_conductor_targets()
+        targets, problems = self._resolve_conductor_targets(self._picked_pair(goal))
         for problem in problems:
             self._log(goal_id, None, "warn", problem)
         if not targets:
@@ -1102,9 +1163,13 @@ class _Conduct(_Plan):
         override it when they are set (see `_conductor_role`).
         """
         role = self._conductor_role()
+        # The model the person picked in the command bar, when they picked one: this is the call that
+        # answers their turn, and answering it on a different model than the one on screen is the
+        # defect the pick exists to remove. The role row is only borrowed for everything else.
+        primary = self._picked_config(self.orchestrator.registry.get_config(role), goal)
         raw = await self.orchestrator.run_agent(
             role, goal_id, None, self._turn_prompt(goal),
-            system=CHAT_SYSTEM_PROMPT, raw_output=True,
+            system=CHAT_SYSTEM_PROMPT, raw_output=True, primary=primary,
         )
         return _as_prose(str(raw)) or "(no answer)"
 
@@ -1173,6 +1238,18 @@ class _Conduct(_Plan):
             return base
         if not (provider and model):
             return base
+        return self._config_for_pair(base, provider, model)
+
+    def _config_for_pair(self, base: AgentConfig, provider: str, model: str) -> AgentConfig:
+        """`base` moved onto `provider`/`model`: the one way a conductor's configuration is built.
+
+        Shared by the two things that name a pair, the engine settings (`_conductor_config`) and the
+        person's pick for a turn (`_picked_config`), so the rules below cannot be true of one and not the
+        other. Only the provider, the protocol that follows it, the model and the credential change; the
+        row's temperature, token cap and `num_ctx` stay the borrowed row's. Naming a *different* provider
+        drops the row's `base_url` and `api_key_ref`, which belong to the provider the row points at (the
+        argument in `_conductor_config`'s docstring). Nothing is stored: the result is a value for one run.
+        """
         moved = provider != base.provider
         return base.model_copy(update={
             "provider": provider,

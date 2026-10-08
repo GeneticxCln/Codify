@@ -6,6 +6,7 @@ per-provider reasons — never a plausible-looking list compiled into the binary
 """
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import asyncio
 import json
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ import httpx
 
 from engine.db import connect
 from engine.model_catalog import (
+    reset_ollama_windows,
     ModelCatalogService,
     ProviderTarget,
     _sorted_models,
@@ -567,7 +569,218 @@ class TestOllamaDiscoveryHoldsTheLocalRule(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.ok, result.error)
         self.assertEqual(["llama3:8b"], [m["id"] for m in result.models])
-        self.assertEqual(1, len(seen))
+        # The list, and then one `/api/show` per model for its context length. Every one of them is made to
+        # the host that passed the rule: the second request is held to the same invariant as the first.
+        self.assertEqual({"/api/tags", "/api/show"}, {r.url.path for r in seen})
+        self.assertEqual({"127.0.0.1"}, {r.url.host for r in seen})
+
+
+class TestContextLength(unittest.IsolatedAsyncioTestCase):
+    """What a provider says a model's context window is, and what is never made up.
+
+    A number a person reads next to a model name is a claim about whether their prompt fits. Every path
+    here is "the provider said it" or "unknown": nothing is read from a model's name, nothing is rounded,
+    and a provider that fails to answer costs the number and never the list.
+    """
+
+    async def asyncSetUp(self) -> None:
+        reset_ollama_windows()
+
+    async def asyncTearDown(self) -> None:
+        reset_ollama_windows()
+
+    def test_only_plainly_a_context_length_is_taken(self) -> None:
+        from engine.model_catalog import MAX_CONTEXT_TOKENS, _positive_int
+
+        for good, want in ((8192, 8192), (131072.0, 131072), (1, 1), (MAX_CONTEXT_TOKENS, MAX_CONTEXT_TOKENS)):
+            self.assertEqual(_positive_int(good), want, good)
+        bad_values: tuple[Any, ...] = (True, False, 0, -4096, 4096.5, "4096", None, [], {}, MAX_CONTEXT_TOKENS + 1, float("inf"), float("nan"))
+        for bad in bad_values:
+            self.assertIsNone(_positive_int(bad), repr(bad))
+
+    async def test_openai_compatible_gateways_report_it_under_the_names_they_use(self) -> None:
+        rows = [
+            {"id": "or", "context_length": 200000},
+            {"id": "groq", "context_window": 131072},
+            {"id": "mistral", "max_context_length": 32768},
+            {"id": "vllm", "max_model_len": 8192},
+            {"id": "openai-style"},
+            {"id": "junk", "context_length": "lots", "context_window": True},
+            {"id": "two", "context_length": 1000, "context_window": 9999},
+        ]
+        target = ProviderTarget("gateway", "openai_compat", "https://gw.example/v1", "k")
+        async with _client({"/models": (200, {"data": rows})}) as client:
+            result = await discover_provider(target, client=client)
+        got = {m["id"]: m["context_tokens"] for m in result.models}
+        self.assertEqual(got, {
+            "or": 200000, "groq": 131072, "mistral": 32768, "vllm": 8192,
+            "openai-style": None, "junk": None, "two": 1000,
+        })
+
+    async def test_anthropic_reports_its_max_input_tokens(self) -> None:
+        routes = {"/v1/models": (200, {"data": [
+            {"id": "claude-x", "display_name": "X", "max_input_tokens": 1000000, "max_tokens": 128000},
+            {"id": "claude-old", "display_name": "Old"},
+        ]})}
+        target = ProviderTarget("anthropic", "anthropic", "https://api.anthropic.com", "k")
+        async with _client(routes) as client:
+            result = await discover_provider(target, client=client)
+        self.assertEqual({m["id"]: m["context_tokens"] for m in result.models}, {"claude-x": 1000000, "claude-old": None})
+
+    async def test_google_reports_its_input_token_limit(self) -> None:
+        routes = {"/models": (200, {"models": [
+            {"name": "models/gemini-a", "inputTokenLimit": 1048576, "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-b"},
+        ]})}
+        target = ProviderTarget("google", "google", "https://generativelanguage.googleapis.com/v1beta", "k")
+        async with _client(routes) as client:
+            result = await discover_provider(target, client=client)
+        self.assertEqual({m["id"]: m["context_tokens"] for m in result.models}, {"gemini-a": 1048576, "gemini-b": None})
+
+    async def test_every_entry_carries_the_field_even_when_it_is_unknown(self) -> None:
+        # A consumer reads `m["context_tokens"]`; a protocol that left the key out would make that a KeyError.
+        for protocol, base, routes in (
+            ("openai_compat", "https://x/v1", {"/models": (200, {"data": [{"id": "a"}]})}),
+            ("anthropic", "https://x", {"/v1/models": (200, {"data": [{"id": "a"}]})}),
+            ("google", "https://x/v1beta", {"/models": (200, {"models": [{"name": "models/a"}]})}),
+            ("ollama", "http://127.0.0.1:11434", {"/api/tags": (200, {"models": [{"name": "a"}]})}),
+        ):
+            target = ProviderTarget(protocol, protocol, base, "k", needs_key=protocol != "ollama")
+            async with _client(routes) as client:
+                result = await discover_provider(target, client=client)
+            self.assertTrue(result.ok, (protocol, result.error))
+            self.assertIn("context_tokens", result.models[0], protocol)
+            self.assertIsNone(result.models[0]["context_tokens"], protocol)
+
+
+class TestOllamaContextLength(unittest.IsolatedAsyncioTestCase):
+    """`/api/tags` has no context length; `/api/show` does. Asked for politely, and never at the list's expense."""
+
+    TARGET = ProviderTarget("ollama", "ollama", "http://127.0.0.1:11434", needs_key=False)
+
+    async def asyncSetUp(self) -> None:
+        reset_ollama_windows()
+        self.shown: list[str] = []
+        self.flying = 0
+        self.most_flying = 0
+
+    async def asyncTearDown(self) -> None:
+        reset_ollama_windows()
+
+    def _client(self, models: list[dict[str, Any]], show: Any, delay: float = 0.0) -> httpx.AsyncClient:
+        async def handle(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/api/tags"):
+                return httpx.Response(200, json={"models": models})
+            if request.url.path.endswith("/api/show"):
+                name = json.loads(request.content)["model"]
+                self.shown.append(name)
+                self.flying += 1
+                self.most_flying = max(self.most_flying, self.flying)
+                try:
+                    if delay:
+                        await asyncio.sleep(delay)
+                finally:
+                    self.flying -= 1
+                answer = show(name) if callable(show) else show
+                if isinstance(answer, int):
+                    return httpx.Response(answer, json={"error": "no"})
+                return httpx.Response(200, json=answer)
+            return httpx.Response(404, json={})
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handle))
+
+    async def _discover(self, client: httpx.AsyncClient) -> Any:
+        async with client:
+            return await discover_provider(self.TARGET, client=client)
+
+    async def test_the_architecture_prefixed_key_is_the_context_length(self) -> None:
+        shows = {
+            "llama": {"model_info": {"general.architecture": "llama", "llama.context_length": 131072}},
+            "qwen": {"model_info": {"general.architecture": "qwen2", "qwen2.context_length": 32768, "qwen2.block_count": 28}},
+            "none": {"model_info": {"general.architecture": "x"}},
+            "bad": {"model_info": {"x.context_length": "big"}},
+            "plain": {"model_info": {"context_length": 4096}},
+        }
+        client = self._client([{"name": n, "digest": n} for n in shows], lambda n: shows[n])
+        result = await self._discover(client)
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(
+            {m["id"]: m["context_tokens"] for m in result.models},
+            {"llama": 131072, "qwen": 32768, "none": None, "bad": None, "plain": 4096},
+        )
+
+    async def test_a_show_that_fails_costs_the_number_and_never_the_list(self) -> None:
+        for answer in (404, 500, {"model_info": "nonsense"}, {}):
+            reset_ollama_windows()
+            result = await self._discover(self._client([{"name": "m"}], answer))
+            self.assertTrue(result.ok, (answer, result.error))
+            self.assertEqual([(m["id"], m["context_tokens"]) for m in result.models], [("m", None)], answer)
+
+    async def test_a_slow_ollama_is_given_a_budget_and_not_the_whole_discovery(self) -> None:
+        import time
+        from unittest import mock
+
+        client = self._client([{"name": f"m{i}", "digest": str(i)} for i in range(5)], {"model_info": {"a.context_length": 8192}}, delay=5.0)
+        with mock.patch("engine.model_catalog.OLLAMA_SHOW_BUDGET_S", 0.2):
+            started = time.monotonic()
+            result = await self._discover(client)
+            took = time.monotonic() - started
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(len(result.models), 5, "the list was lost because a show was slow")
+        self.assertTrue(all(m["context_tokens"] is None for m in result.models))
+        self.assertLess(took, 2.0, f"discovery waited {took:.1f}s on a slow show")
+        self.assertEqual(self.flying, 0, "a request that outlived the budget was left running")
+
+    async def test_a_show_past_the_budget_is_finished_with_before_the_lookup_returns(self) -> None:
+        # Checked the instant it returns, with nothing awaited in between: a cancelled task that nobody awaits
+        # is still running until the loop next visits it, and closing the client (which yields) hides that.
+        from unittest import mock
+
+        from engine.model_catalog import _ollama_windows
+
+        rows = [{"name": f"m{i}", "digest": str(i)} for i in range(4)]
+        client = self._client(rows, {"model_info": {"a.context_length": 8192}}, delay=5.0)
+        with mock.patch("engine.model_catalog.OLLAMA_SHOW_BUDGET_S", 0.1):
+            async with client:
+                found = await _ollama_windows("http://127.0.0.1:11434", client, rows)
+                self.assertEqual(self.flying, 0, "a request past the budget was cancelled but not awaited")
+        self.assertEqual(found, {})
+
+    async def test_what_ollama_said_is_remembered_by_digest(self) -> None:
+        answer = {"model_info": {"a.context_length": 8192}}
+        models = [{"name": "m", "digest": "d1"}]
+        await self._discover(self._client(models, answer))
+        await self._discover(self._client(models, answer))
+        self.assertEqual(self.shown, ["m"], "an unchanged model was asked about twice")
+        # A new digest is a different model under the same name: asked again, and the new answer is used.
+        changed = await self._discover(self._client([{"name": "m", "digest": "d2"}], {"model_info": {"a.context_length": 16384}}))
+        self.assertEqual(self.shown, ["m", "m"])
+        self.assertEqual(changed.models[0]["context_tokens"], 16384)
+
+    async def test_a_failed_show_is_asked_again_next_time(self) -> None:
+        models = [{"name": "m", "digest": "d1"}]
+        first = await self._discover(self._client(models, 500))
+        self.assertIsNone(first.models[0]["context_tokens"])
+        second = await self._discover(self._client(models, {"model_info": {"a.context_length": 8192}}))
+        self.assertEqual(second.models[0]["context_tokens"], 8192, "a failure was remembered as an answer")
+
+    async def test_only_the_newest_are_asked_and_only_a_few_at_once(self) -> None:
+        from engine.model_catalog import OLLAMA_SHOW_CONCURRENCY, OLLAMA_SHOW_MAX_MODELS
+
+        total = OLLAMA_SHOW_MAX_MODELS + 36
+        models = [
+            {"name": f"m{i:03d}", "digest": str(i), "modified_at": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z"}
+            for i in range(total)
+        ]
+        result = await self._discover(self._client(models, {"model_info": {"a.context_length": 8192}}, delay=0.01))
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(len(result.models), total, "the whole list is still listed")
+        self.assertEqual(len(self.shown), OLLAMA_SHOW_MAX_MODELS)
+        newest = {f"m{i:03d}" for i in range(total - OLLAMA_SHOW_MAX_MODELS, total)}
+        self.assertEqual(set(self.shown), newest, "it asked about old models while newer ones had no number")
+        self.assertLessEqual(self.most_flying, OLLAMA_SHOW_CONCURRENCY)
+        known = {m["id"] for m in result.models if m["context_tokens"] is not None}
+        self.assertEqual(known, newest)
 
 
 if __name__ == "__main__":

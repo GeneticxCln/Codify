@@ -201,6 +201,7 @@ engine has *confirmed* it and then stopped listing it.
 | `GET /conversations?workspace_id=&include_archived=` | The side panel, most recently touched first. Archived hidden unless asked. |
 | `GET /conversations/{id}` | One thread. |
 | `GET /conversations/{id}/turns` | The thread's turns, oldest first. Derived, not stored. |
+| `POST /conversations/{id}/turns` | Make a turn: `{prompt, provider?, model?, trace?}`, `extra=forbid`. `provider` and `model` come as a pair or not at all (§10.20). |
 | `PATCH /conversations/{id}` | Rename. The only mutable thing about a thread. |
 | `POST /conversations/{id}/archive?archived=` | Hide from the panel, or restore. |
 | `DELETE /conversations/{id}` | Drop the thread, keep the runs. |
@@ -2364,6 +2365,11 @@ turn, because a client that could choose is the client that produced a plan for
 `TurnCreate` is also `extra: "forbid"`, so `agent_config` is a 422 — invariant 2
 holds on the new route for the same reason it holds on `POST /goals`.
 
+It does carry one choice, the model the turn's own calls run on (`provider` and `model`, a pair or neither, at
+most 64 and 128 characters, the settings' own caps; half a pair or an overlong value is a 422). That is not
+a pipeline flag: it says *where* the turn's calls go and decides nothing about *what the turn becomes*, which
+is still the gate's and the conductor's call. See §10.20.
+
 ### 10.4 No gate means the conductor
 
 A fresh install has no gate configured, and `engine == "skipped"` is the ordinary
@@ -3037,6 +3043,49 @@ history and read-aloud carry it and the window can draw it.
 
 Proven by `tests/test_ask_user.py` (the rules, the loop stopping, where it is offered, the turn it ends) and
 `ui/tests/askUser.test.ts` (the reading, and the buttons through the whole App sending an ordinary turn).
+
+### 10.20 The model a turn runs on
+
+The command bar's model picker used to be a decoration. The engine recorded the pick on the goal row and ran
+the turn on whatever Settings named (the conductor model, else the scribe row it borrows), so choosing
+another model changed the label and nothing else. It is now what it says: **a pick routes the turn.**
+
+* **What the pick routes.** The turn's own calls: the conversation and its tool loop (the conductor), the plain
+  reply when no loop is available, and the resume after an approval. It does **not** route the roles. The
+  planner, fixer, verifier and the rest of a pipeline a turn starts still run on the models in Settings → Agents,
+  because "a role runs on its own configuration" (docs/01 §2.2) is what lets someone give the fixer a strong
+  model and the scribe a cheap one. The menu says so, in the sentence under its search box and in the button's
+  tooltip, so the label cannot be read as more than it is.
+* **Read, never written.** `ExecutorService._picked_pair` reads the pair from the goal row, for a turn only
+  (`mode == "chat"`; a pipeline goal's `provider`/`model` keep meaning what they always meant), and builds the
+  call's configuration from the row the call would have used, with the provider and model replaced. It
+  inherits that row's temperature and `num_ctx`, and drops its `base_url` and key reference when the
+  provider moved (an endpoint is a provider's, not a model's). **No setting is written**, so invariant 2 (agent
+  configuration is written only by the settings routes) holds; `tests/test_turn_model_routing.py::TestThePickOnThePlainReply::test_a_pick_writes_no_configuration`
+  asserts it and is in the invariant ledger.
+* **The fallback is kept.** A pick replaces the *primary* only. The configured fallback still catches a failed
+  call and is announced as `provider_fallback`, as before. A pick no one can reach (no key, a server that is
+  down) is said in the goal's log in those words ("the model you picked ...") rather than in the settings'
+  wording, which would blame a configuration the person did not touch.
+* **What is shown is what runs** (`ui/src/modelChoice.ts`). The bar's *pick* is explicit state, and what it
+  shows is derived: a pick, else the configured conductor model (`GET /models` → `conductor`, `06` §2.1), else
+  the old guess (a local model). Nothing picked and a model configured: it is shown and **nothing is sent**, so
+  the turn follows Settings, including when Settings changes. Nothing configured: the guess is shown and sent,
+  because otherwise nothing would answer. Choosing the configured model again clears the pick. A model typed in
+  by hand (`provider/model`, which no discovery lists) survives a catalog refresh; a *listed* model the catalog
+  has lost is dropped.
+* **The toolbar holds only what a turn reads.** Folder, model, execution mode and Record. Parallel, Design and
+  Knowledge are gone: a turn carries no run flags (§10.3, invariant 8), so each armed a switch that nothing
+  read, and the Deliverable pair looked as if a turn could produce a file on request. Whether steps run
+  concurrently is the engine's call (`parallel_width`, `PUT /settings/engine`); a design or knowledge
+  deliverable is something a person asks for in words. The `Toggle` tones and the deliverable cards in the
+  transcript are untouched: they draw goals that already exist.
+
+Proven by `tests/test_turn_model_routing.py` (the pick reaches the conductor and the plain reply, the fallback
+stays, nothing is written, the door refuses half a pair, a turn with no pick is unchanged) and
+`ui/tests/modelPicker.test.ts` (the real App: what a send posts, with and without a pick, the refresh cases,
+the badges, and the toolbar's contents). Not proven: the picker in the desktop window (WebKitGTK), which no
+test here can open.
 
 ## 11. The clipboard history (built)
 

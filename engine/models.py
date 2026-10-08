@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # The pipeline slots. Each one has a different *ability*, not a different
 # persona: the librarian is the only role that reads the workspace, the design
@@ -648,13 +648,28 @@ class TurnCreate(BaseModel):
     # after the strip below is what makes "  " a 422 rather than a goal whose
     # planner is handed an empty request.
     prompt: str = Field(..., min_length=1, max_length=20000)
-    # The command bar's model choice, recorded on the goal as what the user asked for, exactly as
-    # `POST /goals` does. It is written onto no role (docs/00 §6.2): a role runs on its own
-    # configuration, which only the settings routes change.
-    provider: str | None = None
-    model: str | None = None
+    # The command bar's model choice. It is recorded on the goal, and it **routes this turn's own model
+    # calls**: the conductor's loop and the plain reply, instead of the conductor model the settings name
+    # (`ExecutorService._picked_pair`). It is read from the goal row and written nowhere else: no role row,
+    # no engine setting (docs/00 §6.2 is about *writing* configuration, and this writes none). The eight roles
+    # a move calls keep running on their own configuration, which only the settings routes change.
+    #
+    # Both or neither: half a pair names nothing to call. The caps are the settings' own
+    # (`conductor_provider` 64, `conductor_model` 128), because this is the same two strings by another door
+    # and a value the settings would refuse must not be accepted here.
+    provider: str | None = Field(None, max_length=64)
+    model: str | None = Field(None, max_length=128)
     # Record this turn's model calls (docs/04 §8), same opt-in as a goal.
     trace: bool = False
+
+    @model_validator(mode="after")
+    def _a_pair_or_nothing(self) -> TurnCreate:
+        provider = (self.provider or "").strip() or None
+        model = (self.model or "").strip() or None
+        if (provider is None) != (model is None):
+            raise ValueError("name both `provider` and `model`, or neither: half a pair names nothing to call")
+        self.provider, self.model = provider, model
+        return self
 
 
 class VersionedAction(BaseModel):

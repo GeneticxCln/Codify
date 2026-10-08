@@ -17,7 +17,9 @@ const { ModelBadges } = await import("../src/components/ModelBadges.tsx");
 const { modelBadges, buildModelSignals } = await import("../src/modelSignals.ts");
 
 type Badges = ReturnType<typeof modelBadges>;
-const NONE: Badges = { roles: "", rolesTitle: "", lastRun: false, lastRunTitle: "", notChat: false };
+const NONE: Badges = {
+  roles: "", rolesTitle: "", lastRun: false, lastRunTitle: "", notChat: false, context: null, isDefault: false,
+};
 const render = (b: Partial<Badges>): string =>
   renderToStaticMarkup(React.createElement(ModelBadges, { badges: { ...NONE, ...b } }));
 const textOf = (markup: string): string => markup.replace(/<[^>]*>/g, "");

@@ -728,6 +728,7 @@ LEDGER: dict[int, tuple[str, ...]] = {
         "tests.test_api.TestApi.test_starting_a_goal_refuses_agent_config",
         "tests.test_api.TestApi.test_no_goal_or_turn_route_writes_agent_config",
         "tests.test_turns.TestOneDoor.test_the_turn_route_refuses_agent_config",
+        "tests.test_turn_model_routing.TestThePickOnThePlainReply.test_a_pick_writes_no_configuration",
     ),
     3: (
         "tests.test_every_route_is_authenticated.TestEveryHttpRoute",

@@ -543,7 +543,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/settings/roles` | — | each role's `job` + `timing` (`01` §1) |
 | `GET` | `/settings/engine` | — | every key in `SettingsService.SPEC` / `STRING_SPEC`, each with its clamp band (or its max length, for a string) |
 | `PUT` | `/settings/engine` | `{parallel_width, …}` | `{saved: {…}}` — echoes what was actually stored, clamped for numbers |
-| `GET` | `/models?refresh=` | — | live-discovered catalog, per-provider status (`06`) |
+| `GET` | `/models?refresh=` | — | live-discovered catalog, per-provider status, each model's `context_tokens` (or `null`), and a `conductor` block `{provider, model, source, num_ctx}` — the model a conversation runs on when nothing is picked, computed per request and not cached (`06` §2.1) |
 | `GET` | `/models/recent?limit={1..25}` | — | `[{provider, model, role, ran_at}]`, newest first (`06` §3.1) |
 | `GET` | `/audio/status` | — | `{dictation, read_aloud, recorder, auto_read}`: whether each can run now and, if not, the reason (§3.0.2) |
 | `GET` | `/audio/inputs` | — | `{available, reason, inputs: [{name, description, default}]}` from PipeWire (§3.0.2) |
