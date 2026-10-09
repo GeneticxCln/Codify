@@ -536,8 +536,16 @@ class WorkspaceService:
         self._db = conn
 
     def create(self, body: WorkspaceCreate) -> Workspace:
-        root = str(Path(body.root_path).expanduser().resolve())
-        if not Path(root).is_dir():
+        # A person types this into a box, so it is the one string here that can be anything, and the operating system
+        # answers some of it with an exception rather than "no": a NUL byte (`ValueError`), a `~user` that does not
+        # exist (`RuntimeError`), a symlink loop (`RuntimeError` before 3.13) and a name or path past the filesystem's
+        # limit (`OSError`, `ENAMETOOLONG`, which `Path.is_dir` does not swallow). All of them are "not a directory".
+        try:
+            root = str(Path(body.root_path).expanduser().resolve())
+            is_dir = Path(root).is_dir()
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ApiError(400, "invalid_root", "root_path must be an existing directory") from exc
+        if not is_dir:
             raise ApiError(400, "invalid_root", "root_path must be an existing directory")
         # `/` (or any filesystem ancestor of everything) makes every
         # path-containment check vacuous: nothing can escape a root that

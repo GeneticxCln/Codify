@@ -2381,6 +2381,57 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["code"], "unknown_setting")
 
+    async def test_a_refused_engine_settings_save_changes_nothing(self) -> None:
+        """A 4xx from `PUT /settings/engine` means no key in that request was stored.
+
+        The handler used to write each key as it reached it, so `{"web_fetch": 1, "web_fetch_hosts": "<an address>"}` (what
+        the Web pages card sends) answered 422 about the list and had already moved the mode from any public site to a
+        list; a UI that keeps the person's draft after a refusal was then showing a setting the engine no longer held.
+        """
+        def stored() -> dict[str, int]:
+            return {
+                key: app.state.settings.get_int(key) for key in ("parallel_width", "web_fetch", "conductor_max_turns")
+            }
+
+        before = stored()
+        hosts_before = app.state.settings.get_str("web_fetch_hosts")
+        refused: list[tuple[dict[str, Any], int]] = [
+            ({"parallel_width": 3, "conductor_max_turns": "abc"}, 422),
+            ({"parallel_width": 3, "conductor_max_turns": True}, 422),
+            ({"parallel_width": 3, "not_a_setting": 1}, 400),
+            ({"web_fetch": 1, "web_fetch_hosts": "http://10.0.0.1/"}, 422),
+            ({"web_fetch": 0, "web_fetch_hosts": 5}, 422),
+            ({"parallel_width": 3, "web_fetch_hosts": "docs.python.org", "conductor_provider": "Not A Slug"}, 422),
+        ]
+        for body, status in refused:
+            with self.subTest(body=body):
+                r = await self.client.put("/settings/engine", headers=self.headers, json=body)
+                self.assertEqual(r.status_code, status, r.text)
+                self.assertEqual(stored(), before)
+                self.assertEqual(app.state.settings.get_str("web_fetch_hosts"), hosts_before)
+                self.assertEqual(app.state.settings.get_str("conductor_provider"), "")
+
+        # And a save that is accepted still stores all of it.
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers,
+            json={"parallel_width": 3, "web_fetch": 1, "web_fetch_hosts": "docs.python.org"},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["saved"], {"parallel_width": 3, "web_fetch": 1, "web_fetch_hosts": "docs.python.org"})
+
+    async def test_a_number_that_cannot_be_an_integer_is_refused_not_a_server_error(self) -> None:
+        """JSON as Python reads it holds `Infinity` and `1e999`, and `int()` of either raises `OverflowError`, which the
+        handler's `(TypeError, ValueError)` did not name: a plain-text 500 from the one route every card saves through."""
+        for literal in ("Infinity", "-Infinity", "1e999", "-1e999", "NaN"):
+            with self.subTest(literal=literal):
+                r = await self.client.put(
+                    "/settings/engine",
+                    headers={**self.headers, "content-type": "application/json"},
+                    content=f'{{"parallel_width": {literal}}}',
+                )
+                self.assertEqual(r.status_code, 422, r.text)
+                self.assertEqual(r.json()["code"], "invalid_value")
+
     async def test_the_conductors_model_is_a_setting_a_user_can_reach(self) -> None:
         """The keys the executor reads were declared, read — and unwritable.
 

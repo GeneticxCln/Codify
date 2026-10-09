@@ -97,6 +97,11 @@ from engine.services import (
 # it stays authenticated; `home.boot_token` says why, and what it costs.
 BOOT_TOKEN = os.environ.get(home.ENV_BOOT_TOKEN) or home.boot_token()
 
+# The range of a SQLite INTEGER. An integer in a query that reaches a statement outside it is an `OverflowError`
+# from the driver, so the routes that pass one through say so in their signature and answer 422.
+SQLITE_INT_MIN = -(2**63)
+SQLITE_INT_MAX = 2**63 - 1
+
 
 def pick_port() -> int:
     env = os.environ.get("CODIFY_PORT")
@@ -513,7 +518,11 @@ async def request_validation_error(
     # validator raised in `ctx["error"]`, and `JSONResponse` cannot serialise it. Without this
     # the one custom validator the engine has — the refusal that enforces invariant 8 — was
     # answered with HTTP 500 instead of the 422 it was written to produce.
-    errors = jsonable_encoder(exc.errors())
+    # Without `input`, which pydantic fills with the rejected value (for a missing field, the whole object around
+    # it). A request is not repeated back: an API key sent without its provider came straight back in the response
+    # (docs/00 §6.4), and a `NaN` or `Infinity` in the body made the encoder fail to render this very answer, which
+    # was an HTTP 500 for what should have been a 422.
+    errors = jsonable_encoder([{key: value for key, value in err.items() if key != "input"} for err in exc.errors()])
     fields: list[str] = []
     for err in errors:
         loc = [str(part) for part in err.get("loc", []) if part != "body"]
@@ -1344,7 +1353,11 @@ async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[st
     borrows the scribe's row (`ExecutorService._conductor_config`).
     """
     settings: SettingsService = request.app.state.settings
-    out: dict[str, Any] = {}
+    # Every key is checked before any is stored: a request the engine refuses changes nothing. Each setter
+    # commits as it goes, so refusing at the third key used to leave the first two saved, and a card that sends
+    # a mode and a list together (Web pages) could be told "no" about the list with the mode already moved.
+    int_values: dict[str, int] = {}
+    string_values: dict[str, str] = {}
     for key, value in body.items():
         if key in ENGINE_INT_SETTINGS:
             # A boolean is refused for a number the user is *choosing*: JSON's
@@ -1354,13 +1367,17 @@ async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[st
             if isinstance(value, bool) and key not in ENGINE_SWITCH_SETTINGS:
                 raise ApiError(422, "invalid_value", f"{key} must be an integer, not a boolean")
             try:
-                out[key] = settings.set_int(key, int(value))
-            except (TypeError, ValueError) as err:
+                int_values[key] = int(value)
+            # `OverflowError`: JSON as Python reads it holds `Infinity` and `1e999`, and `int()` of either raises it.
+            except (TypeError, ValueError, OverflowError) as err:
                 raise ApiError(422, "invalid_value", f"{key} must be an integer") from err
         elif key in ENGINE_STRING_SETTINGS:
-            out[key] = settings.set_str(key, _clean_engine_string(key, value))
+            string_values[key] = _clean_engine_string(key, value)
         else:
             raise ApiError(400, "unknown_setting", f"unknown engine setting: {key}")
+    out: dict[str, Any] = {}
+    for key in body:
+        out[key] = settings.set_int(key, int_values[key]) if key in int_values else settings.set_str(key, string_values[key])
     return {"saved": out}
 
 
@@ -1579,7 +1596,7 @@ async def list_conversations(
     workspace_id: str | None = None,
     include_archived: bool = False,
     limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=SQLITE_INT_MAX),
 ) -> list[Conversation]:
     """Threads, most recently touched first, for the side panel.
 
@@ -1762,7 +1779,7 @@ async def list_goals(
     workspace_id: str | None = None,
     status: str | None = None,
     limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=SQLITE_INT_MAX),
 ) -> list[Goal]:
     """Goal history, newest first (active goals lead, so a just-dispatched goal
     never sinks under a wall of finished runs).
@@ -2576,7 +2593,9 @@ async def delete_goal(goal_id: str, request: Request) -> dict[str, Any]:
 
 
 @app.get("/goals/{goal_id}/events")
-async def goal_events(goal_id: str, request: Request, after: int = Query(0)) -> list[Event]:
+async def goal_events(
+    goal_id: str, request: Request, after: int = Query(0, ge=SQLITE_INT_MIN, le=SQLITE_INT_MAX),
+) -> list[Event]:
     goals: GoalService = request.app.state.goals
     goals.get(goal_id)
     return goals.events_after(goal_id, after)

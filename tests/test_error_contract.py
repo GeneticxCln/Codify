@@ -349,6 +349,73 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("root_path", located)
 
+    async def test_a_rejection_does_not_repeat_what_was_sent(self) -> None:
+        """The 422 names the fields that were wrong and the reason, never the values.
+
+        Pydantic's error carries the rejected `input`, and for a missing field that is the *whole object around it*: a
+        key sent without its provider came straight back in the response (docs/00 §6.4, "responses never include raw
+        API keys"). The value is the caller's own, so this is not a disclosure to anyone else, but nothing else in the
+        engine's responses repeats a request, and an echo is what ends up in a log, a bug report and a screenshot.
+        """
+        marker = "marker-" + os.urandom(8).hex()
+        for path, method, body in (
+            ("/settings/keys", "post", {"api" + "_key": marker}),
+            ("/settings/keys", "post", {"provider": "openai", "api" + "_key": [marker]}),
+            ("/workspaces", "post", {"name": marker}),
+            ("/goals", "post", {"title": marker, "dry_run": marker}),
+        ):
+            with self.subTest(path=path, body=sorted(body)):
+                r = await getattr(self.client, method)(path, json=body, headers=self.headers)
+                self.assertEqual(r.status_code, 422, r.text)
+                self.assertNotIn(marker, r.text)
+                payload = r.json()
+                self._assert_declared_shape(422, payload, path)
+                self.assertTrue(all("loc" in e and "msg" in e and "type" in e for e in payload["detail"]))
+                self.assertFalse(any("input" in e for e in payload["detail"]))
+
+    async def test_a_number_json_cannot_hold_is_a_422_not_a_server_error(self) -> None:
+        """Python's JSON parser reads `NaN`, `Infinity` and `1e999`; the response encoder will not write them.
+
+        The 422 repeated the rejected value, so one of those anywhere in a rejected body made the handler fail to
+        render its own answer: HTTP 500, as plain text, on every route that takes a body.
+        """
+        ws = await self._a_workspace()
+        for path, method, raw in (
+            ("/goals", "post", f'{{"workspace_id": "{ws}", "title": "t", "dry_run": NaN}}'),
+            ("/goals", "post", '{"workspace_id": 1e999, "title": "t"}'),
+            ("/workspaces", "post", '{"name": Infinity, "root_path": "/tmp"}'),
+            ("/settings/agents/fixer", "put", '{"temperature": -Infinity}'),
+            ("/settings/keys", "post", '{"provider": NaN}'),
+            ("/shell/tabs", "put", '[{"key": 1e999}]'),
+        ):
+            with self.subTest(path=path, raw=raw):
+                r = await getattr(self.client, method)(
+                    path, content=raw, headers={**self.headers, "content-type": "application/json"},
+                )
+                self.assertIn(r.status_code, (400, 422), r.text)
+                self._assert_declared_shape(r.status_code, r.json(), path)
+
+    async def test_a_number_beyond_what_the_database_holds_is_a_422_not_a_server_error(self) -> None:
+        """An unbounded integer in the query reached SQLite as an `OverflowError`: a plain-text 500."""
+        _, goal_id = await self._a_workspace_and_goal()
+        too_big = 2**63
+        for path in (
+            f"/goals?offset={too_big}",
+            f"/conversations?offset={too_big}",
+            f"/goals/{goal_id}/events?after={too_big}",
+            f"/goals/{goal_id}/events?after={-too_big - 1}",
+        ):
+            with self.subTest(path=path):
+                r = await self.client.get(path, headers=self.headers)
+                self.assertEqual(r.status_code, 422, r.text)
+                self._assert_declared_shape(422, r.json(), path)
+        # And the largest value the database can hold is still an ordinary request.
+        for path in (
+            f"/goals?offset={2**63 - 1}", f"/goals/{goal_id}/events?after={2**63 - 1}", f"/goals/{goal_id}/events?after=-1",
+        ):
+            r = await self.client.get(path, headers=self.headers)
+            self.assertEqual(r.status_code, 200, (path, r.text))
+
     async def test_a_rejection_with_many_fields_still_reads(self) -> None:
         """The message is capped so it stays a sentence, and says how much it hid."""
         r = await self.client.put(
@@ -426,6 +493,24 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual("invalid_root", body["code"])
         listed = (await self.client.get("/workspaces", headers=self.headers)).json()
         self.assertEqual([], listed, "a refused root was stored anyway")
+
+    async def test_a_root_the_filesystem_cannot_name_is_the_same_coded_400(self) -> None:
+        """Four spellings of "not a directory" that the operating system answers with an exception, not a `False`.
+
+        A NUL byte (`ValueError`), a `~user` that does not exist (`RuntimeError`), and a name or a path past the
+        filesystem's limit (`OSError`, `ENAMETOOLONG`, which `Path.is_dir` does not swallow) each reached the route as
+        an HTTP 500. `root_path` is typed in a box by a person, so it is the one string here that can be anything.
+        """
+        for root in ("a\x00b", "~no-such-user-zz/proj", "x" * 5000, "/" + "d/" * 3000):
+            with self.subTest(root=root[:30]):
+                r = await self.client.post(
+                    "/workspaces", json={"name": "bad", "root_path": root}, headers=self.headers,
+                )
+                self.assertEqual(400, r.status_code, r.text)
+                body = r.json()
+                self._assert_declared_shape(400, body, "POST /workspaces with an unnameable root")
+                self.assertEqual("invalid_root", body["code"])
+        self.assertEqual([], (await self.client.get("/workspaces", headers=self.headers)).json())
 
     async def test_every_validator_has_a_route_level_rejection_and_answers_422(self) -> None:
         validators = sorted(

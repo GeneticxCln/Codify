@@ -720,6 +720,10 @@ source), `stt_base_url` and `tts_base_url` (a custom provider's own address, bel
 `tts_auto_read` (0/1, default 0). The two provider keys are slug-checked like the conductor's. The two
 addresses must be `http(s)` with a host, or empty to clear them (`422 invalid_value` otherwise).
 
+A `PUT /settings/engine` is all or nothing: every key in the body is checked first, and a request that answers `400` or
+`422` has stored none of its keys (a card that sends two together, such as Web pages' mode and list, is never left with
+one saved). A number that is not an integer, `Infinity` and `1e999` included, is a `422 invalid_value`.
+
 **Which provider.** A built-in slug resolves to the catalogue's address (`BUILTIN_PROVIDERS`) and ignores
 any typed address, so an address saved beside `openai` can never carry the OpenAI key somewhere else. A
 custom slug resolves to its own address (`stt_base_url` / `tts_base_url`) when one is saved, because a local
