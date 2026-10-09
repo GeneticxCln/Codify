@@ -761,12 +761,6 @@ site name (an address, a URL, a path, a single label such as `intranet`) is `422
 of them, and **nothing is stored**: a list that quietly allowed less than it was shown would be a bug nobody
 could see. `POST /goals` and a turn cannot carry either key (`tests/test_invariants_at_their_boundary.py`).
 
-**`page_actions`** (a switch, 0 or 1, default 0; a checkbox's `true` is 1, any other non-integer is `422`) decides
-whether the conductor's three page verbs that act — `navigate_page`, `click_page`, `type_page` — exist for a run.
-While it is 0, or cannot be read, they are left off the menu and each refuses without announcing or sending
-anything; `read_page` is unaffected. Same writer and same refusal for a goal or a turn that carries it as the two
-keys above (`docs/03` §1.6).
-
 **What the tool does** is `docs/12` §3's table. In short: nothing is fetched unless `web_fetch` is 1 or 2; the
 tool is left off the menu while it cannot act (mode 0, or mode 1 with an empty list); an unreadable setting is
 off; GET only; the name is resolved and every answer must be a public address, and the connection is made to

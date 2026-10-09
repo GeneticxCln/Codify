@@ -12,9 +12,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from engine.chat_prompts import CHAT_SYSTEM_PROMPT, CONDUCTOR_SYSTEM_PROMPT
-from engine.conductor import (
-    ASK_USER, BASE_TOOLS, Conductor, DEFAULT_MAX_MOVES, DEFAULT_MAX_TURNS, FETCH_PAGE, PAGE_ACTION_NAMES, STEP_TOOLS,
-)
+from engine.conductor import ASK_USER, BASE_TOOLS, Conductor, DEFAULT_MAX_MOVES, DEFAULT_MAX_TURNS, FETCH_PAGE, STEP_TOOLS
 from engine.conductor_tools import ConductorTools, _Conducted
 from engine.executor_support import AgentNotConfigured
 from engine.laya import LayaDecision, build_state
@@ -456,15 +454,6 @@ class _Conduct(_Plan):
         hosts, _ = parse_hosts(raw)
         return FetchPolicy(mode=mode if mode in (MODE_LISTED, MODE_ANY) else MODE_OFF, hosts=hosts)
 
-    def _page_actions_allowed(self) -> bool:
-        """Whether the person allowed `navigate_page`, `click_page` and `type_page`, read fresh each time.
-
-        `_web_policy`'s default for `_web_policy`'s reason: a store that cannot answer and a value that is
-        not exactly 1 are *off*. Each of the three can carry what a turn has read out of the machine
-        (docs/03 §1.6), so "I could not read the setting" must not mean "yes".
-        """
-        return self._settings_int("page_actions", 0) == 1
-
     def _settings_int(self, key: str, default: int) -> int:
         """One engine setting, or the default.
 
@@ -674,10 +663,6 @@ class _Conduct(_Plan):
             # A tool that can only say "turned off" is a slot a small model spends a call finding that out.
             if not self._web_policy().offered:
                 offered = [t for t in offered if t.name != FETCH_PAGE.name]
-            # Off is the default, and a hidden tool is one the loop will not dispatch (`Conductor._run_tool`):
-            # the menu is the gate, and each tool's own refusal is the second line behind it.
-            if not self._page_actions_allowed():
-                offered = [t for t in offered if t.name not in PAGE_ACTION_NAMES]
             # A question needs somebody to answer it, and a place to be seen. An approved plan that is
             # running has nobody sitting at it (a step ends finished, or paused with a reason, never parked
             # on a question), and once a plan exists the plan is what the person is looking at: they

@@ -73,16 +73,6 @@ _NO_BROWSER = (
     "to open the page in Codify, or answer from the workspace."
 )
 
-#: What `navigate_page`, `click_page` and `type_page` say while the person has not allowed them. The menu
-#: already hides the three (`ExecutorService.conductor_menu`); this is the refusal behind it, for a caller
-#: that dispatches on the table alone. Checked before anything is announced or sent.
-_PAGE_ACTIONS_OFF = (
-    "Acting on the browser tab is turned off: opening an address, clicking and typing can each carry "
-    "what this turn has read off the machine. The person can allow it in Settings; it is not something a "
-    "conductor can change. `read_page` still reads the open page. Give them the address to open, or say "
-    "what they should click or type."
-)
-
 
 #: What an editor tool says when there is no window to ask. One sentence, named, for the reason `_NO_BROWSER` is one: a
 #: missing window is the *normal* answer in a benchmark, a command-line turn and most of the suite.
@@ -764,11 +754,8 @@ class ConductorTools:
         The guard decides *where* a navigation may go; nothing in this
         engine can decide whether the address is being used to carry data
         out, because the address is the payload. That is the thing to weigh
-        before widening what a conductor turn may read — and it is why the
-        tool does nothing until the person has allowed `page_actions`.
+        before widening what a conductor turn may read.
         """
-        if not self.service._page_actions_allowed():
-            return _PAGE_ACTIONS_OFF
         bridge = self.service.bridge
         if bridge is None:
             return (
@@ -811,8 +798,6 @@ class ConductorTools:
         submit anything, which was true of this tool's absence and is not
         true of the pair.
         """
-        if not self.service._page_actions_allowed():
-            return _PAGE_ACTIONS_OFF
         bridge = self.service.bridge
         if bridge is None:
             return _NO_BROWSER
@@ -845,8 +830,6 @@ class ConductorTools:
         secret into a field a page watches is already an egress, and
         `click_page` on a submit control is the same act in one call.
         """
-        if not self.service._page_actions_allowed():
-            return _PAGE_ACTIONS_OFF
         bridge = self.service.bridge
         if bridge is None:
             return _NO_BROWSER

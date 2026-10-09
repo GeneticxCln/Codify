@@ -523,9 +523,7 @@ class Conductor:
             return (
                 f"`{call.name}` is not available right now: a tool is offered only when it can act (the "
                 "step moves once there is a plan, `ask_user` only while someone is there to answer, never "
-                "during an approved run, `fetch_page` only when the person has allowed it in Settings, "
-                "`navigate_page`, `click_page` and `type_page` only when the person has allowed acting on "
-                "their browser tab in Settings). "
+                "during an approved run, `fetch_page` only when the person has allowed it in Settings). "
                 f"The tools available now are: {now}. Call one of those, or answer without a tool."
             )
         if call.name in STAGE_MOVES:
@@ -1312,12 +1310,6 @@ BASE_TOOLS: tuple[ToolSpec, ...] = (
     RECALL, RECALL_THREADS, USE_SKILL, RECON,
     DESIGN, PLAN,
 )
-
-# The three tools that act on the person's browser tab rather than read it. Off unless the person turned
-# `page_actions` on (`ExecutorService.conductor_menu`): each one can carry what a turn has read off the
-# machine — an address is sent to its site, and typed text to a page that may be watching the field
-# (docs/03 §1.6). `read_page` is not one of them: reading the open page sends nothing.
-PAGE_ACTION_NAMES: frozenset[str] = frozenset({NAVIGATE_PAGE.name, CLICK_PAGE.name, TYPE_PAGE.name})
 
 # Offered once `plan` has produced steps for them to act on. `write` is the only
 # one that touches the filesystem and it still needs the goal's approval. `todo` rides with them: its notes
