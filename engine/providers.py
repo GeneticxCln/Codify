@@ -419,6 +419,24 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def is_local_endpoint(base_url: str) -> bool:
+    """True when `base_url` is a server on this machine or this network: loopback, or a private/link-local address.
+
+    This is what decides who gets a role's `temperature`: the local model does, hosted models do not (Claude Opus 4.7
+    and later and the Sonnet 5 line refuse it with a 400, and OpenAI's reasoning models only take their default).
+    Decided by parsing the address, like `_is_loopback_host`; a hostname that is not a literal address is not
+    assumed local, because nothing here can tell where it points.
+    """
+    host = (urlparse(base_url or "").hostname or "").lower().strip("[]")
+    if _is_loopback_host(host):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_link_local
+
+
 def validate_local_base_url(url: str) -> None:
     parsed = urlparse(url)
     if not _is_loopback_host(parsed.hostname or ""):
@@ -597,7 +615,21 @@ class BaseProvider(ABC):
             _attempts.reset(once)
 
 
+# The one Messages API version both calls name. It accepts `2023-06-01` and `2023-01-01` and nothing else
+# (platform.claude.com/docs/en/api/versioning); the tool-calling call once sent `2023-11-01`, which does not exist.
+ANTHROPIC_API_VERSION = "2023-06-01"
+
+
 class AnthropicProvider(BaseProvider):
+    """Claude over the Messages API.
+
+    **No `temperature` is sent.** A role's temperature is a setting for the local model; Claude Opus 4.7 and later,
+    Fable 5 and the Sonnet 5 line answer a request that carries one with a 400, and every role has one (0.0 to 0.4),
+    so while it was sent no role could run on a current Claude model. The keyword stays in the signature because
+    `BaseProvider.complete` is the contract every role calls through, and is ignored here the way `num_ctx` is by
+    every protocol but Ollama's.
+    """
+
     def __init__(self, api_key: str, base_url: str):
         if not api_key:
             raise ProviderError("missing_api_key", "Anthropic API key is not set")
@@ -605,30 +637,32 @@ class AnthropicProvider(BaseProvider):
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
 
+    async def _messages(self, body: dict[str, Any]) -> Any:
+        """POST /v1/messages: the one way both calls reach the API, so they cannot name different versions."""
+        async with httpx.AsyncClient(timeout=120) as client:
+            return await post_json(
+                client,
+                f"{self._base_url}/v1/messages",
+                label="anthropic",
+                headers={
+                    "x-api-key": self._api_key,
+                    "anthropic-version": ANTHROPIC_API_VERSION,
+                    "content-type": "application/json",
+                },
+                json=body,
+            )
+
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> str:
-        url = f"{self._base_url}/v1/messages"
-        async with httpx.AsyncClient(timeout=120) as client:
-            data = await post_json(
-                client,
-                url,
-                label="anthropic",
-                headers={
-                    "x-api-key": self._api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "system": system_prompt,
-                    "messages": [{"role": "user", "content": user_prompt}],
-                },
-            )
+        data = await self._messages({
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_prompt}],
+        })
         self._report_usage("anthropic", data)
         return "".join(
             b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
@@ -648,24 +682,13 @@ class AnthropicProvider(BaseProvider):
         max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
     ) -> ToolReply:
-        url = f"{self._base_url}/v1/messages"
-        async with httpx.AsyncClient(timeout=120) as client:
-            data = await post_json(
-                client, url, label="anthropic",
-                headers={
-                    "x-api-key": self._api_key,
-                    "anthropic-version": "2023-11-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "system": system_prompt,
-                    "tools": [t.to_anthropic() for t in tools],
-                    "messages": to_anthropic_messages(messages),
-                },
-            )
+        data = await self._messages({
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system_prompt,
+            "tools": [t.to_anthropic() for t in tools],
+            "messages": to_anthropic_messages(messages),
+        })
         self._report_usage("anthropic", data)
         blocks = [b for b in (data.get("content") or []) if isinstance(b, dict)]
         text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
@@ -688,6 +711,8 @@ class OpenAICompatProvider(BaseProvider):
         require_safe_key_destination(api_key, base_url)
         self._api_key = api_key or ""
         self._base_url = base_url.rstrip("/")
+        # A role's temperature goes to a local server (LM Studio, vLLM, llama.cpp) and to no hosted one.
+        self._local = is_local_endpoint(self._base_url)
         # Three states: None = not probed yet, True/False = probed. Cached per
         # provider instance so the capability probe runs once, not per call.
         self._json_mode: bool | None = None
@@ -733,7 +758,7 @@ class OpenAICompatProvider(BaseProvider):
                 client, url, label="openai_compat", headers=headers,
                 json={
                     "model": model,
-                    "temperature": temperature,
+                    **({"temperature": temperature} if self._local else {}),
                     "max_tokens": max_tokens,
                     "messages": [
                         {"role": "system", "content": system_prompt},
@@ -779,7 +804,7 @@ class OpenAICompatProvider(BaseProvider):
             self._json_mode = await self._supports_json_mode(url)
         payload = {
             "model": model,
-            "temperature": temperature,
+            **({"temperature": temperature} if self._local else {}),
             "max_tokens": max_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -1108,10 +1133,7 @@ class GoogleProvider(BaseProvider):
                     "tool_config": {
                         "function_calling_config": {"mode": "AUTO"},
                     },
-                    "generationConfig": {
-                        "temperature": temperature,
-                        "maxOutputTokens": max_tokens,
-                    },
+                    "generationConfig": {"maxOutputTokens": max_tokens},
                 },
                 headers={"x-goog-api-key": self._api_key},
             )
@@ -1130,10 +1152,12 @@ class GoogleProvider(BaseProvider):
             name = str(call.get("name") or "")
             if not name:
                 continue
+            signature = part.get("thoughtSignature")
             calls.append(ToolCall(
                 id=f"call_{index}",
                 name=name,
                 arguments=coerce_arguments(by_name.get(name), call.get("args")),
+                signature=signature if isinstance(signature, str) and signature else None,
             ))
         self._report_usage("google", data)
         reply = coerce_tool_reply(text, calls, tools)
@@ -1153,10 +1177,7 @@ class GoogleProvider(BaseProvider):
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_tokens,
-            },
+            "generationConfig": {"maxOutputTokens": max_tokens},
         }
         # The key travels in a header, not the URL: a query-string credential
         # lands in proxy/server access logs, and Google accepts the header form.

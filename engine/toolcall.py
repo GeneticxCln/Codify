@@ -427,6 +427,9 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    # Opaque, and only Google's: the `thoughtSignature` a Gemini 3 model puts on a step's first function call, which
+    # must go back on that same part or the next request is a 400 (`to_google_contents`). Never read, never invented.
+    signature: str | None = None
 
 
 @dataclass
@@ -651,10 +654,11 @@ def to_google_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             parts: list[dict[str, Any]] = []
             if m.get("content"):
                 parts.append({"text": m["content"]})
-            parts.extend(
-                {"functionCall": {"name": c.name, "args": c.arguments}}
-                for c in (m.get("tool_calls") or [])
-            )
+            for c in m.get("tool_calls") or []:
+                part: dict[str, Any] = {"functionCall": {"name": c.name, "args": c.arguments}}
+                if c.signature:
+                    part["thoughtSignature"] = c.signature
+                parts.append(part)
             out.append({"role": "model", "parts": parts})
         else:
             out.append({"role": "user", "parts": [{"text": m.get("content", "")}]})
