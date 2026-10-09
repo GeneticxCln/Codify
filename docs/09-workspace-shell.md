@@ -1726,7 +1726,10 @@ verdict is the half worth freezing.
 
 The conductor gets page verbs on an **existing** role — never a ninth one — and
 the agent can navigate, read a page's text, click and type, with the page
-staying a sealed guest. Four verbs, two mechanisms:
+staying a sealed guest. A person must explicitly enable `browser_actions` in
+Settings → Engine before navigation, clicking or typing is offered; `read_page`
+remains available independently, and dispatch checks the permission again. Four
+verbs, two mechanisms:
 
 | Verb | Tool | How it travels | What comes back |
 |---|---|---|---|
@@ -2434,7 +2437,7 @@ the pipeline already makes, through the same service:
 | `scan_code` | `engine/scan.py` (`docs/13`) | curated review rules over the workspace in the regex worker: read-only, bounded, hits are candidates at `path:line`, a workspace's own profile is data and its wording is labelled as the repository's |
 | `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` → `engine/git_readonly.py`: subcommands, their exact options, and every positional, one owner; 60 s bound, no credentials in the child's environment |
 | `run_command` | `SandboxService.run_command` | `validate_argv`, `test` mode (docs/00 §6.6) once the goal is approved; `read_only` before that, so a turn cannot start the repository's code |
-| `read_page`, `navigate_page`, `click_page`, `type_page` | `WebviewBridge` (`§7.3`, `§7.5`) | the page is text from the web, quoted as untrusted; every navigation meets the shell's guard; typing submits nothing |
+| `read_page`, `navigate_page`, `click_page`, `type_page` | `WebviewBridge` (`§7.3`, `§7.5`) | `read_page` is independent; navigation/click/type require explicit `browser_actions` consent (off by default), every navigation meets the shell's guard, and typing may send text as it is entered |
 | `fetch_page` | `engine/web_fetch.py` (`docs/12`) | the engine fetches one public page itself, with no tab involved: on for any public site unless a person narrowed or switched it off in Settings → Web pages, public addresses only, bounded, announced before it is made; the page is text from the web, quoted as untrusted |
 | `read_editor` | `SurfaceBridge`, the `editor` surface (`04` §9.1) | eyes on the person's editor, **unsaved text included**; quoted file text, in a fixed shape with caps |
 | `open_in_editor` | the same, `open` | hands that only point: show a file and a range; nothing on disk changes |

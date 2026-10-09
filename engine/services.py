@@ -122,6 +122,9 @@ class SettingsService:
         "conductor_drives_execution": (1, lambda v: 1 if v else 0),
         # Read each answer aloud as it arrives (Settings → Audio). Off unless asked for.
         "tts_auto_read": (0, lambda v: 1 if v else 0),
+        # Whether the conductor may navigate, click or type in the user's browser tabs. Off unless a person
+        # explicitly enables it: these actions can send data to sites and act on logged-in pages.
+        "browser_actions": (0, lambda v: 1 if v == 1 else 0),
         # Whether the conductor's `fetch_page` may read the web: 0 not at all, 1 only the sites in
         # `web_fetch_hosts`, 2 any public site. 2 on a fresh install: Codify runs on local models, and an
         # assistant that cannot look something up is the one that is held back. What that costs is that the

@@ -284,7 +284,7 @@ pub(crate) fn jail_argv(spec: &JailSpec, host: &HostLayout) -> Vec<String> {
     let wrapper = format!(
         "ulimit -c 0 2>/dev/null; ulimit -u {NPROC} 2>/dev/null; \
          ulimit -t {cpu} 2>/dev/null; ulimit -f {blocks} 2>/dev/null; \
-         b=$(command -v bash) && exec \"$b\"; exec sh",
+         PS1='[machine] \\w \\\\$ '; export PS1; b=$(command -v bash) && exec \"$b\"; exec sh",
         cpu = spec.limits.cpu_secs,
         blocks = spec.limits.file_bytes / 1024,
     );

@@ -2401,6 +2401,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["conductor_max_turns"]["value"], 14)
         self.assertEqual(body["conductor_max_moves"]["value"], 12)
         self.assertEqual(body["conductor_drives_execution"]["value"], 1)
+        self.assertEqual(body["browser_actions"], {"value": 0, "min": 0, "max": 1})
 
         r = await self.client.put(
             "/settings/engine",
@@ -2471,6 +2472,22 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             app.state.executor._settings_int("conductor_drives_execution", 1), 1
         )
+
+        # Browser actions are a separate, off-by-default switch: changing web page reading does not enable
+        # navigation/click/type, and an unrecognised switch value is clamped off.
+        self.assertEqual(app.state.executor._settings_int("browser_actions", 0), 0)
+        for sent_int, stored in ((True, 1), (False, 0), (2, 0), (-1, 0)):
+            r = await self.client.put(
+                "/settings/engine", headers=self.headers, json={"browser_actions": sent_int}
+            )
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["saved"]["browser_actions"], stored, sent_int)
+        self.assertEqual(app.state.executor._settings_int("browser_actions", 0), 0)
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, json={"browser_actions": True}
+        )
+        self.assertEqual(r.json()["saved"]["browser_actions"], 1)
+        self.assertEqual(app.state.executor._settings_int("browser_actions", 0), 1)
 
         # Still a refusal for a number the user is choosing, and for a word.
         for bad in (True, "lots", None):

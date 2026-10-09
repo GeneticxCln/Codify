@@ -30,7 +30,7 @@ from typing import Any
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
-from engine.conductor import TOOLS, Conductor, tool_names
+from engine.conductor import BROWSER_ACTION_TOOLS, TOOLS, Conductor, tool_names
 from engine.db import connect
 from engine.fs import PathEscapeError
 from engine.git import GitService
@@ -251,7 +251,10 @@ class TestTheLoop(ConductorTestCase):
         answer = await conductor.run("what does parse do?")
         self.assertEqual(answer, "It parses text and returns it unchanged.")
         self.assertEqual(calls, [{"path": "app.py"}])
-        self.assertEqual(provider.seen_tools[0], tool_names())
+        self.assertEqual(
+            provider.seen_tools[0],
+            [name for name in tool_names() if name not in BROWSER_ACTION_TOOLS],
+        )
 
     async def test_the_tool_result_really_reaches_the_model(self) -> None:
         # A loop that ran the tool but did not put the result back in the
@@ -297,8 +300,10 @@ class TestTheLoop(ConductorTestCase):
         # The refusal must name what it was *offered*, or the model can only
         # guess again — and the menu it was given is the tool list, not
         # whatever happens to be wired into the dispatch table.
-        for name in tool_names():
+        for name in provider.seen_tools[0]:
             self.assertIn(name, refusal["content"])
+        for name in BROWSER_ACTION_TOOLS:
+            self.assertNotIn(name, refusal["content"], "a hidden action was named as offered")
 
     async def test_a_tool_that_raises_comes_back_as_text(self) -> None:
         async def explode(args: dict[str, Any]) -> str:
@@ -316,6 +321,76 @@ class TestTheLoop(ConductorTestCase):
         self.assertIn("could not read", answer)
         refusal = [m for m in provider.seen_messages[-1] if m.get("role") == "tool"][0]
         self.assertIn("the disk fell over", refusal["content"])
+
+
+class TestBrowserActionPermission(ConductorTestCase):
+    async def test_menu_and_dispatch_both_refuse_actions_when_permission_is_disabled(self) -> None:
+        navigations = 0
+
+        async def navigate(_args: dict[str, Any]) -> str:
+            nonlocal navigations
+            navigations += 1
+            return "navigated"
+
+        provider = _ToolProvider([
+            ToolReply(tool_calls=[_call("navigate_page", url="https://example.com")]),
+            ToolReply(text="I left the page unchanged."),
+        ])
+        def menu() -> list[Any]:
+            return [tool for tool in TOOLS if tool.name != "ask_user"]
+
+        conductor = Conductor(
+            provider, "m", str(self.repo), dispatch={"navigate_page": navigate},
+            system_prompt="s", menu=menu,
+        )
+
+        await conductor.run("read this page")
+
+        self.assertEqual(navigations, 0, "a hidden browser action reached its handler")
+        self.assertNotIn("navigate_page", provider.seen_tools[0])
+        result = next(message["content"] for message in provider.seen_messages[1] if message.get("role") == "tool")
+        self.assertIn("Browser actions are turned off", result)
+
+    async def test_permission_is_checked_again_at_dispatch_time(self) -> None:
+        enabled = True
+        navigations = 0
+
+        async def navigate(_args: dict[str, Any]) -> str:
+            nonlocal navigations
+            navigations += 1
+            return "navigated"
+
+        async def turn_permission_off(_args: dict[str, Any]) -> str:
+            nonlocal enabled
+            enabled = False
+            return "setting changed"
+
+        provider = _ToolProvider([
+            ToolReply(tool_calls=[_call("read_file", path="app.py")]),
+            ToolReply(tool_calls=[_call("navigate_page", url="https://example.com")]),
+            ToolReply(text="done"),
+        ])
+        tools = [tool for tool in TOOLS if tool.name != "ask_user"]
+
+        def menu() -> list[Any]:
+            return tools
+
+        conductor = Conductor(
+            provider, "m", str(self.repo), dispatch={
+                "read_file": turn_permission_off, "navigate_page": navigate,
+            }, system_prompt="s", menu=menu,
+            browser_actions_allowed=lambda: enabled,
+        )
+
+        await conductor.run("read this page")
+
+        self.assertEqual(navigations, 0, "permission was only checked when the menu was built")
+        result = next(
+            message["content"]
+            for message in provider.seen_messages[2]
+            if message.get("role") == "tool" and message.get("name") == "navigate_page"
+        )
+        self.assertIn("Browser actions are turned off", result)
 
 
 class TestTheCap(ConductorTestCase):

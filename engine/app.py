@@ -1210,6 +1210,8 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     # Read each answer aloud as it arrives (Settings → Audio). Off by default: a
     # voice that starts talking unasked is not something a fresh install does.
     "tts_auto_read": (0, 1),
+    # Whether model-proposed browser navigation, clicks and typing are allowed. Off by default.
+    "browser_actions": (0, 1),
     # Whether the conductor may fetch web pages: 0 never, 1 only the sites in `web_fetch_hosts`, 2 any
     # public site (the default of a fresh install). Three states, so not a switch: a checkbox's `true` is
     # refused here like any other number a person is choosing.
@@ -1218,7 +1220,7 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
 
 # The integer settings that are really switches, so a checkbox's `true` is a 1
 # rather than the truthiness trap it would be for a number someone chooses.
-ENGINE_SWITCH_SETTINGS = frozenset({"conductor_drives_execution", "tts_auto_read"})
+ENGINE_SWITCH_SETTINGS = frozenset({"conductor_drives_execution", "tts_auto_read", "browser_actions"})
 
 # The conductor's own provider and model, keyed to the longest value each
 # accepts. They are settings rather than an `AgentConfig` row because

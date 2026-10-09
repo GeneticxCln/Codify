@@ -19,7 +19,7 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from engine.conductor import BASE_TOOLS, STEP_TOOLS, TOOLS, Conductor
+from engine.conductor import BASE_TOOLS, BROWSER_ACTION_TOOLS, STEP_TOOLS, TOOLS, Conductor
 from engine.laya import LayaDecision, LayaService
 from engine.models import TurnCreate
 from engine.providers import ProviderError
@@ -98,6 +98,33 @@ class TestTheMenuIsTheDispatchTable(ConductorTestCase):
 
 
 class TestTheMenuFollowsTheState(ConductorTestCase):
+    def test_browser_actions_are_off_by_default_but_page_reading_remains_available(self) -> None:
+        executor = self._executor(_ToolProvider())
+        executor.settings = self.settings
+        menu = executor.conductor_menu(self.goal.id)
+        names = {tool.name for tool in menu()}
+        self.assertTrue(BROWSER_ACTION_TOOLS.isdisjoint(names))
+        self.assertIn("read_page", names)
+
+    def test_browser_actions_fail_closed_when_the_stored_value_is_invalid(self) -> None:
+        executor = self._executor(_ToolProvider())
+        executor.settings = self.settings
+        menu = executor.conductor_menu(self.goal.id)
+        self.conn.execute("UPDATE engine_settings SET value = 'yes' WHERE key = 'browser_actions'")
+        self.conn.commit()
+        self.assertTrue(BROWSER_ACTION_TOOLS.isdisjoint({tool.name for tool in menu()}))
+
+    def test_browser_actions_are_offered_only_after_the_setting_is_enabled(self) -> None:
+        executor = self._executor(_ToolProvider())
+        executor.settings = self.settings
+        menu = executor.conductor_menu(self.goal.id)
+        self.assertTrue(BROWSER_ACTION_TOOLS.isdisjoint({tool.name for tool in menu()}))
+
+        self.settings.set_int("browser_actions", 1)
+        offered = {tool.name for tool in menu()}
+        self.assertTrue(BROWSER_ACTION_TOOLS.issubset(offered))
+        self.assertIn("read_page", offered)
+
     async def test_step_moves_appear_only_once_a_step_exists(self) -> None:
         executor = self._executor(_ToolProvider())
         before = [t.name for t in executor.conductor_menu(self.goal.id)()]
@@ -147,13 +174,20 @@ class TestATurnCanPlanThroughTheConductor(ConductorTestCase):
         # approve, and marking the turn finished would clear the very state the
         # approval gate reads.
         self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
-        # The base menu, and the question a turn may put to the person (`ask_user`, last: it is offered
-        # whenever somebody is there to answer, which is on a turn and never during an approved run). Without
-        # `fetch_page`: it is offered only once a person has allowed it in Settings (docs/12), and a fresh
-        # install has not, so a tool that could only say "turned off" is not a slot the model is shown.
+        # `navigate_page`, `click_page` and `type_page` need the separate, off-by-default browser-actions
+        # permission; `read_page` remains independent. Without `fetch_page`: it is offered only once a person
+        # allows it in Settings (docs/12), and a fresh install has not, so a tool that could only say "turned off"
+        # is not a slot the model is shown. `ask_user` is last: it is offered whenever somebody is there to answer,
+        # which is on a turn and never during an approved run.
         self.assertEqual(
             provider.seen_tools[0],
-            [*(t.name for t in BASE_TOOLS if t.name != "fetch_page"), "ask_user"],
+            [
+                *(
+                    t.name for t in BASE_TOOLS
+                    if t.name != "fetch_page" and t.name not in BROWSER_ACTION_TOOLS
+                ),
+                "ask_user",
+            ],
         )
         # And the run was measured as the pipeline's own stages, not as some
         # new kind of thing the stats screen would have to learn about.

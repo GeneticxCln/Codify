@@ -230,6 +230,8 @@ class Conductor:
         # call, so a Cancel takes effect within one call rather than after the loop has spent
         # its whole budget. The loop has no view of goals or status; whoever built it says.
         cancelled: Callable[[], bool] | None = None,
+        # Browser actions can send data to a site or operate on its logged-in page; off unless Settings allows it.
+        browser_actions_allowed: Callable[[], bool] | None = None,
         # Ollama's context window for this loop's calls, from the conductor
         # role's own config. The move arguments and the librarian's pack are
         # exactly the payloads Ollama's 4096 default has been silently cutting.
@@ -285,6 +287,9 @@ class Conductor:
         # while it was visible.
         self._specs: dict[str, ToolSpec] = {t.name: t for t in self._static_menu}
         self.tools: list[ToolSpec] = list(self._static_menu)
+        # A model that names a hidden action anyway is refused at dispatch time, including if Settings changed
+        # after this menu was offered. No predicate means off.
+        self._browser_actions_allowed = browser_actions_allowed or (lambda: False)
         # Progress callbacks, both optional. `on_text` streams the prose as it
         # arrives so the transcript fills in rather than appearing at the end;
         # `on_tool` is how the UI shows *which* sub-agent the conductor reached
@@ -370,6 +375,8 @@ class Conductor:
         can retry is a refusal that costs a turn every time.
         """
         offered = list(self._menu()) if self._menu is not None else list(self._static_menu)
+        if not self._browser_actions_allowed():
+            offered = without_browser_actions(offered)
         for spec in offered:
             self._specs.setdefault(spec.name, spec)
         if self.moves_made >= self.max_moves:
@@ -403,6 +410,9 @@ class Conductor:
         while True:
             if self._is_cancelled():
                 return ""
+            # Refresh the permission before asking the model; a save made while a turn is running must take
+            # effect on its next model call, not only on the next turn or the next dispatch.
+            self._refresh_menu()
             # `exhausted` is read *before* the call, and the answer below is
             # returned whether or not the model cooperates. An earlier version
             # appended a "you are out of calls" nudge and then went on to honour
@@ -420,7 +430,6 @@ class Conductor:
                     ),
                 })
             self.calls_made += 1
-            self._refresh_menu()
             reply: ToolReply = await self._call(messages)
 
             if reply.text and self.on_text is not None:
@@ -512,6 +521,13 @@ class Conductor:
                 f"There is no tool called {call.name!r}. The tools are: {available}{note}. "
                 "Call one of those, or answer without a tool."
             )
+        # Permission is checked before menu membership so a model that names a hidden browser action gets a
+        # direct consent refusal, and so a settings change after the menu was offered takes effect immediately.
+        if call.name in BROWSER_ACTION_TOOLS and not self._browser_actions_allowed():
+            return (
+                "Browser actions are turned off. A person can allow model-driven navigation, clicking and typing "
+                "in Settings → Engine; this turn cannot enable them."
+            )
         # The menu as it stands *now*, not the dispatch table. The table holds every tool that could ever be
         # offered, so dispatching on it let a move the model was never shown (a `write` before any plan
         # existed, a stage move after the budget was spent) run because the model happened to name it. An
@@ -523,7 +539,8 @@ class Conductor:
             return (
                 f"`{call.name}` is not available right now: a tool is offered only when it can act (the "
                 "step moves once there is a plan, `ask_user` only while someone is there to answer, never "
-                "during an approved run, `fetch_page` only when the person has allowed it in Settings). "
+                "during an approved run, `fetch_page` only when the person has allowed it in Settings, and "
+                "browser navigation/click/type only when allowed in Settings). "
                 f"The tools available now are: {now}. Call one of those, or answer without a tool."
             )
         if call.name in STAGE_MOVES:
@@ -1310,6 +1327,16 @@ BASE_TOOLS: tuple[ToolSpec, ...] = (
     RECALL, RECALL_THREADS, USE_SKILL, RECON,
     DESIGN, PLAN,
 )
+
+# Browser actions can move a user's tab or send text to the page, including a logged-in one.
+# Keep their handlers available for a clear refusal, but do not offer them unless explicitly enabled.
+BROWSER_ACTION_TOOLS = frozenset({"navigate_page", "click_page", "type_page"})
+
+
+def without_browser_actions(tools: list[ToolSpec]) -> list[ToolSpec]:
+    """The menu without the actions that can disclose data or act on a signed-in page."""
+    return [tool for tool in tools if tool.name not in BROWSER_ACTION_TOOLS]
+
 
 # Offered once `plan` has produced steps for them to act on. `write` is the only
 # one that touches the filesystem and it still needs the goal's approval. `todo` rides with them: its notes

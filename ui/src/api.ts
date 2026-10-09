@@ -415,6 +415,7 @@ export async function saveEngineSettings(
     conductor_max_turns?: number;
     conductor_max_moves?: number;
     conductor_drives_execution?: boolean;
+    browser_actions?: boolean;
     stt_provider?: string;
     stt_model?: string;
     stt_language?: string;

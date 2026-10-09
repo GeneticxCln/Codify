@@ -469,9 +469,12 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
   console.error = (...args: unknown[]) => {
     consoleErrors.push(`${format(...args)}\n${whereFrom()}`);
   };
-  const saved = new Map<string, unknown>();
+  const saved = new Map<string, PropertyDescriptor | undefined>();
   for (const name of GLOBALS) {
-    saved.set(name, (globalThis as Record<string, unknown>)[name]);
+    // Read the descriptor rather than the global value: Node's lazy localStorage getter emits an
+    // ExperimentalWarning when accessed without --localstorage-file. The harness replaces it with
+    // jsdom's isolated store below and restores the original descriptor during teardown.
+    saved.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
     const value = (win as unknown as Record<string, unknown>)[name];
     if (value !== undefined) {
       Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
@@ -675,10 +678,9 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
       // Already unmounted, which is the normal case for a test that called it.
     }
     container.remove();
-    for (const [name, value] of saved) {
-      if (value === undefined) delete (globalThis as Record<string, unknown>)[name];
-      else
-        Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+    for (const [name, descriptor] of saved) {
+      if (descriptor === undefined) delete (globalThis as Record<string, unknown>)[name];
+      else Object.defineProperty(globalThis, name, descriptor);
     }
     delete (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT;
     instance.window.close();

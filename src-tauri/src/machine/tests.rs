@@ -210,6 +210,7 @@ fn the_shell_starts_behind_every_limit_the_kernel_can_enforce() {
         format!("ulimit -u {NPROC}"),
         "ulimit -t 90".to_string(),
         "ulimit -f 8192".to_string(),
+        "export PS1".to_string(),
     ] {
         assert!(
             wrapper.contains(&expected),

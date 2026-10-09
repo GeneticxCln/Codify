@@ -12,7 +12,16 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from engine.chat_prompts import CHAT_SYSTEM_PROMPT, CONDUCTOR_SYSTEM_PROMPT
-from engine.conductor import ASK_USER, BASE_TOOLS, Conductor, DEFAULT_MAX_MOVES, DEFAULT_MAX_TURNS, FETCH_PAGE, STEP_TOOLS
+from engine.conductor import (
+    ASK_USER,
+    BASE_TOOLS,
+    Conductor,
+    DEFAULT_MAX_MOVES,
+    DEFAULT_MAX_TURNS,
+    FETCH_PAGE,
+    STEP_TOOLS,
+    without_browser_actions,
+)
 from engine.conductor_tools import ConductorTools, _Conducted
 from engine.executor_support import AgentNotConfigured
 from engine.laya import LayaDecision, build_state
@@ -435,7 +444,9 @@ class _Conduct(_Plan):
         tools = ConductorTools(cast("ExecutorService", self), goal_id, goal, root, skills)
         return {name: getattr(tools, name) for name in ConductorTools.NAMES}
 
-
+    def _browser_actions_enabled(self) -> bool:
+        """Read the person's browser-action permission fresh; any missing/broken setting means off."""
+        return self._settings_int("browser_actions", 0) == 1
     def _web_policy(self) -> FetchPolicy:
         """What the person allowed `fetch_page` to do, read fresh each time and never wider than stored.
 
@@ -661,6 +672,9 @@ class _Conduct(_Plan):
         def menu() -> list[ToolSpec]:
             planned = bool(self.goals.steps(goal_id))
             offered = [*BASE_TOOLS, *(STEP_TOOLS if planned else ())]
+            # Browser actions are a distinct permission from reading pages and are off by default.
+            if not self._browser_actions_enabled():
+                offered = without_browser_actions(offered)
             # A tool that can only say "turned off" is a slot a small model spends a call finding that out.
             if not self._web_policy().offered:
                 offered = [t for t in offered if t.name != FETCH_PAGE.name]
@@ -1047,6 +1061,7 @@ class _Conduct(_Plan):
             fallback=(fallback[0], fallback[1]) if fallback is not None else None,
             on_fallback=self._conductor_fallback_notice(goal_id, role, targets),
             cancelled=lambda: self._is_cancelled(goal_id),
+            browser_actions_allowed=self._browser_actions_enabled,
             num_ctx=cfg.ollama_num_ctx,
             keep_alive=cfg.ollama_keep_alive,
             ledger=self.orchestrator.tool_call_ledger(goal_id, None, targets),

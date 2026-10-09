@@ -754,7 +754,18 @@ browser, is a door nobody needs. Lifecycle:
 `default.audio.source` marked). Without PipeWire's tools both routes say so and name the package; `make doctor`
 reports it as a note, never a failure, because the gate does not need a microphone.
 
-### 3.0.4 Web pages: `fetch_page`
+### 3.0.4 Browser actions: `navigate_page`, `click_page`, `type_page`
+
+`browser_actions` is an engine setting with a 0/1 range and a fresh-install default of 0. Only
+`PUT /settings/engine` writes it (`docs/00` §6.2). Until a person enables it in Settings → Engine,
+the conductor does not receive these three tools in its menu. `read_page` stays independent, and
+`fetch_page` has its own `web_fetch` permission: neither reading permission enables actions on the
+person's tab. The conductor's dispatch path checks the setting again, so a previously offered action
+is refused if consent is withdrawn before it runs. This is an explicit consent switch, not an egress
+filter: navigation URLs and typed values can carry anything the turn has read, and a click may submit
+that data or operate on a logged-in account (`docs/03` §1.6).
+
+### 3.0.5 Web pages: `fetch_page`
 
 The one tool whose request the *engine* makes to an address a model chose (`engine/web_fetch.py`; the audit,
 and every rule's reason, is `docs/12`). It is a conductor tool and has no route of its own.
@@ -787,7 +798,7 @@ the list, too many redirects, a non-text content type, a site that cannot be rea
 rejects, the 20 s budget. None is a traceback, and text that came from the far side (a content type, a host in a
 redirect) is bounded before it is put in a sentence.
 
-### 3.0.5 Code scanning: `scan_code`
+### 3.0.6 Code scanning: `scan_code`
 
 A conductor tool with no route and no setting (`engine/scan.py`; the audit and every limit's reason is `docs/13`). It is
 `search_code` with curated patterns, held to what `search_code` is: read-only, confined to the workspace (the same

@@ -16,6 +16,7 @@ import { findStaleFallback, findStaleModel, StaleModel } from "../staleModel";
 import { AgentConfigCard } from "./AgentConfigCard";
 import { ConductorSettingsCard } from "./ConductorSettingsCard";
 import { WebAccessCard } from "./WebAccessCard";
+import { BrowserActionsCard } from "./BrowserActionsCard";
 import { EngineRuntimeCard } from "./EngineRuntimeCard";
 import { Sliders, ShieldCheck, Zap, AlertTriangle, Cpu, Wand2, Wrench, Workflow } from "lucide-react";
 import { readRejection } from "../rejection.ts";
@@ -685,6 +686,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       )}
 
       <WebAccessCard />
+      <BrowserActionsCard />
 
       <div className="flex flex-col gap-2.5 bg-codify-bg border border-codify-border rounded-xl p-3.5">
         <div className="flex items-center gap-2 text-xs font-semibold text-codify-secondary">

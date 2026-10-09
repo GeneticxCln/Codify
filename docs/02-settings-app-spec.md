@@ -185,6 +185,19 @@ the pane holds no audio state of its own.
   The pane then says the engine needs updating and offers nothing to save, because a save it
   offered would be refused.
 
+## Browser actions card
+
+A separate card for model-driven navigation, clicks and typing in the user's embedded browser. Reading the current
+page (`read_page`) and fetching a web page (`fetch_page`) are different powers, so neither permission implies this
+one. The switch is the `browser_actions` engine setting, written only through `PUT /settings/engine`.
+
+* **Off on a fresh install.** The conductor menu omits `navigate_page`, `click_page` and `type_page` until a person
+  explicitly enables the switch. `read_page` remains available. The conductor also checks the setting again at
+  dispatch, so an action already in a model reply cannot run after permission is withdrawn.
+* **The warning is the consent.** Navigation can send data in a URL, a page can observe text as it is typed, and a
+  click can submit it or act in a logged-in account. This switch is independent from Settings → Web pages.
+* **An engine without the setting shows no card.** The control does not invent or assume a permission on older engines.
+
 ## Web pages card
 
 A card of its own, under the Conductor's: whether the assistant may fetch web pages (`web_fetch`, `web_fetch_hosts`,
