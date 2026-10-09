@@ -941,6 +941,54 @@ class TestToolDialects(unittest.TestCase):
             out[1]["parts"][0]["functionResponse"]["name"], "read_file",
         )
 
+    def test_google_shares_one_turn_between_the_results_of_parallel_calls(self) -> None:
+        # Gemini answers a 400 ("the number of function response parts is equal to the number of function call
+        # parts of the function call turn") when the results of a model turn's parallel calls arrive as separate
+        # turns. The conductor appends one `tool` message per call, so the translation has to put them together,
+        # as `to_anthropic_messages` does for the same reason.
+        out = to_google_contents([
+            {"role": "user", "content": "compare them"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                _call("read_file", path="a"), _call("search_code", query="b"),
+            ]},
+            {"role": "tool", "tool_call_id": "1", "name": "read_file", "content": "x"},
+            {"role": "tool", "tool_call_id": "2", "name": "search_code", "content": "y"},
+            {"role": "assistant", "content": "", "tool_calls": [_call("read_file", path="c")]},
+            {"role": "tool", "tool_call_id": "3", "name": "read_file", "content": "z"},
+        ])
+        self.assertEqual([turn["role"] for turn in out], ["user", "model", "user", "model", "user"])
+        self.assertEqual(
+            [part["functionResponse"]["name"] for part in out[2]["parts"]], ["read_file", "search_code"],
+            "one user turn, one response per call, in the order the calls were made",
+        )
+        self.assertEqual(len(out[2]["parts"]), len(out[1]["parts"]))
+        self.assertEqual(len(out[4]["parts"]), 1, "a later round does not join the earlier turn")
+
+    def test_google_does_not_fold_a_tool_result_into_a_plain_user_turn(self) -> None:
+        out = to_google_contents([
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "tool_call_id": "1", "name": "read_file", "content": "x"},
+        ])
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["parts"], [{"text": "hi"}])
+
+    def test_a_reply_with_neither_text_nor_calls_is_not_sent_back_as_an_empty_turn(self) -> None:
+        # The conductor keeps an empty reply in the history when it nudges the model to act. Anthropic refuses a
+        # message with empty content unless it is the last, and Gemini refuses a turn with no parts, so a nudge
+        # on either turned one empty answer into a 400 on the next call. OpenAI and Ollama take an empty string.
+        history: list[dict[str, Any]] = [
+            {"role": "user", "content": "do it"},
+            {"role": "assistant", "content": "", "tool_calls": []},
+            {"role": "user", "content": "you described it; call the tool"},
+        ]
+        anthropic = to_anthropic_messages(history)
+        self.assertEqual([m["role"] for m in anthropic], ["user", "user"])
+        self.assertTrue(all(m["content"] for m in anthropic))
+        google = to_google_contents(history)
+        self.assertEqual([turn["role"] for turn in google], ["user", "user"])
+        self.assertTrue(all(turn["parts"] for turn in google))
+        self.assertEqual([m["role"] for m in to_openai_messages(history)], ["user", "assistant", "user"])
+
     def test_google_required_comes_from_the_schema_not_the_type(self) -> None:
         # All five tools declare their required parameter as a *string*, so the
         # old `type != "string"` rule sent Gemini: read_file with no required

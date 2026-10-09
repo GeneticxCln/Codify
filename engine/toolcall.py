@@ -607,6 +607,10 @@ def to_anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]
                 out.append({"role": "user", "content": pending})
             continue
         pending = []
+        if role == "assistant" and not m.get("tool_calls") and not m.get("content"):
+            # A reply with nothing in it, kept in the history when the conductor nudges the model to act. The
+            # API refuses an empty message that is not the last one, and the neighbouring user turns are merged.
+            continue
         if role == "assistant" and m.get("tool_calls"):
             blocks: list[dict[str, Any]] = []
             if m.get("content"):
@@ -636,21 +640,31 @@ def parse_anthropic_tool_calls(content: list[dict[str, Any]]) -> list[ToolCall]:
 
 def to_google_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Google: `contents` with `user`/`model` roles, and a function response is
-    a `functionResponse` part inside a `user` turn."""
+    a `functionResponse` part inside a `user` turn.
+
+    The results of one model turn's calls share **one** user turn, a part each and in the order the calls were
+    made: Gemini answers a 400 when the number of response parts differs from the number of call parts of the turn
+    before, and the conductor appends one `tool` message per call. (The same shape `to_anthropic_messages` builds.)
+    """
     out: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] | None = None
     for m in messages:
         role = m.get("role")
         if role == "tool":
-            out.append({
-                "role": "user",
-                "parts": [{
-                    "functionResponse": {
-                        "name": m.get("name", ""),
-                        "response": {"result": m.get("content", "")},
-                    }
-                }],
-            })
-        elif role == "assistant":
+            part_out = {
+                "functionResponse": {
+                    "name": m.get("name", ""),
+                    "response": {"result": m.get("content", "")},
+                }
+            }
+            if results is not None:
+                results.append(part_out)
+            else:
+                results = [part_out]
+                out.append({"role": "user", "parts": results})
+            continue
+        results = None
+        if role == "assistant":
             parts: list[dict[str, Any]] = []
             if m.get("content"):
                 parts.append({"text": m["content"]})
@@ -659,7 +673,9 @@ def to_google_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 if c.signature:
                     part["thoughtSignature"] = c.signature
                 parts.append(part)
-            out.append({"role": "model", "parts": parts})
+            if parts:
+                # A turn with no parts is a 400; an empty reply the conductor kept in its history has nothing to say.
+                out.append({"role": "model", "parts": parts})
         else:
             out.append({"role": "user", "parts": [{"text": m.get("content", "")}]})
     return out

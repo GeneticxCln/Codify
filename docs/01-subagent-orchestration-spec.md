@@ -624,6 +624,15 @@ finds nothing wrong cannot pass for one that works. It is our reading of the
 providers' rules, not their validators: only a live call says one accepts a
 schema.
 
+The same goes for the message array. The conductor appends one `tool` message per
+call, so Anthropic's and Google's translations put the results of one model turn's
+calls in **one** user turn, a block or part each in the order the calls were made
+(Gemini refuses a request whose response parts do not match the call parts of the
+turn before it, and Anthropic expects the results together). And a
+reply with neither text nor calls, which the conductor keeps in its history when it
+nudges the model to act, is left out of both: an empty message that is not the last
+is a 400 on each. OpenAI and Ollama take an empty string and keep it.
+
 ### 5.3 What the loop guarantees
 
 - **It terminates.** `conductor_max_turns` bounds model calls. On the last one
