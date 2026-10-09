@@ -496,7 +496,7 @@ class _ExecutorCore:
         files = (out or {}).get("files")
         if not isinstance(files, list):
             raise AgentOutputInvalid("fixer must return files list", role="fixer")
-        parsed = []
+        parsed: list[dict[str, Any]] = []
         for f in files:
             if not isinstance(f, dict):
                 raise AgentOutputInvalid(
@@ -508,6 +508,19 @@ class _ExecutorCore:
             content = f.get("content")
             if not path or action not in ("create", "update", "delete", "edit"):
                 raise AgentOutputInvalid("fixer file entry invalid", role="fixer")
+            # The types, before anything is done with them: a truthy `path` that is a list, or `content` written as
+            # an array of lines, passed every check above and died inside `FileSystemService.apply` with an
+            # `AttributeError`, which the re-ask does not catch. Said to the model in the words it can act on.
+            if not isinstance(path, str):
+                raise AgentOutputInvalid(
+                    f"fixer file path must be a string like src/app.py, not {_shape(path)}", role="fixer",
+                )
+            if action in ("create", "update") and content is not None and not isinstance(content, str):
+                raise AgentOutputInvalid(
+                    f"fixer content for {path} must be one string holding the file's complete text "
+                    f"(with \\n between lines), not {_shape(content)}",
+                    role="fixer",
+                )
             if action == "delete" and content is not None:
                 raise AgentOutputInvalid("fixer delete must have null content", role="fixer")
             if (

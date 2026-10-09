@@ -577,7 +577,7 @@ class FileSystemService:
             else:
                 try:
                     count = int(raw_count)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):  # OverflowError: `Infinity`, which JSON as Python reads it holds
                     return text, f"edit #{i} has a non-integer count"
                 if count < 0:
                     return text, f"edit #{i}: count must be >= 0"

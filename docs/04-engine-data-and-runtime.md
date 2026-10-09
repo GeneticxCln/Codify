@@ -1194,7 +1194,10 @@ the same way it fails mid-planning: `design_contract_missing`.
 {"files":[{"path":"src/foo.py","action":"update","content":"…"}]}
 ```
 
-`action=delete` ⇒ `content` null. Paths contained by workspace.
+`action=delete` ⇒ `content` null. Paths contained by workspace. `path` is a string, and `content` of a `create` or
+`update` is one string (or null, an empty file): a path that is a list, or a file written as an array of its lines, is
+put to the model once with that said (`04` §4 "One re-ask") and is not repaired by joining the lines, since which
+line ending and whether a last newline were meant is the model's to say.
 
 `action=edit` takes `edits: [{old_text, new_text, count}]` and no `content`. One spelling is read rather than
 refused: **`edit` with a non-empty `content` and no `edits`** is a whole-file `update` — the model wrote the
