@@ -5,6 +5,8 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 from engine import git_readonly
@@ -13,7 +15,7 @@ from engine.fs import FileSystemService, PathEscapeError
 # engine/spawn_guard.py), including how it is launched: the argv shape and the pid
 # handover are the guard's own contract, so they are written down once, next to it.
 from engine.spawn_guard import guarded_argv, guarded_env
-from typing import Any
+from typing import IO, Any
 
 PYTEST_FLAGS = {"-q", "-v", "--tb=short", "--no-header"}
 MAXFAIL_RE = re.compile(r"^--maxfail=\d+$")
@@ -69,10 +71,71 @@ MAX_COMMAND_OUTPUT_CHARS = 200_000
 CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
-def _cap_output(text: str) -> str:
-    if len(text) > MAX_COMMAND_OUTPUT_CHARS:
+# What is kept of each stream *while the command runs*. Applied after `communicate()`, the cap above trimmed what was
+# stored and nothing else: a test stuck printing in a loop was buffered whole in the engine until its timeout (50 MiB
+# of output held 150 MiB). A UTF-8 character is at most four bytes, so this fills the character cap whatever the text.
+MAX_KEPT_BYTES = MAX_COMMAND_OUTPUT_CHARS * 4
+_READ_CHUNK = 65536
+
+
+def _cap_output(text: str, truncated: bool = False) -> str:
+    if truncated or len(text) > MAX_COMMAND_OUTPUT_CHARS:
         return text[:MAX_COMMAND_OUTPUT_CHARS] + "\n… (output truncated)"
     return text
+
+
+class _Drain:
+    """One pipe, read to its end on a thread of its own, keeping at most `MAX_KEPT_BYTES` of it.
+
+    Read to the end, not just to the cap: a command blocked on a full pipe would never exit, and a timeout is not
+    what a long but finished test run should report.
+    """
+
+    def __init__(self, pipe: IO[bytes] | None) -> None:
+        self.kept = bytearray()
+        self.truncated = False
+        self._pipe = pipe
+        self.thread = threading.Thread(target=self._run, name="sandbox-drain", daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        if self._pipe is None:
+            return
+        try:
+            fd = self._pipe.fileno()
+            while chunk := os.read(fd, _READ_CHUNK):
+                room = MAX_KEPT_BYTES - len(self.kept)
+                if room > 0:
+                    self.kept += chunk[:room]
+                if len(chunk) > room:
+                    self.truncated = True
+        except (OSError, ValueError):
+            pass  # the pipe went away under us: what was read is what there is
+        finally:
+            self._pipe.close()
+
+    def text(self) -> str:
+        """What a model reads: never an exception for a byte that is not UTF-8.
+
+        Decoded strictly, one byte of Latin-1 (`git show` of an old source file, a test printing a blob) raised
+        `UnicodeDecodeError` out of `run_command`, past every caller. Line endings are translated the way the text
+        mode this replaced translated them, so what a command printed reads as it always did.
+        """
+        decoded = bytes(self.kept).decode("utf-8", errors="replace")
+        return _cap_output(decoded.replace("\r\n", "\n").replace("\r", "\n"), self.truncated)
+
+
+def _settle(proc: subprocess.Popen[bytes], drains: tuple[_Drain, _Drain], deadline: float) -> bool:
+    """Both pipes at their end and the process exited, by `deadline`: what `communicate(timeout=…)` waited for."""
+    for drain in drains:
+        drain.thread.join(max(0.0, deadline - time.monotonic()))
+        if drain.thread.is_alive():
+            return False
+    try:
+        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        return False
+    return True
 
 
 def _signal_alone(pid: int, sig: int) -> None:
@@ -292,7 +355,6 @@ class SandboxService:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
                 shell=False,
                 # A session of its own: the child becomes process-group leader, so
                 # everything it spawns joins a group the engine can signal as one.
@@ -303,29 +365,30 @@ class SandboxService:
             # resource limits): a refusal with a reason, not a raw traceback in
             # the middle of a step.
             raise CommandNotAllowed(f"failed to start {argv[0]}: {exc.strerror or exc}") from exc
-        timed_out = False
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        drains = (_Drain(proc.stdout), _Drain(proc.stderr))
+        timed_out = not _settle(proc, drains, time.monotonic() + timeout_s)
+        if timed_out:
             # The direct child is not enough — kill the entire group. A gentle
             # TERM first, then KILL for anything still alive a moment later:
             # a test runner that handles TERM to shut its workers down cleanly
             # gets the chance to.
             self._kill_group(proc.pid)
-            try:
-                stdout, stderr = proc.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
+            if not _settle(proc, drains, time.monotonic() + 5):
                 self._kill_group(proc.pid, sig=signal.SIGKILL)
-                stdout, stderr = proc.communicate()
-            stderr = (stderr or "") + f"\n[timed out after {timeout_s}s — the whole process group was killed]"
+                proc.wait()
+                # Bounded, unlike the `communicate()` this replaced: a process that escaped the group and still
+                # holds a pipe would have kept the engine here for as long as it lived.
+                _settle(proc, drains, time.monotonic() + 5)
         # Contract: a timeout is reported as exit 124 (timeout(1)'s code), not
         # the raw -15/-9 signal death. Callers (the verifier's verdict prompt,
         # the transcript) reason about "timed out" as a distinct outcome, and
         # the executor's documented timeout contract expects 124 specifically.
         # The real signal stays visible in stderr above.
-        # Cap stored output: a verbose suite must not bloat memory or the DB.
-        stdout, stderr = _cap_output(stdout or ""), _cap_output(stderr or "")
+        # Capped as it was read (`_Drain`), so a verbose suite bloats neither memory nor the DB. The timeout's own
+        # sentence goes after the cap, where a long stderr cannot cut it off.
+        stdout, stderr = drains[0].text(), drains[1].text()
+        if timed_out:
+            stderr += f"\n[timed out after {timeout_s}s — the whole process group was killed]"
         return {
             "argv": argv,
             "exit_code": 124 if timed_out else proc.returncode,

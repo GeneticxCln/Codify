@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tracemalloc
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -430,6 +431,61 @@ class TestGuardedCommands(unittest.TestCase):
         result = self.sandbox.run_command(str(self.root), ["python3", "exits.py"], timeout_s=30)
         self.assertEqual(3, result["exit_code"])
         self.assertEqual("", result["stderr"], "the guard must not add output of its own")
+
+    def test_output_that_is_not_utf8_comes_back_with_replacements_not_an_exception(self) -> None:
+        """A command's output is what a model reads, and a byte it cannot decode is not a reason to lose all of it.
+
+        Decoded strictly, one byte of Latin-1 (`git show` of an old source file, a test printing a binary blob)
+        raised `UnicodeDecodeError` out of `run_command`: past the verifier and the critic, which catch only a
+        refusal and a timeout, so the step died on it instead of reading the run.
+        """
+        (self.root / "bytes.py").write_text(
+            "import sys\n"
+            "sys.stdout.buffer.write(b'caf\\xe9 ok\\n')\n"
+            "sys.stderr.buffer.write(b'\\xff err\\n')\n",
+            encoding="utf-8",
+        )
+        result = self.sandbox.run_command(str(self.root), ["python3", "bytes.py"], timeout_s=30)
+        self.assertEqual(0, result["exit_code"])
+        self.assertEqual("caf\ufffd ok\n", result["stdout"])
+        self.assertEqual("\ufffd err\n", result["stderr"])
+
+    def test_line_endings_read_as_they_always_did(self) -> None:
+        """Pinned because reading bytes means doing by hand what text mode did: CRLF and a lone CR are a newline."""
+        (self.root / "crlf.py").write_text(
+            "import sys\nsys.stdout.buffer.write(b'a\\r\\nb\\rc\\n')\n", encoding="utf-8"
+        )
+        result = self.sandbox.run_command(str(self.root), ["python3", "crlf.py"], timeout_s=30)
+        self.assertEqual("a\nb\nc\n", result["stdout"])
+
+    def test_a_flood_of_output_is_not_held_in_memory_past_the_cap(self) -> None:
+        """The cap is for memory as much as for the database, so it has to apply while the output is read.
+
+        Applied after `communicate()`, it trimmed what was stored and nothing else: a test stuck printing in a
+        loop was buffered whole in the engine until its timeout, which can be ten minutes.
+        """
+        (self.root / "flood.py").write_text(
+            "import sys\nchunk = b'x' * 65536\nfor _ in range(800):\n    sys.stdout.buffer.write(chunk)\n",
+            encoding="utf-8",
+        )  # 50 MiB
+        tracemalloc.start()
+        try:
+            result = self.sandbox.run_command(str(self.root), ["python3", "flood.py"], timeout_s=60)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(0, result["exit_code"], "the command was not read to its end")
+        self.assertTrue(result["stdout"].endswith("(output truncated)"), result["stdout"][-80:])
+        self.assertLess(peak, 16 * 1024 * 1024, f"run_command held {peak / 2**20:.0f} MiB for 50 MiB of output")
+
+    def test_output_cut_short_says_so_even_when_what_is_left_fits(self) -> None:
+        """Four-byte characters: the bytes kept decode to exactly the character cap, so length alone cannot tell."""
+        (self.root / "wide.py").write_text(
+            "import sys\nsys.stdout.buffer.write('\\U0001F600'.encode() * 300000)\n", encoding="utf-8"
+        )
+        result = self.sandbox.run_command(str(self.root), ["python3", "wide.py"], timeout_s=30)
+        self.assertEqual(0, result["exit_code"])
+        self.assertTrue(result["stdout"].endswith("(output truncated)"), "a cut-off output read as the whole of it")
 
     def test_a_command_killed_by_a_signal_still_reports_that_signal(self) -> None:
         """The contract the guard has to keep: the engine reads -15, not 143.

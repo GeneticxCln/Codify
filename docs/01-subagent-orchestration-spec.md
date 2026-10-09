@@ -155,6 +155,17 @@ providers accept both keywords and ignore them, because they are part of the sig
 provider in this repo shares and a protocol that did not take them would be a different
 signature to stub at every call site.
 
+**`temperature` is the local model's.** Ollama reads it from `options`, on every path. An `openai_compat` endpoint gets it
+when it is a local server (`is_local_endpoint`: loopback or a private address, decided by parsing the address and
+never by its spelling; LM Studio, vLLM and llama.cpp) and not when it is hosted. Anthropic and Google never do:
+Claude Opus 4.7 and later, Fable 5 and the Sonnet 5 line answer a request that carries one with a 400, OpenAI's
+reasoning models only take their default, and every role has one (0.0 to 0.4), so while it was sent no role could run
+on them. A hostname that is not a literal address is not assumed local. The keyword stays in every signature for the
+reason above. The Anthropic provider names `anthropic-version: 2023-06-01` on
+both of its calls, one constant; the API accepts `2023-06-01` and `2023-01-01` and nothing else, and the tool-calling
+call once sent `2023-11-01`, which does not exist. A Gemini 3 model's `thoughtSignature` on a function call is carried
+on `ToolCall.signature` and sent back on the same part, because the API refuses the next request without it.
+
 `keep_alive` is not a latency setting for a single call. Role calls inside one goal are
 seconds apart and already warm; what it covers is the gap *between* goals, where a role used
 every ten minutes pays a full model reload each time.

@@ -1499,6 +1499,15 @@ both cards share one vocabulary of body labels.
 
 `SandboxService.run_command(workspace, argv: list[str], timeout_s: int = 120, mode="test")`.
 
+It returns `{argv, exit_code, stdout, stderr}` and reads the command's output as **bytes, capped while it is read**
+(`engine/sandbox.py`, `_Drain`): each stream keeps at most `MAX_COMMAND_OUTPUT_CHARS * 4` bytes (the cap is 200,000
+characters and a UTF-8 character is at most four bytes), is still read to its end so a chatty command is never
+blocked on a full pipe, and ends in `… (output truncated)` when anything was dropped. Decoding is lenient: a byte
+that is not UTF-8 (`git show` of a Latin-1 file, a test printing a blob) becomes U+FFFD instead of raising, and CRLF
+and a lone CR read as a newline, as they did in the text mode this replaced. Before this, the cap was applied to the
+finished string, so 50 MiB of output was held (150 MiB) until the command ended, and one invalid byte was a
+`UnicodeDecodeError` that no caller catches.
+
 Two callers, two modes, one validator:
 
 - `mode="test"` — the verifier's argv, and the conductor's `run_command` and `verify` moves **for an
