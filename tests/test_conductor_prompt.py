@@ -145,6 +145,21 @@ class TestTheRecipeAgreesWithTheEngine(unittest.TestCase):
     def test_it_says_to_run_the_projects_own_checks_after_the_change(self) -> None:
         self.assertRegex(self.recipe(), r"(linter|type checker|lint)")
 
+    def test_it_says_how_big_the_job_is_when_it_hands_over_the_plan(self) -> None:
+        # The plan waits for approval; the person is approving a cost, so the size has to be said with it.
+        self.assertRegex(self.recipe(), r"how big it is[^.]*: how many steps, which files, and which checks")
+
+    def test_it_wants_a_test_that_fails_without_the_change(self) -> None:
+        # `verify` only shows that the tests pass; a test that also passes without the change proves nothing.
+        self.assertRegex(self.recipe(), r"test that fails on the old code")
+        self.assertRegex(self.recipe(), r"say so if you could not confirm it fails without the change")
+
+    def test_it_ends_with_what_works_what_was_not_verified_and_what_only_the_person_can_do(self) -> None:
+        text = self.recipe()
+        self.assertRegex(text, r"what works \(and the command that showed it\)")
+        self.assertRegex(text, r"what you could not verify \(and why\)")
+        self.assertRegex(text, r"what only the person can do")
+
 
 ENGINE = Path(__file__).resolve().parent.parent / "engine"
 
