@@ -2535,7 +2535,13 @@ async def cancel_goal(goal_id: str, body: VersionedAction, request: Request) -> 
     if g.status not in ("PLANNING", "RUNNING", "PAUSED", "PENDING"):
         raise ApiError(409, "illegal_status", f"cannot cancel from {g.status}")
     goals: GoalService = request.app.state.goals
-    return goals.update_status(goal_id, body.expected_version, "CANCELLED")
+    cancelled = goals.update_status(goal_id, body.expected_version, "CANCELLED")
+    # The status is the record; this is the stop. Every stage re-checks the status before it writes, but a model
+    # call or a test command already under way used to run to its end: minutes of spend, and a test suite running
+    # as the person after they asked for it to stop. Pause is left to finish its step: it is a request to stop
+    # *between* steps, and Start resumes there.
+    _stop_goal(request.app, goal_id)
+    return cancelled
 
 
 @app.delete("/goals/{goal_id}")
@@ -2684,9 +2690,43 @@ def _spawn(
     # vanishing mid-step with no error at all. Held here until it is done.
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_TASKS.discard)
+    if goal_id is not None:
+        # And by goal, so a Cancel can reach it (`_stop_goal`).
+        _GOAL_TASKS.setdefault(goal_id, set()).add(task)
+        task.add_done_callback(lambda done: _task_done(app, goal_id, done))
 
 
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+# The same tasks, by the goal they work for. A goal can have more than one: a turn, then its plan's run.
+_GOAL_TASKS: dict[str, set[asyncio.Task[None]]] = {}
+
+
+def _task_done(app: FastAPI, goal_id: str, task: asyncio.Task[None]) -> None:
+    """Forget a finished task, and the goal's cancel signal once the goal has nothing left running."""
+    running = _GOAL_TASKS.get(goal_id)
+    if running is None:
+        return
+    running.discard(task)
+    if not running:
+        del _GOAL_TASKS[goal_id]
+        executor = getattr(app.state, "executor", None)
+        if executor is not None:
+            executor.forget_in_flight(goal_id)
+
+
+def _stop_goal(app: FastAPI, goal_id: str) -> None:
+    """Stop everything running for a goal now: its sandboxed commands, then the coroutines driving it.
+
+    Cancelling a coroutine raises `CancelledError` where it is waiting: a model call is abandoned, a stage records
+    its outcome as `cancelled` (`ExecutorService._stage`), and the driver is released by its own `finally`. A command
+    on a worker thread cannot be cancelled that way, so it is stopped first, through the goal's signal, which kills
+    its process group. A step that was mid-way stays as it was left; the goal is CANCELLED, which nothing resumes.
+    """
+    executor = getattr(app.state, "executor", None)
+    if executor is not None:
+        executor.stop_in_flight(goal_id)
+    for task in list(_GOAL_TASKS.get(goal_id, ())):
+        task.cancel()
 
 
 async def _retry_and_drive(app: FastAPI, goal_id: str, step_id: str) -> None:

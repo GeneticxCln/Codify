@@ -735,7 +735,8 @@ class _HangingSandbox(SandboxService):
     last_timeout: int
 
     def run_command(
-        self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test"
+        self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test",
+        cancel: threading.Event | None = None,
     ) -> dict[str, Any]:
         self.calls = getattr(self, "calls", 0) + 1
         self.last_timeout = timeout_s

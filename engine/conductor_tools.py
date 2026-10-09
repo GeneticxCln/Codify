@@ -463,6 +463,7 @@ class ConductorTools:
             result = await asyncio.to_thread(
                 self.service.sandbox.run_command, self.root, argv,
                 mode="test" if approved else "read_only",
+                cancel=self.service.cancel_signal(self.goal_id),
             )
         return format_command(result) + (f"\n(reason given: {reason})" if reason else "")
 

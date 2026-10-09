@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import os
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -172,6 +173,9 @@ class _ExecutorCore:
         # One driver per goal: start, retry, and apply each spawn a driver
         # loop, and two loops on one goal re-run the same steps concurrently.
         self._drivers: set[str] = set()
+        # The goal's Cancel, as a signal a command on a worker thread can see (`SandboxService.run_command`). Made on
+        # first use, set by `stop_in_flight`, dropped by `forget_in_flight` once nothing of the goal is running.
+        self._cancel_signals: dict[str, threading.Event] = {}
         # How many edits a goal's conductor run has landed in the person's open editor (`edit_editor`), by goal. Read
         # once, when the run ends, to tell a turn that changed the editor from one that changed nothing: the editor is
         # not a file and not a plan, so neither of the things a turn is otherwise judged by can say.
@@ -322,6 +326,22 @@ class _ExecutorCore:
 
     def release_driver(self, goal_id: str) -> None:
         self._drivers.discard(goal_id)
+
+    def cancel_signal(self, goal_id: str) -> threading.Event:
+        """The signal a sandboxed command of this goal watches, so a Cancel stops it where it runs."""
+        return self._cancel_signals.setdefault(goal_id, threading.Event())
+
+    def stop_in_flight(self, goal_id: str) -> None:
+        """Stop this goal's running commands now: the person cancelled it.
+
+        The coroutines are the caller's to cancel (`engine/app.py` holds them). This reaches what they cannot: a
+        command running on a worker thread, which a cancelled coroutine stops waiting for and does not stop.
+        """
+        self.cancel_signal(goal_id).set()
+
+    def forget_in_flight(self, goal_id: str) -> None:
+        """Drop the goal's signal once nothing of it is running, so the table holds only live goals."""
+        self._cancel_signals.pop(goal_id, None)
 
     def _preflight_roles(self, goal_id: str) -> None:
         """Name, once, every role that cannot be called — before the first call.
