@@ -45,7 +45,7 @@ without adding a boundary. This closes the cleartext leak; it does not claim mor
 
 ### 1.3 Engine–Desktop auth token
 
-On boot, the Engine generates a random token, writes it to stdout, and requires `Authorization: Bearer <token>` on every request. Desktop reads it from the child process stdout when it spawns the Engine and attaches it to every engine call the UI makes (`ui/src/api.ts`) — including `/settings/agents/*`, the most sensitive routes (attacker-controlled local `base_url`, key-reference overwrite).
+On boot, the Engine generates a random token, writes it to stdout, and requires `Authorization: Bearer <token>` on every request, `OPTIONS` included: a browser's CORS preflight is answered by the CORS layer, which sits outside the token check, so it never needs one, and an `OPTIONS` that is not a preflight gets a `401` like anything else rather than the router's `405`/`404`, which would map the routes for a client with no token (`tests/test_cors.py`). Desktop reads it from the child process stdout when it spawns the Engine and attaches it to every engine call the UI makes (`ui/src/api.ts`) — including `/settings/agents/*`, the most sensitive routes (attacker-controlled local `base_url`, key-reference overwrite).
 
 The token is created once per state directory and persisted at `<state dir>/boot_token` (`0600`), not rotated per spawn: a client holding it then survives an engine restart, which per-spawn rotation broke for every client that could not re-read the handshake itself. `CODIFY_BOOT_TOKEN` overrides the value for a caller that wants a per-process token. Lifetime, and what a longer-lived credential costs, are in `04` §6.
 

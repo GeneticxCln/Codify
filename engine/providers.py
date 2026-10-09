@@ -461,7 +461,10 @@ def key_destination_problem(base_url: str) -> str | None:
     except ValueError:
         host, port = "", None
     if parsed.scheme not in ("http", "https") or not host:
-        return f"{base_url!r} is not an http(s) endpoint, so a stored API key will not be sent to it."
+        # Named by scheme and host, like every other refusal here: the address itself can carry a password in its
+        # userinfo, and this sentence is shown to a person and stored in a 400's body.
+        shown = f"{parsed.scheme}://{host}" if parsed.scheme and host else "That address"
+        return f"{shown} is not an http(s) endpoint, so a stored API key will not be sent to it."
     if parsed.scheme == "https" or _is_loopback_host(host):
         return None
     where = f"{host}:{port}" if port else host
