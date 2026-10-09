@@ -192,8 +192,8 @@ A card of its own, under the Conductor's: whether the assistant may fetch web pa
 not which model thinks, and it should be findable by someone who has never opened the conductor's budgets. Like
 the Conductor and Audio it is `engine_settings` keys written through `PUT /settings/engine` and nothing else.
 
-* **Three choices, off first:** Off, Only the sites I list, Any public site. The site field appears only for the
-  list. **The sentence under the picker is the consent** (`webAccessStatus`): both on-states say that each
+* **Three choices, off first:** Off, Only the sites I list, Any public site (the default). The site field appears only for
+  the list. **The sentence under the picker is the consent** (`webAccessStatus`): both on-states say that each
   address is sent to the site and can carry anything the assistant has read in the person's files, and that every
   fetch is shown in the transcript before it is made; "any public site" says so more plainly, and an empty list
   says it allows nothing and that the tool is not offered.

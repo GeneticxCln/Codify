@@ -15,7 +15,7 @@
 
 import { readErrorBody } from "./errorBody.ts";
 
-/** The three states of `web_fetch`, in the order the picker shows them. Off first, because it is the default. */
+/** The three states of `web_fetch`, in the order the picker shows them: narrowest first, and the widest is the default. */
 export const WEB_MODES = [
   { value: 0, label: "Off" },
   { value: 1, label: "Only the sites I list" },

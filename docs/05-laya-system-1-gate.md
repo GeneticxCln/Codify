@@ -51,8 +51,8 @@ description, the mode and the workspace's folder name. It never sees what a run 
 files, `read_page`, `fetch_page`, command output — which is where text written to steer a model
 usually arrives. So it is a first filter on what the person sent, not a boundary against injected
 instructions. The boundaries are the ones that read no text at all: the write gate (`00` §6.9), the
-approval before the repository's own code runs (`00` §6.6), and `fetch_page`, which stays off until
-a person allows it (`12`). That is also why a gate that cannot run is skipped (§3) rather than
+approval before the repository's own code runs (`00` §6.6), and `fetch_page`, which a person can narrow or
+switch off (`12`). That is also why a gate that cannot run is skipped (§3) rather than
 failing the goal: failing closed would refuse the person's own requests whenever the gate's model is
 down, and would protect nothing the gate can see.
 

@@ -45,13 +45,13 @@ measured, what each idea became, and what was not looked at, so the table cannot
 One conductor tool, **`fetch_page(url, selector?, max_chars?)`**, in `engine/web_fetch.py`, offered through
 `engine/conductor.py` and run by `engine/conductor_tools.py`; and two engine settings that a person alone writes.
 
-* **`web_fetch`** (0 / 1 / 2, default 0): off, only the sites in `web_fetch_hosts`, any public site.
+* **`web_fetch`** (0 / 1 / 2, default 2): off, only the sites in `web_fetch_hosts`, any public site.
   **`web_fetch_hosts`**: site names, each covering its subdomains. `PUT /settings/engine` is the only writer
   (`docs/00` §6.2); `tests/test_invariants_at_their_boundary.py` sweeps every writing route with both keys in a
   hostile body and fails if any other route moves them. A list entry that is not a site name (an address, a URL, a
   bare word) is a `422` naming the entries, never a quiet repair. Settings → Web pages is the card (`docs/02`).
 * **Off means off, and unreadable means off.** A store that cannot answer, a value outside 1 and 2, or a list
-  that parses to nothing is the default. The tool is **not on the menu** while it cannot act: a model choosing
+  that parses to nothing is off, whatever a fresh install's default is. The tool is **not on the menu** while it cannot act: a model choosing
   from the tools it is shown should not spend a call learning one only refuses. A list entry in another script is
   stored as its ASCII form, and the list's 200-character limit is applied to the stored form (a list too long once
   written out is refused, never cut).

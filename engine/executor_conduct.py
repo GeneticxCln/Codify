@@ -439,9 +439,10 @@ class _Conduct(_Plan):
     def _web_policy(self) -> FetchPolicy:
         """What the person allowed `fetch_page` to do, read fresh each time and never wider than stored.
 
-        Best-effort the way `_settings_int` is, with the opposite default: a store that cannot answer, a
-        value that is not 1 or 2 and a list that parses to nothing are all *off*. A fetch is the one setting
-        where "I could not read it" must not mean "yes".
+        Best-effort the way `_settings_int` is, with the opposite fallback: a store that cannot answer, a
+        stored 0 and a list that parses to nothing are all *off*. A fetch is the one setting where "the store
+        failed" must not mean "yes". A row that cannot be parsed is unset, which is the default (any public
+        site), and so is no row at all: that is what a fresh install has.
         """
         mode = self._settings_int("web_fetch", MODE_OFF)
         settings = getattr(self, "settings", None)

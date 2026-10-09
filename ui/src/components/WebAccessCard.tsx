@@ -8,7 +8,7 @@ import { WEB_MODES, refusalSentence, webAccessDirty, webAccessStatus, webMode } 
 /**
  * Whether the assistant may fetch web pages, and from which sites.
  *
- * The one place a person turns on the engine's own access to the web (`web_fetch`, docs/12), so the card is
+ * The one place a person narrows or switches off the engine's own access to the web (`web_fetch`, docs/12), so the card is
  * mostly the sentence that says what each choice lets through (`webAccessStatus`). It is a card of its own and
  * not a row of the conductor's: it is a different decision (what leaves the machine, not which model thinks),
  * and it must be findable by someone who has never opened the conductor's budgets.

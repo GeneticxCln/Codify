@@ -51,10 +51,24 @@ class FetchToolCase(ConductorTestCase):
         ]
 
 
-class TestItIsOffUnlessAPersonTurnedItOn(FetchToolCase):
-    async def test_a_fresh_install_does_not_fetch_and_the_model_is_told_who_can_change_that(self) -> None:
+class TestItIsOnUntilAPersonNarrowsOrSwitchesItOff(FetchToolCase):
+    async def test_a_fresh_install_fetches_any_public_site_and_announces_it_first(self) -> None:
         executor = self._executor(_ToolProvider())
         executor.settings = self.settings
+        asked: list[str] = []
+
+        async def request(url: str, policy: Any, **kwargs: Any) -> Fetched:
+            asked.append(url)
+            return a_page()
+
+        with mock.patch("engine.conductor_tools.fetch", request):
+            answer = await self.table(executor)["fetch_page"]({"url": URL})
+        self.assertEqual(asked, [URL], "a fresh install did not fetch")
+        self.assertNotIn("turned off", answer)
+        self.assertIn(f"conductor is fetching {URL}", self.logs())
+
+    async def test_a_person_who_switched_it_off_is_not_fetched_for_and_the_model_is_told_who_can_change_that(self) -> None:
+        executor = self.executor_with(web_fetch.MODE_OFF)
         with mock.patch("engine.conductor_tools.fetch") as network:
             answer = await self.table(executor)["fetch_page"]({"url": URL})
         network.assert_not_called()
@@ -62,11 +76,22 @@ class TestItIsOffUnlessAPersonTurnedItOn(FetchToolCase):
         self.assertIn("Settings", answer)
         self.assertEqual([m for m in self.logs() if "fetching" in m], [], "an address that was never sent is not announced")
 
-    async def test_the_defaults_are_off_and_empty(self) -> None:
-        self.assertEqual(self.settings.get_int("web_fetch"), 0)
+    async def test_the_default_is_any_public_site_with_no_list(self) -> None:
+        self.assertEqual(self.settings.get_int("web_fetch"), web_fetch.MODE_ANY)
         self.assertEqual(self.settings.get_str("web_fetch_hosts"), "")
-        policy = self._executor(_ToolProvider())._web_policy()
-        self.assertEqual((policy.mode, policy.hosts), (web_fetch.MODE_OFF, ()))
+        executor = self._executor(_ToolProvider())
+        executor.settings = self.settings
+        policy = executor._web_policy()
+        self.assertEqual((policy.mode, policy.hosts), (web_fetch.MODE_ANY, ()))
+
+    async def test_a_choice_a_person_already_stored_is_kept(self) -> None:
+        # An install from before the default changed has either no row (it gets the default) or the row it
+        # saved: off stays off, and a list stays a list.
+        self.assertEqual(self.settings.set_int("web_fetch", web_fetch.MODE_OFF), web_fetch.MODE_OFF)
+        self.assertEqual(self.settings.get_int("web_fetch"), web_fetch.MODE_OFF)
+        executor = self._executor(_ToolProvider())
+        executor.settings = self.settings
+        self.assertEqual(executor._web_policy().mode, web_fetch.MODE_OFF)
 
     async def test_a_setting_that_cannot_be_read_is_off_not_on(self) -> None:
         executor = self._executor(_ToolProvider())
@@ -89,10 +114,10 @@ class TestItIsOffUnlessAPersonTurnedItOn(FetchToolCase):
         self.assertEqual(self.settings.set_int("web_fetch", 99), 2)
         self.assertEqual(self.settings.set_int("web_fetch", -5), 0)
         self.assertEqual(executor._web_policy().mode, web_fetch.MODE_OFF)
-        # A row that is not a number is the default, which is off.
+        # A row that is not a number is treated as unset (`SettingsService.get_int`), which is the default.
         self.conn.execute("UPDATE engine_settings SET value = 'yes' WHERE key = 'web_fetch'")
         self.conn.commit()
-        self.assertEqual(executor._web_policy().mode, web_fetch.MODE_OFF)
+        self.assertEqual(executor._web_policy().mode, web_fetch.MODE_ANY)
 
     async def test_the_list_a_person_typed_is_what_the_fetch_reads(self) -> None:
         executor = self.executor_with(web_fetch.MODE_LISTED, "docs.python.org, example.com")

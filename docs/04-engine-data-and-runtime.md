@@ -760,7 +760,7 @@ The one tool whose request the *engine* makes to an address a model chose (`engi
 and every rule's reason, is `docs/12`). It is a conductor tool and has no route of its own.
 
 **Engine settings** (`PUT /settings/engine`, the only writer, `docs/00` §6.2): `web_fetch` (0 off, 1 only the
-sites in `web_fetch_hosts`, 2 any public site; default 0; clamped to 0–2; a boolean is `422`) and
+sites in `web_fetch_hosts`, 2 any public site; default 2; clamped to 0–2; a boolean is `422`) and
 `web_fetch_hosts` (site names, comma-separated, each covering its subdomains; at most 200 characters, which is
 what `SettingsService.set_str` stores). The list is stored in the one spelling the fetch parses (`parse_hosts`:
 lower-cased, `*.` and a leading or trailing dot dropped, a name in another script written as its ASCII form

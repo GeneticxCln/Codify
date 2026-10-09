@@ -1209,8 +1209,8 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     # voice that starts talking unasked is not something a fresh install does.
     "tts_auto_read": (0, 1),
     # Whether the conductor may fetch web pages: 0 never, 1 only the sites in `web_fetch_hosts`, 2 any
-    # public site. Three states, so not a switch: a checkbox's `true` is refused here like any other
-    # number a person is choosing.
+    # public site (the default of a fresh install). Three states, so not a switch: a checkbox's `true` is
+    # refused here like any other number a person is choosing.
     "web_fetch": (0, 2),
 }
 
