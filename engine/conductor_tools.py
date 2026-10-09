@@ -1065,6 +1065,18 @@ class ConductorTools:
                 "`write` first — verification is meant to judge a change, "
                 "and there is none."
             )
+        # `write` and `run_command` read the goal's stored status; so does this. Verification runs the project's own
+        # tests (`pytest` imports every conftest.py, `npm run` runs any script), which is what an approved plan
+        # allows and Pause, a critic's request for changes, Cancel and a failure all take back. The step's files are
+        # what a conductor holds after any of those (it wrote them while the goal was running, or they were recovered
+        # from the log), so having them is not the same as being allowed to run anything.
+        approved, _ = self.service._write_allowed(self.goal_id)
+        if not approved:
+            return (
+                "Nothing was run. `verify` runs this project's own tests, and only an approved plan that is "
+                "running may do that; this goal is paused, not yet approved, plan-only, or over. A paused goal is "
+                "resumed only by the user, with Start. Tell them what is waiting for them and stop."
+            )
         try:
             async with self.service._stage(self.goal_id, "verifier", "verifier", step.id) as v:
                 outcome = await self.service._verifier(

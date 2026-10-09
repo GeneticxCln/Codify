@@ -378,6 +378,73 @@ class TestTheCriticsReasonsReachTheConductor(MovesCase):
         self.assertNotIn("has not been approved", out, "the goal was approved; the critic paused it")
 
 
+class TestVerifyRunsOnlyWhileTheGoalIsApproved(MovesCase):
+    """`verify` runs the project's own code in `test` mode, so it is held to the approval `write` and `run_command` are.
+
+    docs/00 §6.6: the conductor's `verify` move reaches the sandbox in `test` mode only for an approved goal (stored status
+    RUNNING). `write` and `run_command` read that status; `verify` did not, so once the person paused the goal, or the
+    critic did, a conductor that still held the step's files could run the repository's tests again.
+    """
+
+    async def _written(self) -> tuple[_Counting, dict[str, Any], str]:
+        provider = self.build(A_V2)
+        step_id = self.approve()
+        table = self.table()
+        await table["write"]({"step_id": step_id, "instructions": "first"})
+        return provider, table, step_id
+
+    def _leave(self, status: str) -> None:
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, g.version, status)
+
+    async def _refused_once(self, status: str) -> None:
+        provider, table, step_id = await self._written()
+        self._leave(status)
+        asked = provider.asked.get("verifier", 0)
+
+        out = await table["verify"]({"step_id": step_id})
+
+        self.assertIn("Nothing was run", out)
+        self.assertEqual(provider.asked.get("verifier", 0), asked, "the verifier was asked to run a command")
+        self.assertEqual([], [e for e in self.goals.events_after(self.goal.id, 0) if e.type == "test_result"])
+
+    async def test_a_paused_goal_runs_nothing(self) -> None:
+        await self._refused_once("PAUSED")
+
+    async def test_a_failed_goal_runs_nothing(self) -> None:
+        await self._refused_once("FAILED")
+
+    async def test_a_cancelled_goal_runs_nothing(self) -> None:
+        await self._refused_once("CANCELLED")
+
+    async def test_a_paused_goal_says_it_is_paused_and_who_resumes_it(self) -> None:
+        _, table, step_id = await self._written()
+        self._leave("PAUSED")
+
+        out = await table["verify"]({"step_id": step_id})
+
+        self.assertIn("paused", out)
+        self.assertIn("Start", out)
+
+    async def test_a_running_goal_still_verifies(self) -> None:
+        provider, table, step_id = await self._written()
+
+        out = await table["verify"]({"step_id": step_id})
+
+        self.assertNotIn("Nothing was run", out)
+        self.assertEqual(provider.asked.get("verifier", 0), 1)
+
+    async def test_a_goal_with_nothing_written_is_still_told_to_write_first(self) -> None:
+        # Nothing would have run either way, so the answer is the one it always was.
+        self.build(A_V2)
+        step_id = self.approve()
+        self._leave("PAUSED")
+
+        out = await self.table()["verify"]({"step_id": step_id})
+
+        self.assertIn("Call `write` first", out)
+
+
 class TestWhyAWriteWasRefused(MovesCase):
     async def test_a_goal_nobody_has_started_says_the_plan_is_not_approved(self) -> None:
         self.build(A_V2)
