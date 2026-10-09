@@ -19,7 +19,7 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from engine.conductor import BASE_TOOLS, STEP_TOOLS, TOOLS, Conductor
+from engine.conductor import BASE_TOOLS, PAGE_ACTION_NAMES, STEP_TOOLS, TOOLS, Conductor
 from engine.laya import LayaDecision, LayaService
 from engine.models import TurnCreate
 from engine.providers import ProviderError
@@ -150,10 +150,15 @@ class TestATurnCanPlanThroughTheConductor(ConductorTestCase):
         # The base menu, and the question a turn may put to the person (`ask_user`, last: it is offered
         # whenever somebody is there to answer, which is on a turn and never during an approved run). Without
         # `fetch_page`: it is offered only once a person has allowed it in Settings (docs/12), and a fresh
-        # install has not, so a tool that could only say "turned off" is not a slot the model is shown.
+        # install has not, so a tool that could only say "turned off" is not a slot the model is shown. Without
+        # `navigate_page`, `click_page` and `type_page` either, for the same reason: acting on the person's
+        # browser tab is off until they allow it (`page_actions`, docs/03 §1.6).
         self.assertEqual(
             provider.seen_tools[0],
-            [*(t.name for t in BASE_TOOLS if t.name != "fetch_page"), "ask_user"],
+            [
+                *(t.name for t in BASE_TOOLS if t.name != "fetch_page" and t.name not in PAGE_ACTION_NAMES),
+                "ask_user",
+            ],
         )
         # And the run was measured as the pipeline's own stages, not as some
         # new kind of thing the stats screen would have to learn about.

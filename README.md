@@ -265,8 +265,10 @@ See [`docs/10`](docs/10-agent-memory.md).
 
 Pages open **inside** Codify, as a real embedded webview, and the same tab is readable by the model: `read_page`
 returns the address, title, text and links, so a turn can depend on a documentation page instead of guessing.
-Loopback stays blocked, and a model-proposed URL meets the same guard your click goes through. See
-[`docs/09`](docs/09-workspace-shell.md).
+Loopback stays blocked, and a model-proposed URL meets the same guard your click goes through. Opening an address,
+clicking and typing in that tab are **off until you turn them on** in Settings → Browser tab: each can carry what the
+assistant has read off the machine, and the tab may be signed in to something. Reading it is always available. See
+[`docs/09`](docs/09-workspace-shell.md) and [`docs/03`](docs/03-security-and-roadmap.md) §1.6.
 
 The conductor can also **fetch a public page itself** (`fetch_page`), without moving your tab, but only if you turn it on
 in Settings → Web pages: off by default, then either only the sites you list or any public site. It reads the page with
