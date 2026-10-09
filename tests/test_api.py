@@ -1433,7 +1433,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         # And the two stores stay independently readable.
         self.assertIsNotNone(StatsImportService(app.state.conn).get())
-        self.assertIsNotNone(app.state.stats_snapshots.get_day("2026-01-01"))
+        self.assertIn("2026-01-01", [row["day"] for row in app.state.stats_snapshots.history(0)])
 
     async def test_stats_import_sanitizes_the_source_label(self) -> None:
         """The file name is echoed into the UI, so it is not stored raw."""

@@ -33,7 +33,7 @@ from engine.providers import (
     OpenAICompatProvider,
     ProviderError,
     ProviderFactory,
-    key_may_be_sent_to,
+    key_destination_problem,
 )
 from engine.services import AgentRegistryService, ApiError
 
@@ -48,7 +48,7 @@ class TestWhereAKeyMayGo(unittest.TestCase):
             "https://localhost:8443",
         ):
             with self.subTest(url=url):
-                self.assertTrue(key_may_be_sent_to(url))
+                self.assertIsNone(key_destination_problem(url))
 
     def test_plain_http_to_anywhere_else_is_not(self) -> None:
         for url in (
@@ -59,12 +59,12 @@ class TestWhereAKeyMayGo(unittest.TestCase):
             "http://127.0.0.1@evil.example/", "http://127.0.0.1:80@10.0.0.5/",
         ):
             with self.subTest(url=url):
-                self.assertFalse(key_may_be_sent_to(url))
+                self.assertIsNotNone(key_destination_problem(url))
 
     def test_things_that_are_not_http_endpoints_at_all_are_not(self) -> None:
         for url in ("", "ftp://example.test", "file:///etc/passwd", "example.test", "http://", "https://"):
             with self.subTest(url=url):
-                self.assertFalse(key_may_be_sent_to(url))
+                self.assertIsNotNone(key_destination_problem(url))
 
 
 class TestConstructorsRefuseBeforeAnythingCanBeSent(unittest.TestCase):

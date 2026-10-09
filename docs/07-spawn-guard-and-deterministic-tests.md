@@ -294,7 +294,7 @@ act.
 | `test_apply_flow.py` (4 acts) | in-process ASGI, real planner and executor, version read from the service | no mover at PENDING or after a terminal status | hardened: `post_versioned_async` |
 | `test_api.py` (24 sites) | the version comes from the in-process `GoalService` with no yield point, and `run_planning` is stubbed to a no-op, so the test is the only writer | no | left alone: each site is either a deliberate refusal probe (the test's subject) or a synchronous read-then-act |
 | `test_apply_flow.py` (3 sites) | `expected_version: 0`, or a fresh version on a goal with no proposals | n/a | left alone on purpose: they assert `not_dry_run`, `illegal_status` and `nothing_to_apply` |
-| `test_executor.py`, `test_concurrent_streams.py`, `test_db_and_services.py` (~25 `update_status` / `retry_step` calls) | direct service calls, no `await` between the read and the write | no — no yield point exists | left alone |
+| `test_executor.py`, `test_concurrent_streams.py`, `test_db_and_services.py` (~25 `update_status` / `begin_retry` calls) | direct service calls, no `await` between the read and the write | no — no yield point exists | left alone |
 | `test_design_role.py` `_start`, `/apply` (another contributor's in-flight file) | `GET /goals/{id}` then `POST /start` with the read version | no mover, same as the e2e | reported, not edited |
 
 The honest summary: **one site could actually lose a race, and it is the one that

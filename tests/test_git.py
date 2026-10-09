@@ -79,15 +79,15 @@ class TestGitService(GitTestBase):
         self.assertFalse(self.git.is_git_repo(str(self.root / "nope")))
 
     def test_status_and_commit(self) -> None:
-        self.assertEqual(self.git.get_status(str(self.root)).strip(), "")
+        self.assertEqual(self.porcelain().strip(), "")
 
         self.write("hello.py", "print('hello')\n")
-        self.assertIn("hello.py", self.git.get_status(str(self.root)))
+        self.assertIn("hello.py", self.porcelain())
 
         rev = self.git.commit(str(self.root), "feat: initial commit", ["hello.py"])
         assert rev is not None, "the commit must report its revision"
         self.assertEqual(len(rev), 40)
-        self.assertEqual(self.git.get_status(str(self.root)).strip(), "")
+        self.assertEqual(self.porcelain().strip(), "")
 
         # Nothing left to record for that path.
         self.assertIsNone(self.git.commit(str(self.root), "feat: duplicate", ["hello.py"]))
@@ -182,7 +182,7 @@ class TestGitService(GitTestBase):
         rev = self.git.commit(str(self.root), "chore: remove gone", ["gone.py"])
         self.assertIsNotNone(rev)
         self.assertEqual(self.committed_paths(), set())
-        self.assertEqual(self.git.get_status(str(self.root)).strip(), "")
+        self.assertEqual(self.porcelain().strip(), "")
 
     def test_a_path_that_does_not_exist_is_not_an_error_per_path(self) -> None:
         """A mixed proposal (one real file, one phantom) still commits the real one."""

@@ -536,36 +536,6 @@ def search_observations(
     return {"query": query or "", "observations": out, "count": len(out)}
 
 
-def format_observations_result(result: dict[str, Any]) -> str:
-    """Stored observations, as the tool result the model reads.
-
-    The framing is the memory label with its sharpest edge applied: an
-    observation is the most refined thing this engine believes about this
-    workspace, and the proof count is how believable that makes it — which is
-    a reason to check it against the code, not to skip the check.
-    """
-    observations = result.get("observations") or []
-    if not observations:
-        return (
-            "No stored observation about this workspace matches. That is an "
-            "absence, not a proof: observations are distilled from the most "
-            f"recent {MAX_SCAN_EVENTS} events after each run, and only failures "
-            "and recoveries teach anything. `recall` searches the raw events."
-        )
-    lines = [
-        f"{len(observations)} observation(s) about this workspace, most "
-        "recently refined first. Distilled from recorded runs — not evidence "
-        "about the current code: check the file before you believe one. The "
-        "proof count is how many recorded events back it."
-    ]
-    for obs in observations:
-        line = f"- {obs['subject']}: {obs['lesson']} (proof: {obs['proof']})"
-        if obs.get("example"):
-            line += f" — e.g. {obs['example']!r}"
-        lines.append(line)
-    return "\n".join(lines)
-
-
 def _observation_subject(error: dict[str, Any]) -> str | None:
     """The key a failure groups under, or None when it has no key worth keeping.
 

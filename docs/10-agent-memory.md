@@ -210,11 +210,13 @@ Three properties are load-bearing and each is asserted:
   `form_observations` now sorts oldest-first on the same key before pairing.
 
 `GoalService.observation_rows` reads the store; `recall.search_observations`
-caps (`MAX_OBSERVATIONS = 8`) and filters it; `format_observations_result`
-labels it — *distilled from recorded runs, not evidence about the current
-code*, with the proof count stated as what makes it believable rather than
-what makes it unnecessary to check. `recall` searches events;
-`search_observations` searches the beliefs; neither is the other.
+caps (`MAX_OBSERVATIONS = 8`) and filters it, and `build_brief` (§6.1) is
+the one place a model reads it — labelled *recorded history, not evidence
+about the current code*, with the proof count stated as what makes a belief
+believable rather than what makes it unnecessary to check. `recall` searches
+events; `search_observations` searches the beliefs; neither is the other.
+There is no tool that returns observations on request: the brief is injected,
+not asked for.
 
 ### 6.1 The brief: memory injected, not requested
 

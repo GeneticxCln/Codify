@@ -136,7 +136,7 @@ class TestAWorkspaceThatAlreadyExistsCannotWriteThere(HomeCase):
     def test_reading_is_unaffected(self) -> None:
         # The rule is about writing; a recon of a big directory is not made impossible by it.
         (self.home / "notes.txt").write_text("hello\n", encoding="utf-8")
-        self.assertEqual("hello\n", FileSystemService(str(self.home)).read_text("notes.txt"))
+        self.assertEqual("hello\n", FileSystemService(str(self.home)).read_text_or_none("notes.txt"))
 
     def test_a_normal_workspace_still_writes(self) -> None:
         app = self.home / "projects" / "app"
