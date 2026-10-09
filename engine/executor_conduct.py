@@ -447,6 +447,7 @@ class _Conduct(_Plan):
     def _browser_actions_enabled(self) -> bool:
         """Read the person's browser-action permission fresh; any missing/broken setting means off."""
         return self._settings_int("browser_actions", 0) == 1
+
     def _web_policy(self) -> FetchPolicy:
         """What the person allowed `fetch_page` to do, read fresh each time and never wider than stored.
 
