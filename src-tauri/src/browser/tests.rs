@@ -1879,7 +1879,7 @@ fn the_override_is_reachable_from_the_environment() {
         .join("\n");
     assert!(code.contains("std::env::var(UA_ENV)"));
     assert!(
-        code.contains(&format!(".user_agent(&page_user_agent())")),
+        code.contains(".user_agent(&page_user_agent())"),
         "both page builders must go through the resolver, not one of them \
              pinning the string"
     );
@@ -2169,14 +2169,16 @@ fn placement_is_driven_by_this_module_and_never_by_the_toolkit() {
 /// the page was covering the app.
 #[test]
 fn the_smoke_seats_its_page_somewhere_a_discarded_request_cannot_imitate() {
+    // A constant, read at run time on purpose: this is a test that fails by name, not a build that stops.
+    let page = std::hint::black_box(SMOKE_PAGE);
     assert!(
-        !(SMOKE_PAGE.x == 0.0 && SMOKE_PAGE.y == 0.0),
+        !(page.x == 0.0 && page.y == 0.0),
         "the smoke seats its page at the origin again — a toolkit that \
              discards the request and fills the window produces exactly that, \
              which is how this stayed green while a user watched it happen"
     );
     assert!(
-        SMOKE_PAGE.width < 1280.0 && SMOKE_PAGE.height < 800.0,
+        page.width < 1280.0 && page.height < 800.0,
         "the smoke asks for a rectangle as large as the window, which a \
              discarded request imitates perfectly"
     );

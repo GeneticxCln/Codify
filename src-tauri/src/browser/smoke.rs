@@ -41,13 +41,13 @@ pub fn smoke_mode(url: &str, app: &tauri::AppHandle) -> Result<(), String> {
         WebviewUrl::External(target.clone()),
     )
     .user_agent(&page_user_agent())
-    .on_navigation(|url| navigation_allowed(url))
+    .on_navigation(navigation_allowed)
     // The paint detector, injected at document start: two animation frames
     // (the second proves the compositor consumed one) and then the mark. The
     // probe rides in the same script slot because it is the same kind of
     // measurement on the same throwaway page, and concatenating keeps both
     // constants readable and testable on their own.
-    .initialization_script(&format!("{SMOKE_PAINT_SCRIPT}\n{SMOKE_PROBE_SCRIPT}"))
+    .initialization_script(format!("{SMOKE_PAINT_SCRIPT}\n{SMOKE_PROBE_SCRIPT}"))
     // The page's only channel out, and it is one the ACL never governs: a
     // page may set its own title, and this is a builder hook on the shell's
     // side. See SMOKE_PAINT_MARKER for why the page does not get to speak
