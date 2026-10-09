@@ -168,6 +168,27 @@ class TestWhatIsRefusedAndHowItSaysSo(unittest.TestCase):
         self.refused('"just a string"')
         self.refused("42")
 
+    def test_braces_that_python_would_read_as_a_set_are_refused_as_json_not_as_a_type_error(self) -> None:
+        # `{{"a": 1}}` is what a model writes when it copies an f-string template, and `{["a"]}` is a slip of the
+        # same size. `ast.literal_eval`, the last repair, reads each as a *set* and answers `TypeError: unhashable
+        # type`, which is not a `ValueError` and says nothing about JSON. The refusal is what the re-ask quotes
+        # back to the model, so it has to be a reason about the reply.
+        for raw in ('{{"a": 1}}', '{["a"]}', '{{}}', 'Sure: {["a"]} done', '[{[1]}]', '{"files": {[1]}}'):
+            for truncation in (False, True):
+                with self.subTest(raw=raw, truncation=truncation):
+                    with self.assertRaises(ValueError) as caught:
+                        extract_json(raw, ("files",), repair_truncation=truncation)
+                    self.assertNotIn("unhashable", str(caught.exception))
+
+    def test_an_unreadable_span_does_not_hide_the_answer_that_follows_it(self) -> None:
+        # The scan skips a span it cannot read and goes on, so an example the model got wrong must not cost the
+        # real object after it. The repair that cannot read this span used to raise out of the whole scan.
+        reply = 'The shape is {{"files": []}}\n\nThe answer:\n{"files": [{"path": "a.py", "content": "x"}]}'
+        self.assertEqual(extract_json(reply, ("files",)), {"files": [{"path": "a.py", "content": "x"}]})
+        self.assertEqual(
+            extract_json(reply, ("files",), repair_truncation=True), {"files": [{"path": "a.py", "content": "x"}]},
+        )
+
 
 class TestNothingChangesForWhatAlreadyWorked(unittest.TestCase):
     def test_a_well_formed_reply_is_returned_exactly(self) -> None:
