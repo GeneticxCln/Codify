@@ -47,7 +47,6 @@ from engine.recall import (
     build_brief,
     distill_observations,
     format_observations,
-    format_observations_result,
     format_recall,
     format_thread_recall,
     search,
@@ -734,6 +733,7 @@ class TheMemoryBrief(unittest.IsolatedAsyncioTestCase):
         self.assertIn("code:tests_failed", brief)
         self.assertIn("not a claim that it was done", brief)
         self.assertIn("recall` and `recall_threads` can go deeper", brief)
+        self.assertIn("not evidence about the current code", brief, "a lesson reached the model unlabelled")
 
     async def test_an_empty_workspace_gains_no_section_at_all(self) -> None:
         thread = self._thread("First ever")
@@ -930,7 +930,6 @@ class TheDurableObservationStore(unittest.IsolatedAsyncioTestCase):
         filtered = search_observations(self._consolidated(self.here.id), "code_3")
         self.assertEqual(filtered["count"], 1)
         self.assertEqual(filtered["observations"][0]["subject"], "code:code_3")
-        self.assertIn("not evidence about the current code", format_observations_result(result))
 
     async def test_a_recovery_in_the_scan_flips_the_stored_lesson(self) -> None:
         """The lesson takes the newest scan's wording, so a recovery survives

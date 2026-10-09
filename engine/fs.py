@@ -218,20 +218,11 @@ class FileSystemService:
             raise GitMetadataError(rel)
         return target
 
-    def read_text(self, rel: str) -> str:
-        path = self.resolve(rel)
-        if not path.is_file():
-            return ""
-        size = path.stat().st_size
-        if size > MAX_DIFF_BYTES:
-            return path.read_bytes()[:MAX_DIFF_BYTES].decode("utf-8", errors="replace")
-        return path.read_text(encoding="utf-8")
-
     def read_editable(self, rel: str) -> TextFile:
         """A file as the editor opens it: exact text, plus the version a later save must name.
 
-        Not `read_text`: that translates nothing but truncates and replaces undecodable bytes, which is right for a prompt
-        and wrong for a file a person is about to save back. Here a file is either exactly representable as text or it is
+        Not `read_text_or_none`: that truncates a large file and answers None for one that is not text, which is right
+        for a prompt and wrong for a file a person is about to save back. Here a file is either exactly representable as text or it is
         refused, in a way that says which, because "open a PNG, save it" is how a file gets corrupted. A NUL byte
         *anywhere* means binary (not just in the first block, as `looks_binary` sniffs), so what opens is always
         something `save_text` will accept back.

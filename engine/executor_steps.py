@@ -495,12 +495,6 @@ class _Steps(_Design):
         self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="fixer")
         return summaries
 
-    async def retry_step(self, goal_id: str, step_id: str, expected_version: int) -> PlanStep:
-        """Retry a step and wait for it. The retry route does not use this — see `begin_retry`."""
-        self._prepare_retry(goal_id, step_id, expected_version)
-        await self.run_step(goal_id, step_id)
-        return self._step(goal_id, step_id)
-
     def begin_retry(
         self, goal_id: str, step_id: str, expected_version: int, *, keep_notes: bool = False,
     ) -> PlanStep:
@@ -513,13 +507,6 @@ class _Steps(_Design):
         409; the run itself is the caller's to start in the background, and the driver claimed
         here is theirs to release when it ends.
         """
-        step = self._prepare_retry(goal_id, step_id, expected_version, claim=True, keep_notes=keep_notes)
-        return step
-
-    def _prepare_retry(
-        self, goal_id: str, step_id: str, expected_version: int, *, claim: bool = False,
-        keep_notes: bool = False,
-    ) -> PlanStep:
         step = self._step(goal_id, step_id)
         if not (step.status == "FAILED" or (step.status == "IN_PROGRESS" and bool(step.review_notes))):
             raise ApiError(409, "step_not_retryable", f"step {step_id} is not in a retryable state (status={step.status})")
@@ -546,15 +533,14 @@ class _Steps(_Design):
                     f"step {step.title!r} now shares paths with a step that has not finished "
                     "— edit the plan (or finish the other step) before retrying",
                 )
-        if claim and not self.claim_driver(goal_id):
+        if not self.claim_driver(goal_id):
             raise ApiError(409, "driver_busy", "another driver is already running this goal")
         try:
             self.goals.update_status(goal_id, expected_version, "RUNNING")
             self._reset_step(goal_id, step, keep_notes=keep_notes)
         except BaseException:
             # A refused or failed retry must not leave the goal claimed by nobody.
-            if claim:
-                self.release_driver(goal_id)
+            self.release_driver(goal_id)
             raise
         return self._step(goal_id, step_id)
 

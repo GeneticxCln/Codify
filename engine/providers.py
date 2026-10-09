@@ -472,10 +472,6 @@ def key_destination_problem(base_url: str) -> str | None:
     )
 
 
-def key_may_be_sent_to(base_url: str) -> bool:
-    return key_destination_problem(base_url) is None
-
-
 def require_safe_key_destination(api_key: str | None, base_url: str) -> None:
     """Refuse to hold a credential for a destination that must not receive it."""
     if not api_key:

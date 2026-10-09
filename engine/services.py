@@ -1830,15 +1830,6 @@ class GoalService:
         self._db.commit()
         return self.get(goal_id)
 
-    def set_parallel(self, goal_id: str, enabled: bool) -> None:
-        row = self._db.execute(
-            "UPDATE goals SET parallel = ?, updated_at = ? WHERE id = ?",
-            (int(enabled), time.time(), goal_id),
-        )
-        if row.rowcount != 1:
-            raise ApiError(404, "unknown_goal", "goal not found")
-        self._db.commit()
-
     def set_plan_only(self, goal_id: str, enabled: bool) -> Goal:
         """Flip plan_only after creation (used when enabling execution on a
         plan-only goal). Emits a goal_status event so live streams refresh."""

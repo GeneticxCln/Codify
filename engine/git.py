@@ -74,7 +74,7 @@ class GitService:
         """Run one git command under the guard, capturing raw output.
 
         `env=None` means "inherit this process's environment". Only the engine's own
-        fixed commands (`status --porcelain`, `init`) still do; the one caller whose
+        fixed commands (`init`) still do; the one caller whose
         arguments come from a model, `read_only`, passes an explicit environment.
 
         `timeout=None` waits as long as git takes, which a `commit` running the
@@ -155,12 +155,6 @@ class GitService:
         return [
             p.decode("utf-8", errors="replace") for p in res.stdout.split(b"\0") if p
         ]
-
-    def get_status(self, root_path: str) -> str:
-        if not self.is_git_repo(root_path):
-            return ""
-        res = self._run_text(["status", "--porcelain"], cwd=str(Path(root_path).resolve()))
-        return res.stdout
 
     # Read-only subcommands, and the list has **one owner**: `sandbox.py`,
     # next to the flags that decide what a read-only command may say. This used

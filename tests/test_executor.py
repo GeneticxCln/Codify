@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import threading
+import types
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -30,6 +31,22 @@ from engine.models import (
 from engine.providers import BaseProvider, Keychain, ProviderError, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.services import AgentRegistryService, GoalService, WorkspaceService
+
+
+async def retry_as_the_route_does(
+    executor: ExecutorService, goals: GoalService, goal_id: str, step_id: str, expected_version: int,
+) -> None:
+    """`POST /goals/{id}/steps/{step_id}/retry` without the HTTP: the route's own two halves.
+
+    `begin_retry` decides everything that can be refused and claims the driver; `_retry_and_drive` runs the step
+    with it and releases it. The executor used to have a `retry_step` that awaited the step instead, which the
+    route never called, so these tests proved a path no request takes.
+    """
+    from engine.app import _retry_and_drive
+
+    app = types.SimpleNamespace(state=types.SimpleNamespace(executor=executor, goals=goals))
+    executor.begin_retry(goal_id, step_id, expected_version, keep_notes=executor.conductor_can_drive(goal_id))
+    await _retry_and_drive(app, goal_id, step_id)  # type: ignore[arg-type]
 
 
 class MockProvider(BaseProvider):
@@ -429,7 +446,7 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         self.mock_responses["critic"] = {"decision": "approve", "reasons": []}
         self.mock_responses["scribe"] = {"summary": "Done", "commit_message": "feat: b"}
 
-        await self.executor.retry_step(goal.id, step.id, goal_after.version)
+        await retry_as_the_route_does(self.executor, self.goals, goal.id, step.id, goal_after.version)
 
         step_final = self.goals.steps(goal.id)[0]
         self.assertEqual(step_final.status, "COMPLETED")
@@ -437,7 +454,7 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         # Retrying a COMPLETED step should raise ApiError
         from engine.services import ApiError
         with self.assertRaises(ApiError) as ctx:
-            await self.executor.retry_step(goal.id, step.id, self.goals.get(goal.id).version)
+            await retry_as_the_route_does(self.executor, self.goals, goal.id, step.id, self.goals.get(goal.id).version)
         self.assertEqual(ctx.exception.status, 409)
         self.assertEqual(ctx.exception.code, "step_not_retryable")
 
@@ -1991,6 +2008,16 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self.conn.close()
         self.temp_dir.cleanup()
 
+    def _make_the_goal_parallel(self) -> None:
+        """Replace `self.goal` with one created the way a client asks for parallelism: `parallel: true` on `POST /goals`.
+
+        There is no other way to make a goal parallel — the flag is chosen at creation and never flipped — so the
+        tests do not flip it either.
+        """
+        self.goal = self.goals.create(
+            GoalCreate(workspace_id=self.goal.workspace_id, title="T", description="", parallel=True)
+        )
+
     async def _drive(self) -> float:
         """Run the goal exactly like the API layer: start (RUNNING) then _run_steps.
         Returns elapsed."""
@@ -2084,7 +2111,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([x.title for x in solo], ["solo"])
 
     async def test_parallel_goal_really_overlaps_and_completes(self) -> None:
-        self.goals.set_parallel(self.goal.id, True)
+        self._make_the_goal_parallel()
         self._script_parallel(delays={"a": 0.6, "b": 0.6})
         await self.executor.run_planning(self.goal.id)
         await self._drive()
@@ -2112,7 +2139,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         # run_step absorbs a ProviderError into _fail (step FAILED, goal FAILED)
         # rather than raising; _run_parallel must still join the healthy sibling
         # before the driver observes the failure.
-        self.goals.set_parallel(self.goal.id, True)
+        self._make_the_goal_parallel()
         self._script_parallel(delays={"a": 0.4}, fail_on="b")
         await self.executor.run_planning(self.goal.id)
         await self._drive()
@@ -2137,7 +2164,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         os.environ["CODIFY_PARALLEL_WIDTH"] = "2"
         try:
             self.assertEqual(_env_parallel_width(), 2)
-            self.goals.set_parallel(self.goal.id, True)
+            self._make_the_goal_parallel()
             self._script_parallel(delays={n: 0.3 for n in "abcde"}, n_steps=5)
             await self.executor.run_planning(self.goal.id)
             elapsed = await self._drive()
@@ -2202,7 +2229,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         must refuse with batch_no_longer_disjoint — not race the two onto the
         same file — and the driver must recover by re-batching.
         """
-        self.goals.set_parallel(self.goal.id, True)
+        self._make_the_goal_parallel()
         self._script_parallel(delays={"a": 0.15, "b": 0.15})
         await self.executor.run_planning(self.goal.id)
         steps = self.goals.steps(self.goal.id)
@@ -2237,7 +2264,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         refused pass logs a warning and re-batches; the colliding steps then
         run one at a time and the goal still COMPLETED.
         """
-        self.goals.set_parallel(self.goal.id, True)
+        self._make_the_goal_parallel()
         self._script_parallel(delays={"a": 0.1, "b": 0.1})
         await self.executor.run_planning(self.goal.id)
         plan_row = self.conn.execute(
@@ -2262,14 +2289,14 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fixer_calls), 2)
 
     async def test_retry_refused_when_edited_paths_collide_with_unfinished_step(self) -> None:
-        """retry_step re-proves disjointness against unfinished siblings.
+        """A retry re-proves disjointness against unfinished siblings.
 
         Two parallel steps, one failed. Edit the failed step's paths to collide
         with the sibling (allowed while paused/failed), then retry: refused
         with retry_collides_with_running rather than racing the sibling.
         """
         from engine.services import ApiError
-        self.goals.set_parallel(self.goal.id, True)
+        self._make_the_goal_parallel()
         self._script_parallel(delays={"a": 0.1}, fail_on="a")
         await self.executor.run_planning(self.goal.id)
         steps = {s.title: s for s in self.goals.steps(self.goal.id)}
@@ -2290,7 +2317,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self.conn.commit()
 
         with self.assertRaises(ApiError) as ctx:
-            await self.executor.retry_step(self.goal.id, steps["a"].id, g.version)
+            await retry_as_the_route_does(self.executor, self.goals, self.goal.id, steps["a"].id, g.version)
         self.assertEqual(ctx.exception.code, "retry_collides_with_running")
 
     async def test_apply_batches_on_proposed_paths_not_plan_guesses(self) -> None:
@@ -2301,7 +2328,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         the wrong thing. Two steps whose plans collide on paper but whose
         proposals are disjoint must still batch; and vice versa.
         """
-        self.goals.set_parallel(self.goal.id, True)
+        self._make_the_goal_parallel()
         self._script_parallel(n_steps=2)
         await self.executor.run_planning(self.goal.id)
         steps = self.goals.steps(self.goal.id)
@@ -2340,7 +2367,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(self.executor._independent_batch([mk(0, "vague", [])]), [])
 
-        self.goals.set_parallel(self.goal.id, True)
+        self._make_the_goal_parallel()
         self._script_parallel(n_steps=2)
         # Make the head step provably unbatchable: no suggested paths at all.
         await self.executor.run_planning(self.goal.id)
@@ -2373,7 +2400,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         calls, four in flight), and one that waited for the first would return
         only once the first had.
         """
-        self.goals.set_parallel(self.goal.id, True)
+        self._make_the_goal_parallel()
         self._script_parallel(delays={"a": 0.35, "b": 0.35})
         await self.executor.run_planning(self.goal.id)
 
@@ -2417,7 +2444,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         'disjoint' per the batcher), refused again — an infinite loop: apply
         never completed and never ran a step. Both halves now share one proof.
         """
-        self.goals.set_parallel(self.goal.id, True)
+        self._make_the_goal_parallel()
         self.goals.set_dry_run(self.goal.id, True)
         self._script_parallel(n_steps=2)
         await self.executor.run_planning(self.goal.id)
@@ -2452,7 +2479,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refused, [], "apply hit a refuse/re-batch loop")
 
     async def test_cancel_fails_the_batch_promptly(self) -> None:
-        self.goals.set_parallel(self.goal.id, True)
+        self._make_the_goal_parallel()
         self._script_parallel(delays={"a": 0.35, "b": 0.35})
         await self.executor.run_planning(self.goal.id)
         remaining = [s for s in self.goals.steps(self.goal.id) if s.status != "COMPLETED"]
