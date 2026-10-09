@@ -57,7 +57,11 @@ export const withEditorApp: typeof splitApp = (options, body) =>
     try {
       await body(ctx);
     } finally {
-      for (const tabId of [...editorBuffers.getSnapshot().byTab.keys()]) editorBuffers.close(tabId);
+      // Inside `act`: closing a buffer tells the mounted App and pane, and a test that ends with an update React was not
+      // expecting is a test that prints a warning for it.
+      await ctx.act(async () => {
+        for (const tabId of [...editorBuffers.getSnapshot().byTab.keys()]) editorBuffers.close(tabId);
+      });
     }
   });
 

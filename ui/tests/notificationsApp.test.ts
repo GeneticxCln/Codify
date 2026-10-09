@@ -287,7 +287,7 @@ test("a catalogue check that found nothing, an empty diff and a bad frame are no
 
 test("an engine that is up when the window opens says nothing", async () => {
   await withApp({}, async (ctx) => {
-    await new Promise((r) => setTimeout(r, engineNoticeTiming.settleMs * 3));
+    await ctx.act(() => new Promise<void>((r) => setTimeout(r, engineNoticeTiming.settleMs * 3)));
     await ctx.settle();
     assert.equal(badge(ctx), "");
   });
@@ -295,8 +295,13 @@ test("an engine that is up when the window opens says nothing", async () => {
 
 test("an engine that refuses the token is announced once, and again when it recovers", async () => {
   const options: AppOptions = { health: "stale" };
+  // This engine is refused from the first probe, so the notice's timer is already running when the test body starts. At the
+  // file's 40 ms it can be due before the body has reached its first `act`, and a timer that fires between two `act`s is
+  // an update React was not told about; at 300 it cannot be.
+  const shortened = engineNoticeTiming.settleMs;
+  engineNoticeTiming.settleMs = 300;
   await withApp(options, async (ctx) => {
-    await new Promise((r) => setTimeout(r, engineNoticeTiming.settleMs * 3));
+    await ctx.act(() => new Promise<void>((r) => setTimeout(r, engineNoticeTiming.settleMs * 3)));
     await ctx.settle();
     assert.equal(badge(ctx), "1");
     await open(ctx);
@@ -305,26 +310,28 @@ test("an engine that refuses the token is announced once, and again when it reco
 
     options.health = "up";
     await ctx.dom.click(ctx.dom.byButton("Retry now"));
-    await new Promise((r) => setTimeout(r, engineNoticeTiming.settleMs * 3));
+    await ctx.act(() => new Promise<void>((r) => setTimeout(r, engineNoticeTiming.settleMs * 3)));
     await ctx.settle();
     await open(ctx);
     assert.match(rows(ctx)[0]!, /Engine connection restored/, `rows: ${rows(ctx).join(" || ")}`);
     assert.equal(rows(ctx).length, 2);
+  }).finally(() => {
+    engineNoticeTiming.settleMs = shortened;
   });
 });
 
 test("an engine that goes away and comes back is two notices, and a flap that reverses inside the settle time is none", async () => {
   const options: AppOptions = {};
   await withApp(options, async (ctx) => {
-    await new Promise((r) => setTimeout(r, engineNoticeTiming.settleMs * 3));
+    await ctx.act(() => new Promise<void>((r) => setTimeout(r, engineNoticeTiming.settleMs * 3)));
     // Down, then back before the settle time passes: the connection never settled, so it is not news.
     const longer = engineNoticeTiming.settleMs;
     engineNoticeTiming.settleMs = 5000;
     options.health = "down";
-    await new Promise((r) => setTimeout(r, 3300));
+    await ctx.act(() => new Promise<void>((r) => setTimeout(r, 3300)));
     await ctx.settle();
     options.health = "up";
-    await new Promise((r) => setTimeout(r, 3300));
+    await ctx.act(() => new Promise<void>((r) => setTimeout(r, 3300)));
     await ctx.settle();
     engineNoticeTiming.settleMs = longer;
     assert.equal(badge(ctx), "", "a flap that reversed inside the settle time was announced");

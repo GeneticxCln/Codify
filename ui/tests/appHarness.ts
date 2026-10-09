@@ -161,7 +161,7 @@ export interface AppContext {
   /** Emit a shell event to the listeners the app registered, the way Rust's `emit` does. */
   emit(event: string, payload: unknown): Promise<void>;
   /** Run a change inside React's `act`, so state it sets is flushed before you look. */
-  act(body: () => void | Promise<void>): Promise<void>;
+  act<T>(body: () => T | Promise<T>): Promise<T>;
   /** The fake engine's files (see `AppOptions.files`), and the saves a person made. */
   disk: {
     read(workspaceId: string, path: string): string | undefined;
@@ -813,7 +813,7 @@ export async function withApp(
             for (const { handler } of listeners.get(event) ?? []) handler({ event, id: ++eventSeq, payload });
           });
         },
-        act: (fn) => act(async () => { await fn(); }),
+        act: (fn) => dom.act(fn),
         disk: {
           read: (workspaceId, path) => diskFiles.get(`${workspaceId}:${path}`)?.content,
           write(workspaceId, path, content) {

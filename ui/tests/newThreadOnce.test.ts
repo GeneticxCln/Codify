@@ -69,11 +69,11 @@ function holdTheSendsGoalRead(): { hook: (call: EngineCall) => Promise<void>; hy
 
 test("the first message of a brand-new thread is one bubble, not two", async () => {
   const held = holdTheSendsGoalRead();
-  await withApp({ beforeRespond: held.hook }, async ({ dom, engine, settle }) => {
+  await withApp({ beforeRespond: held.hook }, async ({ dom, engine, settle, act }) => {
     await dom.fill(composer(dom.container), PROMPT);
     await dom.press(composer(dom.container), "Enter");
     await settle();
-    await sleep(700);
+    await act(() => sleep(700));
     await settle();
 
     assert.equal(engine.filter((c) => c.method === "POST" && c.path.endsWith("/turns")).length, 1, "one turn was dispatched");
@@ -137,18 +137,19 @@ test("a message sent while the thread is still being read back is not drawn twic
       await sendsGoalRead;
     }
   };
-  await withApp({ conversations: [old], storedTabs: stored, beforeRespond: hook }, async ({ dom, engine, settle }) => {
+  await withApp({ conversations: [old], storedTabs: stored, beforeRespond: hook }, async ({ dom, engine, settle, act }) => {
     await settle();
     await dom.fill(composer(dom.container), PROMPT);
     await dom.press(composer(dom.container), "Enter");
-    // The turn is dispatched; the engine now holds it; the send's own read of it is held.
-    for (let i = 0; i < 100 && !engine.some((c) => c.method === "POST" && c.path === "/conversations/c-old/turns"); i++) await sleep(10);
-    await sleep(80);
+    // The turn is dispatched; the engine now holds it; the send's own read of it is held. (Waiting happens inside `act`: the
+    // window keeps working while the test waits, and what it does in that time is what the test is about.)
+    for (let i = 0; i < 100 && !engine.some((c) => c.method === "POST" && c.path === "/conversations/c-old/turns"); i++) await act(() => sleep(10));
+    await act(() => sleep(80));
     releaseThreadRead(); // the thread's read now lists a turn the screen is already showing
-    await sleep(150);
+    await act(() => sleep(150));
     releaseSendsGoalRead();
     await settle();
-    await sleep(200);
+    await act(() => sleep(200));
     await settle();
 
     assert.equal(bubbles(dom.container, PROMPT), 1, "a turn sent during a read of its thread was drawn twice");

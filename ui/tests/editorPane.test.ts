@@ -128,7 +128,7 @@ test("a file that is still loading says so, and a file that failed to open says 
     assert.match(dom.container.textContent ?? "", /Opening nope\.py/);
 
     release();
-    await pending;
+    await dom.act(() => pending);
     await dom.settle();
 
     assert.match(dom.container.querySelector('[role="alert"]')?.textContent ?? "", /no file/);
@@ -156,7 +156,7 @@ test("a tab with no buffer yet says it is opening, rather than showing an empty 
 test("the status line says where the cursor is and what the file's line endings and encoding are", async () => {
   await withDom(async (dom) => {
     const m = await mounted(dom, { files: { "w1:src/a.py": { content: "one\r\ntwo\r\n", version: "v1" } } });
-    m.buffers.selectLines("e1", 2, 2);
+    await dom.act(() => { m.buffers.selectLines("e1", 2, 2); });
     await dom.settle();
 
     const bar = dom.container.querySelector('[data-testid="editor-status"]')?.textContent ?? "";
@@ -173,7 +173,7 @@ test("an edit by the assistant appears on screen, marked, with the pane told it 
   await withDom(async (dom) => {
     const m = await mounted(dom);
 
-    const done = m.buffers.edit("e1", { oldText: "return 1", newText: "return 42", count: 1 });
+    const done = await dom.act(() => m.buffers.edit("e1", { oldText: "return 1", newText: "return 42", count: 1 }));
     await dom.settle();
 
     assert.equal(done.ok, true);
@@ -192,15 +192,15 @@ test("the assistant's edit is its own undo step, apart from what the person had 
     const m = await mounted(dom);
     const { undo } = await import("@codemirror/commands");
     const view = m.views[0];
-    view.dispatch({ changes: { from: 0, insert: "# mine\n" }, userEvent: "input.type" });
-    m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+    await dom.act(() => { view.dispatch({ changes: { from: 0, insert: "# mine\n" }, userEvent: "input.type" }); });
+    await dom.act(() => { m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 }); });
     await dom.settle();
 
-    undo(view);
+    await dom.act(() => { undo(view); });
     await dom.settle();
 
     assert.equal(view.state.doc.toString(), "# mine\ndef f():\n    return 1\n", "one undo took back the assistant's edit and the person's typing with it");
-    undo(view);
+    await dom.act(() => { undo(view); });
     assert.equal(view.state.doc.toString(), TEXT);
   });
 });
@@ -212,12 +212,12 @@ test("the assistant's edit stays its own undo step even when it touches the text
     const view = m.views[0];
     // Typed straight in front of "def", and the assistant then rewrites "def" itself: adjacent changes in quick succession
     // are one undo step to CodeMirror's history unless something says otherwise.
-    view.dispatch({ changes: { from: 0, insert: "async " }, userEvent: "input.type" });
-    m.buffers.edit("e1", { oldText: "def", newText: "DEF", count: 1 });
+    await dom.act(() => { view.dispatch({ changes: { from: 0, insert: "async " }, userEvent: "input.type" }); });
+    await dom.act(() => { m.buffers.edit("e1", { oldText: "def", newText: "DEF", count: 1 }); });
     await dom.settle();
     assert.match(view.state.doc.toString(), /^async DEF f\(\)/);
 
-    undo(view);
+    await dom.act(() => { undo(view); });
 
     assert.equal(view.state.doc.toString(), "async def f():\n    return 1\n", "one undo took back the person's typing along with the assistant's edit");
   });
@@ -226,11 +226,11 @@ test("the assistant's edit stays its own undo step even when it touches the text
 test("the marks are right the moment the text changes, not a render later", async () => {
   await withDom(async (dom) => {
     const m = await mounted(dom);
-    m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+    await dom.act(() => { m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 }); });
     await dom.settle();
 
     // No settle after this: what is on screen *now* is what the view drew from the store's ranges at the time.
-    m.views[0].dispatch({ changes: { from: 0, insert: "# a comment\n" } });
+    await dom.act(() => { m.views[0].dispatch({ changes: { from: 0, insert: "# a comment\n" } }); });
 
     assert.equal(dom.container.querySelector(".cm-ai-edit")?.textContent, "return 2", "the mark was drawn from ranges that had not caught up with the text");
   });
@@ -247,7 +247,7 @@ test("selecting lines scrolls the selection into view", async () => {
       return original(...args);
     };
 
-    m.buffers.selectLines("e1", 2, 2);
+    await dom.act(() => { m.buffers.selectLines("e1", 2, 2); });
     await dom.settle();
 
     assert.ok(dispatched.some((spec) => spec.effects !== undefined), "nothing asked the view to scroll");
@@ -281,10 +281,10 @@ test("a file with no grammar is plain text, and shows its text all the same", as
 test("a mark follows the text when the person types above it", async () => {
   await withDom(async (dom) => {
     const m = await mounted(dom);
-    m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+    await dom.act(() => { m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 }); });
     await dom.settle();
 
-    m.views[0].dispatch({ changes: { from: 0, insert: "# a comment\n" } });
+    await dom.act(() => { m.views[0].dispatch({ changes: { from: 0, insert: "# a comment\n" } }); });
     await dom.settle();
 
     assert.equal(dom.container.querySelector(".cm-ai-edit")?.textContent, "return 2");
@@ -294,7 +294,7 @@ test("a mark follows the text when the person types above it", async () => {
 test("saving clears the marks and the unsaved badge", async () => {
   await withDom(async (dom) => {
     const m = await mounted(dom);
-    m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+    await dom.act(() => { m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 }); });
     await dom.settle();
 
     await dom.click(button(dom, "Save"));
@@ -312,7 +312,7 @@ test("selecting lines for the assistant puts the selection on screen", async () 
   await withDom(async (dom) => {
     const m = await mounted(dom);
 
-    m.buffers.selectLines("e1", 2, 2);
+    await dom.act(() => { m.buffers.selectLines("e1", 2, 2); });
     await dom.settle();
 
     const { from, to } = m.views[0].state.selection.main;
@@ -326,7 +326,7 @@ test("showing another tab and coming back keeps the text, the selection and the 
   await withDom(async (dom) => {
     const m = await mounted(dom);
     const { undo } = await import("@codemirror/commands");
-    m.views[0].dispatch({ changes: { from: 0, insert: "# kept\n" }, userEvent: "input.type" });
+    await dom.act(() => { m.views[0].dispatch({ changes: { from: 0, insert: "# kept\n" }, userEvent: "input.type" }); });
     await dom.settle();
 
     await dom.render(h("div", null, "another tab"));
@@ -335,7 +335,7 @@ test("showing another tab and coming back keeps the text, the selection and the 
 
     assert.match(text(dom), /# kept/);
     assert.equal(m.views.length, 2, "a new view was made for the new mount");
-    undo(m.views[1]);
+    await dom.act(() => { undo(m.views[1]); });
     assert.equal(m.views[1].state.doc.toString(), TEXT, "the undo history did not survive the pane");
   });
 });
@@ -345,7 +345,7 @@ test("while the pane is away the assistant can still edit, and the edit is there
     const m = await mounted(dom);
     await dom.render(h("div", null, "another tab"));
 
-    const done = m.buffers.edit("e1", { oldText: "return 1", newText: "return 7", count: 1 });
+    const done = await dom.act(() => m.buffers.edit("e1", { oldText: "return 1", newText: "return 7", count: 1 }));
     await m.render();
 
     assert.equal(done.ok, true);
@@ -366,7 +366,7 @@ test("the view is detached from the store when the pane goes, so a stale view is
     };
     await dom.render(h("div", null, "another tab"));
 
-    m.buffers.edit("e1", { oldText: "return 1", newText: "return 9", count: 1 });
+    await dom.act(() => { m.buffers.edit("e1", { oldText: "return 1", newText: "return 9", count: 1 }); });
 
     assert.equal(dispatched, 0);
   });
@@ -375,7 +375,7 @@ test("the view is detached from the store when the pane goes, so a stale view is
 test("reverting puts the file's text back on screen", async () => {
   await withDom(async (dom) => {
     const m = await mounted(dom);
-    m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+    await dom.act(() => { m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 }); });
     await dom.settle();
 
     await dom.click(button(dom, "Revert"));
@@ -394,7 +394,7 @@ test("reverting puts the file's text back on screen", async () => {
 test("backing out of a revert changes nothing", async () => {
   await withDom(async (dom) => {
     const m = await mounted(dom);
-    m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+    await dom.act(() => { m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 }); });
     await dom.settle();
 
     await dom.click(button(dom, "Revert"));
@@ -411,7 +411,7 @@ test("backing out of a revert changes nothing", async () => {
 test("Save writes what is on screen, with the version it was opened at", async () => {
   await withDom(async (dom) => {
     const m = await mounted(dom);
-    m.views[0].dispatch({ changes: { from: 0, insert: "# new\n" } });
+    await dom.act(() => { m.views[0].dispatch({ changes: { from: 0, insert: "# new\n" } }); });
     await dom.settle();
 
     await dom.click(button(dom, "Save"));
@@ -425,13 +425,15 @@ test("Save writes what is on screen, with the version it was opened at", async (
 test("Ctrl+S in the editor saves, and nothing outside the editor does", async () => {
   await withDom(async (dom) => {
     const m = await mounted(dom);
-    m.views[0].dispatch({ changes: { from: 0, insert: "# new\n" } });
+    await dom.act(() => { m.views[0].dispatch({ changes: { from: 0, insert: "# new\n" } }); });
     await dom.settle();
     const content = dom.container.querySelector(".cm-content") as HTMLElement;
 
     const event = new dom.window.KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true, cancelable: true });
-    content.dispatchEvent(event);
-    await beat();
+    await dom.act(async () => {
+      content.dispatchEvent(event);
+      await beat();
+    });
 
     assert.equal(m.saves.length, 1, "Ctrl+S in the editor did not save");
     assert.equal(event.defaultPrevented, true, "the browser's own Save page dialog would have opened");
@@ -441,7 +443,7 @@ test("Ctrl+S in the editor saves, and nothing outside the editor does", async ()
 test("a file that changed on disk offers a way out and does not overwrite", async () => {
   await withDom(async (dom) => {
     const m = await mounted(dom);
-    m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+    await dom.act(() => { m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 }); });
     m.disk["w1:src/a.py"] = { content: "theirs\n", version: "v9" };
     await dom.settle();
 
@@ -459,7 +461,7 @@ test("a file that changed on disk offers a way out and does not overwrite", asyn
 
 async function conflicted(dom: Dom) {
   const m = await mounted(dom);
-  m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+  await dom.act(() => { m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 }); });
   m.disk["w1:src/a.py"] = { content: "theirs\n", version: "v9" };
   await dom.settle();
   await dom.click(button(dom, "Save"));
@@ -499,10 +501,10 @@ test("reloading from disk takes the disk's text and drops the person's", async (
 test("a file deleted on disk says so, and that the text on screen is still the person's", async () => {
   await withDom(async (dom) => {
     const m = await mounted(dom);
-    m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+    await dom.act(() => { m.buffers.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 }); });
     delete m.disk["w1:src/a.py"];
 
-    await m.buffers.noteDiskChange("w1", ["src/a.py"]);
+    await dom.act(() => m.buffers.noteDiskChange("w1", ["src/a.py"]));
     await dom.settle();
 
     const banner = dom.container.querySelector('[role="alert"]')?.textContent ?? "";
@@ -524,7 +526,7 @@ test("a save that fails for another reason says why, in the person's words, and 
     await failing.open("e1", { workspaceId: "w1", path: "src/a.py" });
     await dom.render(h(EditorPane, { tabId: "e1", buffers: failing }));
     await beat();
-    failing.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+    await dom.act(() => { failing.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 }); });
     await dom.settle();
 
     await dom.click(button(dom, "Save"));
@@ -552,14 +554,17 @@ test("while a save is in flight the button says so and cannot be pressed twice",
     await slow.open("e1", { workspaceId: "w1", path: "src/a.py" });
     await dom.render(h(EditorPane, { tabId: "e1", buffers: slow }));
     await beat();
-    slow.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 });
+    await dom.act(() => { slow.edit("e1", { oldText: "return 1", newText: "return 2", count: 1 }); });
     await dom.settle();
 
-    const saving = slow.save("e1");
+    let saving: Promise<unknown> = Promise.resolve();
+    await dom.act(() => {
+      saving = slow.save("e1");
+    });
     await dom.settle();
     assert.equal(button(dom, "Saving…").disabled, true);
     release();
-    await saving;
+    await dom.act(() => saving);
     await dom.settle();
 
     assert.equal(button(dom, "Save").disabled, true);
