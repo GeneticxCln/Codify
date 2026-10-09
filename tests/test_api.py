@@ -2479,6 +2479,29 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(r.status_code, 422, bad)
 
+    async def test_page_actions_are_off_until_a_person_turns_them_on(self) -> None:
+        """Whether the conductor may navigate, click and type in the person's browser tab (docs/03 §1.6).
+
+        Off on a fresh install, because each of the three can carry what a turn has read off the machine. A
+        switch, so a checkbox's `true` is a 1, and a value that is not a switch is refused rather than stored.
+        """
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual(r.json()["page_actions"], {"value": 0, "min": 0, "max": 1})
+        self.assertFalse(app.state.executor._page_actions_allowed())
+
+        r = await self.client.put("/settings/engine", headers=self.headers, json={"page_actions": True})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["saved"], {"page_actions": 1})
+        self.assertTrue(app.state.executor._page_actions_allowed())
+
+        r = await self.client.put("/settings/engine", headers=self.headers, json={"page_actions": False})
+        self.assertEqual(r.json()["saved"], {"page_actions": 0})
+        self.assertFalse(app.state.executor._page_actions_allowed())
+
+        r = await self.client.put("/settings/engine", headers=self.headers, json={"page_actions": "yes"})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertFalse(app.state.executor._page_actions_allowed(), "a refused save changes nothing")
+
     async def test_web_fetch_is_off_until_a_person_turns_it_on_and_the_list_is_kept_as_the_fetch_reads_it(self) -> None:
         """The setting that lets the engine reach the web for a model (engine/web_fetch.py, docs/12).
 

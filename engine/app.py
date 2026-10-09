@@ -1212,11 +1212,14 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     # public site. Three states, so not a switch: a checkbox's `true` is refused here like any other
     # number a person is choosing.
     "web_fetch": (0, 2),
+    # Whether the conductor may navigate, click and type in the person's browser tab. Off by default:
+    # each of the three can carry what a turn has read off the machine (docs/03 §1.6).
+    "page_actions": (0, 1),
 }
 
 # The integer settings that are really switches, so a checkbox's `true` is a 1
 # rather than the truthiness trap it would be for a number someone chooses.
-ENGINE_SWITCH_SETTINGS = frozenset({"conductor_drives_execution", "tts_auto_read"})
+ENGINE_SWITCH_SETTINGS = frozenset({"conductor_drives_execution", "tts_auto_read", "page_actions"})
 
 # The conductor's own provider and model, keyed to the longest value each
 # accepts. They are settings rather than an `AgentConfig` row because

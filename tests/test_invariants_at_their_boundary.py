@@ -169,6 +169,8 @@ class BoundaryCase(unittest.IsolatedAsyncioTestCase):
             # may write it, so no goal, turn or other route may carry it in.
             "web_fetch": 2,
             "web_fetch_hosts": "evil.example",
+            # And the one that lets a model act on the person's browser tab, for the same reason.
+            "page_actions": 1,
             "expected_version": 0,
             "prompt": "hello",
             "title": "t",

@@ -625,6 +625,10 @@ export interface EngineSettings {
   web_fetch?: EngineSettingValue;
   /** The sites `fetch_page` may read when `web_fetch` is 1: site names, each covering its subdomains. */
   web_fetch_hosts?: EngineStringSettingValue;
+  /** 1 = the conductor may navigate, click and type in the person's browser tab (`navigate_page`, `click_page`,
+   * `type_page`). Off by default: each can carry what a turn has read off the machine (docs/03 §1.6). Optional
+   * like the others: an engine that predates it answers without it and the card is absent. */
+  page_actions?: EngineSettingValue;
 }
 
 /** The Settings screen's tabs, in the order they are shown. One definition, so a new tab is one edit. */
