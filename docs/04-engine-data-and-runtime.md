@@ -964,7 +964,9 @@ again, at most `MAX_LIBRARY_ROUNDS` (3) calls per goal. Per-round request caps: 
 
 Two request entries may be plain values or small objects: a `reads` entry is a path string or
 `{path, offset, limit}` (the line-range form for reaching the bottom half of a big file), and a
-`searches` entry is a query string or `{query, regex, glob}`.
+`searches` entry is a query string or `{query, regex, glob}`. A line is what `\n` ends, in a read window, in a
+search hit and in the regex walk alike (`library.text_lines`): a form feed, U+2028 or NEL inside a line does not
+start another, so a hit's `line` is the `offset` that reads it back.
 
 Requests are executed by `engine/library.py`:
 

@@ -258,6 +258,69 @@ class TestLibrarianReadsMore(unittest.TestCase):
         self.assertEqual(res["offset"], 2)
         self.assertEqual(res["total_lines"], 6)
 
+    def _file_with_separators_that_are_not_newlines(self) -> list[str]:
+        """Ten lines by `\\n`, three of which hold a character `str.splitlines` also breaks a line on."""
+        lines = [f"line {i}" for i in range(1, 11)]
+        lines[2] = "line 3 \x0c still line 3"      # a form feed: the page break old C sources carry
+        lines[5] = "line 6   still line 6"    # U+2028, which JSON and JavaScript text can hold
+        lines[7] = "line 8 \x85 still line 8"      # NEL
+        (self.root / "pages.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return lines
+
+    def test_a_line_window_counts_lines_by_newline_like_the_range_it_was_asked_for(self) -> None:
+        """The window starts at the Nth `\\n`, so it must end after `limit` of them.
+
+        It was cut with `str.splitlines`, which also breaks on form feeds, U+2028 and NEL: asking for lines 2-5 of a
+        file with a form feed on line 3 returned lines 2, "3", the rest of 3, and 4, so line 5 was lost while the
+        header still claimed it was there.
+        """
+        lines = self._file_with_separators_that_are_not_newlines()
+
+        res = self.lib.read("pages.txt", offset=2, limit=4)
+
+        self.assertEqual(res["lines"], 4)
+        self.assertEqual(res["text"].split("\n"), lines[1:5])
+
+        res = self.lib.read("pages.txt", offset=5, limit=3)
+
+        self.assertEqual(res["text"].split("\n"), lines[4:7])
+        self.assertEqual(res["total_lines"], 10)
+
+    def test_a_search_hit_and_a_read_agree_about_which_line_it_is(self) -> None:
+        """`search_code` says "path:LINE" and the model then calls `read_file` at LINE: the two must count alike."""
+        self._file_with_separators_that_are_not_newlines()
+
+        for query, wanted_line in (("still line 3", 3), ("still line 6", 6), ("line 9", 9)):
+            with self.subTest(query=query):
+                hits = self.lib.search(query, glob="pages.txt")["matches"]
+                self.assertEqual([h["line"] for h in hits], [wanted_line])
+                read_back = self.lib.read("pages.txt", offset=hits[0]["line"], limit=1)
+                self.assertIn(query, read_back["text"])
+
+    def test_the_regex_walk_counts_lines_the_same_way(self) -> None:
+        from engine.library import scan_regex
+
+        self._file_with_separators_that_are_not_newlines()
+
+        found = scan_regex(str(self.root), r"still line 6", "pages.txt", 5.0)
+
+        self.assertEqual([m["line"] for m in found["matches"]], [6])
+
+    def test_a_windows_file_reads_without_its_carriage_returns(self) -> None:
+        (self.root / "crlf.txt").write_bytes(b"one\r\ntwo\r\nthree")
+
+        res = self.lib.read("crlf.txt", offset=1, limit=3)
+
+        self.assertEqual(res["text"], "one\ntwo\nthree")
+        self.assertEqual(res["lines"], 3)
+        self.assertEqual(res["total_lines"], 3)
+        # `$` still means the end of a line in a file that ends its lines with two characters.
+        from engine.library import scan_regex
+
+        found = scan_regex(str(self.root), r"^two$", "crlf.txt", 5.0)
+        self.assertEqual([m["line"] for m in found["matches"]], [2])
+        self.assertEqual(self.lib.search("two", glob="crlf.txt")["matches"][0]["text"], "two")
+
     def test_an_empty_window_is_rendered_as_one(self) -> None:
         """format_read must not do range math on an empty window — the old
         offset+lines-1 math produced nonsense like "lines 50-49"."""
