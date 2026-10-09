@@ -317,22 +317,6 @@ fn process_alive(pid: u32) -> bool {
     signal_process(pid, 0)
 }
 
-/// Turn a termination signal into the same deliberate exit a closed window takes.
-///
-/// A signal never runs Tauri's exit path. SIGTERM's default disposition is to end the
-/// process where it stands, so on a keybind the window went, the terminals were left
-/// to whatever their PTY happened to do, and the engine was left to notice that its
-/// parent was gone. That last part is a backstop working as designed (`docs/04`
-/// §6.1); it is not the shell keeping its own promise, and it takes up to a second
-/// and a half longer than doing it here.
-///
-/// tokio's signal streams rather than `libc::signal`: what tokio installs writes to a
-/// pipe, and the work happens on a runtime thread, so this may touch the app's state
-/// and call into Tauri at all — none of which a signal handler may do.
-///
-/// SIGHUP is deliberately absent. A terminal that launched the app may have been
-/// started with SIGHUP ignored, and a handler installed over an inherited `SIG_IGN`
-/// would make closing that terminal kill an app that was deliberately detached.
 // ── the render-starvation watchdog ──────────────────────────────────────────
 //
 // On a machine whose WebKitGTK composites in software (an Nvidia/Wayland
@@ -488,6 +472,23 @@ fn main_thread_cpu_ticks() -> Option<u64> {
     Some(utime + stime)
 }
 
+/// Turn a termination signal into the same deliberate exit a closed window takes.
+///
+/// A signal never runs Tauri's exit path. SIGTERM's default disposition is to end the
+/// process where it stands, so on a keybind the window went, the terminals were left
+/// to whatever their PTY happened to do, and the engine was left to notice that its
+/// parent was gone. That last part is a backstop working as designed (`docs/04`
+/// §6.1); it is not the shell keeping its own promise, and it takes up to a second
+/// and a half longer than doing it here.
+///
+/// tokio's signal streams rather than `libc::signal`: what tokio installs writes to a
+/// pipe, and the work happens on a runtime thread, so this may touch the app's state
+/// and call into Tauri at all — none of which a signal handler may do.
+///
+/// SIGHUP is deliberately absent. A terminal that launched the app may have been
+/// started with SIGHUP ignored, and a handler installed over an inherited `SIG_IGN`
+/// would make closing that terminal kill an app that was deliberately detached.
+///
 /// SIGTERM and SIGINT are requests to stop, with no such second reading.
 fn watch_shutdown_signals(app: AppHandle) {
     use tokio::signal::unix::{signal, SignalKind};
@@ -1461,8 +1462,7 @@ fn get_ui_webview(window: &tauri::WebviewWindow<tauri::Wry>) -> Option<tauri::We
     }
     window
         .webviews()
-        .into_iter()
-        .map(|(_, page)| page)
+        .into_values()
         .find(|page| !page.label().starts_with(crate::browser::LABEL_PREFIX))
 }
 
@@ -1608,7 +1608,7 @@ fn tabs_smoke_mode(app: tauri::AppHandle, state: SharedEngineState) -> Result<()
         //    all any more (the page gets it from the shell over IPC and keeps it
         //    in memory), so there is no stale token to overwrite.
         let fresh_port = port;
-        if let Err(e) = window.eval(&format!(
+        if let Err(e) = window.eval(format!(
             "localStorage.setItem('CODIFY_PORT', '{fresh_port}');",
         )) {
             println!("{TABS_SMOKE_LINE}FAILED could not reach the window's webview: {e}");
@@ -1623,8 +1623,8 @@ fn tabs_smoke_mode(app: tauri::AppHandle, state: SharedEngineState) -> Result<()
         // state is the pure label scan.
         let mut seen_seats: std::collections::HashSet<String> = window
             .webviews()
-            .into_iter()
-            .map(|(_, page)| page.label().to_string())
+            .into_values()
+            .map(|page| page.label().to_string())
             .collect();
         loop {
             // Live probe, every fourth iteration (~6s): what the window's own
@@ -1634,7 +1634,10 @@ fn tabs_smoke_mode(app: tauri::AppHandle, state: SharedEngineState) -> Result<()
             // the port a failed request tried; `tabs` is the strip's DOM.
             if let Some(ui) = &ui {
                 let n = iteration.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n % 4 == 0 {
+                // Not `n.is_multiple_of(4)`: that is newer than the `rust-version` Cargo.toml declares.
+                #[allow(clippy::manual_is_multiple_of)]
+                let every_fourth = n % 4 == 0;
+                if every_fourth {
                     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
                     let tx = std::sync::Mutex::new(Some(tx));
                     let script = "JSON.stringify({tabs: document.querySelectorAll('[role=\"tab\"]').length, \
@@ -1688,8 +1691,8 @@ fn tabs_smoke_mode(app: tauri::AppHandle, state: SharedEngineState) -> Result<()
             // asked, once, bounded.
             let labels: Vec<String> = window
                 .webviews()
-                .into_iter()
-                .map(|(_, page)| page.label().to_string())
+                .into_values()
+                .map(|page| page.label().to_string())
                 .collect();
             let mut seated = false;
             for label in &labels {
@@ -1906,8 +1909,7 @@ pub fn run() {
                     url
                 };
                 println!("embed-smoke: mode engaged ({url})");
-                browser::smoke_mode(&url, app.handle())
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                browser::smoke_mode(&url, app.handle()).map_err(std::io::Error::other)?;
                 // `Listener` comes from the Manager/AppHandle side, not the
                 // Window: the event is announced by browser::smoke_mode from
                 // the shell's own title hook, and the app is the listener.

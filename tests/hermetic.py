@@ -26,6 +26,7 @@ recommended to developers must not change what the suite proves — see
 from __future__ import annotations
 
 import atexit
+import logging
 import os
 import shutil
 import tempfile
@@ -38,6 +39,21 @@ from engine.watchdog import ENV_PARENT_PID
 _scratch: str | None = None
 
 
+class _DropSlowCallbackNotes(logging.Filter):
+    """Drop asyncio's "Executing <Task ...> took 0.130 seconds" warnings, and only those.
+
+    `IsolatedAsyncioTestCase` runs every test on a loop in debug mode, and debug mode logs any step that takes
+    over 100 ms. Under a loaded machine that is most `asyncSetUp`s: about three hundred lines per run, each a
+    page-wide task repr, which buried the one line a failed run needs. The rest of debug mode stays on and
+    stays loud (a coroutine that was never awaited, a callback that raised); a slow step is not a failure of
+    anything these tests assert.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (message.startswith("Executing ") and " took " in message and message.endswith(" seconds"))
+
+
 def activate() -> str:
     """Redirect state to a temp directory once. Returns the directory in force."""
     global _scratch
@@ -48,6 +64,7 @@ def activate() -> str:
     # the one inherited value that can kill this process.
     disarm_parent_watchdogs()
     pin_laya_sdk_off()
+    quiet_slow_callback_notes()
 
     if home.is_isolated() or os.environ.get(home.ENV_DB):
         # Already redirected by the caller — do not second-guess an explicit choice.
@@ -83,6 +100,13 @@ def disarm_parent_watchdogs() -> None:
     """
     for name in (ENV_PARENT_PID, ENV_SANDBOX_PARENT_PID):
         os.environ.pop(name, None)
+
+
+def quiet_slow_callback_notes() -> None:
+    """Put `_DropSlowCallbackNotes` on asyncio's logger, once however many modules import this."""
+    logger = logging.getLogger("asyncio")
+    if not any(isinstance(f, _DropSlowCallbackNotes) for f in logger.filters):
+        logger.addFilter(_DropSlowCallbackNotes())
 
 
 def pin_laya_sdk_off() -> None:

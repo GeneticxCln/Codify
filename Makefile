@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history hooks clean bench bench-smoke
+.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history hooks clean bench bench-smoke smoke-tabs
 
 # A checkout's own virtualenv (`make setup` makes one) wins over whatever `python3` is on
 # PATH, so `make setup && make check` works with nothing activated. The floor leg sets
@@ -46,7 +46,7 @@ help:
 	@echo "  make typecheck    - Static-type-check engine, tests and scripts with mypy (config in pyproject.toml)"
 	@echo "  make build-ui     - Typecheck and build React frontend (Vite)"
 	@echo "  make dev-ui       - Start Vite dev server"
-	@echo "  make check-tauri  - Cargo check Tauri Rust backend"
+	@echo "  make check-tauri  - Cargo check, test, clippy (warnings are errors), the declared Rust version, and fmt for the desktop shell"
 	@echo "  make build-tauri  - Build Tauri desktop application"
 	@echo "  make run-app      - Build the UI and launch the desktop app with it embedded (the way to open Codify from a checkout)"
 	@echo "  make build-app    - Build the release app (UI embedded) that scripts/codify and the menu entry start"
@@ -58,7 +58,7 @@ help:
 	@echo "  make run-engine-scratch - Start an engine isolated under $(SCRATCH_HOME) (real ~/.codify untouched)"
 	@echo "  make bench-smoke  - Run the hermetic benchmark tier (no network, no models, no spend)"
 	@echo "  make bench        - Run the repo_scale tier against your configured models (spends tokens)"
-	@echo "  make check        - Run all verifications (ruff + UI tests + Python tests + stream tests + UI build + Tauri check)"
+	@echo "  make check        - Run all verifications (ruff + mypy + UI tests + UI test typecheck + Python tests + stream tests + benchmark smoke + UI build + Tauri check)"
 	@echo "  make ci           - Run the whole CI gate locally: make check plus the declared $(PY_MIN) leg"
 	@echo "  make check-history - Check that every commit in HISTORY_RANGE builds, not just the tip (default: origin/\$$branch..HEAD)"
 	@echo "  make ci-python-floor - Run only the $(PY_MIN) leg (uv or a system python$(PY_MIN) covers it)"
@@ -207,6 +207,11 @@ check-tauri:
 	  echo "check-tauri: no display and no xvfb-run, so the one GTK test will fail — run 'make doctor'" >&2; \
 	fi
 	cd src-tauri && $(XVFB) cargo test
+	# Clippy with every warning an error, on the tests too: a lint nobody can fail on is a lint nobody reads.
+	cd src-tauri && cargo clippy --all-targets -- -D warnings
+	# `rust-version` is a promise the locked dependency graph can contradict (it said 1.77.2 while `darling` needed
+	# 1.88). The script reads cargo's own account of the graph on stdin and starts no process itself.
+	cd src-tauri && cargo metadata --format-version 1 --locked | python3 ../scripts/check_msrv.py
 	cd src-tauri && cargo fmt --check
 
 # NOTE: this only compiles the Rust crate (`cargo build`); Codify ships no installer or
@@ -269,16 +274,16 @@ run-engine-scratch:
 # The fastest checks first, so the cheap failure is the one you read. These are the
 # same targets the CI workflow names, split by toolchain (.github/workflows/check.yml),
 # but only on the host interpreter.
-# Benchmarks stay out of `check` and `ci` on purpose. The smoke tier is hermetic,
-# but the configured tier spends real tokens on real models, and a gate that costs
-# money on every push is a gate people learn to bypass. Run these deliberately.
+# The configured benchmark tier stays out of `check` and `ci` on purpose: it spends real tokens on real
+# models, and a gate that costs money on every push is a gate people learn to bypass. Run it deliberately.
+# The smoke tier is the other half and is in `check`: hermetic, two seconds, no network and no spend.
 bench:
 	python3 -m benchmarks.runner --tier repo_scale
 
 bench-smoke:
 	python3 -m benchmarks.runner --tier smoke
 
-check: lint typecheck test-ui typecheck-ui-tests test test-streams build-ui check-tauri
+check: lint typecheck test-ui typecheck-ui-tests test test-streams bench-smoke build-ui check-tauri
 	@echo "All verifications passed successfully!"
 
 # The declared-minimum leg. No machine is guaranteed a python $(PY_MIN), so this brings

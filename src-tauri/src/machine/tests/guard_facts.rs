@@ -305,7 +305,7 @@ fn a_reset_ends_everything_the_old_machine_was_running_and_changes_nothing_a_per
         &jail,
         "the background process never started, so this proves nothing",
         5,
-        &running,
+        running,
     );
     let old_root = jail.root_pid();
 

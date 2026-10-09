@@ -1879,7 +1879,7 @@ fn the_override_is_reachable_from_the_environment() {
         .join("\n");
     assert!(code.contains("std::env::var(UA_ENV)"));
     assert!(
-        code.contains(&format!(".user_agent(&page_user_agent())")),
+        code.contains(".user_agent(&page_user_agent())"),
         "both page builders must go through the resolver, not one of them \
              pinning the string"
     );
@@ -2169,17 +2169,21 @@ fn placement_is_driven_by_this_module_and_never_by_the_toolkit() {
 /// the page was covering the app.
 #[test]
 fn the_smoke_seats_its_page_somewhere_a_discarded_request_cannot_imitate() {
-    assert!(
-        !(SMOKE_PAGE.x == 0.0 && SMOKE_PAGE.y == 0.0),
-        "the smoke seats its page at the origin again — a toolkit that \
+    // Constants, so checked when this compiles: a smoke page moved back to the origin or grown to the window's
+    // size fails the build of the tests, which is earlier than failing them.
+    const {
+        assert!(
+            !(SMOKE_PAGE.x == 0.0 && SMOKE_PAGE.y == 0.0),
+            "the smoke seats its page at the origin again — a toolkit that \
              discards the request and fills the window produces exactly that, \
              which is how this stayed green while a user watched it happen"
-    );
-    assert!(
-        SMOKE_PAGE.width < 1280.0 && SMOKE_PAGE.height < 800.0,
-        "the smoke asks for a rectangle as large as the window, which a \
+        );
+        assert!(
+            SMOKE_PAGE.width < 1280.0 && SMOKE_PAGE.height < 800.0,
+            "the smoke asks for a rectangle as large as the window, which a \
              discarded request imitates perfectly"
-    );
+        );
+    }
     let source = production_source();
     assert!(
         source.contains("page_layer::geometry(&geometry_sink, SMOKE_PAGE_LABEL)"),

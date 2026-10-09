@@ -3,7 +3,7 @@ name: check
 # CONTRIBUTING.md states the bar in one line: "`make check` must pass." This runs
 # that same gate in CI — the union of the three jobs below is exactly the targets
 # `make check` depends on (lint, typecheck, test-ui, typecheck-ui-tests, test,
-# test-streams, build-ui, check-tauri), split by toolchain so a Python failure
+# test-streams, bench-smoke, build-ui, check-tauri), split by toolchain so a Python failure
 # cannot hide a Rust one and
 # each job installs only the toolchain it needs.
 #
@@ -77,15 +77,15 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: engine/requirements.txt
+          cache-dependency-path: pyproject.toml
 
-      - name: Install engine dependencies
+      - name: Install the engine and its dev tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r engine/requirements.txt
-          # Dev tools, not engine dependencies; `make lint`/`make typecheck` need
-          # them on PATH.
-          python -m pip install "ruff>=0.6" "mypy>=1.11" "httpx2>=2.13,<3"
+          # One list: `pyproject.toml`, the engine's dependencies and the `dev` extra (ruff, mypy, httpx2, ...).
+          # `make lint` and `make typecheck` need the dev tools on PATH. A tools list written out here was a
+          # second copy of the extra, free to drift from it (tests/test_dependency_parity.py pins the rest).
+          python -m pip install -e ".[dev]"
 
       # Rules and target-version are pinned in pyproject.toml, so this checks the
       # same thing on every machine — including the syntax ruff only rejects for
@@ -107,6 +107,12 @@ jobs:
       - name: Stream isolation
         run: make test-streams
 
+      # The hermetic benchmark tier: the fixed pipeline against a canned model. Two seconds, no network, no spend,
+      # and part of `make check`, so the same thing runs here. It proves the harness and the pipeline still do
+      # their job together, never model quality (docs/08).
+      - name: Benchmark smoke tier
+        run: make bench-smoke
+
   ui:
     name: ui — unit tests, typecheck, build
     runs-on: ubuntu-latest
@@ -115,10 +121,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # `make test-ui` runs the TypeScript tests directly through
-          # `node --test --experimental-strip-types`, which needs 22.6+. The Vite
-          # build only needs 18+, so 22 is the floor for the whole UI job.
-          node-version: "22"
+          # The floor, exactly, as the Python job pins 3.10: the UI suite runs through `node --test` with type
+          # stripping and a module loader, and jsdom 30 declares 22.22.2 / 24.15 / 26 (`ui/package.json` engines,
+          # checked by `make test-ui`). A bare "22" took whichever 22.x the runner image had cached, so the floor
+          # was never the version that ran.
+          node-version: "22.22.2"
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -148,7 +155,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       # Tauri v2 links the platform webview: without these the crate does not
       # compile at all on a bare runner.
@@ -183,5 +190,5 @@ jobs:
 
       # `cargo check` compiles without the frontend bundle, so this job needs no
       # Node toolchain — verified by running it with ui/dist removed.
-      - name: Check, test and format
+      - name: Check, test, lint and format
         run: make check-tauri

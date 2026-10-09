@@ -483,7 +483,7 @@ pub fn open(
         // The guard at the only place it can be enforced: every navigation
         // request the page makes is asked first, including ones it
         // initiates itself and server redirects. Returning false cancels.
-        .on_navigation(|url| navigation_allowed(url))
+        .on_navigation(navigation_allowed)
         // The page's life, announced: a load starts (the tab may show a
         // loading marker), a load finishes (the marker ends, and the
         // address the page actually arrived at — redirects included — is
