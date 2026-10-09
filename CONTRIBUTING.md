@@ -154,7 +154,14 @@ screen. Two rules fall out of it. A new `ui/src/components/ui/*.tsx` has to be
 added to the table in `componentLoader.test.ts`, so a shared primitive nobody
 rendered is a primitive whose markup nothing checks. And a render must produce no
 React warning at all: a list child without a unique key reconciles by index, which
-is a state-mixing bug rather than a cosmetic one.
+is a state-mixing bug rather than a cosmetic one. The DOM harness below holds the
+suite to it: `withDom` collects everything the page prints with `console.error` and
+fails a test that finished with any of it left (`dom.takeConsoleErrors()` is how a
+test that expects a complaint takes it), and the failure names the lines of `src/`
+and `tests/` that made the update. A change to the store, the editor or the clock
+that a test makes itself goes through `dom.act`, and a real-time wait goes inside
+one (`dom.act(() => sleep(ms))`); the warning "not wrapped in act" is a true
+statement that the next assertion may have run before the screen did.
 
 **And when a control has to be *used*, there is now a DOM for it.** The rules
 above are all about `react-dom/server`, and a static render has one blind spot

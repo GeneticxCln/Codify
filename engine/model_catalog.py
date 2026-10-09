@@ -174,11 +174,6 @@ def _entry(
 _OLLAMA_WINDOWS: dict[tuple[str, str, str], int] = {}
 
 
-def reset_ollama_windows() -> None:
-    """Forget what Ollama said about its models (for tests, which share this module's memory)."""
-    _OLLAMA_WINDOWS.clear()
-
-
 def _ollama_context_from(show: Any) -> int | None:
     """The context length in an `/api/show` answer: `model_info["<architecture>.context_length"]`."""
     info = show.get("model_info") if isinstance(show, dict) else None

@@ -167,7 +167,10 @@ pub(crate) fn find_on_path(name: &str, path_var: &str) -> Option<PathBuf> {
 }
 
 /// What was learned the one time this host was asked, per place the stage is made.
-static PROBED: OnceLock<Mutex<Vec<(PathBuf, Result<(), String>)>>> = OnceLock::new();
+static PROBED: OnceLock<Mutex<Vec<Probe>>> = OnceLock::new();
+
+/// One place the stage is made, and whether this host could make a layer there (or why not).
+type Probe = (PathBuf, Result<(), String>);
 
 /// Ask whether this host can make the layer, by making one: a throwaway project with a directory in it, the
 /// real mount script, and a program that deletes the directory and makes it again, which is the part of an

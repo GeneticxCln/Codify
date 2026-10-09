@@ -53,6 +53,42 @@ def _normalise(dep: str) -> str:
     return dep.strip()
 
 
+def _dev_extra() -> list[str]:
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r"^dev\s*=\s*\[(.*?)^\]", text, re.S | re.M)
+    if not m:
+        raise AssertionError("could not find the `dev = [...]` extra in pyproject.toml")
+    deps = re.findall(r'"([^"]+)"', _COMMENT.sub("", m.group(1)))
+    if not deps:
+        raise AssertionError("pyproject.toml dev extra parsed to nothing — extractor is stale")
+    return deps
+
+
+class TestDevToolsHaveOneList(unittest.TestCase):
+    """The dev tools (`make lint`, `make typecheck`) are declared once, in pyproject.toml's `dev` extra.
+
+    CI's python job wrote them out by hand, and so does the floor script (`scripts/ci-python-floor.sh`); a list
+    written out twice is a list that drifts, and a gate that checks with a different ruff than the one a
+    contributor installs is a gate nobody can reproduce.
+    """
+
+    def test_ci_installs_the_extra_instead_of_writing_the_tools_out(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "check.yml").read_text(encoding="utf-8")
+        self.assertIn('pip install -e ".[dev]"', workflow)
+        for hand_written in ('"ruff>=', '"mypy>=', '"httpx2>='):
+            self.assertNotIn(hand_written, workflow, "check.yml lists a dev tool itself again")
+
+    def test_the_floor_scripts_tools_are_exactly_members_of_the_extra(self) -> None:
+        script = (ROOT / "scripts" / "ci-python-floor.sh").read_text(encoding="utf-8")
+        m = re.search(r"^tools=\((.*?)\)", script, re.S | re.M)
+        if not m:
+            raise AssertionError("could not find the `tools=( ... )` array in scripts/ci-python-floor.sh")
+        tools = re.findall(r'"([^"]+)"', m.group(1))
+        self.assertTrue(tools, "the floor script's tools parsed to nothing — extractor is stale")
+        extra = _dev_extra()
+        self.assertEqual([t for t in tools if t not in extra], [], "the floor script pins a tool the dev extra does not")
+
+
 class TestDependencyParity(unittest.TestCase):
     def test_both_lists_parse(self) -> None:
         self.assertTrue(_pyproject_dependencies(), "pyproject.toml has dependencies")

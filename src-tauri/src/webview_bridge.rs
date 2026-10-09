@@ -435,7 +435,7 @@ fn page_preamble(request: &BridgeRequest, verb: &str) -> Result<String, String> 
     // never tested as a JavaScript literal.
     let id = serde_json::to_string(&id).map_err(|e| e.to_string())?;
     let raw = request.selector.as_deref().map(str::trim);
-    if !verb.is_empty() && raw.map_or(true, |sel| sel.is_empty()) {
+    if !verb.is_empty() && raw.is_none_or(|sel| sel.is_empty()) {
         return Err(format!("{verb} needs a CSS selector to act on"));
     }
     let selector = match raw {

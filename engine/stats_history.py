@@ -144,31 +144,6 @@ class StatsSnapshotService:
         due = self.pending_days(goals, events, now, keep)
         return self.store(self.build_documents(goals, events, due), now) if due else None
 
-    def get_day(self, day: str) -> dict[str, Any] | None:
-        row = self._db.execute(
-            "SELECT document FROM stats_snapshots WHERE day = ?", (day,)
-        ).fetchone()
-        if row is None:
-            return None
-        try:
-            document: dict[str, Any] = json.loads(row["document"])
-            return document
-        except (TypeError, ValueError):
-            return None
-
-    def list_days(self, before: str | None = None, limit: int = 365) -> list[str]:
-        """Snapshot days oldest first, optionally only strictly before a day."""
-        if before is None:
-            rows = self._db.execute(
-                "SELECT day FROM stats_snapshots ORDER BY day LIMIT ?", (limit,)
-            ).fetchall()
-        else:
-            rows = self._db.execute(
-                "SELECT day FROM stats_snapshots WHERE day < ? ORDER BY day LIMIT ?",
-                (before, limit),
-            ).fetchall()
-        return [r["day"] for r in rows]
-
     def history(self, limit: int = 120) -> list[dict[str, Any]]:
         """Snapshot rows oldest first, documents already parsed.
 

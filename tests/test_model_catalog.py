@@ -18,7 +18,7 @@ import httpx
 
 from engine.db import connect
 from engine.model_catalog import (
-    reset_ollama_windows,
+    _OLLAMA_WINDOWS,
     ModelCatalogService,
     ProviderTarget,
     _sorted_models,
@@ -28,6 +28,11 @@ from engine.model_catalog import (
 from engine.models import AgentConfigUpdate
 from engine.providers import Keychain, ProviderFactory
 from engine.services import AgentRegistryService
+
+
+def reset_ollama_windows() -> None:
+    """Forget what Ollama said about its models: the cache is module memory that every test in the process shares."""
+    _OLLAMA_WINDOWS.clear()
 
 
 class _StubKeychain:

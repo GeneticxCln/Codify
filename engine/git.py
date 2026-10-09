@@ -156,12 +156,6 @@ class GitService:
             p.decode("utf-8", errors="replace") for p in res.stdout.split(b"\0") if p
         ]
 
-    def get_status(self, root_path: str) -> str:
-        if not self.is_git_repo(root_path):
-            return ""
-        res = self._run_text(["status", "--porcelain"], cwd=str(Path(root_path).resolve()))
-        return res.stdout
-
     # Read-only subcommands, and the list has **one owner**: `sandbox.py`,
     # next to the flags that decide what a read-only command may say. This used
     # to be a second literal — eight subcommands against the librarian's

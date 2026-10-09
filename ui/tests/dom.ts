@@ -59,6 +59,7 @@
  *   than a constant.
  */
 import type React from "react";
+import { format } from "node:util";
 import { withoutHooks } from "./tsxLoader.ts";
 import { TERMINAL_RENDERER_KEY } from "../src/terminalRenderer.ts";
 
@@ -98,9 +99,10 @@ const GLOBALS = [
   "MutationObserver",
   "Range",
   "Selection",
-  // Deliberately not `Window`. CodeMirror asks `elt instanceof Window` on every measure; defined, the measure runs to the end,
-  // and with no layout in jsdom it settles on a two-line viewport and stops drawing the lines the tests are looking at. Undefined,
-  // the measure throws inside a timer (a line on stderr, nothing else) and the view keeps drawing the whole document.
+  // CodeMirror asks `elt instanceof Window` on every measure. Undefined, that is a ReferenceError thrown from an animation
+  // frame, where nothing can catch it and the measure stops before it has finished. Defined, the measure runs, which is why
+  // a line of text has a height of its own in `installCanvas`.
+  "Window",
 ] as const;
 
 /** One document, and everything a test can do to it. */
@@ -131,6 +133,12 @@ export interface Dom {
    * and React prints a warning that looks like a failure and is not one.
    */
   settle(): Promise<void>;
+  /**
+   * Do something that is not a click or a keystroke — change the store, dispatch to the editor, let an answer land — inside
+   * `act`, and return what it returned. A test that changes what is on screen from outside `act` is changing it behind
+   * React's back, and the warning React prints for that is a true one: the next assertion may run before the screen did.
+   */
+  act<T>(body: () => T | Promise<T>): Promise<T>;
   /** Dispatch a keydown/keyup pair. */
   press(element: Element, key: string, init?: Record<string, unknown>): Promise<void>;
   /** The first element with this accessible name. Throws, naming what was there. */
@@ -160,6 +168,12 @@ export interface Dom {
    * record of what it was asked for.
    */
   fetches: FetchAttempt[];
+  /**
+   * What the page printed with `console.error` since the last call, taken and cleared. A test that *expects* the page to
+   * complain reads this and asserts on it; one that does not is failed at the end for whatever is left, because a React
+   * warning, an uncaught error in a timer and a failed `act` all arrive here and none of them is noise.
+   */
+  takeConsoleErrors(): string[];
   /**
    * Every element something asked the browser to scroll to, in order.
    *
@@ -228,6 +242,7 @@ function installEnvironment(
   installCanvas(win);
   installNetwork(fetches);
   installScrolling(win, scrolls);
+  installMedia(win);
   void win;
 }
 
@@ -287,6 +302,21 @@ function installNetwork(fetches: FetchAttempt[]): void {
     configurable: true,
     writable: true,
   });
+}
+
+/**
+ * Media elements that do nothing.
+ *
+ * jsdom has no media pipeline: `play`, `pause` and `load` are stubs that print "Not implemented" to the console, one line
+ * for every call, which now fails the test that made it. Nothing here plays; a test that wants to know *what* was played
+ * assigns its own `play` and reads what it was given (`audioPane.test.ts` does).
+ */
+function installMedia(win: Window & typeof globalThis): void {
+  const proto = win.HTMLMediaElement.prototype;
+  for (const name of ["pause", "load"] as const) {
+    Object.defineProperty(proto, name, { value: () => {}, configurable: true, writable: true });
+  }
+  Object.defineProperty(proto, "play", { value: () => Promise.resolve(), configurable: true, writable: true });
 }
 
 /**
@@ -398,11 +428,20 @@ function installCanvas(win: Window & typeof globalThis): void {
       configurable: true,
     });
   }
+  // Every element is the size of the window, except a line of text. An editor measures one `.cm-line` to learn how tall a
+  // line is and then decides how many it must draw to fill the view; told that a line is 900 pixels, it fills the view with
+  // two. A line of text is the one thing in this app whose height is a property of the font and not of the box around it.
   Object.defineProperty(win.HTMLElement.prototype, "getBoundingClientRect", {
-    value: () => ({ x: 0, y: 0, top: 0, left: 0, right: 1440, bottom: 900, width: 1440, height: 900 }),
+    value: function getBoundingClientRect(this: Element) {
+      const height = this.classList.contains("cm-line") ? LINE_HEIGHT : 900;
+      return { x: 0, y: 0, top: 0, left: 0, right: 1440, bottom: height, width: 1440, height };
+    },
     configurable: true,
   });
 }
+
+/** What a line of text in an editor measures, in a document with no layout. */
+const LINE_HEIGHT = 20;
 
 /**
  * Install a DOM, call `body`, and tear it down again.
@@ -425,6 +464,11 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
 
   const fetches: FetchAttempt[] = [];
   const scrolls: Element[] = [];
+  const consoleErrors: string[] = [];
+  const realConsoleError = console.error;
+  console.error = (...args: unknown[]) => {
+    consoleErrors.push(`${format(...args)}\n${whereFrom()}`);
+  };
   const saved = new Map<string, unknown>();
   for (const name of GLOBALS) {
     saved.set(name, (globalThis as Record<string, unknown>)[name]);
@@ -454,6 +498,9 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
     window: win,
     fetches,
     scrolls,
+    takeConsoleErrors() {
+      return consoleErrors.splice(0);
+    },
     async render(element) {
       await act(async () => {
         root.render(element);
@@ -524,6 +571,13 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
           new win.MouseEvent("mousedown", { bubbles: true, cancelable: true }),
         );
       });
+    },
+    async act<T>(body: () => T | Promise<T>): Promise<T> {
+      let result: T | undefined;
+      await act(async () => {
+        result = await body();
+      });
+      return result as T;
     },
     async settle() {
       // Two turns of the event loop: one for whatever the component awaited,
@@ -606,8 +660,12 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
     },
   };
 
+  let failed = false;
   try {
     return await body(dom);
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
     try {
       await act(async () => {
@@ -624,7 +682,34 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
     }
     delete (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT;
     instance.window.close();
+    console.error = realConsoleError;
+    // The test's own failure is the one worth reading; a complaint is only reported for a test that otherwise passed.
+    if (!failed && consoleErrors.length > 0) {
+      throw new Error(
+        `withDom: the page printed ${consoleErrors.length} console.error message(s) and the test did not take them ` +
+          `(dom.takeConsoleErrors()). A React warning is a true statement about the test, not noise:\n\n` +
+          consoleErrors.join("\n---\n"),
+      );
+    }
   }
+}
+
+/**
+ * The app's and the test's own frames from where `console.error` was called, nearest first.
+ *
+ * A React warning names a component and nothing else, and its stack is thirty frames of React. The frames that say *which
+ * line made the update* are the ones in `src/` and `tests/`, so those are what a failure prints.
+ */
+function whereFrom(): string {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 100;
+  const stack = new Error().stack ?? "";
+  Error.stackTraceLimit = limit;
+  const own = stack
+    .split("\n")
+    .filter((line) => /\/ui\/(src|tests)\//.test(line) && !line.includes("/tests/dom.ts"))
+    .map((line) => line.trim().replace(/\(?file:\/\/[^)]*?\/ui\//, "(").replace(/^at \/.*?\/ui\//, "at "));
+  return own.length > 0 ? `  from: ${own.slice(0, 6).join("\n        ")}` : "  from: (no frame in src/ or tests/)";
 }
 
 function all(root: ParentNode, selector: string): HTMLElement[] {

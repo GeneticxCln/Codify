@@ -47,7 +47,6 @@ from engine.recall import (
     build_brief,
     distill_observations,
     format_observations,
-    format_observations_result,
     format_recall,
     format_thread_recall,
     search,
@@ -930,7 +929,10 @@ class TheDurableObservationStore(unittest.IsolatedAsyncioTestCase):
         filtered = search_observations(self._consolidated(self.here.id), "code_3")
         self.assertEqual(filtered["count"], 1)
         self.assertEqual(filtered["observations"][0]["subject"], "code:code_3")
-        self.assertIn("not evidence about the current code", format_observations_result(result))
+        # The only way stored beliefs reach a model is the brief, and it labels them as history.
+        brief = build_brief([], [], observation_rows=self._consolidated(self.here.id))
+        self.assertIn("code:code_3", brief)
+        self.assertIn("not evidence about the current code", brief)
 
     async def test_a_recovery_in_the_scan_flips_the_stored_lesson(self) -> None:
         """The lesson takes the newest scan's wording, so a recovery survives

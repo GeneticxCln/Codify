@@ -57,10 +57,13 @@ from engine.trace import TraceService
 BENCH_DIR = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = BENCH_DIR / "manifest.json"
 
-# What runs the tasks: `run_task` creates a goal with `POST /goals` and waits for it, which is the fixed recipe
-# (docs/00 §4). It is a constant and not an option because there is nothing here to choose between; the day a
-# benchmark can drive the conductor, this becomes a value the run reports rather than one it assumes.
-DRIVER = "recipe"
+# What runs a task once it is planned. `conductor` is what a person's goal gets on an install with a tool-calling
+# model: `POST /goals/{id}/start`, then the conductor takes each step through `write`, `verify`, `review` and
+# `summarize` (docs/09 §10). `recipe` is the fixed pipeline that remains for `parallel` goals and for installs with no
+# tool-capable model. Both are real paths, and a number from one is not a number about the other, so the report says
+# which ran (docs/08 §6).
+DRIVERS = ("conductor", "recipe")
+DEFAULT_DRIVER = "conductor"
 
 # Checks that measure the harness rather than a model. Everything else in a
 # task's `checks` is a quality claim and needs a real provider to be honest.
@@ -387,8 +390,11 @@ async def run_task(
     engine_db: Path | None = None,
     attempt: int = 1,
     trace: bool = False,
+    driver: str = DEFAULT_DRIVER,
 ) -> dict[str, Any]:
     """Run one task end to end: measurements, harness checks, quality checks.
+
+    `driver` is who takes the approved plan to the end: the conductor, or the fixed recipe (see `DRIVERS`).
 
     `trace` records every model call in the task's own store (`docs/04` §8), which is how a real model's
     raw replies are read afterwards and committed as fixtures.
@@ -396,6 +402,8 @@ async def run_task(
     `attempt` numbers repeats of the same task, so each gets a workspace and a store of its own: two
     runs sharing either would measure the first run's leftovers.
     """
+    if driver not in DRIVERS:
+        raise BenchmarkError(f"unknown driver {driver!r}; known drivers: {', '.join(DRIVERS)}")
     started = time.monotonic()
     slug = str(task["id"]) if attempt == 1 else f"{task['id']}-attempt{attempt}"
     workspace = work_root / slug
@@ -411,8 +419,11 @@ async def run_task(
             WorkspaceCreate(name=f"bench-{task['id']}", root_path=str(workspace))
         )
 
+        provider: CannedProvider | None = None
         if canned:
-            provider = CannedProvider([dict(w) for w in task.get("canned_write", [])])
+            provider = CannedProvider(
+                [dict(w) for w in task.get("canned_write", [])], conductor=driver == "conductor",
+            )
             registry = AgentRegistryService(conn, CannedFactory(provider), Keychain())
             for role in ROLES:
                 registry.set_config(
@@ -443,21 +454,35 @@ async def run_task(
         )
         executor.settings = SettingsService(conn)
 
+        if driver == "conductor" and not executor.conductor_can_drive(goal.id):
+            # Before planning, so a setup that cannot run the conductor costs nothing to find out. The engine
+            # falls back to the recipe in this case, which is right for a person and wrong for a benchmark
+            # that was asked to measure the conductor: a number that came from the other driver is the
+            # mislabelled number `driver` exists to prevent.
+            raise BenchmarkError(
+                "the conductor cannot run on this setup: its model is the scribe's, and the scribe's provider "
+                "must call tools (docs/09 §10.9). Point the scribe at one, or run `--driver recipe`."
+            )
         await executor.run_planning(goal.id)
-        # The same driver loop `app._run_steps_locked` runs, minus the
-        # batching a single-step fixture never needs: run what is left, stop
-        # if the goal stopped itself, then close it out. Finishing here is the
-        # point — without it the goal sits at RUNNING and `goal_completed`
-        # would fail a run that in fact succeeded.
-        remaining = [s for s in goals.steps(goal.id) if s.status != "COMPLETED"]
-        if remaining and goals.get(goal.id).status != "RUNNING":
+        # Approving the plan: the press of Start (`POST /goals/{id}/start`) moves the goal to RUNNING, and
+        # `write` refuses until it has.
+        if goals.get(goal.id).status != "RUNNING" and any(s.status != "COMPLETED" for s in goals.steps(goal.id)):
             goals.update_status(goal.id, goals.get(goal.id).version, "RUNNING")
-        for step in remaining:
-            await executor.run_step(goal.id, step.id)
-            if goals.get(goal.id).status != "RUNNING":
-                break
-        if goals.get(goal.id).status == "RUNNING":
-            goals.update_status(goal.id, goals.get(goal.id).version, "COMPLETED")
+        if driver == "conductor":
+            # The same call `app._run_steps_locked` makes, and the goal's end is the engine's to decide: a
+            # conductor that ran out of moves leaves the goal PAUSED, and that is the result.
+            await executor.run_conductor_resume(goal.id)
+        else:
+            # The recipe, as `app._run_steps_locked` runs it, minus the batching a single-step fixture never
+            # needs: run what is left, stop if the goal stopped itself, then close it out. Finishing here is
+            # the point — without it the goal sits at RUNNING and `goal_completed` would fail a run that in
+            # fact succeeded.
+            for step in [s for s in goals.steps(goal.id) if s.status != "COMPLETED"]:
+                await executor.run_step(goal.id, step.id)
+                if goals.get(goal.id).status != "RUNNING":
+                    break
+            if goals.get(goal.id).status == "RUNNING":
+                goals.update_status(goal.id, goals.get(goal.id).version, "COMPLETED")
 
         # Annotated, because the comprehension would otherwise settle on
         # `EventType | dict[str, Any]` and every payload read below would be a
@@ -509,6 +534,10 @@ async def run_task(
         "id": task["id"],
         "attempt": attempt,
         "tier": task.get("tier"),
+        "driver": driver,
+        # How many times the scripted conductor was asked for a move: the proof, in a canned run, that the
+        # conductor and not the recipe took the steps. A configured run does not count them here.
+        "conductor_calls": provider.calls.count("conductor") if provider is not None else None,
         "status": status,
         "wall_ms": wall_ms,
         "stage_ms": stage_ms,
@@ -625,7 +654,7 @@ def _keep_record(work_root: Path, record: Path) -> None:
 
 def _run_one(
     task: dict[str, Any], work_root: Path, *, canned: bool, engine_db: Path | None, attempt: int,
-    trace: bool = False,
+    trace: bool = False, driver: str = DEFAULT_DRIVER,
 ) -> dict[str, Any]:
     """`run_task`, with a crash turned into the failed result it is.
 
@@ -636,7 +665,7 @@ def _run_one(
     started = time.monotonic()
     try:
         return asyncio.run(run_task(
-            task, work_root, canned=canned, engine_db=engine_db, attempt=attempt, trace=trace,
+            task, work_root, canned=canned, engine_db=engine_db, attempt=attempt, trace=trace, driver=driver,
         ))
     except BenchmarkError:
         raise
@@ -646,6 +675,8 @@ def _run_one(
             "id": task["id"],
             "attempt": attempt,
             "tier": task.get("tier"),
+            "driver": driver,
+            "conductor_calls": None,
             "status": "ERRORED",
             "error": error,
             "wall_ms": round((time.monotonic() - started) * 1000),
@@ -697,6 +728,13 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         metavar="N",
         help="run every task N times, each in its own workspace: one run of a model is an anecdote",
+    )
+    parser.add_argument(
+        "--driver",
+        choices=DRIVERS,
+        default=DEFAULT_DRIVER,
+        help="who takes the approved plan to the end: the conductor (what a person's goal gets) or the fixed "
+             "recipe (default: %(default)s)",
     )
     parser.add_argument(
         "--min-pass-rate",
@@ -757,7 +795,7 @@ def main(argv: list[str] | None = None) -> int:
             for task in tasks:
                 result = _run_one(
                     task, work_root, canned=canned, engine_db=args.engine_db, attempt=attempt,
-                    trace=args.record is not None,
+                    trace=args.record is not None, driver=args.driver,
                 )
                 results.append(result)
                 if args.record is not None:
@@ -780,10 +818,9 @@ def main(argv: list[str] | None = None) -> int:
     report = {
         "tier": args.tier,
         "provider": "canned" if canned else "configured",
-        # What drove the tasks. The runner calls `POST /goals`, which is the fixed recipe; a person's goal on
-        # an install with a conductor is driven by the conductor, so a rate quoted without this reads as a
-        # claim about the product when it is a claim about the floor under it (docs/08 §6).
-        "driver": DRIVER,
+        # What drove the tasks. A rate quoted without this reads as a claim about the product when it may be
+        # a claim about the fixed recipe under it, or the other way round (docs/08 §6).
+        "driver": args.driver,
         "summary": summary,
         "tasks": results,
     }
@@ -792,7 +829,9 @@ def main(argv: list[str] | None = None) -> int:
         args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     print(f"tier      {args.tier} ({report['provider']} provider)")
-    print(f"driver    {DRIVER} (the fixed pipeline: not the conductor)")
+    print(f"driver    {args.driver} ("
+          + ("what a person's goal gets" if args.driver == "conductor" else "the fixed pipeline: not the conductor")
+          + ")")
     rate = summary["pass_rate"]
     print(f"harness   {summary['passed']}/{summary['tasks']} passed"
           + (f" ({rate}%)" if rate is not None else ""))

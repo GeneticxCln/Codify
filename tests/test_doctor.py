@@ -41,6 +41,10 @@ STUBS: dict[str, str] = {
         '  [ -n "$DOCTOR_STUB_NO_RUSTFMT" ] && { echo "error: cargo-fmt is not installed" >&2; exit 1; }\n'
         '  echo "rustfmt 1.8.0-stable"; exit 0\n'
         'fi\n'
+        'if [ "$1" = clippy ]; then\n'
+        '  [ -n "$DOCTOR_STUB_NO_CLIPPY" ] && { echo "error: no such command: `clippy`" >&2; exit 1; }\n'
+        '  echo "clippy 0.1.94"; exit 0\n'
+        'fi\n'
         'echo "cargo 1.94.1"\n'
     ),
     "rustc": '#!/bin/sh\necho "rustc 1.94.1"\n',
@@ -168,6 +172,19 @@ class TestEveryMissingPieceIsNamedAndFixable(DoctorCase):
         self.assertMissing(done, "rustfmt is not installed", "rustup component add rustfmt")
         # cargo and rustc themselves were found, so they are still reported as found.
         self.assertIn("ok       rustc 1.94.1", done.stdout)
+
+    def test_a_toolchain_without_clippy_is_named_with_the_fix(self) -> None:
+        # `make check-tauri` runs clippy with warnings as errors, so a profile without it would build and test
+        # and then fail the gate at the lint, after the long part.
+        done = self.doctor(DISPLAY=":0", DOCTOR_STUB_NO_CLIPPY="1")
+
+        self.assertMissing(done, "clippy is not installed", "rustup component add clippy")
+        self.assertIn("ok       rustfmt", done.stdout)
+
+    def test_a_toolchain_with_both_components_reports_both(self) -> None:
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertIn("ok       clippy", done.stdout)
 
     def test_a_missing_system_library_is_named_with_its_package_line(self) -> None:
         done = self.doctor(DISPLAY=":0", DOCTOR_STUB_MISSING_LIBS="webkit2gtk-4.1 libsoup-3.0")

@@ -18,10 +18,12 @@ would be a lie. That split is why `repo_scale` declares a real provider.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from engine.models import AgentConfig
 from engine.providers import BaseProvider, Keychain, ProviderFactory
+from engine.toolcall import ToolCall, ToolReply, ToolSpec
 
 # What one canned write from the manifest looks like: a path and the bytes the
 # fixer should put there.
@@ -34,11 +36,23 @@ CannedWrite = dict[str, str]
 _CANNED_USAGE = {"input_tokens": 100, "output_tokens": 40, "total_tokens": 140}
 
 
-class CannedProvider(BaseProvider):
-    """Answers by role, and has the fixer write the task's scripted files."""
+# The words the engine opens an approved step's run with (`ExecutorService._step_prompt`) and the moves it asks for, in
+# order. A change to either breaks the conductor driver loudly (the script finds no step) rather than quietly: the
+# conductor benchmark's own test pins both against the engine.
+APPROVED_STEP = "The user has approved this plan and started it: "
+STEP_MOVES = ("write", "verify", "review", "summarize")
+_STEP_ID = re.compile(r"one step only: step (\S+?),")
 
-    def __init__(self, writes: list[CannedWrite] | None = None) -> None:
+
+class CannedProvider(BaseProvider):
+    """Answers by role, and has the fixer write the task's scripted files.
+
+    With `conductor=True` it also plays the conductor: the same few moves, in the same order, every time.
+    """
+
+    def __init__(self, writes: list[CannedWrite] | None = None, *, conductor: bool = False) -> None:
         self.writes = writes or []
+        self.conductor = conductor
         # Set by `CannedFactory.build`, from the `AgentConfig` the engine asked
         # for — the same signal the real providers get, rather than a guess
         # from the prompt's wording.
@@ -60,6 +74,54 @@ class CannedProvider(BaseProvider):
         if self.usage_sink is not None:
             self.usage_sink(dict(_CANNED_USAGE))
         return json.dumps(self._reply(role))
+
+    @property
+    def supports_tools(self) -> bool:
+        return self.conductor
+
+    async def complete_with_tools(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
+    ) -> ToolReply:
+        """The scripted conductor's next move, rebuilt from the transcript like a model with no memory of its own.
+
+        It knows one thing, an approved step: take it through `write`, `verify`, `review` and `summarize`, then say
+        so. It only calls a move it was offered, so a conductor the engine gave no `write` ends the run with the step
+        open and the goal paused, which is what the benchmark should report, not something to paper over.
+        """
+        self.calls.append("conductor")
+        if self.usage_sink is not None:
+            self.usage_sink(dict(_CANNED_USAGE))
+        started = max(
+            (i for i, m in enumerate(messages) if m.get("role") == "user" and APPROVED_STEP in str(m.get("content"))),
+            default=None,
+        )
+        if started is None:
+            return ToolReply(text="The canned conductor only knows how to take an approved step.")
+        found = _STEP_ID.search(str(messages[started].get("content")))
+        step_id = found.group(1) if found else ""
+        called = [
+            str(getattr(call, "name", None) or (call.get("name") if isinstance(call, dict) else ""))
+            for m in messages[started + 1:]
+            if m.get("role") == "assistant"
+            for call in m.get("tool_calls") or []
+        ]
+        offered = {t.name for t in tools}
+        move = next((name for name in STEP_MOVES if name not in called), None)
+        if move is None:
+            return ToolReply(text="That step is done.")
+        if move not in offered:
+            return ToolReply(text=f"I stopped before {move}: it was not offered.")
+        arguments: dict[str, Any] = {"step_id": step_id}
+        if move == "write":
+            arguments["instructions"] = "Make the change this step describes."
+        return ToolReply(tool_calls=[ToolCall(id=f"canned-{len(called) + 1}", name=move, arguments=arguments)])
 
     def _reply(self, role: str) -> dict[str, Any]:
         if role == "librarian":

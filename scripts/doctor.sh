@@ -123,6 +123,13 @@ if have cargo && have rustc; then
     bad "rustfmt is not installed for this Rust toolchain ('make check-tauri' runs cargo fmt --check)" \
       "Run: rustup component add rustfmt   (rustup's default profile includes it; --profile minimal does not)"
   fi
+  # Likewise `cargo clippy --all-targets -- -D warnings`, which `make check-tauri` runs before fmt.
+  if run cargo clippy --version >/dev/null 2>&1; then
+    ok "clippy ($(run cargo clippy --version 2>/dev/null))"
+  else
+    bad "clippy is not installed for this Rust toolchain ('make check-tauri' runs cargo clippy)" \
+      "Run: rustup component add clippy   (rustup's default profile includes it; --profile minimal does not)"
+  fi
 else
   bad "cargo/rustc not installed" "Install Rust with rustup: https://rustup.rs"
 fi

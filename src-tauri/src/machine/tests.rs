@@ -271,22 +271,22 @@ fn what_stops_a_jail_from_being_made_is_said_before_trying() {
     };
     // Disabled outright: refused, root or not.
     let none = table(&[("/proc/sys/user/max_user_namespaces", "0\n")]);
-    assert!(userns_refusal(false, &none)
+    assert!(userns_refusal(false, none)
         .unwrap()
         .contains("max_user_namespaces"));
-    assert!(userns_refusal(true, &none).is_some());
+    assert!(userns_refusal(true, none).is_some());
     // Debian's switch binds an unprivileged user and not root.
     let debian = table(&[("/proc/sys/kernel/unprivileged_userns_clone", "0\n")]);
-    assert!(userns_refusal(false, &debian)
+    assert!(userns_refusal(false, debian)
         .unwrap()
         .contains("unprivileged_userns_clone"));
-    assert!(userns_refusal(true, &debian).is_none());
+    assert!(userns_refusal(true, debian).is_none());
     // Ubuntu's AppArmor restriction is not a refusal: it cannot say whether `bwrap` is among the blocked.
     let ubuntu = table(&[(
         "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
         "1\n",
     )]);
-    assert!(userns_refusal(false, &ubuntu).is_none());
+    assert!(userns_refusal(false, ubuntu).is_none());
     // Nothing readable, nothing to say.
     assert!(userns_refusal(false, |_: &str| None).is_none());
 }

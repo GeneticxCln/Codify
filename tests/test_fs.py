@@ -8,6 +8,11 @@ from engine.fs import MAX_DIFF_BYTES, FileSystemService, GitMetadataError, PathE
 from typing import Any
 
 
+def on_disk(root: Path, rel: str) -> str:
+    """What is on disk, read around the service under test."""
+    return (root / rel).read_text(encoding="utf-8")
+
+
 class TestFileSystemService(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -34,15 +39,6 @@ class TestFileSystemService(unittest.TestCase):
         with self.assertRaises(PathEscapeError):
             self.fs.resolve("")
 
-    def test_read_text(self) -> None:
-        # Non-existent returns empty string
-        self.assertEqual(self.fs.read_text("missing.txt"), "")
-
-        # Existing returns contents
-        test_file = self.root / "hello.txt"
-        test_file.write_text("hello world", encoding="utf-8")
-        self.assertEqual(self.fs.read_text("hello.txt"), "hello world")
-
     def test_apply_create_update_delete(self) -> None:
         # Create. `list[dict]` on purpose: a delete carries `content: None`
         # while the other actions carry text, so the values are not uniformly str.
@@ -55,7 +51,7 @@ class TestFileSystemService(unittest.TestCase):
         # Update
         files = [{"path": "new_file.txt", "action": "update", "content": "line 1\nline 2 modified\n"}]
         summaries = self.fs.apply(files, dry_run=False)
-        self.assertEqual(self.fs.read_text("new_file.txt"), "line 1\nline 2 modified\n")
+        self.assertEqual(on_disk(self.root, "new_file.txt"), "line 1\nline 2 modified\n")
         self.assertIn("-line 2", summaries[0]["unified_diff"])
         self.assertIn("+line 2 modified", summaries[0]["unified_diff"])
 
@@ -137,7 +133,7 @@ class TestWhatApplyActuallyChanged(unittest.TestCase):
         )
         self.assertEqual(summaries[0]["unified_diff"], "")
         self.assertIn("too large to diff", summaries[0]["diff_note"])
-        self.assertEqual(self.fs.read_text("big.txt"), "small now\n")
+        self.assertEqual(on_disk(self.root, "big.txt"), "small now\n")
 
     def test_a_file_that_cannot_be_decoded_is_diffed_as_missing_text(self) -> None:
         (self.root / "latin.txt").write_bytes(b"caf\xe9 not utf-8")
@@ -145,7 +141,7 @@ class TestWhatApplyActuallyChanged(unittest.TestCase):
             [{"path": "latin.txt", "action": "update", "content": "now utf-8\n"}], dry_run=False
         )
         self.assertIn(summaries[0]["diff_note"], ("file is not UTF-8 text", "file is binary"))
-        self.assertEqual(self.fs.read_text("latin.txt"), "now utf-8\n")
+        self.assertEqual(on_disk(self.root, "latin.txt"), "now utf-8\n")
 
     def test_no_temporary_file_is_left_behind(self) -> None:
         self.fs.apply([{"path": "a.txt", "action": "create", "content": "a\n"}], dry_run=False)
@@ -163,7 +159,7 @@ class TestWhatApplyActuallyChanged(unittest.TestCase):
 
         self.fs.apply([{"path": "run.sh", "action": "update", "content": "#!/bin/sh\necho new\n"}], dry_run=False)
 
-        self.assertEqual(self.fs.read_text("run.sh"), "#!/bin/sh\necho new\n")
+        self.assertEqual(on_disk(self.root, "run.sh"), "#!/bin/sh\necho new\n")
         self.assertEqual(script.stat().st_mode & 0o777, 0o755)
 
     @unittest.skipUnless(os.name == "posix", "the executable bit is a POSIX idea")
@@ -219,7 +215,7 @@ class TestEditAction(unittest.TestCase):
               "edits": [{"old_text": "return 1", "new_text": "return 42"}]}],
             dry_run=False,
         )
-        self.assertEqual(self.fs.read_text("svc.py"), "def greet():\n    return 42\n")
+        self.assertEqual(on_disk(self.root, "svc.py"), "def greet():\n    return 42\n")
         self.assertTrue(summaries[0]["changed"])
         self.assertIn("-    return 1", summaries[0]["unified_diff"])
         self.assertIn("+    return 42", summaries[0]["unified_diff"])
@@ -234,7 +230,7 @@ class TestEditAction(unittest.TestCase):
             dry_run=True,
         )
         # Nothing written, but the proposal is concrete content, ready to store.
-        self.assertEqual(self.fs.read_text("svc.py"), "a = 1\n")
+        self.assertEqual(on_disk(self.root, "svc.py"), "a = 1\n")
         self.assertTrue(summaries[0]["changed"])
         self.assertEqual(summaries[0]["resolved_content"], "a = 2\n")
 
@@ -257,7 +253,7 @@ class TestEditAction(unittest.TestCase):
             )
         self.assertIn("appears 2 time(s), expected 1", str(ctx.exception))
         # The file is untouched — a refused edit must not write half an edit.
-        self.assertEqual(self.fs.read_text("svc.py"), "x = f()\ny = f()\n")
+        self.assertEqual(on_disk(self.root, "svc.py"), "x = f()\ny = f()\n")
 
     def test_count_zero_replaces_every_occurrence(self) -> None:
         self._seed("x = f()\ny = f()\n")
@@ -266,7 +262,7 @@ class TestEditAction(unittest.TestCase):
               "edits": [{"old_text": "f()", "new_text": "g()", "count": 0}]}],
             dry_run=False,
         )
-        self.assertEqual(self.fs.read_text("svc.py"), "x = g()\ny = g()\n")
+        self.assertEqual(on_disk(self.root, "svc.py"), "x = g()\ny = g()\n")
 
     def test_an_absent_old_text_is_refused(self) -> None:
         self._seed("a = 1\n")
@@ -290,7 +286,7 @@ class TestEditAction(unittest.TestCase):
                 dry_run=False,
             )
         self.assertIn("old_text must not be empty", str(ctx.exception))
-        self.assertEqual(self.fs.read_text("svc.py"), "a = 1\n")
+        self.assertEqual(on_disk(self.root, "svc.py"), "a = 1\n")
 
     def test_edits_apply_in_order_against_the_previous_result(self) -> None:
         self._seed("def greet():\n    return 1\n")
@@ -301,7 +297,7 @@ class TestEditAction(unittest.TestCase):
             ]}],
             dry_run=False,
         )
-        self.assertEqual(self.fs.read_text("svc.py"), "def greet():\n    return 3\n")
+        self.assertEqual(on_disk(self.root, "svc.py"), "def greet():\n    return 3\n")
 
     def test_an_edit_on_a_missing_file_is_refused(self) -> None:
         with self.assertRaises(ValueError):
@@ -352,11 +348,11 @@ class TestTheRepositorysOwnMetadataIsNotAFilesPath(unittest.TestCase):
     def test_a_read_returns_nothing_rather_than_the_config(self) -> None:
         # Both read doors already treat a path that escapes the workspace this
         # way — `read_text_or_none` answers "nothing to read here" and the
-        # stricter `read_text` raises — so git's metadata behaves like `../x`
+        # stricter `read_editable` raises — so git's metadata behaves like `../x`
         # rather than getting a third, softer answer of its own.
         self.assertIsNone(self.fs.read_text_or_none(".git/config"))
         with self.assertRaises(PathEscapeError):
-            self.fs.read_text(".git/config")
+            self.fs.read_editable(".git/config")
 
     def test_the_same_refusal_two_levels_down_and_through_a_symlink(self) -> None:
         # A submodule's own metadata, and a link that reaches the root's without

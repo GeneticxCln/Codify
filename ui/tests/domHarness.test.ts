@@ -338,3 +338,122 @@ test("scrolling is answered, and what it was asked to bring into view is recorde
     );
   });
 });
+
+// ── what the page prints is part of the result ──────────────────────────────
+
+/** Run a `withDom` that is expected to fail, and return the message it failed with. */
+async function failureOf(body: Parameters<typeof withDom>[0]): Promise<string> {
+  try {
+    await withDom(body);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  assert.fail("the test passed, and it should have been failed");
+}
+
+test("a test whose page printed console.error is failed for it, naming what was printed", async () => {
+  // A React warning, an uncaught error in a timer and a failed `act` all arrive as `console.error`. Before this the suite
+  // printed 138 of them and passed, and CONTRIBUTING.md says a render must produce none.
+  const message = await failureOf(async () => {
+    console.error("something the page is unhappy about");
+  });
+  assert.match(message, /1 console\.error message/);
+  assert.match(message, /something the page is unhappy about/);
+});
+
+test("a test that expects the page to complain takes the complaint, and passes", async () => {
+  await withDom(async (dom) => {
+    console.error("expected: %s", "a refusal");
+    assert.deepEqual(
+      dom.takeConsoleErrors().map((line) => line.split("\n")[0]),
+      ["expected: a refusal"],
+    );
+    assert.deepEqual(dom.takeConsoleErrors(), [], "taking them clears them");
+  });
+});
+
+test("the real console.error is put back when the DOM goes", async () => {
+  const before = console.error;
+  await withDom(async () => {
+    assert.notEqual(console.error, before, "the page's complaints were not being collected");
+  });
+  assert.equal(console.error, before);
+});
+
+test("the test's own failure is the one reported, not the complaint that came with it", async () => {
+  const message = await failureOf(async () => {
+    console.error("a warning on the way down");
+    throw new Error("the assertion that actually failed");
+  });
+  assert.equal(message, "the assertion that actually failed");
+});
+
+test("an update React was not told about fails the test, and the message says where it came from", async () => {
+  function Late() {
+    const [value, setValue] = React.useState("early");
+    React.useEffect(() => {
+      const timer = setTimeout(() => setValue("late"), 5);
+      return () => clearTimeout(timer);
+    }, []);
+    return h("p", null, value);
+  }
+  const message = await failureOf(async (dom) => {
+    await dom.render(h(Late));
+    // Real time passes outside `act`, and the component updates in it: the next assertion could run before the screen did.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  });
+  assert.match(message, /not wrapped in act/);
+  assert.match(message, /from:/, "a warning that does not say which line made the update is nearly useless");
+});
+
+test("the same wait inside dom.act is not a warning, and act hands back what its body returned", async () => {
+  function Late() {
+    const [value, setValue] = React.useState("early");
+    React.useEffect(() => {
+      const timer = setTimeout(() => setValue("late"), 5);
+      return () => clearTimeout(timer);
+    }, []);
+    return h("p", null, value);
+  }
+  await withDom(async (dom) => {
+    await dom.render(h(Late));
+    const returned = await dom.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return 7;
+    });
+    assert.equal(returned, 7);
+    assert.equal(dom.text(), "late");
+  });
+});
+
+// ── the parts of a browser an editor and a player ask about ─────────────────
+
+test("Window exists, so an editor measuring itself does not throw out of an animation frame", async () => {
+  await withDom(async (dom) => {
+    assert.equal(typeof (globalThis as { Window?: unknown }).Window, "function");
+    assert.equal(dom.window instanceof (globalThis as unknown as { Window: new () => unknown }).Window, true);
+  });
+});
+
+test("a line of text measures as a line, and everything else as the window", async () => {
+  // An editor learns how many lines fill the view from one line's height. At the window's own 900 pixels it believed
+  // each line filled the screen and drew two.
+  await withDom(async (dom) => {
+    const line = dom.window.document.createElement("div");
+    line.className = "cm-line";
+    const box = dom.window.document.createElement("div");
+    dom.container.append(line, box);
+    assert.equal(line.getBoundingClientRect().height, 20);
+    assert.equal(box.getBoundingClientRect().height, 900);
+  });
+});
+
+test("playing, pausing and loading media are answered, and print nothing", async () => {
+  await withDom(async (dom) => {
+    const audio = dom.window.document.createElement("audio");
+    audio.pause();
+    audio.load();
+    await audio.play();
+    assert.deepEqual(dom.takeConsoleErrors(), [], "jsdom's 'Not implemented' reached the console");
+  });
+});

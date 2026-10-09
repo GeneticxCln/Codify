@@ -598,8 +598,7 @@ fn start(
     machines: &Arc<Mutex<Machines>>,
     id: &str,
     recipe: &Recipe,
-    cols: u16,
-    rows: u16,
+    (cols, rows): (u16, u16),
     on_text: &TextSink,
     on_exit: &ExitSink,
 ) -> Result<ProjectNote, String> {
@@ -683,7 +682,13 @@ pub(crate) fn open_with_sink(
     guard.seq += 1;
     let id = format!("mach-{}", guard.seq);
     let project = start(
-        &mut guard, machines, &id, recipe, cols, rows, &on_text, &on_exit,
+        &mut guard,
+        machines,
+        &id,
+        recipe,
+        (cols, rows),
+        &on_text,
+        &on_exit,
     )?;
     Ok(OpenedMachine {
         id,
@@ -724,7 +729,13 @@ pub(crate) fn reset_with_sink(
         "\x1bc[machine reset: a clean project, nothing from before]\r\n".to_string(),
     );
     match start(
-        &mut guard, machines, id, &recipe, cols, rows, &on_text, &on_exit,
+        &mut guard,
+        machines,
+        id,
+        &recipe,
+        (cols, rows),
+        &on_text,
+        &on_exit,
     ) {
         Ok(project) => Ok(OpenedMachine {
             id: id.to_string(),
