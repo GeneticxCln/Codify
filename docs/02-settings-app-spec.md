@@ -201,23 +201,6 @@ the Conductor and Audio it is `engine_settings` keys written through `PUT /setti
   (`refusalSentence`, reading the `{code, message}` body); it keeps no copy of the rule and keeps the person's draft
   so the entry can be fixed. After a save it shows what the engine kept, which is the list in the engine's spelling.
 * **An engine without the keys shows no card**, because a save it offered would be refused.
-
-## Browser tab card
-
-Under Web pages: whether the assistant may act on the browser tab the person has open (`page_actions`: the
-conductor's `navigate_page`, `click_page` and `type_page`). Off on a fresh install. It is the same kind of
-decision as Web pages, what may leave the machine, and it is `engine_settings` written through
-`PUT /settings/engine` and nothing else (`PageActionsCard.tsx`).
-
-* **One switch, saved as it is flipped**, like the Conductor's "drives an approved plan". The card shows what the
-  engine stored (the save's echo), not what was clicked, and a refused save leaves the switch where the engine has it
-  with the engine's sentence beside it.
-* **The sentence is the consent.** Off says the assistant can read the open page but cannot open an address, click
-  or type in it. On says that an opened address is sent to its site, that typed text can be sent by the page as it
-  is typed, that either can carry anything the assistant has read in the person's files, that the tab may be
-  signed in to something, and that every action is shown in the transcript before it is taken.
-* **Reading is not covered.** `read_page` sends nothing and is offered either way.
-* **An engine without the key shows no card.**
 * **No model or voice lists of its own.** The model fields browse the same discovered models as a
   role card, with free text allowed. The voice is free text, because the provider owns its voice
   names.

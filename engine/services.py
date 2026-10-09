@@ -127,12 +127,6 @@ class SettingsService:
         # leaves the machine from the engine itself (engine/web_fetch.py, docs/12), and a person opens
         # that, never a goal or a turn (docs/00 §6.2).
         "web_fetch": (0, lambda v: max(0, min(v, 2))),
-        # Whether the conductor may act on the browser tab the person has open: `navigate_page`,
-        # `click_page` and `type_page`. Off by default for `web_fetch`'s reason and one more: an address the
-        # model navigates to, or text it types into a field a page watches, leaves the machine carrying
-        # whatever the turn has read (docs/03 §1.6), and the tab may be signed in to something. `read_page`
-        # is not covered: reading the open page sends nothing. A person opens this, never a goal or a turn.
-        "page_actions": (0, lambda v: 1 if v else 0),
     }
 
     # The conductor's model, and why it is here rather than in `agent_configs`:

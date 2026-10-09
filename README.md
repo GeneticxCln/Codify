@@ -265,10 +265,8 @@ See [`docs/10`](docs/10-agent-memory.md).
 
 Pages open **inside** Codify, as a real embedded webview, and the same tab is readable by the model: `read_page`
 returns the address, title, text and links, so a turn can depend on a documentation page instead of guessing.
-Loopback stays blocked, and a model-proposed URL meets the same guard your click goes through. Opening an address,
-clicking and typing in that tab are **off until you turn them on** in Settings → Browser tab: each can carry what the
-assistant has read off the machine, and the tab may be signed in to something. Reading it is always available. See
-[`docs/09`](docs/09-workspace-shell.md) and [`docs/03`](docs/03-security-and-roadmap.md) §1.6.
+Loopback stays blocked, and a model-proposed URL meets the same guard your click goes through. See
+[`docs/09`](docs/09-workspace-shell.md).
 
 The conductor can also **fetch a public page itself** (`fetch_page`), without moving your tab, but only if you turn it on
 in Settings → Web pages: off by default, then either only the sites you list or any public site. It reads the page with
@@ -484,8 +482,11 @@ Inside the jail the assistant is **not held to the command allowlist**; the jail
 7. **Commit scope.** A step commits *only* the paths it wrote (`git commit -- <paths>`). The engine never runs a
    bare `git add -A`, so work you had staged in the same tree is neither committed under Codify's message nor
    staged by it.
-8. **The gate is not optional.** Injection probability `≥ 0.85` fails the goal before the planner runs. An
-   unavailable gate logs that it was skipped and the pipeline proceeds; it is never a silent failure.
+8. **The gate reads your request, and only your request.** Injection probability `≥ 0.85` fails the goal before
+   the planner runs. It never sees the files, pages or command output a run reads afterwards, which is where text
+   written to steer a model usually arrives, so it is a first filter and not a boundary: the boundaries are the
+   approval gate on writes and on running the project's code, and `fetch_page`, which is off until you allow it.
+   A gate that cannot run is skipped, logged and shown in Settings; it never blocks.
 
 Each is specified with its reasoning in [`docs/03`](docs/03-security-and-roadmap.md).
 

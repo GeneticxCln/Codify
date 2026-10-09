@@ -110,6 +110,17 @@ the race does not crash a background task), the conductor asks "cancelled?" befo
 tool call (`Conductor(cancelled=...)`, so a Cancel takes effect within one call), and the step driver only
 drives a `RUNNING` goal (M2: a cancel during a retried step used to be followed by a full conductor run).
 
+**A Cancel also stops what is already running.** Every background run of a goal (a turn, planning, a start, a
+retry, an apply) is held by the goal it works for (`_spawn`), and `POST /goals/{id}/cancel`, once the status is
+stored, cancels them: a model call that has not answered is abandoned, a stage records its outcome as
+`cancelled`, and the driver is released by its own `finally`. A command on a worker thread is not reached by
+that, so each goal has a cancel signal (`ExecutorService.cancel_signal`) that every sandbox call it makes is
+handed — the verifier's, the critic's read-only probes and the conductor's `run_command` — and the sandbox stops
+the command's whole process group as soon as it is set (exit `130`, below). A step that was mid-way stays as it
+was left; nothing re-opens `CANCELLED`. A refused cancel (`version_conflict`, `illegal_status`) stops nothing.
+**Pause does not do this**: it asks for a stop between steps, and Start resumes there
+(`tests/test_cancel_stops_work.py`).
+
 **One driver per goal, held for the whole run** (review of 2026-09-29, finding 2). `run_chat` and `run_planning`
 claim the goal's driver (`claim_driver`) for as long as they run, as `start`, `retry` and `apply` already did.
 The conductor's `plan` move leaves the goal `PENDING` while the turn goes on to write its answer, and `PENDING` is
@@ -760,12 +771,6 @@ last site to a name that matches nothing. An entry that is not a
 site name (an address, a URL, a path, a single label such as `intranet`) is `422 invalid_value` naming up to five
 of them, and **nothing is stored**: a list that quietly allowed less than it was shown would be a bug nobody
 could see. `POST /goals` and a turn cannot carry either key (`tests/test_invariants_at_their_boundary.py`).
-
-**`page_actions`** (a switch, 0 or 1, default 0; a checkbox's `true` is 1, any other non-integer is `422`) decides
-whether the conductor's three page verbs that act — `navigate_page`, `click_page`, `type_page` — exist for a run.
-While it is 0, or cannot be read, they are left off the menu and each refuses without announcing or sending
-anything; `read_page` is unaffected. Same writer and same refusal for a goal or a turn that carries it as the two
-keys above (`docs/03` §1.6).
 
 **What the tool does** is `docs/12` §3's table. In short: nothing is fetched unless `web_fetch` is 1 or 2; the
 tool is left off the menu while it cannot act (mode 0, or mode 1 with an empty list); an unreadable setting is
@@ -1533,7 +1538,9 @@ test that calls `input()`, would wait out its whole timeout.
 
 `argv[0]` basename only (no `/`). Resolved as `shutil.which` then executed with `cwd=workspace.root_path`, `env` stripped to `PATH`,
 `HOME`, `LANG`, `TERM`, `VIRTUAL_ENV`, `PYTHONPATH`, `PYTHONHOME`, and `shell=False`, in a new session so a timeout can kill the
-whole process group.
+whole process group. A command that times out reports exit `124` (`timeout(1)`'s code); one stopped because its goal
+was cancelled reports `130` and says so in its stderr, so the two are never confused with each other or with an exit the
+command chose.
 
 | argv[0] | Allowed remaining args |
 |---|---|

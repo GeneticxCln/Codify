@@ -77,6 +77,13 @@ CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 MAX_KEPT_BYTES = MAX_COMMAND_OUTPUT_CHARS * 4
 _READ_CHUNK = 65536
 
+# How often a running command looks at its cancel signal. A Cancel is a person waiting to see the work stop, so a
+# fraction of a second; and the wait between looks is the same `_settle` the timeout uses, so it costs nothing.
+CANCEL_POLL_S = 0.2
+# What a command stopped by a Cancel reports: 128 + SIGINT, the shell's code for "interrupted", so it is told apart
+# from a timeout (124) and from anything the command could have exited with on its own.
+CANCELLED_EXIT_CODE = 130
+
 
 def _cap_output(text: str, truncated: bool = False) -> str:
     if truncated or len(text) > MAX_COMMAND_OUTPUT_CHARS:
@@ -309,6 +316,7 @@ def validate_argv(argv: list[str], fs: FileSystemService, mode: str = "test") ->
 class SandboxService:
     def run_command(
         self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test",
+        cancel: threading.Event | None = None,
     ) -> dict[str, Any]:
         """Run one allowlisted command. `mode="read_only"` narrows the allowlist
         to commands that cannot change the workspace (used by the librarian).
@@ -322,6 +330,12 @@ class SandboxService:
         is `engine/spawn_guard.py`, which kills the group when the engine that
         spawned it is gone. A command still running when the window is closed is the
         same stray as a timed-out one, and the timeout cannot catch it.
+
+        `cancel` is the goal's Cancel, reaching a command that runs on a worker thread. Cancelling the coroutine
+        that awaits this call stops the wait and not the command: a test suite would run on for the rest of its
+        timeout, as the person, after they asked for it to stop. So the wait looks at the signal, and once it is
+        set the group is stopped exactly as a timeout stops it, and the result says it was cancelled (exit
+        `CANCELLED_EXIT_CODE`).
         """
         if not isinstance(timeout_s, (int, float)) or timeout_s <= 0 or timeout_s > 600:
             raise CommandNotAllowed(f"invalid timeout: {timeout_s!r}")
@@ -366,8 +380,18 @@ class SandboxService:
             # the middle of a step.
             raise CommandNotAllowed(f"failed to start {argv[0]}: {exc.strerror or exc}") from exc
         drains = (_Drain(proc.stdout), _Drain(proc.stderr))
-        timed_out = not _settle(proc, drains, time.monotonic() + timeout_s)
-        if timed_out:
+        deadline = time.monotonic() + timeout_s
+        timed_out = cancelled = False
+        while not _settle(
+            proc, drains, deadline if cancel is None else min(deadline, time.monotonic() + CANCEL_POLL_S),
+        ):
+            if cancel is not None and cancel.is_set():
+                cancelled = True
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+        if timed_out or cancelled:
             # The direct child is not enough — kill the entire group. A gentle
             # TERM first, then KILL for anything still alive a moment later:
             # a test runner that handles TERM to shut its workers down cleanly
@@ -389,9 +413,11 @@ class SandboxService:
         stdout, stderr = drains[0].text(), drains[1].text()
         if timed_out:
             stderr += f"\n[timed out after {timeout_s}s — the whole process group was killed]"
+        if cancelled:
+            stderr += "\n[stopped: the goal was cancelled — the whole process group was killed]"
         return {
             "argv": argv,
-            "exit_code": 124 if timed_out else proc.returncode,
+            "exit_code": 124 if timed_out else CANCELLED_EXIT_CODE if cancelled else proc.returncode,
             "stdout": stdout,
             "stderr": stderr,
         }

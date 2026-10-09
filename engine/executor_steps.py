@@ -876,6 +876,7 @@ class _Steps(_Design):
                 async with self._sandbox_lock:
                     result = await asyncio.to_thread(
                         self.sandbox.run_command, ws.root_path, proposed, timeout_s=timeout_s,
+                        cancel=self.cancel_signal(goal_id),
                     )
             except subprocess.TimeoutExpired:
                 # A hang is not a refusal (nothing was proposed wrongly, so it is
@@ -1071,6 +1072,7 @@ class _Steps(_Design):
                         result = await asyncio.to_thread(
                             self.sandbox.run_command,
                             ws_root, argv, timeout_s=READ_ONLY_TIMEOUT_S, mode="read_only",
+                            cancel=self.cancel_signal(goal_id),
                         )
                     output = (
                         f"Command output (exit {result['exit_code']}):\n"

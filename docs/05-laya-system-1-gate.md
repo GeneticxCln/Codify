@@ -46,6 +46,16 @@ expensive, non-deterministic part of the system is the seven-LLM pipeline, and t
 protect it is to reject hostile or underspecified requests before any of it runs. A blocked goal
 therefore has **zero** `plan_steps` and **zero** provider calls — verifiable in the event stream.
 
+**What it does not see.** The state it scores is the request (`build_state`): the title, the
+description, the mode and the workspace's folder name. It never sees what a run reads afterwards —
+files, `read_page`, `fetch_page`, command output — which is where text written to steer a model
+usually arrives. So it is a first filter on what the person sent, not a boundary against injected
+instructions. The boundaries are the ones that read no text at all: the write gate (`00` §6.9), the
+approval before the repository's own code runs (`00` §6.6), and `fetch_page`, which stays off until
+a person allows it (`12`). That is also why a gate that cannot run is skipped (§3) rather than
+failing the goal: failing closed would refuse the person's own requests whenever the gate's model is
+down, and would protect nothing the gate can see.
+
 ## 3. Engines, and honest provenance
 
 The gate reports which engine answered in `laya_decision.payload.engine`:
