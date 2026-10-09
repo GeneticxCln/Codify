@@ -36,6 +36,16 @@
  * is shaped to make that the path of least resistance rather than a rule to
  * remember.
  *
+ * ## What it refuses to let through
+ *
+ * - **A `console.error`.** React says a render broke a rule this way (an update outside `act`, a missing key), and
+ *   jsdom says an exception was thrown inside a timer or that it did not implement something. It is recorded, not
+ *   printed, and the test fails with every message once the document is torn down (`CONTRIBUTING.md`: a render must
+ *   produce no React warning at all). A test that fails for its own reason reports that one instead.
+ * - **A frame outside `act`.** An animation frame that fires while nothing is open runs inside `act`; one that
+ *   fires inside an open `act` is already covered. `dom.act(body)` is the same thing for a change the test makes
+ *   itself, and the way to wait out real time without the app's own timers landing in the gaps.
+ *
  * ## What the browser still refuses to do
  *
  * jsdom is a DOM, not a browser, and a harness that pretends otherwise gets
@@ -56,8 +66,12 @@
  * - **Layout-dependent senses.** Sizes, `matchMedia` and the observers are
  *   answered above, in `installEnvironment`, and answered with fixed answers,
  *   because there is no honest alternative and pretending otherwise is worse
- *   than a constant.
+ *   than a constant. The one exception is an editor's line, which is 20px tall:
+ *   every other element reports the whole window, and an editor that measured a
+ *   line that tall (it now can, because `Window` is defined and its measure runs
+ *   to the end) concludes one line fits on screen and stops drawing the rest.
  */
+import { format } from "node:util";
 import type React from "react";
 import { withoutHooks } from "./tsxLoader.ts";
 import { TERMINAL_RENDERER_KEY } from "../src/terminalRenderer.ts";
@@ -98,9 +112,8 @@ const GLOBALS = [
   "MutationObserver",
   "Range",
   "Selection",
-  // Deliberately not `Window`. CodeMirror asks `elt instanceof Window` on every measure; defined, the measure runs to the end,
-  // and with no layout in jsdom it settles on a two-line viewport and stops drawing the lines the tests are looking at. Undefined,
-  // the measure throws inside a timer (a line on stderr, nothing else) and the view keeps drawing the whole document.
+  // CodeMirror asks `elt instanceof Window` on every measure; undefined, that is a ReferenceError thrown inside a timer.
+  "Window",
 ] as const;
 
 /** One document, and everything a test can do to it. */
@@ -131,6 +144,14 @@ export interface Dom {
    * and React prints a warning that looks like a failure and is not one.
    */
   settle(): Promise<void>;
+  /**
+   * Run `body` inside `act`, and hand back what it returned.
+   *
+   * For a change the test makes to something React reads but the test owns — a store, an editor view, a held promise
+   * it releases. Done bare, the component re-renders outside `act` and React says so; done here, the render has landed
+   * by the time this returns. `body` may be async: what it awaits is awaited inside the same `act`.
+   */
+  act<R>(body: () => Promise<R> | R): Promise<R>;
   /** Dispatch a keydown/keyup pair. */
   press(element: Element, key: string, init?: Record<string, unknown>): Promise<void>;
   /** The first element with this accessible name. Throws, naming what was there. */
@@ -178,6 +199,12 @@ export interface FetchAttempt {
   body: string | null;
 }
 
+/**
+ * How tall a line of the editor is. Every other element is as tall as the window (see `installCanvas`), which makes an
+ * editor measure a line as 900px and conclude that one line fits on screen.
+ */
+const LINE_HEIGHT = 20;
+
 /** jsdom has no layout, so the things `src/` asks the browser for must be answered. */
 function installEnvironment(
   win: Window & typeof globalThis,
@@ -224,11 +251,26 @@ function installEnvironment(
       }
     });
   }
+  installMedia(win);
   installRangeGeometry(win);
   installCanvas(win);
   installNetwork(fetches);
   installScrolling(win, scrolls);
   void win;
+}
+
+/**
+ * Media elements that can be stopped.
+ *
+ * jsdom plays no audio, and each call to `pause()` or `load()` is reported through `console.error` as "Not implemented",
+ * which `withDom` now fails a test for. Stopping something that is not playing is a no-op in a browser too, so both are
+ * answered with one. `play()` is deliberately left alone: a test that expects a sound replaces it on the prototype and
+ * records what was played (`audioPane.test.ts`), and one that did not expect a sound should hear about it.
+ */
+function installMedia(win: Window & typeof globalThis): void {
+  for (const name of ["pause", "load"]) {
+    Object.defineProperty(win.HTMLMediaElement.prototype, name, { value: () => {}, configurable: true, writable: true });
+  }
 }
 
 /**
@@ -399,7 +441,10 @@ function installCanvas(win: Window & typeof globalThis): void {
     });
   }
   Object.defineProperty(win.HTMLElement.prototype, "getBoundingClientRect", {
-    value: () => ({ x: 0, y: 0, top: 0, left: 0, right: 1440, bottom: 900, width: 1440, height: 900 }),
+    value: function getBoundingClientRect(this: HTMLElement) {
+      const height = this.classList?.contains("cm-line") ? LINE_HEIGHT : 900;
+      return { x: 0, y: 0, top: 0, left: 0, right: 1440, bottom: height, width: 1440, height };
+    },
     configurable: true,
   });
 }
@@ -448,6 +493,8 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
   win.document.body.appendChild(container);
   const root = createRoot(container);
   const act = React.act as (body: () => Promise<void> | void) => Promise<void>;
+  installFrames(win, React);
+  const logged = refuseConsoleErrors();
 
   const dom: Dom = {
     container,
@@ -506,6 +553,13 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
       await act(async () => {
         element.dispatchEvent(new win.Event("change", { bubbles: true }));
       });
+    },
+    async act<R>(body: () => Promise<R> | R): Promise<R> {
+      let result: R | undefined;
+      await act(async () => {
+        result = await body();
+      });
+      return result as R;
     },
     async press(element, key, init = {}) {
       await act(async () => {
@@ -606,8 +660,12 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
     },
   };
 
+  let result: T | undefined;
+  let failure: { error: unknown } | null = null;
   try {
-    return await body(dom);
+    result = await body(dom);
+  } catch (error) {
+    failure = { error };
   } finally {
     try {
       await act(async () => {
@@ -624,7 +682,74 @@ export async function withDom<T>(body: (dom: Dom) => Promise<T> | T): Promise<T>
     }
     delete (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT;
     instance.window.close();
+    logged.restore();
   }
+  // The test's own failure is the one to read; a console.error is reported only when nothing else went wrong.
+  if (failure) throw failure.error;
+  if (logged.messages.length > 0) {
+    throw new Error(
+      `withDom: console.error was called ${logged.messages.length} time(s) during the test. React reports an update ` +
+        `outside act() and a render that broke a rule this way, and so does jsdom for an exception thrown in a timer. ` +
+        `CONTRIBUTING.md says a render must produce no React warning at all.\n\n` +
+        logged.messages.map((m, i) => `[${i + 1}] ${m}`).join("\n\n"),
+    );
+  }
+  return result as T;
+}
+
+/**
+ * Animation frames that run inside `act`.
+ *
+ * jsdom's `requestAnimationFrame` fires on a timer of its own, between whatever the test is awaiting. CodeMirror measures
+ * its view in one, and a measure tells the pane (a selection, a viewport, a scroll), which sets state — so React sees an
+ * update that no `act` is around and prints "not wrapped in act(...)" once per frame. The frame still has to run when the
+ * browser would run it, because a test that only awaits a timer must see the measure's result; so it is wrapped rather
+ * than queued for the next `dom.settle()`. The wrapper is installed on both the node global and the window, for the
+ * reason `installEnvironment` gives for its senses: a component asks one, a library asks the other.
+ *
+ * **Only when no `act` is open.** A frame that fires while a test is inside `act` is already covered, and wrapping it
+ * would do harm: `act` called with nothing open treats itself as the outermost one and, when it returns, closes React's
+ * queue. An `act` that is still draining its own work (its callback has returned, its effects have not all run) then
+ * finds the queue gone, and every update after that point is reported. Whether one is open is React's own `actQueue`.
+ */
+function installFrames(win: Window & typeof globalThis, React: typeof import("react")): void {
+  const internals = (React as unknown as Record<string, { actQueue: unknown[] | null }>)
+    .__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  const request = win.requestAnimationFrame.bind(win);
+  const inAct = (callback: FrameRequestCallback): number =>
+    request((time) => {
+      // Reads `actQueue` off the internals: a React that renames it fails here, loudly, not by letting warnings through.
+      if (internals.actQueue !== null) callback(time);
+      else React.act(() => void callback(time));
+    });
+  for (const target of [globalThis, win] as unknown as Record<string, unknown>[]) {
+    Object.defineProperty(target, "requestAnimationFrame", { value: inAct, configurable: true, writable: true });
+  }
+}
+
+/**
+ * `console.error`, recorded and refused.
+ *
+ * It is how React says a render broke a rule — an update outside `act`, a list child without a key, a prop it does not
+ * know — and how jsdom reports an exception thrown inside a timer. A suite that prints those and passes has a bar the
+ * output does not meet, and a line of noise in a hundred and thirty-eight is a line nobody reads. So the call is kept,
+ * not printed, and `withDom` fails the test with every message once the document is torn down. A test that *expects* a
+ * console.error replaces it for its own duration and puts it back.
+ */
+function refuseConsoleErrors(): { messages: string[]; restore(): void } {
+  const original = console.error;
+  const messages: string[] = [];
+  const own = (...args: unknown[]): void => {
+    messages.push(format(...args));
+  };
+  console.error = own;
+  return {
+    messages,
+    restore() {
+      // Not ours any more means the test replaced it and has not put it back; leave that to the test.
+      if (console.error === own) console.error = original;
+    },
+  };
 }
 
 function all(root: ParentNode, selector: string): HTMLElement[] {

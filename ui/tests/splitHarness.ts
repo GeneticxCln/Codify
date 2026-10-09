@@ -31,7 +31,14 @@ export const React = (await import("react")).default;
  * test can: these tests wait a beat after anything that mounts a terminal, and again before the app is torn down.
  * That is about xterm and the speed of a test, not about splitting.
  */
-export const beat = (ms = 120): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+export const beat = (ms = 120): Promise<void> => {
+  const elapsed = new Promise<void>((resolve) => setTimeout(resolve, ms));
+  // Inside `act` while an app is mounted: the app's own timers and its fake engine's answers land during the wait, and each
+  // is a state update React would otherwise report as outside `act`.
+  return mounted ? mounted.act(() => elapsed) : elapsed;
+};
+/** The app a `withApp` body is running against, for `beat`. Tests in a file run one after another, so there is one at most. */
+let mounted: AppContext | null = null;
 /** A click, then a beat: closing or opening a split mounts or unmounts a terminal, and the next step must not undo it inside xterm's window. */
 export const click = async (ctx: AppContext, el: Element): Promise<void> => {
   await ctx.dom.click(el);
@@ -40,8 +47,13 @@ export const click = async (ctx: AppContext, el: Element): Promise<void> => {
 export const conversation = harnessConversation;
 export const withApp: typeof harnessApp = (options, body) =>
   harnessApp(options, async (ctx) => {
-    await body(ctx);
-    await beat();
+    mounted = ctx;
+    try {
+      await body(ctx);
+      await beat();
+    } finally {
+      mounted = null;
+    }
   });
 
 export const WIDE = { width: 2400, height: 900 };

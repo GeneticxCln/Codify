@@ -46,7 +46,8 @@ async function framesRequested(dom: AppContext["dom"], ms: number): Promise<numb
   win.requestAnimationFrame = counting;
   g.requestAnimationFrame = counting;
   try {
-    await new Promise((r) => setTimeout(r, ms));
+    // Inside `act`: the app is live for the whole wait, and what it sets state on lands during it.
+    await dom.act(() => new Promise((r) => setTimeout(r, ms)));
   } finally {
     win.requestAnimationFrame = real;
     g.requestAnimationFrame = realGlobal;

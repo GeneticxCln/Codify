@@ -198,13 +198,13 @@ test("dismissing hides the banner, and the next probe puts the true state back",
   // Dismiss is a decision about the banner, not about the connection: the banner
   // is a message, not a mute. If dismissal is ever "fixed" into a permanent mute,
   // it should be a change someone wrote on purpose.
-  await withApp({ standalone: true, engineToken: "the-real-token", localStorage: { CODIFY_TOKEN: "stale" } }, async ({ dom, settle }) => {
+  await withApp({ standalone: true, engineToken: "the-real-token", localStorage: { CODIFY_TOKEN: "stale" } }, async ({ dom, settle, act }) => {
     await settle();
     await dom.click(dom.byButton("Dismiss"));
     await settle();
     assert.ok(banner(dom.container) === null, "Dismiss did not hide the banner");
-    // The poll is 3 s while the window is visible.
-    await new Promise((r) => setTimeout(r, 3300));
+    // The poll is 3 s while the window is visible, and its state update lands inside this wait.
+    await act(() => new Promise((r) => setTimeout(r, 3300)));
     await settle();
     assert.ok(banner(dom.container), "the connection is still refused but the banner stayed gone");
   });

@@ -773,8 +773,11 @@ export async function withApp(
       const settle = async (): Promise<void> => {
         await dom.settle();
         for (let i = 0; i < 6; i++) {
-          await new Promise((r) => setTimeout(r, 0));
-          await new Promise((r) => requestAnimationFrame(() => r(null)));
+          // Inside `act`, because this is real time: an app timer that fires during it is a state update React reports otherwise.
+          await dom.act(async () => {
+            await new Promise((r) => setTimeout(r, 0));
+            await new Promise((r) => requestAnimationFrame(() => r(null)));
+          });
         }
       };
       await dom.render(

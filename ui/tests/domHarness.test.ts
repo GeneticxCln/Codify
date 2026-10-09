@@ -338,3 +338,85 @@ test("scrolling is answered, and what it was asked to bring into view is recorde
     );
   });
 });
+
+// ── what the harness refuses to let through ─────────────────────────────────
+
+/** A component that sets state when an animation frame fires, which is what an editor's measure does. */
+function Framed() {
+  const [frames, setFrames] = React.useState(0);
+  React.useEffect(() => {
+    const id = requestAnimationFrame(() => setFrames((n) => n + 1));
+    return () => cancelAnimationFrame(id);
+  }, []);
+  return h("p", null, `frames: ${frames}`);
+}
+
+test("a state update made by an animation frame is inside act, even when the test only awaits a timer", async () => {
+  await withDom(async (dom) => {
+    await dom.render(h(Framed));
+
+    // A raw wait, which is the case that used to print "not wrapped in act(...)" once per frame.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.equal(dom.text(), "frames: 1");
+  });
+});
+
+test("an update outside act fails the test that made it, with React's own words", async () => {
+  let held: (() => void) | null = null;
+  function Held() {
+    const [n, setN] = React.useState(0);
+    held = () => setN((v) => v + 1);
+    return h("p", null, `n: ${n}`);
+  }
+
+  await assert.rejects(
+    withDom(async (dom) => {
+      await dom.render(h(Held));
+      held?.(); // not inside act
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }),
+    (error: Error) => /console\.error was called 1 time/.test(error.message) && /not wrapped in act/.test(error.message),
+  );
+});
+
+test("a test that fails for its own reason reports that one, not the console.error it also caused", async () => {
+  await assert.rejects(
+    withDom(async (dom) => {
+      console.error("noise");
+      await dom.render(h("p", null, "x"));
+      throw new Error("the assertion that failed");
+    }),
+    /the assertion that failed/,
+  );
+});
+
+test("console.error is put back when the DOM goes", async () => {
+  const before = console.error;
+
+  await assert.rejects(withDom(async () => console.error("one")), /console\.error was called 1 time/);
+
+  assert.equal(console.error, before);
+});
+
+test("Window is the jsdom window's, so a library that asks `instanceof Window` gets an answer", async () => {
+  await withDom(async (dom) => {
+    assert.equal(dom.window instanceof (globalThis as unknown as { Window: typeof Window }).Window, true);
+    assert.equal(({} as unknown) instanceof (globalThis as unknown as { Window: typeof Window }).Window, false);
+  });
+  assert.equal(typeof (globalThis as Record<string, unknown>).Window, "undefined", "the window's constructor outlived the DOM");
+});
+
+test("act returns what its body returned, and has landed the render by then", async () => {
+  await withDom(async (dom) => {
+    await dom.render(h(Probe, {}));
+
+    const seen = await dom.act(() => {
+      (dom.byLabel("Bump") as HTMLElement).dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      return "clicked";
+    });
+
+    assert.equal(seen, "clicked");
+    assert.match(dom.text(), /clicks: 1/);
+  });
+});

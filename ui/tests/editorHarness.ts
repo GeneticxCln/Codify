@@ -57,7 +57,10 @@ export const withEditorApp: typeof splitApp = (options, body) =>
     try {
       await body(ctx);
     } finally {
-      for (const tabId of [...editorBuffers.getSnapshot().byTab.keys()]) editorBuffers.close(tabId);
+      // Inside act: the App and the pane both read this store, and closing a buffer re-renders them.
+      await ctx.act(async () => {
+        for (const tabId of [...editorBuffers.getSnapshot().byTab.keys()]) editorBuffers.close(tabId);
+      });
     }
   });
 
