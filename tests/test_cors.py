@@ -110,6 +110,18 @@ class CORSPreflight(unittest.IsolatedAsyncioTestCase):
         response = await self._preflight("http://evil.example")
         self.assertNotIn("access-control-allow-origin", response.headers)
 
+    async def test_an_options_request_that_is_not_a_preflight_still_needs_the_token(self) -> None:
+        # A preflight is answered by `CORSMiddleware` before the auth middleware sees it (the tests above). What
+        # is left is an OPTIONS a browser did not send as a preflight: no `Origin`, or no
+        # `Access-Control-Request-Method`. It used to pass the auth middleware untouched and reach the router,
+        # whose 405 for a real route against a 404 for an unknown one told a client with no token which routes
+        # exist. It is a 401 now, like every other request without the token.
+        for headers in ({}, {"Origin": "http://localhost:5173"}):
+            for path in ("/goals/anything", "/no/such/route"):
+                with self.subTest(headers=headers, path=path):
+                    response = await self.client.options(path, headers=headers)
+                    self.assertEqual(response.status_code, 401, response.text)
+
     async def test_a_loopback_host_on_another_port_is_granted_by_the_regex(self) -> None:
         # `allow_origin_regex` deliberately admits any http(s) loopback host on
         # any port: dev servers drift off 5173 when it is taken, and a second

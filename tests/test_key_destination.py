@@ -87,6 +87,17 @@ class TestConstructorsRefuseBeforeAnythingCanBeSent(unittest.TestCase):
             OpenAICompatProvider("sk-secret", "http://user:hunter2@10.0.0.5:8080/v1")
         self.assertNotIn("hunter2", caught.exception.message)
 
+    def test_an_address_that_is_not_http_at_all_is_refused_without_echoing_its_userinfo(self) -> None:
+        # The other branch of the same refusal: not plain http to a remote host, but not http(s) at all. It used
+        # to quote the whole address back, password included.
+        for url in ("ftp://user:hunter2@files.example/v1", "user:hunter2@files.example", "http://user:hunter2@"):
+            with self.subTest(url=url):
+                with self.assertRaises(ProviderError) as caught:
+                    OpenAICompatProvider("sk-secret", url)
+                self.assertEqual("invalid_base_url", caught.exception.code)
+                self.assertNotIn("hunter2", caught.exception.message)
+                self.assertIn("is not an http(s) endpoint", caught.exception.message)
+
     def test_a_keyless_plain_http_server_is_still_fine(self) -> None:
         OpenAICompatProvider(None, LAN)
         OpenAICompatProvider("", LAN)

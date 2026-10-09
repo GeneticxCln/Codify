@@ -436,9 +436,11 @@ def _same_secret(offered: str, expected: str) -> bool:
 
 @app.middleware("http")
 async def auth(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
-    # CORS preflights carry no Authorization header; let them through.
-    if request.method == "OPTIONS":
-        return await call_next(request)
+    # No exception for OPTIONS. A browser's CORS preflight carries no Authorization header, and it never
+    # reaches this function: `CORSMiddleware` is registered after it and so sits outside it, and answers every
+    # preflight itself (an allowed origin with the grant, any other with a refusal). An OPTIONS that gets this far
+    # is not one a browser sent as a preflight, and letting it through without the token let any local process
+    # map which routes exist from the 405 it got back where an unknown path is a 404 (`tests/test_cors.py`).
     expected = getattr(request.app.state, "token", None) or BOOT_TOKEN
     header = request.headers.get("authorization", "")
     if not expected or not _same_secret(header, f"Bearer {expected}"):
@@ -1209,8 +1211,8 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     # voice that starts talking unasked is not something a fresh install does.
     "tts_auto_read": (0, 1),
     # Whether the conductor may fetch web pages: 0 never, 1 only the sites in `web_fetch_hosts`, 2 any
-    # public site. Three states, so not a switch: a checkbox's `true` is refused here like any other
-    # number a person is choosing.
+    # public site (the default of a fresh install). Three states, so not a switch: a checkbox's `true` is
+    # refused here like any other number a person is choosing.
     "web_fetch": (0, 2),
 }
 

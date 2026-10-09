@@ -2479,18 +2479,18 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(r.status_code, 422, bad)
 
-    async def test_web_fetch_is_off_until_a_person_turns_it_on_and_the_list_is_kept_as_the_fetch_reads_it(self) -> None:
+    async def test_web_fetch_starts_on_for_any_public_site_and_the_list_is_kept_as_the_fetch_reads_it(self) -> None:
         """The setting that lets the engine reach the web for a model (engine/web_fetch.py, docs/12).
 
-        Off on a fresh install, three states rather than a switch, and a list that is stored in the one
+        Any public site on a fresh install, three states rather than a switch, and a list that is stored in the one
         spelling the fetch parses. An entry that is not a site name is refused rather than dropped, because a
         list that quietly allowed less than it was shown would be a bug nobody could see.
         """
         r = await self.client.get("/settings/engine", headers=self.headers)
         body = r.json()
-        self.assertEqual(body["web_fetch"], {"value": 0, "min": 0, "max": 2})
+        self.assertEqual(body["web_fetch"], {"value": 2, "min": 0, "max": 2})
         self.assertEqual(body["web_fetch_hosts"], {"value": "", "max": 200})
-        self.assertEqual(app.state.executor._web_policy().mode, 0)
+        self.assertEqual(app.state.executor._web_policy().mode, 2)
 
         r = await self.client.put(
             "/settings/engine", headers=self.headers,

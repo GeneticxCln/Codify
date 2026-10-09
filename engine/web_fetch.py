@@ -14,7 +14,7 @@ file (docs/00 §6.7). `tests/test_web_fetch.py` pins every one of those exclusio
 
 What the rules are, and the attack each one answers:
 
-  * **Off unless a person turned it on**, and then either for the sites they listed or for any public site
+  * **Any public site until a person narrows it or switches it off** (to the sites they list, or to none)
     (`web_fetch`, `web_fetch_hosts`; `PUT /settings/engine` is the only writer, docs/00 §6.2). A model cannot
     widen it, and a goal or a turn cannot set it.
   * **GET only, with no body, header, cookie or credential the model can supply**, and none the engine adds: no
@@ -34,7 +34,7 @@ What the rules are, and the attack each one answers:
 **What this does not do, and cannot.** The address is the payload: a model that has read `.env` can put it in
 the query string of a URL on an allowed site, and the site receives it. No rule here can tell a destination
 from a destination used to carry data, which is the same limit `navigate_page` has (docs/03 §1.6). What the
-rules do is make that a thing a person chose to allow (off by default, a list by preference), announce every
+rules do is make that a thing a person can see and narrow (any public site by default, a list by preference), announce every
 attempt in the transcript before it is made, and bound how many a run may make. A proxy in the person's
 environment is not used, so the address check is the only one: with `trust_env` on, the proxy would resolve
 names and the check above would be checking nothing.
@@ -55,7 +55,8 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 from scrapling.parser import Selector
 
-#: The three states of the `web_fetch` setting. Off is the default and the only state a fresh install has.
+#: The three states of the `web_fetch` setting. A fresh install has `MODE_ANY`; off is what a person chooses, and
+#: what a setting that cannot be read means.
 MODE_OFF = 0
 MODE_LISTED = 1
 MODE_ANY = 2

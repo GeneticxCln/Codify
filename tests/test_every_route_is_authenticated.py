@@ -101,13 +101,14 @@ class TestEveryHttpRoute(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], leaks)
 
     async def test_an_unauthenticated_options_request_reaches_no_handler(self) -> None:
-        # OPTIONS is let through so a CORS preflight, which cannot carry a header, can be answered. That must
-        # stay a preflight: no route may answer it with anything but the CORS machinery's own reply.
+        # A browser's CORS preflight is answered by the CORS layer, outside the token check, and never reaches a
+        # route (tests/test_cors.py). Any other OPTIONS without the token is refused like every other request: a
+        # 401, never the router's 405 or 404, which would tell a client with no token which routes exist.
         async with self.client() as client:
             leaks = []
             for _, path in http_routes():
                 r = await client.options(path)
-                if r.status_code not in (200, 400, 405):
+                if r.status_code != 401:
                     leaks.append((path, r.status_code))
         self.assertEqual([], leaks)
 

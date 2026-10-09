@@ -268,11 +268,12 @@ returns the address, title, text and links, so a turn can depend on a documentat
 Loopback stays blocked, and a model-proposed URL meets the same guard your click goes through. See
 [`docs/09`](docs/09-workspace-shell.md).
 
-The conductor can also **fetch a public page itself** (`fetch_page`), without moving your tab, but only if you turn it on
-in Settings → Web pages: off by default, then either only the sites you list or any public site. It reads the page with
+The conductor can also **fetch a public page itself** (`fetch_page`), without moving your tab. It is on for any public
+site out of the box, because an assistant on a local model has to be able to look things up; Settings → Web pages
+narrows it to only the sites you list, or switches it off. It reads the page with
 [Scrapling](https://github.com/D4Vinci/Scrapling)'s parser and nothing else of Scrapling: the request is Codify's own,
 public addresses only, bounded, and announced in the transcript before it is made. The address is sent to the site and
-can carry whatever the assistant has read, which no rule can prevent, so the list is the safer setting. See
+can carry whatever the assistant has read, which no rule can prevent, so the list is the safer setting if that matters to you. See
 [`docs/12`](docs/12-scrapling-audit.md).
 
 For a security review, the conductor has a scanner of its own, `scan_code`: curated rule profiles (secrets, injection,
@@ -485,7 +486,7 @@ Inside the jail the assistant is **not held to the command allowlist**; the jail
 8. **The gate reads your request, and only your request.** Injection probability `≥ 0.85` fails the goal before
    the planner runs. It never sees the files, pages or command output a run reads afterwards, which is where text
    written to steer a model usually arrives, so it is a first filter and not a boundary: the boundaries are the
-   approval gate on writes and on running the project's code, and `fetch_page`, which is off until you allow it.
+   approval gate on writes and on running the project's code, and `fetch_page`, which Settings → Web pages can narrow or switch off.
    A gate that cannot run is skipped, logged and shown in Settings; it never blocks.
 
 Each is specified with its reasoning in [`docs/03`](docs/03-security-and-roadmap.md).

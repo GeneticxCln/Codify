@@ -19,10 +19,14 @@ const h = React.createElement;
 const { ClipboardDrawer } = await import("../src/components/ClipboardDrawer.tsx");
 const { SKIP_MESSAGES, MAX_PINNED } = await import("../src/clipboardHistory.ts");
 
+// One timestamp for every clip a test builds. Read per clip, `Date.now()` can roll over to the next millisecond
+// between two clips, and the later one then counts as newer and sorts first, which flipped the order a test
+// asserts (the history is newest first, and equal timestamps keep the order the clips were given in).
+const FIVE_MINUTES_AGO = Date.now() - 5 * 60_000;
 const clip = (id: string, text: string, over: Partial<Clip> = {}): Clip => ({
   id,
   text,
-  at: Date.now() - 5 * 60_000,
+  at: FIVE_MINUTES_AGO,
   source: "selection",
   pinned: false,
   ...over,
