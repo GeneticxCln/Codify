@@ -56,8 +56,8 @@ help:
 	@echo "  make run-engine   - Start Codify Python engine standalone"
 	@echo "  make run-engine-preview - Start the engine and print the token/port for the browser preview"
 	@echo "  make run-engine-scratch - Start an engine isolated under $(SCRATCH_HOME) (real ~/.codify untouched)"
-	@echo "  make bench-smoke  - Run the hermetic benchmark tier (no network, no models, no spend)"
-	@echo "  make bench        - Run the repo_scale tier against your configured models (spends tokens)"
+	@echo "  make bench-smoke  - Run the hermetic benchmark tier under both drivers (no network, no models, no spend)"
+	@echo "  make bench        - Run the repo_scale tier against your configured models (spends tokens; BENCH_DRIVER=recipe for the fixed pipeline)"
 	@echo "  make check        - Run all verifications (ruff + mypy + UI tests + UI test typecheck + Python tests + stream tests + benchmark smoke + UI build + Tauri check)"
 	@echo "  make ci           - Run the whole CI gate locally: make check plus the declared $(PY_MIN) leg"
 	@echo "  make check-history - Check that every commit in HISTORY_RANGE builds, not just the tip (default: origin/\$$branch..HEAD)"
@@ -277,11 +277,16 @@ run-engine-scratch:
 # The configured benchmark tier stays out of `check` and `ci` on purpose: it spends real tokens on real
 # models, and a gate that costs money on every push is a gate people learn to bypass. Run it deliberately.
 # The smoke tier is the other half and is in `check`: hermetic, two seconds, no network and no spend.
+# `BENCH_DRIVER=recipe make bench` measures the fixed pipeline instead of the conductor (docs/08 §6).
+BENCH_DRIVER ?= conductor
 bench:
-	python3 -m benchmarks.runner --tier repo_scale
+	python3 -m benchmarks.runner --tier repo_scale --driver $(BENCH_DRIVER)
 
+# Both drivers, because both are real paths: the conductor is what a person's goal gets, the recipe is what is left
+# for `parallel` goals and for an install with no tool-capable model.
 bench-smoke:
-	python3 -m benchmarks.runner --tier smoke
+	python3 -m benchmarks.runner --tier smoke --driver conductor
+	python3 -m benchmarks.runner --tier smoke --driver recipe
 
 check: lint typecheck test-ui typecheck-ui-tests test test-streams bench-smoke build-ui check-tauri
 	@echo "All verifications passed successfully!"

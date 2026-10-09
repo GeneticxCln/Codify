@@ -107,9 +107,10 @@ jobs:
       - name: Stream isolation
         run: make test-streams
 
-      # The hermetic benchmark tier: the fixed pipeline against a canned model. Two seconds, no network, no spend,
-      # and part of `make check`, so the same thing runs here. It proves the harness and the pipeline still do
-      # their job together, never model quality (docs/08).
+      # The hermetic benchmark tier, under both drivers: the conductor (what a person's goal gets) and the fixed
+      # pipeline, each against a canned model. A few seconds, no network, no spend, and part of `make check`, so the
+      # same thing runs here. It proves the harness and the execution paths still do their job together, never model
+      # quality (docs/08).
       - name: Benchmark smoke tier
         run: make bench-smoke
 

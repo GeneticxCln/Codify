@@ -145,24 +145,35 @@ class SmokeTierTests(unittest.TestCase):
             self.assertEqual(data["provider"], "canned")
 
     def test_a_report_says_which_driver_ran_the_tasks(self) -> None:
-        """A benchmark number is a number about the fixed recipe, and the report must say so.
+        """A benchmark number is a number about whoever took the plan to the end, and the report must say who.
 
-        The runner drives `POST /goals`, which is the recipe (librarian, design, planner, fixer, verifier,
-        critic, scribe in a compiled order). On an install with a conductor, a person's goal is run by the
-        conductor instead, so a benchmark rate quoted without this field reads as a claim about how the
-        product behaves when it is a claim about the floor under it (docs/08 §6).
+        The conductor is what a person's goal gets on an install with a tool-calling model; the fixed recipe is
+        what remains for `parallel` goals and for installs without one. A rate quoted without this field reads
+        as a claim about the product when it may be a claim about the floor under it (docs/08 §6).
         """
+        for driver in ("conductor", "recipe"):
+            with self.subTest(driver=driver), tempfile.TemporaryDirectory() as tmp:
+                report = Path(tmp) / "report.json"
+                code, _ = _run_main(["--tier", "smoke", "--driver", driver, "--report", str(report)])
+                self.assertEqual(0, code)
+                data = json.loads(report.read_text(encoding="utf-8"))
+                self.assertEqual(driver, data["driver"])
+                self.assertEqual({driver}, {t["driver"] for t in data["tasks"]})
+
+    def test_the_default_driver_is_the_one_a_persons_goal_gets(self) -> None:
+        """No flag measures the default execution path, not the fallback."""
         with tempfile.TemporaryDirectory() as tmp:
             report = Path(tmp) / "report.json"
             _run_main(["--tier", "smoke", "--report", str(report)])
-            data = json.loads(report.read_text(encoding="utf-8"))
-            self.assertEqual("recipe", data["driver"])
+            self.assertEqual("conductor", json.loads(report.read_text(encoding="utf-8"))["driver"])
 
     def test_the_console_says_which_driver_ran_the_tasks_too(self) -> None:
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            main(["--tier", "smoke"])
-        self.assertRegex(out.getvalue(), r"driver\s+recipe")
+        for driver in ("conductor", "recipe"):
+            with self.subTest(driver=driver):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                    main(["--tier", "smoke", "--driver", driver])
+                self.assertRegex(out.getvalue(), rf"driver\s+{driver}")
 
     def test_a_canned_run_reports_quality_as_skipped_not_passed(self) -> None:
         """The dishonest failure mode: a canned run claiming task quality."""

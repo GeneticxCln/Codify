@@ -56,16 +56,16 @@ run as a perfect one.
 ## 3. Running them
 
 ```
-make bench-smoke     # hermetic; safe anywhere
-make bench           # your configured models; spends tokens
+make bench-smoke     # hermetic; safe anywhere; both drivers
+make bench           # your configured models; spends tokens (BENCH_DRIVER=recipe for the fixed pipeline)
 python3 -m benchmarks.runner --tier smoke --report /tmp/bench.json
 ```
 
-Benchmarks are **not** part of `make check` or `make ci`, and the reason is in
-the Makefile: a gate that costs money on every push is a gate people learn to
-bypass, and then it protects nothing. The smoke tier *is* hermetic and would be
-free in the gate; it is left out because a benchmark number in CI stops being
-read the first time it is red for reasons unrelated to the change.
+The **smoke** tier is part of `make check` (so of `make ci`) and runs in CI: it is hermetic, takes a few seconds, and
+costs nothing, and it is the only thing in the gate that drives a goal from planning to COMPLETED under each driver
+(§6), so a change that breaks the executor or the conductor's path is red there and not only on someone's machine.
+The **configured** tier is *not* in the gate, and the reason is in the Makefile: a gate that costs money on every
+push is a gate people learn to bypass, and then it protects nothing.
 
 Useful flags: `--only <task-id>` (one task), `--report <path>` (JSON), and
 `--engine-db <path>` (read a specific engine store for a configured run). For a
@@ -201,12 +201,27 @@ outside `engine/` by accident of layout, not by decision.
   provider entirely. It measures the harness, which is the point of the smoke
   tier.
 
-* **Driver.** The report says `"driver": "recipe"`, and the console prints it. Every task here is run by
-  `POST /goals`, which is the fixed pipeline (librarian, design, planner, fixer, verifier, critic, scribe in a
-  compiled order). On an install with a conductor a person's goal is driven by the conductor instead, so **a
-  number from this harness is a recipe number unless the report says `conductor`**: it measures the floor under
-  the product, not how the product behaves. The conductor has been measured only by hand (§8, "The conductor,
-  end to end"), on three turns and one small model.
+* **Driver.** `--driver conductor` (the default) or `--driver recipe`; the report says which as `"driver"`, each
+  task result repeats it, and the console prints it. The **conductor** is what a person's goal gets on an install
+  whose scribe can call tools: the runner plans the goal, presses Start (moves it to RUNNING, which is what lets
+  `write` through) and calls `run_conductor_resume`, the call `_run_steps_locked` makes. The **recipe** is the fixed
+  pipeline (librarian, design, planner, fixer, verifier, critic, scribe in a compiled order) that remains for
+  `parallel` goals and for installs with no tool-capable model. Both are real paths and a number from one is not a
+  number about the other, so the runner refuses a conductor run on a setup where `conductor_can_drive` is false
+  rather than quietly running the recipe and labelling it otherwise.
+
+  Under the canned provider the conductor is scripted (`CannedProvider(conductor=True)`): it takes an approved step
+  through `write`, `verify`, `review` and `summarize`, calling only what it was offered. That proves the path's
+  plumbing (an approved plan reaches COMPLETED through the conductor's moves, the `write` gate lets bytes through,
+  the stage results are all there) and **says nothing about whether a model could drive it**. A task's
+  `conductor_calls` is how often the script was asked for a move: five for a one-step plan, and zero under the
+  recipe, which is the proof that the driver in the report is the one that ran. `make bench-smoke` runs both
+  drivers. The conductor has been measured against a real model only by hand (§8, "The conductor, end to end"),
+  on three turns and one small model.
+
+* **One repository.** Every `repo_scale` task runs against the same synthetic fixture and `repos` is empty. That is
+  the no-third-party-source rule (§4), not an oversight, and it bounds what the tier can claim: a pass is about
+  small edits in a small Python module.
 
 Before quoting any of it, read `benchmarks/manifest.json`'s `_read_this_first`.
 
