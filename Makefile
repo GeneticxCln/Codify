@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history hooks clean bench bench-smoke
+.PHONY: help test test-engine test-streams smoke-embed smoke-tabs test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor ci-rust-floor check-history hooks clean bench bench-conductor bench-smoke
 
 # A checkout's own virtualenv (`make setup` makes one) wins over whatever `python3` is on
 # PATH, so `make setup && make check` works with nothing activated. The floor leg sets
@@ -25,6 +25,9 @@ MYPY ?= $(shell $(if $(PREFER_VENV),PATH="$(CURDIR)/.venv/bin:$$PATH" ,)command 
 # deployment contract here — the desktop shell boots the engine as `python3 -m engine` —
 # and the floor is the only leg that rejects syntax the newest interpreter accepts.
 PY_MIN := $(shell sed -n 's/^requires-python *= *">= *\([0-9][0-9.]*\)".*/\1/p' pyproject.toml)
+# The same for Rust: `rust-version` in the shell's manifest. It is the oldest compiler the *locked* dependency graph
+# builds on (the highest `rust-version` any package in Cargo.lock declares), and `ci-rust-floor` is what keeps it so.
+RUST_MIN := $(shell sed -n 's/^rust-version *= *"\([0-9][0-9.]*\)".*/\1/p' src-tauri/Cargo.toml)
 # Outside the repository on purpose: `make ci` must leave no untracked state behind.
 CI_CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/codify
 PY_MIN_VENV := $(CI_CACHE)/venv-$(PY_MIN)
@@ -46,7 +49,7 @@ help:
 	@echo "  make typecheck    - Static-type-check engine, tests and scripts with mypy (config in pyproject.toml)"
 	@echo "  make build-ui     - Typecheck and build React frontend (Vite)"
 	@echo "  make dev-ui       - Start Vite dev server"
-	@echo "  make check-tauri  - Cargo check Tauri Rust backend"
+	@echo "  make check-tauri  - Rust shell: cargo check, clippy (-D warnings), tests, fmt --check"
 	@echo "  make build-tauri  - Build Tauri desktop application"
 	@echo "  make run-app      - Build the UI and launch the desktop app with it embedded (the way to open Codify from a checkout)"
 	@echo "  make build-app    - Build the release app (UI embedded) that scripts/codify and the menu entry start"
@@ -56,12 +59,14 @@ help:
 	@echo "  make run-engine   - Start Codify Python engine standalone"
 	@echo "  make run-engine-preview - Start the engine and print the token/port for the browser preview"
 	@echo "  make run-engine-scratch - Start an engine isolated under $(SCRATCH_HOME) (real ~/.codify untouched)"
-	@echo "  make bench-smoke  - Run the hermetic benchmark tier (no network, no models, no spend)"
-	@echo "  make bench        - Run the repo_scale tier against your configured models (spends tokens)"
-	@echo "  make check        - Run all verifications (ruff + UI tests + Python tests + stream tests + UI build + Tauri check)"
-	@echo "  make ci           - Run the whole CI gate locally: make check plus the declared $(PY_MIN) leg"
+	@echo "  make bench-smoke  - Run the hermetic benchmark tier through both drivers, recipe and conductor (no network, no models, no spend)"
+	@echo "  make bench        - Run the repo_scale tier against your configured models, through the fixed recipe (spends tokens)"
+	@echo "  make bench-conductor - Run the repo_scale tier through the conductor, the path a normal install takes (spends tokens)"
+	@echo "  make check        - Run all verifications (ruff, mypy, UI tests, UI test typecheck, Python tests, stream tests, UI build, Tauri check)"
+	@echo "  make ci           - Run the whole CI gate locally: make check plus the declared minimums (python $(PY_MIN), rust $(RUST_MIN))"
 	@echo "  make check-history - Check that every commit in HISTORY_RANGE builds, not just the tip (default: origin/\$$branch..HEAD)"
 	@echo "  make ci-python-floor - Run only the $(PY_MIN) leg (uv or a system python$(PY_MIN) covers it)"
+	@echo "  make ci-rust-floor - Run only the rust $(RUST_MIN) leg: cargo check --locked on the declared minimum (rustup fetches it)"
 	@echo "  make ci-report    - make ci, then publish the verdict on the commit as a GitHub status (needs gh; clean tree; pushed commit)"
 	@echo "  make hooks        - Install the git hooks (pre-commit: lint+typecheck, pre-push: 'make ci')"
 	@echo "  make clean        - Remove caches and build artifacts"
@@ -69,7 +74,7 @@ help:
 	@echo "Prerequisites: engine needs \`pip install -r engine/requirements.txt\` (plus \`pip install ruff mypy\`"
 	@echo "for the checks, or one \`pip install -e \".[dev]\"\`); the ui targets need \`npm install\` in ui/,"
 	@echo "and \`make test-ui\` needs Node 22.22.2+, 24.15+ or 26+."
-	@echo "\`make ci\` additionally needs a python$(PY_MIN) or uv, so its floor leg runs instead of skipping."
+	@echo "\`make ci\` additionally needs a python$(PY_MIN) or uv, and rustup, so its floor legs run instead of skipping."
 
 # From a fresh clone to a checkout `make check` can run in. A virtualenv rather than the
 # system Python, because a modern distribution refuses `pip install` into it (PEP 668) —
@@ -198,8 +203,13 @@ dev-ui:
 # initialisation error to explain itself.
 XVFB := $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),,$(shell command -v xvfb-run >/dev/null 2>&1 && echo "xvfb-run -a"))
 
+# Clippy is in the gate, not beside it: `-D warnings` over every target, tests and the smoke modules
+# included, so a warning is a failure the day it is written and never a number someone counts later
+# (it was 20 once, at lib.rs:335 and eighteen other places, before anything failed on it). The
+# lints are clippy's defaults; a lint this crate disagrees with is an `#[allow]` at the site, with the reason.
 check-tauri:
 	cd src-tauri && cargo check
+	cd src-tauri && cargo clippy --all-targets -- -D warnings
 	# The shell's pure pieces — handshake parsing, the project-root guess, role
 	# validation — live in src/engine_protocol.rs exactly so this can reach them. The
 	# rest of the crate (spawn, read, kill) needs a live process and is not unit-testable.
@@ -269,14 +279,23 @@ run-engine-scratch:
 # The fastest checks first, so the cheap failure is the one you read. These are the
 # same targets the CI workflow names, split by toolchain (.github/workflows/check.yml),
 # but only on the host interpreter.
-# Benchmarks stay out of `check` and `ci` on purpose. The smoke tier is hermetic,
-# but the configured tier spends real tokens on real models, and a gate that costs
-# money on every push is a gate people learn to bypass. Run these deliberately.
+# Benchmarks stay out of `check` and `ci` on purpose. The smoke tier is hermetic, but the configured tier
+# spends real tokens on real models, and a gate that costs money on every push is a gate people learn to
+# bypass. Run these deliberately. The CI workflow does run `bench-smoke` (two seconds, no network, no spend);
+# `check` does not, and docs/08 §3 says why that is a decision rather than an oversight.
 bench:
 	python3 -m benchmarks.runner --tier repo_scale
 
+# The same tier through the driver a normal install uses. `bench` runs the fixed recipe, which is the floor
+# under the product; this is the product: the plan taken step by step through the conductor's moves. It needs
+# a model that can call tools (the conductor's, or the scribe's it borrows) and says so before it spends.
+bench-conductor:
+	python3 -m benchmarks.runner --tier repo_scale --driver conductor
+
+# Both drivers, because a harness that only drives the recipe says nothing about the path a person's goal takes.
 bench-smoke:
 	python3 -m benchmarks.runner --tier smoke
+	python3 -m benchmarks.runner --tier smoke --driver conductor
 
 check: lint typecheck test-ui typecheck-ui-tests test test-streams build-ui check-tauri
 	@echo "All verifications passed successfully!"
@@ -290,13 +309,24 @@ ci-python-floor:
 	@echo "==> python $(PY_MIN) leg"
 	PATH=$(PY_MIN_VENV)/bin:$$PATH CODIFY_FLOOR_LEG=1 $(MAKE) --no-print-directory lint typecheck test test-streams
 
+# The Rust twin of the leg above. `rust-version` in src-tauri/Cargo.toml is a claim about what builds the
+# shell, and nothing tested it: it said 1.77.2 while the locked graph (quick-xml 0.42 wants edition 2024, `time`
+# wants 1.88) could not even be parsed by that Cargo. So this checks the claim the cheap way, `cargo check --locked`
+# on exactly that toolchain, with rustup fetching it when the machine has not. `--locked` because the lockfile is
+# the thing being claimed about. `--profile minimal`: a check needs the compiler and Cargo and nothing else.
+ci-rust-floor:
+	@command -v rustup >/dev/null 2>&1 || { echo "ci-rust-floor: rustup is not installed, and it is what fetches Rust $(RUST_MIN). 'make ci' does not drop this leg — install it from https://rustup.rs" >&2; exit 1; }
+	rustup toolchain install $(RUST_MIN) --profile minimal --no-self-update
+	@echo "==> rust $(RUST_MIN) leg"
+	cd src-tauri && cargo +$(RUST_MIN) check --locked --all-targets
+
 # The whole gate, locally, in one command: every leg CI covered — the host interpreter,
-# the declared minimum, the UI and the Rust shell — with the floor provisioned on demand
+# the declared minimums, the UI and the Rust shell — with the floors provisioned on demand
 # instead of assumed. The Actions workflow (check.yml) is a second opinion on a clean
 # machine, not this gate; run this before calling a change done.
-ci: ci-python-floor check
+ci: ci-python-floor ci-rust-floor check
 	@echo ""
-	@echo "CI gate passed locally: python $(PY_MIN) (provisioned) + host + ui + rust."
+	@echo "CI gate passed locally: python $(PY_MIN) and rust $(RUST_MIN) (provisioned) + host + ui + rust."
 
 # `make ci`, then say so on the commit. Actions gives a pull request its own check; this
 # publishes the local verdict next to it as a commit status (context local/make-ci) using

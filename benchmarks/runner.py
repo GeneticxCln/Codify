@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from benchmarks.provider import CannedFactory, CannedProvider
+from benchmarks.provider import CannedConductorProvider, CannedFactory, CannedProvider
 from engine.db import connect, default_db_path
 from engine.executor import ExecutorService
 from engine.git import GitService
@@ -57,14 +57,22 @@ from engine.trace import TraceService
 BENCH_DIR = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = BENCH_DIR / "manifest.json"
 
-# What runs the tasks: `run_task` creates a goal with `POST /goals` and waits for it, which is the fixed recipe
-# (docs/00 §4). It is a constant and not an option because there is nothing here to choose between; the day a
-# benchmark can drive the conductor, this becomes a value the run reports rather than one it assumes.
-DRIVER = "recipe"
+# What takes a task's plan from "approved" to "done". Both are planned the same way, by the recipe's planner, which
+# is how `POST /goals` plans on every install (docs/00 §4); they differ in what happens after Start:
+#
+# * `recipe` runs each step through the fixed sequence (fixer, verifier, critic, scribe in a compiled order),
+#   which is what an install with no tool-capable model does and what `parallel` goals do.
+# * `conductor` hands each open step to the conductor, which takes it through its `write`, `verify`, `review` and
+#   `summarize` moves (`run_conductor_resume`). That is what a normal install does, so it is what the product
+#   does by default, and it is the one that needs a model that can call tools.
+#
+# The report says which one ran. A number from `recipe` is a number about the floor under the product.
+DRIVERS = ("recipe", "conductor")
+DEFAULT_DRIVER = "recipe"
 
 # Checks that measure the harness rather than a model. Everything else in a
 # task's `checks` is a quality claim and needs a real provider to be honest.
-HARNESS_CHECKS = frozenset({"goal_completed", "stages", "files_written"})
+HARNESS_CHECKS = frozenset({"goal_completed", "stages", "files_written", "conductor_calls"})
 
 
 class BenchmarkError(RuntimeError):
@@ -240,6 +248,19 @@ def run_check(
             return "failed", f"stages never ran: {', '.join(missing)}", kind
         return "passed", f"{len(got)} stage results; all {len(expect)} expected ran", kind
 
+    if check_type == "conductor_calls":
+        # Counted from the usage the executor records for every model call, which names the conductor as the
+        # role. The stage events cannot say: a conductor's `write` runs the fixer and emits the same
+        # `stage_result` the recipe's fixer does, so a run that fell back to the recipe looks identical there.
+        minimum = int(check.get("min", 1))
+        calls = sum(
+            1 for e in events
+            if e.get("type") == "usage" and (e.get("payload") or {}).get("role") == "conductor"
+        )
+        if calls >= minimum:
+            return "passed", f"the conductor made {calls} model call(s)", kind
+        return "failed", f"the conductor made {calls} model call(s), wanted {minimum}+: the plan was not driven by it", kind
+
     if check_type == "files_written":
         minimum = int(check.get("min", 1))
         if len(new_files) >= minimum:
@@ -343,6 +364,41 @@ def seed_agent_configs(engine_db: Path, conn: sqlite3.Connection) -> list[str]:
     return _with_model(rows)
 
 
+def seed_conductor_settings(engine_db: Path, conn: sqlite3.Connection) -> list[str]:
+    """Copy the engine's conductor settings (its model, its budgets) into the scratch store.
+
+    The conductor is not a role, so it has no row in `agent_configs`: its model and its budgets live in
+    `engine_settings`, and a configured conductor run that left them behind would quietly run the conductor on
+    the scribe's model with default budgets instead of the ones the person chose. Only `conductor_*` keys come
+    across, and `conductor_drives_execution` is not among them: the driver is this run's own choice, not
+    something to inherit. Returns the keys copied.
+    """
+    source = sqlite3.connect(engine_db)
+    source.row_factory = sqlite3.Row
+    try:
+        rows = [
+            dict(r) for r in source.execute(
+                "SELECT key, value, updated_at FROM engine_settings WHERE key LIKE 'conductor\\_%' ESCAPE '\\'"
+            )
+        ]
+    except sqlite3.Error:
+        # No settings table or no row: the conductor runs on its defaults, as it does for a person who never chose.
+        return []
+    finally:
+        source.close()
+    copied: list[str] = []
+    for row in rows:
+        if row["key"] == "conductor_drives_execution":
+            continue
+        conn.execute(
+            "INSERT OR REPLACE INTO engine_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            (row["key"], row["value"], row["updated_at"]),
+        )
+        copied.append(str(row["key"]))
+    conn.commit()
+    return copied
+
+
 def _files(root: Path) -> set[str]:
     """Every file a run could have written, as workspace-relative paths — git's own bookkeeping excluded.
 
@@ -387,8 +443,13 @@ async def run_task(
     engine_db: Path | None = None,
     attempt: int = 1,
     trace: bool = False,
+    driver: str = DEFAULT_DRIVER,
 ) -> dict[str, Any]:
     """Run one task end to end: measurements, harness checks, quality checks.
+
+    `driver` is what takes the approved plan to done (`DRIVERS`). The conductor needs a model that can call
+    tools; where there is none it is an error and not a quiet fall back to the recipe, because a run that
+    reported `conductor` and had run the recipe would be a number about something it did not measure.
 
     `trace` records every model call in the task's own store (`docs/04` §8), which is how a real model's
     raw replies are read afterwards and committed as fixtures.
@@ -396,6 +457,8 @@ async def run_task(
     `attempt` numbers repeats of the same task, so each gets a workspace and a store of its own: two
     runs sharing either would measure the first run's leftovers.
     """
+    if driver not in DRIVERS:
+        raise BenchmarkError(f"unknown driver {driver!r}; known drivers: {', '.join(DRIVERS)}")
     started = time.monotonic()
     slug = str(task["id"]) if attempt == 1 else f"{task['id']}-attempt{attempt}"
     workspace = work_root / slug
@@ -411,8 +474,19 @@ async def run_task(
             WorkspaceCreate(name=f"bench-{task['id']}", root_path=str(workspace))
         )
 
+        # The step the conductor is handed, read from the goal's rows when it asks (the goal does not exist yet).
+        goal_ref: list[str] = []
+
+        def open_step() -> str | None:
+            if not goal_ref:
+                return None
+            return next((s.id for s in goals.steps(goal_ref[0]) if s.status != "COMPLETED"), None)
+
         if canned:
-            provider = CannedProvider([dict(w) for w in task.get("canned_write", [])])
+            writes = [dict(w) for w in task.get("canned_write", [])]
+            provider: CannedProvider = (
+                CannedConductorProvider(writes, open_step) if driver == "conductor" else CannedProvider(writes)
+            )
             registry = AgentRegistryService(conn, CannedFactory(provider), Keychain())
             for role in ROLES:
                 registry.set_config(
@@ -428,6 +502,8 @@ async def run_task(
                     "`--tier smoke`"
                 )
             registry = AgentRegistryService(conn, ProviderFactory(Keychain()), Keychain())
+            if driver == "conductor":
+                seed_conductor_settings(engine_db or default_db_path(), conn)
 
         goal = goals.create(
             GoalCreate(
@@ -442,22 +518,34 @@ async def run_task(
             laya=SkippedGate(), tracer=TraceService(conn),
         )
         executor.settings = SettingsService(conn)
+        goal_ref.append(goal.id)
 
         await executor.run_planning(goal.id)
-        # The same driver loop `app._run_steps_locked` runs, minus the
-        # batching a single-step fixture never needs: run what is left, stop
-        # if the goal stopped itself, then close it out. Finishing here is the
-        # point — without it the goal sits at RUNNING and `goal_completed`
-        # would fail a run that in fact succeeded.
         remaining = [s for s in goals.steps(goal.id) if s.status != "COMPLETED"]
         if remaining and goals.get(goal.id).status != "RUNNING":
+            # What the person's Start does, minus the HTTP.
             goals.update_status(goal.id, goals.get(goal.id).version, "RUNNING")
-        for step in remaining:
-            await executor.run_step(goal.id, step.id)
-            if goals.get(goal.id).status != "RUNNING":
-                break
-        if goals.get(goal.id).status == "RUNNING":
-            goals.update_status(goal.id, goals.get(goal.id).version, "COMPLETED")
+        if driver == "conductor":
+            if not executor.conductor_can_drive(goal.id):
+                raise BenchmarkError(
+                    "this run has no conductor to drive the plan: it needs a model that can call tools, "
+                    "chosen in Settings → Agents (or the scribe's, which the conductor borrows). "
+                    "Without one the engine would run the recipe and call it the conductor."
+                )
+            # The conductor completes the goal itself, or pauses it with a reason; the run does not finish it
+            # on its behalf, because whether it does is part of what is measured.
+            await executor.run_conductor_resume(goal.id)
+        else:
+            # The same driver loop `app._run_steps_locked` runs, minus the batching a single-step fixture
+            # never needs: run what is left, stop if the goal stopped itself, then close it out. Finishing
+            # here is the point — without it the goal sits at RUNNING and `goal_completed` would fail a run
+            # that in fact succeeded.
+            for step in remaining:
+                await executor.run_step(goal.id, step.id)
+                if goals.get(goal.id).status != "RUNNING":
+                    break
+            if goals.get(goal.id).status == "RUNNING":
+                goals.update_status(goal.id, goals.get(goal.id).version, "COMPLETED")
 
         # Annotated, because the comprehension would otherwise settle on
         # `EventType | dict[str, Any]` and every payload read below would be a
@@ -472,6 +560,10 @@ async def run_task(
 
     new_files = sorted(_files(workspace) - before)
     harness, quality = split_checks(task)
+    if driver == "conductor":
+        # Not in the manifest, because it is not about a task: it is the proof that this run is the thing its
+        # report says it is. Every other check passes just as well for a recipe run.
+        harness = [*harness, {"type": "conductor_calls", "min": 1}]
 
     checks: list[dict[str, Any]] = []
     for check in harness:
@@ -509,6 +601,7 @@ async def run_task(
         "id": task["id"],
         "attempt": attempt,
         "tier": task.get("tier"),
+        "driver": driver,
         "status": status,
         "wall_ms": wall_ms,
         "stage_ms": stage_ms,
@@ -523,6 +616,13 @@ async def run_task(
         "passed": all(c["status"] == "passed" for c in checks)
         and all(q["status"] != "failed" for q in quality_results),
     }
+
+
+# What each driver means, for the line the console prints under the tier.
+DRIVER_NOTES = {
+    "recipe": "the fixed pipeline: not the conductor",
+    "conductor": "the plan taken step by step through the conductor's moves, as after Start on a normal install",
+}
 
 
 def call_health(events: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
@@ -625,7 +725,7 @@ def _keep_record(work_root: Path, record: Path) -> None:
 
 def _run_one(
     task: dict[str, Any], work_root: Path, *, canned: bool, engine_db: Path | None, attempt: int,
-    trace: bool = False,
+    trace: bool = False, driver: str = DEFAULT_DRIVER,
 ) -> dict[str, Any]:
     """`run_task`, with a crash turned into the failed result it is.
 
@@ -636,7 +736,7 @@ def _run_one(
     started = time.monotonic()
     try:
         return asyncio.run(run_task(
-            task, work_root, canned=canned, engine_db=engine_db, attempt=attempt, trace=trace,
+            task, work_root, canned=canned, engine_db=engine_db, attempt=attempt, trace=trace, driver=driver,
         ))
     except BenchmarkError:
         raise
@@ -646,6 +746,7 @@ def _run_one(
             "id": task["id"],
             "attempt": attempt,
             "tier": task.get("tier"),
+            "driver": driver,
             "status": "ERRORED",
             "error": error,
             "wall_ms": round((time.monotonic() - started) * 1000),
@@ -685,6 +786,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--report", type=Path, default=None, help="write the JSON report here")
     parser.add_argument("--only", default=None, help="run a single task id")
+    parser.add_argument(
+        "--driver",
+        choices=DRIVERS,
+        default=DEFAULT_DRIVER,
+        help="what takes the approved plan to done: the fixed recipe, or the conductor a normal install uses "
+             "(default: %(default)s)",
+    )
     parser.add_argument(
         "--engine-db",
         type=Path,
@@ -757,7 +865,7 @@ def main(argv: list[str] | None = None) -> int:
             for task in tasks:
                 result = _run_one(
                     task, work_root, canned=canned, engine_db=args.engine_db, attempt=attempt,
-                    trace=args.record is not None,
+                    trace=args.record is not None, driver=args.driver,
                 )
                 results.append(result)
                 if args.record is not None:
@@ -780,10 +888,10 @@ def main(argv: list[str] | None = None) -> int:
     report = {
         "tier": args.tier,
         "provider": "canned" if canned else "configured",
-        # What drove the tasks. The runner calls `POST /goals`, which is the fixed recipe; a person's goal on
-        # an install with a conductor is driven by the conductor, so a rate quoted without this reads as a
-        # claim about the product when it is a claim about the floor under it (docs/08 §6).
-        "driver": DRIVER,
+        # What drove the tasks after the plan was approved. A person's goal on an install with a conductor is
+        # driven by the conductor, so a rate quoted without this reads as a claim about the product when it may
+        # be a claim about the floor under it (docs/08 §6).
+        "driver": args.driver,
         "summary": summary,
         "tasks": results,
     }
@@ -792,7 +900,7 @@ def main(argv: list[str] | None = None) -> int:
         args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     print(f"tier      {args.tier} ({report['provider']} provider)")
-    print(f"driver    {DRIVER} (the fixed pipeline: not the conductor)")
+    print(f"driver    {args.driver} ({DRIVER_NOTES[args.driver]})")
     rate = summary["pass_rate"]
     print(f"harness   {summary['passed']}/{summary['tasks']} passed"
           + (f" ({rate}%)" if rate is not None else ""))

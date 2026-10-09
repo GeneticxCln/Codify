@@ -30,7 +30,7 @@ runs everything in one pass:
 | `make test` | full Python suite (411 tests today — the number moves, so trust the run) |
 | `make test-streams` | the concurrency/stream-isolation tests, **by name** (not just via discovery) |
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |
-| `make check-tauri` | `cargo check` + `cargo test` (under Xvfb when there is no display; the machine tab's tests run a real `bwrap` jail) + `cargo fmt --check` on the desktop shell |
+| `make check-tauri` | `cargo check` + `cargo clippy --all-targets -- -D warnings` + `cargo test` (under Xvfb when there is no display; the machine tab's tests run a real `bwrap` jail) + `cargo fmt --check` on the desktop shell |
 | `make check-history` | every commit in `HISTORY_RANGE` (default `origin/<branch>..HEAD`) builds, not just the tip |
 
 The Python suite must run on **3.10 and 3.14** — 3.10 because `pyproject.toml`
@@ -48,8 +48,10 @@ make ci
 
 which runs everything above and then the same Python targets again on the declared
 minimum, bringing that interpreter up on demand (it downloads one with `uv`, or uses a
-`python3.10` you already have). The floor leg never skips: if it cannot be provisioned,
-`make ci` fails and says what to install. `.github/workflows/check.yml` describes the
+`python3.10` you already have), and `cargo check --locked` on the Rust minimum
+`src-tauri/Cargo.toml` declares (`make ci-rust-floor`; `rustup` fetches the compiler).
+The floor legs never skip: if one cannot be provisioned, `make ci` fails and says what
+to install. `.github/workflows/check.yml` describes the
 same targets split by toolchain. That workflow runs on every pull request and every
 push to `master` (its header says what the earlier billing lock was, and why a status
 from `make ci-report` is still worth having): a second opinion from GitHub's own
@@ -154,7 +156,12 @@ screen. Two rules fall out of it. A new `ui/src/components/ui/*.tsx` has to be
 added to the table in `componentLoader.test.ts`, so a shared primitive nobody
 rendered is a primitive whose markup nothing checks. And a render must produce no
 React warning at all: a list child without a unique key reconciles by index, which
-is a state-mixing bug rather than a cosmetic one.
+is a state-mixing bug rather than a cosmetic one. The second rule is enforced where a
+DOM is mounted: `withDom` records every `console.error` and fails the test, with all of
+them, once the document is torn down, so an update outside `act` is a red test and not a
+line in the scrollback. A wait that spans real time (an app timer, an answer the test is
+holding) goes through `dom.act(...)` or the App harness's `ctx.act(...)`, so what lands
+meanwhile lands inside `act`.
 
 **And when a control has to be *used*, there is now a DOM for it.** The rules
 above are all about `react-dom/server`, and a static render has one blind spot
@@ -252,8 +259,9 @@ SPDX licence named by a person, a pinned commit SHA, a recorded reason, and a
 with that instruction rather than scoring an empty run as perfect. See
 `docs/08-benchmarks.md`.
 
-**Benchmarks are not in the gate.** `make bench-smoke` is hermetic; `make bench`
-spends real tokens on real models. A gate that costs money on every push is a
+**Benchmarks are not in the gate.** `make bench-smoke` is hermetic (both drivers,
+recipe and conductor; the CI workflow runs it); `make bench` and `make bench-conductor`
+spend real tokens on real models. A gate that costs money on every push is a
 gate people learn to bypass. Run them deliberately.
 
 **No hardcoded model lists.** Models come from live provider discovery

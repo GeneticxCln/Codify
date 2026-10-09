@@ -26,6 +26,7 @@ recommended to developers must not change what the suite proves — see
 from __future__ import annotations
 
 import atexit
+import logging
 import os
 import shutil
 import tempfile
@@ -48,6 +49,7 @@ def activate() -> str:
     # the one inherited value that can kill this process.
     disarm_parent_watchdogs()
     pin_laya_sdk_off()
+    quiet_slow_callbacks()
 
     if home.is_isolated() or os.environ.get(home.ENV_DB):
         # Already redirected by the caller — do not second-guess an explicit choice.
@@ -110,6 +112,33 @@ def pin_laya_sdk_off() -> None:
     # `CODIFY_LAYA_TIMEOUT_S` would turn a slow test machine into a skipped gate.
     for name in (SDK_DEVICE_ENV, SDK_TIMEOUT_ENV, SDK_WARM_ENV):
         os.environ.pop(name, None)
+
+
+class _SlowCallbackFilter(logging.Filter):
+    """Drops asyncio's "Executing <…> took 0.123 seconds", and nothing else asyncio says."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (message.startswith("Executing <") and " took " in message)
+
+
+def quiet_slow_callbacks() -> None:
+    """Keep asyncio's slow-callback warnings out of the suite's output.
+
+    `unittest.IsolatedAsyncioTestCase` runs every test's loop in asyncio debug mode, and debug mode logs a
+    warning for each callback that holds the loop for more than 100 ms. This suite drives real git, real
+    sandboxed commands and real sqlite from async tests on purpose, so that is most of them: about three
+    hundred lines per run, ahead of the summary and in front of the one line that mattered. A warning that fires
+    on every run says nothing about this run, and one real message among three hundred is not read.
+
+    Only that message is dropped. The tests that care whether the loop was blocked say so themselves and
+    measure it (`test_a_librarian_command_does_not_hold_the_event_loop`,
+    `the_wait_yields_instead_of_blocking_the_thread_it_runs_on` in the shell's suite), and every other
+    thing asyncio logs, an exception nobody retrieved included, still prints.
+    """
+    logger = logging.getLogger("asyncio")
+    if not any(isinstance(f, _SlowCallbackFilter) for f in logger.filters):
+        logger.addFilter(_SlowCallbackFilter())
 
 
 HOME = activate()

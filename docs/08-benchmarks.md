@@ -18,7 +18,7 @@ So there are two kinds of check, and they are never mixed in a single line:
 
 | Kind | Question | Measured by |
 |---|---|---|
-| **Harness** | Did the pipeline run the way it claims to? | `goal_completed`, `stages`, `files_written`, `file_exists` |
+| **Harness** | Did the pipeline run the way it claims to? | `goal_completed`, `stages`, `files_written`, `file_exists`, and under the conductor driver `conductor_calls` |
 | **Quality** | Did it do the task correctly? | `test_command`, `file_contains` |
 
 A harness check that fails is a bug in Codify. A quality check that fails is
@@ -37,7 +37,7 @@ labelled `tokens_are_synthetic` for the same reason.
 
 | Tier | Provider | What it is for | What it costs |
 |---|---|---|---|
-| `smoke` | canned (`benchmarks/provider.py`) | Proves the harness. Deterministic, offline, ~90 ms. | nothing |
+| `smoke` | canned (`benchmarks/provider.py`) | Proves the harness, through both drivers (§6). Deterministic, offline, about two seconds. | nothing |
 | `repo_scale` | configured (your models) | Cross-file, multi-step refactors with a real test command at the end. | real tokens |
 
 The synthetic fixture under `benchmarks/fixtures/synthetic-repo/` is what makes
@@ -53,21 +53,32 @@ fixture, so they need no fetch and no third-party code. A task written against a
 fails with a diagnosis naming the missing repository rather than scoring an empty
 run as a perfect one.
 
+**What that does not cover.** All eleven run on one repository, a small synthetic Python module, so a number from
+`repo_scale` says nothing about how a model does on a repository of a different shape or size, and `"repos": []` in the
+manifest is empty on purpose: no third-party source is committed here (§4), and a task written against a repository nobody
+has fetched fails and says so. Breadth beyond the one fixture comes from `benchmarks/vendor.py`, run deliberately by a
+person, not from this repository.
+
 ## 3. Running them
 
 ```
-make bench-smoke     # hermetic; safe anywhere
-make bench           # your configured models; spends tokens
-python3 -m benchmarks.runner --tier smoke --report /tmp/bench.json
+make bench-smoke       # hermetic; safe anywhere; both drivers
+make bench             # your configured models, through the fixed recipe; spends tokens
+make bench-conductor   # your configured models, through the conductor; spends tokens
+python3 -m benchmarks.runner --tier smoke --driver conductor --report /tmp/bench.json
 ```
 
-Benchmarks are **not** part of `make check` or `make ci`, and the reason is in
-the Makefile: a gate that costs money on every push is a gate people learn to
-bypass, and then it protects nothing. The smoke tier *is* hermetic and would be
-free in the gate; it is left out because a benchmark number in CI stops being
-read the first time it is red for reasons unrelated to the change.
+**The CI workflow runs the smoke tier, through both drivers; `make check` and `make ci` do not, and the
+configured tier is run by nobody but you.** The smoke tier costs nothing and about two seconds, and it is the only
+check that drives the engine from a goal to a commit through the harness, so CI runs it: a change that breaks that
+fails the change that broke it, not the next benchmark run. It was left out of the local gate on purpose, because "a
+benchmark number in CI stops being read the first time it is red for reasons unrelated to the change", and that
+decision stands: the smoke tier is not a number (it passes or it names the check that failed), which is an argument
+for adding it to `make check` as well, and `make bench-smoke` is one word away from being a prerequisite there. That
+is the owner's call, not an accident of this document. The configured tier stays out of both for the reason in the
+Makefile: a gate that costs money on every push is a gate people learn to bypass, and then it protects nothing.
 
-Useful flags: `--only <task-id>` (one task), `--report <path>` (JSON), and
+Useful flags: `--driver recipe|conductor` (§6), `--only <task-id>` (one task), `--report <path>` (JSON), and
 `--engine-db <path>` (read a specific engine store for a configured run). For a
 real model, three more matter:
 
@@ -201,12 +212,29 @@ outside `engine/` by accident of layout, not by decision.
   provider entirely. It measures the harness, which is the point of the smoke
   tier.
 
-* **Driver.** The report says `"driver": "recipe"`, and the console prints it. Every task here is run by
-  `POST /goals`, which is the fixed pipeline (librarian, design, planner, fixer, verifier, critic, scribe in a
-  compiled order). On an install with a conductor a person's goal is driven by the conductor instead, so **a
-  number from this harness is a recipe number unless the report says `conductor`**: it measures the floor under
-  the product, not how the product behaves. The conductor has been measured only by hand (§8, "The conductor,
-  end to end"), on three turns and one small model.
+* **Driver.** The report says which one ran (`"driver"`, and on every task), and the console prints it. Both
+  plan the same way, with the recipe's planner, which is how `POST /goals` plans on every install; they differ in
+  what takes the approved plan to done:
+  * `recipe` (the default) walks each step through the fixed pipeline (fixer, verifier, critic, scribe in a compiled
+    order). That is what an install with no tool-capable model does, and it is the floor under the product.
+  * `conductor` hands each open step to the conductor, which takes it through `write`, `verify`, `review` and
+    `summarize` (`ExecutorService.run_conductor_resume`, the call `_run_steps_locked` makes after Start). That is
+    what a normal install does, so it is the path a person's goal takes by default.
+
+  **A number from `recipe` is a number about the floor, not about the product.** Under `conductor` a run is held
+  to one more harness check, `conductor_calls`: the conductor made at least one model call, counted from the
+  `usage` events that name it as the role. It is there because every other check passes just as well for a recipe
+  run (a conductor's `write` runs the fixer and emits the same `stage_result`), so without it a run that fell back
+  to the recipe would report `conductor`. The run also refuses outright, with a diagnosis, when the install has no
+  conductor to drive the plan, rather than running the recipe in its place.
+
+  The smoke tier's conductor is scripted (`CannedConductorProvider`): it makes the four moves in order and does
+  not read their results, so a broken move fails the task instead of being routed around. It proves the engine
+  carries a goal from approval to a commit by way of the conductor's moves. It cannot say whether a real model
+  *chooses* those moves; that is `make bench-conductor`, which has not been run against a model for this document,
+  and a configured run copies the conductor's model and budgets from the engine's settings
+  (`seed_conductor_settings`) so that it uses the conductor the person chose. The older by-hand measurement is in
+  §8, "The conductor, end to end", on three turns and one small model.
 
 Before quoting any of it, read `benchmarks/manifest.json`'s `_read_this_first`.
 

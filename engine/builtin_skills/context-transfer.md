@@ -51,7 +51,7 @@ content is "none".
 * **The gate, and its actual last result.** `make ci` is the gate: ruff, mypy,
   the Python suite on the host interpreter *and* on the provisioned 3.10
   floor, the UI suite, `typecheck-ui-tests` over `ui/src` **and** `ui/tests`,
-  the production UI build, and `cargo check` + `cargo fmt --check`. Name the
+  the production UI build, and `cargo check`, `cargo clippy -- -D warnings` + `cargo fmt --check`. Name the
   command and the verdict you last saw. If it is red, say which leg and which
   file — a block that claims green when it is not costs the next thread more
   than any omission in this list.

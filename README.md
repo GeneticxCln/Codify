@@ -95,7 +95,7 @@ make doctor     # checks everything below, prints the install command for what i
 
 It looks for **Python 3.10+** with `venv` (3.10 is a real deployment floor: the shell boots the engine as
 `python3 -m engine`), **Node 22.22.2+ / 24.15+ / 26+** (jsdom's range, which the UI suite inherits), **Rust
-stable** with `rustfmt` (rustup's default profile includes it, `--profile minimal` does not) and WebKitGTK 4.1 (2.40 or newer: the UI is
+stable** with `rustfmt` and `clippy` (rustup's default profile includes both, `--profile minimal` neither) and WebKitGTK 4.1 (2.40 or newer: the UI is
 built with Tailwind 4, which needs a Safari 16.4-class engine), GTK 3, libsoup 3, librsvg, OpenSSL and `pkg-config`, and a display for the Tauri leg (`xvfb` is used
 automatically on a headless machine). **bubblewrap** (`bwrap`) that can actually build a jail, because the machine tab
 is a jailed shell and its containment tests start real ones (WebKitGTK's own sandbox already uses it). PipeWire's `pw-record` is optional and only needed for the mic (see
@@ -495,12 +495,12 @@ Each is specified with its reasoning in [`docs/03`](docs/03-security-and-roadmap
 ## 🧪 The gate
 
 ```bash
-make check     # lint, typecheck, UI tests, Python suite, stream isolation, build, cargo
-make ci        # the same Python legs again on the declared minimum (3.10)
+make check     # lint, typecheck, UI tests, UI test typecheck, Python suite, stream isolation, build, cargo (+clippy)
+make ci        # the same legs again on the declared minimums: Python 3.10 and the Rust floor
 ```
 
 `make check` only ever runs the interpreter you have installed. `make ci` runs the Python legs again on **3.10**,
-fetching that interpreter on demand rather than skipping the leg. 3.10 matters: a construct only 3.12+ parses is
+fetching that interpreter on demand rather than skipping the leg, and checks that the Rust shell builds on the compiler `rust-version` declares (`rustup` fetches it). 3.10 matters: a construct only 3.12+ parses is
 invisible on a modern interpreter and fatal on the declared minimum. `.github/workflows/check.yml` runs the same
 targets on GitHub's runners for every pull request and every push to `master`: a second opinion from a clean machine.
 

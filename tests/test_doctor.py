@@ -35,11 +35,16 @@ STUBS: dict[str, str] = {
     "npm": '#!/bin/sh\necho 10.9.7\n',
     # `cargo fmt --version` fails when DOCTOR_STUB_NO_RUSTFMT is set: a toolchain installed with
     # rustup's minimal profile, which has cargo and rustc and not rustfmt.
+    # `cargo clippy --version` fails when DOCTOR_STUB_NO_CLIPPY is set, for the same minimal profile.
     "cargo": (
         '#!/bin/sh\n'
         'if [ "$1" = fmt ]; then\n'
         '  [ -n "$DOCTOR_STUB_NO_RUSTFMT" ] && { echo "error: cargo-fmt is not installed" >&2; exit 1; }\n'
         '  echo "rustfmt 1.8.0-stable"; exit 0\n'
+        'fi\n'
+        'if [ "$1" = clippy ]; then\n'
+        '  [ -n "$DOCTOR_STUB_NO_CLIPPY" ] && { echo "error: no such command: `clippy`" >&2; exit 1; }\n'
+        '  echo "clippy 0.1.94"; exit 0\n'
         'fi\n'
         'echo "cargo 1.94.1"\n'
     ),
@@ -50,6 +55,7 @@ STUBS: dict[str, str] = {
         'for m in $DOCTOR_STUB_MISSING_LIBS; do [ "$m" = "$lib" ] && exit 1; done\nexit 0\n'
     ),
     "uv": "#!/bin/sh\nexit 0\n",
+    "rustup": "#!/bin/sh\nexit 0\n",
     "xvfb-run": "#!/bin/sh\nexit 0\n",
     # `bwrap --version` answers; building a jail (anything else) fails when DOCTOR_STUB_BWRAP_CANNOT_JAIL is
     # set: bubblewrap installed on a kernel or an AppArmor policy that refuses it user namespaces.
@@ -169,6 +175,14 @@ class TestEveryMissingPieceIsNamedAndFixable(DoctorCase):
         # cargo and rustc themselves were found, so they are still reported as found.
         self.assertIn("ok       rustc 1.94.1", done.stdout)
 
+    def test_a_toolchain_without_clippy_is_named_with_the_fix(self) -> None:
+        # The gate runs `cargo clippy --all-targets -- -D warnings` right after `cargo check`. A minimal rustup
+        # profile has no clippy, and the gate would then fail on a missing subcommand rather than on code.
+        done = self.doctor(DISPLAY=":0", DOCTOR_STUB_NO_CLIPPY="1")
+
+        self.assertMissing(done, "clippy is not installed", "rustup component add clippy")
+        self.assertIn("ok       rustc 1.94.1", done.stdout)
+
     def test_a_missing_system_library_is_named_with_its_package_line(self) -> None:
         done = self.doctor(DISPLAY=":0", DOCTOR_STUB_MISSING_LIBS="webkit2gtk-4.1 libsoup-3.0")
 
@@ -200,6 +214,13 @@ class TestEveryMissingPieceIsNamedAndFixable(DoctorCase):
         self.remove("uv")
 
         self.assertMissing(self.doctor(DISPLAY=":0"), "floor leg", "uv")
+
+    def test_no_rustup_means_the_rust_floor_leg_cannot_run(self) -> None:
+        # `make ci-rust-floor` fetches the declared-minimum compiler with rustup and never skips, so a machine
+        # with a distro cargo and no rustup has to be told before the long part.
+        self.remove("rustup")
+
+        self.assertMissing(self.doctor(DISPLAY=":0"), "Rust floor leg", "rustup.rs")
 
     def test_a_python_that_cannot_make_a_venv_names_the_debian_package(self) -> None:
         self.install(

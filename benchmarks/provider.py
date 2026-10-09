@@ -18,10 +18,12 @@ would be a lie. That split is why `repo_scale` declares a real provider.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 from engine.models import AgentConfig
 from engine.providers import BaseProvider, Keychain, ProviderFactory
+from engine.toolcall import ToolCall, ToolReply, ToolSpec
 
 # What one canned write from the manifest looks like: a path and the bytes the
 # fixer should put there.
@@ -94,6 +96,64 @@ class CannedProvider(BaseProvider):
         # Laya never reaches the provider (the gate is skipped in a benchmark
         # run), but an unknown role must fail loudly rather than return "{}".
         raise ValueError(f"canned provider has no reply for role {role!r}")
+
+
+class CannedConductorProvider(CannedProvider):
+    """The same scripted roles, and a conductor that takes one step through its four moves.
+
+    This is what lets the smoke tier drive the engine the way a person's goal is driven on a normal
+    install: after Start, the *conductor* takes each open step through `write`, `verify`, `review` and
+    `summarize` (`ExecutorService.run_conductor_resume`), and each move runs the role the recipe would have
+    run, which is still answered by `CannedProvider._reply`. What the script replaces is the model that
+    chooses the moves, not the moves.
+
+    **It does not read the results it is given.** A move that is refused (a goal that is not RUNNING, a
+    verifier that failed) is not retried or routed around, the next move is simply called, so the step does
+    not complete and the task fails its `goal_completed` check. A scripted conductor that quietly recovered
+    from a broken move would be a harness that hid the breakage it exists to find. And, like the canned roles,
+    it measures the pipeline and never a model: whether a real model *chooses* these moves in this order is
+    precisely the thing a canned run cannot say.
+    """
+
+    MOVES = ("write", "verify", "review", "summarize")
+
+    def __init__(self, writes: list[CannedWrite] | None, open_step: Callable[[], str | None]) -> None:
+        super().__init__(writes)
+        # The id of the step the conductor was handed, read from the goal's stored steps rather than parsed out
+        # of its prompt: the prompt's wording is not a contract and the rows are.
+        self._open_step = open_step
+
+    @property
+    def supports_tools(self) -> bool:
+        return True
+
+    async def complete_with_tools(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        *,
+        num_ctx: int | None = None, keep_alive: str | None = None,
+    ) -> ToolReply:
+        self.calls.append("conductor")
+        if self.usage_sink is not None:
+            self.usage_sink(dict(_CANNED_USAGE))
+        # Where this run is in the four moves is a function of the transcript: one `tool` message per move
+        # already made. Nothing is remembered between calls, so a conductor run per step needs no reset.
+        made = sum(1 for message in messages if message.get("role") == "tool")
+        if made >= len(self.MOVES):
+            return ToolReply(text="That step is done.")
+        step_id = self._open_step()
+        if step_id is None:
+            return ToolReply(text="There is no open step.")
+        move = self.MOVES[made]
+        arguments: dict[str, Any] = {"step_id": step_id}
+        if move == "write":
+            arguments["instructions"] = "Make the change this step describes."
+        return ToolReply(tool_calls=[ToolCall(id=f"bench_{move}_{made}", name=move, arguments=arguments)])
 
 
 class CannedFactory(ProviderFactory):

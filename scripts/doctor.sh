@@ -123,6 +123,22 @@ if have cargo && have rustc; then
     bad "rustfmt is not installed for this Rust toolchain ('make check-tauri' runs cargo fmt --check)" \
       "Run: rustup component add rustfmt   (rustup's default profile includes it; --profile minimal does not)"
   fi
+  # `make ci` also runs `cargo check --locked` on the Rust minimum `src-tauri/Cargo.toml` declares, and
+  # `rustup` is what fetches that compiler: a distro `cargo` has none, and the leg never skips.
+  if have rustup; then
+    ok "rustup (fetches the declared-minimum Rust for 'make ci')"
+  else
+    bad "rustup is not installed — 'make ci' cannot provision its Rust floor leg" \
+      "Install rustup (https://rustup.rs); the floor leg never skips."
+  fi
+  # And `cargo clippy --all-targets -- -D warnings` right after `cargo check`, which a minimal profile
+  # also leaves out: the gate would fail at its second step on a missing subcommand, not on code.
+  if run cargo clippy --version >/dev/null 2>&1; then
+    ok "clippy ($(run cargo clippy --version 2>/dev/null))"
+  else
+    bad "clippy is not installed for this Rust toolchain ('make check-tauri' runs cargo clippy -- -D warnings)" \
+      "Run: rustup component add clippy   (rustup's default profile includes it; --profile minimal does not)"
+  fi
 else
   bad "cargo/rustc not installed" "Install Rust with rustup: https://rustup.rs"
 fi

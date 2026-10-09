@@ -12,6 +12,7 @@ this repository, so no third-party source is needed to exercise the runner.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import errno
 import io
@@ -43,7 +44,9 @@ from benchmarks.runner import (
     seed_agent_configs,
     summarise,
 )
+from benchmarks.provider import CannedConductorProvider
 from engine.db import connect
+from engine.executor import ExecutorService
 from engine.git import GitService
 
 SYNTHETIC = "synthetic-repo"
@@ -183,6 +186,219 @@ class SmokeTierTests(unittest.TestCase):
         code, err = _run_main(["--manifest", "/tmp/does-not-exist.json"])
         self.assertEqual(code, 2)
         self.assertIn("no manifest", err)
+
+
+class TheConductorDriverTests(unittest.TestCase):
+    """The default execution path has a benchmark, and the benchmark cannot pass without it.
+
+    Until `--driver conductor` the harness ran every task through the fixed recipe and said so: a rate from
+    it was a number about the floor under the product, since a person's goal on a normal install is taken
+    through the conductor's moves instead. These pin that the other driver is real (it makes model calls as
+    the conductor, through the engine's own `run_conductor_resume`), that the report says which one ran, and
+    that a run which was *not* driven by the conductor cannot be reported as if it were.
+    """
+
+    def _report(self, *argv: str) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            code, _ = _run_main(["--tier", "smoke", "--report", str(report), *argv])
+            data: dict[str, Any] = json.loads(report.read_text(encoding="utf-8"))
+            data["exit"] = code
+            return data
+
+    def test_the_smoke_tier_passes_when_the_conductor_drives_it(self) -> None:
+        data = self._report("--driver", "conductor")
+
+        self.assertEqual(0, data["exit"])
+        self.assertEqual("conductor", data["driver"])
+        self.assertEqual({"conductor"}, {t["driver"] for t in data["tasks"]})
+        self.assertEqual(data["summary"]["tasks"], data["summary"]["passed"])
+
+    def test_the_default_is_still_the_recipe_and_says_so(self) -> None:
+        data = self._report()
+
+        self.assertEqual("recipe", data["driver"])
+        self.assertEqual({"recipe"}, {t["driver"] for t in data["tasks"]})
+
+    def test_a_conductor_run_proves_the_conductor_made_the_calls(self) -> None:
+        data = self._report("--driver", "conductor")
+
+        for task in data["tasks"]:
+            proof = [c for c in task["checks"] if c["type"] == "conductor_calls"]
+            self.assertEqual(1, len(proof), task["id"])
+            self.assertEqual("passed", proof[0]["status"], proof[0]["detail"])
+        # The recipe has no such check to pass: it would be a check that cannot fail.
+        for task in self._report()["tasks"]:
+            self.assertEqual([], [c for c in task["checks"] if c["type"] == "conductor_calls"])
+
+    def test_the_console_names_the_conductor_driver(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            main(["--tier", "smoke", "--driver", "conductor"])
+
+        self.assertRegex(out.getvalue(), r"driver\s+conductor")
+        self.assertNotRegex(out.getvalue(), r"driver\s+recipe")
+
+    def test_an_unknown_driver_is_a_usage_error(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            main(["--tier", "smoke", "--driver", "autopilot"])
+
+        self.assertEqual(2, raised.exception.code)
+
+    def test_the_check_counts_conductor_usage_and_nothing_else(self) -> None:
+        check = {"type": "conductor_calls", "min": 2}
+
+        def usage(role: str) -> dict[str, Any]:
+            return {"type": "usage", "payload": {"role": role}}
+
+        none = runner.run_check(check, Path("."), [usage("fixer"), usage("verifier")], "COMPLETED", [])
+        one = runner.run_check(check, Path("."), [usage("conductor"), usage("fixer")], "COMPLETED", [])
+        two = runner.run_check(check, Path("."), [usage("conductor"), usage("conductor")], "COMPLETED", [])
+
+        self.assertEqual("failed", none[0])
+        self.assertEqual("failed", one[0])
+        self.assertEqual("passed", two[0])
+        self.assertEqual("harness", two[2], "a check about the run, not about a model, must not be skipped as quality")
+
+    def test_a_run_the_conductor_did_not_drive_fails_instead_of_passing_as_the_recipe(self) -> None:
+        """If the engine would fall back to the recipe, the run stops and says so.
+
+        `conductor_can_drive` is False on an install with no tool-capable model, and `_run_steps_locked` then
+        walks the steps through the recipe without a word. A benchmark that did the same and printed
+        `driver conductor` would be reporting a number about something it never ran.
+        """
+        task = next(t for t in load_manifest()["tasks"] if t["tier"] == "smoke")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(ExecutorService, "conductor_can_drive", return_value=False):
+            with self.assertRaises(BenchmarkError) as raised:
+                asyncio.run(runner.run_task(task, Path(tmp), canned=True, driver="conductor"))
+
+        self.assertIn("no conductor", str(raised.exception))
+
+    def test_a_run_that_was_secretly_the_recipe_fails_the_proof_and_only_the_proof(self) -> None:
+        """Everything else passes a recipe run too, which is why the proof is a check of its own."""
+        task = next(t for t in load_manifest()["tasks"] if t["tier"] == "smoke")
+
+        async def the_recipe_instead(self: Any, goal_id: str, focus_step_id: str | None = None) -> None:
+            for step in self.goals.steps(goal_id):
+                await self.run_step(goal_id, step.id)
+            self.goals.update_status(goal_id, self.goals.get(goal_id).version, "COMPLETED")
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(ExecutorService, "run_conductor_resume", the_recipe_instead):
+            result = asyncio.run(runner.run_task(task, Path(tmp), canned=True, driver="conductor"))
+
+        self.assertFalse(result["passed"])
+        self.assertEqual({"conductor_calls"}, {c["type"] for c in result["checks"] if c["status"] == "failed"})
+
+    def test_a_conductor_that_never_writes_leaves_the_task_failing(self) -> None:
+        """A scripted conductor does not get to hide a broken path: skip `write` and the step cannot finish."""
+        task = next(t for t in load_manifest()["tasks"] if t["tier"] == "smoke")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(CannedConductorProvider, "MOVES", ("verify", "review", "summarize")):
+            result = asyncio.run(runner.run_task(task, Path(tmp), canned=True, driver="conductor"))
+
+        self.assertFalse(result["passed"])
+        failed = {c["type"] for c in result["checks"] if c["status"] == "failed"}
+        self.assertIn("goal_completed", failed)
+        self.assertIn("files_written", failed)
+
+    def test_the_scripted_conductor_walks_the_four_moves_and_then_stops(self) -> None:
+        provider = CannedConductorProvider([], lambda: "step-1")
+        self.assertTrue(provider.supports_tools)
+
+        async def walk() -> tuple[list[tuple[str, dict[str, Any]]], str]:
+            messages: list[dict[str, Any]] = [{"role": "user", "content": "go"}]
+            calls: list[tuple[str, dict[str, Any]]] = []
+            for _ in range(6):
+                reply = await provider.complete_with_tools("", messages, [], "m", 0.0, 1)
+                if not reply.tool_calls:
+                    return calls, reply.text
+                call = reply.tool_calls[0]
+                calls.append((call.name, dict(call.arguments)))
+                messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": "ok"})
+            return calls, ""
+
+        calls, final = asyncio.run(walk())
+
+        self.assertEqual(["write", "verify", "review", "summarize"], [name for name, _ in calls])
+        self.assertTrue(all(args["step_id"] == "step-1" for _, args in calls))
+        self.assertIn("instructions", calls[0][1])
+        self.assertEqual("That step is done.", final)
+
+    def test_a_scripted_conductor_with_no_open_step_says_so_and_calls_nothing(self) -> None:
+        provider = CannedConductorProvider([], lambda: None)
+
+        reply = asyncio.run(provider.complete_with_tools("", [{"role": "user", "content": "go"}], [], "m", 0.0, 1))
+
+        self.assertEqual([], list(reply.tool_calls))
+        self.assertIn("no open step", reply.text)
+
+
+class TheConductorsSettingsComeAcrossTests(unittest.TestCase):
+    """A configured conductor run uses the conductor the person chose, not the scribe's by accident."""
+
+    @staticmethod
+    def _engine_store(tmp: str) -> Path:
+        path = Path(tmp) / "engine.sqlite"
+        conn = connect(path)
+        try:
+            for key, value in (
+                ("conductor_provider", "anthropic"),
+                ("conductor_model", "big-model"),
+                ("conductor_max_turns", "30"),
+                ("conductor_drives_execution", "0"),
+                ("parallel_width", "9"),
+                ("web_fetch", "2"),
+            ):
+                conn.execute(
+                    "INSERT OR REPLACE INTO engine_settings (key, value, updated_at) VALUES (?, ?, 1.0)", (key, value),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return path
+
+    def test_only_conductor_keys_come_across_and_the_driver_choice_does_not(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._engine_store(tmp)
+            scratch = connect(Path(tmp) / "scratch.db")
+            try:
+                copied = runner.seed_conductor_settings(db, scratch)
+                rows = {r["key"]: r["value"] for r in scratch.execute("SELECT key, value FROM engine_settings")}
+            finally:
+                scratch.close()
+
+        self.assertEqual({"conductor_provider", "conductor_model", "conductor_max_turns"}, set(copied))
+        self.assertEqual({"conductor_provider": "anthropic", "conductor_model": "big-model", "conductor_max_turns": "30"}, rows)
+
+    def test_the_engine_store_is_left_as_it_was(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._engine_store(tmp)
+            scratch = connect(Path(tmp) / "scratch.db")
+            try:
+                runner.seed_conductor_settings(db, scratch)
+            finally:
+                scratch.close()
+            after = sqlite3.connect(db)
+            try:
+                count = after.execute("SELECT COUNT(*) FROM engine_settings").fetchone()[0]
+            finally:
+                after.close()
+
+        self.assertEqual(6, count)
+
+    def test_a_store_with_no_settings_table_means_the_defaults_not_a_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bare = Path(tmp) / "bare.sqlite"
+            sqlite3.connect(bare).close()
+            scratch = connect(Path(tmp) / "scratch.db")
+            try:
+                copied = runner.seed_conductor_settings(bare, scratch)
+            finally:
+                scratch.close()
+
+        self.assertEqual([], copied)
 
 
 class ConfiguredTierTests(unittest.TestCase):

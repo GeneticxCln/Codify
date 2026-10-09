@@ -29,16 +29,18 @@ mean the change is shippable.
 |---|---|
 | `make setup` / `make doctor` | From a fresh clone: create `.venv` + install everything / check the machine, and this checkout's `.venv` against `pyproject.toml`, and say how to fix what is missing (read-only). The Makefile prefers `./.venv/bin` automatically, except inside the 3.10 floor leg |
 | `make check` | Everything below, on the interpreter you have |
-| `make ci` | `make check`, then the same Python legs again on the declared 3.10 minimum |
+| `make ci` | `make check`, then the same Python legs again on the declared 3.10 minimum, and `cargo check --locked` on the declared Rust minimum |
 | `make lint` | `ruff check engine tests scripts` — rules and target Python pinned in `pyproject.toml` |
 | `make typecheck` | `mypy` over `engine`, `tests`, `scripts` — config pinned in `pyproject.toml` |
 | `make test` | Full Python suite via `unittest` |
 | `make test-streams` | Stream-isolation tests **by name**, not just by discovery |
+| `make bench-smoke` | The hermetic benchmark tier through both drivers, recipe and conductor: no network, no model, no spend, about two seconds. Run by the CI workflow, not by `make check`. `make bench` and `make bench-conductor` spend tokens and are run by nobody but you |
 | `make test-ui` | `ui/tests/` through `node --test` (needs Node 22.22.2+, 24.15+ or 26+; checked before it runs) |
 | `make typecheck-ui-tests` | `tsc --noEmit` over `ui/src` **and** `ui/tests` — config `ui/tsconfig.test.json` |
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |
-| `make check-tauri` | `cargo check` + `cargo test` (under Xvfb when there is no display; includes the machine tab's real-jail tests, which need `bwrap` and user namespaces) + `cargo fmt --check` |
+| `make check-tauri` | `cargo check` + `cargo clippy --all-targets -- -D warnings` + `cargo test` (under Xvfb when there is no display; includes the machine tab's real-jail tests, which need `bwrap` and user namespaces) + `cargo fmt --check` |
 | `make ci-python-floor` | Only the 3.10 leg; never skips — it fails with install instructions |
+| `make ci-rust-floor` | Only the Rust minimum (`rust-version` in `src-tauri/Cargo.toml`): `cargo check --locked --all-targets` on exactly that compiler, fetched with `rustup`; never skips |
 | `make ci-report` | `make ci`, then publishes its verdict on the commit as a GitHub status (context local/make-ci) via `gh`. Not a second gate: it runs the one gate and reports it, and refuses a dirty tree — the mark a PR still carries when Actions cannot give one (it was billing-locked once) |
 | `make check-history` | Every commit in `HISTORY_RANGE` (default `origin/<branch>..HEAD`), not just the tip. Separate from the gate on purpose: `make ci` asks about the tree you are about to share, this asks about the commits on the way to it. Pre-push runs it second, and it declines a one-commit range — that has no middle |
 
