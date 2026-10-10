@@ -1624,15 +1624,18 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         app.state.goals.update_status(goal_id, 0, "PENDING")
         app.state.goals.update_status(goal_id, 1, "COMPLETED")
 
-        now = time.time()
+        # Anchored at midday UTC rather than at `now`: the goal and its events are stamped up to two minutes after
+        # the anchor, and a run in the last two minutes of a UTC day put them in the *next* day's bucket, so the
+        # days the engine froze were not the days this computes (a failure that came and went with the clock).
+        midday = (int(time.time()) // 86400) * 86400 + 12 * 3600
         for offset in (6, 4, 2):  # three distinct past days, oldest first
             app.state.conn.execute(
                 "UPDATE goals SET created_at = ?, updated_at = ? WHERE id = ?",
-                (now - offset * 86400, now - offset * 86400 + 60, goal_id),
+                (midday - offset * 86400, midday - offset * 86400 + 60, goal_id),
             )
             app.state.conn.execute(
                 "UPDATE events SET timestamp = ? WHERE goal_id = ? AND type = 'usage'",
-                (now - offset * 86400 + 120, goal_id),
+                (midday - offset * 86400 + 120, goal_id),
             )
             app.state.conn.commit()
             r = await self.client.get("/stats/overview", headers=self.headers)
@@ -1642,7 +1645,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         r = await self.client.get("/stats/history", headers=self.headers)
         days = r.json()["days"]
         self.assertEqual(len(days), 2, "retention kept the newest two")
-        expected_oldest = time.strftime("%Y-%m-%d", time.gmtime(now - 4 * 86400))
+        expected_oldest = time.strftime("%Y-%m-%d", time.gmtime(midday - 4 * 86400))
         self.assertEqual(days[0]["day"], expected_oldest, "and they are the newest two, not any two")
 
     async def test_stats_history_serves_frozen_days_and_freezes_on_read(self) -> None:
@@ -2380,6 +2383,57 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["code"], "unknown_setting")
+
+    async def test_a_refused_engine_settings_save_changes_nothing(self) -> None:
+        """A 4xx from `PUT /settings/engine` means no key in that request was stored.
+
+        The handler used to write each key as it reached it, so `{"web_fetch": 1, "web_fetch_hosts": "<an address>"}` (what
+        the Web pages card sends) answered 422 about the list and had already moved the mode from any public site to a
+        list; a UI that keeps the person's draft after a refusal was then showing a setting the engine no longer held.
+        """
+        def stored() -> dict[str, int]:
+            return {
+                key: app.state.settings.get_int(key) for key in ("parallel_width", "web_fetch", "conductor_max_turns")
+            }
+
+        before = stored()
+        hosts_before = app.state.settings.get_str("web_fetch_hosts")
+        refused: list[tuple[dict[str, Any], int]] = [
+            ({"parallel_width": 3, "conductor_max_turns": "abc"}, 422),
+            ({"parallel_width": 3, "conductor_max_turns": True}, 422),
+            ({"parallel_width": 3, "not_a_setting": 1}, 400),
+            ({"web_fetch": 1, "web_fetch_hosts": "http://10.0.0.1/"}, 422),
+            ({"web_fetch": 0, "web_fetch_hosts": 5}, 422),
+            ({"parallel_width": 3, "web_fetch_hosts": "docs.python.org", "conductor_provider": "Not A Slug"}, 422),
+        ]
+        for body, status in refused:
+            with self.subTest(body=body):
+                r = await self.client.put("/settings/engine", headers=self.headers, json=body)
+                self.assertEqual(r.status_code, status, r.text)
+                self.assertEqual(stored(), before)
+                self.assertEqual(app.state.settings.get_str("web_fetch_hosts"), hosts_before)
+                self.assertEqual(app.state.settings.get_str("conductor_provider"), "")
+
+        # And a save that is accepted still stores all of it.
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers,
+            json={"parallel_width": 3, "web_fetch": 1, "web_fetch_hosts": "docs.python.org"},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["saved"], {"parallel_width": 3, "web_fetch": 1, "web_fetch_hosts": "docs.python.org"})
+
+    async def test_a_number_that_cannot_be_an_integer_is_refused_not_a_server_error(self) -> None:
+        """JSON as Python reads it holds `Infinity` and `1e999`, and `int()` of either raises `OverflowError`, which the
+        handler's `(TypeError, ValueError)` did not name: a plain-text 500 from the one route every card saves through."""
+        for literal in ("Infinity", "-Infinity", "1e999", "-1e999", "NaN"):
+            with self.subTest(literal=literal):
+                r = await self.client.put(
+                    "/settings/engine",
+                    headers={**self.headers, "content-type": "application/json"},
+                    content=f'{{"parallel_width": {literal}}}',
+                )
+                self.assertEqual(r.status_code, 422, r.text)
+                self.assertEqual(r.json()["code"], "invalid_value")
 
     async def test_the_conductors_model_is_a_setting_a_user_can_reach(self) -> None:
         """The keys the executor reads were declared, read — and unwritable.

@@ -114,6 +114,12 @@ class TestWhatItSaysTheEngineDoes(unittest.TestCase):
         self.assertRegex(text, r"edit_editor`[^.]*say what you changed")
         self.assertRegex(text, r"read_editor`[^.]*(not yet saved|unsaved)")
 
+    def test_it_says_the_browser_actions_need_the_persons_permission(self) -> None:
+        # They are off on a fresh install and left off the menu, so a prompt that says they "drive" the tab
+        # sends the model after tools it was not given. `fetch_page` already says "when the person has allowed it".
+        text = self.prompt()
+        self.assertRegex(text, r"navigate_page`[^.]*click_page`[^.]*type_page`[^.]*allowed")
+
     def test_it_points_at_recall_as_the_first_look_at_a_failure(self) -> None:
         text = self.prompt()
         self.assertRegex(text, r"recall`[^.]*(fail|before|past)")

@@ -324,7 +324,22 @@ def load_profiles(root: str | None) -> ProfileSet:
             if profile is not None:
                 found[profile.name] = profile
     directory = Path(root) / PROFILES_DIRNAME if root else None
-    if directory is not None and directory.is_dir():
+    # The directory is held to the rule its files are: `skills._skill_files` refuses a link at `.codify` or at
+    # `profiles` for the same reason. Once the link is followed every file over there is a plain file, so the
+    # per-file check below cannot see it, and a cloned repository would choose which of this machine's
+    # directories is read as this workspace's rules (and whose file names the problems list would quote).
+    linked_away = (
+        root is not None
+        and directory is not None
+        and directory.is_dir()
+        and directory.resolve() != Path(root).resolve() / PROFILES_DIRNAME
+    )
+    if linked_away:
+        problems.append(
+            f"{PROFILES_DIRNAME}: refused, it is a link to a directory outside the workspace's own "
+            f"{PROFILES_DIRNAME}, and files elsewhere are not this workspace's rules"
+        )
+    elif directory is not None and directory.is_dir():
         files = sorted(p for p in directory.glob("*.json"))
         if len(files) > MAX_WORKSPACE_PROFILES:
             problems.append(

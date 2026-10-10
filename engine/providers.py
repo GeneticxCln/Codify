@@ -877,8 +877,10 @@ class OpenAICompatProvider(BaseProvider):
             if resp.status_code != 200:
                 return False
             for m in (resp.json() or {}).get("data", []):
-                caps = m.get("capabilities", {}) or {}
-                if isinstance(caps, dict) and caps.get("json_schema") or caps.get("json_object"):
+                # An entry shaped differently from the rest is skipped, not fatal: the blanket `except` below
+                # would turn it into "not supported" for every model listed after it.
+                caps = m.get("capabilities") if isinstance(m, dict) else None
+                if isinstance(caps, dict) and (caps.get("json_schema") or caps.get("json_object")):
                     return True
             return False
         except Exception:

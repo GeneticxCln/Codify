@@ -237,6 +237,87 @@ class TestAFilesListOfTheWrongShape(ReAskCase):
         self.assertEqual("agent_output_invalid", self.events("error")[-1]["code"])
 
 
+class TestAFieldOfTheWrongType(ReAskCase):
+    """An entry of the right shape whose `path` or `content` is not a string.
+
+    `TestAFilesListOfTheWrongShape` covers entries that are not objects. These are objects that pass every check the
+    parser made and then fail inside `FileSystemService.apply` with an `AttributeError` (`'list' object has no
+    attribute 'splitlines'`), which the re-ask does not catch: the step failed as an internal error. A file written
+    as an array of its lines is the commonest of them.
+    """
+
+    GOOD = {"files": [{"path": "a.py", "action": "update", "content": "x = 1\n"}]}
+
+    async def asked_again_and_recovers(self, wrong: Any, said: str) -> None:
+        provider = self.build(wrong, self.GOOD)
+
+        status = await self.run_the_step()
+
+        self.assertEqual(2, len(provider.fixer_prompts))
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertEqual("x = 1\n", self.file)
+        self.assertIn(said, provider.fixer_prompts[1], "the model was not told what was wrong")
+
+    async def test_content_written_as_a_list_of_lines(self) -> None:
+        wrong = {"files": [{"path": "a.py", "action": "update", "content": ["x = 1", ""]}]}
+        await self.asked_again_and_recovers(wrong, "must be one string")
+
+    async def test_content_that_is_a_number_or_an_object(self) -> None:
+        for content in (1, 2.5, True, {"text": "x = 1"}):
+            with self.subTest(content=content):
+                await self.asyncTearDown_and_up()
+                await self.asked_again_and_recovers(
+                    {"files": [{"path": "a.py", "action": "create", "content": content}]}, "must be one string",
+                )
+
+    async def test_a_path_that_is_a_list_or_an_object(self) -> None:
+        for path in (["a.py"], {"file": "a.py"}, 7):
+            with self.subTest(path=path):
+                await self.asyncTearDown_and_up()
+                await self.asked_again_and_recovers(
+                    {"files": [{"path": path, "action": "update", "content": "x = 1\n"}]}, "path must be a string",
+                )
+
+    async def test_an_edit_count_that_is_not_a_finite_number(self) -> None:
+        # `Infinity` is JSON as Python reads it, and `int()` of it is an OverflowError, not a ValueError.
+        wrong = (
+            '{"files": [{"path": "a.py", "action": "edit", '
+            '"edits": [{"old_text": "greet", "new_text": "hello", "count": Infinity}]}]}'
+        )
+        provider = self.build(wrong, self.GOOD)
+
+        status = await self.run_the_step()
+
+        self.assertEqual(2, len(provider.fixer_prompts))
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertEqual("x = 1\n", self.file)
+
+    async def test_the_same_slip_twice_is_invalid_output_not_an_internal_error(self) -> None:
+        self.build({"files": [{"path": "a.py", "action": "update", "content": ["x = 1"]}]})
+
+        status = await self.run_the_step()
+
+        self.assertEqual("FAILED", status)
+        self.assertEqual("agent_output_invalid", self.events("error")[-1]["code"])
+        self.assertEqual(SOURCE, self.file, "a reply that was refused wrote something")
+
+    async def test_a_null_content_still_means_an_empty_file(self) -> None:
+        # Not a type error: `create` with no content is how a model makes an empty file.
+        provider = self.build({"files": [{"path": "empty.txt", "action": "create", "content": None}]})
+
+        status = await self.run_the_step()
+
+        self.assertEqual(1, len(provider.fixer_prompts))
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertEqual("", (self.root / "empty.txt").read_text(encoding="utf-8"))
+
+    async def asyncTearDown_and_up(self) -> None:
+        """A fresh workspace and goal for the next case of a loop, because a step runs once per goal."""
+        self.temp_dir.cleanup()
+        self.conn.close()
+        await self.asyncSetUp()
+
+
 class TestAPathTheWorkspaceRefuses(ReAskCase):
     """A path the model wrote in the wrong form: absolute, climbing out, or inside `.git`.
 

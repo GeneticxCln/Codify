@@ -46,6 +46,7 @@ from engine.scan import (
     PROFILES_DIRNAME,
     Rule,
     is_test_path,
+    list_profiles,
     load_profiles,
     mask,
     run_scan,
@@ -504,6 +505,56 @@ class TestWorkspaceProfiles(Workspace):
         found = load_profiles(str(self.root))
         self.assertIsNone(found.get("linked"))
         self.assertTrue(any("not a plain file" in p for p in found.problems))
+
+    def _linked_profiles_directory(self, *, link_at: str) -> None:
+        """A directory of valid profiles somewhere else on the machine, reached through a link the repository ships."""
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, True)
+        (outside / "elsewhere.json").write_text(
+            json.dumps({"name": "elsewhere", "description": "not this workspace's", "rules": [self.rule()]}),
+            encoding="utf-8",
+        )
+        (outside / "private-notes.json").write_text("{}", encoding="utf-8")
+        if link_at == "profiles":
+            (self.root / ".codify").mkdir(parents=True)
+            os.symlink(outside, self.root / PROFILES_DIRNAME)
+        else:
+            (outside / "profiles").mkdir()
+            (outside / "profiles" / "elsewhere.json").write_text(
+                json.dumps({"name": "elsewhere", "description": "not this workspace's", "rules": [self.rule()]}),
+                encoding="utf-8",
+            )
+            (outside / "profiles" / "private-notes.json").write_text("{}", encoding="utf-8")
+            os.symlink(outside, self.root / ".codify")
+
+    def test_a_linked_profiles_directory_is_refused_as_a_linked_skills_directory_is(self) -> None:
+        # `skills._skill_files` holds the directory to the rule it holds the files to, and this module says a profile
+        # is data "exactly as a skill is". A repository that ships `.codify/profiles -> /somewhere/else` (or links
+        # `.codify` itself) must not get the files over there read as this workspace's own rules.
+        for link_at in ("profiles", ".codify"):
+            with self.subTest(link_at=link_at):
+                shutil.rmtree(self.root / ".codify", ignore_errors=True)
+                if (self.root / ".codify").is_symlink():
+                    (self.root / ".codify").unlink()
+                self._linked_profiles_directory(link_at=link_at)
+                found = load_profiles(str(self.root))
+                self.assertIsNone(found.get("elsewhere"))
+                self.assertEqual([p.name for p in found.profiles if p.is_workspace], [])
+                self.assertTrue(any("refused" in p and PROFILES_DIRNAME in p for p in found.problems), found.problems)
+                # Nor does the refusal hand the model a file name from the directory it pointed at.
+                self.assertNotIn("private-notes", " ".join(found.problems))
+                self.assertNotIn("private-notes", list_profiles(str(self.root)))
+
+    def test_a_real_profiles_directory_is_still_read_when_the_workspace_itself_is_reached_through_a_link(self) -> None:
+        # The check compares the directory with where the *workspace* really is, so a project opened through a
+        # symlinked path (a common way to reach `~/work`) is not mistaken for an escape.
+        self.profile()
+        alias = Path(tempfile.mkdtemp()) / "alias"
+        self.addCleanup(shutil.rmtree, alias.parent, True)
+        os.symlink(self.root, alias)
+        found = load_profiles(str(alias))
+        self.assertIsNotNone(found.get("mine"))
+        self.assertFalse(any("refused" in p for p in found.problems), found.problems)
 
     def test_a_hostile_name_is_clipped_in_the_problem_that_reports_it(self) -> None:
         self.profile(rules=[self.rule(id="x" * 10_000)])

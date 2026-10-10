@@ -720,6 +720,10 @@ source), `stt_base_url` and `tts_base_url` (a custom provider's own address, bel
 `tts_auto_read` (0/1, default 0). The two provider keys are slug-checked like the conductor's. The two
 addresses must be `http(s)` with a host, or empty to clear them (`422 invalid_value` otherwise).
 
+A `PUT /settings/engine` is all or nothing: every key in the body is checked first, and a request that answers `400` or
+`422` has stored none of its keys (a card that sends two together, such as Web pages' mode and list, is never left with
+one saved). A number that is not an integer, `Infinity` and `1e999` included, is a `422 invalid_value`.
+
 **Which provider.** A built-in slug resolves to the catalogue's address (`BUILTIN_PROVIDERS`) and ignores
 any typed address, so an address saved beside `openai` can never carry the OpenAI key somewhere else. A
 custom slug resolves to its own address (`stt_base_url` / `tts_base_url`) when one is saved, because a local
@@ -960,7 +964,9 @@ again, at most `MAX_LIBRARY_ROUNDS` (3) calls per goal. Per-round request caps: 
 
 Two request entries may be plain values or small objects: a `reads` entry is a path string or
 `{path, offset, limit}` (the line-range form for reaching the bottom half of a big file), and a
-`searches` entry is a query string or `{query, regex, glob}`.
+`searches` entry is a query string or `{query, regex, glob}`. A line is what `\n` ends, in a read window, in a
+search hit and in the regex walk alike (`library.text_lines`): a form feed, U+2028 or NEL inside a line does not
+start another, so a hit's `line` is the `offset` that reads it back.
 
 Requests are executed by `engine/library.py`:
 
@@ -1188,7 +1194,10 @@ the same way it fails mid-planning: `design_contract_missing`.
 {"files":[{"path":"src/foo.py","action":"update","content":"…"}]}
 ```
 
-`action=delete` ⇒ `content` null. Paths contained by workspace.
+`action=delete` ⇒ `content` null. Paths contained by workspace. `path` is a string, and `content` of a `create` or
+`update` is one string (or null, an empty file): a path that is a list, or a file written as an array of its lines, is
+put to the model once with that said (`04` §4 "One re-ask") and is not repaired by joining the lines, since which
+line ending and whether a last newline were meant is the model's to say.
 
 `action=edit` takes `edits: [{old_text, new_text, count}]` and no `content`. One spelling is read rather than
 refused: **`edit` with a non-empty `content` and no `edits`** is a whole-file `update` — the model wrote the

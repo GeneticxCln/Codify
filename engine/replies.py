@@ -201,7 +201,10 @@ def _load_repaired(span: str) -> Any:
         pass
     try:
         value = ast.literal_eval(_pythonish(cleaned))
-    except (ValueError, SyntaxError, MemoryError, RecursionError) as exc:
+    # `TypeError` is what `{{"a": 1}}` and `{["a"]}` come to: Python reads each as a set holding something
+    # unhashable. It is a model's slip like the rest, and a span that cannot be read is skipped by the scan; left
+    # to escape, it ended the scan and lost any valid object after the span.
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError) as exc:
         raise ValueError(f"invalid JSON that could not be repaired ({exc})") from exc
     if not isinstance(value, (dict, list)):
         raise ValueError("invalid JSON that could not be repaired")

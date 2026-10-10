@@ -66,8 +66,11 @@ scanned. Fixing goes through `plan` and the person's approval, like every other 
   cloned repository and is untrusted. It can add or replace rules; the worker is handed only `id`, `pattern`, `flags`,
   `languages` and `where`, so a profile has no path to name, no command and nothing to write. Its wording (title, why,
   fix) is clipped, and a scan that used one says so before the hits, because that text is the repository's, not ours.
-  A bad rule is dropped and reported (never raised); a symlinked profile file is not read; there are caps on its size,
-  on rules per profile and on profiles per workspace.
+  A bad rule is dropped and reported (never raised); a symlinked profile file is not read, and neither is a directory
+  that is: `.codify/profiles` must resolve to exactly `<workspace>/.codify/profiles` (a link at `.codify` or at
+  `profiles` is refused and reported, the way `engine/skills.py` refuses the same for `.codify/skills`), because once a
+  link is followed every file behind it looks like a plain file and the repository would choose which of the machine's
+  directories is read as rules; there are caps on its size, on rules per profile and on profiles per workspace.
 * **Where the regexes run: not in the engine.** A workspace's patterns are an attacker's regexes, and CPython's `re`
   cannot be interrupted. The walk runs in the regex worker (`op: "scan"`), the process `search_code(regex=true)` already
   uses, under `guarded_argv`, in its own session, killed with `SIGKILL` at a hard limit. **No new spawn site**:

@@ -136,6 +136,21 @@ class RegexWorkerTimeout(ValueError):
     """The worker was killed at its hard limit. A `ValueError`, as it always was, so every caller that refuses on one still does."""
 
 
+def text_lines(text: str) -> list[str]:
+    """The lines of `text` as every line number in this module counts them: separated by `\n`, and nothing else.
+
+    `str.splitlines` also breaks on a form feed, a vertical tab, the file/group/record separators, NEL, U+2028 and
+    U+2029, none of which `read_file` counts when it finds a line by its newlines. Used for a window and for a hit,
+    it put a hit at a line number `read_file` did not agree with and cut a window short of the line it said it had.
+    A final newline ends the last line rather than starting an empty one, and a `\r` before the `\n` is dropped, so
+    `$` still means the end of a line in a file that ends its lines with two characters.
+    """
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
 def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) -> dict[str, Any]:
     """The regex walk itself: every file under `root_path`, every line, the model's pattern.
 
@@ -178,7 +193,7 @@ def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) 
                 files_skipped += 1
                 continue
             files_scanned += 1
-            for lineno, line in enumerate(raw.decode("utf-8", errors="replace").splitlines(), 1):
+            for lineno, line in enumerate(text_lines(raw.decode("utf-8", errors="replace")), 1):
                 if rx.search(line):
                     matches.append({"path": rel, "line": lineno, "text": line.strip()[:240]})
                     if len(matches) >= MAX_MATCHES:
@@ -349,7 +364,7 @@ class LibraryService:
             window_raw = fh.read(MAX_READ_CHARS * 4)
             if window_raw:
                 last_bytes = window_raw[-1:]
-            window_lines = window_raw.decode("utf-8", errors="replace").splitlines()
+            window_lines = text_lines(window_raw.decode("utf-8", errors="replace"))
             newlines_after_start = window_raw.count(b"\n")
 
             # Pass 3 (bounded): finish counting to EOF so the "of N" label is
@@ -522,7 +537,7 @@ class LibraryService:
                     files_skipped += 1
                     continue
                 files_scanned += 1
-                for lineno, line in enumerate(raw.decode("utf-8", errors="replace").splitlines(), 1):
+                for lineno, line in enumerate(text_lines(raw.decode("utf-8", errors="replace")), 1):
                     if lowered in line.lower():
                         matches.append({"path": rel, "line": lineno, "text": line.strip()[:240]})
                         if len(matches) >= MAX_MATCHES:

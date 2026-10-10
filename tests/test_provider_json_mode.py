@@ -21,8 +21,10 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
     """
 
     def __init__(self, advertise: bool, reject_json_mode: bool, reject_stream: bool = False,
-                 split_usage: bool = False):
+                 split_usage: bool = False, models: list[Any] | None = None):
         self.advertise = advertise
+        # When set, /v1/models answers exactly this list: real servers do not all shape the entries alike.
+        self.models = models
         self.reject_json_mode = reject_json_mode
         self.reject_stream = reject_stream
         # split_usage: emit the usage block on its own chunk, ahead of the
@@ -40,8 +42,8 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
                     server.models_requests += 1
                     # `capabilities` is attached only when advertised, so the
                     # reply is deliberately not uniformly shaped.
-                    data: dict[str, Any] = {"data": [{"id": "m1"}]}
-                    if server.advertise:
+                    data: dict[str, Any] = {"data": [{"id": "m1"}] if server.models is None else server.models}
+                    if server.models is None and server.advertise:
                         data["data"][0]["capabilities"] = {"json_object": True}
                     body = json.dumps(data).encode()
                     self.send_response(200)
@@ -102,8 +104,8 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
 
 class _ServerMixin(unittest.TestCase):
     def _start(self, advertise: bool, reject_json_mode: bool = False, reject_stream: bool = False,
-               split_usage: bool = False) -> _FakeOpenAIServer:
-        server = _FakeOpenAIServer(advertise, reject_json_mode, reject_stream, split_usage)
+               split_usage: bool = False, models: list[Any] | None = None) -> _FakeOpenAIServer:
+        server = _FakeOpenAIServer(advertise, reject_json_mode, reject_stream, split_usage, models)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
@@ -163,6 +165,44 @@ class TestJsonModeCapability(_ServerMixin):
         self.assertIn("response_format", server.post_bodies[0])
         self.assertNotIn("response_format", server.post_bodies[1])
         self.assertNotIn("response_format", server.post_bodies[2])
+
+
+    def test_an_odd_entry_in_the_models_list_does_not_hide_a_capable_model_after_it(self) -> None:
+        """The probe reads every entry, and one that is shaped differently is skipped, not fatal.
+
+        `isinstance(caps, dict) and caps.get("json_schema") or caps.get("json_object")` parses as
+        `(a and b) or c`, so the guard did not cover the second `.get`: a model whose `capabilities` is a list
+        raised, the probe's blanket `except` turned that into "not supported", and every entry after it was never read.
+        """
+        for odd in ({"id": "list-caps", "capabilities": ["streaming"]}, {"id": "no-caps"}, "a-bare-string", None):
+            with self.subTest(odd=odd):
+                server = self._start(
+                    advertise=False, models=[odd, {"id": "m1", "capabilities": {"json_object": True}}],
+                )
+                provider = self._provider(self.base)
+
+                self.assertEqual(self._complete(provider), "ok")
+
+                self.assertTrue(server.post_bodies)
+                self.assertTrue(all("response_format" in b for b in server.post_bodies), server.post_bodies)
+
+    def test_a_schema_capability_alone_is_enough(self) -> None:
+        server = self._start(advertise=False, models=[{"id": "m1", "capabilities": {"json_schema": True}}])
+        provider = self._provider(self.base)
+
+        self.assertEqual(self._complete(provider), "ok")
+
+        self.assertTrue(all("response_format" in b for b in server.post_bodies), server.post_bodies)
+
+    def test_no_model_that_advertises_it_means_the_field_is_not_sent(self) -> None:
+        server = self._start(
+            advertise=False, models=[{"id": "a", "capabilities": ["x"]}, {"id": "b", "capabilities": {"vision": True}}],
+        )
+        provider = self._provider(self.base)
+
+        self.assertEqual(self._complete(provider), "ok")
+
+        self.assertFalse(any("response_format" in b for b in server.post_bodies))
 
 
 class TestOpenAIStreaming(_ServerMixin):
