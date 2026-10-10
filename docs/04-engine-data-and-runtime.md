@@ -1696,6 +1696,11 @@ token on the Upgrade, or the `{"type": "auth"}` first frame; `4401` on a bad one
 it: the goal stream is a durable sequenced log that replays from 0, and a frame with no `goal_id` and no
 `sequence` in it is a frame a deduping client drops.
 
+Unlike the goal stream, `ui/src/engineStream.ts` does not treat `4401` as final. It re-reads the connection
+info on every attempt and backs off 1, 2, 4, 8, then 16 s. The counter resets only after a connection has
+stayed open for `STABLE_CONNECTION_MS` (10 s), not on open, because the engine accepts the upgrade before it
+checks the token: resetting on open made a rejected token a 1 Hz reconnect loop.
+
 One frame exists today:
 
 | frame | payload | when |
