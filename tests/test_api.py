@@ -1624,15 +1624,18 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         app.state.goals.update_status(goal_id, 0, "PENDING")
         app.state.goals.update_status(goal_id, 1, "COMPLETED")
 
-        now = time.time()
+        # Anchored at midday UTC rather than at `now`: the goal and its events are stamped up to two minutes after
+        # the anchor, and a run in the last two minutes of a UTC day put them in the *next* day's bucket, so the
+        # days the engine froze were not the days this computes (a failure that came and went with the clock).
+        midday = (int(time.time()) // 86400) * 86400 + 12 * 3600
         for offset in (6, 4, 2):  # three distinct past days, oldest first
             app.state.conn.execute(
                 "UPDATE goals SET created_at = ?, updated_at = ? WHERE id = ?",
-                (now - offset * 86400, now - offset * 86400 + 60, goal_id),
+                (midday - offset * 86400, midday - offset * 86400 + 60, goal_id),
             )
             app.state.conn.execute(
                 "UPDATE events SET timestamp = ? WHERE goal_id = ? AND type = 'usage'",
-                (now - offset * 86400 + 120, goal_id),
+                (midday - offset * 86400 + 120, goal_id),
             )
             app.state.conn.commit()
             r = await self.client.get("/stats/overview", headers=self.headers)
@@ -1642,7 +1645,7 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         r = await self.client.get("/stats/history", headers=self.headers)
         days = r.json()["days"]
         self.assertEqual(len(days), 2, "retention kept the newest two")
-        expected_oldest = time.strftime("%Y-%m-%d", time.gmtime(now - 4 * 86400))
+        expected_oldest = time.strftime("%Y-%m-%d", time.gmtime(midday - 4 * 86400))
         self.assertEqual(days[0]["day"], expected_oldest, "and they are the newest two, not any two")
 
     async def test_stats_history_serves_frozen_days_and_freezes_on_read(self) -> None:
