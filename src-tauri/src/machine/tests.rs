@@ -221,6 +221,47 @@ fn the_shell_starts_behind_every_limit_the_kernel_can_enforce() {
     assert!(wrapper.find("ulimit -t").unwrap() < wrapper.find("exec").unwrap());
 }
 
+// ── ps1: each shell gets a prompt it can expand ───────────────────────────────────────────────────
+
+/// The wrapper's two halves: what runs when the host has `bash`, and what runs when it does not.
+fn wrapper_halves() -> (String, String) {
+    let argv = jail_argv(&spec(false, 1000), &layout());
+    let wrapper = argv.last().expect("the jail ends in the shell's wrapper");
+    let (bash, fallback) = wrapper
+        .split_once("exec \"$b\"")
+        .expect("the wrapper execs the bash it found");
+    (bash.to_string(), fallback.to_string())
+}
+
+#[test]
+fn the_fallback_shell_gets_a_prompt_it_can_expand_and_bash_keeps_its_own() {
+    let (bash, fallback) = wrapper_halves();
+    // Bash's prompt is byte-for-byte what it always was: `\w` and `\\$` are bash's own escapes.
+    let bash_prompt = "PS1='[machine] \\w \\\\$ '";
+    assert_eq!(bash.matches("PS1=").count(), 1, "{bash}");
+    assert!(bash.contains(bash_prompt), "bash's prompt changed: {bash}");
+    // POSIX `sh` (dash and its kind) expands parameters in `PS1` and nothing else: `\w` and `\$` are shown
+    // as typed. So the fallback sets its own, from `$PWD`, in the same fixed script, and then execs `sh`.
+    assert!(
+        fallback.contains("PS1='[machine] $PWD $ '") && fallback.contains("export PS1"),
+        "the fallback has no prompt of its own: {fallback}"
+    );
+    assert_eq!(fallback.matches("PS1=").count(), 1, "{fallback}");
+    assert!(
+        !fallback.contains('\\'),
+        "a backslash escape in the fallback's prompt is shown literally by `sh`: {fallback}"
+    );
+    assert!(fallback.trim_end().ends_with("exec sh"), "{fallback}");
+    // Bash's prompt is assigned only on the branch that finds bash: it is part of the `command -v bash`
+    // chain, so what the fallback shell starts with is its own prompt and not bash's.
+    assert!(
+        bash.contains(&format!(
+            "b=$(command -v bash) && {bash_prompt} && export PS1 && "
+        )),
+        "bash's prompt is not on bash's branch: {bash}"
+    );
+}
+
 #[test]
 fn the_network_is_the_persons_choice_and_only_theirs() {
     let on = jail_argv(&spec(true, 1000), &layout());
@@ -680,6 +721,18 @@ fn a_read_only_project_is_read_only_and_the_hosts_files_are_untouched() {
         "original\n",
         "the host's file changed"
     );
+}
+
+#[test]
+fn the_prompt_in_a_real_jail_names_the_directory_the_person_is_in() {
+    let ws = tempfile_dir("prompt");
+    let jail = Jail::open(&ws, false);
+    // The first prompt was read by `start`; the one after a command is the prompt a person sees between
+    // commands, and bash has expanded `\w` and `\$` in it.
+    jail.run(DONE);
+    jail.until("[machine] /work $ ", 15);
+    jail.run(&format!("cd /tmp; {DONE}"));
+    jail.until("[machine] /tmp $ ", 15);
 }
 
 #[test]
