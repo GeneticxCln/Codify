@@ -1688,6 +1688,10 @@ CPU went 0.2 % → 3.6 % → 7.0 % → 13.9 % of a core over 50, 200 and 500 vie
 client may act on: `4401` bad token, `4404` no such goal (checked only *after* auth, so an
 unauthenticated peer cannot probe ids). Neither changes by asking again, so `ui/src/goalStream.ts`
 treats both as final — no reconnect, `onGone(code)` — while any other close reconnects with backoff.
+The backoff counter resets only after a connection has stayed open for the stability window
+(`STABLE_CONNECTION_MS`, 10 s, in `ui/src/goalStream.ts`), not on open, because the engine accepts the upgrade
+before it authenticates and replays the log from 0, so an open that dies right after (1011, 1006) would
+otherwise reconnect at 1 Hz and re-deliver the whole log each time.
 
 ### 6.0 Engine-level frames
 
