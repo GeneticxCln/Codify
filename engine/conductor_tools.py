@@ -855,8 +855,8 @@ class ConductorTools:
 
         The engine's own request, unlike the page verbs above, which ask the shell's webview: so the rules are
         `engine/web_fetch.py`'s, not a guard in another process, and they are those rules and no copy of them
-        (policy, public addresses only, the connection pinned to the address that was checked, every redirect
-        checked again, bounded in time and bytes). This method decides only whether to ask, and says so in
+        (policy, public addresses only, the connection pinned to one of the addresses that were checked, every
+        redirect checked again, bounded in time and bytes). This method decides only whether to ask, and says so in
         the transcript first.
 
         **What it does not prevent.** The address is sent to the site, and a model that has read the workspace

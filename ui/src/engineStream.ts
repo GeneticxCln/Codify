@@ -26,7 +26,20 @@ export { readEngineFrame, type FrameOutcome };
  *
  * Auth is `{ type: "auth", token }` as the first frame, not a header: a browser
  * cannot set headers on a WebSocket, and the engine accepts either.
+ *
+ * Reconnect backoff is 1 s, 2 s, 4 s, 8 s, then 16 s at most. The counter is
+ * **not** reset when a socket opens: the engine accepts the upgrade first and
+ * only then reads the auth frame, closing with 4401 on a bad token, so "open"
+ * proves nothing and resetting on it turned a rejected token into a 1 Hz
+ * reconnect loop (open, close, open, close). It resets only once a connection
+ * has stayed open for `STABLE_CONNECTION_MS`; one that drops sooner keeps
+ * climbing, whatever the reason. 4401 is deliberately not final here, unlike on
+ * the goal stream: every attempt re-reads the engine's connection info, and a
+ * restarted engine can come back on another port or with another token, so
+ * retrying is how this stream heals.
  */
+export const STABLE_CONNECTION_MS = 10_000;
+
 export interface EngineStreamHandle {
   close: () => void;
 }
@@ -42,6 +55,13 @@ export function openEngineStream(opts: {
   let destroyed = false;
   let attempt = 0;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  // Armed on open, cleared on close: fires only for a connection that lasted.
+  let stableTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearStableTimer = () => {
+    if (stableTimer) clearTimeout(stableTimer);
+    stableTimer = null;
+  };
 
   const connect = () => {
     if (destroyed) return;
@@ -54,7 +74,11 @@ export function openEngineStream(opts: {
     ws = new WebSocket(`ws://127.0.0.1:${engine.port}/ws/engine`);
 
     ws.onopen = () => {
-      attempt = 0;
+      clearStableTimer();
+      stableTimer = setTimeout(() => {
+        stableTimer = null;
+        attempt = 0;
+      }, STABLE_CONNECTION_MS);
       ws!.send(JSON.stringify({ type: "auth", token: engine.token }));
       onConnected?.();
     };
@@ -64,6 +88,7 @@ export function openEngineStream(opts: {
     };
 
     ws.onclose = () => {
+      clearStableTimer();
       if (destroyed) return;
       attempt += 1;
       const delay = Math.min(1000 * 2 ** (attempt - 1), 16000);
@@ -81,6 +106,7 @@ export function openEngineStream(opts: {
   return {
     close: () => {
       destroyed = true;
+      clearStableTimer();
       if (retryTimer) clearTimeout(retryTimer);
       try {
         ws?.close();

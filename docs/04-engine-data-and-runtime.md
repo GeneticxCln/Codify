@@ -790,7 +790,8 @@ could see. `POST /goals` and a turn cannot carry either key (`tests/test_invaria
 **What the tool does** is `docs/12` §3's table. In short: nothing is fetched unless `web_fetch` is 1 or 2; the
 tool is left off the menu while it cannot act (mode 0, or mode 1 with an empty list); an unreadable setting is
 off; GET only; the name is resolved and every answer must be a public address, and the connection is made to
-the address that was checked; each redirect (at most 5) passes every rule again; 20 s overall, 1 MB of body,
+one of the addresses that were checked (the next one is tried only when connecting fails, at most 4 per hop,
+inside the same 20 s); each redirect (at most 5) passes every rule again; 20 s overall, 1 MB of body,
 text content types only; the address is logged (`conductor is fetching <address>`) before the request, and a run
 makes at most 8. What comes back is `Fetched`: the final address, status, content type, title, text (default
 12,000 characters, 200–40,000 as asked), whether it was truncated or its body capped, the redirect route and up
@@ -1695,6 +1696,11 @@ token on the Upgrade, or the `{"type": "auth"}` first frame; `4401` on a bad one
 §6.3, holding on a socket as on every route). It is a sibling of `/ws/goals/{id}`, not an extension of
 it: the goal stream is a durable sequenced log that replays from 0, and a frame with no `goal_id` and no
 `sequence` in it is a frame a deduping client drops.
+
+Unlike the goal stream, `ui/src/engineStream.ts` does not treat `4401` as final. It re-reads the connection
+info on every attempt and backs off 1, 2, 4, 8, then 16 s. The counter resets only after a connection has
+stayed open for `STABLE_CONNECTION_MS` (10 s), not on open, because the engine accepts the upgrade before it
+checks the token: resetting on open made a rejected token a 1 Hz reconnect loop.
 
 One frame exists today:
 
