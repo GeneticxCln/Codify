@@ -125,6 +125,16 @@ def _shape(value: Any) -> str:
     return type(value).__name__
 
 
+def _encodable(text: str) -> str:
+    """`text` with what UTF-8 cannot hold written as an escape (`\\ud800`), and nothing else changed.
+
+    A fixer reply's JSON can spell a lone surrogate in a path, and the reason the model is asked about names
+    that path: interpolated as it is, the re-ask prompt could not be encoded into the request that carries it.
+    An ordinary path comes back as the same text, so no message changes for one.
+    """
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 class _ExecutorCore:
     """The state every layer of the executor shares, and the primitives they all use.
 
@@ -517,7 +527,7 @@ class _ExecutorCore:
                 )
             if action in ("create", "update") and content is not None and not isinstance(content, str):
                 raise AgentOutputInvalid(
-                    f"fixer content for {path} must be one string holding the file's complete text "
+                    f"fixer content for {_encodable(path)} must be one string holding the file's complete text "
                     f"(with \\n between lines), not {_shape(content)}",
                     role="fixer",
                 )
@@ -533,7 +543,7 @@ class _ExecutorCore:
                 # their contract meaning and `content` is ignored, as the prompt says.
                 if notes is not None:
                     notes.append(
-                        f"fixer sent action=edit with content and no edits for {path}; "
+                        f"fixer sent action=edit with content and no edits for {_encodable(path)}; "
                         "treated as a whole-file update"
                     )
                 parsed.append({"path": path, "action": "update", "content": content})
@@ -542,7 +552,7 @@ class _ExecutorCore:
                 edits = f.get("edits")
                 if not isinstance(edits, list) or not edits:
                     raise AgentOutputInvalid(
-                        f"fixer edit for {path} requires a non-empty edits list of {{old_text, new_text}}; "
+                        f"fixer edit for {_encodable(path)} requires a non-empty edits list of {{old_text, new_text}}; "
                         'to replace the whole file use action "update" with its complete content',
                         role="fixer",
                     )

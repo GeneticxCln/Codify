@@ -1,10 +1,14 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import difflib
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from engine.fs import MAX_DIFF_BYTES, FileSystemService, GitMetadataError, PathEscapeError
+from engine.library import text_lines
 from typing import Any
 
 
@@ -192,6 +196,281 @@ class TestWhatApplyActuallyChanged(unittest.TestCase):
                 self.fs.resolve("link.txt")
         finally:
             outside.unlink(missing_ok=True)
+
+
+class TestADiffCountsLinesAsReadFileDoes(unittest.TestCase):
+    """A diff's hunks are numbered by `\\n` alone, the way `read_file` and the search tools count (`library.text_lines`).
+
+    `str.splitlines` also cuts at a form feed, a vertical tab, U+001C-1E, NEL, U+2028 and U+2029. The diff did,
+    so a file holding one got hunk headers that disagreed with every other tool's line numbers, and `difflib`
+    (which joins its pieces with nothing between them) ran the two halves of a cut line into the next one.
+    """
+
+    SEPARATORS = ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.fs = FileSystemService(str(self.root))
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def diff_of(self, before: str, after: str) -> str:
+        (self.root / "f").write_bytes(before.encode("utf-8"))  # bytes: no newline translation
+        [summary] = self.fs.apply([{"path": "f", "action": "update", "content": after}], dry_run=True)
+        return str(summary["unified_diff"])
+
+    def assert_hunks_agree_with_text_lines(self, diff: str, before: str) -> None:
+        """Every hunk's header names the lines `text_lines` numbers that way, and its body holds exactly those."""
+        old_lines = text_lines(before)
+        hunks = re.split(r"^@@ -(\d+),(\d+) \+\d+,\d+ @@\n", diff, flags=re.MULTILINE)
+        self.assertGreater(len(hunks), 1, "the diff has no hunk")
+        for start, count, body in zip(hunks[1::3], hunks[2::3], hunks[3::3], strict=True):
+            rows = body.split("\n")[:-1]
+            self.assertTrue(all(r[:1] in (" ", "+", "-") for r in rows), f"a line lost its marker: {rows!r}")
+            old_side = "\n".join(r[1:] for r in rows if r[0] != "+")
+            first = int(start) - 1
+            self.assertEqual(old_lines[first : first + int(count)], text_lines(old_side + "\n"))
+
+    def test_hunk_headers_and_bodies_follow_text_lines(self) -> None:
+        for sep in self.SEPARATORS:
+            with self.subTest(sep=repr(sep)):
+                before = f"head\nline1{sep}line2\nline3\nline4\nline5\nline6\nline7\nline8\ntail\n"
+                diff = self.diff_of(before, before.replace("line4", "line4 changed"))
+                # line4 is line 4 by read_file's count: three lines of context before it, so the hunk starts at 1.
+                self.assertIn("@@ -1,7 +1,7 @@\n", diff)
+                self.assertIn(f" line1{sep}line2\n", diff, "a context line was cut at the separator")
+                self.assert_hunks_agree_with_text_lines(diff, before)
+
+    def test_a_change_inside_a_line_with_a_separator_is_one_removed_and_one_added_line(self) -> None:
+        for sep in self.SEPARATORS:
+            with self.subTest(sep=repr(sep)):
+                diff = self.diff_of(f"h\n1{sep}2\n3\n", f"h\n1{sep}Z\n3\n")
+                self.assertEqual(f"--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n h\n-1{sep}2\n+1{sep}Z\n 3\n", diff)
+
+    def test_a_lone_cr_stays_inside_its_line(self) -> None:
+        # `text_lines` counts `\n` only, so `a\rb` is one line; `splitlines` cut it in two and numbered the hunk 1,4.
+        diff = self.diff_of("h\na\rb\nc\n", "h\na\rB\nc\n")
+        self.assertEqual("--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n h\n-a\rb\n+a\rB\n c\n", diff)
+        before = "head\nline1\rline2\nline3\nline4\nline5\nline6\nline7\nline8\ntail\n"
+        diff = self.diff_of(before, before.replace("line4", "line4 changed"))
+        self.assertIn("@@ -1,7 +1,7 @@\n", diff)
+        self.assertIn(" line1\rline2\n", diff)
+        self.assert_hunks_agree_with_text_lines(diff, before)
+
+    def test_an_ordinary_diff_is_what_it_always_was(self) -> None:
+        # The pinned strings are what `splitlines(keepends=True)` rendered before the change.
+        self.assertEqual("--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n a\r\n-b\r\n+c\r\n", self.diff_of("a\r\nb\r\n", "a\r\nc\r\n"))
+        self.assertEqual("--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n", self.diff_of("a\nb\n", "a\nc\n"))
+        self.assertEqual("--- a/f\n+++ b/f\n@@ -0,0 +1,2 @@\n+a\n+b\n", self.diff_of("", "a\nb\n"))
+
+    def test_the_rendered_diff_matches_splitlines_wherever_the_two_cut_alike(self) -> None:
+        # A small deterministic corpus: LF, CRLF, no final newline, empty, blank lines, non-ASCII.
+        texts = ["", "\n", "a", "a\n", "a\nb", "a\r\nb\r\n", "a\r\nb", "\n\n", "é\n\U0001f600\nx", "a\n\nb\n\n"]
+
+        def splitlines(text: str) -> list[str]:
+            return text.splitlines(keepends=True)
+
+        for before in texts:
+            for after in texts:
+                if before == after:
+                    continue
+                with self.subTest(before=before, after=after):
+                    expected = "".join(difflib.unified_diff(splitlines(before), splitlines(after), "a/f", "b/f"))
+                    self.assertEqual(expected, self.diff_of(before, after))
+
+
+class TestALoneSurrogateIsRefusedBeforeAnythingIsDone(unittest.TestCase):
+    """Text that cannot be saved as UTF-8 is refused in phase one, so a dry run and a real run agree.
+
+    A reply's JSON can spell `"\\ud800"`. The real run only noticed when it made the bytes, in phase two, and rolled
+    back; a dry run never gets that far, accepted it, and left the failure to the database. The refusal is a
+    `ValueError` (the fixer is asked about it once) that names the file and says what to do.
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        (self.root / "a.py").write_text("x = 1\n", encoding="utf-8")
+        self.fs = FileSystemService(str(self.root))
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def tree(self) -> dict[str, bytes | None]:
+        return {
+            str(p.relative_to(self.root)): (p.read_bytes() if p.is_file() else None)
+            for p in sorted(self.root.rglob("*"))
+        }
+
+    def refused(self, files: list[dict[str, Any]], *, dry_run: bool) -> str:
+        before = self.tree()
+        with self.assertRaises(ValueError) as caught:
+            self.fs.apply(files, dry_run=dry_run)
+        self.assertEqual(before, self.tree(), "a refused batch changed the tree")
+        return str(caught.exception)
+
+    def test_a_dry_run_and_a_real_run_refuse_the_same_text_with_the_same_words(self) -> None:
+        files: list[dict[str, Any]] = [
+            {"path": "new/sub/b.py", "action": "create", "content": "ok\n"},
+            {"path": "a.py", "action": "update", "content": "x\ud800y"},
+        ]
+        real = self.refused(files, dry_run=False)
+        dry = self.refused(files, dry_run=True)
+        self.assertEqual(real, dry)
+        self.assertIn("'a.py'", real)
+        self.assertIn("\\ud800", real, "the escape was not shown the way the model wrote it")
+        self.assertIn("lone surrogate", real)
+        self.assertNotIn("codec", real)
+        self.assertTrue(real.isascii(), "the reason carries the surrogate itself, which would break the re-ask prompt")
+
+    def test_an_edits_new_text_is_judged_as_the_text_it_makes(self) -> None:
+        edit = {"old_text": "x = 1", "new_text": "x = '\udfff'"}
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                message = self.refused([{"path": "a.py", "action": "edit", "edits": [edit]}], dry_run=dry_run)
+                self.assertIn("'a.py'", message)
+
+    def test_a_path_that_would_make_a_non_utf8_filename_is_refused(self) -> None:
+        for path in ("b\udc80.py", "b\ud800.py", "dir\udcff/b.py"):
+            for dry_run in (True, False):
+                with self.subTest(path=path, dry_run=dry_run):
+                    message = self.refused([{"path": path, "action": "create", "content": "x\n"}], dry_run=dry_run)
+                    self.assertIn("path", message)
+                    self.assertTrue(message.isascii())
+
+    def test_a_delete_has_no_text_to_judge(self) -> None:
+        # A delete's `content` is ignored by `apply`, so what it holds cannot make the delete refused.
+        for content in (None, "x\ud800"):
+            with self.subTest(content=content):
+                (self.root / "a.py").write_text("x = 1\n", encoding="utf-8")
+                [summary] = self.fs.apply([{"path": "a.py", "action": "delete", "content": content}], dry_run=False)
+                self.assertTrue(summary["changed"])
+                self.assertFalse((self.root / "a.py").exists())
+
+    def test_a_delete_of_a_path_that_is_not_a_filename_is_refused_like_any_other_action(self) -> None:
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                message = self.refused([{"path": "b\udc80.py", "action": "delete"}], dry_run=dry_run)
+                self.assertIn("path", message)
+
+    def test_a_valid_pair_is_one_character_and_is_written(self) -> None:
+        # json.loads combines "\\ud83d\\ude00" into one character before the engine sees it.
+        import json
+
+        text = json.loads('"smile \\ud83d\\ude00\\n"')
+        self.fs.apply([{"path": "smile.txt", "action": "create", "content": text}], dry_run=False)
+        self.assertEqual("smile \U0001f600\n", on_disk(self.root, "smile.txt"))
+
+
+class TestAFailedWriteLeavesNoDirectoryBehind(unittest.TestCase):
+    """`apply` promises all of a batch or none of it, and a directory it made for a file is part of "all".
+
+    A name of 240 characters is a legal target and an illegal temp file (`<name>.<12 hex>.codify-tmp` is over the
+    255 a name may be), so a dry run accepts it and the real write fails at the open. The directories had been made
+    by then, outside the `try` that takes them back, and stayed.
+    """
+
+    LONG = "n" * 240 + ".py"
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        (self.root / "keep.py").write_text("x = 1\n", encoding="utf-8")
+        (self.root / "shared").mkdir()
+        self.fs = FileSystemService(str(self.root))
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def tree(self) -> dict[str, bytes | None]:
+        return {
+            str(p.relative_to(self.root)): (p.read_bytes() if p.is_file() else None)
+            for p in sorted(self.root.rglob("*"))
+        }
+
+    def fails_and_changes_nothing(self, files: list[dict[str, Any]]) -> None:
+        before = self.tree()
+        self.fs.apply(files, dry_run=True)  # the dry run is phase one only: it accepts every one of these
+        with self.assertRaises(OSError):
+            self.fs.apply(files, dry_run=False)
+        self.assertEqual(before, self.tree(), "a failed batch left something behind")
+
+    def test_the_directories_made_for_a_file_whose_temp_file_cannot_be_opened_are_removed(self) -> None:
+        self.fails_and_changes_nothing([{"path": f"newdir/sub/{self.LONG}", "action": "create", "content": "hi\n"}])
+
+    def test_the_same_when_a_later_file_in_the_batch_is_the_one_that_fails(self) -> None:
+        self.fails_and_changes_nothing(
+            [
+                {"path": "keep.py", "action": "update", "content": "x = 2\n"},
+                {"path": "first/deep/ok.py", "action": "create", "content": "ok\n"},
+                {"path": "shared/ok.py", "action": "create", "content": "ok\n"},
+                {"path": f"second/sub/{self.LONG}", "action": "create", "content": "hi\n"},
+            ]
+        )
+
+    def test_a_directory_both_files_would_have_made_goes_when_the_second_file_fails(self) -> None:
+        self.fails_and_changes_nothing(
+            [
+                {"path": "common/ok.py", "action": "create", "content": "ok\n"},
+                {"path": f"common/inner/{self.LONG}", "action": "create", "content": "hi\n"},
+            ]
+        )
+
+    def test_a_directory_the_filesystem_refuses_half_way_down_takes_its_parents_with_it(self) -> None:
+        before = self.tree()
+        with self.assertRaises(OSError):
+            self.fs.apply([{"path": f"a/b/{'d' * 300}/c.py", "action": "create", "content": "x\n"}], dry_run=False)
+        self.assertEqual(before, self.tree())
+
+    def test_a_full_disk_at_the_open_is_no_different(self) -> None:
+        import errno
+
+        before = self.tree()
+        with mock.patch("engine.fs.os.open", side_effect=OSError(errno.ENOSPC, "No space left on device")):
+            with self.assertRaises(OSError):
+                self.fs.apply([{"path": "new/dir/f.py", "action": "create", "content": "x\n"}], dry_run=False)
+        self.assertEqual(before, self.tree())
+
+    def test_a_file_that_is_not_ours_in_a_directory_we_made_is_never_removed(self) -> None:
+        # The rollback takes back empty directories with `rmdir`; it must not make one empty to do it.
+        real = FileSystemService._write_atomic
+        calls: list[int] = []
+
+        def second_write_fails(fs: FileSystemService, target: Path, data: bytes) -> list[Path]:
+            calls.append(1)
+            if len(calls) == 2:
+                (self.root / "new" / "foreign.txt").write_text("not ours\n", encoding="utf-8")
+                raise OSError(28, "No space left on device")
+            return real(fs, target, data)
+
+        files: list[dict[str, Any]] = [
+            {"path": "new/a.py", "action": "create", "content": "a\n"},
+            {"path": "other.py", "action": "create", "content": "b\n"},
+        ]
+        with mock.patch.object(FileSystemService, "_write_atomic", second_write_fails):
+            with self.assertRaises(OSError):
+                self.fs.apply(files, dry_run=False)
+        self.assertEqual("not ours\n", on_disk(self.root, "new/foreign.txt"))
+        self.assertFalse((self.root / "new" / "a.py").exists(), "the batch's own file was left")
+        self.assertFalse((self.root / "other.py").exists())
+
+    def test_the_same_when_the_write_itself_fails_after_the_temp_file_is_open(self) -> None:
+        def replace_fails(src: Any, dst: Any) -> None:
+            (self.root / "new" / "sub" / "foreign.txt").write_text("not ours\n", encoding="utf-8")
+            raise OSError(5, "Input/output error")
+
+        with mock.patch("engine.fs.os.replace", side_effect=replace_fails):
+            with self.assertRaises(OSError):
+                self.fs.apply([{"path": "new/sub/f.py", "action": "create", "content": "x\n"}], dry_run=False)
+        self.assertEqual("not ours\n", on_disk(self.root, "new/sub/foreign.txt"))
+        self.assertEqual([], [p.name for p in (self.root / "new" / "sub").iterdir() if p.name != "foreign.txt"],
+                         "this call's temp file or target was left behind")
+
+    def test_a_write_that_succeeds_still_keeps_the_directories_it_made(self) -> None:
+        self.fs.apply([{"path": "new/dir/f.py", "action": "create", "content": "x\n"}], dry_run=False)
+        self.assertEqual("x\n", on_disk(self.root, "new/dir/f.py"))
 
 
 class TestEditAction(unittest.TestCase):

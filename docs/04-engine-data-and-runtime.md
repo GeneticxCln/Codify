@@ -967,7 +967,12 @@ Two request entries may be plain values or small objects: a `reads` entry is a p
 `{path, offset, limit}` (the line-range form for reaching the bottom half of a big file), and a
 `searches` entry is a query string or `{query, regex, glob}`. A line is what `\n` ends, in a read window, in a
 search hit and in the regex walk alike (`library.text_lines`): a form feed, U+2028 or NEL inside a line does not
-start another, so a hit's `line` is the `offset` that reads it back.
+start another, so a hit's `line` is the `offset` that reads it back. The unified diff of a `diff` event is cut
+the same way (`fs._lines_keepends`: `\n` alone, endings kept), so its hunk headers count lines as `read_file` and
+the search tools do: a form feed, vertical tab, U+001C–U+001E, NEL, U+2028 or U+2029 inside a line neither starts
+a new line nor moves a hunk header. A CRLF file's diff keeps its `\r`, and a file whose lines end in a lone `\r`
+diffs as one line, as it reads as one. A file without a final newline still has its last lines glued in the
+diff (`-b+c`, no `\ No newline at end of file` marker); that is unchanged.
 
 Requests are executed by `engine/library.py`:
 
@@ -1213,12 +1218,25 @@ path outside the workspace) is put to the model once, with the reason and, for a
 **A batch is applied completely or not at all** (`FileSystemService.apply`; audit of 2026-09-29, M4).
 Phase one resolves and validates every operation before anything is written — containment, `.git`, the
 action name, a target that is a directory, each `edit`'s search text — against a virtual view that reflects
-the operations before it in the same batch, so an `edit` of a file the batch just created sees it. Only
-then are the writes made, and a write that fails half-way (a full disk, a permission) puts back what the
+the operations before it in the same batch, so an `edit` of a file the batch just created sees it.
+Phase one also checks that every path and every resolved text (a create's or update's content, an edit's
+result) can be written as UTF-8; a delete has no text, but its path is judged like any other. A lone
+surrogate escape such as `\ud800` in either is refused with a `ValueError` that names the file in words,
+before anything is written or stored, so a real run and a dry run refuse the same batch and the fixer is
+asked about it once. A path holding one would otherwise make a filename that is not UTF-8. A valid pair
+(`\ud83d\ude00`) is one character after `json.loads` and is accepted. This is also what keeps a dry run from
+storing a proposal that Apply could not write.
+Only then are the writes made, and a write that fails half-way (a full disk, a permission) puts back what the
 batch had already touched: content, mode, deleted files and any directories it created. So a refused batch,
-or one that failed while writing, leaves the tree byte-identical, which is what makes it safe for the
+or one that failed while writing, leaves the tree byte-identical, or names any file it could not put back,
+which is what makes it safe for the
 step to fail loudly instead of leaving half a change uncommitted and unannounced. A dry run performs phase
-one only. Nothing is written into a protected workspace root at all (`03` §1.4).
+one only, so it cannot see a failure that only the filesystem reports at write time (for example a name of
+about 240 characters, whose temp file name is over the 255-byte limit). When a write fails, whether in the
+first file of a batch or a later one, the temp file and every directory the call made are taken back along
+with every file touched. A failed write takes back only what this call made: a directory goes only once it is
+empty (`rmdir`, never a recursive remove), so a file that someone else put in it survives.
+Nothing is written into a protected workspace root at all (`03` §1.4).
 
 ### 4.3 Verifier
 
