@@ -1706,6 +1706,15 @@ info on every attempt and backs off 1, 2, 4, 8, then 16 s. The counter resets on
 stayed open for `STABLE_CONNECTION_MS` (10 s), not on open, because the engine accepts the upgrade before it
 checks the token: resetting on open made a rejected token a 1 Hz reconnect loop.
 
+`onConnected` is reported only for a connection that is *proven*, not for a bare websocket open, which proves
+nothing for the same reason. It fires once per socket, when a frame arrives (the engine writes nothing to an
+unauthenticated socket, so even a frame the client cannot read counts) or when `CONNECTION_PROVEN_MS` (2 s)
+passes with no close; an idle healthy socket gets no frame until the engine's first sweep, so the timer is what
+proves it. A rejected token arrives as `4401` within milliseconds, so it never reports connected. The 10 s
+`STABLE_CONNECTION_MS` window answers a different question and governs only when the backoff counter resets.
+Events delivered late by a socket that has been closed or replaced are ignored. (`openGoalStream`'s
+`onConnected` is still a bare open; nothing passes it.)
+
 One frame exists today:
 
 | frame | payload | when |

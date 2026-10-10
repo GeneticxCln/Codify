@@ -231,13 +231,21 @@ keys selections on the `(provider, id)` pair.
     has. The settings panel's own minute tick and focus refresh are therefore the **fallback for a
     socket that is down** — a stale list is worse than one extra discovery, and the cost of a dead
     socket falls to one open panel (`needsOwnRefresh` in `ui/src/providerSetup.ts` pins which way
-    that goes).
+    that goes). "Down" means not *proven*: `catalogLive` turns true on a proven connection, and a socket
+    that merely opened and was then refused with `4401` does not flip it, so the fallback poll is neither
+    suppressed nor re-armed by a rejected token. Until a socket is proven, up to 2 s after each connect, it
+    counts as down.
   * A sweep that changed nothing still sends `model_catalog_checked`, carrying only the time. Without
     it a screen that no longer polls cannot report the age of its own list, and the alternatives are
     a number nobody is keeping true or the client-side timer this design removed. It is a time, not a
     diff: silence about *changes* and a report of the *check* are different jobs.
   * **A reconnect re-reads.** The engine only announces to current subscribers and does not replay, so
-    a release that landed while the socket was down is one nobody would otherwise ever hear about.
+    a release that landed while the socket was down is one nobody would otherwise ever hear about. Every
+    *proven* connection after the first one re-reads (a frame, or 2 s without being refused,
+    `CONNECTION_PROVEN_MS`: docs/04 §6.0), and a socket the engine rejected never counts, so a refusal loop
+    does not hammer `GET /models`. The cost is that a start whose first sockets were refused does not
+    re-read when one is finally accepted: its list waits for the engine's next frame (one sweep interval,
+    about 60 s) or for the panel's own tick.
   * **The diff is also recorded, because the badge cannot say a model went away.** The frame used to be
     used only as a signal to re-read, and its payload thrown away. It is now also counted per provider and
     kept as a notification (`ui/src/notifications.ts`, docs/09 §10.18): "Groq +1 · NVIDIA +3 −1". The
