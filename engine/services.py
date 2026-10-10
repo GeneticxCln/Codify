@@ -51,6 +51,9 @@ from engine.models import (
     WorkspaceFileList,
     WorkspaceFileSaved,
     WorkspaceCreate,
+    loads_payload,
+    scrub_payload_text,
+    scrub_surrogates,
 )
 from engine.providers import (
     BaseProvider,
@@ -1324,7 +1327,7 @@ class GoalService:
             ).fetchall()
             text = ""
             for ev in reversed(reply):
-                payload = json.loads(ev["payload"] or "{}")
+                payload = scrub_surrogates(json.loads(ev["payload"] or "{}"))
                 if payload.get("turn"):
                     text = str(payload.get("message") or "")
                     break
@@ -1412,7 +1415,7 @@ class GoalService:
         seen: set[tuple[str, str]] = set()
         for row in rows:
             try:
-                payload = json.loads(row["payload"] or "{}")
+                payload = loads_payload(row["payload"])
             except (TypeError, ValueError):
                 continue
             provider = (payload.get("provider") or "").strip()
@@ -1483,6 +1486,11 @@ class GoalService:
             (workspace_id, *kinds, cutoff, cutoff, scan),
         ).fetchall()
         rows = [dict(row) for row in rows]
+        # `engine.recall` parses these as text; a row from before `publish` scrubbed may still hold an
+        # escaped lone surrogate, which would reach the memory brief (and so a provider request body).
+        for row in rows:
+            if isinstance(row["payload"], str):
+                row["payload"] = scrub_payload_text(row["payload"])
         if with_ids:
             ids = self._db.execute(
                 """SELECT goal_id, step_id, type, sequence, id FROM events
@@ -2067,7 +2075,8 @@ class GoalService:
     def publish(self, event: Event) -> Event:
         self._db.execute(
             "INSERT INTO events (id, goal_id, step_id, type, payload, timestamp, sequence) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (event.id, event.goal_id, event.step_id, event.type, dumps(event.payload), event.timestamp, event.sequence),
+            (event.id, event.goal_id, event.step_id, event.type, dumps(scrub_surrogates(event.payload)),
+             event.timestamp, event.sequence),
         )
         self._db.commit()
         return event

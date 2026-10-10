@@ -180,7 +180,7 @@ class Event(BaseModel):
     goal_id: str
     step_id: Optional[str] = None
     type: EventType
-    payload: dict
+    payload: dict  # lone surrogates become U+FFFD when built or read back (§6)
     timestamp: float
     sequence: int  # per-goal, starts at 1, +1 per publish
 ```
@@ -1696,6 +1696,22 @@ The line is printed **only once the engine can serve**: `serve()` opens the SQLi
 `token` = 32 bytes CSPRNG hex (64 chars), created once and kept at `<state dir>/boot_token` (`0600`). Desktop reads this line, then attaches `Authorization: Bearer <token>` to HTTP and `?token=` is **forbidden** (query leakage). WS: first text frame from client `{"type":"auth","token":"<hex>"}` or HTTP header on the Upgrade.
 
 WS URL: `ws://127.0.0.1:<port>/ws/goals/{id}`. After auth, server sends events with `sequence > 0` live; client SHOULD `GET /goals/{id}/events?after=` for gap fill.
+
+Payload text is stored and served with lone surrogates replaced by U+FFFD, so one bad character cannot make a
+goal's log unreadable. A model's JSON reply can carry an escaped lone surrogate (for example `\ud800`);
+`json.loads` turns it into a Python string that cannot be encoded to UTF-8, and the stored row (written through
+`db.dumps`, which escapes it) comes back as the same string, which neither the events route nor the WebSocket
+replay could then send. `Event.payload` therefore passes through `scrub_surrogates` (`engine/models.py`)
+whenever an `Event` is validated (built, or read back from the table), which covers new events and rows already in the table alike, so a log written
+before this heals on read with no migration; and `GoalService.publish` applies the same function before the
+INSERT, so a row written afterwards never holds the escape. Valid astral characters and every non-string value
+are untouched.
+
+Readers that take `events.payload` from SQL without building an `Event` (the agent and overview statistics,
+`/models/recent`, the previous turn's reply, `recall_events`) scrub with `models.loads_payload`,
+`models.scrub_payload_text` or `models.scrub_surrogates` instead, so rows written before the fix are healed on read there too. The
+guarantee covers events only: other stored text, such as a plan step's title and description, is not scrubbed,
+and sqlite refuses a lone surrogate there with an encoding error instead of storing it.
 
 The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
 once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with
