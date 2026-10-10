@@ -65,7 +65,7 @@ One conductor tool, **`fetch_page(url, selector?, max_chars?)`**, in `engine/web
   | GET only; no body, header, cookie, credential or proxy the model can name, and none the engine adds (no `Referer`, no cookie jar, `trust_env=False`) | Data carried in a request any way but the address; a proxy that would resolve names and turn the next rule into a check of nothing |
   | `http`/`https`, no user-info, ports 80/443/8080/8443, ≤ 2,000 characters, no whitespace or control characters | `file:`, `ftp:`, `gopher:`, credentials in a URL, the HTTP-to-SMTP/SSH/Redis cross-protocol trick, a long URL as a data channel |
   | The name is resolved here and **every** answer must be a public address (`is_public`: loopback, private, link-local and so the cloud metadata service, CGNAT, multicast, reserved, and IPv6 that wraps one of those, NAT64 included) | `localhost`, `169.254.169.254`, a LAN host, the engine's own port, whatever name points there; a name with one private answer among public ones |
-  | The connection is made **to the address that was checked**; the name travels in `Host` and, for HTTPS, as the name the certificate must match (`sni_hostname`) | DNS rebinding: a name that answers differently the second time is never asked again |
+  | The connection is made **to one of the addresses that were checked** (the name is resolved once per request; no other address is ever used); the name travels in `Host` and, for HTTPS, as the name the certificate must match (`sni_hostname`). If connecting to an address fails (`ConnectError`, which includes a failed TLS handshake, or `ConnectTimeout`, so no request was sent), the next checked address is tried, in the resolver's order, each host once however its address is spelled, at most `MAX_ADDRESS_TRIES` (4) per hop (each redirect is a new request that resolves afresh) and inside the same 20 s budget, which ends a run of slow connect timeouts before the cap does (the sentence is then "took longer than 20 seconds"); any other failure ends the fetch | DNS rebinding: a name that answers differently the second time is never asked again. (The fallback is for a dual-stack host whose first answer, often IPv6, cannot be reached from this machine; it connects to no address the check did not pass, because every address it can try was checked.) |
   | Redirects are followed by hand, at most 5, and each hop passes every rule again, the list included | An open redirect on an allowed site walking somewhere the first hop could not go |
   | One 20 s budget over the whole fetch; the body is read to 1 MB and the stream stops there (a compressed body is capped after it is decompressed); the content type must be text | A slow or endless response; a large one held in memory; a binary one |
   | Text is capped, stripped of zero-width and bidirectional controls and of the Unicode tag block, and returned labelled as a website's words | Instructions hidden in text a person cannot see; a page that talks like a command (`format_fetch` says what it is in the same breath as the text) |
@@ -107,7 +107,9 @@ One conductor tool, **`fetch_page(url, selector?, max_chars?)`**, in `engine/web
   `127.0.0.1`: the request succeeded, and a certificate for a different name failed closed. A test that mints a
   certificate needs a package the 3.10 floor leg does not install, so what the suite pins is the request's
   *construction* (the address in the URL, the name in `Host`, `sni_hostname` set) and a real socket test of the
-  `Host` header. A change to httpcore's handling of `sni_hostname` would not be seen by the suite.
+  `Host` header. A change to httpcore's handling of `sni_hostname` would not be seen by the suite. What it does
+  pin on the fallback path, over real sockets, is that a failed handshake moves on to the next checked address and
+  that no request reaches either.
 * **Rule mutations.** Twenty-five deliberate breaks of these rules were tried (sixteen in `web_fetch.py`, nine in
   the wiring; the first version of one, the redirect re-check, was weaker than intended and was redone) and each
   was checked against the tests. One real gap in the tests was found and closed (the
@@ -116,7 +118,10 @@ One conductor tool, **`fetch_page(url, selector?, max_chars?)`**, in `engine/web
   which `ipaddress`'s `is_global` already does on 3.10.20 and 3.11.15; it stays as a guard for an interpreter
   that does not. NAT64 is the one wrapped form that `is_global` gets wrong (`64:ff9b::7f00:1` is "global" on both),
   which is why it is named in `_NEVER` and in the tests. That shows the breaks someone thought of are noticed, not
-  that no other gap exists.
+  that no other gap exists. The count predates the address fallback (`MAX_ADDRESS_TRIES`), which was broken on
+  purpose separately: thirteen mutants, of which four survived the first tests (a hard-coded fallback address for a
+  host with one answer, a sorted order, a cache across same-host redirects, a bare timeout treated as retryable)
+  and each now has a test that kills it.
 
 ## 5. If a rejected row is ever reopened
 

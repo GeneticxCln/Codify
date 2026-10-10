@@ -9,7 +9,7 @@ differently the second time, a redirect that walks somewhere the first hop was n
 
 Nothing here touches the network. `httpx.MockTransport` serves most pages; one test starts a server on the
 loopback interface and lets the guard through for it (the guard is patched, never bypassed by a parameter), to
-prove the connection really goes to the address that was checked and the name really travels in `Host`.
+prove the connection really goes to an address that was checked and the name really travels in `Host`.
 
 Scrapling is the parser and only the parser. `TestScraplingIsOnlyTheParser` reads the engine's source and fails
 when anything else of it is imported, because the reasons it is not (docs/12) are the reasons this file exists.
@@ -36,6 +36,7 @@ from scrapling import parser as scrapling_parser
 
 from engine import web_fetch
 from engine.web_fetch import (
+    MAX_ADDRESS_TRIES,
     MAX_BODY_BYTES,
     MAX_REDIRECTS,
     MODE_ANY,
@@ -50,6 +51,7 @@ from engine.web_fetch import (
     is_public,
     parse_hosts,
     public_address,
+    public_addresses,
 )
 
 ENGINE = Path(__file__).resolve().parent.parent / "engine"
@@ -274,6 +276,257 @@ class TestOnlyPublicAddressesAreConnectedTo(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FetchRefused) as caught:
             await public_address("nowhere.example", 443, nothing)
         self.assertIn("did not resolve", str(caught.exception))
+
+
+V6 = "2606:4700:4700::1111"
+V4 = "93.184.216.34"
+
+
+def failing_at(
+    bad: set[str], seen: list[httpx.Request], error: Callable[[], Exception] = lambda: httpx.ConnectError("boom"),
+) -> Callable[[httpx.Request], httpx.Response]:
+    """A handler that records every request, raises `error()` for the pinned hosts in `bad`, and serves a page otherwise."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.host in bad:
+            raise error()
+        return html()
+
+    return handler
+
+
+class TestPublicAddresses(unittest.IsolatedAsyncioTestCase):
+    async def test_every_checked_answer_comes_back_in_resolver_order_without_duplicates(self) -> None:
+        answers = [V6, V4, V6, "8.8.8.8", V4]
+        self.assertEqual(await public_addresses("docs.example", 443, resolver({"docs.example": answers})), [V6, V4, "8.8.8.8"])
+
+    async def test_one_host_spelled_several_ways_is_one_address(self) -> None:
+        for answers in (
+            ["::ffff:93.184.216.34", V4, "::FFFF:5db8:d822", V4],
+            [V4, "::ffff:93.184.216.34"],
+        ):
+            with self.subTest(answers=answers):
+                got = await public_addresses("docs.example", 443, resolver({"docs.example": answers}))
+                self.assertEqual(got, [answers[0]], "the first spelling is the one kept")
+
+    async def test_one_private_answer_refuses_the_whole_name_and_says_which(self) -> None:
+        for answers in ([V4, "127.0.0.1"], ["10.0.0.1", V4], [V6, V4, "::ffff:192.168.0.1"]):
+            with self.subTest(answers=answers):
+                with self.assertRaises(FetchRefused) as caught:
+                    await public_addresses("docs.example", 443, resolver({"docs.example": answers}))
+                self.assertIn("not a public address", str(caught.exception))
+
+    async def test_an_empty_answer_is_refused(self) -> None:
+        async def nothing(host: str, port: int) -> list[str]:
+            return []
+
+        with self.assertRaises(FetchRefused) as caught:
+            await public_addresses("nowhere.example", 443, nothing)
+        self.assertEqual(str(caught.exception), "nowhere.example did not resolve to an address.")
+
+    async def test_a_literal_host_is_judged_without_the_resolver_and_is_the_only_address(self) -> None:
+        async def never(host: str, port: int) -> list[str]:
+            raise AssertionError("a literal address needs no lookup")
+
+        self.assertEqual(await public_addresses(V4, 443, never), [V4])
+        self.assertEqual(await public_addresses(V6, 443, never), [V6])
+        with self.assertRaises(FetchRefused):
+            await public_addresses("127.0.0.1", 443, never)
+
+    async def test_public_address_is_still_the_first_checked_one(self) -> None:
+        self.assertEqual(await public_address("docs.example", 443, resolver({"docs.example": [V6, V4]})), V6)
+        with self.assertRaises(FetchRefused):
+            await public_address("docs.example", 443, resolver({"docs.example": [V6, "127.0.0.1"]}))
+
+
+class TestAHostWithSeveralAddresses(unittest.IsolatedAsyncioTestCase):
+    """A dual-stack host whose first answer cannot be reached from here is not an unreachable host."""
+
+    DUAL = {"docs.example": [V6, V4]}
+
+    async def test_the_next_checked_address_is_tried_when_the_first_cannot_be_connected_to(self) -> None:
+        seen: list[httpx.Request] = []
+        page = await get("https://docs.example/a", failing_at({V6}, seen), table=self.DUAL)
+        self.assertEqual(page.status, 200)
+        self.assertIn("Quickstart", page.text)
+        self.assertEqual([r.url.host for r in seen], [V6, V4])
+        for request in seen:
+            self.assertEqual(request.headers["host"], "docs.example")
+            self.assertEqual(request.extensions.get("sni_hostname"), "docs.example")
+            self.assertEqual(request.url.path, "/a")
+
+    async def test_a_connect_timeout_falls_through_too(self) -> None:
+        seen: list[httpx.Request] = []
+        page = await get(
+            "https://docs.example/", failing_at({V6}, seen, lambda: httpx.ConnectTimeout("slow")), table=self.DUAL,
+        )
+        self.assertEqual(page.status, 200)
+        self.assertEqual([r.url.host for r in seen], [V6, V4])
+
+    async def test_when_every_address_fails_the_sentence_is_the_old_one_and_holds_no_address(self) -> None:
+        for error, name in ((lambda: httpx.ConnectError("boom"), "ConnectError"), (lambda: httpx.ConnectTimeout("slow"), "ConnectTimeout")):
+            with self.subTest(name=name):
+                seen: list[httpx.Request] = []
+                with self.assertRaises(FetchRefused) as caught:
+                    await get("https://docs.example/", failing_at({V6, V4}, seen, error), table=self.DUAL)
+                self.assertEqual(str(caught.exception), f"docs.example could not be reached ({name}).")
+                self.assertEqual(len(seen), 2)
+                for address in (V6, V4):
+                    self.assertNotIn(address, str(caught.exception))
+
+    async def test_the_last_failure_names_the_sentence(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            raise httpx.ConnectError("boom") if len(seen) == 1 else httpx.ConnectTimeout("slow")
+
+        with self.assertRaises(FetchRefused) as caught:
+            await get("https://docs.example/", handler, table=self.DUAL)
+        self.assertIn("(ConnectTimeout)", str(caught.exception))
+
+    async def test_a_failure_after_the_connection_was_made_is_not_retried_elsewhere(self) -> None:
+        for make in (
+            lambda: httpx.ReadTimeout("slow"), lambda: httpx.ReadError("cut"), lambda: httpx.RemoteProtocolError("bad"),
+            lambda: httpx.WriteError("cut"), lambda: httpx.PoolTimeout("busy"), lambda: httpx.InvalidURL("no"),
+        ):
+            name = type(make()).__name__
+            with self.subTest(error=name):
+                seen: list[httpx.Request] = []
+                with self.assertRaises(FetchRefused) as caught:
+                    await get("https://docs.example/", failing_at({V6}, seen, make), table=self.DUAL)
+                self.assertEqual(len(seen), 1, "request bytes may have been sent; a second address would repeat them")
+                self.assertEqual(str(caught.exception), f"docs.example could not be reached ({name}).")
+
+    async def test_a_refusal_raised_while_reading_the_reply_passes_through_and_is_not_retried(self) -> None:
+        seen: list[httpx.Request] = []
+        with self.assertRaises(FetchRefused) as caught:
+            await get(
+                "https://docs.example/x", recording(seen, lambda: httpx.Response(200, content=b"x", headers={"content-type": "image/png"})),
+                table=self.DUAL,
+            )
+        self.assertIn("not text", str(caught.exception))
+        self.assertEqual(len(seen), 1)
+
+    async def test_an_unchecked_address_is_never_connected_to(self) -> None:
+        seen: list[httpx.Request] = []
+        with self.assertRaises(FetchRefused):
+            await get("https://docs.example/", failing_at(set(), seen), table={"docs.example": [V6, "127.0.0.1", V4]})
+        self.assertEqual(seen, [], "one private answer refuses the name before any connection")
+
+    async def test_each_hop_resolves_and_is_connected_only_inside_its_own_checked_set(self) -> None:
+        other = "8.8.8.8"
+        answers = {"docs.example": [V6, V4], "next.example": ["2001:4860:4860::8888", other]}
+        asked: list[str] = []
+        seen: list[httpx.Request] = []
+
+        async def resolve(host: str, port: int) -> list[str]:
+            asked.append(host)
+            return answers[host]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            if request.url.host in (V6, "2001:4860:4860::8888"):
+                raise httpx.ConnectError("boom")
+            if request.headers["host"] == "docs.example":
+                return httpx.Response(302, headers={"location": "https://next.example/b"})
+            return html()
+
+        page = await fetch("https://docs.example/a", ANY, resolve=resolve, transport=httpx.MockTransport(handler))
+        self.assertEqual(page.url, "https://next.example/b")
+        self.assertEqual(asked, ["docs.example", "next.example"], "one lookup per hop, none per attempt")
+        self.assertEqual(
+            [(r.headers["host"], r.url.host) for r in seen],
+            [("docs.example", V6), ("docs.example", V4), ("next.example", "2001:4860:4860::8888"), ("next.example", other)],
+        )
+        for request in seen:
+            self.assertIn(request.url.host, answers[request.headers["host"]])
+
+    async def test_at_most_max_address_tries_are_made_per_hop(self) -> None:
+        many = [f"93.184.216.{n}" for n in range(1, 7)]
+        seen: list[httpx.Request] = []
+        with self.assertRaises(FetchRefused) as caught:
+            await get("https://docs.example/", failing_at(set(many), seen), table={"docs.example": many})
+        self.assertEqual(MAX_ADDRESS_TRIES, 4)
+        self.assertEqual([r.url.host for r in seen], many[:MAX_ADDRESS_TRIES])
+        self.assertEqual(str(caught.exception), "docs.example could not be reached (ConnectError).")
+
+    async def test_an_address_past_the_cap_is_not_used_even_when_it_would_work(self) -> None:
+        many = [f"93.184.216.{n}" for n in range(1, 7)]
+        seen: list[httpx.Request] = []
+        with self.assertRaises(FetchRefused):
+            await get("https://docs.example/", failing_at(set(many[:MAX_ADDRESS_TRIES]), seen), table={"docs.example": many})
+        self.assertEqual(len(seen), MAX_ADDRESS_TRIES)
+
+    async def test_one_host_spelled_three_ways_spends_one_try_not_three(self) -> None:
+        answers = ["::ffff:93.184.216.34", V4, "::FFFF:5db8:d822", "8.8.8.8", "1.1.1.1", "9.9.9.9", "208.67.222.222"]
+        seen: list[httpx.Request] = []
+        with self.assertRaises(FetchRefused):
+            await get("https://docs.example/", failing_at(set(answers), seen), table={"docs.example": answers})
+        self.assertEqual(
+            [r.url.host for r in seen], ["::ffff:93.184.216.34", "8.8.8.8", "1.1.1.1", "9.9.9.9"],
+            "three spellings of one machine are one try, so a distinct address is still inside the cap",
+        )
+
+    async def test_attempts_follow_the_resolvers_order_not_a_sorted_one(self) -> None:
+        answers = [V4, "8.8.8.8", V6]
+        seen: list[httpx.Request] = []
+        page = await get("https://docs.example/", failing_at({V4, "8.8.8.8"}, seen), table={"docs.example": answers})
+        self.assertEqual(page.status, 200)
+        self.assertEqual([r.url.host for r in seen], answers)
+
+    async def test_a_host_with_one_checked_address_is_tried_there_and_nowhere_else(self) -> None:
+        seen: list[httpx.Request] = []
+        with self.assertRaises(FetchRefused) as caught:
+            await get("https://docs.example/", failing_at({V4}, seen), table={"docs.example": [V4]})
+        self.assertEqual([r.url.host for r in seen], [V4])
+        self.assertEqual(str(caught.exception), "docs.example could not be reached (ConnectError).")
+
+    async def test_a_redirect_to_the_same_host_resolves_again(self) -> None:
+        asked: list[str] = []
+
+        async def resolve(host: str, port: int) -> list[str]:
+            asked.append(host)
+            return [V6, V4]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/a":
+                return httpx.Response(302, headers={"location": "/b"})
+            return html()
+
+        page = await fetch("https://docs.example/a", ANY, resolve=resolve, transport=httpx.MockTransport(handler))
+        self.assertEqual(page.url, "https://docs.example/b")
+        self.assertEqual(asked, ["docs.example", "docs.example"], "a cached answer is the window rebinding needs")
+
+    async def test_a_bare_timeout_raised_in_an_attempt_is_final_and_is_not_retried(self) -> None:
+        seen: list[httpx.Request] = []
+        with self.assertRaises(FetchRefused) as caught:
+            await get("https://docs.example/", failing_at({V6}, seen, lambda: asyncio.TimeoutError()), table=self.DUAL)
+        self.assertEqual(len(seen), 1)
+        self.assertIn("took longer", str(caught.exception))
+
+    async def test_a_tls_failure_is_a_connect_failure_and_moves_on(self) -> None:
+        seen: list[httpx.Request] = []
+        tls = lambda: httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")  # noqa: E731
+        page = await get("https://docs.example/", failing_at({V6}, seen, tls), table=self.DUAL)
+        self.assertEqual(page.status, 200)
+        self.assertEqual([r.url.host for r in seen], [V6, V4])
+
+    async def test_the_total_budget_still_bounds_the_attempts(self) -> None:
+        many = [f"93.184.216.{n}" for n in range(1, 5)]
+        seen: list[httpx.Request] = []
+
+        async def slow(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            await asyncio.sleep(0.04)
+            raise httpx.ConnectError("boom")
+
+        with mock.patch.object(web_fetch, "TOTAL_TIMEOUT_S", 0.07):
+            with self.assertRaises(FetchRefused) as caught:
+                await fetch("https://docs.example/", ANY, resolve=resolver({"docs.example": many}), transport=httpx.MockTransport(slow))
+        self.assertIn("took longer", str(caught.exception))
+        self.assertLess(len(seen), len(many), "the budget stopped the fetch with addresses still untried")
 
 
 class TestWhatTheRequestIs(unittest.IsolatedAsyncioTestCase):
@@ -651,6 +904,52 @@ class TestTheConnectionReallyGoesToTheCheckedAddress(unittest.IsolatedAsyncioTes
         with self.assertRaises(FetchRefused) as caught:
             await fetch("http://fetch.test:8080/x", ANY, resolve=resolve)
         self.assertIn("not a public address", str(caught.exception))
+
+
+class TestAFailedHandshakeFallsThroughWithoutSendingARequest(unittest.IsolatedAsyncioTestCase):
+    """Real sockets: httpx reports a failed TLS handshake as `ConnectError`, which the fallback retries.
+
+    Each server answers plain HTTP to whatever it is sent, so an `https` client fails its handshake. What the
+    mock transport cannot show is that the failure happens before any request bytes leave: the servers record
+    what they received and none of it may be an HTTP request.
+    """
+
+    async def test_both_addresses_fail_the_handshake_and_neither_receives_a_request(self) -> None:
+        received: dict[str, list[bytes]] = {"127.0.0.1": [], "127.0.0.2": []}
+
+        def handler_for(address: str) -> type[socketserver.BaseRequestHandler]:
+            class Handler(socketserver.BaseRequestHandler):
+                def handle(self) -> None:
+                    self.request.settimeout(2)
+                    try:
+                        received[address].append(self.request.recv(4096))
+                    except OSError:
+                        received[address].append(b"")
+                    self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+
+            return Handler
+
+        first = socketserver.ThreadingTCPServer(("127.0.0.1", 0), handler_for("127.0.0.1"))
+        port = first.server_address[1]
+        second = socketserver.ThreadingTCPServer(("127.0.0.2", port), handler_for("127.0.0.2"))
+        for server in (first, second):
+            server.daemon_threads = True
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+        async def resolve(host: str, p: int) -> list[str]:
+            return ["127.0.0.1", "127.0.0.2"]
+
+        with mock.patch.object(web_fetch, "ALLOWED_PORTS", frozenset({port})), mock.patch.object(web_fetch, "is_public", lambda ip: True):
+            with self.assertRaises(FetchRefused) as caught:
+                await fetch(f"https://fetch.test:{port}/x", ANY, resolve=resolve)
+        self.assertEqual(str(caught.exception), "fetch.test could not be reached (ConnectError).")
+        for address, chunks in received.items():
+            with self.subTest(address=address):
+                self.assertEqual(len(chunks), 1, "the handshake was attempted at this address, so the fallback reached it")
+                self.assertFalse(chunks[0].startswith(b"GET "), "no HTTP request may precede a completed handshake")
+                self.assertNotIn(b"/x", chunks[0])
 
 
 class TestScraplingIsOnlyTheParser(unittest.TestCase):

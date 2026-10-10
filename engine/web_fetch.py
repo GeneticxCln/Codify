@@ -22,9 +22,16 @@ What the rules are, and the attack each one answers:
     the workspace is sent but the address, which is also the one thing that can carry it out (see below).
   * **Only public addresses.** The name is resolved here and every answer must be a public address, so
     `localhost`, `169.254.169.254` (a cloud's metadata service), a LAN host and the engine's own port are all
-    refused whatever they are called. The connection is then made *to the address that was checked*, with the
-    name carried in `Host` and in the TLS handshake, so a name that answers differently the second time
-    (DNS rebinding) is never asked again. Each redirect is a new request and passes every rule again.
+    refused whatever they are called. The connection is then made *to one of the addresses that were checked*,
+    with the name carried in `Host` and in the TLS handshake, so a name that answers differently the second
+    time (DNS rebinding) is never asked again. When the connection to one cannot be made (`ConnectError`,
+    `ConnectTimeout`: no request was sent), the next checked address is tried, in the order the resolver gave
+    them, at most `MAX_ADDRESS_TRIES` per request (a redirect is a new request, so the bound is per hop) and all
+    inside the one time budget; any other failure is final, because the request may already have been sent.
+    A failed TLS handshake, a certificate that does not match the name included, reaches httpx as a
+    `ConnectError` and is retried the same way: no request bytes had been sent, and every attempt verifies the
+    certificate against the name afresh. No address the check did not see is ever connected to.
+    Each redirect is a new request, resolves afresh and passes every rule again.
   * **Bounded.** One total time budget, a cap on bytes read (the stream stops at the cap; nothing is held beyond
     it, and a compressed body is capped after it is decompressed), a cap on redirects, and a content type that
     must be text.
@@ -77,6 +84,13 @@ MAX_REDIRECTS = 5
 #: Bytes of body read. A page's useful text is a few thousand characters, and a response can otherwise be as
 #: large as the server cares to make it.
 MAX_BODY_BYTES = 1_000_000
+
+#: How many of a host's checked addresses one request tries before giving up, when connecting to each in turn
+#: fails. A dual-stack host whose first answer is unreachable from here still has a second; a name with dozens of
+#: answers does not get dozens of attempts. The real bound on all of them together is `TOTAL_TIMEOUT_S`: four
+#: connect timeouts (`CONNECT_TIMEOUT_S` each) are longer than it, so a host that swallows every connection ends as
+#: "took longer than 20 seconds" rather than "could not be reached".
+MAX_ADDRESS_TRIES = 4
 
 #: The whole fetch, resolution and every redirect included, and the part of it spent connecting.
 TOTAL_TIMEOUT_S = 20.0
@@ -322,11 +336,12 @@ async def system_resolver(host: str, port: int) -> list[str]:
     return seen
 
 
-async def public_address(host: str, port: int, resolve: Resolver) -> str:
-    """The one address to connect to for a host, every answer for it having been public.
+async def public_addresses(host: str, port: int, resolve: Resolver) -> list[str]:
+    """Every address a host may be connected to, every answer for it having been public.
 
-    One private answer among public ones refuses the lot: a name that sometimes points inside is a name that
-    can be made to.
+    The name is resolved once. One private answer among public ones refuses the lot: a name that sometimes
+    points inside is a name that can be made to. An address literal is judged without asking the resolver. The
+    answers come back in the resolver's order, each once.
     """
     if _ip(host) is not None:
         addresses = [host]
@@ -334,6 +349,7 @@ async def public_address(host: str, port: int, resolve: Resolver) -> str:
         addresses = await resolve(host, port)
     if not addresses:
         raise FetchRefused(f"{_shown(host)} did not resolve to an address.")
+    distinct: dict[IPAddress, str] = {}
     for address in addresses:
         ip = _ip(address)
         if ip is None or not is_public(ip):
@@ -341,7 +357,16 @@ async def public_address(host: str, port: int, resolve: Resolver) -> str:
                 f"{_shown(host)} resolves to {address}, which is not a public address. Only public web hosts are "
                 "fetched: a local or private page is something the person opens in their own browser."
             )
-    return addresses[0]
+        # One host is one slot however it is spelled: `::ffff:1.2.3.4`, `1.2.3.4` and `::FFFF:102:304` would
+        # otherwise spend three of `MAX_ADDRESS_TRIES` on a single machine. The first spelling is the one kept.
+        key = ip.ipv4_mapped if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None else ip
+        distinct.setdefault(key, address)
+    return list(distinct.values())
+
+
+async def public_address(host: str, port: int, resolve: Resolver) -> str:
+    """The first of a host's checked addresses (see `public_addresses`)."""
+    return (await public_addresses(host, port, resolve))[0]
 
 
 def _budget(requested: int | None) -> int:
@@ -486,7 +511,7 @@ async def _once(
     transport: httpx.AsyncBaseTransport | None,
     verify: SSLContext | bool,
 ) -> _Reply:
-    """One request, to the address that was checked.
+    """One request, to one address that was checked.
 
     The URL carries the address and the name travels in `Host` and in the TLS handshake (`sni_hostname`, which
     httpcore uses as the name the certificate must match). A fresh client per request, so no cookie, connection
@@ -530,6 +555,33 @@ async def _once(
             await response.aclose()
 
 
+async def _first_reply(
+    target: Target,
+    addresses: list[str],
+    transport: httpx.AsyncBaseTransport | None,
+    verify: SSLContext | bool,
+) -> _Reply:
+    """The reply from the first checked address that can be connected to.
+
+    Only a failure to connect (`ConnectError`, `ConnectTimeout`) moves on to the next address: nothing was sent,
+    so another address cannot repeat a request. That includes a failed TLS handshake, which httpx also reports as
+    `ConnectError`; each attempt verifies the certificate against the name again. Every other failure ends the
+    fetch, since the request may have reached the host. The refusal names the host and the last error's type,
+    never an address.
+    """
+    last: Exception | None = None
+    for address in addresses[:MAX_ADDRESS_TRIES]:
+        try:
+            return await _once(target, address, transport, verify)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            last = exc
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+            raise FetchRefused(f"{_shown(target.host)} could not be reached ({type(exc).__name__}).") from exc
+    # `addresses` is never empty (`public_addresses` refuses an empty answer), so `last` is set here.
+    name = type(last).__name__ if last is not None else "ConnectError"
+    raise FetchRefused(f"{_shown(target.host)} could not be reached ({name}).") from last
+
+
 async def _fetch(
     url: str,
     policy: FetchPolicy,
@@ -542,11 +594,8 @@ async def _fetch(
     target = check_url(url, policy)
     hops: list[str] = []
     for _ in range(MAX_REDIRECTS + 1):
-        address = await public_address(target.host, target.port, resolve)
-        try:
-            reply = await _once(target, address, transport, verify)
-        except (httpx.HTTPError, httpx.InvalidURL) as exc:
-            raise FetchRefused(f"{_shown(target.host)} could not be reached ({type(exc).__name__}).") from exc
+        addresses = await public_addresses(target.host, target.port, resolve)
+        reply = await _first_reply(target, addresses, transport, verify)
         if reply.location is not None:
             hops.append(target.url)
             target = check_url(urljoin(target.url, reply.location), policy)
