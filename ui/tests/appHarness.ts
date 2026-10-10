@@ -136,6 +136,8 @@ export interface HarnessSocket {
   closed: boolean;
   /** The socket opens, as the engine accepting the connection. */
   open(): Promise<void>;
+  /** The connection ends with this close code (4401 is the engine refusing the token), as the browser reports it. */
+  drop(code: number): Promise<void>;
   /** The engine sends one frame (JSON-encoded here, as it is on the wire). */
   deliver(frame: unknown): Promise<void>;
 }
@@ -662,6 +664,9 @@ export async function withApp(
         },
         async open() {
           await actNow(() => self.onopen?.());
+        },
+        async drop(code) {
+          await actNow(() => self.onclose?.({ code }));
         },
         async deliver(frame) {
           await actNow(() => self.onmessage?.({ data: JSON.stringify(frame) }));

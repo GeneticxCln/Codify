@@ -280,11 +280,16 @@ pub(crate) fn jail_argv(spec: &JailSpec, host: &HostLayout) -> Vec<String> {
     // The shell, behind the limits `bwrap` has no flag for: no core files, no fork bomb, no one process
     // that burns CPU for ever, no single huge file. `ulimit -f` counts 1024-byte blocks in bash and
     // 512-byte blocks in dash, so the cap is a gigabyte or half of one, and either is the point.
-    // `bash` where the host has it (its readline is what a person expects), `sh` where it does not.
+    // `bash` where the host has it (its readline is what a person expects), `sh` where it does not. The two
+    // get two prompts, because only bash reads `\w` and `\$` as escapes; POSIX `sh` expands parameters in
+    // `PS1` and nothing else, so its prompt names the directory with `$PWD`. Either way it is
+    // `[machine] <directory> $ `, the marker the assistant looks for. The bash prompt is assigned on bash's
+    // branch only; the fallback sets its own, and neither adds a command the person did not type.
     let wrapper = format!(
         "ulimit -c 0 2>/dev/null; ulimit -u {NPROC} 2>/dev/null; \
          ulimit -t {cpu} 2>/dev/null; ulimit -f {blocks} 2>/dev/null; \
-         PS1='[machine] \\w \\\\$ '; export PS1; b=$(command -v bash) && exec \"$b\"; exec sh",
+         b=$(command -v bash) && PS1='[machine] \\w \\\\$ ' && export PS1 && exec \"$b\"; \
+         PS1='[machine] $PWD $ '; export PS1; exec sh",
         cpu = spec.limits.cpu_secs,
         blocks = spec.limits.file_bytes / 1024,
     );

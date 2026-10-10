@@ -80,6 +80,7 @@ from engine.models import (
     WorkspaceFileList,
     WorkspaceFileSave,
     WorkspaceFileSaved,
+    loads_payload,
 )
 from engine.providers import Keychain, ProviderError, ProviderFactory
 from engine.sandbox import SandboxService
@@ -791,7 +792,7 @@ async def agent_call_stats(request: Request, limit: int = Query(20, ge=1, le=100
 
     def _load(raw: Any) -> dict[str, Any]:
         try:
-            parsed: dict[str, Any] = json.loads(raw or "{}")
+            parsed: dict[str, Any] = loads_payload(raw)
             return parsed
         except (TypeError, ValueError):
             return {}
@@ -2117,7 +2118,7 @@ def _load_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[di
     parsed = []
     for row in events:
         try:
-            payload = json.loads(row["payload"] or "{}")
+            payload = loads_payload(row["payload"])
         except (TypeError, ValueError):
             continue
         parsed.append({"type": row["type"], "payload": payload, "timestamp": row["timestamp"]})
@@ -2227,7 +2228,7 @@ def _load_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     parsed = []
     for row in rows:
         try:
-            payload = json.loads(row["payload"] or "{}")
+            payload = loads_payload(row["payload"])
         except (TypeError, ValueError):
             continue
         parsed.append({

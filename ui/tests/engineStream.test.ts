@@ -47,7 +47,7 @@ class MockWebSocket {
 
 (globalThis as any).WebSocket = MockWebSocket;
 
-const { openEngineStream, STABLE_CONNECTION_MS } = await import("../src/engineStream.ts");
+const { openEngineStream, STABLE_CONNECTION_MS, CONNECTION_PROVEN_MS } = await import("../src/engineStream.ts");
 
 function lastSocket(): SentSocket {
   const s = sockets[sockets.length - 1];
@@ -103,7 +103,12 @@ test("the stability window is 10 s, pinned as a literal and not read back from t
   assert.equal(STABLE_CONNECTION_MS, 10_000);
 });
 
-test("auth frame is sent with the stored value on open, and onConnected fires", () => {
+test("the proof window is 2 s, pinned as a literal and shorter than the stability window", () => {
+  assert.equal(CONNECTION_PROVEN_MS, 2_000);
+  assert.ok(CONNECTION_PROVEN_MS < STABLE_CONNECTION_MS);
+});
+
+test("auth frame is sent with the stored value on open; onConnected waits for the proof window", () => {
   mock.timers.enable({ apis: ["setTimeout"] });
   try {
     sockets.length = 0;
@@ -115,6 +120,129 @@ test("auth frame is sent with the stored value on open, and onConnected fires", 
     ws.onopen?.();
     assert.equal(ws.sent.length, 1);
     assert.deepEqual(JSON.parse(ws.sent[0]), { type: "auth", token: STORED_CREDENTIAL });
+    assert.equal(connected, 0, "a bare open was reported as connected");
+    mock.timers.tick(CONNECTION_PROVEN_MS);
+    assert.equal(connected, 1);
+    handle.close();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("open then 4401, round after round, never reports connected", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    sockets.length = 0;
+    let connected = 0;
+    const handle = openEngineStream({ onFrame: () => {}, onConnected: () => (connected += 1) });
+    for (const delay of BACKOFF_MS) {
+      openThenReject();
+      mock.timers.tick(delay);
+    }
+    // And the last socket, rejected too, then well past every window.
+    openThenReject();
+    mock.timers.tick(10 * STABLE_CONNECTION_MS);
+    assert.equal(connected, 0, "a rejected token was reported as connected");
+    handle.close();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a connection that outlives the proof window reports connected once, at the window", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    sockets.length = 0;
+    let connected = 0;
+    const handle = openEngineStream({ onFrame: () => {}, onConnected: () => (connected += 1) });
+    lastSocket().onopen?.();
+    mock.timers.tick(CONNECTION_PROVEN_MS - 1);
+    assert.equal(connected, 0, "reported before the window");
+    mock.timers.tick(1);
+    assert.equal(connected, 1, "not reported at the window");
+    mock.timers.tick(50_000);
+    assert.equal(connected, 1, "reported more than once for one socket");
+    handle.close();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("each proven connection reports once; a rejected one between them reports nothing", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    sockets.length = 0;
+    let connected = 0;
+    const handle = openEngineStream({ onFrame: () => {}, onConnected: () => (connected += 1) });
+    lastSocket().onopen?.();
+    mock.timers.tick(CONNECTION_PROVEN_MS);
+    assert.equal(connected, 1);
+    lastSocket().onclose?.({ code: 1006 });
+    mock.timers.tick(1000);
+    openThenReject();
+    mock.timers.tick(2000);
+    assert.equal(connected, 1, "the rejected socket was reported");
+    lastSocket().onopen?.();
+    mock.timers.tick(CONNECTION_PROVEN_MS);
+    assert.equal(connected, 2);
+    handle.close();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("close() inside the proof window never reports connected and leaves no pending timer", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const timers = trackTimers();
+  try {
+    sockets.length = 0;
+    let connected = 0;
+    const handle = openEngineStream({ onFrame: () => {}, onConnected: () => (connected += 1) });
+    lastSocket().onopen?.();
+    mock.timers.tick(CONNECTION_PROVEN_MS - 1);
+    assert.equal(timers.pending(), 2, "the proof and stability timers should both be armed");
+    handle.close();
+    assert.equal(timers.pending(), 0, "close() left a timer pending");
+    mock.timers.tick(10 * STABLE_CONNECTION_MS);
+    assert.equal(connected, 0);
+  } finally {
+    timers.restore();
+    mock.timers.reset();
+  }
+});
+
+test("a frame inside the proof window proves the connection at once, and the window does not report it again", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    sockets.length = 0;
+    let connected = 0;
+    const frames: unknown[] = [];
+    const handle = openEngineStream({
+      onFrame: (ev) => frames.push(ev),
+      onConnected: () => (connected += 1),
+    });
+    const ws = lastSocket();
+    ws.onopen?.();
+    mock.timers.tick(100);
+    ws.onmessage?.({ data: JSON.stringify({ type: "model_catalog_checked", payload: {} }) });
+    assert.equal(connected, 1, "a frame did not prove the connection");
+    mock.timers.tick(10 * CONNECTION_PROVEN_MS);
+    assert.equal(connected, 1, "the window reported a connection a frame already had");
+    handle.close();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a frame of a type this client does not know still proves the connection", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    sockets.length = 0;
+    let connected = 0;
+    const handle = openEngineStream({ onFrame: () => {}, onConnected: () => (connected += 1) });
+    const ws = lastSocket();
+    ws.onopen?.();
+    ws.onmessage?.({ data: JSON.stringify({ type: "engine_ready_from_the_future" }) });
     assert.equal(connected, 1);
     handle.close();
   } finally {
@@ -240,6 +368,7 @@ test("close() while the stability timer is pending leaves nothing that fires lat
     const ws = lastSocket();
     ws.onopen?.();
     mock.timers.tick(STABLE_CONNECTION_MS - 1);
+    // The proof timer has fired by now; only the stability timer is left.
     assert.equal(timers.pending(), 1, "the stability timer should be armed");
 
     handle.close();
@@ -258,6 +387,117 @@ test("close() while the stability timer is pending leaves nothing that fires lat
     assert.deepEqual(told, []);
   } finally {
     timers.restore();
+    mock.timers.reset();
+  }
+});
+
+test("several frames on one socket report connected once, whether the frames or the window came first", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    sockets.length = 0;
+    let connected = 0;
+    const handle = openEngineStream({ onFrame: () => {}, onConnected: () => (connected += 1) });
+
+    // Frames first, with a different type for the second, then well past the window.
+    const first = lastSocket();
+    first.onopen?.();
+    first.onmessage?.({ data: JSON.stringify({ type: "model_catalog_checked", payload: {} }) });
+    first.onmessage?.({ data: JSON.stringify({ type: "engine_ready_from_the_future" }) });
+    first.onmessage?.({ data: JSON.stringify({ type: "model_catalog_checked", payload: {} }) });
+    mock.timers.tick(10 * CONNECTION_PROVEN_MS);
+    assert.equal(connected, 1, "every frame reported the connection again");
+
+    // The window first, then frames: the socket is already proven, so they add nothing.
+    first.onclose?.({ code: 1006 });
+    mock.timers.tick(1000);
+    const second = lastSocket();
+    assert.notEqual(second, first);
+    second.onopen?.();
+    mock.timers.tick(CONNECTION_PROVEN_MS);
+    assert.equal(connected, 2);
+    second.onmessage?.({ data: JSON.stringify({ type: "model_catalog_checked", payload: {} }) });
+    second.onmessage?.({ data: JSON.stringify({ type: "model_catalog_checked", payload: {} }) });
+    assert.equal(connected, 2, "a frame reported a socket the window had already proven");
+    handle.close();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a frame that cannot be read still proves the connection: the engine only speaks to an authenticated socket", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    sockets.length = 0;
+    let connected = 0;
+    const frames: unknown[] = [];
+    const handle = openEngineStream({ onFrame: (ev) => frames.push(ev), onConnected: () => (connected += 1) });
+    const ws = lastSocket();
+    ws.onopen?.();
+    ws.onmessage?.({ data: "not-json{" });
+    assert.equal(connected, 1);
+    assert.deepEqual(frames, [], "an unreadable frame reached onFrame");
+    handle.close();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("nothing a socket delivers after close() reports connected, reaches onFrame, or arms a timer", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const timers = trackTimers();
+  try {
+    sockets.length = 0;
+    let connected = 0;
+    const frames: unknown[] = [];
+    const handle = openEngineStream({ onFrame: (ev) => frames.push(ev), onConnected: () => (connected += 1) });
+    const ws = lastSocket();
+    ws.onopen?.();
+    handle.close();
+    ws.onmessage?.({ data: JSON.stringify({ type: "model_catalog_checked", payload: {} }) });
+    assert.equal(connected, 0, "a frame after close() reported connected");
+    assert.deepEqual(frames, [], "a frame after close() reached onFrame");
+
+    // A late open must not send the credential or arm anything either.
+    const sentBefore = ws.sent.length;
+    ws.onopen?.();
+    assert.equal(ws.sent.length, sentBefore, "a late open after close() sent the auth frame");
+    assert.equal(timers.pending(), 0, "a late open after close() armed a timer");
+    mock.timers.tick(10 * STABLE_CONNECTION_MS);
+    assert.equal(connected, 0);
+  } finally {
+    timers.restore();
+    mock.timers.reset();
+  }
+});
+
+test("a late frame from a closed socket neither reports for it nor cancels the proof of its replacement", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    sockets.length = 0;
+    let connected = 0;
+    const frames: unknown[] = [];
+    const handle = openEngineStream({ onFrame: (ev) => frames.push(ev), onConnected: () => (connected += 1) });
+    const a = lastSocket();
+    a.onopen?.();
+    a.onclose?.({ code: 1006 });
+    mock.timers.tick(1000);
+    const b = lastSocket();
+    assert.notEqual(b, a);
+    b.onopen?.();
+
+    a.onmessage?.({ data: JSON.stringify({ type: "model_catalog_checked", payload: {} }) });
+    assert.equal(connected, 0, "a frame from the closed socket reported a connection");
+    assert.deepEqual(frames, [], "a frame from the closed socket reached onFrame");
+
+    // A late close from A must not cancel B's timers or schedule another reconnect.
+    a.onclose?.({ code: 1006 });
+    const before: number = sockets.length;
+    mock.timers.tick(CONNECTION_PROVEN_MS);
+    assert.equal(connected, 1, "the replacement socket was never proven");
+    mock.timers.tick(20_000);
+    assert.equal(sockets.length, before, "a late close from the old socket opened another");
+    handle.close();
+  } finally {
     mock.timers.reset();
   }
 });

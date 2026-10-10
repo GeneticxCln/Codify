@@ -7,7 +7,11 @@ import { getEngineInfo } from "./api.ts";
  * Design:
  * - Auth handshake on open: `{ type: "auth", token }` (engine closes with 4401 otherwise).
  * - Dedup by `sequence`, since the server replays all events from 0 on every (re)connect.
- * - Reconnect with 1s → 2s → 4s … capped at 16s backoff; resets on successful open.
+ * - Reconnect with 1s → 2s → 4s … capped at 16s backoff. The counter does **not** reset on
+ *   open: the engine accepts the upgrade before it authenticates and then replays the log
+ *   from 0, so "open" proves nothing and a post-accept failure (1011, 1006) would reconnect
+ *   at 1 Hz forever. It resets only once a connection has stayed open for
+ *   `STABLE_CONNECTION_MS`; one that drops sooner keeps climbing.
  * - `onTerminal` fires when a goal_status event reaches COMPLETED/FAILED/CANCELLED so
  *   callers can stop streaming (the engine keeps the goal endpoint open otherwise).
  * - `sinceSequence` floors replayed history: events at or below it are still delivered
@@ -19,6 +23,8 @@ import { getEngineInfo } from "./api.ts";
  *   Neither changes by asking again, so those closes are final: no reconnect, and `onGone`
  *   says which. Reconnecting at the 16 s cap forever was a request nothing could answer.
  */
+export const STABLE_CONNECTION_MS = 10_000;
+
 export interface GoalStreamHandle {
   close: () => void;
 }
@@ -28,6 +34,10 @@ export function openGoalStream(opts: {
   onEvent: (ev: Event) => void;
   onTerminal?: (ev: Event) => void;
   onReconnecting?: (attempt: number) => void;
+  /**
+   * The socket opened. Unlike `engineStream`'s `onConnected` this is not a proof: the engine
+   * accepts the upgrade before it reads the auth frame, so a refused token reports it too.
+   */
   onConnected?: () => void;
   /** The engine ended the stream for good (4404 no such goal, 4401 refused token). */
   onGone?: (code: number) => void;
@@ -41,6 +51,13 @@ export function openGoalStream(opts: {
   let destroyed = false;
   let attempt = 0;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  // Armed on open, cleared on close: fires only for a connection that lasted.
+  let stableTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearStableTimer = () => {
+    if (stableTimer) clearTimeout(stableTimer);
+    stableTimer = null;
+  };
   // Terminal statuses end the stream — no point reconnecting to a finished goal.
   const TERMINAL = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
   // `engine/app.py` `ws_goal`: 4404 after auth for an unknown goal, 4401 for a bad token.
@@ -59,7 +76,11 @@ export function openGoalStream(opts: {
     ws = new WebSocket(`ws://127.0.0.1:${engine.port}/ws/goals/${goalId}`);
 
     ws.onopen = () => {
-      attempt = 0;
+      clearStableTimer();
+      stableTimer = setTimeout(() => {
+        stableTimer = null;
+        attempt = 0;
+      }, STABLE_CONNECTION_MS);
       ws!.send(JSON.stringify({ type: "auth", token: engine.token }));
       onConnected?.();
     };
@@ -73,6 +94,7 @@ export function openGoalStream(opts: {
           onTerminal?.(ev);
           if (!destroyed) {
             destroyed = true;
+            clearStableTimer();
             ws?.close();
           }
         }
@@ -82,6 +104,7 @@ export function openGoalStream(opts: {
     };
 
     ws.onclose = (e) => {
+      clearStableTimer();
       if (destroyed) return;
       if (e?.code === CLOSE_NO_SUCH_GOAL || e?.code === CLOSE_REFUSED) {
         destroyed = true;
@@ -104,6 +127,7 @@ export function openGoalStream(opts: {
   return {
     close: () => {
       destroyed = true;
+      clearStableTimer();
       if (retryTimer) clearTimeout(retryTimer);
       // Guard: close() may run before the socket finished constructing.
       try {

@@ -105,11 +105,13 @@ impl Stage {
         use std::os::unix::fs::DirBuilderExt;
         let n = STAGE_SEQ.fetch_add(1, Ordering::SeqCst);
         let dir = base.join(format!("codify-machine-{}-{n}", std::process::id()));
+        // The path is checked before the directory exists: a refused path must leave nothing behind, and
+        // there is no `Stage` yet to release if the check came after.
+        overlay_safe(&dir)?;
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&dir)
             .map_err(|e| format!("could not make a place for the project layer: {e}"))?;
-        overlay_safe(&dir)?;
         Ok(Stage { dir })
     }
 

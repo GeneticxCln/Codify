@@ -172,6 +172,45 @@ class TextFile:
     size: int
 
 
+def _lines_keepends(text: str) -> list[str]:
+    """The lines of `text` with their endings kept, cut at `\n` and nothing else, for `difflib`.
+
+    The newline-only counterpart of `engine.library.text_lines`, which drops the endings. It lives here and not
+    there because `engine.library` imports this module. `str.splitlines` also breaks on a form feed, a vertical
+    tab, the file/group/record separators, NEL, U+2028 and U+2029, which `read_file` and the search tools do not
+    count as line ends: a diff cut there put its hunks at line numbers they did not agree with, and `difflib`
+    joins its pieces with nothing between them, so a piece without a `\n` ran into the next line. A `\r` before a
+    `\n` stays, so a CRLF file diffs as it always did.
+    """
+    *whole, last = text.split("\n")
+    lines = [line + "\n" for line in whole]
+    if last:
+        lines.append(last)
+    return lines
+
+
+def _require_writable_text(value: str, rel: str, what: str) -> None:
+    """Refuse, as a `ValueError` the fixer is asked about once, text that cannot be saved as UTF-8.
+
+    A reply's JSON can spell a lone surrogate (`"\\ud800"`): half of a character pair on its own, which Python
+    holds as a string and no file can hold. It used to surface only in phase two, when the bytes were made, so a
+    dry run (phase one alone) accepted it and the proposal failed later, in the database, outside any re-ask; and
+    the codec's own message named neither the file nor what to do. So it is judged in phase one, for a real run
+    and a dry run alike, before anything is written or stored. A pair (`"\\ud83d\\ude00"`) is one character by
+    the time `json.loads` returns, so it is not refused. `what` is `"path"` or `"text"`; the file is named with
+    `ascii()` so the reason can go back into a prompt without carrying a surrogate with it.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        found = sorted({ch for ch in value if "\ud800" <= ch <= "\udfff"})
+        escapes = ", ".join(ascii(ch)[1:-1] for ch in found[:3]) + (", ..." if len(found) > 3 else "")
+        raise ValueError(
+            f"{ascii(rel)}: the {what} contains {escapes}, a lone surrogate escape. That is half of a character "
+            f"and not a character, so it cannot be saved in a file. Write the character itself instead, or leave it out."
+        ) from None
+
+
 def _read_bytes(path: Path) -> bytes | None:
     try:
         return path.read_bytes()
@@ -363,7 +402,6 @@ class FileSystemService:
             created.append(probe)
             probe = probe.parent
         created.reverse()
-        real_parent.mkdir(parents=True, exist_ok=True)
         # The temp file is created, never opened: a fixed name (`<file>.codify-tmp`)
         # is one a repository can pre-plant as a symlink, and `write_text` follows
         # a symlink, so writing `a.txt` overwrote whatever `a.txt.codify-tmp`
@@ -373,18 +411,22 @@ class FileSystemService:
         # decide the mode, exactly as `write_text` did.
         tmp = real_parent / f"{target.name}.{secrets.token_hex(6)}.codify-tmp"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(tmp, flags, 0o666)
-        # `write_text` mints the temp file with the process default (0644 before
-        # umask), and `os.replace` carries *that* mode onto the target. An edit
-        # to a script that was executable came back non-executable — and since
-        # the fixer then commits the file, git recorded a mode change nobody
-        # asked for. Copy the mode the target already had; a file being created
-        # keeps the default, since there is no earlier mode to honour.
+        # The directories are made inside the `try` that takes them back, as is the open of the
+        # temp file: a name the filesystem refuses (the temp file's name is longer than the target's)
+        # or a full disk fails *there*, and the directories this call had just made must not outlive it.
         try:
-            mode: int | None = target.stat().st_mode if target.is_file() else None
-        except OSError:
-            mode = None
-        try:
+            real_parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(tmp, flags, 0o666)
+            # `write_text` mints the temp file with the process default (0644 before
+            # umask), and `os.replace` carries *that* mode onto the target. An edit
+            # to a script that was executable came back non-executable — and since
+            # the fixer then commits the file, git recorded a mode change nobody
+            # asked for. Copy the mode the target already had; a file being created
+            # keeps the default, since there is no earlier mode to honour.
+            try:
+                mode: int | None = target.stat().st_mode if target.is_file() else None
+            except OSError:
+                mode = None
             with os.fdopen(fd, "wb") as handle:
                 handle.write(data)
             if mode is not None:
@@ -404,11 +446,12 @@ class FileSystemService:
                     pass
             raise
         finally:
-            if tmp.exists():
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
+            # `unlink` and not `exists` first: `Path.exists` raises, before Python 3.12, for a name the
+            # filesystem refuses, and that would replace the failure being reported with its own.
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
         return created
 
     def apply(self, files: list[dict[str, Any]], *, dry_run: bool) -> list[dict[str, Any]]:
@@ -450,6 +493,7 @@ class FileSystemService:
             rel = item["path"]
             action = item["action"]
             content = item.get("content")
+            _require_writable_text(rel, rel, "path")
             target = self.resolve(rel)
             if target.is_dir():
                 raise ValueError(f"{rel} is a directory, not a file")
@@ -474,6 +518,8 @@ class FileSystemService:
                 if action not in ("create", "update", "delete"):
                     raise ValueError(f"unknown file action for {rel}: {action!r}")
                 after = "" if action == "delete" else (content or "")
+            if action != "delete":
+                _require_writable_text(after, rel, "text")
             # A delete changes the tree iff the file is there — an *empty* file
             # still disappears, which `before != after` alone would miss.
             changed = exists if action == "delete" else before != after
@@ -481,8 +527,8 @@ class FileSystemService:
             if before != after and note is None:
                 diff = "".join(
                     difflib.unified_diff(
-                        before.splitlines(keepends=True),
-                        after.splitlines(keepends=True),
+                        _lines_keepends(before),
+                        _lines_keepends(after),
                         fromfile=f"a/{rel}",
                         tofile=f"b/{rel}",
                     )

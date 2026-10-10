@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import itertools
+import json
 import re
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
 # The pipeline slots. Each one has a different *ability*, not a different
 # persona: the librarian is the only role that reads the workspace, the design
@@ -547,12 +549,115 @@ class PlanStepUpdate(BaseModel):
     suggested_paths: list[str] | None = Field(None, max_length=50)
 
 
+# Any code point in this range inside a Python `str` is a lone surrogate: a valid pair is already
+# one astral character by the time it is a `str`, so there is no pair left to protect.
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _scrub_text(text: str) -> str:
+    if _SURROGATE.search(text) is None:
+        return text
+    # Through UTF-16, so two halves that happen to sit side by side become the one character they
+    # spell (which is what `json.loads` of the stored row would have made of them) and every half
+    # that does not becomes U+FFFD. Idempotent: the result holds no surrogate to find again.
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
+def scrub_surrogates(value: Any) -> Any:
+    """`value` with every lone surrogate in its strings replaced by U+FFFD.
+
+    A model can put `\\ud800` in a JSON reply, and `json.loads` turns it into a `str` that Python holds
+    happily and that cannot be encoded to UTF-8 by anything that follows: pydantic's
+    `model_dump_json`, Starlette's JSON response, a WebSocket text frame. The stored row is no
+    defence (`db.dumps` escapes it, so it is written fine and comes back as the same poisoned
+    `str`), which is how one character made a goal's whole log unreadable. See docs/04 section 6.
+
+    Walks `str`, `dict` (keys as well as values) and `list`; every other type, and every `str` that
+    is already clean, is returned as the same object. A container is rebuilt only from the first
+    element that changed, and only along the path to it, so the usual payload costs one pass and no
+    allocation, and a payload of n strings costs O(n), never O(n^2).
+
+    Keys are scrubbed too, so two keys that differ only in a lone surrogate (`{"\\ud800": 1, "\\udc00": 2}`)
+    become the same key and the later value is the one kept; a model's reply is the only place such keys
+    come from and nothing reads a payload by one.
+    """
+    if isinstance(value, str):
+        return _scrub_text(value)
+    if isinstance(value, dict):
+        rebuilt: dict[Any, Any] | None = None
+        for position, (key, item) in enumerate(value.items()):
+            clean_key = scrub_surrogates(key)
+            clean_item = scrub_surrogates(item)
+            if rebuilt is None:
+                if clean_key is key and clean_item is item:
+                    continue
+                rebuilt = dict(itertools.islice(value.items(), position))
+            rebuilt[clean_key] = clean_item
+        return value if rebuilt is None else rebuilt
+    if isinstance(value, list):
+        out: list[Any] | None = None
+        for position, item in enumerate(value):
+            clean = scrub_surrogates(item)
+            if out is None:
+                if clean is item:
+                    continue
+                out = value[:position]
+            out.append(clean)
+        return value if out is None else out
+    return value
+
+
+# What `db.dumps` writes for a lone surrogate (`\ud800`, lower case; upper case is allowed for here too). A
+# stored payload with none of these cannot hold one, so reading it needs no walk.
+_ESCAPED_SURROGATE = re.compile(r"\\u[dD][89a-fA-F][0-9a-fA-F]{2}")
+
+
+def loads_payload(raw: str | None) -> Any:
+    """`json.loads` of a stored `events.payload`, with every lone surrogate scrubbed.
+
+    For the readers that take a row from SQL and never build an `Event` (the statistics screen, the model
+    list): a row written before `publish` scrubbed still holds the escape, and `json.loads` hands it back
+    as a `str` that cannot be put in a response. Raises what `json.loads` raises, so a caller's existing
+    `except (TypeError, ValueError)` is unchanged. A row with no escape in it is not walked.
+    """
+    text = raw or "{}"
+    data = json.loads(text)
+    return scrub_surrogates(data) if _ESCAPED_SURROGATE.search(text) else data
+
+
+def scrub_payload_text(raw: str) -> str:
+    """A stored payload, still as JSON text, with its lone surrogates replaced; `raw` itself when it has none.
+
+    For `recall_events`, whose rows go to `engine.recall.project` as text. Text that is not JSON is returned
+    as it came, because that reader already treats it as an empty payload.
+    """
+    if _ESCAPED_SURROGATE.search(raw) is None:
+        return raw
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return raw
+    cleaned = scrub_surrogates(data)
+    return raw if cleaned is data else json.dumps(cleaned, separators=(",", ":"))
+
+
+def _scrub_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    cleaned: dict[str, Any] = scrub_surrogates(payload)
+    return cleaned
+
+
 class Event(BaseModel):
     id: str
     goal_id: str
     step_id: str | None = None
     type: EventType
-    payload: dict[str, Any]
+    # The one door every Event goes through: a new one built by the engine, and a row read back from
+    # the table. The second is what heals logs written before this existed, with no migration,
+    # because the damage was only ever in how the text is *read*. An `AfterValidator` rather than a
+    # `field_validator`, on purpose: tests/test_error_contract.py sweeps the decorated validators of
+    # this module and demands a request that trips each into a 422, and this one never rejects, it
+    # normalises.
+    payload: Annotated[dict[str, Any], AfterValidator(_scrub_payload)]
     timestamp: float
     sequence: int
 

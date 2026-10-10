@@ -23,7 +23,9 @@ import ast
 import asyncio
 import http.server
 import ipaddress
+import socket
 import socketserver
+import ssl
 import threading
 import unittest
 from collections.abc import AsyncIterator, Callable
@@ -385,6 +387,185 @@ class TestAHostWithSeveralAddresses(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FetchRefused) as caught:
             await get("https://docs.example/", handler, table=self.DUAL)
         self.assertIn("(ConnectTimeout)", str(caught.exception))
+
+    @staticmethod
+    def _because(error: httpx.ConnectError, cause: BaseException) -> httpx.ConnectError:
+        """`error` as httpx raises it for a failed handshake: the lower error is its explicit cause."""
+        error.__cause__ = cause
+        return error
+
+    def _failing_with(self, cause: BaseException) -> Callable[[], Exception]:
+        return lambda: self._because(httpx.ConnectError("handshake"), cause)
+
+    def _bad_certificate(self) -> httpx.ConnectError:
+        return self._because(httpx.ConnectError("handshake"), ssl.SSLCertVerificationError(1, "verify failed"))
+
+    async def test_a_bad_certificate_on_the_first_address_only_still_falls_through(self) -> None:
+        seen: list[httpx.Request] = []
+        page = await get("https://docs.example/", failing_at({V6}, seen, self._bad_certificate), table=self.DUAL)
+        self.assertEqual(page.status, 200)
+        self.assertEqual([r.url.host for r in seen], [V6, V4])
+
+    async def test_when_every_address_fails_on_a_certificate_the_refusal_names_the_certificate(self) -> None:
+        seen: list[httpx.Request] = []
+        with self.assertRaises(FetchRefused) as caught:
+            await get("https://docs.example/", failing_at({V6, V4}, seen, self._bad_certificate), table=self.DUAL)
+        message = str(caught.exception)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(
+            message,
+            "docs.example presented a certificate that did not verify for that name, "
+            "so the connection was dropped before anything was sent.",
+        )
+        self.assertNotIn("ConnectError", message)
+        self.assertNotIn("verify failed", message, "the ssl library's own text is not passed on")
+        for address in (V6, V4):
+            self.assertNotIn(address, message)
+
+    async def test_a_certificate_failure_is_still_named_when_a_later_address_times_out(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            raise self._bad_certificate() if len(seen) == 1 else httpx.ConnectTimeout("slow")
+
+        with self.assertRaises(FetchRefused) as caught:
+            await get("https://docs.example/", handler, table=self.DUAL)
+        self.assertEqual(len(seen), 2)
+        self.assertIn("certificate", str(caught.exception))
+        self.assertNotIn("ConnectTimeout", str(caught.exception))
+
+    async def test_a_handshake_that_failed_for_another_reason_keeps_the_old_sentence(self) -> None:
+        for cause in (ssl.SSLError(1, "WRONG_VERSION_NUMBER"), ConnectionResetError("reset"), OSError("unreachable")):
+            with self.subTest(cause=type(cause).__name__):
+                seen: list[httpx.Request] = []
+                with self.assertRaises(FetchRefused) as caught:
+                    await get(
+                        "https://docs.example/",
+                        failing_at({V6, V4}, seen, self._failing_with(cause)),
+                        table=self.DUAL,
+                    )
+                self.assertEqual(str(caught.exception), "docs.example could not be reached (ConnectError).")
+
+    async def test_a_cyclic_cause_chain_ends_with_the_old_sentence(self) -> None:
+        def cyclic() -> Exception:
+            one, two = httpx.ConnectError("one"), httpx.ConnectError("two")
+            one.__cause__, two.__cause__ = two, one
+            return one
+
+        seen: list[httpx.Request] = []
+        with self.assertRaises(FetchRefused) as caught:
+            await get("https://docs.example/", failing_at({V6, V4}, seen, cyclic), table=self.DUAL)
+        self.assertEqual(str(caught.exception), "docs.example could not be reached (ConnectError).")
+
+    @staticmethod
+    def _chained(links: int, leaf: BaseException) -> BaseException:
+        """`links` ConnectErrors, each the explicit cause-holder of the next, ending in `leaf`."""
+        deepest = leaf
+        for _ in range(links):
+            link = httpx.ConnectError("link")
+            link.__cause__ = deepest
+            deepest = link
+        return deepest
+
+    def test_a_certificate_error_beyond_the_chain_depth_is_not_followed(self) -> None:
+        leaf = ssl.SSLCertVerificationError(1, "verify failed")
+        self.assertFalse(web_fetch._certificate_failed(self._chained(web_fetch._CHAIN_DEPTH, leaf)))
+
+    def test_a_certificate_error_at_the_last_link_the_walk_visits_is_found(self) -> None:
+        leaf = ssl.SSLCertVerificationError(1, "verify failed")
+        self.assertTrue(web_fetch._certificate_failed(self._chained(web_fetch._CHAIN_DEPTH - 1, leaf)))
+
+    @staticmethod
+    def _as_httpx_raises_it(leaf: BaseException) -> httpx.ConnectError:
+        """The shape httpx 0.28 gives a failed handshake (pinned against a real one below).
+
+        `httpx.ConnectError` has httpcore's `ConnectError` as its explicit cause; that one was raised `from None`,
+        so `leaf` is only its `__context__`. Only the links matter to the walk, not their classes, so the lower
+        one is another `httpx.ConnectError` here and httpcore is not imported by a test that does not declare it.
+        """
+        lower = httpx.ConnectError("handshake")
+        lower.__suppress_context__ = True
+        lower.__context__ = leaf
+        upper = httpx.ConnectError("handshake")
+        upper.__cause__ = lower
+        return upper
+
+    def test_a_certificate_that_is_only_the_context_of_the_lower_error_is_found(self) -> None:
+        error = self._as_httpx_raises_it(ssl.SSLCertVerificationError(1, "verify failed"))
+        self.assertIsNone(error.__cause__ and error.__cause__.__cause__)
+        self.assertTrue(web_fetch._certificate_failed(error))
+
+    def test_the_same_shape_with_another_ssl_error_is_not_a_certificate_failure(self) -> None:
+        self.assertFalse(web_fetch._certificate_failed(self._as_httpx_raises_it(ssl.SSLError(1, "WRONG_VERSION"))))
+
+    def test_an_explicit_cause_is_followed_instead_of_the_context(self) -> None:
+        # A cause says what an error came from; the context is only what was being handled. A certificate error
+        # that is merely the context of a link with another cause is not why the connection failed.
+        error = httpx.ConnectError("one")
+        error.__cause__ = ConnectionResetError("reset")
+        error.__context__ = ssl.SSLCertVerificationError(1, "verify failed")
+        self.assertFalse(web_fetch._certificate_failed(error))
+
+    async def test_a_certificate_and_then_a_refusal_still_names_the_certificate(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            raise self._bad_certificate() if len(seen) == 1 else httpx.ConnectError("refused")
+
+        with self.assertRaises(FetchRefused) as caught:
+            await get("https://docs.example/", handler, table=self.DUAL)
+        self.assertEqual(len(seen), 2)
+        self.assertIn("did not verify", str(caught.exception))
+
+    async def test_a_refusal_and_then_a_certificate_names_the_certificate_too(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            raise httpx.ConnectError("refused") if len(seen) == 1 else self._bad_certificate()
+
+        with self.assertRaises(FetchRefused) as caught:
+            await get("https://docs.example/", handler, table=self.DUAL)
+        self.assertIn("did not verify", str(caught.exception))
+
+    async def test_real_httpx_chains_a_failed_handshake_the_way_the_walk_expects(self) -> None:
+        """The chain is read off a real `httpx` request: its links, not hand-set ones.
+
+        No certificate is minted (this suite declares no way to), so the server speaks no TLS and the handshake
+        fails with a reset, not a certificate error. What this pins is the structure the walk relies on: a
+        `ConnectError` whose cause is a second one that has no cause of its own and holds what failed as its context.
+        """
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+
+        def hang_up() -> None:
+            connection, _ = listener.accept()
+            connection.recv(16)
+            connection.close()
+
+        thread = threading.Thread(target=hang_up, daemon=True)
+        thread.start()
+        target = web_fetch.Target(f"https://docs.example:{port}/", "https", "docs.example", port, "/")
+        try:
+            with self.assertRaises(httpx.ConnectError) as caught:
+                await web_fetch._once(target, "127.0.0.1", None, True)
+        finally:
+            thread.join(5)
+            listener.close()
+        upper = caught.exception
+        lower = upper.__cause__
+        assert lower is not None
+        # httpcore's own ConnectError, named rather than imported (see `_as_httpx_raises_it`).
+        self.assertEqual(("httpcore", "ConnectError"), (type(lower).__module__.split(".")[0], type(lower).__name__))
+        self.assertIsNone(lower.__cause__)
+        self.assertIsNotNone(lower.__context__)
+        # Graft a certificate error where the real handshake error was: the walk finds it through the real links.
+        lower.__context__ = ssl.SSLCertVerificationError(1, "verify failed")
+        self.assertTrue(web_fetch._certificate_failed(upper))
 
     async def test_a_failure_after_the_connection_was_made_is_not_retried_elsewhere(self) -> None:
         for make in (

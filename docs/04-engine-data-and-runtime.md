@@ -180,7 +180,7 @@ class Event(BaseModel):
     goal_id: str
     step_id: Optional[str] = None
     type: EventType
-    payload: dict
+    payload: dict  # lone surrogates become U+FFFD when built or read back (§6)
     timestamp: float
     sequence: int  # per-goal, starts at 1, +1 per publish
 ```
@@ -799,8 +799,8 @@ to 40 links (each address at most 500 characters, so the links cannot outweigh t
 
 **Errors the model is told in a sentence** (`FetchRefused`, as `That page was not fetched: <reason>`): off, a
 scheme, user-info, a port, a length, an address that resolves to a non-public one (naming it), a host not on
-the list, too many redirects, a non-text content type, a site that cannot be reached, a selector the parser
-rejects, the 20 s budget. None is a traceback, and text that came from the far side (a content type, a host in a
+the list, too many redirects, a non-text content type, a site that cannot be reached, a certificate that did not verify for the
+site's name, a selector the parser rejects, the 20 s budget. None is a traceback, and text that came from the far side (a content type, a host in a
 redirect) is bounded before it is put in a sentence.
 
 ### 3.0.6 Code scanning: `scan_code`
@@ -967,7 +967,12 @@ Two request entries may be plain values or small objects: a `reads` entry is a p
 `{path, offset, limit}` (the line-range form for reaching the bottom half of a big file), and a
 `searches` entry is a query string or `{query, regex, glob}`. A line is what `\n` ends, in a read window, in a
 search hit and in the regex walk alike (`library.text_lines`): a form feed, U+2028 or NEL inside a line does not
-start another, so a hit's `line` is the `offset` that reads it back.
+start another, so a hit's `line` is the `offset` that reads it back. The unified diff of a `diff` event is cut
+the same way (`fs._lines_keepends`: `\n` alone, endings kept), so its hunk headers count lines as `read_file` and
+the search tools do: a form feed, vertical tab, U+001C–U+001E, NEL, U+2028 or U+2029 inside a line neither starts
+a new line nor moves a hunk header. A CRLF file's diff keeps its `\r`, and a file whose lines end in a lone `\r`
+diffs as one line, as it reads as one. A file without a final newline still has its last lines glued in the
+diff (`-b+c`, no `\ No newline at end of file` marker); that is unchanged.
 
 Requests are executed by `engine/library.py`:
 
@@ -1213,12 +1218,25 @@ path outside the workspace) is put to the model once, with the reason and, for a
 **A batch is applied completely or not at all** (`FileSystemService.apply`; audit of 2026-09-29, M4).
 Phase one resolves and validates every operation before anything is written — containment, `.git`, the
 action name, a target that is a directory, each `edit`'s search text — against a virtual view that reflects
-the operations before it in the same batch, so an `edit` of a file the batch just created sees it. Only
-then are the writes made, and a write that fails half-way (a full disk, a permission) puts back what the
+the operations before it in the same batch, so an `edit` of a file the batch just created sees it.
+Phase one also checks that every path and every resolved text (a create's or update's content, an edit's
+result) can be written as UTF-8; a delete has no text, but its path is judged like any other. A lone
+surrogate escape such as `\ud800` in either is refused with a `ValueError` that names the file in words,
+before anything is written or stored, so a real run and a dry run refuse the same batch and the fixer is
+asked about it once. A path holding one would otherwise make a filename that is not UTF-8. A valid pair
+(`\ud83d\ude00`) is one character after `json.loads` and is accepted. This is also what keeps a dry run from
+storing a proposal that Apply could not write.
+Only then are the writes made, and a write that fails half-way (a full disk, a permission) puts back what the
 batch had already touched: content, mode, deleted files and any directories it created. So a refused batch,
-or one that failed while writing, leaves the tree byte-identical, which is what makes it safe for the
+or one that failed while writing, leaves the tree byte-identical, or names any file it could not put back,
+which is what makes it safe for the
 step to fail loudly instead of leaving half a change uncommitted and unannounced. A dry run performs phase
-one only. Nothing is written into a protected workspace root at all (`03` §1.4).
+one only, so it cannot see a failure that only the filesystem reports at write time (for example a name of
+about 240 characters, whose temp file name is over the 255-byte limit). When a write fails, whether in the
+first file of a batch or a later one, the temp file and every directory the call made are taken back along
+with every file touched. A failed write takes back only what this call made: a directory goes only once it is
+empty (`rmdir`, never a recursive remove), so a file that someone else put in it survives.
+Nothing is written into a protected workspace root at all (`03` §1.4).
 
 ### 4.3 Verifier
 
@@ -1679,6 +1697,22 @@ The line is printed **only once the engine can serve**: `serve()` opens the SQLi
 
 WS URL: `ws://127.0.0.1:<port>/ws/goals/{id}`. After auth, server sends events with `sequence > 0` live; client SHOULD `GET /goals/{id}/events?after=` for gap fill.
 
+Payload text is stored and served with lone surrogates replaced by U+FFFD, so one bad character cannot make a
+goal's log unreadable. A model's JSON reply can carry an escaped lone surrogate (for example `\ud800`);
+`json.loads` turns it into a Python string that cannot be encoded to UTF-8, and the stored row (written through
+`db.dumps`, which escapes it) comes back as the same string, which neither the events route nor the WebSocket
+replay could then send. `Event.payload` therefore passes through `scrub_surrogates` (`engine/models.py`)
+whenever an `Event` is validated (built, or read back from the table), which covers new events and rows already in the table alike, so a log written
+before this heals on read with no migration; and `GoalService.publish` applies the same function before the
+INSERT, so a row written afterwards never holds the escape. Valid astral characters and every non-string value
+are untouched.
+
+Readers that take `events.payload` from SQL without building an `Event` (the agent and overview statistics,
+`/models/recent`, the previous turn's reply, `recall_events`) scrub with `models.loads_payload`,
+`models.scrub_payload_text` or `models.scrub_surrogates` instead, so rows written before the fix are healed on read there too. The
+guarantee covers events only: other stored text, such as a plan step's title and description, is not scrubbed,
+and sqlite refuses a lone surrogate there with an encoding error instead of storing it.
+
 The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
 once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with
 no new events never attempts — and every finished goal that was ever viewed (the UI closes the socket
@@ -1688,6 +1722,10 @@ CPU went 0.2 % → 3.6 % → 7.0 % → 13.9 % of a core over 50, 200 and 500 vie
 client may act on: `4401` bad token, `4404` no such goal (checked only *after* auth, so an
 unauthenticated peer cannot probe ids). Neither changes by asking again, so `ui/src/goalStream.ts`
 treats both as final — no reconnect, `onGone(code)` — while any other close reconnects with backoff.
+The backoff counter resets only after a connection has stayed open for the stability window
+(`STABLE_CONNECTION_MS`, 10 s, in `ui/src/goalStream.ts`), not on open, because the engine accepts the upgrade
+before it authenticates and replays the log from 0, so an open that dies right after (1011, 1006) would
+otherwise reconnect at 1 Hz and re-deliver the whole log each time.
 
 ### 6.0 Engine-level frames
 
@@ -1701,6 +1739,15 @@ Unlike the goal stream, `ui/src/engineStream.ts` does not treat `4401` as final.
 info on every attempt and backs off 1, 2, 4, 8, then 16 s. The counter resets only after a connection has
 stayed open for `STABLE_CONNECTION_MS` (10 s), not on open, because the engine accepts the upgrade before it
 checks the token: resetting on open made a rejected token a 1 Hz reconnect loop.
+
+`onConnected` is reported only for a connection that is *proven*, not for a bare websocket open, which proves
+nothing for the same reason. It fires once per socket, when a frame arrives (the engine writes nothing to an
+unauthenticated socket, so even a frame the client cannot read counts) or when `CONNECTION_PROVEN_MS` (2 s)
+passes with no close; an idle healthy socket gets no frame until the engine's first sweep, so the timer is what
+proves it. A rejected token arrives as `4401` within milliseconds, so it never reports connected. The 10 s
+`STABLE_CONNECTION_MS` window answers a different question and governs only when the backoff counter resets.
+Events delivered late by a socket that has been closed or replaced are ignored. (`openGoalStream`'s
+`onConnected` is still a bare open; nothing passes it.)
 
 One frame exists today:
 

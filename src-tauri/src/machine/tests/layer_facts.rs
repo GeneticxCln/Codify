@@ -121,6 +121,48 @@ fn a_stage_is_an_empty_owner_only_directory_that_is_removed_but_never_emptied() 
     b.release();
 }
 
+// ── stage-leak: a stage is made only after its path has been checked ─────────────────────────────────
+
+#[test]
+fn a_stage_that_cannot_be_made_safe_leaves_nothing_behind() {
+    use std::os::unix::ffi::OsStrExt;
+    let parent = tempfile_dir("stage-unsafe");
+    // One base per refusal `overlay_safe` has: each of `,` `:` `\`, a control character, and a name that
+    // is not UTF-8. A refused stage must not leave its directory in the base the host was handed.
+    let mut bases: Vec<PathBuf> = ["comma,base", "colon:base", "back\\slash", "new\nline"]
+        .iter()
+        .map(|n| parent.join(n))
+        .collect();
+    bases.push(parent.join(std::ffi::OsStr::from_bytes(b"not-utf8-\xff")));
+    for base in &bases {
+        std::fs::create_dir_all(base).unwrap();
+        let err = layer::Stage::create(base).unwrap_err();
+        assert!(err.contains("path"), "{base:?}: {err}");
+        assert!(
+            std::fs::read_dir(base).unwrap().next().is_none(),
+            "a refused stage left something in {base:?}"
+        );
+        // The probe makes a stage first, so it must leave nothing either; and the person-facing door,
+        // `make_layer`, reports the refusal and also leaves nothing.
+        let err = layer::probe_uncached(base, Path::new("/nonexistent/unshare"), "/usr/bin:/bin")
+            .unwrap_err();
+        assert!(err.contains("path"), "{base:?}: {err}");
+        assert!(
+            std::fs::read_dir(base).unwrap().next().is_none(),
+            "a probe in an unsafe base left something in {base:?}"
+        );
+        let workspace = tempfile_dir("stage-unsafe-ws");
+        let err = make_layer(base, &workspace, "/usr/bin:/bin")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("path"), "{base:?}: {err}");
+        assert!(
+            std::fs::read_dir(base).unwrap().next().is_none(),
+            "make_layer in an unsafe base left something in {base:?}"
+        );
+    }
+}
+
 #[test]
 fn asking_whether_the_layer_works_fails_with_a_sentence_where_it_does_not() {
     let base = tempfile_dir("probe-bad");

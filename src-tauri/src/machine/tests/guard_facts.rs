@@ -121,6 +121,77 @@ fn a_process_tree_is_found_from_its_root_and_a_dead_root_has_none() {
     assert!(matches!(verdict, guard::Verdict::Over(used) if used > 1024));
 }
 
+// ── guard-pid: the walk over a parent map ends, whatever the map says ────────────────────────────
+
+/// `guard::tree_from` over a hand-built map of pid to parent, with a deadline. The walk runs on a thread of
+/// its own so that a walk that never ends is a failed test and not a hung suite. (A runaway thread cannot be
+/// stopped, only given up on; it holds nothing the other tests need, and the test binary ends with them.)
+fn walk(pairs: &[(u32, u32)], root: u32) -> Vec<u32> {
+    let map: HashMap<u32, u32> = pairs.iter().copied().collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(guard::tree_from(&map, root));
+    });
+    rx.recv_timeout(Duration::from_secs(3))
+        .expect("the walk over this parent map did not end")
+}
+
+fn sorted(mut pids: Vec<u32>) -> Vec<u32> {
+    pids.sort_unstable();
+    pids
+}
+
+#[test]
+fn a_cycle_in_the_parent_map_ends_the_walk_and_lists_each_process_once() {
+    // 5 is read as a child of 6 and 6 as a child of 5: a pid reused mid-scan can make a map say so.
+    let found = walk(&[(5, 6), (6, 5)], 5);
+    assert_eq!(found.first(), Some(&5), "the root is not first");
+    assert_eq!(sorted(found), vec![5, 6], "a process is listed twice");
+    // A longer ring, entered from a root that is in it.
+    let found = walk(&[(5, 8), (6, 5), (7, 6), (8, 7)], 5);
+    assert_eq!(sorted(found), vec![5, 6, 7, 8]);
+}
+
+#[test]
+fn a_process_that_is_its_own_parent_is_listed_once() {
+    assert_eq!(walk(&[(5, 5)], 5), vec![5]);
+    // And it does not hide the children it does have.
+    assert_eq!(sorted(walk(&[(5, 5), (6, 5)], 5)), vec![5, 6]);
+}
+
+#[test]
+fn a_stale_parent_inside_the_subtree_does_not_loop_and_a_process_outside_it_is_left_out() {
+    // The root's own parent is read, stale, as its grandchild. 9 belongs to someone else and its parent (1)
+    // is outside the tree. What this does not cover, because no walk over a parent map can: a stranger whose
+    // recorded parent is inside the tree (a pid reused into a live slot) is listed, as the map says it is a child.
+    let found = walk(&[(5, 7), (6, 5), (7, 6), (9, 1)], 5);
+    assert_eq!(found.first(), Some(&5));
+    assert_eq!(sorted(found), vec![5, 6, 7], "9 is not 5's descendant");
+}
+
+#[test]
+fn a_tree_that_branches_and_deepens_is_found_in_full_and_a_stranger_is_not() {
+    // 5 -> {6, 8}; 6 -> 7; 8 -> {9, 10}; 10 -> 11. (A parent map gives each pid one parent, so a node
+    // cannot be reached by two paths; the tree is as wide and as deep as a build's is.) 20 and 21 are not 5's.
+    let pairs = [
+        (5, 1),
+        (6, 5),
+        (7, 6),
+        (8, 5),
+        (9, 8),
+        (10, 8),
+        (11, 10),
+        (20, 1),
+        (21, 20),
+    ];
+    let found = walk(&pairs, 5);
+    assert_eq!(found.first(), Some(&5), "the root is not first");
+    assert_eq!(sorted(found), vec![5, 6, 7, 8, 9, 10, 11]);
+    // A pid the map does not hold has no tree, and a leaf's is itself.
+    assert!(walk(&pairs, 99).is_empty());
+    assert_eq!(walk(&pairs, 11), vec![11]);
+}
+
 // ── the guard as a fact ───────────────────────────────────────────────────────────────────────────
 
 #[test]

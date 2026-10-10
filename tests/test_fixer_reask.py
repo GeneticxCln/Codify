@@ -380,6 +380,103 @@ class TestAPathTheWorkspaceRefuses(ReAskCase):
         self.assertEqual("path_escape", self.events("error")[-1]["code"])
 
 
+class TestALoneSurrogate(ReAskCase):
+    """A reply whose JSON spells a lone surrogate (`"\\ud800"`) cannot be saved as UTF-8, and is asked about once.
+
+    A real run used to be re-asked with the codec's own sentence, which names no file; a dry run (a plan-only goal)
+    passed the engine's checks, failed later when the proposal was stored, and so was never re-asked, ended with
+    the wrong error code, and left the rows stored before the bad one for Apply to replay.
+    """
+
+    BAD_UPDATE = {"path": "a.py", "action": "update", "content": "x\ud800y"}
+    NEW_FILE = {"path": "new.py", "action": "create", "content": "ok\n"}
+    GOOD = {"files": [{"path": "a.py", "action": "update", "content": "x = 2\n"}]}
+
+    def proposed(self) -> list[Any]:
+        return self.conn.execute("SELECT path, action FROM proposed_files").fetchall()
+
+    async def test_a_real_run_is_asked_again_with_the_file_named_in_words(self) -> None:
+        provider = self.build({"files": [self.NEW_FILE, self.BAD_UPDATE]}, self.GOOD)
+
+        status = await self.run_the_step()
+
+        self.assertEqual(2, len(provider.fixer_prompts))
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        second = provider.fixer_prompts[1]
+        self.assertIn("'a.py'", second, "the reason did not name the file")
+        self.assertIn("lone surrogate", second)
+        self.assertNotIn("codec", second)
+        self.assertEqual("x = 2\n", self.file)
+        self.assertFalse((self.root / "new.py").exists(), "the batch was half applied")
+
+    async def test_a_reason_that_names_a_path_with_one_in_it_can_still_be_sent(self) -> None:
+        # The file is named in the reason the model is asked about, and a reason with a lone surrogate in it
+        # cannot be encoded into the request that carries it: the re-ask would die in the provider, not in us.
+        wrong_shape = {"path": "a\ud800.py", "action": "update", "content": ["x = 1"]}
+        provider = self.build({"files": [wrong_shape]}, self.GOOD)
+
+        status = await self.run_the_step()
+
+        self.assertEqual(2, len(provider.fixer_prompts))
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        second = provider.fixer_prompts[1]
+        second.encode("utf-8")  # raises if the reason carried the surrogate through
+        self.assertIn("a\\ud800.py", second, "the reason should show the escape, not drop the name")
+        self.assertEqual("x = 2\n", self.file)
+
+    async def test_a_dry_run_is_asked_again_and_proposes_nothing_in_part(self) -> None:
+        self.goals.set_dry_run(self.goal.id, True)
+        provider = self.build({"files": [self.NEW_FILE, self.BAD_UPDATE]})
+
+        status = await self.run_the_step()
+
+        self.assertEqual("FAILED", status)
+        self.assertEqual(2, len(provider.fixer_prompts), "a dry run was not asked again")
+        self.assertEqual("agent_output_invalid", self.events("error")[-1]["code"])
+        self.assertEqual([], self.proposed(), "a refused batch left part of a proposal for Apply to replay")
+        self.assertEqual(SOURCE, self.file)
+
+    async def test_a_dry_run_that_is_corrected_stores_the_corrected_proposal_only(self) -> None:
+        self.goals.set_dry_run(self.goal.id, True)
+        self.build({"files": [self.NEW_FILE, self.BAD_UPDATE]}, self.GOOD)
+
+        status = await self.run_the_step()
+
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertEqual([("a.py", "update")], [tuple(r) for r in self.proposed()])
+
+    async def test_a_path_that_would_be_a_non_utf8_filename_is_asked_again(self) -> None:
+        provider = self.build({"files": [{"path": "b\udc80.py", "action": "create", "content": "x\n"}]}, self.GOOD)
+
+        status = await self.run_the_step()
+
+        self.assertEqual(2, len(provider.fixer_prompts))
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertEqual(["a.py", "t.db"], sorted(p.name for p in self.root.iterdir() if not p.name.startswith("t.db-")))
+
+    async def test_the_new_text_of_an_edit_is_asked_again(self) -> None:
+        edit = {"files": [{"path": "a.py", "action": "edit",
+                           "edits": [{"old_text": "greet", "new_text": "wel\ud800come", "count": 0}]}]}
+        provider = self.build(edit, CORRECTED)
+
+        status = await self.run_the_step()
+
+        self.assertEqual(2, len(provider.fixer_prompts))
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertIn("'a.py'", provider.fixer_prompts[1])
+        self.assertEqual(SOURCE.replace("greet", "welcome"), self.file)
+
+    async def test_a_surrogate_pair_is_one_character_and_is_not_asked_about(self) -> None:
+        pair = '{"files": [{"path": "a.py", "action": "update", "content": "smile \\ud83d\\ude00\\n"}]}'
+        provider = self.build(pair)
+
+        status = await self.run_the_step()
+
+        self.assertEqual(1, len(provider.fixer_prompts))
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertEqual("smile \U0001f600\n", self.file)
+
+
 class TestAVerifierThatHasNothingToRun(ReAskCase):
     """`"argv": []` is "no command", not a malformed command.
 

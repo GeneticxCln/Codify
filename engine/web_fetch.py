@@ -30,7 +30,11 @@ What the rules are, and the attack each one answers:
     inside the one time budget; any other failure is final, because the request may already have been sent.
     A failed TLS handshake, a certificate that does not match the name included, reaches httpx as a
     `ConnectError` and is retried the same way: no request bytes had been sent, and every attempt verifies the
-    certificate against the name afresh. No address the check did not see is ever connected to.
+    certificate against the name afresh. No address the check did not see is ever connected to. If a
+    certificate that did not verify was seen at any checked address and no address answered (the others may have
+    been refused or timed out), the refusal says so in its own sentence, naming the certificate and the host and
+    saying the connection was dropped before anything was sent, rather than "could not be reached"; it holds no
+    address and none of the ssl library's own text. Every other connect failure keeps the generic sentence.
     Each redirect is a new request, resolves afresh and passes every rule again.
   * **Bounded.** One total time budget, a cap on bytes read (the stream stops at the cap; nothing is held beyond
     it, and a compressed body is capped after it is decompressed), a cap on redirects, and a content type that
@@ -54,6 +58,7 @@ import importlib.metadata
 import ipaddress
 import re
 import socket
+import ssl
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from ssl import SSLContext
@@ -555,6 +560,29 @@ async def _once(
             await response.aclose()
 
 
+#: How many links of an exception's cause chain `_certificate_failed` follows before it gives up.
+_CHAIN_DEPTH = 8
+
+
+def _certificate_failed(exc: BaseException) -> bool:
+    """Whether a certificate that did not verify is anywhere in `exc`'s cause chain.
+
+    httpx reports a TLS handshake failure as the same `ConnectError` as a refused connection and chains the ssl
+    error behind it, so the type is read off the chain, never off message text. The real chain is
+    `httpx.ConnectError` (explicit cause) -> `httpcore.ConnectError` (raised `from None`, so the ssl error is only
+    its `__context__`) -> `ssl.SSLCertVerificationError`: the walk follows `__cause__`, then `__context__`. It
+    makes at most `_CHAIN_DEPTH` hops, which alone ends a cyclic chain.
+    """
+    link: BaseException | None = exc
+    for _ in range(_CHAIN_DEPTH):
+        if link is None:
+            return False
+        if isinstance(link, ssl.SSLCertVerificationError):
+            return True
+        link = link.__cause__ or link.__context__
+    return False
+
+
 async def _first_reply(
     target: Target,
     addresses: list[str],
@@ -567,16 +595,25 @@ async def _first_reply(
     so another address cannot repeat a request. That includes a failed TLS handshake, which httpx also reports as
     `ConnectError`; each attempt verifies the certificate against the name again. Every other failure ends the
     fetch, since the request may have reached the host. The refusal names the host and the last error's type,
-    never an address.
+    never an address. When any attempt failed on a certificate that did not verify and no address answered, the
+    refusal names the certificate instead of "could not be reached"; it still holds the host alone. It does not
+    say every address failed that way: one may have been refused or timed out, and others were never tried.
     """
     last: Exception | None = None
+    certificate = False
     for address in addresses[:MAX_ADDRESS_TRIES]:
         try:
             return await _once(target, address, transport, verify)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             last = exc
+            certificate = certificate or _certificate_failed(exc)
         except (httpx.HTTPError, httpx.InvalidURL) as exc:
             raise FetchRefused(f"{_shown(target.host)} could not be reached ({type(exc).__name__}).") from exc
+    if certificate:
+        raise FetchRefused(
+            f"{_shown(target.host)} presented a certificate that did not verify for that name, "
+            "so the connection was dropped before anything was sent."
+        ) from last
     # `addresses` is never empty (`public_addresses` refuses an empty answer), so `last` is set here.
     name = type(last).__name__ if last is not None else "ConnectError"
     raise FetchRefused(f"{_shown(target.host)} could not be reached ({name}).") from last
