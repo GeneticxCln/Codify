@@ -799,8 +799,8 @@ to 40 links (each address at most 500 characters, so the links cannot outweigh t
 
 **Errors the model is told in a sentence** (`FetchRefused`, as `That page was not fetched: <reason>`): off, a
 scheme, user-info, a port, a length, an address that resolves to a non-public one (naming it), a host not on
-the list, too many redirects, a non-text content type, a site that cannot be reached, a selector the parser
-rejects, the 20 s budget. None is a traceback, and text that came from the far side (a content type, a host in a
+the list, too many redirects, a non-text content type, a site that cannot be reached, a certificate that did not verify for the
+site's name, a selector the parser rejects, the 20 s budget. None is a traceback, and text that came from the far side (a content type, a host in a
 redirect) is bounded before it is put in a sentence.
 
 ### 3.0.6 Code scanning: `scan_code`
