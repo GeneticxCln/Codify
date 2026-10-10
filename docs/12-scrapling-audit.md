@@ -82,9 +82,9 @@ One conductor tool, **`fetch_page(url, selector?, max_chars?)`**, in `engine/web
 * **The address is the payload.** A model that has read `.env` can put it in the query string of a URL on an
   allowed site, and the site receives it. No rule here can tell a destination from a destination used to carry
   data; `docs/03` §1.6 says the same of `navigate_page`, and this tool is the same limit made *invisible* (no tab
-  moves) and *engine-originated* (no shell guard in the way). What was done is what can be done: it is off until a
-  person turns it on, a list is the default recommendation and the card says why, every attempt is in the
-  transcript before it happens, a run is bounded, and the tool's description and the conductor's prompt both say
+  moves) and *engine-originated* (no shell guard in the way). What was done is what can be done: it is on for any
+  public site until a person narrows it to a list or switches it off (the card says in plain words what each
+  choice allows), every attempt is in the transcript before it happens, a run is bounded, and the tool's description and the conductor's prompt both say
   not to put the workspace in an address. A model that ignores that, with the setting on, is a way out of the
   machine for what the turn has read.
 * **With the list, the destination is a site a person named. With "any public site" it is anywhere.** The card
