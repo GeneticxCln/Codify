@@ -29,7 +29,7 @@
 //! on a system with a delegated cgroup (systemd's `systemd-run --user --scope -p MemoryMax=…`) a kernel-enforced
 //! limit would be stronger, and is the next step, left out because it cannot be run or tested without systemd.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 /// The most a machine may use, and how closely it is watched.
@@ -129,19 +129,34 @@ fn parents() -> HashMap<u32, u32> {
 /// `root` and every live process that descends from it. The jail's processes reparent to the jail's own init
 /// when their parent ends, and that init is a descendant of `root`, so nothing in a machine is outside this.
 pub(crate) fn tree(root: u32) -> Vec<u32> {
-    let parents = parents();
+    tree_from(&parents(), root)
+}
+
+/// The walk behind [`tree`], over a map of pid to parent, so a test can hand it any map it likes. `root`
+/// first, then its descendants breadth-first, each **once**: `/proc` is read a process at a time, not
+/// atomically, so a pid that is reused while it is being read can make the map say that a process is its own
+/// ancestor, and a walk that trusted the map would never end and would fill memory as it went. A process
+/// already listed is not listed again, so the walk is bounded by the number of processes in the map. This
+/// closes the loop, not the reuse: a stranger whose recorded parent is in the tree is still listed, and a
+/// pid reused between this sample and [`kill_all`] is still killed.
+pub(crate) fn tree_from(parents: &HashMap<u32, u32>, root: u32) -> Vec<u32> {
     if !parents.contains_key(&root) {
         return Vec::new();
     }
     let mut kids: HashMap<u32, Vec<u32>> = HashMap::new();
-    for (pid, ppid) in &parents {
+    for (pid, ppid) in parents {
         kids.entry(*ppid).or_default().push(*pid);
     }
     let mut out = vec![root];
+    let mut seen: HashSet<u32> = HashSet::from([root]);
     let mut at = 0;
     while at < out.len() {
         if let Some(children) = kids.get(&out[at]) {
-            out.extend(children.iter().copied());
+            for child in children {
+                if seen.insert(*child) {
+                    out.push(*child);
+                }
+            }
         }
         at += 1;
     }
