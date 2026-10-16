@@ -509,7 +509,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 |---|---|---|---|
 | `GET` | `/health` | — | `{ok:true}` (still requires Bearer) |
 | `POST` | `/workspaces` | `{name, root_path}` extra=forbid | `Workspace` |
-| `POST` | `/workspaces/browse` | — | `{cancelled:true}` (the person closed the dialog — the only silent outcome) \| `{cancelled:false, workspace}` \| **503 `picker_unavailable`** with the reason and the way out (no dialog could open, or one did not answer within `PICKER_TIMEOUT_S`, 120 s, and was killed with everything it started). See "Folder dialog" below |
+| `POST` | `/workspaces/browse` | — | `{cancelled:true}` (the person closed the dialog — the only silent outcome) \| `{cancelled:false, workspace}` \| **503 `picker_unavailable`** with the reason and the way out (no dialog could open, or one did not answer within `PICKER_TIMEOUT_S`, 120 s, and was killed with everything it started) \| **400 `invalid_root`** when the chosen folder's path is not valid UTF-8 text (the dialog worked; the folder cannot be a workspace). See "Folder dialog" below |
 | `GET` | `/workspaces` | — | `Workspace[]` |
 | `GET` | `/workspaces/{id}` | — | `Workspace` |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
@@ -651,7 +651,7 @@ A successful repair **invalidates the model catalog cache** (the catalog is keye
 ### 3.0.1 Folder dialog
 
 `POST /workspaces/browse` runs a native folder dialog in a subprocess (GTK is never imported into the engine)
-under the spawn guard, and answers with one of three things — only one of which is silent (audit of
+under the spawn guard, and answers with one of four things — only one of which is silent (audit of
 2026-09-29, M8: a dialog that had *crashed* was reported as `{"cancelled": true}`, so a picker that could not
 open looked exactly like one the person closed, in the API and on screen):
 
@@ -660,6 +660,7 @@ open looked exactly like one the person closed, in the API and on screen):
 | a folder chosen | `{cancelled:false, workspace}` — the existing workspace for that path, or a new one |
 | the dialog closed with nothing chosen | `{cancelled:true}` |
 | no dialog could open, it crashed, or it did not answer | **503 `picker_unavailable`**, the reason, and "type the folder's path instead" |
+| a folder chosen whose path is not valid UTF-8 text | **400 `invalid_root`**, the same code a typed path that is not a usable folder gets, with a sentence that names the folder (each undecodable byte written `\xNN`) and says to rename it or choose another; no workspace is made, and the search ends (a dialog that answered is not asked again) |
 
 The UI acts on that code rather than only showing it: on `picker_unavailable` it shows the reason **and opens
 its "Enter workspace path" form**, so a desktop with no dialog helper (a bare window manager, a container) is
@@ -674,6 +675,12 @@ well, so a `1` whose stderr mentions the display is a failure, not a cancel. A r
 ends the search. A dialog that has not answered within `PICKER_TIMEOUT_S` is killed with its whole process
 group, so a dialog the engine gave up on does not stay open on the screen. The UI shows the 503's message
 in its error banner; typing a path in the folder menu always works without any dialog.
+
+The dialogs' output is read as bytes and decoded by the engine, not by `communicate` (`text=True`): a folder
+whose name is not UTF-8 text (an unzipped Latin-1 archive) used to raise `UnicodeDecodeError` there, outside the
+only exception that was caught, and the route answered a plain-text 500 for a dialog that had worked. The GTK
+script writes `os.fsencode(path)` to `sys.stdout.buffer` rather than `print`, which cannot encode a surrogate
+escape. stderr is only ever a reason, so it is decoded with replacement.
 
 ### 3.0.3 The editor's files
 
@@ -1753,8 +1760,8 @@ guarantee covers events only: other stored text, such as a plan step's title and
 and sqlite refuses a lone surrogate there with an encoding error instead of storing it. File names are a
 different case and are not scrubbed: a name the operating system supplies that is not valid UTF-8 is handled at
 the walk, left out and counted, never given a spelling (§4.0). It appears escaped only inside a sentence about a
-file that cannot be addressed: a profile file's name in a problem sentence (`bad\udcff.json`), or an ancestor
-named in the fixer's file-versus-folder refusal (§4.2).
+file that cannot be addressed: a profile file's name in a problem sentence (`bad\udcff.json`), an ancestor named
+in the fixer's file-versus-folder refusal (§4.2), or the folder the picker was given (§3.0.1).
 
 The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
 once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with
