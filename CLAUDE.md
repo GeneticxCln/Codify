@@ -79,7 +79,8 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
                   agent_orchestrator, the conductor's moves in conductor_tools
   skills.py       built-in + workspace recipes (`.codify/skills/`) discovered and loaded as data
   toolcall.py     the neutral tool-calling shape and its four protocol translations
-  spawn_guard.py process guard; every spawn routes through it
+  spawn_guard.py process guard; every spawn routes through it, and it applies a spawn site's resource limits (`Limits`)
+  binary_analysis.py  `analyze_binary`: Ghidra, one-shot, on a private copy; its own spawn site (docs/14 §4)
   speech.py       voice: dictation and read-aloud through an OpenAI-compatible speech provider; the engine records the mic (pw-record)
   surfaces.py     the bridge for what the app window owns: the engine asks, the window answers, ops are fixed strings in a table;
                   surface_editor.py is the editor's table (`read_editor`, `open_in_editor`, `edit_editor`; none touches the disk),
@@ -155,7 +156,7 @@ docs/           00–14, below
 | `docs/11` | The Ruflo audit: which ideas were borrowed, which were refused and by which invariant, and what was not read |
 | `docs/13` | The Grepify audit: `scan_code`, the built-in scanner for code review (curated profiles, masking, workspace profiles as data), and what of Grepify was taken |
 | `docs/12` | The Scrapling audit: `fetch_page` (a request the engine makes to an address a model chose), its rules, and what of Scrapling was refused |
-| `docs/14` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, the design a Ghidra tool would need here, and two gaps it found (child resource limits, a cancellable worker) |
+| `docs/14` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, the design a Ghidra tool needs here (now built: `analyze_binary`), and the gaps it found (child resource limits and a cancellable worker, both closed) |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.

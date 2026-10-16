@@ -3,9 +3,10 @@
 REA ("Reverse Engineer Anything", [`morluto/rea`](https://github.com/morluto/rea)) is an MIT-licensed TypeScript MCP
 server and CLI that lets an agent inspect binaries, JavaScript and Electron apps, firmware and websites through
 providers (Ghidra, IDA, Hopper, JADX, Frida and others). The request was an audit of all of it, **with Ghidra looked at
-on its own**, and of the parts of this project that would change for the better because of it. The result is a verdict
-and a list, not a tool: nothing in this change adds Ghidra, and the document says why, what it would take, and which
-smaller things REA does better than this engine today. It follows the shape of `docs/10` to `docs/13`: what was read,
+on its own**, and of the parts of this project that would change for the better because of it. The audit's result was a verdict
+and a list, and on the owner's decision (section 8) it has since been built: sections 1 to 7 are the audit as written,
+with their status marked where it changed, and section 8 is what was built and what was not. The document still says why,
+what it took, and which smaller things REA does better than this engine. It follows the shape of `docs/10` to `docs/13`: what was read,
 what is taken and refused, what a build would be, what the audit does not claim, and what reopens a row.
 
 ## 1. What was read, and what was not
@@ -50,12 +51,14 @@ what is taken and refused, what a build would be, what the audit does not claim,
 
 Both were checked by search in this repository.
 
-1. **A spawned child has no resource limits.** `grep -rn "setrlimit\|RLIMIT\|preexec_fn\|prlimit" engine/` finds
+1. **A spawned child has no resource limits.** *(Closed: `spawn_guard.Limits`, `docs/07` §1.)* When this audit was
+   written, `grep -rn "setrlimit\|RLIMIT\|preexec_fn\|prlimit" engine/` found
    nothing. A command is bounded by a wall-clock timeout and an output cap, not by memory, CPU time or file size, and
    there is no network isolation either. A test suite that allocates until the machine swaps, or writes a
    file until the disk is full, is stopped only by the timeout. REA caps address space, file size, CPU and core size,
    and clamps its limits so they never exceed those it inherited.
-2. **The worker that scans files cannot be cancelled.** `library._run_regex_worker` waits with
+2. **The worker that scans files cannot be cancelled.** *(Closed: `docs/07` §1.)* When this audit was written,
+   `library._run_regex_worker` waited with
    `communicate(timeout=...)` and takes no cancel signal; `run_command` polls a per-goal `threading.Event` every 0.2 s
    and kills the group. A regex search or scan is short (2.5 s, 15 s), so the cost is small today. It becomes the
    cost the moment a worker can run for minutes, which an external analyser does.
@@ -140,9 +143,10 @@ In order of value for cost; none of them needs Ghidra.
 
 1. **Resource limits for spawned children**, set in `spawn_guard.py` before it execs the command (address space, file
    size, CPU time, core size; clamped to the inherited limits). A test that a command allocating past the cap is
-   killed and says so.
+   killed and says so. *(Done. Sandbox commands get no core and a 2 GiB file cap, the scan worker 2 GiB of address
+   space and a CPU bound; a command's address space and CPU are left alone on purpose, `docs/07` §1.)*
 2. **A cancel signal for the file-scanning worker**, so a long worker is stoppable the way a command is. Needed before
-   any long-running child.
+   any long-running child. *(Done: `_run_regex_worker(request, cancel)`, `docs/07` §1.)*
 3. **A run token and a startup sweep for what a hard-killed engine leaves** (stale per-run directories of dead pids),
    the pattern `sweep_stale` now has for machines.
 4. **Machine-readable `retryable` and a required remediation on tool refusals**, so the conductor can branch on them
@@ -173,3 +177,32 @@ In order of value for cost; none of them needs Ghidra.
 * **The structured evidence envelope.** Reopens `docs/04`'s tool-result shapes and every tool that formats text today;
   start with the coverage field on the one tool that needs it.
 * **An MCP front door.** `docs/11` §3.
+
+## 8. What was built, and what was not
+
+The owner's answer to section 4's "if the owner says yes" was yes, so the recommendation was built as written:
+
+| Item | Where | Status |
+|---|---|---|
+| Resource limits on spawned children | `spawn_guard.Limits`, `docs/07` §1 | Built and tested against real guarded children |
+| A cancel signal for the scan worker | `library._run_regex_worker(request, cancel)`, `docs/07` §1 | Built and tested, and through the conductor's own tools |
+| A Ghidra tool, `analyze_binary` | `engine/binary_analysis.py`, `engine/ghidra/CodifyExport.java`, `docs/04` §3.0.7 | Built: its own guarded spawn site, a one-shot `analyzeHeadless` on a hashed private copy, an engine-owned export script, the child limits, a stripped environment, a total deadline, a cancel-aware wait, a startup sweep of dead pids' run directories, a cache keyed by the file's bytes, output quoted as data. Tested against a stand-in `analyzeHeadless` (`tests/fake_ghidra.py`) |
+| A run token and a startup sweep (item 3) | `binary_analysis.sweep_stale_runs` | Built for the one place that leaves directories behind today. The machine tab already had its own (`sweep_stale`) |
+| Machine-readable `retryable` and a remediation on refusals (item 4) | `BinaryAnalysisError` and the sentence `analyze_binary` returns | Built for this tool. **Not** applied to every refusal in the conductor: those are sentences today, and a shape for all of them is a wider change |
+| The rules REA's installation checks keep (item 6) | `locate_ghidra`, `docs/04` §3.0.7 | A relative path is never executed, a configured location is authoritative even when invalid, a missing tool is a named failure; `make doctor` reports the install |
+
+**Not built, and said so.**
+
+* **The `_clip` question (item 5) was not measured.** `analyze_binary` puts its caveat and its caps at the head of the
+  result, so it does not depend on the answer; `scan_code`'s coverage line, which sits at the end, is still the open
+  question section 3 describes.
+* **The export script has not run in a real Ghidra in this repository.** It was syntax-checked against stubs of the
+  `GhidraScript` calls it makes (`currentProgram`, `getFunctionManager().getFunctions`, `Function.getCallingFunctions`,
+  `getListing().getDefinedData`, `Data.hasStringValue`, `getSymbolTable().getExternalSymbols`, `getMemory().getBlocks`),
+  all long-stable, and the gate drives a stand-in for `analyzeHeadless`. Run a real analysis once before relying on it,
+  and expect to adjust a call if a release moved one.
+* **No decompiler.** The one-shot design gives up interactive decompiling by design (section 4, item 2); it is a second
+  decision if it is wanted.
+* **No network isolation of the JVM.** The child is given no socket by this code and its environment carries no proxy or
+  credential, but nothing enforces "no network"; section 3 says the same of every other child.
+* **POSIX only.** The guard's limits and group kill are, as the rest of the spawn guard is.

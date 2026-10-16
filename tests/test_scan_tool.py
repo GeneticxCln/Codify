@@ -180,5 +180,31 @@ class TestTheSecurityReviewSkill(ScanToolCase):
         self.assertNotIn("Note from the engine", answer)
 
 
+class TestACancelReachesTheWorker(ScanToolCase):
+    async def test_a_cancelled_goal_stops_a_scan_and_a_regex_search_instead_of_running_to_their_clock(self) -> None:
+        import time
+
+        (self.repo / "minified.js").write_text("a" * 28 + "!\n", encoding="utf-8")
+        profiles = self.repo / ".codify" / "profiles"
+        profiles.mkdir(parents=True, exist_ok=True)
+        (profiles / "boom.json").write_text(json.dumps({
+            "name": "boom", "description": "slow",
+            "rules": [{"id": "boom", "title": "Slow", "severity": "info", "pattern": r"(a+)+$",
+                       "languages": [], "where": "raw", "why": "slow", "fix": "none"}],
+        }), encoding="utf-8")
+        executor = self._executor(_ToolProvider())
+        executor.cancel_signal(self.goal.id).set()
+        table = executor._conductor_dispatch(
+            self.goal.id, self.goals.get(self.goal.id), str(self.repo), load_skills(str(self.repo)),
+        )
+        started = time.monotonic()
+        scanned = await table["scan_code"]({"profile": "boom"})
+        self.assertIn("cancelled", scanned)
+        with self.assertRaises(ValueError) as caught:
+            await table["search_code"]({"query": r"(a+)+$", "regex": True})
+        self.assertIn("cancelled", str(caught.exception))
+        self.assertLess(time.monotonic() - started, 4, "a cancelled goal still waited for the worker's clock")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

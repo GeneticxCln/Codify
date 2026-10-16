@@ -859,6 +859,44 @@ label if a workspace profile was used, the counts by severity, each rule's group
 cut, the file types it cannot read comments in, and why it stopped early. Errors the model is told in a sentence:
 `That scan did not run: <reason>`.
 
+### 3.0.7 Binary analysis: `analyze_binary`
+
+A conductor tool with no route (`engine/binary_analysis.py`; the design and the reasons are `docs/14` §4). It asks Ghidra
+about one compiled file in the workspace and answers from a bounded export, and it is held to what the read tools are:
+the file is never run, nothing in the workspace is written, and the model's words never reach an argv.
+
+**The call.** `analyze_binary(path, view?, query?, limit?)`. `view` is one of `summary` (default), `functions`, `imports`,
+`strings`, `sections`, `calls`; `query` is a **literal**, case-insensitive substring (never a regex: a hostile binary's names
+can make one backtrack for as long as it likes); `limit` defaults to 50 and is at most 200. `calls` takes a function name or
+address in `query` and shows its callers and callees.
+
+**Locating Ghidra.** `GHIDRA_INSTALL_DIR`, an absolute path, is authoritative: a relative path is never executed, a wrong
+one is an error and not a reason to search `PATH`, and the install is recognised by `support/analyzeHeadless` and
+`Ghidra/application.properties`, never by running anything. Ghidra 11 and 12 are accepted; another line is refused by name.
+`GHIDRA_HEADLESS_MAXMEM` sets the JVM heap (`2G` by default; anything that is not digits and `M` or `G` is ignored).
+
+**The run.** The file is copied once to a private owner-only directory under `CODIFY_HOME/binary-analysis/runs/` (opened without
+following a final link and without blocking on a FIFO, a regular file of at most 64 MiB, the copy re-hashed), and
+`analyzeHeadless <project> analysis -import <copy> -readOnly -deleteProject -analysisTimeoutPerFile 240 -scriptPath <dir>
+-postScript CodifyExport.java <out> <caps…>` runs under the guard with `spawn_guard.Limits`, a stripped environment (a
+`PATH`, a `HOME` and temp directory inside the run directory, the heap cap and nothing else of the engine's), a 300 s
+deadline, and a wait that stops the moment the goal is cancelled. `engine/ghidra/CodifyExport.java` is the engine's own file;
+it writes one JSON document and exits. The engine re-bounds and cleans what it reads back, caches it by the file's SHA-256
+and Ghidra's version (the 32 newest are kept), and answers every later question from the cache without starting Ghidra.
+
+**What a refusal says.** One sentence: `That analysis did not run (<code>): <what happened> <what to do> Retrying <may help|will
+not help until that changes>.` The codes are `not_configured`, `not_absolute`, `incomplete_install`, `not_executable`,
+`unsupported_version`, `bad_request`, `bad_input`, `too_large`, `timeout` and `cancelled` (the last two are the only ones a
+retry can help), `failed`, `no_export` and `bad_export`.
+
+**What a crash leaves.** A run directory named `<pid>-<token>`. The next run removes every one whose pid is dead.
+
+**What is not claimed.** The gate drives a stand-in for `analyzeHeadless` (`tests/fake_ghidra.py`) and compiles nothing of
+Ghidra's: the export script has been syntax-checked against stubs of the `GhidraScript` calls it uses, not run in a real
+install. A real-Ghidra check is a separate, named verification that fails where Ghidra is missing and is not part of the gate.
+There is no network isolation on the child beyond what it is given (it is not given a socket by this code, and nothing here
+forbids one); and analysis, not the file, is what is trusted: a malformed binary is an input to Ghidra's parsers.
+
 ### 3.1.1 The same rule at the start of every goal
 
 `POST /settings/agents/repair` is an action, and an action nobody thinks to take

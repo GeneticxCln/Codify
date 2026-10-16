@@ -67,6 +67,9 @@ GUARDED_SPAWN_SITES: dict[str, dict[str, str]] = {
     "engine/library.py": {
         "Popen": "the regex search worker (engine/regex_worker.py): guarded_argv/guarded_env + start_new_session, killed with SIGKILL at a hard limit. CPython's `re` cannot be interrupted and holds the GIL, so a model-supplied pattern can only be bounded by a process the engine can kill; the argv is a fixed script path, the pattern travels as JSON on stdin, pinned by tests/test_library_regex_bound.py",
     },
+    "engine/binary_analysis.py": {
+        "Popen": "Ghidra's `analyzeHeadless` for `analyze_binary` (docs/14 section 4): the engine's own door, not SandboxService, so validate_argv and docs/00 6.6 are untouched. The argv is built by _argv from the install GHIDRA_INSTALL_DIR names (an absolute path, located by its own files and never searched for on PATH) and fixed flags; the model supplies a workspace-relative path, a view from a fixed list and a literal filter, none of which reaches the argv except as the hashed private copy the engine made. guarded_argv/guarded_env + start_new_session, spawn_guard.Limits on the child, a stripped environment, a total deadline, a cancel-aware wait, and a SIGKILL of the whole group on timeout, cancel or error. Pinned by tests/test_binary_analysis.py against a stand-in analyzeHeadless, including that the child dies with the engine",
+    },
     "engine/app.py": {
         "Popen": "the folder picker (_run_picker): _picker_command's, and the zenity/kdialog fallbacks', guarded_argv/guarded_env + start_new_session, and a whole-group kill at PICKER_TIMEOUT_S; pinned by tests/test_sandbox.py, tests/test_workspace_browse.py and the live-engine e2e",
     },

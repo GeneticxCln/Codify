@@ -54,6 +54,35 @@ short the grace a test runner deliberately gets to shut its workers down, so a
 TERM whose sender is still alive forwards nothing — the command answers it. A TERM
 that arrives because the engine died is the one case that gets the group kill.
 
+**Resource limits are the third thing the guard does.** A wall-clock timeout bounds how long a child
+runs, not what it takes. `guarded_env(env, limits)` takes a `Limits` (address space, CPU seconds, file
+size, core size; each optional) and carries it in `CODIFY_SPAWN_LIMITS` as JSON; the guard applies it
+to itself with `setrlimit` just before starting the command, so the command is born under it and
+inherits it. Three rules, each pinned in `tests/test_spawn_limits.py` against a real guarded child:
+
+* **A limit is only ever lowered.** A request above the hard limit the guard inherited is clamped to
+  it, never raised, and a child cannot raise its own limit past the one it was given.
+* **A request the guard cannot trust is ignored, not guessed at.** An unknown name, a negative or
+  non-integer value, a boolean or malformed JSON applies nothing. A limit that cannot be set is
+  printed to the guard's stderr and the command still runs: a limit is a bound, not a gate on starting.
+* **A stale variable never leaks in.** `guarded_env` drops any `CODIFY_SPAWN_LIMITS` already in the
+  environment it was handed, so a child's limits are what its spawn site asked for, not what its
+  parent had.
+
+What each site asks for: a sandbox command (`SandboxService.COMMAND_LIMITS`) gets **no core file and
+a 2 GiB file-size cap**, and deliberately **no address-space or CPU cap**, because build tools, a JVM
+and Node reserve far more virtual memory than they use and the command already has a wall-clock
+timeout; the regex/scan worker (`library._regex_worker_limits`) gets **2 GiB of address space, its
+budget plus thirty seconds of CPU, and no core file**, because it holds a user-chosen pattern and a
+whole file in memory. A site that starts a long external analyser sets its own.
+
+**A cancel reaches the scan worker too.** `library._run_regex_worker(request, cancel)` waits in
+`CANCEL_POLL_S` slices when it is given the goal's cancel `Event` (the one a running command watches), and
+a set signal kills the worker's whole group and raises `RegexWorkerCancelled`, a `ValueError` like the timeout.
+The conductor's `search_code` and `scan_code` pass `cancel_signal(goal_id)`. Without a signal the wait is the
+single `communicate(timeout=...)` it always was. Pinned in `tests/test_regex_worker_cancel.py` and, for the
+conductor's wiring, `tests/test_scan_tool.py`.
+
 ### The guarded spawn sites
 
 One table in the code (`tests/test_no_unguarded_spawns.py::GUARDED_SPAWN_SITES`)
@@ -65,6 +94,7 @@ its own table beside it (`RUST_GUARDED_SPAWN_SITES`) — see §2.1:
 | `engine/sandbox.py` `run_command` | model-asked commands | `guarded_argv` + `guarded_env` + `start_new_session=True`; timeout kills the group, reports exit 124 | `tests/test_sandbox.py`, the live-engine e2e |
 | `engine/git.py` `_run_bytes` | every git command the engine runs | same, through the single choke point all callers route through; a `timeout` (the conductor's `git_history` passes one) stops the whole group, not just the guard | `tests/test_git.py`, `tests/test_sandbox_read_only_git.py`, the commit-hook e2e |
 | `engine/library.py` `_run_regex_worker` | the regex search (`engine/regex_worker.py`), one process per `search_code(regex=true)` | same, and a hard `SIGKILL` of the whole group at `REGEX_HARD_LIMIT_S`; the pattern travels on stdin, never in argv | `tests/test_library_regex_bound.py` |
+| `engine/binary_analysis.py` `_run_ghidra` | Ghidra's `analyzeHeadless`, one process per un-cached `analyze_binary` (`docs/14` §4); the engine's own door, not `SandboxService` | same, plus `spawn_guard.Limits` (CPU, file size, no core; a JVM's address space is left to `-Xmx`), a stripped environment of its own, a 300 s deadline, a cancel-aware wait, and a `SIGKILL` of the whole group on timeout, cancel or error; the argv is built from fixed flags and the located install, never from the model | `tests/test_binary_analysis.py` (against a stand-in `analyzeHeadless`, including that it dies with the engine) |
 | `engine/app.py` `_run_picker` (`_picker_command`, and the zenity/kdialog fallbacks) | the folder dialog behind `POST /workspaces/browse` | same, plus a whole-group `SIGKILL` at `PICKER_TIMEOUT_S`; env inherited because DISPLAY/WAYLAND put the dialog on screen | `tests/test_sandbox.py`, `tests/test_workspace_browse.py`, the picker e2e |
 | `engine/spawn_guard.py` `main` | the guard's own `Popen` of the command | is the guard | every one of the above |
 | `benchmarks/runner.py` | a benchmark task's `test_command`, taken from the manifest | same, plus a whole-group kill on timeout | `tests/test_benchmark_runner.py` |

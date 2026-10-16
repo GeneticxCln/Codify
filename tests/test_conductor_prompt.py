@@ -36,7 +36,9 @@ NOT_TOOLS = {"task"}
 # engine itself, and the instruction not to put the workspace in it belongs in the prompt and not only in a
 # description a model may not reread. Then to 3200 for `scan_code` (docs/13): one clause saying its hits are
 # candidates, because a model that reports a scanner's output unread is the failure the tool most invites.
-CEILING = 3200
+# Then to 3340 for `analyze_binary` (docs/14): a binary's names and strings are attacker-chosen text, and the same
+# one-clause rule that keeps a fetched page from being read as instructions belongs next to the tool's name.
+CEILING = 3340
 
 
 class TestTheToolsAreNamed(unittest.TestCase):

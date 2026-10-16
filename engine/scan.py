@@ -41,6 +41,7 @@ import fnmatch
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -690,6 +691,7 @@ def run_scan(
     glob: str | None = None,
     include_tests: bool = False,
     include_comments: bool = False,
+    cancel: threading.Event | None = None,
 ) -> str:
     """One scan of a workspace, as the text a model reads. Raises `ValueError` with a sentence for what it cannot do."""
     root = str(Path(root).resolve())
@@ -707,7 +709,7 @@ def run_scan(
             "include_tests": include_tests,
             "include_comments": include_comments,
             "budget_s": SCAN_BUDGET_S,
-        })
+        }, cancel)
     except RegexWorkerTimeout:
         raise ValueError(
             f"the scan was stopped at its time limit ({SCAN_BUDGET_S:.0f} s). Narrow it with `glob`, or choose a smaller "
