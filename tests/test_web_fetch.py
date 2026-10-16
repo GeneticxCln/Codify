@@ -1123,7 +1123,9 @@ class TestAFailedHandshakeFallsThroughWithoutSendingARequest(unittest.IsolatedAs
             with self.subTest(address=address):
                 self.assertEqual(len(chunks), 1, "the handshake was attempted at this address, so the fallback reached it")
                 self.assertFalse(chunks[0].startswith(b"GET "), "no HTTP request may precede a completed handshake")
-                self.assertNotIn(b"/x", chunks[0])
+                # The request line, not two bytes: a TLS ClientHello carries ~600 random bytes and `/x` turns up in them
+                # by chance about one run in a hundred (it failed master's 3.14 leg once).
+                self.assertNotIn(b" /x HTTP/", chunks[0])
 
 
 class TestScraplingIsOnlyTheParser(unittest.TestCase):
