@@ -335,6 +335,24 @@ test("a log that outgrows its cap is cut at the front and says so", async () => 
   assert.ok(data.endsWith(chunk), "the cut took the end and not the front");
 });
 
+test("a cut that lands inside an emoji does not leave half of it at the front of the replay", async () => {
+  const s = make();
+  // 1 + 2k + 1 code units: with a one-unit prefix the emoji start on odd indexes, so the cut (index 2) falls
+  // between a high and a low surrogate.
+  const emoji = "\u{1F600}";
+  const k = MAX_LOG_CHARS / 2;
+  s.write("m1", "x" + emoji.repeat(k) + "z");
+
+  const { data, truncated } = s.replay("m1");
+
+  assert.equal(truncated, true);
+  const first = data.charCodeAt(0);
+  assert.ok(!(first >= 0xdc00 && first <= 0xdfff), "the replay starts with a lone low surrogate");
+  assert.ok(data.length <= MAX_LOG_CHARS, "the log is not held to its cap");
+  assert.ok(data.startsWith(emoji), "the repair took more than the half character");
+  assert.ok(data.endsWith(emoji + "z"), "the cut took the end and not the front");
+});
+
 test("a reset brings an exited machine back and a machine that did not exit is left alone", async () => {
   const s = make();
   s.write("m1", "before\r\n");
