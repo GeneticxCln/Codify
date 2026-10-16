@@ -319,6 +319,9 @@ test("with no split showing it offers a new terminal beside this tab, and each t
     items.map(actionOf),
     [
       { type: "split-new-terminal" },
+      { type: "split-new-browser" },
+      { type: "split-new-machine", network: false },
+      { type: "split-new-machine", network: true },
       { type: "show-beside", tabId: "t1" },
       { type: "show-beside", tabId: "p" },
       { type: "show-beside", tabId: "t2" },
@@ -327,7 +330,15 @@ test("with no split showing it offers a new terminal beside this tab, and each t
   );
   assert.deepEqual(
     items.map((i) => i.title),
-    ["Split: new terminal beside this one", "Show beside: Shell t1", "Show beside: Page p", "Show beside: Shell t2"],
+    [
+      "Split: new terminal beside this one",
+      "Split: new browser page beside this one",
+      "Split: new machine beside this one, no network",
+      "Split: new machine beside this one, with network",
+      "Show beside: Shell t1",
+      "Show beside: Page p",
+      "Show beside: Shell t2",
+    ],
   );
 });
 
@@ -340,23 +351,32 @@ test("from a terminal, another terminal and a chat can sit beside it", () => {
   });
   assert.deepEqual(items.map(actionOf), [
     { type: "split-new-terminal" },
+    { type: "split-new-browser" },
+    { type: "split-new-machine", network: false },
+    { type: "split-new-machine", network: true },
     { type: "show-beside", tabId: "c" },
     { type: "show-beside", tabId: "t2" },
   ]);
 });
 
-test("from a browser page, a new terminal and each tab but another page can sit beside it", () => {
+test("from a browser page, a new terminal or machine and each tab but another page can sit beside it", () => {
   const items = actionItems({
     tabs: [pageTab("p"), termTab("t"), pageTab("q"), chatTab("c")],
     activeId: "p",
     conversations: [],
     split: { showing: false },
   });
-  assert.deepEqual(items.map(actionOf), [
-    { type: "split-new-terminal" },
-    { type: "show-beside", tabId: "t" },
-    { type: "show-beside", tabId: "c" },
-  ]);
+  assert.deepEqual(
+    items.map(actionOf),
+    [
+      { type: "split-new-terminal" },
+      { type: "split-new-machine", network: false },
+      { type: "split-new-machine", network: true },
+      { type: "show-beside", tabId: "t" },
+      { type: "show-beside", tabId: "c" },
+    ],
+    "a page was offered beside a page",
+  );
 });
 
 test("nothing open has no split to offer", () => {
@@ -375,7 +395,7 @@ test("the split actions come last, under their own heading, and have unique ids"
   assert.equal(new Set(items.map((i) => i.id)).size, items.length, "two items share an id");
   assert.ok(actionItems({ tabs: [chatTab("c"), termTab("t")], activeId: "c", conversations: [], split: { showing: false } }).every((i) => i.label === "Split"));
   const lastMachine = items.map((i) => actionOf(i)?.type).lastIndexOf("new-machine");
-  const firstSplit = items.findIndex((i) => ["split-new-terminal", "show-beside", "close-split"].includes(actionOf(i)?.type ?? ""));
+  const firstSplit = items.findIndex((i) => ["split-new-terminal", "split-new-browser", "split-new-machine", "show-beside", "close-split"].includes(actionOf(i)?.type ?? ""));
   assert.ok(lastMachine < firstSplit, "a machine row came after a split row");
 });
 
@@ -415,14 +435,24 @@ test("the machine rows are under their own heading, and not under the split's", 
   assert.match(markup, />Machine</);
 });
 
-test("typing 'machine' finds both rows, and 'network' finds the one that has one", () => {
+test("typing 'machine' finds both opening rows first, then the two that open one beside this tab", () => {
   const items = buildPaletteItems({ tabs: [chatTab("c")], activeId: "c", conversations: [], split: { showing: false } });
 
-  assert.deepEqual(filterPalette(items, "machine").map((i) => actionOf(i)), [
+  const found = filterPalette(items, "machine").map((i) => actionOf(i));
+  assert.deepEqual(found, [
     { type: "new-machine", network: false },
     { type: "new-machine", network: true },
+    { type: "split-new-machine", network: false },
+    { type: "split-new-machine", network: true },
   ]);
-  assert.deepEqual(filterPalette(items, "with network").map((i) => actionOf(i)), [{ type: "new-machine", network: true }]);
+  assert.deepEqual(
+    filterPalette(items, "with network").map((i) => actionOf(i)),
+    [
+      { type: "new-machine", network: true },
+      { type: "split-new-machine", network: true },
+    ],
+    "a row that gives a jail a network must say so in its title, and the one that does not must not",
+  );
 });
 
 test("typing 'split' finds the split actions", () => {

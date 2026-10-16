@@ -12,7 +12,13 @@
 import { PAIR_REFUSALS, pairRefusal } from "./panes";
 import type { Tab, TabState } from "./tabs";
 
-export type TabMenuItemId = "show-beside" | "split-new-terminal" | "close-split";
+export type TabMenuItemId =
+  | "show-beside"
+  | "split-new-terminal"
+  | "split-new-browser"
+  | "split-new-machine"
+  | "split-new-machine-network"
+  | "close-split";
 
 export interface TabMenuItem {
   id: TabMenuItemId;
@@ -34,12 +40,25 @@ export const TAB_MENU_FALLBACK_SIZE = { width: 224, height: 40 };
  * While a split is showing, closing it is the one thing to offer, from any tab (opening another tab already puts it in a
  * pane: `panes.resolveSplit`). Otherwise the tab in view offers a split with a new terminal, and any other tab offers to
  * be shown beside the current one.
+ *
+ * "Otherwise the tab in view offers a split" is one item per thing a split can open: a terminal, a browser page, and a
+ * machine in two rows, because the machine's network is the one fact about a jail that is chosen on purpose and cannot be
+ * changed afterwards (the palette's two "New machine" rows say the same). A page beside a page is still refused (`panes.ts`):
+ * the item stays, with its reason, rather than vanishing from a menu that offers the other two.
  */
 export function tabMenuItems(opened: Tab, state: TabState, splitShowing: boolean): TabMenuItem[] {
   if (splitShowing) return [{ id: "close-split", label: "Close split" }];
 
   const active = state.tabs.find((t) => t.id === state.activeId);
-  if (opened.id === state.activeId) return [{ id: "split-new-terminal", label: "Split with a new terminal" }];
+  if (opened.id === state.activeId) {
+    const page = opened.kind === "browser" ? PAIR_REFUSALS["two-pages"] : undefined;
+    return [
+      { id: "split-new-terminal", label: "Split with a new terminal" },
+      { id: "split-new-browser", label: "Split with a new browser page", ...(page ? { reason: page } : {}) },
+      { id: "split-new-machine", label: "Split with a new machine (no network)" },
+      { id: "split-new-machine-network", label: "Split with a new machine, with network" },
+    ];
+  }
   const why = pairRefusal(active, opened);
   return [
     {

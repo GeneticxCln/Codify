@@ -3199,11 +3199,22 @@ and not seen. If a terminal selection does not appear in the history, that is th
 
 ## 12. Split panes (built)
 
-The centre column can show two views side by side: **a chat, a terminal, an editor or a browser page beside any of those**, but never two chats and never two pages. A split is made three
+The centre column can show two views side by side: **a chat, a terminal, a machine, an editor or a browser page beside any of those**, but never two chats and never two pages. A split is made three
 ways: a right-click on a tab (or the Menu key on a focused one), an entry in the command palette (Ctrl+K, type
 "split"), and **Ctrl+.**, which splits and, pressed again, closes. The rules are `ui/src/panes.ts`, pure and DOM-free like
 `tabs.ts`; the divider and the two panes are `ui/src/components/SplitPanes.tsx`; the hook that keeps the split in step
 with the tab strip is `ui/src/useSplit.ts`.
+
+**What the menu and the palette can open beside the tab in view.** A right-click on the tab in view offers four splits with
+something new: **a terminal, an empty browser page, a machine with no network and a machine with network** (§14; the
+network is two rows because it is the one fact about a jail that is chosen on purpose and cannot be changed afterwards, as in
+the palette's "New machine" rows). The palette carries the same set ("Split: new terminal / new browser page / new machine,
+no network / new machine, with network, beside this one"). Opening a machine here is the person's own act, as everywhere
+(§14), and a shell that cannot make a jail leaves no split and says why in the banner. From a browser page the page item
+stays in the menu with its reason (a page beside a page is refused, §12.2) and the palette leaves it out. An editor is
+not offered as new: it needs a file, and an editor is opened by choosing one. Another tab is shown beside the current one with
+"Show beside the current tab", as before. The code is `tabMenu.ts` (the items), `commandPalette.ts` (the rows) and
+`splitWithNew` in `App.tsx`.
 
 ### 12.1 Beside the tabs, never in them
 
