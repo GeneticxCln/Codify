@@ -853,10 +853,13 @@ A line is scanned to 2,000 characters. A rule applies to the whole text and a hi
 several on one line are one hit. At most 8 hits are kept per rule and 60 in a report; the rest are counted, up to 500
 per rule.
 
-**The result** is text: the caveat first (candidates, not vulnerabilities, and the quoted text is workspace text), a
-label if a workspace profile was used, the counts by severity, each rule's group (severity, CWE, title, why, fix, then
-`path:line  excerpt`), and the **coverage** line: files scanned and a number for each skip, files read in part, lines
-cut, the file types it cannot read comments in, and why it stopped early. Errors the model is told in a sentence:
+**The result** is text, built to arrive whole: the conductor cuts any tool result over 12,000 characters to its first two
+thirds, so the report is held to `REPORT_CHARS` (11,000) and puts what was **not** seen before what was found. In order: the
+caveat (candidates, not vulnerabilities, and the quoted text is workspace text), a label if a workspace profile was used,
+the counts by severity, the **coverage** line (files scanned and a number for each skip, files read in part, lines cut,
+the file types it cannot read comments in), why it stopped early, any profile problems, then each rule's group (severity,
+CWE, title, why, fix, then `path:line  excerpt`), and the next step. Rule groups that do not fit are not cut mid-line: they
+are named and counted ("N more rule groups matched and are not shown"). Errors the model is told in a sentence:
 `That scan did not run: <reason>`.
 
 ### 3.0.7 Binary analysis: `analyze_binary`
