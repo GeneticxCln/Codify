@@ -46,7 +46,7 @@ help:
 	@echo "  make typecheck    - Static-type-check engine, tests and scripts with mypy (config in pyproject.toml)"
 	@echo "  make build-ui     - Typecheck and build React frontend (Vite)"
 	@echo "  make dev-ui       - Start Vite dev server"
-	@echo "  make check-tauri  - Cargo check, test, clippy (warnings are errors), the declared Rust version, and fmt for the desktop shell"
+	@echo "  make check-tauri  - Cargo check, test, clippy (warnings are errors), the declared Rust version, and fmt for the desktop shell (the tests need bwrap + unshare + an unprivileged overlay mount; make doctor checks them)"
 	@echo "  make build-tauri  - Build Tauri desktop application"
 	@echo "  make run-app      - Build the UI and launch the desktop app with it embedded (the way to open Codify from a checkout)"
 	@echo "  make build-app    - Build the release app (UI embedded) that scripts/codify and the menu entry start"
@@ -196,6 +196,9 @@ dev-ui:
 # never mentioned. So without a display it runs the tests under Xvfb, when there is one.
 # With neither, the test fails and the line below says why, rather than leaving a GTK
 # initialisation error to explain itself.
+# The machine tab's tests also build a real bwrap jail and its unshare-mounted project layer, and fail
+# loudly without them (the app itself falls back to a read-only machine; the gate does not). `make doctor`
+# says whether this machine can.
 XVFB := $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),,$(shell command -v xvfb-run >/dev/null 2>&1 && echo "xvfb-run -a"))
 
 check-tauri:

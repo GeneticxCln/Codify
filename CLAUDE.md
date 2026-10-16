@@ -37,7 +37,7 @@ mean the change is shippable.
 | `make test-ui` | `ui/tests/` through `node --test` (needs Node 22.22.2+, 24.15+ or 26+; checked before it runs) |
 | `make typecheck-ui-tests` | `tsc --noEmit` over `ui/src` **and** `ui/tests` — config `ui/tsconfig.test.json` |
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |
-| `make check-tauri` | `cargo check` + `cargo test` (under Xvfb when there is no display; includes the machine tab's real-jail tests, which need `bwrap` and user namespaces) + `cargo fmt --check` |
+| `make check-tauri` | `cargo check` + `cargo test` (under Xvfb when there is no display; includes the machine tab's real-jail tests, which need `bwrap`, `unshare` and an unprivileged overlay mount, not only user namespaces; `make doctor` fails on each) + `cargo fmt --check` |
 | `make ci-python-floor` | Only the 3.10 leg; never skips — it fails with install instructions |
 | `make ci-report` | `make ci`, then publishes its verdict on the commit as a GitHub status (context local/make-ci) via `gh`. Not a second gate: it runs the one gate and reports it, and refuses a dirty tree — the mark a PR still carries when Actions cannot give one (it was billing-locked once) |
 | `make check-history` | Every commit in `HISTORY_RANGE` (default `origin/<branch>..HEAD`), not just the tip. Separate from the gate on purpose: `make ci` asks about the tree you are about to share, this asks about the commits on the way to it. Pre-push runs it second, and it declines a one-commit range — that has no middle |
