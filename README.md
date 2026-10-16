@@ -540,6 +540,8 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/09`](docs/09-workspace-shell.md) | The workspace shell: conversations, tabs, panes, the embedded browser, the editor, the machine, what a turn is |
 | [`docs/10`](docs/10-agent-memory.md) | Agent memory: what was built, what was rejected |
 | [`docs/11`](docs/11-ruflo-audit.md) | The Ruflo audit: which ideas were borrowed, which were refused and why |
+| [`docs/12`](docs/12-scrapling-audit.md) | The Scrapling audit: `fetch_page`, a request the engine makes to an address a model chose, its rules, and what was refused |
+| [`docs/13`](docs/13-grepify-audit.md) | The Grepify audit: `scan_code`, the built-in scanner for code review, and what of Grepify was taken |
 
 ## 📂 Layout
 
