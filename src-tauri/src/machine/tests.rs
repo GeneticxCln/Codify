@@ -404,6 +404,24 @@ fn a_workspace_that_would_hand_over_the_persons_secrets_is_refused() {
 }
 
 #[test]
+fn a_workspace_that_resolves_to_a_path_that_is_not_text_is_refused_not_respelled() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile_dir("pin-nontext");
+    // A real directory whose name is not UTF-8, reached through an ordinary (UTF-8) symlink: the string the shell
+    // is given is text, the path it resolves to is not, and a lossy conversion would bind another path entirely.
+    let odd = dir.join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+    std::fs::create_dir(&odd).unwrap();
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&odd, &link).unwrap();
+
+    let refused = pin_workspace(Some(&link.to_string_lossy())).unwrap_err();
+    assert!(
+        refused.contains("not valid UTF-8"),
+        "the refusal must say why: {refused}"
+    );
+}
+
+#[test]
 fn a_machine_opens_only_on_a_real_absolute_directory() {
     assert!(pin_workspace(None).unwrap_err().contains("no root path"));
     assert!(pin_workspace(Some("   "))

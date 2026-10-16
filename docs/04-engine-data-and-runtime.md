@@ -1269,8 +1269,12 @@ alone` (the system's reason, never an errno or an absolute path; before, such a 
 deleted and, on a failed batch, unlinked by the rollback); and a final tree in which one path is both a file
 and a folder, which names both paths. The check judges where each path ends up, not the order of the
 operations, so a file replaced by a folder of its name (`utils.py` becoming `utils/__init__.py`) is accepted
-in either order: phase two runs the deletions first. Only a file that is binary, over the diff limit or not
-UTF-8 is still written over without a diff, since its bytes can be put back. A name the filesystem supplies
+in either order: phase two runs the deletions first. A file that is binary, over the diff limit or not UTF-8 is
+still written over without a diff, since its bytes can be put back, and its `changed` compares the bytes; but
+`create` or `update` with empty content over such a file is refused (`<path> cannot be shown as text (file is
+binary), so writing nothing over it would erase it without a trace…`), because the model never saw what it would
+erase. Deleting it, or sending its real content, is still allowed, and an empty `update` of a text file is still
+a truncation. A name the filesystem supplies
 that is not valid UTF-8 appears only escaped (`ascii()`), in the sentence about an ancestor that is an
 existing file.
 Only then are the writes made, deletions first, and a write that fails half-way (a full disk, a permission)
@@ -1798,10 +1802,12 @@ refuses a lone surrogate in either (§4.2): the model is asked once. Every other
 through `run_agent` (the gate's typed choices and scores do not) is healed before `accept` and before any effect, the first reply and the re-ask's alike, with one warn log line
 when something was replaced. So the planner's titles, the critic's notes, the scribe's commit message, the
 verifier's explanation and the librarian's and designer's text reach SQLite, git and the next prompt clean. The
-designer's `design_md` is healed on purpose: it reaches the fixer inside a request, which is healed anyway, so
-holding it verbatim would only move the replacement one step later, and the design event carries the same text. The
-file is still the fixer's own reply, which stays strict. That is not an approval gate (a plan can start itself under
-Direct Apply), so a U+FFFD can reach DESIGN.md without anyone having looked at it first. A reply nested too deeply for the healing walk is treated
+designer's `design_md` is the one field that is REFUSED although its role is healed (`REFUSED_FIELDS =
+{design: (design_md,)}`, `engine/replies.py`): it is the body the fixer is told to write as DESIGN.md or CODIFY.md,
+and a plan can start itself under Direct Apply, so a replacement character could reach the repository unreviewed.
+A lone surrogate in it makes the designer's reply an unusable one: the designer is told which field and asked once
+more, and a second such reply fails the role as `agent_output_invalid`. The rest of the designer's reply is healed.
+A reply nested too deeply for the healing walk is treated
 as an unusable reply (re-ask), not an escape. A role whose text becomes a file or a buffer belongs in
 `VERBATIM_ROLES` (`tests/test_surrogate_sinks.py` pins the set).
 
@@ -1823,8 +1829,11 @@ through them, and a healed path almost always names a file that is not there; a 
 the one case the heal cannot tell apart. A future tool whose text becomes a file, a
 buffer or a typed command belongs in the set (`tests/test_conductor_surrogates.py` pins its exact membership).
 
-Refused: the fixer's file path and content, in `fs.apply` phase one (§4.2), and the text of `edit_editor` and the
-command of `run_in_machine` (above).
+Refused: the fixer's file path and content, in `fs.apply` phase one (§4.2), the text of `edit_editor` and the
+command of `run_in_machine` (above), and a request body the person sent to `PUT /settings/engine` or
+`POST /stats/import`: it is their own text, kept and echoed, so a lone surrogate anywhere in it is a 422
+`invalid_value` naming the top-level key, and nothing is stored (before, a setting earlier in the body was saved and
+the answer then could not be written, a 500).
 
 The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
 once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with
@@ -1847,8 +1856,11 @@ but asks for no goal refresh and no editor reload and raises no notification. An
 (the goal refresh, or the lookup that tells an open editor) is run again by the next replay, whatever has
 arrived since. The mark lives in memory with the subscription, so after an app reload the replay from 0 is
 acted on once, as before. `sinceSequence` alone still decides what may end a stream (`onTerminal`). The 1.5 s
-poll in `App.tsx` is a separate clock that refreshes the goal on its own and can still race the per-event
-refreshes (the last response wins); this gate does not change that. See docs/09 §10.18.
+poll in `App.tsx` is a separate clock that refreshes the goal on its own. Its answers and the per-event and
+end-of-stream refreshes are ordered by what was asked, not by what arrived (`ui/src/goalReadOrder.ts`): each read
+takes a ticket when it is sent, and an answer is written into the transcript only if no later-asked read for that
+goal has been written already, so a poll sent before an event and answered after it no longer puts the older goal
+back. See docs/09 §10.18.
 
 ### 6.0 Engine-level frames
 

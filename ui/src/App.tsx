@@ -237,6 +237,7 @@ import {
 import { readRejection } from "./rejection.ts";
 import { threadTitleFromPrompt } from "./threadTitle";
 import { clipHead } from "./textCut";
+import { createGoalReadOrder } from "./goalReadOrder";
 import {
   AlertCircle,
   History,
@@ -601,6 +602,8 @@ export const App: React.FC = () => {
   useEngineNotices(engineConnection, notify, () => engineStderrRef.current[engineStderrRef.current.length - 1]);
 
   // Live goal streams (one per goal, with reconnect backoff).
+  // Which answer about a goal is the newest one asked for; see `goalReadOrder.ts`.
+  const goalReads = useRef(createGoalReadOrder());
   const goalStreams = useRef<Record<string, GoalStreamHandle>>({});
   // Set below; refs let the connection effects call the latest versions
   // without re-subscribing on every render.
@@ -2722,13 +2725,16 @@ export const App: React.FC = () => {
           ev.type === "step_status" ||
           ev.type === "plan_updated"
         ) {
+          const ticket = goalReads.current.begin(goalId);
           getGoal(goalId)
             .then((refreshed) => {
-              setMessages((prev) =>
-                prev.map((msg) =>
-                  msg.id === messageId ? { ...msg, goal: refreshed } : msg,
-                ),
-              );
+              if (goalReads.current.apply(goalId, ticket)) {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === messageId ? { ...msg, goal: refreshed } : msg,
+                  ),
+                );
+              }
               // A plan that has come back and will *wait* for the person is news; one that starts itself
               // (Direct Apply) is not. Only on a goal_status event: a step or plan edit is the person's own.
               if (ev.type === "goal_status") {
@@ -2771,16 +2777,18 @@ export const App: React.FC = () => {
           // every future subscribeToGoal() for this goal a silent no-op (so a
           // retried or re-applied goal streamed no events).
           delete goalStreams.current[goalId];
+          const ticket = goalReads.current.begin(goalId);
           getGoal(goalId)
             .then((refreshed) => {
               // The run is over, so the dispatch flag goes with it. What the
               // busy dot reads is the goal's own status (`isMessageBusy`), but a
               // `true` left on a finished message is a trap for the next reader
-              // either way.
+              // either way. The goal itself is written only if no later read has been applied already.
+              const newest = goalReads.current.apply(goalId, ticket);
               setMessages((prev) =>
                 prev.map((msg) =>
                   msg.id === messageId
-                    ? { ...msg, goal: refreshed, isStreaming: false }
+                    ? { ...msg, ...(newest ? { goal: refreshed } : {}), isStreaming: false }
                     : msg,
                 ),
               );
@@ -3081,12 +3089,16 @@ export const App: React.FC = () => {
           ) {
             const goalId = msg.goal.id;
             try {
+              // A read answered after a newer one (an event's refresh, say) is not written: see goalReadOrder.ts.
+              const ticket = goalReads.current.begin(goalId);
               const refreshed = await getGoal(goalId);
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === msg.id ? { ...m, goal: refreshed } : m,
-                ),
-              );
+              if (goalReads.current.apply(goalId, ticket)) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === msg.id ? { ...m, goal: refreshed } : m,
+                  ),
+                );
+              }
 
               // Direct mode means direct: start as soon as the plan is ready,
               // whatever we happened to observe first.
@@ -3097,12 +3109,15 @@ export const App: React.FC = () => {
               ) {
                 autoStartedGoals.current.add(goalId);
                 await startGoal(refreshed.id, refreshed.version);
+                const runningTicket = goalReads.current.begin(goalId);
                 const running = await getGoal(refreshed.id);
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === msg.id ? { ...m, goal: running } : m,
-                  ),
-                );
+                if (goalReads.current.apply(goalId, runningTicket)) {
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === msg.id ? { ...m, goal: running } : m,
+                    ),
+                  );
+                }
               }
             } catch (e) {
               // Ignore polling errors

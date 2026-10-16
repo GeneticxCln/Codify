@@ -124,6 +124,73 @@ fn a_stage_is_an_empty_owner_only_directory_that_is_removed_but_never_emptied() 
 // ── stage-leak: a stage is made only after its path has been checked ─────────────────────────────────
 
 #[test]
+fn what_a_killed_run_left_behind_is_swept_and_nothing_else_is() {
+    // A process that has exited and been reaped: its pid names nothing now.
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let dead = gone.id();
+    gone.wait().unwrap();
+    // A process that is still running: its directories are not ours to remove.
+    let mut live = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let alive = live.id();
+
+    let base = tempfile_dir("sweep");
+    let stage_dead = base.join(format!("codify-machine-{dead}-0"));
+    let probe_dead = base.join(format!("codify-machine-probe-{dead}-1"));
+    let stage_live = base.join(format!("codify-machine-{alive}-0"));
+    let stage_own = base.join(format!("codify-machine-{}-7", std::process::id()));
+    let stage_full = base.join(format!("codify-machine-{dead}-2"));
+    let unrelated = base.join("codify-machine-notes");
+    let odd = base.join(format!("codify-machine-{dead}-x"));
+    let file_named_like_one = base.join(format!("codify-machine-{dead}-3"));
+    for dir in [
+        &stage_dead,
+        &stage_live,
+        &stage_own,
+        &stage_full,
+        &unrelated,
+        &odd,
+    ] {
+        std::fs::create_dir(dir).unwrap();
+    }
+    std::fs::create_dir_all(probe_dead.join("d")).unwrap();
+    std::fs::write(probe_dead.join("d/x"), b"x").unwrap();
+    std::fs::write(stage_full.join("keep"), b"someone's file").unwrap();
+    std::fs::write(&file_named_like_one, b"not a directory").unwrap();
+    let target = base.join("target");
+    std::fs::create_dir(&target).unwrap();
+    let link = base.join(format!("codify-machine-{dead}-4"));
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let removed = layer::sweep_stale(&base);
+    let _ = live.kill();
+    let _ = live.wait();
+
+    assert_eq!(
+        removed, 2,
+        "the dead run's empty stage and its probe project"
+    );
+    assert!(!stage_dead.exists() && !probe_dead.exists());
+    assert!(stage_live.exists(), "a live process's stage is left");
+    assert!(stage_own.exists(), "this process's own is left");
+    assert!(
+        stage_full.join("keep").exists(),
+        "a stage with something in it is never emptied"
+    );
+    assert!(
+        unrelated.exists() && odd.exists(),
+        "names of another shape are not ours"
+    );
+    assert!(file_named_like_one.exists(), "a file is not a stage");
+    assert!(
+        link.exists() && target.exists(),
+        "a symlink is never followed or removed"
+    );
+}
+
+#[test]
 fn a_stage_that_cannot_be_made_safe_leaves_nothing_behind() {
     use std::os::unix::ffi::OsStrExt;
     let parent = tempfile_dir("stage-unsafe");

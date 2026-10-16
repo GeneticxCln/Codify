@@ -180,9 +180,14 @@ async fn stop_engine(shared: &SharedEngineState) -> EngineStop {
         return EngineStop::NothingToStop;
     };
     let grace = stop_grace(guard.hard_exit_s);
+    // Taken while the lock, and with it the child handle, is still held: a pid is only a name until the child is
+    // reaped, and the grace below is long enough for the engine to exit, be reaped and have its pid given to some
+    // other process. A signal sent by number after that would land on a stranger; one sent through this handle can
+    // only reach the process it was opened on.
+    let engine = EngineProcess::open(pid);
     drop(guard);
 
-    if !signal_process(pid, libc::SIGTERM) {
+    if !engine.signal(libc::SIGTERM) {
         // No such process: it exited between the id being read and the signal being
         // sent, which is the ordinary state of an engine that has already crashed.
         return EngineStop::Graceful;
@@ -194,10 +199,10 @@ async fn stop_engine(shared: &SharedEngineState) -> EngineStop {
     let state = shared.clone();
     await_exit(
         grace,
-        || !engine_has_gone(process_alive(pid), engine_reported_gone(&state)),
+        || !engine_has_gone(engine.alive(), engine_reported_gone(&state)),
         |nap| Box::pin(tokio::time::sleep(nap)),
         || {
-            let _ = signal_process(pid, libc::SIGKILL);
+            let _ = engine.signal(libc::SIGKILL);
         },
     )
     .await
@@ -297,24 +302,80 @@ fn engine_reported_gone(shared: &SharedEngineState) -> bool {
         .is_ok_and(|state| state.token.is_none() && state.port.is_none())
 }
 
-/// Send a signal, reporting whether there was a process there to receive it.
+/// The engine process, held by something that stays true after the pid is reused.
 ///
-/// `false` means `ESRCH`: no such process. That is a normal answer on this path —
-/// the engine may have exited a moment ago — and not an error worth logging.
-fn signal_process(pid: u32, signal: i32) -> bool {
-    // SAFETY: `kill` is handed a pid and a signal and reads neither of ours; no
-    // pointer into this process is involved, and every argument is a plain integer
-    // this function has already range-checked by type.
-    unsafe { libc::kill(pid as libc::pid_t, signal) == 0 }
+/// On Linux this is a pidfd (`pidfd_open`, kernel 5.3): a file descriptor that names *that* process and no other, so
+/// a signal sent through it can never reach whatever is given the number later. Where the kernel does not have it
+/// (or on another Unix) the handle falls back to the bare pid, which is what this code always used and which is
+/// right for as long as the child is unreaped, the case at the moment it is opened.
+struct EngineProcess {
+    pid: u32,
+    #[cfg(target_os = "linux")]
+    pidfd: Option<std::os::fd::OwnedFd>,
 }
 
-/// Whether a pid still names a process — a zombie included, deliberately.
-///
-/// Signal 0 asks the question without sending anything, and it is the only liveness
-/// question available without owning the child's reaping. The zombie case is why
-/// [`engine_reported_gone`] exists and why this is never the only answer.
-fn process_alive(pid: u32) -> bool {
-    signal_process(pid, 0)
+impl EngineProcess {
+    /// Open a handle on `pid`. Call it while the child is still unreaped (under the state lock).
+    fn open(pid: u32) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::FromRawFd;
+            // SAFETY: `pidfd_open` takes two integers and returns a new descriptor or -1; no pointer is involved.
+            // A descriptor it returns is owned by nobody else, so wrapping it in an `OwnedFd` is sound.
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+            let pidfd = if fd >= 0 {
+                Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) })
+            } else {
+                None
+            };
+            Self { pid, pidfd }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self { pid }
+        }
+    }
+
+    /// Whether this handle names a process and not a number (for the test that pins it).
+    #[cfg(all(test, target_os = "linux"))]
+    fn is_pinned(&self) -> bool {
+        self.pidfd.is_some()
+    }
+
+    /// Send a signal, reporting whether there was a process there to receive it.
+    ///
+    /// `false` means `ESRCH`: no such process. That is a normal answer on this path — the engine may have exited a
+    /// moment ago — and not an error worth logging.
+    fn signal(&self, signal: i32) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(fd) = &self.pidfd {
+            use std::os::fd::AsRawFd;
+            // SAFETY: `pidfd_send_signal` reads a descriptor this struct owns and a signal number; the siginfo
+            // pointer is null, which the call defines as "as if sent by kill(2)", and the flags are zero.
+            let sent = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    fd.as_raw_fd(),
+                    signal,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                )
+            };
+            return sent == 0;
+        }
+        // SAFETY: `kill` is handed a pid and a signal and reads neither of ours; no pointer into this process is
+        // involved, and every argument is a plain integer.
+        unsafe { libc::kill(self.pid as libc::pid_t, signal) == 0 }
+    }
+
+    /// Whether the process still exists — a zombie included, deliberately.
+    ///
+    /// Signal 0 asks the question without sending anything, and it is the only liveness question available without
+    /// owning the child's reaping. The zombie case is why [`engine_reported_gone`] exists and why this is never the
+    /// only answer.
+    fn alive(&self) -> bool {
+        self.signal(0)
+    }
 }
 
 // ── the render-starvation watchdog ──────────────────────────────────────────
@@ -2076,9 +2137,9 @@ pub fn run() {
 mod tests {
     use super::{
         await_exit, claim_shutdown, display_backend, engine_has_gone, stop_engine, stop_grace,
-        tabs_smoke_requested, tabs_smoke_seed_body, tabs_smoke_seed_url, EngineState, EngineStop,
-        SharedEngineState, DEFAULT_STOP_GRACE, ENGINE_STOP_POLL, STOP_GRACE_SLACK, TABS_SMOKE_ENV,
-        TABS_SMOKE_LINE, TABS_SMOKE_SEED_KEY,
+        tabs_smoke_requested, tabs_smoke_seed_body, tabs_smoke_seed_url, EngineProcess,
+        EngineState, EngineStop, SharedEngineState, DEFAULT_STOP_GRACE, ENGINE_STOP_POLL,
+        STOP_GRACE_SLACK, TABS_SMOKE_ENV, TABS_SMOKE_LINE, TABS_SMOKE_SEED_KEY,
     };
     use super::{render_watchdog, RENDER_STARVED_EVENT};
     use std::sync::Arc;
@@ -2349,6 +2410,40 @@ mod tests {
         let claimed = std::sync::atomic::AtomicBool::new(false);
         assert!(claim_shutdown(&claimed), "the first caller does the work");
         assert!(!claim_shutdown(&claimed), "the second is told it is done");
+    }
+
+    /// The handle on a live child: pinned to the process, able to signal it, and answering "gone" once it has been
+    /// reaped. A bare pid would answer the same here; what the pidfd adds is that it keeps answering for *this*
+    /// process after the number could belong to another, which no test can arrange, so what is pinned is that the
+    /// handle is the pidfd kind wherever the kernel has one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_engine_handle_names_the_process_and_not_just_its_number() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep must start for this test");
+        let engine = EngineProcess::open(child.id());
+        assert!(
+            engine.is_pinned(),
+            "this kernel has pidfd_open; the handle must use it"
+        );
+        assert!(engine.alive(), "a live child answers signal 0");
+
+        assert!(
+            engine.signal(libc::SIGKILL),
+            "the signal reaches the child it was opened on"
+        );
+        child.wait().expect("the killed child is reaped");
+
+        assert!(
+            !engine.alive(),
+            "a reaped child is gone, through the handle"
+        );
+        assert!(
+            !engine.signal(libc::SIGKILL),
+            "and a signal sent after that reaches nothing"
+        );
     }
 
     #[test]

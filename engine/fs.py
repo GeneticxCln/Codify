@@ -557,11 +557,21 @@ class FileSystemService:
                 if action not in ("create", "update", "delete"):
                     raise ValueError(f"unknown file action for {rel}: {action!r}")
                 after = "" if action == "delete" else (content or "")
+                if action != "delete" and after == "" and exists and note is not None:
+                    # A file the diff cannot show (binary, not UTF-8, too large) was never seen by the model, so an
+                    # empty `content` is not a considered change: phase two would truncate it, and report no change.
+                    raise ValueError(
+                        f"{rel} cannot be shown as text ({note}), so writing nothing over it would erase it without "
+                        f"a trace. Delete {rel} if that is meant, or send its real content"
+                    )
             if action != "delete":
                 _require_writable_text(after, rel, "text")
             # A delete changes the tree iff the file is there — an *empty* file
             # still disappears, which `before != after` alone would miss.
             changed = exists if action == "delete" else before != after
+            if note is not None and exists and action != "delete":
+                # `before` is "" for a file the diff cannot show, so comparing text says nothing: compare the bytes.
+                changed = _read_bytes(target) != after.encode("utf-8")
             diff = ""
             if before != after and note is None:
                 diff = "".join(

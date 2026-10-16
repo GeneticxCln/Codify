@@ -202,7 +202,11 @@ impl HostLayout {
                 continue;
             };
             if meta.file_type().is_symlink() {
-                if let Ok(target) = std::fs::read_link(at) {
+                // A target that is not UTF-8 text cannot be written into the argv as it is: left out, not respelled.
+                if let Some(target) = std::fs::read_link(at)
+                    .ok()
+                    .filter(|target| target.to_str().is_some())
+                {
                     top.push(TopLevel::Link {
                         at: at.to_string(),
                         target: target.to_string_lossy().into_owned(),
@@ -217,7 +221,9 @@ impl HostLayout {
             .filter(|p| Path::new(p).exists())
             .map(|p| p.to_string())
             .collect();
-        let resolv = std::fs::canonicalize("/etc/resolv.conf").ok();
+        let resolv = std::fs::canonicalize("/etc/resolv.conf")
+            .ok()
+            .filter(|real| real.to_str().is_some());
         HostLayout { top, etc, resolv }
     }
 }
@@ -390,6 +396,14 @@ pub(crate) fn pin_workspace(root_path: Option<&str>) -> Result<PathBuf, String> 
     if !resolved.is_dir() {
         return Err(format!(
             "workspace root is not a directory: {raw:?} — refusing to open a machine on it"
+        ));
+    }
+    // The jail's argv is text. `raw` is, but the resolved path can be a name the filesystem holds as other bytes (a
+    // symlink into a directory whose name is not UTF-8), and converting it lossily would bind a different path than
+    // the one that was checked above. Refused, the same way the project layer refuses such a path.
+    if resolved.to_str().is_none() {
+        return Err(format!(
+            "workspace root {raw:?} resolves to a path that is not valid UTF-8 text — refusing to open a machine on it"
         ));
     }
     let home = std::env::var_os("HOME")
