@@ -1,3 +1,5 @@
+import { clipHead } from "./textCut.ts";
+
 /**
  * What a thread is called.
  *
@@ -85,7 +87,8 @@ export function threadTitleFromPrompt(
   const flat = prompt.replace(/\s+/g, " ").trim();
   if (!flat) return UNTITLED_THREAD_TITLE;
   if (flat.length <= limit) return flat;
-  const head = flat.slice(0, limit);
+  // `clipHead`, not a bare slice: a cut between the halves of an emoji sends the engine a lone surrogate, which it refuses.
+  const head = clipHead(flat, limit);
   // A cut that lands exactly on a word boundary keeps the word. Asking for 12
   // characters of "Add an index to the goals table" and getting "Add an" back
   // is a name worse than the one that fitted — the last word is whole, it just

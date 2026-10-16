@@ -365,7 +365,11 @@ Settled decisions:
   is a tab labelled "New chat" and opening one is indistinguishable from opening
   nothing. `threadTitleFromPrompt` (`ui/src/threadTitle.ts`) collapses the
   prompt's whitespace and cuts it at 60 characters **on a word boundary** — a
-  tab is 224px wide, and "so every row h" is a name you read twice. The turn
+  tab is 224px wide, and "so every row h" is a name you read twice. The cut counts
+  UTF-16 units but never ends between the halves of an emoji (`clipHead`,
+  `ui/src/textCut.ts`; the same cut names a restored legacy goal's thread and
+  clips read-aloud text): a lone half is refused by the engine (422), so the
+  thread would never have been created. The turn
   calls it only for a thread it can see is unnamed, so a name the user chose is
   never overwritten, and `nameThread` moves the *tab* with the rename, because a
   name the engine accepted that the strip never learned about is the same

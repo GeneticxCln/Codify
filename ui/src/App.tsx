@@ -236,6 +236,7 @@ import {
 } from "./terminalBuffer";
 import { readRejection } from "./rejection.ts";
 import { threadTitleFromPrompt } from "./threadTitle";
+import { clipHead } from "./textCut";
 import {
   AlertCircle,
   History,
@@ -2861,7 +2862,7 @@ export const App: React.FC = () => {
           // whichever project happens to be selected when History is clicked.
           const convo = await createConversation(
             goal.workspace_id,
-            (goal.description || goal.title).slice(0, 200),
+            clipHead(goal.description || goal.title, 200),
           );
           threadId = convo.id;
           updateWorkspaceConversations(convo.workspace_id, (previous) => [

@@ -490,6 +490,9 @@ export async function withApp(
       const ws = query.get("workspace_id");
       return respond(conversations.filter((c) => (!ws || c.workspace_id === ws) && !c.archived));
     }
+    // The History drawer's index: the seeded goals. Before this it fell through to `[]`, so no test could restore a goal
+    // from the drawer.
+    if (path === "/goals" && method === "GET") return respond([...goalsById.values()]);
     if (path === "/conversations" && method === "POST") {
       const made = conversation({
         id: `c-new-${++created}`,
