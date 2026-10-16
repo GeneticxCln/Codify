@@ -870,7 +870,9 @@ export const App: React.FC = () => {
    * again for something we were just told.
    */
   useEffect(() => {
-    const everConnected = { current: false };
+    // True from the first socket that closes, proven or not, until a connection is proven. False at mount:
+    // a healthy start has just read the catalogue itself, and a second read for the same answer is waste.
+    let dropped = false;
     const handle = openEngineStream({
       onFrame: (frame) => {
         // The frame carries the diff, and until the notifications existed it was thrown away. Counted
@@ -882,19 +884,21 @@ export const App: React.FC = () => {
       },
       onConnected: () => {
         setCatalogLive(true);
-        if (everConnected.current) {
-          // A change that landed while the socket was down was never announced to
-          // anybody: the engine only reports to current subscribers, and there is
-          // no replay. So a reconnect re-reads, or the one release nobody hears
-          // about is the one that arrived while you were not looking.
+        if (dropped) {
+          // A change that landed while no connection was proven was never announced to anybody: the engine
+          // only reports to current subscribers, and there is no replay. That includes a start whose first
+          // sockets were refused, whose open-time read may have failed for the same reason.
+          dropped = false;
           setCatalogTick((n) => n + 1);
           void loadModels(false);
         }
-        everConnected.current = true;
       },
       // Backoff starts the moment the socket drops, which is exactly when a screen
       // showing a model list needs to start asking for itself again.
-      onReconnecting: () => setCatalogLive(false),
+      onReconnecting: () => {
+        dropped = true;
+        setCatalogLive(false);
+      },
     });
     return () => {
       handle.close();

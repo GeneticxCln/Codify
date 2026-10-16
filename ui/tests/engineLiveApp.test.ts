@@ -73,3 +73,38 @@ test("a proven connection that is lost and proven again re-reads the catalogue o
     assert.equal(rereads(ctx), before + 1, "a proven reconnect should re-read exactly once");
   });
 });
+
+test("a start whose first sockets were refused re-reads the catalogue once when one is finally accepted", async () => {
+  await withApp({}, async (ctx) => {
+    await ctx.settle();
+    const before = rereads(ctx);
+    for (let round = 1; round <= 2; round++) {
+      const refused = await nthEngineSocket(ctx, round);
+      await refused.open();
+      await refused.drop(4401);
+      await ctx.settle();
+    }
+    assert.equal(rereads(ctx), before, "a refused socket re-read /models");
+
+    const accepted = await nthEngineSocket(ctx, 3);
+    await accepted.open();
+    assert.equal(rereads(ctx), before, "the accepted socket re-read before it was proven");
+    const deadline = Date.now() + 5000;
+    while (rereads(ctx) === before && Date.now() < deadline) await wait(ctx, 100);
+    await wait(ctx, 300);
+    await ctx.settle();
+    assert.equal(rereads(ctx), before + 1, "the first proven connection after refusals should re-read exactly once");
+  });
+});
+
+test("a healthy first connection does not re-read: the app's own open-time read is the answer", async () => {
+  await withApp({}, async (ctx) => {
+    await ctx.settle();
+    const before = rereads(ctx);
+    const first = await nthEngineSocket(ctx, 1);
+    await first.open();
+    await wait(ctx, CONNECTION_PROVEN_MS + 800);
+    await ctx.settle();
+    assert.equal(rereads(ctx), before, "a connection nothing had dropped re-read /models");
+  });
+});

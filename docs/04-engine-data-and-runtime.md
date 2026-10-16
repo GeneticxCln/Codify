@@ -1749,7 +1749,9 @@ proves it. A rejected token arrives as `4401` within milliseconds, so it never r
 Events delivered late by a socket that has been closed or replaced are ignored. (`openGoalStream` has no
 `onConnected`: an open proves nothing on `/ws/goals/{id}` either, a goal with no events sends no frame to prove
 it by, and nothing needed the signal. `tests/goalStream.test.ts` pins its absence at the type level. A caller
-that wants one must take the proof rule above, timer included.)
+that wants one must take the proof rule above, timer included.) The app re-reads `GET /models` on the first
+`onConnected` that follows any `onReconnecting` (every close counts, a rejected socket as much as a lost one),
+once per run of closes; at mount nothing has closed, so a healthy start does not re-read (docs/06 §6).
 
 One frame exists today:
 
