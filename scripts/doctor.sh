@@ -220,6 +220,21 @@ else
 fi
 echo
 
+echo "Binary analysis (optional: the conductor's analyze_binary; 'make ci' does not need it)"
+if [ -z "${GHIDRA_INSTALL_DIR:-}" ]; then
+  note "GHIDRA_INSTALL_DIR is not set: the app runs, but analyze_binary will say Ghidra is not configured" \
+    "Unpack Ghidra 11 or 12 and export GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra_<version> (the folder holding support/analyzeHeadless), then restart Codify"
+elif [ "${GHIDRA_INSTALL_DIR#/}" = "$GHIDRA_INSTALL_DIR" ]; then
+  note "GHIDRA_INSTALL_DIR is not an absolute path, so analyze_binary will not use it" \
+    "Set it to the full path of the install; a relative path is never executed"
+elif [ -f "$GHIDRA_INSTALL_DIR/support/analyzeHeadless" ] && [ -f "$GHIDRA_INSTALL_DIR/Ghidra/application.properties" ]; then
+  ok "Ghidra $(sed -n 's/^application.version=//p' "$GHIDRA_INSTALL_DIR/Ghidra/application.properties" | head -1) at $GHIDRA_INSTALL_DIR (analyze_binary accepts Ghidra 11 and 12)"
+else
+  note "GHIDRA_INSTALL_DIR does not point at a Ghidra install: analyze_binary will refuse" \
+    "It needs support/analyzeHeadless and Ghidra/application.properties; point it at the unpacked release folder"
+fi
+echo
+
 if [ "$missing" -eq 0 ]; then
   echo "Everything 'make ci' needs is here. Next: make setup && make ci"
   exit 0

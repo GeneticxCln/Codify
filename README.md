@@ -285,6 +285,12 @@ crypto, deserialization, unsafe C, web) run over the workspace with comments and
 before it calls it real, and fixes still go through a plan you approve. It is the idea of NCC Group's Grepify built
 natively, with none of its code. See [`docs/13`](docs/13-grepify-audit.md).
 
+For compiled files, the conductor can ask Ghidra with `analyze_binary` (functions, imports, strings, sections and what
+calls what). Ghidra is not bundled: set `GHIDRA_INSTALL_DIR` to an unpacked Ghidra 11 or 12 and restart. The first question
+about a file runs one headless analysis of a private copy (the file is never run, the workspace is never written) and the
+rest are answered from a cache; what comes back is the binary's own text and is handed to the model as data, not instructions.
+See [`docs/14`](docs/14-rea-audit.md) and `docs/04` §3.0.7.
+
 ---
 
 ## 🎨 Appearance
@@ -542,7 +548,7 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/11`](docs/11-ruflo-audit.md) | The Ruflo audit: which ideas were borrowed, which were refused and why |
 | [`docs/12`](docs/12-scrapling-audit.md) | The Scrapling audit: `fetch_page`, a request the engine makes to an address a model chose, its rules, and what was refused |
 | [`docs/13`](docs/13-grepify-audit.md) | The Grepify audit: `scan_code`, the built-in scanner for code review, and what of Grepify was taken |
-| [`docs/14`](docs/14-rea-audit.md) | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, and what was not built |
+| [`docs/14`](docs/14-rea-audit.md) | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, and what was built from it (child resource limits, a cancellable scan worker, `analyze_binary` for Ghidra) |
 
 ## 📂 Layout
 

@@ -12,6 +12,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
+from engine import binary_analysis
 from engine.ask import AskRefused, parse_question
 from engine.conductor import EndTurn
 from engine.executor_support import (
@@ -225,6 +226,7 @@ class ConductorTools:
         'read_file',
         'search_code',
         'scan_code',
+        'analyze_binary',
         'git_history',
         'run_command',
         'read_page',
@@ -407,6 +409,34 @@ class ConductorTools:
             )
         except ValueError as exc:
             return f"That scan did not run: {exc}."
+
+    async def analyze_binary(self, args: dict[str, Any]) -> str:
+        """What Ghidra knows about one compiled workspace file, from a one-shot analysis of a private copy.
+
+        The door is `engine/binary_analysis.py` (`docs/14` §4): its own guarded spawn site, an engine-owned export
+        script, the engine's limits, a stripped environment, and output framed as the binary's own words. The model
+        supplies a path, a view from a fixed list and a literal filter, never a flag, a script or a regex. A refusal
+        says what happened, whether trying again could help, and what to do, in one sentence the model can branch on.
+        """
+        try:
+            limit = int(args["limit"]) if args.get("limit") is not None else binary_analysis.DEFAULT_LIMIT
+        except (TypeError, ValueError):
+            limit = binary_analysis.DEFAULT_LIMIT
+        try:
+            return await asyncio.to_thread(
+                binary_analysis.analyze_binary,
+                self.root,
+                str(args.get("path") or ""),
+                str(args.get("view") or "summary"),
+                str(args.get("query") or ""),
+                limit,
+                self.service.cancel_signal(self.goal_id),
+            )
+        except binary_analysis.BinaryAnalysisError as exc:
+            return (
+                f"That analysis did not run ({exc.code}): {exc}"
+                f" Retrying {'may help' if exc.retryable else 'will not help until that changes'}."
+            )
 
     async def git_history(self, args: dict[str, Any]) -> str:
         # `GitService.read_only` owns the subcommand allowlist. The
