@@ -1856,8 +1856,11 @@ but asks for no goal refresh and no editor reload and raises no notification. An
 (the goal refresh, or the lookup that tells an open editor) is run again by the next replay, whatever has
 arrived since. The mark lives in memory with the subscription, so after an app reload the replay from 0 is
 acted on once, as before. `sinceSequence` alone still decides what may end a stream (`onTerminal`). The 1.5 s
-poll in `App.tsx` is a separate clock that refreshes the goal on its own and can still race the per-event
-refreshes (the last response wins); this gate does not change that. See docs/09 §10.18.
+poll in `App.tsx` is a separate clock that refreshes the goal on its own. Its answers and the per-event and
+end-of-stream refreshes are ordered by what was asked, not by what arrived (`ui/src/goalReadOrder.ts`): each read
+takes a ticket when it is sent, and an answer is written into the transcript only if no later-asked read for that
+goal has been written already, so a poll sent before an event and answered after it no longer puts the older goal
+back. See docs/09 §10.18.
 
 ### 6.0 Engine-level frames
 

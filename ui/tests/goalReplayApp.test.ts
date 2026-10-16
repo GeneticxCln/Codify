@@ -285,3 +285,50 @@ test("an old stream's late failure does not make the next stream treat history a
     }
   });
 });
+
+test("a poll answered after a newer refresh does not put the older goal back", async () => {
+  // The poll's read is sent first and held; the goal then moves on and a state event's refresh brings the newer goal
+  // home; the held poll is answered last, with the goal as it was. Written back, it would show a finished goal as planning until the next tick, so what the window shows right after is what is checked.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let armed = false;
+  let held = false;
+  let engineGoal: Record<string, unknown> | undefined;
+  await withApp(
+    {
+      conversations: [THREAD],
+      goals: [goalRow()] as never,
+      beforeRespond: async (call) => {
+        if (armed && !held && call.method === "GET" && call.path === "/goals/g1") {
+          held = true;
+          await gate;
+          // The held read is answered with the goal as it was when it was asked, and the engine is back at the
+          // newer goal straight after, so no read made later can say otherwise.
+          Object.assign(engineGoal!, { status: "PLANNING", version: 3 });
+          setTimeout(() => Object.assign(engineGoal!, { status: "COMPLETED", version: 4 }), 40);
+        }
+      },
+    },
+    async (ctx) => {
+      await ctx.dom.click(ctx.dom.container.querySelector('[data-thread-row="true"]') as Element);
+      await ctx.settle();
+      engineGoal = ctx.engineGoal("g1");
+      armed = true;
+      const deadline = Date.now() + 5000;
+      while (!held && Date.now() < deadline) await wait(ctx, 50);
+      assert.ok(held, "the poll never sent its read");
+
+      Object.assign(ctx.engineGoal("g1")!, { status: "COMPLETED", version: 4 });
+      const s1 = goalSockets(ctx)[0]!;
+      await s1.open();
+      await s1.deliver(ev("goal_status", { status: "COMPLETED" }, 1));
+      await ctx.settle();
+
+      release();
+      await ctx.settle();
+
+      const shown = (ctx.dom.container.textContent ?? "").match(/PLANNING|COMPLETED|RUNNING|PENDING/g);
+      assert.deepEqual(shown, ["COMPLETED"], "the older goal was written back over the newer one");
+    },
+  );
+});
