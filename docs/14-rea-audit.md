@@ -63,7 +63,7 @@ Both were checked by search in this repository.
    and kills the group. A regex search or scan is short (2.5 s, 15 s), so the cost is small today. It becomes the
    cost the moment a worker can run for minutes, which an external analyser does.
 
-Reported, not yet confirmed by a run: `conductor._clip` keeps the head of an over-long tool result and drops the tail
+*(Measured and fixed; see section 8.)* Reported, not yet confirmed by a run when this was written: `conductor._clip` keeps the head of an over-long tool result and drops the tail
 (`…[N chars elided…]`), and `scan_code` writes its `Coverage:` and "stopped at its limit" lines after the findings.
 Whether a real report reaches 12,000 characters with the lines at the end elided has not been measured here; if it can,
 the coverage claim is exactly the sentence a reader needs and it is the one lost.
@@ -151,7 +151,7 @@ In order of value for cost; none of them needs Ghidra.
    the pattern `sweep_stale` now has for machines.
 4. **Machine-readable `retryable` and a required remediation on tool refusals**, so the conductor can branch on them
    rather than on a sentence.
-5. **Measure the clipping question** (section 3): the longest realistic `scan_code` report against `_clip`; move the
+5. **Measure the clipping question** *(done, section 8)* (section 3): the longest realistic `scan_code` report against `_clip`; move the
    coverage lines to the front if they can be elided.
 6. **State in `docs/07`** the rules REA's installation checks keep: a relative path is never executed, a configured
    location is authoritative even when invalid, and a missing external tool is a named failure.
@@ -186,21 +186,20 @@ The owner's answer to section 4's "if the owner says yes" was yes, so the recomm
 |---|---|---|
 | Resource limits on spawned children | `spawn_guard.Limits`, `docs/07` §1 | Built and tested against real guarded children |
 | A cancel signal for the scan worker | `library._run_regex_worker(request, cancel)`, `docs/07` §1 | Built and tested, and through the conductor's own tools |
+| Verification against a real Ghidra (item 6) | `scripts/check_ghidra.py`, `make check-ghidra` | Built and **run** against Ghidra 12.1.4, including the cancel; not part of the gate, and it fails rather than skips without Ghidra |
 | A Ghidra tool, `analyze_binary` | `engine/binary_analysis.py`, `engine/ghidra/CodifyExport.java`, `docs/04` §3.0.7 | Built: its own guarded spawn site, a one-shot `analyzeHeadless` on a hashed private copy, an engine-owned export script, the child limits, a stripped environment, a total deadline, a cancel-aware wait, a startup sweep of dead pids' run directories, a cache keyed by the file's bytes, output quoted as data. Tested against a stand-in `analyzeHeadless` (`tests/fake_ghidra.py`) |
 | A run token and a startup sweep (item 3) | `binary_analysis.sweep_stale_runs` | Built for the one place that leaves directories behind today. The machine tab already had its own (`sweep_stale`) |
-| Machine-readable `retryable` and a remediation on refusals (item 4) | `BinaryAnalysisError` and the sentence `analyze_binary` returns | Built for this tool. **Not** applied to every refusal in the conductor: those are sentences today, and a shape for all of them is a wider change |
+| Machine-readable `retryable` and a remediation on refusals (item 4) | `BinaryAnalysisError` and the sentence `analyze_binary` returns | Built for the one tool where a transient failure (a timeout) differs from a permanent one. **Deliberately not applied to the conductor's other refusals**: REA's flag exists for MCP clients that are programs and branch on a field, but the consumer of every tool result here is the model, which reads the sentence, and those sentences already say what to do next (`Refused, and retrying will not help: ...`, `That call failed: ...`, "ask the person to open a machine"). Converting about 25 hand-written refusals to a structured shape would change text that tests and prompts quote and buy no behaviour. Reopen it if a program, not a model, ever consumes a tool result |
+| The `_clip` question (item 5) | `scan.format_scan`, `docs/04` §3.0.6, `tests/test_scan_report_fits.py` | Measured with the real profiles: a scan with hits in about 20 rules was 14,000 characters and `_clip` dropped the coverage line, the stop line and the next step. The report is now built to fit under 11,000, puts coverage and the stop reason **before** the findings, and names the rule groups it held back |
 | The rules REA's installation checks keep (item 6) | `locate_ghidra`, `docs/04` §3.0.7 | A relative path is never executed, a configured location is authoritative even when invalid, a missing tool is a named failure; `make doctor` reports the install |
 
 **Not built, and said so.**
 
-* **The `_clip` question (item 5) was not measured.** `analyze_binary` puts its caveat and its caps at the head of the
-  result, so it does not depend on the answer; `scan_code`'s coverage line, which sits at the end, is still the open
-  question section 3 describes.
-* **The export script has not run in a real Ghidra in this repository.** It was syntax-checked against stubs of the
-  `GhidraScript` calls it makes (`currentProgram`, `getFunctionManager().getFunctions`, `Function.getCallingFunctions`,
-  `getListing().getDefinedData`, `Data.hasStringValue`, `getSymbolTable().getExternalSymbols`, `getMemory().getBlocks`),
-  all long-stable, and the gate drives a stand-in for `analyzeHeadless`. Run a real analysis once before relying on it,
-  and expect to adjust a call if a release moved one.
+* **Only Ghidra 12.1.4 has run it.** The export script compiled and ran unchanged inside a real Ghidra 12.1.4 on the first
+  attempt (`make check-ghidra`, `docs/04` §3.0.7): real functions, imports, strings and sections, correct callers and
+  callees for a small C program, a cache hit on the second question, and a Cancel that killed the real JVM and its group
+  (only defunct entries remained, reaped within 1.5 s). Ghidra 11 is accepted by the version policy and has not been run.
+  The gate itself still drives a stand-in; `make check-ghidra` is the separate verification, outside `make ci`.
 * **No decompiler.** The one-shot design gives up interactive decompiling by design (section 4, item 2); it is a second
   decision if it is wanted.
 * **No network isolation of the JVM.** The child is given no socket by this code and its environment carries no proxy or

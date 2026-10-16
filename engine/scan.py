@@ -97,6 +97,12 @@ EXCERPT_CHARS = 200
 #: the rule is dropped for the rest of the scan and the count reads as a floor.
 MAX_PER_RULE = 8
 MAX_FINDINGS = 60
+# The most a report may weigh. The conductor cuts any tool result over 12,000 characters to its first two thirds and
+# drops the rest, which used to be the coverage and stop lines; a report is built to fit under that instead, with the
+# lines that say what was not seen placed before the findings. A test holds this below the conductor's cap.
+REPORT_CHARS = 11_000
+_GROUPS_NOTE_RESERVE = 400
+_NOTE_RULES = 6
 COUNT_CAP = 500
 
 #: The scan's clock. The soft budget is checked between files and ends a scan that is merely large, returning
@@ -721,7 +727,7 @@ def run_scan(
 
 
 def format_scan(result: dict[str, Any], chosen: Sequence[Profile], profiles: ProfileSet, glob: str | None = None) -> str:
-    """A scan, as the tool result the model reads: the caveat first, then what was found, then what was not seen."""
+    """A scan, as the tool result the model reads: the caveat, then what was NOT seen, then what was found, within `REPORT_CHARS`."""
     by_id: dict[str, tuple[Rule, Profile]] = {}
     for profile in chosen:
         for candidate in profile.rules:
@@ -756,6 +762,7 @@ def format_scan(result: dict[str, Any], chosen: Sequence[Profile], profiles: Pro
     for finding in findings:
         if finding["rule"] not in shown_rules:
             shown_rules.append(finding["rule"])
+    groups: list[tuple[str, list[str]]] = []
     for rule_id in shown_rules:
         meta = by_id.get(rule_id)
         rule = meta[0] if meta else None
@@ -766,20 +773,18 @@ def format_scan(result: dict[str, Any], chosen: Sequence[Profile], profiles: Pro
             head += f" · {rule.title}"
         n = counts.get(rule_id, 0)
         head += f"  ({n}{'+' if n >= COUNT_CAP else ''} hit{'s' if n != 1 else ''})"
-        lines.append("")
-        lines.append(head)
+        block = ["", head]
         if rule and rule.why:
-            lines.append(f"  why: {rule.why}")
+            block.append(f"  why: {rule.why}")
         if rule and rule.fix:
-            lines.append(f"  fix: {rule.fix}")
+            block.append(f"  fix: {rule.fix}")
         kept = [f for f in findings if f["rule"] == rule_id]
         for finding in kept:
-            lines.append(f"  {finding['path']}:{finding['line']}  {finding['text']}")
+            block.append(f"  {finding['path']}:{finding['line']}  {finding['text']}")
         if n > len(kept):
-            lines.append(f"  (+{n - len(kept)} more, not shown)")
-    if result.get("omitted"):
-        lines.append("")
-        lines.append(f"({result['omitted']} lower-ranked hits are not shown; narrow with `glob` or a smaller profile.)")
+            block.append(f"  (+{n - len(kept)} more, not shown)")
+        groups.append((rule_id, block))
+
     skipped: dict[str, int] = result.get("skipped") or {}
     reasons = [f"{n} {what}" for what, n in (
         ("test files", skipped.get("tests", 0)), ("generated or minified", skipped.get("generated", 0)),
@@ -800,7 +805,8 @@ def format_scan(result: dict[str, Any], chosen: Sequence[Profile], profiles: Pro
             f"{result['unmasked_files']} files are in languages the scanner cannot read comments in"
             + (f" ({kinds})" if kinds else "") + ", so they were scanned as written"
         )
-    lines.append("")
+    # What was NOT seen goes before what was found. The conductor keeps the head of a long result and elides the tail,
+    # and a clean-looking report is exactly the one a reader must be able to check against its coverage.
     lines.append("; ".join(cover) + ".")
     if result.get("stopped") == "files":
         lines.append(f"The scan stopped at its limit of {MAX_FILES_SCANNED} files, so later files were not scanned; narrow it with `glob`.")
@@ -808,5 +814,28 @@ def format_scan(result: dict[str, Any], chosen: Sequence[Profile], profiles: Pro
         lines.append(f"The scan stopped at its time budget ({SCAN_BUDGET_S:.0f} s), so later files were not scanned; narrow it with `glob`.")
     if profiles.problems:
         lines.append("Profile problems (the rules named were skipped): " + "; ".join(profiles.problems[:_SHOWN_COUNT]))
-    lines.append("Next: read each hit with `read_file` (path and a line range) before you decide; a fix goes through a plan.")
+
+    closing = ["Next: read each hit with `read_file` (path and a line range) before you decide; a fix goes through a plan."]
+    if result.get("omitted"):
+        closing.insert(0, f"({result['omitted']} lower-ranked hits are not shown; narrow with `glob` or a smaller profile.)")
+    # The report must fit the conductor's result cap whole: past it the tail is cut blind. Rule groups are added while
+    # they fit; the rest are named, so the reader knows what is missing and which rules to ask about.
+    used = sum(len(ln) + 1 for ln in lines) + sum(len(ln) + 1 for ln in closing) + _GROUPS_NOTE_RESERVE
+    held_back: list[str] = []
+    for rule_id, block in groups:
+        size = sum(len(ln) + 1 for ln in block)
+        if held_back or used + size > REPORT_CHARS:
+            held_back.append(rule_id)
+            continue
+        used += size
+        lines.extend(block)
+    if held_back:
+        listed = ", ".join(held_back[:_NOTE_RULES]) + (", …" if len(held_back) > _NOTE_RULES else "")
+        lines.append("")
+        lines.append(
+            f"({len(held_back)} more rule group{'s' if len(held_back) != 1 else ''} matched and {'are' if len(held_back) != 1 else 'is'} "
+            f"not shown, to keep this result whole: {listed}. Narrow with `glob`, or scan one profile at a time.)"
+        )
+    lines.append("")
+    lines.extend(closing)
     return "\n".join(lines)

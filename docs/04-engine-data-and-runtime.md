@@ -853,10 +853,13 @@ A line is scanned to 2,000 characters. A rule applies to the whole text and a hi
 several on one line are one hit. At most 8 hits are kept per rule and 60 in a report; the rest are counted, up to 500
 per rule.
 
-**The result** is text: the caveat first (candidates, not vulnerabilities, and the quoted text is workspace text), a
-label if a workspace profile was used, the counts by severity, each rule's group (severity, CWE, title, why, fix, then
-`path:line  excerpt`), and the **coverage** line: files scanned and a number for each skip, files read in part, lines
-cut, the file types it cannot read comments in, and why it stopped early. Errors the model is told in a sentence:
+**The result** is text, built to arrive whole: the conductor cuts any tool result over 12,000 characters to its first two
+thirds, so the report is held to `REPORT_CHARS` (11,000) and puts what was **not** seen before what was found. In order: the
+caveat (candidates, not vulnerabilities, and the quoted text is workspace text), a label if a workspace profile was used,
+the counts by severity, the **coverage** line (files scanned and a number for each skip, files read in part, lines cut,
+the file types it cannot read comments in), why it stopped early, any profile problems, then each rule's group (severity,
+CWE, title, why, fix, then `path:line  excerpt`), and the next step. Rule groups that do not fit are not cut mid-line: they
+are named and counted ("N more rule groups matched and are not shown"). Errors the model is told in a sentence:
 `That scan did not run: <reason>`.
 
 ### 3.0.7 Binary analysis: `analyze_binary`
@@ -891,9 +894,14 @@ retry can help), `failed`, `no_export` and `bad_export`.
 
 **What a crash leaves.** A run directory named `<pid>-<token>`. The next run removes every one whose pid is dead.
 
-**What is not claimed.** The gate drives a stand-in for `analyzeHeadless` (`tests/fake_ghidra.py`) and compiles nothing of
-Ghidra's: the export script has been syntax-checked against stubs of the `GhidraScript` calls it uses, not run in a real
-install. A real-Ghidra check is a separate, named verification that fails where Ghidra is missing and is not part of the gate.
+**What is verified, and how.** The gate drives a stand-in for `analyzeHeadless` (`tests/fake_ghidra.py`), which proves the
+door and nothing of Ghidra's. `make check-ghidra` (`scripts/check_ghidra.py`) is the check against a real install: it analyses
+a small executable, checks every view and the cache, checks that no run directory is left, and with `GHIDRA_CHECK_ARGS="--cancel"`
+that a Cancel returns promptly and kills the whole real run. It fails where Ghidra is missing and is not part of `check` or `ci`.
+It has passed against Ghidra 12.1.4 (a nixpkgs build, which reports `application.release.name=NIX`); Ghidra 11 is accepted
+by the version policy but has not been run, and another 12.x is expected to work and has not been.
+
+**What is not claimed.**
 There is no network isolation on the child beyond what it is given (it is not given a socket by this code, and nothing here
 forbids one); and analysis, not the file, is what is trusted: a malformed binary is an input to Ghidra's parsers.
 
