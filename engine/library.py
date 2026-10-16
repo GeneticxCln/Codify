@@ -26,11 +26,12 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 from engine.fs import FileSystemService, PathEscapeError
-from engine.sandbox import CommandNotAllowed, SandboxService
+from engine.sandbox import CANCEL_POLL_S, CommandNotAllowed, SandboxService
 from engine.spawn_guard import Limits, guarded_argv, guarded_env
 from collections.abc import Iterator
 from typing import Any
@@ -151,6 +152,10 @@ class RegexWorkerTimeout(ValueError):
     """The worker was killed at its hard limit. A `ValueError`, as it always was, so every caller that refuses on one still does."""
 
 
+class RegexWorkerCancelled(ValueError):
+    """The person cancelled while the worker ran, and the worker's whole group was killed. A `ValueError`, like the timeout."""
+
+
 def text_lines(text: str) -> list[str]:
     """The lines of `text` as every line number in this module counts them: separated by `\n`, and nothing else.
 
@@ -250,12 +255,38 @@ def _regex_worker_limits(budget_s: float) -> Limits:
     return Limits(address_space=REGEX_WORKER_ADDRESS_SPACE, cpu_seconds=int(budget_s) + 30, core_bytes=0)
 
 
-def _run_regex_worker(request: dict[str, Any]) -> dict[str, Any]:
+def _wait_for_worker(
+    proc: subprocess.Popen[str], payload: str, hard_limit: float, cancel: threading.Event | None,
+) -> tuple[str, str]:
+    """The worker's output, waiting at most `hard_limit` seconds and giving up the moment `cancel` is set.
+
+    Without a signal this is the one `communicate(timeout=...)` it always was. With one, the same wait is taken in
+    `CANCEL_POLL_S` slices (the poll a running command uses), so a Cancel stops a long worker where it runs rather
+    than after its clock. The payload goes in the first slice only: `communicate` keeps what it has not written.
+    """
+    if cancel is None:
+        return proc.communicate(payload, timeout=hard_limit)
+    deadline = time.monotonic() + hard_limit
+    pending: str | None = payload
+    while True:
+        if cancel.is_set():
+            raise RegexWorkerCancelled("stopped: the goal was cancelled — the scan worker was killed")
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise subprocess.TimeoutExpired(proc.args, hard_limit)
+        try:
+            return proc.communicate(pending, timeout=min(CANCEL_POLL_S, left))
+        except subprocess.TimeoutExpired:
+            pending = None
+
+
+def _run_regex_worker(request: dict[str, Any], cancel: threading.Event | None = None) -> dict[str, Any]:
     """Run one regex scan in a worker process and return its reply, or raise ValueError.
 
     Under the spawn guard like every process this engine starts, in a session of its own so
     the kill takes the whole group, and with a hard clock: `SIGKILL`, not `SIGTERM` — a
     process stuck inside `re` has nothing to clean up and does not run a handler anyway.
+    A `cancel` that is set kills it the same way and raises `RegexWorkerCancelled`.
     """
     proc = subprocess.Popen(  # noqa: S603 — argv is sys.executable and a script path computed from __file__; the model's pattern travels as JSON on stdin, never in an argv
         guarded_argv([sys.executable, REGEX_WORKER]),
@@ -275,7 +306,7 @@ def _run_regex_worker(request: dict[str, Any]) -> dict[str, Any]:
         # The hard limit is the request's own soft budget plus the same margin for start-up and the reply that a
         # regex search has always had, so a longer job (a scan) is not killed at a search's two and a half seconds.
         hard_limit = float(request["budget_s"]) + (REGEX_HARD_LIMIT_S - REGEX_BUDGET_S)
-        out, err = proc.communicate(json.dumps(request), timeout=hard_limit)
+        out, err = _wait_for_worker(proc, json.dumps(request), hard_limit, cancel)
     except subprocess.TimeoutExpired:
         SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
         proc.communicate()
@@ -524,6 +555,7 @@ class LibraryService:
         glob: str | None = None,
         regex: bool = False,
         mode: str | None = None,
+        cancel: threading.Event | None = None,
     ) -> dict[str, Any]:
         """Search across the workspace: literal substring, ranked keyword, or bounded regex.
 
@@ -544,7 +576,7 @@ class LibraryService:
         if not needle:
             raise ValueError("empty search query")
         if regex:
-            return self._search_regex(needle, glob)
+            return self._search_regex(needle, glob, cancel)
         if mode == "keyword":
             return self._search_keyword(needle, glob)
         if mode is not None:
@@ -729,7 +761,7 @@ class LibraryService:
             result["non_utf8_names"] = odd_names
         return result
 
-    def _search_regex(self, pattern: str, glob: str | None) -> dict[str, Any]:
+    def _search_regex(self, pattern: str, glob: str | None, cancel: threading.Event | None = None) -> dict[str, Any]:
         """Bounded regex search: the literal walker with pattern guards.
 
         Same walker shape as `search` — SKIP_DIRS, binary sniff, byte caps — so the two
@@ -756,7 +788,7 @@ class LibraryService:
             "pattern": pattern,
             "glob": glob,
             "budget_s": REGEX_BUDGET_S,
-        })
+        }, cancel)
         if reply.get("ok"):
             result: dict[str, Any] = reply["result"]
             return result

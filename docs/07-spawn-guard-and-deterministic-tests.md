@@ -76,6 +76,13 @@ timeout; the regex/scan worker (`library._regex_worker_limits`) gets **2 GiB of 
 budget plus thirty seconds of CPU, and no core file**, because it holds a user-chosen pattern and a
 whole file in memory. A site that starts a long external analyser sets its own.
 
+**A cancel reaches the scan worker too.** `library._run_regex_worker(request, cancel)` waits in
+`CANCEL_POLL_S` slices when it is given the goal's cancel `Event` (the one a running command watches), and
+a set signal kills the worker's whole group and raises `RegexWorkerCancelled`, a `ValueError` like the timeout.
+The conductor's `search_code` and `scan_code` pass `cancel_signal(goal_id)`. Without a signal the wait is the
+single `communicate(timeout=...)` it always was. Pinned in `tests/test_regex_worker_cancel.py` and, for the
+conductor's wiring, `tests/test_scan_tool.py`.
+
 ### The guarded spawn sites
 
 One table in the code (`tests/test_no_unguarded_spawns.py::GUARDED_SPAWN_SITES`)

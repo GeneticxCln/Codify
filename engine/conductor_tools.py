@@ -378,6 +378,7 @@ class ConductorTools:
             glob=str(args["glob"]) if args.get("glob") else None,
             regex=bool(args.get("regex")),
             mode=str(args["mode"]) if args.get("mode") else None,
+            cancel=self.service.cancel_signal(self.goal_id),
         )
         return format_search(result)
 
@@ -402,6 +403,7 @@ class ConductorTools:
                 glob=str(args.get("glob") or "").strip() or None,
                 include_tests=bool(args.get("include_tests")),
                 include_comments=bool(args.get("include_comments")),
+                cancel=self.service.cancel_signal(self.goal_id),
             )
         except ValueError as exc:
             return f"That scan did not run: {exc}."

@@ -56,7 +56,8 @@ Both were checked by search in this repository.
    there is no network isolation either. A test suite that allocates until the machine swaps, or writes a
    file until the disk is full, is stopped only by the timeout. REA caps address space, file size, CPU and core size,
    and clamps its limits so they never exceed those it inherited.
-2. **The worker that scans files cannot be cancelled.** `library._run_regex_worker` waits with
+2. **The worker that scans files cannot be cancelled.** *(Closed: `docs/07` §1.)* When this audit was written,
+   `library._run_regex_worker` waited with
    `communicate(timeout=...)` and takes no cancel signal; `run_command` polls a per-goal `threading.Event` every 0.2 s
    and kills the group. A regex search or scan is short (2.5 s, 15 s), so the cost is small today. It becomes the
    cost the moment a worker can run for minutes, which an external analyser does.
@@ -144,7 +145,7 @@ In order of value for cost; none of them needs Ghidra.
    killed and says so. *(Done. Sandbox commands get no core and a 2 GiB file cap, the scan worker 2 GiB of address
    space and a CPU bound; a command's address space and CPU are left alone on purpose, `docs/07` §1.)*
 2. **A cancel signal for the file-scanning worker**, so a long worker is stoppable the way a command is. Needed before
-   any long-running child.
+   any long-running child. *(Done: `_run_regex_worker(request, cancel)`, `docs/07` §1.)*
 3. **A run token and a startup sweep for what a hard-killed engine leaves** (stale per-run directories of dead pids),
    the pattern `sweep_stale` now has for machines.
 4. **Machine-readable `retryable` and a required remediation on tool refusals**, so the conductor can branch on them
