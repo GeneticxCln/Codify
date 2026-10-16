@@ -1269,8 +1269,12 @@ alone` (the system's reason, never an errno or an absolute path; before, such a 
 deleted and, on a failed batch, unlinked by the rollback); and a final tree in which one path is both a file
 and a folder, which names both paths. The check judges where each path ends up, not the order of the
 operations, so a file replaced by a folder of its name (`utils.py` becoming `utils/__init__.py`) is accepted
-in either order: phase two runs the deletions first. Only a file that is binary, over the diff limit or not
-UTF-8 is still written over without a diff, since its bytes can be put back. A name the filesystem supplies
+in either order: phase two runs the deletions first. A file that is binary, over the diff limit or not UTF-8 is
+still written over without a diff, since its bytes can be put back, and its `changed` compares the bytes; but
+`create` or `update` with empty content over such a file is refused (`<path> cannot be shown as text (file is
+binary), so writing nothing over it would erase it without a trace…`), because the model never saw what it would
+erase. Deleting it, or sending its real content, is still allowed, and an empty `update` of a text file is still
+a truncation. A name the filesystem supplies
 that is not valid UTF-8 appears only escaped (`ascii()`), in the sentence about an ancestor that is an
 existing file.
 Only then are the writes made, deletions first, and a write that fails half-way (a full disk, a permission)

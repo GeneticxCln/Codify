@@ -502,5 +502,44 @@ class TestASuccessfulBatchIsUnchanged(ApplyCase):
         self.assertEqual("deep\n", (self.root / "a" / "b" / "c.txt").read_text(encoding="utf-8"))
 
 
+class TestAFileTheDiffCannotShowIsNotErasedByAnEmptyUpdate(ApplyCase):
+    """`blob.bin` is binary, so `before` is "" and an `update` with no content compared equal to it: reported
+    `changed=False`, then phase two wrote zero bytes over it."""
+
+    def test_an_empty_update_is_refused_in_a_dry_run_and_a_real_run(self) -> None:
+        for action in ("update", "create"):
+            for dry_run in (True, False):
+                with self.subTest(action=action, dry_run=dry_run):
+                    before = snapshot(self.root)
+                    with self.assertRaises(ValueError) as caught:
+                        self.apply([{"path": "blob.bin", "action": action, "content": ""}], dry_run=dry_run)
+                    self.assertEqual(before, snapshot(self.root))
+                    self.assertIn("blob.bin cannot be shown as text (file is binary)", str(caught.exception))
+                    self.assertFalse(str(caught.exception).endswith("."))
+
+    def test_a_missing_content_field_is_the_same_empty_update(self) -> None:
+        with self.assertRaises(ValueError):
+            self.apply([{"path": "blob.bin", "action": "update"}])
+        self.assertEqual(b"\x00\x01\x02binary\xff", (self.root / "blob.bin").read_bytes())
+
+    def test_real_content_still_replaces_it_and_says_it_changed(self) -> None:
+        summary = self.apply([{"path": "blob.bin", "action": "update", "content": "now text\n"}])
+        self.assertTrue(summary[0]["changed"])
+        self.assertEqual("now text\n", (self.root / "blob.bin").read_text(encoding="utf-8"))
+
+    def test_the_same_bytes_are_not_a_change(self) -> None:
+        (self.root / "same.bin").write_bytes(b"\x00same")
+        summary = self.apply([{"path": "same.bin", "action": "update", "content": "\x00same"}])
+        self.assertFalse(summary[0]["changed"])
+
+    def test_deleting_it_is_still_allowed(self) -> None:
+        self.apply([{"path": "blob.bin", "action": "delete"}])
+        self.assertFalse((self.root / "blob.bin").exists())
+
+    def test_an_empty_update_of_a_text_file_is_still_a_truncation_the_model_may_ask_for(self) -> None:
+        self.apply([{"path": "keep.txt", "action": "update", "content": ""}])
+        self.assertEqual("", (self.root / "keep.txt").read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()
