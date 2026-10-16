@@ -1346,6 +1346,10 @@ or `request-changes` with ≥1 reason. See `01` §5.1.
 {"summary":"…","commit_message":"fix: …"}
 ```
 
+Both fields are text. A field that is present and is not text (a list or an object, which is truthy) is a reply the
+engine cannot use: the scribe is told which field and asked once more, like any reply `accept` refuses (§4.6), and a
+second such reply fails the step as `agent_output_invalid`. A field that is absent or empty fails at once.
+
 ### 4.6 Which target a role is called on
 
 Every agent call goes through `AgentOrchestrator.run_agent`, which builds the targets it may use — the
