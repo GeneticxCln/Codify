@@ -2668,7 +2668,19 @@ export const App: React.FC = () => {
     (goalId: string, messageId: string, sinceSequence = 0) => {
       if (goalStreams.current[goalId]) return;
 
+      // What this stream has already acted on. The engine replays the whole log from 0 on every connect, so an event at
+      // or below `seq` is history: it is merged into the message (deduplicated there) but asks for no refresh, no editor
+      // reload and raises no notification. It starts at the floor the stream was told, because what is at or below
+      // `sinceSequence` is already on screen. It belongs to this subscription alone (a closure, not a map keyed by goal),
+      // so a late answer to an old stream's request cannot move a newer stream's mark.
+      // `failed` holds the events whose side effect did not complete: unlike the rest, the next replay runs those again,
+      // whatever has arrived since, as it did before this gate existed.
+      const gate = { seq: sinceSequence, failed: new Set<number>() };
+
       const applyEvent = (ev: Event) => {
+        const replayed = ev.sequence <= gate.seq && !gate.failed.has(ev.sequence);
+        if (ev.sequence > gate.seq) gate.seq = ev.sequence;
+
         setMessages((prev) =>
           prev.map((msg) => {
             if (msg.id !== messageId) return msg;
@@ -2683,6 +2695,10 @@ export const App: React.FC = () => {
           }),
         );
 
+        // History: merged above, nothing more to do.
+        if (replayed) return;
+        gate.failed.delete(ev.sequence);
+
         // The fixer wrote files: an editor holding one of them reloads if the person has not touched it, and says so if they
         // have. Only worth asking when an editor is open at all, and only for a write that happened (not a dry run).
         if (ev.type === "file_change_summary" && editorBuffers.getSnapshot().byTab.size > 0) {
@@ -2693,7 +2709,10 @@ export const App: React.FC = () => {
           if (!payload?.dry_run && paths.length > 0) {
             void getGoal(goalId)
               .then((owner) => editorBuffers.noteDiskChange(owner.workspace_id, paths))
-              .catch(() => {});
+              .catch(() => {
+                // The editor was never told: left to the next replay, which is the only other chance it gets.
+                gate.failed.add(ev.sequence);
+              });
           }
         }
 
@@ -2720,6 +2739,8 @@ export const App: React.FC = () => {
               }
             })
             .catch((err: any) => {
+              // Retried by the next replay, whatever has been applied since.
+              gate.failed.add(ev.sequence);
               setError(readRejection(err, "Failed to refresh goal"));
             });
         }

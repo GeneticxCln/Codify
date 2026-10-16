@@ -1727,6 +1727,16 @@ The backoff counter resets only after a connection has stayed open for the stabi
 before it authenticates and replays the log from 0, so an open that dies right after (1011, 1006) would
 otherwise reconnect at 1 Hz and re-deliver the whole log each time.
 
+The server replays the whole log from sequence 0 on every connect, so the window does not act twice on what it
+has acted on. `App.tsx` keeps, per subscription (`subscribeToGoal`), the highest sequence it has handled,
+starting at the `sinceSequence` the stream was opened with. An event at or below it is merged into the message
+but asks for no goal refresh and no editor reload and raises no notification. An event whose side effect failed
+(the goal refresh, or the lookup that tells an open editor) is run again by the next replay, whatever has
+arrived since. The mark lives in memory with the subscription, so after an app reload the replay from 0 is
+acted on once, as before. `sinceSequence` alone still decides what may end a stream (`onTerminal`). The 1.5 s
+poll in `App.tsx` is a separate clock that refreshes the goal on its own and can still race the per-event
+refreshes (the last response wins); this gate does not change that. See docs/09 §10.18.
+
 ### 6.0 Engine-level frames
 
 `ws://127.0.0.1:<port>/ws/engine` carries what belongs to *no* goal, on the same auth contract (boot

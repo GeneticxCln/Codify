@@ -2993,6 +2993,13 @@ durable in History, and the other three are not facts the engine keeps. The rule
   (`goal:<id>:<status>:<updated_at>`, `paused:<id>:<version>`, `plan:<id>:<version>`,
   `models:<fetched_at>:<diff>`), and an id already
   in the list is dropped. A goal that is retried and fails again is a new entry, because `updated_at` moved.
+  The id is not the only guard, because after Clear the list is empty and an id check suppresses nothing. Each
+  goal subscription (`subscribeToGoal` in `App.tsx`) also keeps the highest event sequence it has acted on,
+  starting at the `sinceSequence` floor given on Apply/Retry. An event at or below it is merged into the message
+  but triggers no goal refresh, no editor reload and no notification, so a reconnect replay cannot re-announce a
+  plan the person cleared. An event whose refresh or editor lookup failed is the exception: it is run again by
+  the next replay, whatever has arrived since. The mark belongs to one subscription and lives in memory, so after
+  an app reload the replay from 0 is acted on once, as before (docs/04 §6).
 * **Opening is reading.** Everything is marked read when the drawer opens, and as entries arrive while it
   stays open, so the header count clears at once. The dot on a row is for the ones that were new when the
   drawer opened, and it lasts as long as the drawer does, so the person can still see what they had not seen.
