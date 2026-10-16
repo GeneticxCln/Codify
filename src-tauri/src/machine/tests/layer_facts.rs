@@ -125,16 +125,18 @@ fn a_stage_is_an_empty_owner_only_directory_that_is_removed_but_never_emptied() 
 
 #[test]
 fn what_a_killed_run_left_behind_is_swept_and_nothing_else_is() {
-    // A process that has exited and been reaped: its pid names nothing now.
-    let mut gone = std::process::Command::new("true").spawn().unwrap();
-    let dead = gone.id();
-    gone.wait().unwrap();
-    // A process that is still running: its directories are not ours to remove.
-    let mut live = std::process::Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .unwrap();
-    let alive = live.id();
+    // A pid that names nothing now, found rather than made: the test starts no process (the spawn sites are frozen,
+    // `tests/test_no_unguarded_spawns.py`). Walk down from the top of the pid space until the kernel says ESRCH.
+    let dead = (1..4_194_304u32)
+        .rev()
+        .find(|pid| {
+            // SAFETY: signal 0 sends nothing; `kill` reads two integers.
+            let sent = unsafe { libc::kill(*pid as libc::pid_t, 0) };
+            sent != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        })
+        .expect("some pid is unused");
+    // A pid that is certainly running: init. Whether this user may signal it or not, it is alive.
+    let alive = 1u32;
 
     let base = tempfile_dir("sweep");
     let stage_dead = base.join(format!("codify-machine-{dead}-0"));
@@ -165,8 +167,6 @@ fn what_a_killed_run_left_behind_is_swept_and_nothing_else_is() {
     std::os::unix::fs::symlink(&target, &link).unwrap();
 
     let removed = layer::sweep_stale(&base);
-    let _ = live.kill();
-    let _ = live.wait();
 
     assert_eq!(
         removed, 2,
