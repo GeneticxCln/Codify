@@ -52,7 +52,6 @@ from engine.web_fetch import (
     host_listed,
     is_public,
     parse_hosts,
-    public_address,
     public_addresses,
 )
 
@@ -271,13 +270,12 @@ class TestOnlyPublicAddressesAreConnectedTo(unittest.IsolatedAsyncioTestCase):
             await fetch("http://localhost/", ANY)
         self.assertRegex(str(caught.exception), r"not a public address|did not resolve")
 
-    async def test_a_name_that_does_not_resolve_is_a_sentence(self) -> None:
-        async def nothing(host: str, port: int) -> list[str]:
-            return []
-
+    async def test_a_name_that_does_not_resolve_is_a_sentence_and_sends_nothing(self) -> None:
+        seen: list[httpx.Request] = []
         with self.assertRaises(FetchRefused) as caught:
-            await public_address("nowhere.example", 443, nothing)
+            await get("https://nowhere.example/", recording(seen), table={"nowhere.example": []})
         self.assertIn("did not resolve", str(caught.exception))
+        self.assertEqual(seen, [])
 
 
 V6 = "2606:4700:4700::1111"
@@ -313,7 +311,7 @@ class TestPublicAddresses(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(got, [answers[0]], "the first spelling is the one kept")
 
     async def test_one_private_answer_refuses_the_whole_name_and_says_which(self) -> None:
-        for answers in ([V4, "127.0.0.1"], ["10.0.0.1", V4], [V6, V4, "::ffff:192.168.0.1"]):
+        for answers in ([V4, "127.0.0.1"], [V6, "127.0.0.1"], ["10.0.0.1", V4], [V6, V4, "::ffff:192.168.0.1"]):
             with self.subTest(answers=answers):
                 with self.assertRaises(FetchRefused) as caught:
                     await public_addresses("docs.example", 443, resolver({"docs.example": answers}))
@@ -335,11 +333,6 @@ class TestPublicAddresses(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await public_addresses(V6, 443, never), [V6])
         with self.assertRaises(FetchRefused):
             await public_addresses("127.0.0.1", 443, never)
-
-    async def test_public_address_is_still_the_first_checked_one(self) -> None:
-        self.assertEqual(await public_address("docs.example", 443, resolver({"docs.example": [V6, V4]})), V6)
-        with self.assertRaises(FetchRefused):
-            await public_address("docs.example", 443, resolver({"docs.example": [V6, "127.0.0.1"]}))
 
 
 class TestAHostWithSeveralAddresses(unittest.IsolatedAsyncioTestCase):
