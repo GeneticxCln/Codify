@@ -91,7 +91,7 @@ scripts/        fake_ollama.py (drive a goal with no API keys; FAKE_CONDUCTOR=1 
                  drive_a_turn.py (drive a turn against a real local model; --approve presses Start),
                  make_logo.py, check_history.py (does every commit in a range build)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–13, below
+docs/           00–14, below
 .githooks/      versioned pre-commit / pre-push
 ```
 
@@ -155,6 +155,7 @@ docs/           00–13, below
 | `docs/11` | The Ruflo audit: which ideas were borrowed, which were refused and by which invariant, and what was not read |
 | `docs/13` | The Grepify audit: `scan_code`, the built-in scanner for code review (curated profiles, masking, workspace profiles as data), and what of Grepify was taken |
 | `docs/12` | The Scrapling audit: `fetch_page` (a request the engine makes to an address a model chose), its rules, and what of Scrapling was refused |
+| `docs/14` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, the design a Ghidra tool would need here, and two gaps it found (child resource limits, a cancellable worker) |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.
