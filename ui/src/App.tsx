@@ -147,7 +147,7 @@ import {
   type Tab,
   type TabState,
 } from "./tabs";
-import { PAIR_REFUSALS, closeInSplit, splitPartner, startSplit, type PaneSide } from "./panes";
+import { PAIR_REFUSALS, closeInSplit, pairRefusal, splitPartner, startSplit, type PaneSide } from "./panes";
 import { useSplit } from "./useSplit";
 import { useSplitFits } from "./useSplitFits";
 import { readSplitRatio, writeSplitRatio } from "./splitPref";
@@ -2345,16 +2345,38 @@ export const App: React.FC = () => {
     },
     [tabState, setSplit],
   );
-  const splitWithNewTerminal = useCallback(async () => {
-    const active = activeTab(tabState);
-    if (!active) {
-      setPaneNotice(PAIR_REFUSALS.missing);
-      return;
-    }
-    const id = await startTerminal(active.workspaceId ?? selectedWs?.id);
-    // The new tab is active (`openTerminalTab`), so the pair is shown the moment it exists.
-    if (id) setSplit({ panes: [active.id, id], focused: 1 });
-  }, [tabState, startTerminal, selectedWs, setSplit]);
+  // A split with something new beside the tab in view: a terminal, an empty browser page, or a machine. The tab strip
+  // moves only when the new thing exists (`openTerminalTab`, `openMachineTab`, the page's `openTab`), so a refusal leaves
+  // everything as it was.
+  const splitWithNew = useCallback(
+    async (kind: "terminal" | "browser" | "machine", network = false) => {
+      const active = activeTab(tabState);
+      if (!active) {
+        setPaneNotice(PAIR_REFUSALS.missing);
+        return;
+      }
+      const workspaceId = active.workspaceId ?? selectedWs?.id;
+      if (kind === "browser") {
+        // A page beside a page is refused for the reason `panes.ts` gives, said where it was asked for.
+        const why = pairRefusal(active, { id: "new-page", kind: "browser", title: "New tab" });
+        if (why) {
+          setPaneNotice(PAIR_REFUSALS[why]);
+          return;
+        }
+        // The same tab the header's button opens: an address bar waiting for an address (`handleNewBrowserTab`).
+        const page = tabId("browser");
+        setTabState((prev) => openTab(prev, { id: page, kind: "browser", title: "New tab", workspaceId }));
+        setSplit({ panes: [active.id, page], focused: 1 });
+        return;
+      }
+      // The new tab is active (`openTerminalTab` / `openMachineTab`), so the pair is shown the moment it exists. A machine is
+      // the person's act and its network is theirs: it is the item they pressed, and nothing here can open one on its own.
+      const id = kind === "terminal" ? await startTerminal(workspaceId) : await startMachine(workspaceId, network);
+      if (id) setSplit({ panes: [active.id, id], focused: 1 });
+    },
+    [tabState, startTerminal, startMachine, selectedWs, setSplit],
+  );
+  const splitWithNewTerminal = useCallback(() => splitWithNew("terminal"), [splitWithNew]);
   const toggleSplit = useCallback(() => {
     if (shownSplit) {
       closeSplit();
@@ -2413,10 +2435,13 @@ export const App: React.FC = () => {
     (id: TabMenuItemId) => {
       const target = tabMenu?.tabId;
       if (id === "close-split") closeSplit();
-      else if (id === "split-new-terminal") void splitWithNewTerminal();
+      else if (id === "split-new-terminal") void splitWithNew("terminal");
+      else if (id === "split-new-browser") void splitWithNew("browser");
+      else if (id === "split-new-machine") void splitWithNew("machine", false);
+      else if (id === "split-new-machine-network") void splitWithNew("machine", true);
       else if (target) startSplitWith(target);
     },
-    [tabMenu, closeSplit, splitWithNewTerminal, startSplitWith],
+    [tabMenu, closeSplit, splitWithNew, startSplitWith],
   );
   const paneTitle = (tab: Tab): string =>
     threadLabel(tab.title, workspaces.find((w) => w.id === tab.workspaceId)?.name);
@@ -2597,7 +2622,9 @@ export const App: React.FC = () => {
       case "action":
         if (item.action.type === "close-split") closeSplit();
         else if (item.action.type === "new-machine") void handleOpenMachine(item.action.network);
-        else if (item.action.type === "split-new-terminal") void splitWithNewTerminal();
+        else if (item.action.type === "split-new-terminal") void splitWithNew("terminal");
+        else if (item.action.type === "split-new-browser") void splitWithNew("browser");
+        else if (item.action.type === "split-new-machine") void splitWithNew("machine", item.action.network);
         else startSplitWith(item.action.tabId);
         break;
       case "file":

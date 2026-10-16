@@ -16,6 +16,7 @@ registerTsx();
 const {
   React, WIDE, SEEDED, id, click, commands, chord, split, rightClick, menuItems, pressIn, panes, pane, focusedSide, terminalIn, screenOf, composer, selectedTab, tabNamed, terminalTabs, openShell, openThread, shells, withApp, withChatAndShell,
 } = await import("./splitHarness.ts");
+import type { AppContext, AppOptions } from "./splitHarness.ts";
 
 
 // ── making a split ──────────────────────────────────────────────────────────
@@ -105,6 +106,109 @@ test("the tab's own menu offers a split with a new terminal", async () => {
     await click(ctx, item);
     await ctx.settle();
     assert.equal(terminalIn(pane(ctx, 1)), id("menu"));
+  });
+});
+
+// ── a browser page or a machine beside this tab, from its menu ──────────────
+
+/** A shell that makes machines: ids in order, and what each open was asked for is in `commands(ctx, "codify_machine_open")`. */
+const machines = (...ids: string[]): NonNullable<AppOptions["shellAnswers"]> => {
+  let next = 0;
+  return {
+    codify_machine_open: () => ({ id: ids[Math.min(next++, ids.length - 1)], copy_on_write: true, note: null }),
+    codify_machine_resize: () => null,
+    codify_machine_write: () => null,
+    codify_machine_close: () => null,
+  };
+};
+const itemTitled = (ctx: AppContext, text: RegExp): HTMLElement => {
+  const found = menuItems(ctx).find((i) => text.test(i.textContent ?? ""));
+  if (!found) throw new Error(`no menu item ${text}: ${menuItems(ctx).map((i) => i.textContent).join(" | ")}`);
+  return found;
+};
+
+test("the tab's menu offers a browser page and a machine beside it, not only a terminal", async () => {
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: shells(id("menu")) }, async (ctx) => {
+    await openThread(ctx, "c1");
+    await rightClick(ctx, tabNamed(ctx, "Conversation:"));
+    assert.deepEqual(
+      menuItems(ctx).map((i) => i.textContent?.trim()),
+      [
+        "Split with a new terminal",
+        "Split with a new browser page",
+        "Split with a new machine (no network)",
+        "Split with a new machine, with network",
+      ],
+    );
+  });
+});
+
+test("Split with a new browser page puts an empty page beside the chat, and the page has the focus", async () => {
+  await withApp({ viewport: WIDE, ...SEEDED }, async (ctx) => {
+    await openThread(ctx, "c1");
+    await rightClick(ctx, tabNamed(ctx, "Conversation:"));
+    await click(ctx, itemTitled(ctx, /new browser page/));
+    await ctx.settle();
+    assert.equal(panes(ctx).length, 2, "no split was made");
+    assert.match(pane(ctx, 0).textContent ?? "", /Reply from the first thread/, "the chat is not the left pane");
+    assert.ok(pane(ctx, 1).querySelector('[data-testid="browser-viewport"]'), "the right pane is not a browser page");
+    assert.match(selectedTab(ctx), /^Browser/, "the page was not the focused pane");
+  });
+});
+
+test("Split with a new machine opens one with no network beside the chat", async () => {
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: machines("mach-1") }, async (ctx) => {
+    await openThread(ctx, "c1");
+    await rightClick(ctx, tabNamed(ctx, "Conversation:"));
+    await click(ctx, itemTitled(ctx, /new machine \(no network\)/));
+    await ctx.settle();
+    assert.deepEqual(commands(ctx, "codify_machine_open"), [{ workspaceId: "ws-a", cols: 80, rows: 24, network: false }]);
+    assert.equal(panes(ctx).length, 2, "no split was made");
+    assert.ok(pane(ctx, 1).querySelector('[data-machine-id="mach-1"]'), "the machine is not the right pane");
+  });
+});
+
+test("Split with a new machine, with network, asks the shell for a network and for nothing else", async () => {
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: machines("mach-1") }, async (ctx) => {
+    await openThread(ctx, "c1");
+    await rightClick(ctx, tabNamed(ctx, "Conversation:"));
+    await click(ctx, itemTitled(ctx, /new machine, with network/));
+    await ctx.settle();
+    assert.deepEqual(commands(ctx, "codify_machine_open"), [{ workspaceId: "ws-a", cols: 80, rows: 24, network: true }]);
+    assert.equal(panes(ctx).length, 2);
+  });
+});
+
+test("a shell that cannot make a jail leaves no split and says why", async () => {
+  await withApp(
+    { viewport: WIDE, ...SEEDED, shellFails: { codify_machine_open: "bubblewrap (bwrap) is not installed" } },
+    async (ctx) => {
+      await openThread(ctx, "c1");
+      await rightClick(ctx, tabNamed(ctx, "Conversation:"));
+      await click(ctx, itemTitled(ctx, /new machine \(no network\)/));
+      await ctx.settle();
+      assert.equal(panes(ctx).length, 0, "a split was made around a machine that does not exist");
+      const alert = [...ctx.dom.container.querySelectorAll('[role="alert"]')].map((a) => a.textContent).join(" ");
+      assert.match(alert, /bubblewrap \(bwrap\) is not installed/);
+    },
+  );
+});
+
+test("on a browser page, a new page beside it is refused with the reason, and a terminal or machine is not", async () => {
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: shells(id("page")) }, async (ctx) => {
+    await openThread(ctx, "c1");
+    await click(ctx, ctx.dom.container.querySelector('button[title^="Browser"]') as HTMLElement);
+    await ctx.settle();
+    await rightClick(ctx, tabNamed(ctx, "Browser"));
+    const page = itemTitled(ctx, /new browser page/);
+    assert.equal(page.getAttribute("aria-disabled"), "true");
+    assert.match(ctx.dom.container.querySelector('[role="menu"]')?.textContent ?? "", /Two browser pages can't be side by side yet/);
+    for (const other of [/new terminal/, /new machine \(no network\)/, /new machine, with network/]) {
+      assert.notEqual(itemTitled(ctx, other).getAttribute("aria-disabled"), "true", `${other} was refused beside a page`);
+    }
+    await click(ctx, page);
+    await ctx.settle();
+    assert.equal(panes(ctx).length, 0, "a page was split beside a page");
   });
 });
 

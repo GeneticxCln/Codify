@@ -1,5 +1,5 @@
 import React from "react";
-import { Columns2, SquareTerminal, X } from "lucide-react";
+import { Columns2, Globe, ShieldCheck, ShieldHalf, SquareTerminal, X } from "lucide-react";
 
 import { Button } from "./ui/Button";
 import { clampMenuPosition, type Bounds } from "../threadMenu";
@@ -35,6 +35,9 @@ export interface TabMenuProps {
 const ICONS: Record<TabMenuItemId, React.FC<{ className?: string }>> = {
   "show-beside": Columns2,
   "split-new-terminal": SquareTerminal,
+  "split-new-browser": Globe,
+  "split-new-machine": ShieldCheck,
+  "split-new-machine-network": ShieldHalf,
   "close-split": X,
 };
 

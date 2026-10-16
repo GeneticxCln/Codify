@@ -35,17 +35,29 @@ test("on the tab you are in, the menu offers a split with a new terminal", () =>
   for (const active of [chat("c"), term("t")]) {
     const state = strip([active, chat("other")], active.id);
     const items = tabMenuItems(active, state, false);
-    assert.deepEqual(ids(items), ["split-new-terminal"]);
-    assert.equal(items[0].label, "Split with a new terminal");
-    assert.equal(items[0].reason, undefined, "an item that can work says it cannot");
+    assert.deepEqual(ids(items), ["split-new-terminal", "split-new-browser", "split-new-machine", "split-new-machine-network"]);
+    assert.deepEqual(
+      items.map((i) => i.label),
+      [
+        "Split with a new terminal",
+        "Split with a new browser page",
+        "Split with a new machine (no network)",
+        "Split with a new machine, with network",
+      ],
+    );
+    for (const item of items) assert.equal(item.reason, undefined, `${item.id} says it cannot work`);
   }
 });
 
-test("on a browser page you are in, the same item works: a page can sit beside a new terminal", () => {
+test("on a browser page you are in, a new terminal or machine works and a new page says why it cannot", () => {
   const state = strip([page("p"), term("t")], "p");
-  const [item] = tabMenuItems(page("p"), state, false);
-  assert.equal(item.id, "split-new-terminal");
-  assert.equal(item.reason, undefined, "an item that can work says it cannot");
+  const items = tabMenuItems(page("p"), state, false);
+  assert.deepEqual(ids(items), ["split-new-terminal", "split-new-browser", "split-new-machine", "split-new-machine-network"]);
+  const byId = Object.fromEntries(items.map((i) => [i.id, i]));
+  assert.equal(byId["split-new-terminal"].reason, undefined, "a terminal beside a page says it cannot work");
+  assert.equal(byId["split-new-machine"].reason, undefined);
+  assert.equal(byId["split-new-machine-network"].reason, undefined);
+  assert.equal(byId["split-new-browser"].reason, PAIR_REFUSALS["two-pages"], "a page beside a page gave no reason");
 });
 
 test("on another tab, the menu offers to show it beside the current one", () => {

@@ -30,6 +30,8 @@ export type PaletteAction =
   | { type: "close-split" }
   | { type: "new-machine"; network: boolean }
   | { type: "split-new-terminal" }
+  | { type: "split-new-browser" }
+  | { type: "split-new-machine"; network: boolean }
   | { type: "show-beside"; tabId: string };
 
 interface BaseItem {
@@ -198,6 +200,13 @@ function splitActions(sources: PaletteSources): PaletteItem[] {
   if (!active) return [];
   return [
     make("split-new-terminal", "Split: new terminal beside this one", { type: "split-new-terminal" }),
+    // A page beside a page is refused (`panes.ts`), so it is not offered from a page, as a conversation is not offered a
+    // conversation. The machine is two rows for the reason `machineActions` gives: its network is chosen on purpose.
+    ...(active.kind === "browser"
+      ? []
+      : [make("split-new-browser", "Split: new browser page beside this one", { type: "split-new-browser" })]),
+    make("split-new-machine", "Split: new machine beside this one, no network", { type: "split-new-machine", network: false }),
+    make("split-new-machine-network", "Split: new machine beside this one, with network", { type: "split-new-machine", network: true }),
     // `canPair` refuses the tab itself ("same"), so the active tab is not offered beside itself.
     ...sources.tabs
       .filter((t) => canPair(active, t))
