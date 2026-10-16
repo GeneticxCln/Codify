@@ -1212,13 +1212,16 @@ baseline, `08` §8; asking again did not help, since it does not know what `edit
 `fixer sent action=edit with content and no edits for <path>; treated as a whole-file update`, never does it for
 an empty `content` (that would blank the file), and never when `edits` is present — those keep their meaning and
 `content` is ignored. A reply the engine cannot apply (an `old_text` that matches the wrong number of times, a
-path outside the workspace) is put to the model once, with the reason and, for an edit, the alternatives
-(`04` §4 "One re-ask").
+path outside the workspace, a file that exists but cannot be read, a path that would be both a file and a
+folder) is put to the model once, with the reason and, for an edit, the alternatives (`04` §4 "One re-ask").
 
 **A batch is applied completely or not at all** (`FileSystemService.apply`; audit of 2026-09-29, M4).
 Phase one resolves and validates every operation before anything is written — containment, `.git`, the
-action name, a target that is a directory, each `edit`'s search text — against a virtual view that reflects
-the operations before it in the same batch, so an `edit` of a file the batch just created sees it.
+action name, a target that is a directory or any other path that is not a regular file (a pipe, a socket, a
+device), a file that exists but cannot be read (at any size), a final tree in which one path is both a file and
+a folder (`a.py` with `a.py/b.py`, or `run.sh/inner.py` with `run.sh` an existing file the batch does not
+delete), each `edit`'s search text — against a virtual view that reflects the operations before it in the same
+batch, so an `edit` of a file the batch just created sees it.
 Phase one also checks that every path and every resolved text (a create's or update's content, an edit's
 result) can be written as UTF-8; a delete has no text, but its path is judged like any other. A lone
 surrogate escape such as `\ud800` in either is refused with a `ValueError` that names the file in words,
@@ -1226,13 +1229,32 @@ before anything is written or stored, so a real run and a dry run refuse the sam
 asked about it once. A path holding one would otherwise make a filename that is not UTF-8. A valid pair
 (`\ud83d\ude00`) is one character after `json.loads` and is accepted. This is also what keeps a dry run from
 storing a proposal that Apply could not write.
-Only then are the writes made, and a write that fails half-way (a full disk, a permission) puts back what the
-batch had already touched: content, mode, deleted files and any directories it created. So a refused batch,
-or one that failed while writing, leaves the tree byte-identical, or names any file it could not put back,
-which is what makes it safe for the
-step to fail loudly instead of leaving half a change uncommitted and unannounced. A dry run performs phase
-one only, so it cannot see a failure that only the filesystem reports at write time (for example a name of
-about 240 characters, whose temp file name is over the 255-byte limit). When a write fails, whether in the
+Phase one also refuses, in a dry run and a real run alike, with a `ValueError` the fixer is asked about once
+(`04` §4 "One re-ask"): an existing file that cannot be read (create, update, edit or delete), because its
+bytes could neither be put back after a failed write nor left alone by a rollback, so the reason reads
+`<path> exists but cannot be read (Permission denied), so it cannot be changed or deleted safely. Leave <path>
+alone` (the system's reason, never an errno or an absolute path; before, such a file was overwritten or
+deleted and, on a failed batch, unlinked by the rollback); and a final tree in which one path is both a file
+and a folder, which names both paths. The check judges where each path ends up, not the order of the
+operations, so a file replaced by a folder of its name (`utils.py` becoming `utils/__init__.py`) is accepted
+in either order: phase two runs the deletions first. Only a file that is binary, over the diff limit or not
+UTF-8 is still written over without a diff, since its bytes can be put back. A name the filesystem supplies
+that is not valid UTF-8 appears only escaped (`ascii()`), in the sentence about an ancestor that is an
+existing file.
+Only then are the writes made, deletions first, and a write that fails half-way (a full disk, a permission)
+puts back what the batch had already touched, in three steps: the files the batch made are removed, then the
+directories it made, and only then are the files it changed or deleted written back (so a file the batch
+replaced with a folder of its name comes back as the file), content and mode. A file that is already as it was
+is skipped, so a file is named as not put back only when it truly differs. A file that exists but cannot be
+read at write time is never taken for an absent one: the read error stops the batch before that path is
+touched, and the rollback leaves it as it was. So a refused batch, or one that failed while writing, leaves
+the tree byte-identical, or names any file it could not put back, which is what makes it safe for the
+step to fail loudly instead of leaving half a change uncommitted and unannounced. One limit remains: a file
+whose own name is longer than 231 bytes can be deleted but not rewritten (the temp file's name is 24 bytes
+longer than the file's), so if a later write fails the rollback cannot restore it and names it. A dry run
+performs phase one only, so it cannot see a failure that only the filesystem reports at write time (for
+example a name of about 240 characters, whose temp file name is over the 255-byte limit); a file/folder clash
+and an unreadable file used to be of this kind and are now phase-one refusals. When a write fails, whether in the
 first file of a batch or a later one, the temp file and every directory the call made are taken back along
 with every file touched. A failed write takes back only what this call made: a directory goes only once it is
 empty (`rmdir`, never a recursive remove), so a file that someone else put in it survives.
