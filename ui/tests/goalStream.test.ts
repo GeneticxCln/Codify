@@ -483,3 +483,18 @@ test("4401 and 4404 after an open stay final and clear the stability timer", () 
     }
   }
 });
+
+test("a goal stream has no 'onConnected': a bare open proves nothing, so there is no option for it", () => {
+  // The engine accepts the upgrade before it reads the auth frame, so an open is reported for a
+  // refused token too. This is a type-level guard: `make typecheck-ui-tests` fails with an unused
+  // `@ts-expect-error` if the option comes back without the proof rule `engineStream` has. It is
+  // inert under `node --test`, which strips types.
+  sockets.length = 0;
+  const handle = openGoalStream({
+    goalId: "goal-1",
+    onEvent: () => {},
+    // @ts-expect-error -- `onConnected` was removed on purpose; see the comment above.
+    onConnected: () => {},
+  });
+  handle.close();
+});

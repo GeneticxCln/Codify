@@ -1746,8 +1746,10 @@ unauthenticated socket, so even a frame the client cannot read counts) or when `
 passes with no close; an idle healthy socket gets no frame until the engine's first sweep, so the timer is what
 proves it. A rejected token arrives as `4401` within milliseconds, so it never reports connected. The 10 s
 `STABLE_CONNECTION_MS` window answers a different question and governs only when the backoff counter resets.
-Events delivered late by a socket that has been closed or replaced are ignored. (`openGoalStream`'s
-`onConnected` is still a bare open; nothing passes it.)
+Events delivered late by a socket that has been closed or replaced are ignored. (`openGoalStream` has no
+`onConnected`: an open proves nothing on `/ws/goals/{id}` either, a goal with no events sends no frame to prove
+it by, and nothing needed the signal. `tests/goalStream.test.ts` pins its absence at the type level. A caller
+that wants one must take the proof rule above, timer included.)
 
 One frame exists today:
 
