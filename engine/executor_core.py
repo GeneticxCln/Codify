@@ -497,6 +497,13 @@ class _ExecutorCore:
             paths = s.get("suggested_paths") or []
             if not title or not desc:
                 raise AgentOutputInvalid("planner step missing title/description", role="planner")
+            # Truthy is not text: a title written as `["a"]` passed the check above and died in the INSERT with a
+            # `sqlite3.ProgrammingError`, which no re-ask and no failure path catches. Said to the model here instead.
+            if not isinstance(title, str) or not isinstance(desc, str):
+                raise AgentOutputInvalid(
+                    f"planner step title and description must be strings, not {_shape(title)} and {_shape(desc)}",
+                    role="planner",
+                )
             if not isinstance(paths, list):
                 raise AgentOutputInvalid("planner suggested_paths must be a list", role="planner")
             parsed.append({"title": title, "description": desc, "suggested_paths": [str(p) for p in paths]})
@@ -584,13 +591,24 @@ class _ExecutorCore:
         raise ApiError(404, "unknown_step", f"step {step_id} not found in goal {goal_id}")
 
     def _insert_steps(self, goal_id: str, steps: list[dict[str, Any]]) -> None:
-        for ordinal, s in enumerate(steps):
-            self.goals._db.execute(
-                "INSERT INTO plan_steps (id, goal_id, ordinal, title, description, suggested_paths, status, review_notes, commit_message, last_agent_role) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'PENDING', NULL, NULL, NULL)",
-                (str(uuid.uuid4()), goal_id, ordinal, s["title"], s["description"], json.dumps(s["suggested_paths"])),
-            )
-        self.goals._db.commit()
+        """Store a plan whole or not at all.
+
+        The inserts share one transaction that nothing committed until the last, so a step that could not be
+        bound left the ones before it pending, and the failure path's next commit stored them: a plan of
+        one step, and a goal that could never be planned again ("this goal already has a plan").
+        """
+        db = self.goals._db
+        try:
+            for ordinal, s in enumerate(steps):
+                db.execute(
+                    "INSERT INTO plan_steps (id, goal_id, ordinal, title, description, suggested_paths, status, review_notes, commit_message, last_agent_role) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'PENDING', NULL, NULL, NULL)",
+                    (str(uuid.uuid4()), goal_id, ordinal, s["title"], s["description"], json.dumps(s["suggested_paths"])),
+                )
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
 
     def _store_proposed_files(
         self, goal_id: str, step_id: str, files: list[dict[str, Any]], summaries: list[dict[str, Any]] | None = None,

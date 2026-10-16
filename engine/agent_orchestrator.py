@@ -17,11 +17,12 @@ from engine.conductor import CallBooks, ToolCallRequest
 from engine.default_prompts import DEFAULT_PROMPTS
 from engine.executor_support import AgentNotConfigured, AgentOutputInvalid
 from engine.laya import GateCall
-from engine.models import AgentConfig, AgentRole, Event, EventType
+from engine.models import AgentConfig, AgentRole, Event, EventType, scrub_surrogates
 from engine.providers import BaseProvider, FALLBACK_TRIGGER_CODES, ProviderError
 from engine.replies import (
     REPLY_KEYS,
     REPLY_TOLERATES_TRUNCATION,
+    VERBATIM_ROLES,
     _repair_prompt,
     coerce_object,
     extract_json,
@@ -594,7 +595,9 @@ class AgentOrchestrator:
             tolerate_cut = role in REPLY_TOLERATES_TRUNCATION
             what = "non-JSON output"
             try:
-                parsed = coerce_object(role, extract_json(raw, expect, repair_truncation=tolerate_cut))
+                parsed = self._healed(role, goal_id, step_id, coerce_object(
+                    role, extract_json(raw, expect, repair_truncation=tolerate_cut),
+                ))
             except (ValueError, TypeError) as exc:
                 problem = str(exc)
             else:
@@ -661,7 +664,9 @@ class AgentOrchestrator:
                 goal_id, step_id, role, target, model_name, system, repair_prompt, repaired, repair_books,
             )
             try:
-                parsed = coerce_object(role, extract_json(repaired, expect, repair_truncation=tolerate_cut))
+                parsed = self._healed(role, goal_id, step_id, coerce_object(
+                    role, extract_json(repaired, expect, repair_truncation=tolerate_cut),
+                ))
             except (ValueError, TypeError) as exc:
                 failures.append((
                     label, target.provider,
@@ -690,6 +695,34 @@ class AgentOrchestrator:
                 continue
 
         raise self._all_targets_failed(role, failures)
+
+    def _healed(self, role: str, goal_id: str, step_id: str | None, parsed: Any) -> Any:
+        """The parsed reply with every lone surrogate in its strings replaced by U+FFFD, except the fixer's.
+
+        A model can spell `\\ud800` in its JSON, and `json.loads` hands the engine a `str` that no SQLite
+        bind, git argv or request body can carry. Every role but the fixer writes prose (a step title, a
+        review note, a commit message, a summary), where U+FFFD is cosmetic and a re-ask is a model call
+        that a small model rarely repairs, so the text is healed here, before `accept` and before any
+        effect: a scribe's commit message used to reach `git commit` unhealed and fail the step after the
+        commit had landed. The fixer's text becomes the person's files and paths, so it is passed through
+        untouched and `FileSystemService.apply` refuses it (docs/04 section 6). `scrub_surrogates` returns
+        the same object for a clean reply, which is what makes the warning below an identity test.
+        """
+        if role in VERBATIM_ROLES:
+            return parsed
+        try:
+            healed = scrub_surrogates(parsed)
+        except RecursionError:
+            # `json.loads` accepts a reply nested nearly as deep as the interpreter's stack, and the walk needs a frame
+            # per level: a model looping on `[` made it a `RuntimeError` that neither `except` around the parse caught,
+            # and the goal stayed PLANNING with no error and no re-ask. A reply nobody could use is a `ValueError`.
+            raise ValueError(f"the {role} reply is nested too deeply to be read") from None
+        if healed is not parsed:
+            self.goals.publish(self._event(
+                goal_id, step_id, "log",
+                {"level": "warn", "message": f"{role} reply contained a lone surrogate; replaced with U+FFFD"},
+            ))
+        return healed
 
     def _trace_call(
         self, goal_id: str, step_id: str | None, role: str, target: Any, model_name: str,

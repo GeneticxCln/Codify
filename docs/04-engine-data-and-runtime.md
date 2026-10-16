@@ -960,6 +960,10 @@ Three more slips a real small model made are handled the same way, each found by
   fails with `path_escape`, the code it always had. A protected workspace *root* is not put to the model — asking
   again cannot change where the workspace is.
 
+A lone surrogate in a parsed reply (a model can spell `\ud800` in its JSON) is not a reason to re-ask for any role
+that goes through `run_agent` but the fixer: `run_agent` heals it before `accept` runs, and the fixer's is refused by `fs.apply` and put to the
+model once. Which text is healed and which is refused is one rule, stated once in `04` §6.
+
 ### 4.0 Librarian
 
 ```json
@@ -1216,7 +1220,11 @@ the same way it fails mid-planning: `design_contract_missing`.
 ```
 
 `1 ≤ len(steps) ≤ 20`. Paths relative, no `..`. When a design contract is present it is binding
-(§4.0a): the plan must realize its direction and tokens rather than substitute its own.
+(§4.0a): the plan must realize its direction and tokens rather than substitute its own. A step whose `title` or
+`description` is not a string (a list, say) is put to the model once, as a step with none is; it used to escape
+planning as a `sqlite3.ProgrammingError`. Storing a plan is all-or-nothing: `_insert_steps` rolls back on any
+failure, so a partly stored plan can no longer survive and make the goal answer "this goal already has a plan"
+forever.
 
 ### 4.2 Fixer
 
@@ -1767,19 +1775,34 @@ under. It appears escaped only inside a sentence about a file that cannot be add
 problem sentence (`bad\udcff.json`), an ancestor named in the fixer's file-versus-folder refusal (§4.2), or the
 folder the picker was given (§3.0.1).
 
-Healed so far: events (above) and every completion request body. `providers._healed_body` replaces a lone
-surrogate in the JSON body in the two functions all four providers send through, `_post_until_answered` (for
-`post_json` and `post_bytes`) and `open_stream`, whatever put it there (a reply echoed back, a stored row, a tool
-result). httpx cannot encode it, and that used to surface as a bare `UnicodeEncodeError` outside the fallback
-rules (`01` §5.0). The caller's own payload is not rewritten; a copy is sent. A body nested so deeply that the
-walk itself runs out of stack (a tool call's arguments are echoed back into the next request) is a `ProviderError`
-with the code `request_unsendable`, which is not in `FALLBACK_TRIGGER_CODES`: a second provider would be sent the
-same conversation. The guard test over
-`engine/providers.py` reads that file only; it is not a census of every outgoing request (`engine/model_catalog.py`
-also posts and swallows its exceptions). Refused: the fixer's file path and content, in `fs.apply` phase one
-(§4.2). The rest of the rule is not applied yet: a model's reply that becomes a plan step's title and description,
-a note or a commit message, and the conductor's tool arguments, reach their sinks as written, and sqlite refuses a
-lone surrogate in a stored column with an encoding error instead of storing it.
+Healed so far: events (above), every completion request body, the reply of every role but one, and a stored plan
+step's `suggested_paths` on read. `providers._healed_body` replaces a lone surrogate in the JSON body in the two
+functions all four providers send through, `_post_until_answered` (for `post_json` and `post_bytes`) and
+`open_stream`, whatever put it there (a reply echoed back, a stored row, a tool result). httpx cannot encode it,
+and that used to surface as a bare `UnicodeEncodeError` outside the fallback rules (`01` §5.0). The caller's own
+payload is not rewritten; a copy is sent. The guard test over `engine/providers.py` reads that file only; it is
+not a census of every outgoing request (`engine/model_catalog.py` also posts and swallows its exceptions).
+
+`VERBATIM_ROLES = {fixer}` (`engine/replies.py`) names the roles whose parsed reply `AgentOrchestrator._healed`
+hands back untouched, because the fixer's text becomes the person's files and paths and `fs.apply` phase one
+refuses a lone surrogate in either (§4.2): the model is asked once. Every other role's parsed reply that goes
+through `run_agent` (the gate's typed choices and scores do not) is healed before `accept` and before any effect, the first reply and the re-ask's alike, with one warn log line
+when something was replaced. So the planner's titles, the critic's notes, the scribe's commit message, the
+verifier's explanation and the librarian's and designer's text reach SQLite, git and the next prompt clean. The
+designer's `design_md` is healed on purpose: it reaches the fixer inside a request, which is healed anyway, so
+holding it verbatim would only move the replacement one step later, and the design event carries the same text. The
+file is still the fixer's own reply, which stays strict. That is not an approval gate (a plan can start itself under
+Direct Apply), so a U+FFFD can reach DESIGN.md without anyone having looked at it first. A reply nested too deeply for the healing walk is treated
+as an unusable reply (re-ask), not an escape. A role whose text becomes a file or a buffer belongs in
+`VERBATIM_ROLES` (`tests/test_surrogate_sinks.py` pins the set).
+
+A plan step's `suggested_paths` is healed on read in `GoalService.steps`: `json.dumps` writes a lone surrogate as
+an ASCII escape, so a path stored by an older engine reads back as the unencodable `str`, and healing it keeps
+`GET /goals/{id}` and the fixer's prompt working for rows already in a database. No other column of a plan step
+could have been stored with one.
+
+Refused: the fixer's file path and content, in `fs.apply` phase one (§4.2). The rest of the rule is not applied
+yet: the conductor's tool arguments reach their handlers as written.
 
 The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
 once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with

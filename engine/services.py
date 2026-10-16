@@ -1669,7 +1669,11 @@ class GoalService:
         out = []
         for r in rows:
             d = row_to_dict(r)
-            d["suggested_paths"] = json.loads(d["suggested_paths"] or "[]")
+            # `json.dumps` writes a lone surrogate as the ASCII escape `\ud800`, so a path a planner spelled
+            # that way was stored without complaint and reads back as the unencodable `str` that makes the
+            # steps route a 500 and the fixer's prompt unsendable. Healed on read, as the events are, so the
+            # rows already in a database stop doing it too; no other column of a step could have been stored.
+            d["suggested_paths"] = scrub_surrogates(json.loads(d["suggested_paths"] or "[]"))
             out.append(PlanStep.model_validate(d))
         return out
 
