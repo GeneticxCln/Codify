@@ -168,6 +168,69 @@ pub(crate) fn find_on_path(name: &str, path_var: &str) -> Option<PathBuf> {
         })
 }
 
+/// Remove what an app that was killed left in `base`: stage directories (`codify-machine-<pid>-<n>`, empty) and
+/// probe projects (`codify-machine-probe-<pid>-<n>`, a few bytes) whose `<pid>` is no longer a process.
+///
+/// A normal exit releases both, so these exist only after a crash or a SIGKILL, one or two per run, until
+/// something clears `/tmp`. Deliberately narrow, since the directory is shared: only names of exactly that shape,
+/// only real directories (never a symlink) owned by this user, never a pid that is alive (or this process's own),
+/// a stage with `remove_dir` so one that is not empty is left, and a probe project only with its known contents.
+/// Returns how many it removed. Every failure is ignored: a sweep that cannot finish is the state before it.
+pub(crate) fn sweep_stale(base: &Path) -> usize {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return 0;
+    };
+    // SAFETY: `geteuid` takes nothing and cannot fail.
+    let me = unsafe { libc::geteuid() };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(rest) = name.strip_prefix("codify-machine-") else {
+            continue;
+        };
+        let (probe, rest) = match rest.strip_prefix("probe-") {
+            Some(tail) => (true, tail),
+            None => (false, rest),
+        };
+        let Some((pid, seq)) = rest.split_once('-') else {
+            continue;
+        };
+        let (Ok(pid), Ok(_)) = (pid.parse::<u32>(), seq.parse::<u64>()) else {
+            continue;
+        };
+        if pid == 0 || pid == std::process::id() || pid > i32::MAX as u32 {
+            continue;
+        }
+        // SAFETY: signal 0 sends nothing; `kill` reads two integers.
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+        if alive {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_dir() || meta.uid() != me {
+            continue;
+        }
+        let gone = if probe {
+            // Only what `probe_uncached` makes: `d/x` under the project.
+            let _ = std::fs::remove_file(path.join("d/x"));
+            let _ = std::fs::remove_dir(path.join("d"));
+            std::fs::remove_dir(&path).is_ok()
+        } else {
+            std::fs::remove_dir(&path).is_ok()
+        };
+        if gone {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// What was learned the one time this host was asked, per place the stage is made.
 static PROBED: OnceLock<Mutex<Vec<Probe>>> = OnceLock::new();
 
@@ -184,6 +247,8 @@ pub(crate) fn probe(base: &Path, unshare: &Path, path_var: &str) -> Result<(), S
             return answer.clone();
         }
     }
+    // Once per place, with the probe: the first look at `base` is the moment to clear what a killed run left.
+    sweep_stale(base);
     let answer = probe_uncached(base, unshare, path_var);
     if let Ok(mut known) = cache.lock() {
         known.push((base.to_path_buf(), answer.clone()));
