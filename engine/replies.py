@@ -46,12 +46,12 @@ BARE_ARRAY_KEYS: dict[str, tuple[str, str]] = {
 # instead (and the model asked once, see `fs.apply` phase one), because a U+FFFD written into code is corruption
 # nobody asked for. `tests/test_surrogate_sinks.py` pins this set; a role whose text becomes a file or a buffer
 # belongs in it.
-# One deliberate exception to "only the fixer": the designer's `design_md` is the body the fixer is later told to write
-# as DESIGN.md or CODIFY.md, and it is healed like the designer's other prose. It would be healed anyway: the body
-# reaches the fixer inside a request, and a request body is healed (`providers._healed_body`), so holding it verbatim
-# here would only move the replacement one step later. The design event the person reads carries the same healed text.
-# That is not an approval gate (under Direct Apply a plan can start itself), so a U+FFFD can reach the file without
-# anyone having looked at it first; refusing instead would cost a model call for a character a person can read past.
+# One field of one other role is refused, not healed: the designer's `design_md` is the body the fixer is later told to
+# write as DESIGN.md or CODIFY.md, and a plan can start itself under Direct Apply, so a U+FFFD put there by a heal could
+# reach the person's repository with nobody having looked at it. A lone surrogate in it makes the designer's reply an
+# unusable one: the designer is told which field and asked once more (`AgentOrchestrator._healed`). The rest of the
+# designer's reply is prose and is healed like any other role's.
+REFUSED_FIELDS: dict[str, tuple[str, ...]] = {"design": ("design_md",)}
 VERBATIM_ROLES: frozenset[str] = frozenset({"fixer"})
 
 # Reasoning models put their thinking in a tag before the answer, and the thinking mentions braces.

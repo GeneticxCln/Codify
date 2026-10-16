@@ -1802,10 +1802,12 @@ refuses a lone surrogate in either (§4.2): the model is asked once. Every other
 through `run_agent` (the gate's typed choices and scores do not) is healed before `accept` and before any effect, the first reply and the re-ask's alike, with one warn log line
 when something was replaced. So the planner's titles, the critic's notes, the scribe's commit message, the
 verifier's explanation and the librarian's and designer's text reach SQLite, git and the next prompt clean. The
-designer's `design_md` is healed on purpose: it reaches the fixer inside a request, which is healed anyway, so
-holding it verbatim would only move the replacement one step later, and the design event carries the same text. The
-file is still the fixer's own reply, which stays strict. That is not an approval gate (a plan can start itself under
-Direct Apply), so a U+FFFD can reach DESIGN.md without anyone having looked at it first. A reply nested too deeply for the healing walk is treated
+designer's `design_md` is the one field that is REFUSED although its role is healed (`REFUSED_FIELDS =
+{design: (design_md,)}`, `engine/replies.py`): it is the body the fixer is told to write as DESIGN.md or CODIFY.md,
+and a plan can start itself under Direct Apply, so a replacement character could reach the repository unreviewed.
+A lone surrogate in it makes the designer's reply an unusable one: the designer is told which field and asked once
+more, and a second such reply fails the role as `agent_output_invalid`. The rest of the designer's reply is healed.
+A reply nested too deeply for the healing walk is treated
 as an unusable reply (re-ask), not an escape. A role whose text becomes a file or a buffer belongs in
 `VERBATIM_ROLES` (`tests/test_surrogate_sinks.py` pins the set).
 

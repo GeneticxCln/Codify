@@ -22,6 +22,7 @@ from engine.providers import BaseProvider, FALLBACK_TRIGGER_CODES, ProviderError
 from engine.replies import (
     REPLY_KEYS,
     REPLY_TOLERATES_TRUNCATION,
+    REFUSED_FIELDS,
     VERBATIM_ROLES,
     _repair_prompt,
     coerce_object,
@@ -710,6 +711,15 @@ class AgentOrchestrator:
         """
         if role in VERBATIM_ROLES:
             return parsed
+        if isinstance(parsed, dict):
+            for field in REFUSED_FIELDS.get(role, ()):
+                value = parsed.get(field)
+                if isinstance(value, str) and scrub_surrogates(value) is not value:
+                    # Becomes a file the fixer writes, possibly with no pause for review: refused, not healed.
+                    raise ValueError(
+                        f"{field} holds a character that is not valid text (a lone surrogate); write it again "
+                        "without it"
+                    )
         try:
             healed = scrub_surrogates(parsed)
         except RecursionError:

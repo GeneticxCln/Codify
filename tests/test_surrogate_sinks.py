@@ -44,7 +44,8 @@ from engine.executor import ExecutorService
 from engine.laya import GateCall, LayaDecision, LayaService
 from engine.models import ROLES, AgentConfig, AgentConfigUpdate, GoalCreate, WorkspaceCreate, scrub_surrogates
 from engine.providers import BaseProvider, Keychain, ProviderFactory
-from engine.replies import VERBATIM_ROLES
+from engine.executor_support import AgentOutputInvalid
+from engine.replies import REFUSED_FIELDS, VERBATIM_ROLES
 from engine.sandbox import SandboxService
 from engine.services import AgentRegistryService, GoalService, WorkspaceService
 
@@ -400,17 +401,41 @@ class TestTheLibrarianAndTheDesigner(SinkCase):
         self.assertEqual(1, len(self.goals.steps(self.goal.id)))
         self.assertIn(f"calm {FFFD} and plain", self.provider.prompts["planner"][0])
 
-    async def test_design_md_is_healed_on_purpose_and_the_fixer_is_still_the_one_that_writes_it(self) -> None:
-        # The one body a model writes that a later step is told to write verbatim into a file. It is healed like the
-        # designer's other prose (a refusal would cost a model call for a character the approved contract shows the
-        # person), and the pinned exception in `replies.VERBATIM_ROLES` says so. If this is ever made strict, the
-        # change is to that set and to this test, together.
+    async def test_design_md_is_refused_and_the_designer_is_asked_once_more(self) -> None:
+        # The one body a model writes that a later step is told to write verbatim into a file, with a plan that can
+        # start itself under Direct Apply: a heal could put a U+FFFD into the person's repository unreviewed, so the
+        # designer is told which field and asked once more (`replies.REFUSED_FIELDS`).
         self.assertNotIn("design", VERBATIM_ROLES)
-        self.reply("design", {"applies": True, "artifact": "web", "design_md": "# Title \ud800\n\nbody \udc80"})
+        self.assertEqual(("design_md",), REFUSED_FIELDS["design"])
+        self.reply(
+            "design",
+            {"applies": True, "artifact": "web", "design_md": "# Title \ud800\n\nbody"},
+            {"applies": True, "artifact": "web", "design_md": "# Title\n\nbody"},
+        )
 
         out = await self.executor.orchestrator.run_agent("design", self.goal.id, None, "design it")
 
-        self.assertEqual(f"# Title {FFFD}\n\nbody {FFFD}", out["design_md"])
+        self.assertEqual("# Title\n\nbody", out["design_md"])
+        self.assertEqual(2, len(self.provider.prompts["design"]))
+        self.assertIn("design_md holds a character that is not valid text", self.provider.prompts["design"][1])
+
+    async def test_a_design_md_that_stays_poisoned_fails_the_role_by_name(self) -> None:
+        bad = {"applies": True, "artifact": "web", "design_md": "x \udc80"}
+        self.reply("design", bad, bad)
+
+        with self.assertRaises(AgentOutputInvalid):
+            await self.executor.orchestrator.run_agent("design", self.goal.id, None, "design it")
+        self.assertEqual(2, len(self.provider.prompts["design"]))
+
+    async def test_the_rest_of_the_designers_reply_is_still_healed(self) -> None:
+        self.reply("design", {
+            "applies": True, "artifact": "web", "design_md": "# Title\n\nbody", "direction": "calm \ud800 and plain",
+        })
+
+        out = await self.executor.orchestrator.run_agent("design", self.goal.id, None, "design it")
+
+        self.assertEqual(f"calm {FFFD} and plain", out["direction"])
+        self.assertEqual(1, len(self.provider.prompts["design"]))
 
 
 class TestRowsAlreadyInADatabase(SinkCase):
