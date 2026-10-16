@@ -898,8 +898,9 @@ retry can help), `failed`, `no_export` and `bad_export`.
 door and nothing of Ghidra's. `make check-ghidra` (`scripts/check_ghidra.py`) is the check against a real install: it analyses
 a small executable, checks every view and the cache, checks that no run directory is left, and with `GHIDRA_CHECK_ARGS="--cancel"`
 that a Cancel returns promptly and kills the whole real run. It fails where Ghidra is missing and is not part of `check` or `ci`.
-It has passed against Ghidra 12.1.4 (a nixpkgs build, which reports `application.release.name=NIX`); Ghidra 11 is accepted
-by the version policy but has not been run, and another 12.x is expected to work and has not been.
+It has passed, including the cancel, against Ghidra 12.1.4 and Ghidra 11.2.1 (both nixpkgs builds, which report
+`application.release.name=NIX`: the two ends of the supported range). Other releases in the range are expected to work and
+have not been run.
 
 **What is not claimed.**
 There is no network isolation on the child beyond what it is given (it is not given a socket by this code, and nothing here

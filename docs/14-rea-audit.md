@@ -195,10 +195,10 @@ The owner's answer to section 4's "if the owner says yes" was yes, so the recomm
 
 **Not built, and said so.**
 
-* **Only Ghidra 12.1.4 has run it.** The export script compiled and ran unchanged inside a real Ghidra 12.1.4 on the first
+* **Only Ghidra 12.1.4 and 11.2.1 have run it.** The export script compiled and ran unchanged inside a real Ghidra 12.1.4 on the first
   attempt (`make check-ghidra`, `docs/04` §3.0.7): real functions, imports, strings and sections, correct callers and
   callees for a small C program, a cache hit on the second question, and a Cancel that killed the real JVM and its group
-  (only defunct entries remained, reaped within 1.5 s). Ghidra 11 is accepted by the version policy and has not been run.
+  (only defunct entries remained, reaped within 1.5 s). Ghidra 11.2.1 passed the same check, including the cancel; releases between them have not been run.
   The gate itself still drives a stand-in; `make check-ghidra` is the separate verification, outside `make ci`.
 * **No decompiler.** The one-shot design gives up interactive decompiling by design (section 4, item 2); it is a second
   decision if it is wanted.
