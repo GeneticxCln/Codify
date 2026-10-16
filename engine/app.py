@@ -48,6 +48,7 @@ from engine.model_catalog import ModelCatalogService
 from engine.catalog_watch import CatalogWatch
 from engine.models import (
     BUILTIN_PROVIDERS,
+    scrub_surrogates,
     ErrorBody,
     ROLE_JOB,
     ROLE_ORDER,
@@ -1320,6 +1321,27 @@ async def get_engine_settings(request: Request) -> dict[str, Any]:
     return out
 
 
+def _refuse_lone_surrogates(body: dict[str, Any]) -> None:
+    """422 when a request body holds text that cannot be encoded (a JSON `\\ud800` with no partner).
+
+    `json.loads` hands the engine a `str` that no SQLite bind and no JSON response can carry, and these two routes
+    keep what the person sent and echo it: the setting was stored and then the answer could not be written, and the
+    import reached the database, each ending in a 500 and, for the setting, a poisoned row. It is the person's own
+    text, so it is refused with the key named rather than repaired (docs/04 section 6). A body nested past the
+    interpreter's stack is refused the same way.
+    """
+    for key, value in body.items():
+        try:
+            clean = scrub_surrogates(value) is value and scrub_surrogates(key) is key
+        except RecursionError:
+            raise ApiError(422, "invalid_value", f"{ascii(key)} is nested too deeply") from None
+        if not clean:
+            raise ApiError(
+                422, "invalid_value",
+                f"{ascii(key)} holds a character that is not valid text (a lone surrogate), so nothing was saved",
+            )
+
+
 def _clean_engine_string(key: str, value: Any) -> str:
     """One string setting, stripped, bounded, and slug-checked where it is a slug.
 
@@ -1377,6 +1399,7 @@ async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[st
     borrows the scribe's row (`ExecutorService._conductor_config`).
     """
     settings: SettingsService = request.app.state.settings
+    _refuse_lone_surrogates(body)
     # Every key is checked before any is stored: a request the engine refuses changes nothing. Each setter
     # commits as it goes, so refusing at the third key used to leave the first two saved, and a card that sends
     # a mode and a list together (Web pages) could be told "no" about the list with the mode already moved.
@@ -2469,6 +2492,7 @@ async def post_stats_import(body: dict[str, Any], request: Request) -> dict[str,
     imported file at a time, matching what the panel holds.
     """
     service: StatsImportService = request.app.state.stats_imports
+    _refuse_lone_surrogates(body or {})
     # `source` rides alongside the document rather than inside it: it is a label
     # about the upload, not part of the exported artifact, and must not become
     # part of what gets re-exported.

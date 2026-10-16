@@ -1827,8 +1827,11 @@ through them, and a healed path almost always names a file that is not there; a 
 the one case the heal cannot tell apart. A future tool whose text becomes a file, a
 buffer or a typed command belongs in the set (`tests/test_conductor_surrogates.py` pins its exact membership).
 
-Refused: the fixer's file path and content, in `fs.apply` phase one (§4.2), and the text of `edit_editor` and the
-command of `run_in_machine` (above).
+Refused: the fixer's file path and content, in `fs.apply` phase one (§4.2), the text of `edit_editor` and the
+command of `run_in_machine` (above), and a request body the person sent to `PUT /settings/engine` or
+`POST /stats/import`: it is their own text, kept and echoed, so a lone surrogate anywhere in it is a 422
+`invalid_value` naming the top-level key, and nothing is stored (before, a setting earlier in the body was saved and
+the answer then could not be written, a 500).
 
 The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
 once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with

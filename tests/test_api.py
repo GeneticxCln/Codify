@@ -2823,5 +2823,60 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ctx.exception.code, 4404)
 
 
+class TestALoneSurrogateInABodyThePersonSent(unittest.IsolatedAsyncioTestCase):
+    """`\\ud800` is valid JSON that parses to a `str` nothing can encode. `PUT /settings/engine` and `POST
+    /stats/import` take what the person typed or chose to import and kept it: the first stored it and then could not
+    echo it, the second wrote it into a row, each ending in a 500. It is the person's own text, so it is refused
+    (422) with the field named, and nothing is stored (docs/04 section 6)."""
+
+    async def asyncSetUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.conn = connect(Path(self.temp_dir.name) / "t.db")
+        self.addCleanup(self.conn.close)
+        app.state.settings = SettingsService(self.conn)
+        app.state.stats_imports = StatsImportService(self.conn)
+        app.state.token = BOOT_TOKEN
+        self.client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+        self.addAsyncCleanup(self.client.aclose)
+        self.headers = {"Authorization": f"Bearer {BOOT_TOKEN}", "Content-Type": "application/json"}
+
+    async def test_a_setting_holding_one_is_refused_and_nothing_is_stored(self) -> None:
+        before = (await self.client.get("/settings/engine", headers=self.headers)).json()
+        for body in (
+            b'{"conductor_model": "a\\ud800b"}',
+            b'{"conductor_provider": "ollama", "conductor_model": "x\\udc00"}',
+            b'{"stats_retention_days": 5, "conductor_model": "\\ud83d"}',
+        ):
+            with self.subTest(body=body):
+                r = await self.client.put("/settings/engine", headers=self.headers, content=body)
+                self.assertEqual(422, r.status_code, r.text)
+                self.assertEqual("invalid_value", r.json()["code"])
+                self.assertIn("conductor_model", r.json()["message"])
+        after = (await self.client.get("/settings/engine", headers=self.headers)).json()
+        self.assertEqual(before, after, "a refused request changed a setting")
+
+    async def test_an_import_holding_one_is_refused_and_replaces_nothing(self) -> None:
+        for body in (
+            b'{"exported_at": "2026-01-01T00:00:00.000Z", "days": [], "source": "a\\ud800.json"}',
+            b'{"exported_at": "x\\ud800", "days": []}',
+        ):
+            with self.subTest(body=body):
+                r = await self.client.post("/stats/import", headers=self.headers, content=body)
+                self.assertEqual(422, r.status_code, r.text)
+                self.assertEqual("invalid_value", r.json()["code"])
+        self.assertIsNone(app.state.stats_imports.get())
+
+    async def test_a_valid_pair_and_ordinary_text_are_still_accepted(self) -> None:
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, content=b'{"stats_retention_days": 7}'
+        )
+        self.assertEqual(200, r.status_code, r.text)
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, content='{"web_fetch_allowlist": "caf\u00e9.example \\ud83d\\ude00"}'.encode()
+        )
+        self.assertNotEqual(500, r.status_code, r.text)
+
+
 if __name__ == "__main__":
     unittest.main()
