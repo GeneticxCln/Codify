@@ -93,6 +93,7 @@ from typing import Any, Protocol
 from collections.abc import Awaitable, Callable
 
 from engine.ask import MAX_OPTION_CHARS, MAX_OPTIONS, MAX_QUESTION_CHARS
+from engine.models import scrub_surrogates
 from engine.sandbox import CommandNotAllowed
 from engine.services import ApiError
 from engine.providers import FALLBACK_TRIGGER_CODES, ProviderError
@@ -128,6 +129,34 @@ DEFAULT_MAX_MOVES = 12
 STAGE_MOVES = frozenset({
     "recon", "design", "plan", "write", "verify", "review", "summarize",
 })
+
+# The tools whose text arguments are never healed. A model's reply can spell a character the engine cannot encode
+# (`"\ud800"` is a lone surrogate once parsed), and the rule (docs/04 section 6) is that such text is healed, a lone
+# surrogate becoming U+FFFD, wherever it becomes prose, a message, a note or a command line that goes through
+# `validate_argv`, and refused wherever it becomes the person's file, an editor buffer or a command typed into the
+# machine. These two are the refused kind:
+#   * `edit_editor` puts the model's text into the person's buffer, and a U+FFFD there is a changed file;
+#   * `run_in_machine` types the model's command into a shell that deliberately has no `validate_argv` (docs/00 §6.6),
+#     so healing would silently rewrite what the shell runs. Its argument model refuses the text today ("That was not run in
+#     the machine") and that is the behaviour kept.
+# Every other tool's arguments are prose or argv, and are healed in `_run_tool` before the handler sees them, so
+# `run_command`'s argv is the very list `validate_argv` checks and the sandbox runs. That includes the path and glob
+# arguments of the tools that only read (`read_file`, `open_in_editor`, `search_code`, `scan_code`, `git_history`):
+# nothing is written through them, and a healed path almost always names a file that is not there. The one case the
+# heal cannot tell apart is a file really named with U+FFFD, which it would then read or open. A future tool whose text
+# becomes a file, a buffer or a typed command belongs in this set; `tests/test_conductor_surrogates.py` pins it.
+VERBATIM_TOOLS = frozenset({"edit_editor", "run_in_machine"})
+# What each of them says when its arguments hold a lone surrogate: the opening of the sentence its own handler uses for
+# a refusal, so the model reads one voice whichever layer refused. The check is here, explicit, because the handlers'
+# refusals came by accident (pydantic rejecting the text inside `SurfaceBridge.ask`; for a path, `resolve` raising a
+# bare `UnicodeEncodeError`) and a change in either would have let the text through to a request that cannot be sent.
+_VERBATIM_REFUSALS = {
+    "edit_editor": "That edit was not made.",
+    "run_in_machine": "That was not run in the machine.",
+}
+# `type_page` is healed on purpose, and is not in the set: its text is typed into a web page in the app's own window,
+# never into a shell or the engine's sandbox or a file, and it only runs when the person switched browser actions on.
+# A page is not a buffer the person's files come from, so a U+FFFD there is a changed keystroke, not a changed file.
 
 # What every loop call is asked for. Named because the ledger records them: a trace row that said
 # nothing about the temperature a call ran at could not be compared with another run.
@@ -559,7 +588,13 @@ class Conductor:
             (t for t in self.tools if t.name == call.name), None
         )
         try:
-            return _result(await handler(coerce_arguments(spec, call.arguments)))
+            arguments = coerce_arguments(spec, call.arguments)
+            if call.name in VERBATIM_TOOLS:
+                if refusal := _lone_surrogate_refusal(call.name, arguments):
+                    return refusal
+            else:
+                arguments = scrub_surrogates(arguments)
+            return _result(await handler(arguments))
         except EndTurn as end:
             self.ended = end
             return "Your question was put to the person. The run ends here; their answer is their next message."
@@ -569,6 +604,21 @@ class Conductor:
             return f"Refused, and retrying will not help: {exc}"
         except Exception as exc:  # noqa: BLE001 — a model's bad call is not our bug
             return f"That call failed: {type(exc).__name__}: {exc}"
+
+
+def _lone_surrogate_refusal(name: str, arguments: dict[str, Any]) -> str | None:
+    """The sentence refusing a verbatim tool's call when an argument holds a lone surrogate, else None.
+
+    Names the field, so the model can send it again without the character. Nothing was done: the window has not been
+    asked, the buffer has not changed, the shell has not been typed into.
+    """
+    fields = [str(key) for key, value in arguments.items() if scrub_surrogates(value) is not value]
+    if not fields:
+        return None
+    return (
+        f"{_VERBATIM_REFUSALS[name]} The text of {', '.join(f'`{f}`' for f in fields)} holds a character that is not "
+        "valid text (a lone surrogate), and it is not rewritten for you. Send the call again without it."
+    )
 
 
 # ── the tool menu ───────────────────────────────────────────────────────────

@@ -54,8 +54,9 @@ Two rules make its evidence usable:
    lives, so there is no second validator to drift. `git commit`, `git add`, `rm`, `pytest` and
    `-C`/`--output` redirections are all refused there.
 2. **Every claim is checked.** A path is kept only if the librarian actually opened it, a search
-   showed a matching line in it, or it exists in the tree listing; anything else is dropped and
-   logged (`librarian cited N path(s) it never saw`). A confident list of files that do not exist is
+   showed a matching line in it, or it exists in the tree listing (a name that is not valid UTF-8 text is never
+   listed, so it cannot be cited as evidence; the tree header says how many were left out); anything else is
+   dropped and logged (`librarian cited N path(s) it never saw`). A confident list of files that do not exist is
    how "planning from the repository" becomes planning from a hallucination.
 
 **One thing is read *before* all of that, and is deliberately not evidence.** A workspace's
@@ -449,6 +450,16 @@ for a code in `FALLBACK_TRIGGER_CODES` — the same set the roles use, defined i
 `engine/providers.py` so both layers share one answer — and exactly once. A
 switch publishes `provider_fallback` then `agent_assigned`, because a silent
 switch credits the turn's answer to a model that never produced it.
+
+Every completion body goes through `_post_until_answered` (`post_json`, `post_bytes`) or `open_stream`, and both
+replace a lone surrogate in the JSON body with U+FFFD before anything is read from it or sent. httpx encodes
+`json=` as UTF-8 and a lone surrogate cannot be encoded: it used to raise a bare `UnicodeEncodeError`, a
+`ValueError` that is neither an `httpx.HTTPError` nor a `ProviderError`, so it skipped `FALLBACK_TRIGGER_CODES` and
+reached the goal as `agent_output_invalid`, `replay_failed` or `internal_error`. A request is prose to a model, so
+it is healed whatever put the surrogate there (the rule is in `04` §6). The caller's own payload is not rewritten;
+a copy is sent. `tests/test_provider_requests_surrogates.py` covers all four providers across `complete`,
+`complete_with_tools` and the streaming paths, and pins that these two functions are the only senders in
+`providers.py`.
 
 ### 5.1 Moves are the pipeline's own doors
 

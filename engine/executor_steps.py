@@ -1161,10 +1161,23 @@ class _Steps(_Design):
         else:
             verdict_text = "Test verdict: NONE REPORTED."
 
+        def accept(reply: Any) -> None:
+            # Both fields are text. A list or an object is truthy, so it passed the emptiness check below and then
+            # reached the log and `git commit` as a non-string: a `TypeError` that nothing around the step names. The
+            # model is told which field and asked once more, like any reply the engine cannot use. A field that is
+            # absent is not this check's: it fails below, at once, as it always did.
+            if not isinstance(reply, dict):
+                return
+            for field in ("summary", "commit_message"):
+                value = reply.get(field)
+                if value and not isinstance(value, str):
+                    raise ValueError(f"the scribe's {field} must be text, not {type(value).__name__}")
+
         out = await self.orchestrator.run_agent(
             "scribe", goal_id, step.id,
             f"Step: {step.title}\n{step.description}\n\n"
             f"{verdict_text}\n\nDiffs:\n{diff_text}",
+            accept=accept,
         )
         summary = out.get("summary")
         commit_message = out.get("commit_message")

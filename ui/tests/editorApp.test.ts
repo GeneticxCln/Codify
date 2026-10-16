@@ -456,3 +456,60 @@ test("pressing Open twice does not make a second tab for the same file", async (
     },
   );
 });
+
+test("a reconnect that replays a file change already handled reads neither the goal nor the file again", async () => {
+  await withEditorApp({ ...SEEDED, goals: [RUNNING_GOAL] as never }, async (ctx) => {
+    await openThread(ctx, "c1");
+    await openFile(ctx, "main", "src/main.py");
+    await goalSocket(ctx).open();
+    await goalSocket(ctx).deliver(summary(5, ["src/main.py"]));
+    await beat(60);
+    await ctx.settle();
+    const reads = () => ctx.engine.filter((c) => c.path === "/goals/g1" || c.path.endsWith("/file")).length;
+    const seen = reads();
+    await goalSocket(ctx).drop(1006);
+    const deadline = Date.now() + 6000;
+    while (ctx.sockets.filter((s) => s.url.endsWith("/ws/goals/g1")).length < 2 && Date.now() < deadline) await beat(50);
+    const second = ctx.sockets.filter((s) => s.url.endsWith("/ws/goals/g1"))[1]!;
+    await second.open();
+    await second.deliver(summary(5, ["src/main.py"]));
+    await beat(60);
+    await ctx.settle();
+    assert.equal(reads(), seen, "a replayed file_change_summary read the goal and the file again");
+  });
+});
+
+test("a file change whose goal lookup failed reaches the editor when the replay brings it again", async () => {
+  await withEditorApp({ ...SEEDED, goals: [RUNNING_GOAL] as never }, async (ctx) => {
+    await openThread(ctx, "c1");
+    await openFile(ctx, "main", "src/main.py");
+    ctx.disk.write("ws-a", "src/main.py", "def main():\n    return 'from the fixer'\n");
+    const realFetch = globalThis.fetch;
+    let down = true;
+    globalThis.fetch = (async (input: unknown, init?: unknown) => {
+      const url = new URL(String(input instanceof Request ? input.url : input), "http://x");
+      if (down && url.pathname === "/goals/g1") throw new TypeError("network down");
+      return (realFetch as (a: unknown, b?: unknown) => Promise<Response>)(input, init);
+    }) as typeof fetch;
+    try {
+      await goalSocket(ctx).deliver(summary(5, ["src/main.py"]));
+      await beat(60);
+      await ctx.settle();
+      assert.doesNotMatch(cmText(ctx), /from the fixer/, "the editor was told although the goal could not be read");
+
+      down = false;
+      await goalSocket(ctx).drop(1006);
+      const deadline = Date.now() + 6000;
+      while (ctx.sockets.filter((s) => s.url.endsWith("/ws/goals/g1")).length < 2 && Date.now() < deadline) await beat(50);
+      const second = ctx.sockets.filter((s) => s.url.endsWith("/ws/goals/g1"))[1]!;
+      await second.open();
+      await second.deliver(summary(5, ["src/main.py"]));
+      await beat(60);
+      await ctx.settle();
+
+      assert.match(cmText(ctx), /from the fixer/, "the replay did not tell the editor about the change it missed");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});

@@ -509,11 +509,11 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 |---|---|---|---|
 | `GET` | `/health` | — | `{ok:true}` (still requires Bearer) |
 | `POST` | `/workspaces` | `{name, root_path}` extra=forbid | `Workspace` |
-| `POST` | `/workspaces/browse` | — | `{cancelled:true}` (the person closed the dialog — the only silent outcome) \| `{cancelled:false, workspace}` \| **503 `picker_unavailable`** with the reason and the way out (no dialog could open, or one did not answer within `PICKER_TIMEOUT_S`, 120 s, and was killed with everything it started). See "Folder dialog" below |
+| `POST` | `/workspaces/browse` | — | `{cancelled:true}` (the person closed the dialog — the only silent outcome) \| `{cancelled:false, workspace}` \| **503 `picker_unavailable`** with the reason and the way out (no dialog could open, or one did not answer within `PICKER_TIMEOUT_S`, 120 s, and was killed with everything it started) \| **400 `invalid_root`** when the chosen folder's path is not valid UTF-8 text (the dialog worked; the folder cannot be a workspace). See "Folder dialog" below |
 | `GET` | `/workspaces` | — | `Workspace[]` |
 | `GET` | `/workspaces/{id}` | — | `Workspace` |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
-| `GET` | `/workspaces/{id}/files?limit=` | `limit` 1–10 000, default 5 000 | `{files, truncated, limit}` — every file path under the root, sorted, skipping `SKIP_DIRS` and links out of the workspace. See §3.0.3 |
+| `GET` | `/workspaces/{id}/files?limit=` | `limit` 1–10 000, default 5 000 | `{files, truncated, limit}`, plus `non_utf8_names` only when it is not zero (names that are not valid UTF-8 text, left out and counted; the route is sent with `response_model_exclude_defaults=True`, so an ordinary workspace's body is byte-identical) — every file path under the root, sorted, skipping `SKIP_DIRS` and links out of the workspace. See §3.0.3 and §4.0 |
 | `GET` | `/workspaces/{id}/file?path=` | — | `{path, content, version, size}`. 400 `file_escape` / `workspace_protected`, 404 `file_missing`, 422 `file_binary` / `file_not_text` / `file_too_large` / `file_access`. See §3.0.3 |
 | `PUT` | `/workspaces/{id}/file` | `{path, content, base_version}` extra=forbid | `{path, version, size}` — **a person's Save, the one writer besides the fixer** (`00` §6.9). Replaces a file that exists; never creates or deletes one. 409 `file_changed` (carries `current_version`) when the file is not the version that was opened; the same 400/404/422 refusals as the read. Refused means untouched. Commits nothing |
 | `DELETE` | `/workspaces/{id}?delete_goals={bool}` | — | forgets the folder; **never touches `root_path`**. 409 `workspace_not_empty` (with the goal count) unless the cascade is requested, 409 `workspace_has_active_goals` if anything is PLANNING/RUNNING |
@@ -651,7 +651,7 @@ A successful repair **invalidates the model catalog cache** (the catalog is keye
 ### 3.0.1 Folder dialog
 
 `POST /workspaces/browse` runs a native folder dialog in a subprocess (GTK is never imported into the engine)
-under the spawn guard, and answers with one of three things — only one of which is silent (audit of
+under the spawn guard, and answers with one of four things — only one of which is silent (audit of
 2026-09-29, M8: a dialog that had *crashed* was reported as `{"cancelled": true}`, so a picker that could not
 open looked exactly like one the person closed, in the API and on screen):
 
@@ -660,6 +660,7 @@ open looked exactly like one the person closed, in the API and on screen):
 | a folder chosen | `{cancelled:false, workspace}` — the existing workspace for that path, or a new one |
 | the dialog closed with nothing chosen | `{cancelled:true}` |
 | no dialog could open, it crashed, or it did not answer | **503 `picker_unavailable`**, the reason, and "type the folder's path instead" |
+| a folder chosen whose path is not valid UTF-8 text | **400 `invalid_root`**, the same code a typed path that is not a usable folder gets, with a sentence that names the folder (each undecodable byte written `\xNN`) and says to rename it or choose another; no workspace is made, and the search ends (a dialog that answered is not asked again) |
 
 The UI acts on that code rather than only showing it: on `picker_unavailable` it shows the reason **and opens
 its "Enter workspace path" form**, so a desktop with no dialog helper (a bare window manager, a container) is
@@ -674,6 +675,12 @@ well, so a `1` whose stderr mentions the display is a failure, not a cancel. A r
 ends the search. A dialog that has not answered within `PICKER_TIMEOUT_S` is killed with its whole process
 group, so a dialog the engine gave up on does not stay open on the screen. The UI shows the 503's message
 in its error banner; typing a path in the folder menu always works without any dialog.
+
+The dialogs' output is read as bytes and decoded by the engine, not by `communicate` (`text=True`): a folder
+whose name is not UTF-8 text (an unzipped Latin-1 archive) used to raise `UnicodeDecodeError` there, outside the
+only exception that was caught, and the route answered a plain-text 500 for a dialog that had worked. The GTK
+script writes `os.fsencode(path)` to `sys.stdout.buffer` rather than `print`, which cannot encode a surrogate
+escape. stderr is only ever a reason, so it is decoded with replacement.
 
 ### 3.0.3 The editor's files
 
@@ -700,7 +707,9 @@ window is the length of one `os.replace`. A client that wants to overwrite anywa
 `save_text`, any but `app.py` names `save_file`, or any conductor, executor, skill or surface module names either.
 
 The listing is not `LibraryService.tree` (two levels, 120 names, orientation for a model): it walks to the bottom, is
-sorted, and is cut at `limit` with `truncated: true` rather than silently. All three do their file work off the event
+sorted, and is cut at `limit` with `truncated: true` rather than silently. A name that is not valid UTF-8 text is left
+out and counted as `non_utf8_names`, a key present only when it is not zero (before this, one such file made the whole
+route a plain-text 500 and the Open-file palette silently empty); see §4.0. All three do their file work off the event
 loop, after the workspace is looked up on it.
 
 ### 3.0.2 Voice: dictation and read-aloud
@@ -834,8 +843,11 @@ symlinked profile file is not read. A profile can name nothing else: the worker 
 
 **The scan** runs in `engine/regex_worker.py` with `op: "scan"`, started by `library._run_regex_worker` (no new spawn
 site) and killed at the request's `budget_s` (15 s) plus the margin a search has. It walks in sorted order, skips test
-files (`is_test_path`; `include_tests` brings them back), generated and minified files, binary files, files over 2 MB
-and symlinks that leave the workspace, and stops, with the reason, at 800 files or the time budget. Comments (and, for
+files (`is_test_path`; `include_tests` brings them back), generated and minified files, binary files, files over 2 MB,
+symlinks that leave the workspace and names that are not valid UTF-8 text (left out and counted as `skipped.names`,
+present only when not zero; the Coverage line says `N names that are not valid UTF-8`, adding that a folder is one name and everything under it
+is unscanned), and stops, with the reason,
+at 800 files or the time budget. Comments (and, for
 `code` rules, string contents) are blanked by a heuristic tokenizer per language family, keeping newlines and columns.
 A line is scanned to 2,000 characters. A rule applies to the whole text and a hit is reported at the line it starts on;
 several on one line are one hit. At most 8 hits are kept per rule and 60 in a report; the rest are counted, up to 500
@@ -948,6 +960,10 @@ Three more slips a real small model made are handled the same way, each found by
   fails with `path_escape`, the code it always had. A protected workspace *root* is not put to the model — asking
   again cannot change where the workspace is.
 
+A lone surrogate in a parsed reply (a model can spell `\ud800` in its JSON) is not a reason to re-ask for any role
+that goes through `run_agent` but the fixer: `run_agent` heals it before `accept` runs, and the fixer's is refused by `fs.apply` and put to the
+model once. Which text is healed and which is refused is one rule, stated once in `04` §6.
+
 ### 4.0 Librarian
 
 ```json
@@ -1001,6 +1017,18 @@ Requests are executed by `engine/library.py`:
   **exact-match table** of subcommands and the options each accepts (`engine/git_readonly.py`, §5
   below), so an option the table does not name is refused whatever git would have made of its
   spelling.
+
+**A name that is not UTF-8 text** (bytes such as `b"bad\xffname.txt"`, which `os.walk` can only hand back as a `str` of
+surrogate escapes that no provider body, JSON response or SQLite binding can encode) is left out of `tree`,
+`list_files`, every search strategy (substring, regex, keyword) and `scan_code`, and counted: `non_utf8_names` in
+the result, present only when it is not zero, so a workspace without such a name gets exactly the result it always
+got. A directory with such a name is left out with everything under it and counts once. The count is a floor when a
+listing is truncated, and it can include a name a glob would have excluded (the check runs before the glob). The
+model is told in words: `format_search` adds `; N name(s) that is/are not valid UTF-8 left out, so not searched` to
+its head line, and the librarian's tree header says `, N name(s) that is/are not valid UTF-8 left out: no tool here
+can open it/them` (both say "at least N" when the walk was cut short). The name itself is never given a spelling:
+the model's JSON cannot spell the byte, and a display escape such as `bad\xffname.txt` would be a literal file name
+that `fs.apply` would create next to the real one. Reading, resolving and writing are unchanged.
 
 A refused request is **feedback, not failure**: the refusal is returned to the librarian (so it can
 ask for something else) and logged at `warn`. The goal is unaffected.
@@ -1192,7 +1220,11 @@ the same way it fails mid-planning: `design_contract_missing`.
 ```
 
 `1 ≤ len(steps) ≤ 20`. Paths relative, no `..`. When a design contract is present it is binding
-(§4.0a): the plan must realize its direction and tokens rather than substitute its own.
+(§4.0a): the plan must realize its direction and tokens rather than substitute its own. A step whose `title` or
+`description` is not a string (a list, say) is put to the model once, as a step with none is; it used to escape
+planning as a `sqlite3.ProgrammingError`. Storing a plan is all-or-nothing: `_insert_steps` rolls back on any
+failure, so a partly stored plan can no longer survive and make the goal answer "this goal already has a plan"
+forever.
 
 ### 4.2 Fixer
 
@@ -1212,13 +1244,16 @@ baseline, `08` §8; asking again did not help, since it does not know what `edit
 `fixer sent action=edit with content and no edits for <path>; treated as a whole-file update`, never does it for
 an empty `content` (that would blank the file), and never when `edits` is present — those keep their meaning and
 `content` is ignored. A reply the engine cannot apply (an `old_text` that matches the wrong number of times, a
-path outside the workspace) is put to the model once, with the reason and, for an edit, the alternatives
-(`04` §4 "One re-ask").
+path outside the workspace, a file that exists but cannot be read, a path that would be both a file and a
+folder) is put to the model once, with the reason and, for an edit, the alternatives (`04` §4 "One re-ask").
 
 **A batch is applied completely or not at all** (`FileSystemService.apply`; audit of 2026-09-29, M4).
 Phase one resolves and validates every operation before anything is written — containment, `.git`, the
-action name, a target that is a directory, each `edit`'s search text — against a virtual view that reflects
-the operations before it in the same batch, so an `edit` of a file the batch just created sees it.
+action name, a target that is a directory or any other path that is not a regular file (a pipe, a socket, a
+device), a file that exists but cannot be read (at any size), a final tree in which one path is both a file and
+a folder (`a.py` with `a.py/b.py`, or `run.sh/inner.py` with `run.sh` an existing file the batch does not
+delete), each `edit`'s search text — against a virtual view that reflects the operations before it in the same
+batch, so an `edit` of a file the batch just created sees it.
 Phase one also checks that every path and every resolved text (a create's or update's content, an edit's
 result) can be written as UTF-8; a delete has no text, but its path is judged like any other. A lone
 surrogate escape such as `\ud800` in either is refused with a `ValueError` that names the file in words,
@@ -1226,13 +1261,32 @@ before anything is written or stored, so a real run and a dry run refuse the sam
 asked about it once. A path holding one would otherwise make a filename that is not UTF-8. A valid pair
 (`\ud83d\ude00`) is one character after `json.loads` and is accepted. This is also what keeps a dry run from
 storing a proposal that Apply could not write.
-Only then are the writes made, and a write that fails half-way (a full disk, a permission) puts back what the
-batch had already touched: content, mode, deleted files and any directories it created. So a refused batch,
-or one that failed while writing, leaves the tree byte-identical, or names any file it could not put back,
-which is what makes it safe for the
-step to fail loudly instead of leaving half a change uncommitted and unannounced. A dry run performs phase
-one only, so it cannot see a failure that only the filesystem reports at write time (for example a name of
-about 240 characters, whose temp file name is over the 255-byte limit). When a write fails, whether in the
+Phase one also refuses, in a dry run and a real run alike, with a `ValueError` the fixer is asked about once
+(`04` §4 "One re-ask"): an existing file that cannot be read (create, update, edit or delete), because its
+bytes could neither be put back after a failed write nor left alone by a rollback, so the reason reads
+`<path> exists but cannot be read (Permission denied), so it cannot be changed or deleted safely. Leave <path>
+alone` (the system's reason, never an errno or an absolute path; before, such a file was overwritten or
+deleted and, on a failed batch, unlinked by the rollback); and a final tree in which one path is both a file
+and a folder, which names both paths. The check judges where each path ends up, not the order of the
+operations, so a file replaced by a folder of its name (`utils.py` becoming `utils/__init__.py`) is accepted
+in either order: phase two runs the deletions first. Only a file that is binary, over the diff limit or not
+UTF-8 is still written over without a diff, since its bytes can be put back. A name the filesystem supplies
+that is not valid UTF-8 appears only escaped (`ascii()`), in the sentence about an ancestor that is an
+existing file.
+Only then are the writes made, deletions first, and a write that fails half-way (a full disk, a permission)
+puts back what the batch had already touched, in three steps: the files the batch made are removed, then the
+directories it made, and only then are the files it changed or deleted written back (so a file the batch
+replaced with a folder of its name comes back as the file), content and mode. A file that is already as it was
+is skipped, so a file is named as not put back only when it truly differs. A file that exists but cannot be
+read at write time is never taken for an absent one: the read error stops the batch before that path is
+touched, and the rollback leaves it as it was. So a refused batch, or one that failed while writing, leaves
+the tree byte-identical, or names any file it could not put back, which is what makes it safe for the
+step to fail loudly instead of leaving half a change uncommitted and unannounced. One limit remains: a file
+whose own name is longer than 231 bytes can be deleted but not rewritten (the temp file's name is 24 bytes
+longer than the file's), so if a later write fails the rollback cannot restore it and names it. A dry run
+performs phase one only, so it cannot see a failure that only the filesystem reports at write time (for
+example a name of about 240 characters, whose temp file name is over the 255-byte limit); a file/folder clash
+and an unreadable file used to be of this kind and are now phase-one refusals. When a write fails, whether in the
 first file of a batch or a later one, the temp file and every directory the call made are taken back along
 with every file touched. A failed write takes back only what this call made: a directory goes only once it is
 empty (`rmdir`, never a recursive remove), so a file that someone else put in it survives.
@@ -1291,6 +1345,10 @@ or `request-changes` with ≥1 reason. See `01` §5.1.
 ```json
 {"summary":"…","commit_message":"fix: …"}
 ```
+
+Both fields are text. A field that is present and is not text (a list or an object, which is truthy) is a reply the
+engine cannot use: the scribe is told which field and asked once more, like any reply `accept` refuses (§4.6), and a
+second such reply fails the step as `agent_output_invalid`. A field that is absent or empty fails at once.
 
 ### 4.6 Which target a role is called on
 
@@ -1709,9 +1767,64 @@ are untouched.
 
 Readers that take `events.payload` from SQL without building an `Event` (the agent and overview statistics,
 `/models/recent`, the previous turn's reply, `recall_events`) scrub with `models.loads_payload`,
-`models.scrub_payload_text` or `models.scrub_surrogates` instead, so rows written before the fix are healed on read there too. The
-guarantee covers events only: other stored text, such as a plan step's title and description, is not scrubbed,
-and sqlite refuses a lone surrogate there with an encoding error instead of storing it.
+`models.scrub_payload_text` or `models.scrub_surrogates` instead, so rows written before the fix are healed on read there too.
+
+One rule covers every place a lone surrogate can enter (a model's JSON can spell one as `\ud800`, and so can a
+file name the operating system supplies). Text a model wrote is HEALED (a lone surrogate becomes U+FFFD, with
+`models.scrub_surrogates`) wherever it becomes prose, a title, a note, a message, a prompt or a command line that
+goes through `validate_argv`. It is REFUSED wherever it becomes the person's file or its path, an editor buffer or
+a command typed into the machine shell (the fixer is asked once; a conductor tool call is answered with a refusal
+sentence, below). A name the operating system supplies that is not valid
+UTF-8 is OMITTED: left out of listings and counted (§4.0), never shown with a spelling a model could write a file
+under. It appears escaped only inside a sentence about a file that cannot be addressed: a profile file's name in a
+problem sentence (`bad\udcff.json`), an ancestor named in the fixer's file-versus-folder refusal (§4.2), or the
+folder the picker was given (§3.0.1).
+
+Healed: events (above), every completion request body, the reply of every role that goes through `run_agent`
+except the fixer, a stored plan step's `suggested_paths` on read, and the arguments of every conductor tool but two. `providers._healed_body` replaces a
+lone surrogate in the JSON body in the two functions all four providers send through, `_post_until_answered` (for
+`post_json` and `post_bytes`) and `open_stream`, whatever put it there (a reply echoed back, a stored row, a tool
+result). httpx cannot encode it, and that used to surface as a bare `UnicodeEncodeError` outside the fallback
+rules (`01` §5.0). The caller's own payload is not rewritten; a copy is sent. A body nested so deeply that the
+walk itself runs out of stack (a tool call's arguments are echoed back into the next request) is a `ProviderError`
+with the code `request_unsendable`, which is not in `FALLBACK_TRIGGER_CODES`: a second provider would be sent the
+same conversation. The guard test over
+`engine/providers.py` reads that file only; it is not a census of every outgoing request (`engine/model_catalog.py`
+also posts and swallows its exceptions).
+
+`VERBATIM_ROLES = {fixer}` (`engine/replies.py`) names the roles whose parsed reply `AgentOrchestrator._healed`
+hands back untouched, because the fixer's text becomes the person's files and paths and `fs.apply` phase one
+refuses a lone surrogate in either (§4.2): the model is asked once. Every other role's parsed reply that goes
+through `run_agent` (the gate's typed choices and scores do not) is healed before `accept` and before any effect, the first reply and the re-ask's alike, with one warn log line
+when something was replaced. So the planner's titles, the critic's notes, the scribe's commit message, the
+verifier's explanation and the librarian's and designer's text reach SQLite, git and the next prompt clean. The
+designer's `design_md` is healed on purpose: it reaches the fixer inside a request, which is healed anyway, so
+holding it verbatim would only move the replacement one step later, and the design event carries the same text. The
+file is still the fixer's own reply, which stays strict. That is not an approval gate (a plan can start itself under
+Direct Apply), so a U+FFFD can reach DESIGN.md without anyone having looked at it first. A reply nested too deeply for the healing walk is treated
+as an unusable reply (re-ask), not an escape. A role whose text becomes a file or a buffer belongs in
+`VERBATIM_ROLES` (`tests/test_surrogate_sinks.py` pins the set).
+
+A plan step's `suggested_paths` is healed on read in `GoalService.steps`: `json.dumps` writes a lone surrogate as
+an ASCII escape, so a path stored by an older engine reads back as the unencodable `str`, and healing it keeps
+`GET /goals/{id}` and the fixer's prompt working for rows already in a database. No other column of a plan step
+could have been stored with one.
+
+`VERBATIM_TOOLS = {edit_editor, run_in_machine}` (`engine/conductor.py`) names the conductor tools whose text
+arguments are never healed. Every other tool's arguments are healed in `Conductor._run_tool` before the handler
+runs, so `run_command`'s argv is healed BEFORE `validate_argv` and the list that is validated is the list the
+sandbox runs. `edit_editor` puts the model's text into the person's buffer, and `run_in_machine` types a command
+into a shell that deliberately has no `validate_argv` (`00` §6.6), so a lone surrogate in any argument of either is
+refused before the handler or the window is asked, with a sentence that names the field ("That edit was not
+made." or "That was not run in the machine."); the text is never rewritten (`09` §13.4). `type_page` is healed on
+purpose: it types into a web page, never into a shell or a file. So are the path and glob arguments of the tools
+that only read (`read_file`, `open_in_editor`, `search_code`, `scan_code`, `git_history`): nothing is written
+through them, and a healed path almost always names a file that is not there; a file really named with U+FFFD is
+the one case the heal cannot tell apart. A future tool whose text becomes a file, a
+buffer or a typed command belongs in the set (`tests/test_conductor_surrogates.py` pins its exact membership).
+
+Refused: the fixer's file path and content, in `fs.apply` phase one (§4.2), and the text of `edit_editor` and the
+command of `run_in_machine` (above).
 
 The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
 once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with
@@ -1726,6 +1839,16 @@ The backoff counter resets only after a connection has stayed open for the stabi
 (`STABLE_CONNECTION_MS`, 10 s, in `ui/src/goalStream.ts`), not on open, because the engine accepts the upgrade
 before it authenticates and replays the log from 0, so an open that dies right after (1011, 1006) would
 otherwise reconnect at 1 Hz and re-deliver the whole log each time.
+
+The server replays the whole log from sequence 0 on every connect, so the window does not act twice on what it
+has acted on. `App.tsx` keeps, per subscription (`subscribeToGoal`), the highest sequence it has handled,
+starting at the `sinceSequence` the stream was opened with. An event at or below it is merged into the message
+but asks for no goal refresh and no editor reload and raises no notification. An event whose side effect failed
+(the goal refresh, or the lookup that tells an open editor) is run again by the next replay, whatever has
+arrived since. The mark lives in memory with the subscription, so after an app reload the replay from 0 is
+acted on once, as before. `sinceSequence` alone still decides what may end a stream (`onTerminal`). The 1.5 s
+poll in `App.tsx` is a separate clock that refreshes the goal on its own and can still race the per-event
+refreshes (the last response wins); this gate does not change that. See docs/09 §10.18.
 
 ### 6.0 Engine-level frames
 
@@ -1746,8 +1869,12 @@ unauthenticated socket, so even a frame the client cannot read counts) or when `
 passes with no close; an idle healthy socket gets no frame until the engine's first sweep, so the timer is what
 proves it. A rejected token arrives as `4401` within milliseconds, so it never reports connected. The 10 s
 `STABLE_CONNECTION_MS` window answers a different question and governs only when the backoff counter resets.
-Events delivered late by a socket that has been closed or replaced are ignored. (`openGoalStream`'s
-`onConnected` is still a bare open; nothing passes it.)
+Events delivered late by a socket that has been closed or replaced are ignored. (`openGoalStream` has no
+`onConnected`: an open proves nothing on `/ws/goals/{id}` either, a goal with no events sends no frame to prove
+it by, and nothing needed the signal. `tests/goalStream.test.ts` pins its absence at the type level. A caller
+that wants one must take the proof rule above, timer included.) The app re-reads `GET /models` on the first
+`onConnected` that follows any `onReconnecting` (every close counts, a rejected socket as much as a lost one),
+once per run of closes; at mount nothing has closed, so a healthy start does not re-read (docs/06 §6).
 
 One frame exists today:
 

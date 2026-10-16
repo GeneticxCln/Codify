@@ -212,6 +212,52 @@ test("a thread started by a prompt is named by the shared rule, not a raw slice"
   });
 });
 
+const GRIN = "\u{1F600}"; // two UTF-16 units
+/** A high surrogate with no low one after it, or a low one with no high one before it. */
+const hasLoneHalf = (text: string): boolean =>
+  /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(text);
+
+test("a first prompt with an emoji at the cut still names its thread with text the engine accepts", async () => {
+  // 59 units of one long word, then an emoji whose two halves straddle the 60-unit cut. A bare slice sent the engine a
+  // lone high surrogate, which it refuses (422), on every attempt: the thread was never made.
+  await withApp({}, async ({ dom, engine, settle }) => {
+    await dom.fill(composer(dom.container), "x".repeat(59) + GRIN + " and some more words");
+    await dom.press(composer(dom.container), "Enter");
+    await settle();
+    const made = posts(engine, "/conversations");
+    assert.equal(made.length, 1, "the first prompt did not create a thread");
+    const title = String(made[0].body?.title);
+    assert.ok(!hasLoneHalf(title), JSON.stringify(title));
+    assert.equal(title, "x".repeat(59));
+  });
+});
+
+test("restoring a goal that predates threads files it under a title that does not split an emoji", async () => {
+  // The restore path names the new thread after the goal's description, cut at 200 units.
+  const legacy = {
+    id: "g-old", conversation_id: "", workspace_id: "ws-a", title: "Old goal",
+    description: "y".repeat(199) + GRIN + " tail", status: "COMPLETED", mode: "normal", version: 1, steps: [],
+    created_at: 1,
+  };
+  await withApp({ goals: [legacy] }, async ({ dom, engine, settle }) => {
+    const history = [...dom.container.querySelectorAll("button")].find((b) =>
+      (b.getAttribute("title") ?? "").startsWith("Goal history"),
+    );
+    assert.ok(history, "the header has no History control");
+    await dom.click(history);
+    await settle();
+    const row = [...dom.container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Old goal"));
+    assert.ok(row, "History did not list the goal");
+    await dom.click(row);
+    await settle();
+    const made = posts(engine, "/conversations");
+    assert.equal(made.length, 1, "restoring a goal with no thread did not file it under one");
+    const title = String(made[0].body?.title);
+    assert.ok(!hasLoneHalf(title), JSON.stringify(title));
+    assert.equal(title, "y".repeat(199));
+  });
+});
+
 test("a turn names an unnamed thread from its prompt, and the thread's tab follows", async () => {
   const unnamed = conversation({ id: "c-open", title: "" });
   await withApp({ conversations: [unnamed], storedTabs: stripOn("c-open") }, async ({ dom, engine, settle, tabs }) => {

@@ -39,6 +39,21 @@ BARE_ARRAY_KEYS: dict[str, tuple[str, str]] = {
     "planner": ("steps", "title"),
 }
 
+# The roles whose reply text becomes the person's files (a path, a file's content, an edit's new text). A lone
+# surrogate in the reply of any other role that goes through `run_agent` is healed to U+FFFD before the reply is
+# accepted, because there it lands in prose: a step title, a review note, a commit message, a prompt. (The gate's
+# answers are typed choices and scores, read in `laya.py`, not through `run_agent`.) In these roles it is refused
+# instead (and the model asked once, see `fs.apply` phase one), because a U+FFFD written into code is corruption
+# nobody asked for. `tests/test_surrogate_sinks.py` pins this set; a role whose text becomes a file or a buffer
+# belongs in it.
+# One deliberate exception to "only the fixer": the designer's `design_md` is the body the fixer is later told to write
+# as DESIGN.md or CODIFY.md, and it is healed like the designer's other prose. It would be healed anyway: the body
+# reaches the fixer inside a request, and a request body is healed (`providers._healed_body`), so holding it verbatim
+# here would only move the replacement one step later. The design event the person reads carries the same healed text.
+# That is not an approval gate (under Direct Apply a plan can start itself), so a U+FFFD can reach the file without
+# anyone having looked at it first; refusing instead would cost a model call for a character a person can read past.
+VERBATIM_ROLES: frozenset[str] = frozenset({"fixer"})
+
 # Reasoning models put their thinking in a tag before the answer, and the thinking mentions braces.
 _THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)\b[^>]*>.*?</\1\s*>", re.DOTALL | re.IGNORECASE)
 _THINK_OPEN = re.compile(r"<(think|thinking|reasoning)\b[^>]*>", re.IGNORECASE)

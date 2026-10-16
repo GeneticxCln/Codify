@@ -19,6 +19,9 @@ import { getEngineInfo } from "./api.ts";
  *   to a finished goal (e.g. after Apply) without the replayed terminal event instantly
  *   closing the stream before the new run's events arrive.
  * - Optional `onReconnecting` for UI status display.
+ * - There is deliberately no `onConnected`: an open proves nothing here (see the reconnect
+ *   note above), a goal with no events sends no frame to prove it by, and nothing needed the
+ *   signal. A caller that wants one must take `engineStream`'s proof rule, timer included.
  * - The engine closes with 4404 (there is no such goal) or 4401 (the token was refused).
  *   Neither changes by asking again, so those closes are final: no reconnect, and `onGone`
  *   says which. Reconnecting at the 16 s cap forever was a request nothing could answer.
@@ -34,17 +37,12 @@ export function openGoalStream(opts: {
   onEvent: (ev: Event) => void;
   onTerminal?: (ev: Event) => void;
   onReconnecting?: (attempt: number) => void;
-  /**
-   * The socket opened. Unlike `engineStream`'s `onConnected` this is not a proof: the engine
-   * accepts the upgrade before it reads the auth frame, so a refused token reports it too.
-   */
-  onConnected?: () => void;
   /** The engine ended the stream for good (4404 no such goal, 4401 refused token). */
   onGone?: (code: number) => void;
   /** Events with sequence <= this are replayed history: never terminal. */
   sinceSequence?: number;
 }): GoalStreamHandle {
-  const { goalId, onEvent, onTerminal, onReconnecting, onConnected, onGone } = opts;
+  const { goalId, onEvent, onTerminal, onReconnecting, onGone } = opts;
   const sinceSequence = opts.sinceSequence ?? 0;
 
   let ws: WebSocket | null = null;
@@ -82,7 +80,6 @@ export function openGoalStream(opts: {
         attempt = 0;
       }, STABLE_CONNECTION_MS);
       ws!.send(JSON.stringify({ type: "auth", token: engine.token }));
-      onConnected?.();
     };
 
     ws.onmessage = (e) => {

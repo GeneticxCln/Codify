@@ -63,8 +63,9 @@ STUBS: dict[str, str] = {
         '[ -n "$DOCTOR_STUB_BWRAP_CANNOT_JAIL" ] && { echo "bwrap: No permissions to create new namespace" >&2; exit 1; }\n'
         'exit 0\n'
     ),
-    # `unshare` is what the machine's own copy of the project is mounted behind; it fails when
-    # DOCTOR_STUB_NO_OVERLAY is set: a kernel or a tmpfs that will not mount an overlay without privilege.
+    # `unshare` is what the machine's own copy of the project is mounted behind (the gate's layer tests need it);
+    # it fails when DOCTOR_STUB_NO_OVERLAY is set: a kernel or a tmpfs that will not mount an overlay without
+    # privilege.
     "unshare": (
         '#!/bin/sh\n'
         '[ -n "$DOCTOR_STUB_NO_OVERLAY" ] && { echo "mount: permission denied" >&2; exit 1; }\n'
@@ -250,24 +251,27 @@ class TestEveryMissingPieceIsNamedAndFixable(DoctorCase):
         self.assertEqual(0, done.returncode, done.stdout)
         self.assertIn("ok       an unprivileged overlay mount works here", done.stdout)
 
-    def test_a_host_that_cannot_is_a_note_and_not_a_failure_because_the_machine_is_then_read_only(self) -> None:
-        # The project layer is a feature and not a requirement (docs/09 section 14.1a): without it the machine is the
-        # read-only machine it always was, so the gate does not need it and the doctor does not fail for it.
+    def test_a_host_that_cannot_make_the_machines_own_copy_fails_the_check_because_the_gate_needs_it(self) -> None:
+        # For the APP the project layer is a feature (docs/09 section 14.1a): without it the machine is the read-only
+        # machine it always was. For the GATE it is a requirement: `make check-tauri`'s layer tests assert it and
+        # no test may skip itself out of a guarantee. This script answers "does make ci work here", so it fails,
+        # and says in the same breath that the app still runs.
         done = self.doctor(DISPLAY=":0", DOCTOR_STUB_NO_OVERLAY="1")
 
-        self.assertEqual(0, done.returncode, done.stdout)
-        self.assertIn("note     an unprivileged overlay mount does not work here", done.stdout)
-        self.assertIn("project will be read-only", done.stdout)
-        self.assertNotIn("MISSING", done.stdout)
+        self.assertMissing(
+            done, "an unprivileged overlay mount does not work here", "make check-tauri", "the app still runs", "Linux 6.6+",
+        )
+        self.assertNotIn("Not a failure", done.stdout)
+        self.assertNotIn("note     an unprivileged", done.stdout)
 
-    def test_no_unshare_is_a_note_too(self) -> None:
+    def test_no_unshare_is_missing_with_the_package_and_names_the_failing_target(self) -> None:
         self.remove("unshare")
 
         done = self.doctor(DISPLAY=":0")
 
-        self.assertEqual(0, done.returncode, done.stdout)
-        self.assertIn("note     unshare (util-linux) not found", done.stdout)
-        self.assertNotIn("MISSING", done.stdout)
+        self.assertMissing(done, "unshare (util-linux) not found", "make check-tauri", "the app still runs", "apt install util-linux")
+        self.assertNotIn("Not a failure", done.stdout)
+        self.assertNotIn("note     unshare", done.stdout)
 
     def test_no_git_is_missing(self) -> None:
         self.remove("git")

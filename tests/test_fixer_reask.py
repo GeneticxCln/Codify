@@ -380,6 +380,38 @@ class TestAPathTheWorkspaceRefuses(ReAskCase):
         self.assertEqual("path_escape", self.events("error")[-1]["code"])
 
 
+class TestAFileThatWouldAlsoBeAFolder(ReAskCase):
+    """`a.py` is a file on disk and the reply writes `a.py/helpers.py`: refused by `apply` in phase one, so the
+    fixer is asked once, in a dry run and a real run alike. The filesystem used to say so in phase two, as an
+    `OSError` that nothing asks the model about, after a dry run had accepted the batch."""
+
+    CLASH = {"files": [{"path": "a.py/helpers.py", "action": "create", "content": "x = 1\n"}]}
+    GOOD = {"files": [{"path": "helpers.py", "action": "create", "content": "x = 1\n"}]}
+
+    async def test_the_reason_goes_back_to_the_model_and_the_corrected_reply_is_used(self) -> None:
+        provider = self.build(self.CLASH, self.GOOD)
+
+        status = await self.run_the_step()
+
+        self.assertEqual(2, len(provider.fixer_prompts))
+        self.assertNotEqual("FAILED", status, self.events("error"))
+        self.assertIn(
+            "a.py/helpers.py cannot be written: a.py is an existing file, not a folder", provider.fixer_prompts[1]
+        )
+        self.assertEqual("x = 1\n", (self.root / "helpers.py").read_text(encoding="utf-8"))
+        self.assertTrue((self.root / "a.py").is_file())
+
+    async def test_the_same_clash_twice_writes_nothing(self) -> None:
+        provider = self.build(self.CLASH, self.CLASH)
+
+        status = await self.run_the_step()
+
+        self.assertEqual("FAILED", status)
+        self.assertEqual(2, len(provider.fixer_prompts))
+        self.assertEqual(SOURCE, self.file)
+        self.assertFalse((self.root / "helpers.py").exists())
+
+
 class TestALoneSurrogate(ReAskCase):
     """A reply whose JSON spells a lone surrogate (`"\\ud800"`) cannot be saved as UTF-8, and is asked about once.
 

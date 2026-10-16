@@ -241,11 +241,11 @@ keys selections on the `(provider, id)` pair.
     diff: silence about *changes* and a report of the *check* are different jobs.
   * **A reconnect re-reads.** The engine only announces to current subscribers and does not replay, so
     a release that landed while the socket was down is one nobody would otherwise ever hear about. Every
-    *proven* connection after the first one re-reads (a frame, or 2 s without being refused,
-    `CONNECTION_PROVEN_MS`: docs/04 §6.0), and a socket the engine rejected never counts, so a refusal loop
-    does not hammer `GET /models`. The cost is that a start whose first sockets were refused does not
-    re-read when one is finally accepted: its list waits for the engine's next frame (one sweep interval,
-    about 60 s) or for the panel's own tick.
+    *proven* connection that follows a closed socket re-reads, once: a socket that was lost, and equally a
+    start whose first sockets the engine refused (a frame, or 2 s without being refused,
+    `CONNECTION_PROVEN_MS`: docs/04 §6.0). A healthy first connection does not, because the open-time read
+    has just answered the same question. A socket the engine rejected never counts as proven, so a refusal
+    loop does not hammer `GET /models`.
   * **The diff is also recorded, because the badge cannot say a model went away.** The frame used to be
     used only as a signal to re-read, and its payload thrown away. It is now also counted per provider and
     kept as a notification (`ui/src/notifications.ts`, docs/09 §10.18): "Groq +1 · NVIDIA +3 −1". The

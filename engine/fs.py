@@ -211,6 +211,10 @@ def _require_writable_text(value: str, rel: str, what: str) -> None:
         ) from None
 
 
+# How `_read_for_diff` begins its reason for a file that exists and could not be read at all (not binary, not large).
+UNREADABLE = "unreadable: "
+
+
 def _read_bytes(path: Path) -> bytes | None:
     try:
         return path.read_bytes()
@@ -227,12 +231,25 @@ class _Original:
 
     @classmethod
     def of(cls, path: Path) -> _Original:
+        # `None` means the path did not exist, and only that. A file that is there and cannot be read is not
+        # absent: recording it so made `_restore` unlink it. The OSError propagates instead, before the batch has
+        # touched this path, so the rollback puts back everything earlier and leaves this file as it was.
         if not path.is_file():
             return cls(None, None)
-        try:
-            return cls(path.read_bytes(), path.stat().st_mode)
-        except OSError:
-            return cls(None, None)
+        return cls(path.read_bytes(), path.stat().st_mode)
+
+
+def _is_as_it_was(path: Path, original: _Original) -> bool:
+    """True when `path` is a file holding exactly the bytes and mode `original` recorded."""
+    try:
+        return (
+            original.data is not None
+            and path.is_file()
+            and path.read_bytes() == original.data
+            and (original.mode is None or path.stat().st_mode == original.mode)
+        )
+    except OSError:
+        return False
 
 
 class FileSystemService:
@@ -367,20 +384,24 @@ class FileSystemService:
 
         `errors="replace"` would let a binary file be diffed into nonsense, so
         binary and oversized files are reported with the reason instead — and the
-        write still happens, which is what the user asked for.
+        write still happens, which is what the user asked for. That holds for a file that is binary, too large or
+        not UTF-8, whose bytes `apply` can still read and put back. A file that exists and cannot be read at all
+        (`UNREADABLE`) is different: `apply` refuses to touch it, because a rollback could not restore it.
         """
         try:
             if not path.is_file():
                 return "", None
             size = path.stat().st_size
             if size > MAX_DIFF_BYTES:
+                path.open("rb").close()  # not read, but a file that cannot be opened is unreadable at any size
                 return "", f"file is {size} bytes — too large to diff"
             raw = path.read_bytes()
             if looks_binary(raw):
                 return "", "file is binary"
             return raw.decode("utf-8"), None
         except OSError as exc:
-            return "", f"unreadable: {exc}"
+            # The reason travels into a prompt: what the system said ("Permission denied"), not its errno or path.
+            return "", f"{UNREADABLE}{exc.strerror or type(exc).__name__}"
         except UnicodeDecodeError:
             return "", "file is not UTF-8 text"
 
@@ -478,6 +499,13 @@ class FileSystemService:
         anything is written, so a dry-run's stored proposal is the final bytes —
         `apply` replays content, never re-runs edits against a moved file.
         An `edit` that cannot be applied raises ValueError with the reason.
+
+        Phase one also refuses, with a ValueError the fixer is asked about once, in a dry run and a real run alike:
+        an existing file that cannot be read (its bytes could not be put back after a failed write, and a rollback
+        must not delete it), and a final tree in which one path is both a file and a folder (`a.py` and
+        `a.py/b.py`, or `run.sh/inner.py` with `run.sh` an existing file the batch does not delete). A file replaced
+        by a folder of its name (`utils.py` -> `utils/__init__.py`) is fine in either order: phase two runs the
+        deletions first.
         """
         # Before anything is resolved or read. A workspace saved before `protected_root_reason`
         # existed is still in the database, and `WorkspaceService.create` cannot refuse it.
@@ -489,6 +517,7 @@ class FileSystemService:
         summaries: list[dict[str, Any]] = []
         # Where each path stands after the operations planned so far: its text, or None once deleted.
         virtual: dict[Path, str | None] = {}
+        spelled: dict[Path, str] = {}  # how the batch wrote each path, for a reason that names it
         for item in files:
             rel = item["path"]
             action = item["action"]
@@ -497,6 +526,9 @@ class FileSystemService:
             target = self.resolve(rel)
             if target.is_dir():
                 raise ValueError(f"{rel} is a directory, not a file")
+            if target.exists() and not target.is_file():
+                # A FIFO, a socket, a device: `is_file()` calls it absent, so a rollback would unlink it.
+                raise ValueError(f"{rel} is not a regular file (it is a pipe, socket or device), so it cannot be changed")
             if target in virtual:
                 planned = virtual[target]
                 before, note = ("" if planned is None else planned), None
@@ -504,6 +536,13 @@ class FileSystemService:
             else:
                 before, note = self._read_for_diff(target)
                 exists = target.is_file()
+                if exists and note is not None and note.startswith(UNREADABLE):
+                    # Its bytes are unknown, so a rollback could neither put them back nor leave the file be:
+                    # it would delete it, or write other bytes over it. Not "all of it or none of it".
+                    raise ValueError(
+                        f"{rel} exists but cannot be read ({note[len(UNREADABLE):]}), so it cannot be changed "
+                        f"or deleted safely. Leave {rel} alone"
+                    )
             if action == "edit":
                 # Resolve the ops against what the file holds right now, batch so far included.
                 # The result is the concrete `after` content, so dry-run storage and diff
@@ -534,6 +573,7 @@ class FileSystemService:
                     )
                 )
             virtual[target] = None if action == "delete" else after
+            spelled[target] = rel
             summaries.append(
                 {
                     "path": rel,
@@ -548,6 +588,7 @@ class FileSystemService:
                     "diff_note": note if changed and not diff else None,
                 }
             )
+        self._refuse_file_directory_clash(virtual, spelled)
         if dry_run:
             return summaries
 
@@ -555,7 +596,9 @@ class FileSystemService:
         originals: dict[Path, _Original] = {}
         made: list[Path] = []
         try:
-            for target, final in virtual.items():
+            # Deletions first. A file replaced by a folder of the same name (`utils.py` -> `utils/__init__.py`) needs
+            # the file gone before anything is made inside it, whichever order the batch listed them in.
+            for target, final in sorted(virtual.items(), key=lambda item: item[1] is not None):
                 on_disk = target.is_file()
                 if final is None:
                     if not on_disk:
@@ -572,6 +615,42 @@ class FileSystemService:
             raise
         return summaries
 
+    def _refuse_file_directory_clash(self, virtual: dict[Path, str | None], spelled: dict[Path, str]) -> None:
+        """Refuse, in phase one, a final tree in which one path is both a file and a folder.
+
+        `virtual` is where each path ends up. A path that ends up holding a file needs every folder above it to be
+        a folder, so none of them may end up a file in the batch, or be a file on disk that the batch does not
+        delete. Phase two used to find this out from the filesystem (`FileExistsError`, `NotADirectoryError`,
+        `IsADirectoryError`), after a dry run had accepted the batch, and an `OSError` is not put back to the fixer.
+        """
+        for target, text in virtual.items():
+            if text is None:
+                continue
+            for ancestor in target.parents:
+                if ancestor == self.root:
+                    break
+                if ancestor in virtual:
+                    if virtual[ancestor] is None:
+                        continue  # deleted in this batch: a folder may take its place
+                    raise ValueError(
+                        f"{spelled[ancestor]} and {spelled[target]} cannot both be written: {spelled[ancestor]} is a "
+                        f"file, and {spelled[target]} would be inside it as if it were a folder. Keep one of them"
+                    )
+                if ancestor.is_file():
+                    raise ValueError(
+                        f"{spelled[target]} cannot be written: {self._named(ancestor)} is an existing file, not a "
+                        f"folder. To replace the file with a folder, delete {self._named(ancestor)} in the same batch"
+                    )
+
+    def _named(self, path: Path) -> str:
+        """`path` relative to the workspace, as text a reason can carry (ascii() if a name on disk is not UTF-8)."""
+        text = path.relative_to(self.root).as_posix()
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            return ascii(text)
+        return text
+
     def _restore(self, originals: dict[Path, _Original], made: list[Path], failure: BaseException) -> None:
         """Put back what a failed batch had touched: bytes, mode, deleted files, new directories.
 
@@ -580,21 +659,34 @@ class FileSystemService:
         to be half-written is a different thing to tell the user from one that is not.
         """
         stuck: list[str] = []
-        for target, original in reversed(list(originals.items())):
-            try:
-                if original.data is None:
+        ordered = list(reversed(list(originals.items())))
+        # In three steps, because a folder the batch made can stand where a file it deleted has to come back
+        # (`utils.py` replaced by `utils/__init__.py`): the files the batch made go first, then the folders it
+        # made, and only then are the files it changed or deleted written back.
+        for target, original in ordered:
+            if original.data is None:
+                try:
                     target.unlink(missing_ok=True)
-                else:
-                    self._write_atomic(target, original.data)
-                    if original.mode is not None:
-                        os.chmod(target, original.mode)
-            except OSError:
-                stuck.append(str(target.relative_to(self.root)))
+                except OSError:
+                    stuck.append(str(target.relative_to(self.root)))
         for directory in reversed(made):
             try:
                 directory.rmdir()
             except OSError:
                 pass  # not empty, or already gone: either way there is nothing of ours in it
+        for target, original in ordered:
+            if original.data is not None:
+                try:
+                    if _is_as_it_was(target, original):
+                        # The operation that failed was this file's own and never got as far as changing it
+                        # (its directory refused the unlink): writing it again could only fail the same way and
+                        # report an intact file as lost.
+                        continue
+                    self._write_atomic(target, original.data)
+                    if original.mode is not None:
+                        os.chmod(target, original.mode)
+                except OSError:
+                    stuck.append(str(target.relative_to(self.root)))
         if stuck:
             raise OSError(
                 f"{failure}; and these files could not be put back as they were: {', '.join(stuck)}"

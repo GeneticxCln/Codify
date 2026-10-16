@@ -30,6 +30,8 @@
  */
 import type { Terminal as HeadlessTerminal, IMarker } from "@xterm/headless";
 
+import { trimTail } from "./terminalHistory.ts";
+
 /** The grid a machine is opened at before a pane has measured itself, the same one a terminal starts with. */
 export const DEFAULT_COLS = 80;
 export const DEFAULT_ROWS = 24;
@@ -236,7 +238,9 @@ export function createMachineScreens(loadHeadless: () => Promise<TerminalCtor>):
       entry.chunks += 1;
       entry.log += chunk;
       if (entry.log.length > MAX_LOG_CHARS) {
-        entry.log = entry.log.slice(entry.log.length - MAX_LOG_CHARS);
+        // `trimTail`, not a bare slice: a cut that lands inside an emoji would otherwise leave a lone low surrogate at the
+        // front of the replay, written back into every pane that mounts later.
+        entry.log = trimTail(entry.log, MAX_LOG_CHARS);
         entry.truncated = true;
       }
       void feed(entry, chunk)

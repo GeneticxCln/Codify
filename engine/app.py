@@ -1029,7 +1029,7 @@ def _picker_command() -> tuple[list[str], dict[str, str]]:
     # dialog that could not open. The route used to read every nonzero exit as "cancelled".
     code = f"""
 # {PICKER_MARKER}
-import sys
+import os, sys
 try:
     import gi
     gi.require_version('Gtk', '3.0')
@@ -1044,7 +1044,10 @@ if not (initialised[0] if isinstance(initialised, tuple) else initialised):
 dialog = Gtk.FileChooserNative.new('Select Workspace Directory', None, Gtk.FileChooserAction.SELECT_FOLDER, '_Select', '_Cancel')
 res = dialog.run()
 if res == Gtk.ResponseType.ACCEPT:
-    print(dialog.get_filename())
+    # Bytes, not `print`: a folder whose name is not UTF-8 text comes back as surrogate escapes, which `print`
+    # cannot encode, so the dialog died after the person had chosen. The engine says in words what it cannot use.
+    sys.stdout.buffer.write(os.fsencode(dialog.get_filename()) + b'\\n')
+    sys.stdout.buffer.flush()
 dialog.destroy()
 while Gtk.events_pending():
     Gtk.main_iteration_do(False)
@@ -1067,7 +1070,9 @@ class _Picked:
     """One attempt at a folder dialog: what it says, and whether the next one should be tried."""
 
     def __init__(self, kind: str, detail: str = "") -> None:
-        self.kind = kind  # "chosen" | "cancelled" | "unavailable" | "failed" | "timeout"
+        # "chosen" | "cancelled" | "unavailable" | "failed" | "timeout" | "not_text" (a folder was chosen whose path
+        # is not UTF-8 text: `detail` is that path with each undecodable byte written as `\xNN`, for a sentence)
+        self.kind = kind
         self.detail = detail
 
 
@@ -1082,7 +1087,9 @@ def _run_picker(argv: list[str], env: dict[str, str], *, cancel_codes: tuple[int
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
-            text=True,
+            # Bytes, decoded below: `text=True` decoded in `communicate`, where a chosen folder whose name is not UTF-8
+            # text raised `UnicodeDecodeError` that only `TimeoutExpired` was caught around, and the route answered a
+            # plain-text 500 for a dialog that had worked.
             # The caller's half of the guard contract (see spawn_guard.py): the guard must lead the
             # session — and so the group — it kills.
             start_new_session=True,
@@ -1095,13 +1102,20 @@ def _run_picker(argv: list[str], env: dict[str, str], *, cancel_codes: tuple[int
         SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
         proc.communicate()
         return _Picked("timeout", f"the folder dialog did not answer within {PICKER_TIMEOUT_S} s and was closed")
-    chosen = out.strip()
     if proc.returncode == 0:
-        return _Picked("chosen", chosen) if chosen else _Picked("cancelled")
-    reason = " ".join(err.strip().split())[-300:]
+        picked = out.strip()
+        if not picked:
+            return _Picked("cancelled")
+        try:
+            return _Picked("chosen", picked.decode("utf-8"))
+        except UnicodeDecodeError:
+            return _Picked("not_text", picked.decode("utf-8", "backslashreplace"))
+    # Only ever read as a reason, so a byte that is not text is replaced rather than raised on.
+    err_text = err.decode("utf-8", "replace")
+    reason = " ".join(err_text.strip().split())[-300:]
     if proc.returncode in (PICKER_UNAVAILABLE, PICKER_NO_DISPLAY):
         return _Picked("unavailable", reason.split(": ", 1)[-1] if reason else "the dialog could not open")
-    if proc.returncode in cancel_codes and "display" not in err.lower():
+    if proc.returncode in cancel_codes and "display" not in err_text.lower():
         # zenity and kdialog exit 1 for Cancel — and zenity exits 1 for "cannot open display" too,
         # which only its stderr distinguishes.
         return _Picked("cancelled")
@@ -1129,13 +1143,13 @@ async def browse_workspace(request: Request) -> dict[str, Any]:
     def _pick() -> _Picked:
         argv, env = _picker_command()
         first = _run_picker(argv, env)
-        if first.kind in ("chosen", "cancelled", "timeout"):
+        if first.kind in ("chosen", "cancelled", "timeout", "not_text"):
             return first
         # The GTK script could not show a dialog (or died): what else does this machine have?
         problems = [f"the GTK dialog: {first.detail}"]
         for name, command in _fallback_pickers():
             attempt = _run_picker(command, dict(os.environ), cancel_codes=(1,))
-            if attempt.kind in ("chosen", "cancelled", "timeout"):
+            if attempt.kind in ("chosen", "cancelled", "timeout", "not_text"):
                 return attempt
             problems.append(f"{name}: {attempt.detail}")
         return _Picked("unavailable", "; ".join(problems))
@@ -1143,6 +1157,15 @@ async def browse_workspace(request: Request) -> dict[str, Any]:
     outcome = await asyncio.to_thread(_pick)
     if outcome.kind == "cancelled":
         return {"cancelled": True}
+    if outcome.kind == "not_text":
+        # The dialog worked and the person chose; the folder cannot be a workspace, because every path the engine
+        # keeps, sends to a model or stores is text. The same refusal, with the same code, as a typed path that is
+        # not a usable folder (`WorkspaceService.create`).
+        raise ApiError(
+            400, "invalid_root",
+            f"The folder you chose has a name that is not valid UTF-8 text ({outcome.detail}), so Codify cannot "
+            "open it as a workspace. Rename the folder, or choose another.",
+        )
     if outcome.kind != "chosen":
         if outcome.kind == "timeout":
             message = outcome.detail
@@ -1499,14 +1522,15 @@ async def get_ws(workspace_id: str, request: Request) -> Workspace:
     return workspaces.get(workspace_id)
 
 
-@app.get("/workspaces/{workspace_id}/files", response_model=WorkspaceFileList)
+@app.get("/workspaces/{workspace_id}/files", response_model=WorkspaceFileList, response_model_exclude_defaults=True)
 async def list_workspace_files(
     workspace_id: str, request: Request, limit: int = Query(5000, ge=1, le=10_000)
 ) -> WorkspaceFileList:
     """Every file path in the workspace, for the editor's quick-open.
 
     Skips the folders that are not source (`.git`, `node_modules`, caches, build output) and never follows a link out of
-    the workspace. Cut at `limit` with `truncated: true`, never silently.
+    the workspace. Cut at `limit` with `truncated: true`, never silently. A name that is not UTF-8 text is left out and
+    counted as `non_utf8_names`, a key that is present only when it is not zero (docs/04 section 4.0).
     """
     workspaces: WorkspaceService = request.app.state.workspaces
     workspace = workspaces.get(workspace_id)

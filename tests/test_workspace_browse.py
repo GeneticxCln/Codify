@@ -212,5 +212,77 @@ class TestTheRouteStillCreatesTheWorkspace(BrowseCase):
         self.assertEqual(1, len(listed))
 
 
+class TestAFolderWhoseNameIsNotText(BrowseCase):
+    """A dialog that worked, and a person who chose, must never end in a plain-text 500.
+
+    The dialogs were read with `text=True`, so `communicate` decoded their output itself and a folder whose name is not
+    UTF-8 (an unzipped Latin-1 archive) raised `UnicodeDecodeError` there, where only `TimeoutExpired` was caught. Every
+    path the engine keeps, sends to a model or stores is text, so such a folder cannot be a workspace; the person is
+    told that in a sentence, with the route's existing error shape, and no workspace is made.
+    """
+
+    async def assertTheSentence(self, r: httpx.Response) -> None:
+        self.assertEqual(400, r.status_code, r.text)
+        body = r.json()
+        self.assertEqual("invalid_root", body["code"], "the code a typed path that is not a usable folder gets")
+        self.assertIn("not valid UTF-8", body["message"])
+        self.assertIn("bad\\xffdir", body["message"], "the folder is named with its byte written out, not guessed at")
+        self.assertIn("Rename", body["message"])
+        listed: Any = (await self.client.get("/workspaces", headers=self.headers)).json()
+        self.assertEqual([], listed, "a workspace was made out of a path that cannot be said as text")
+
+    async def test_the_gtk_dialog_choosing_one_is_told_in_words(self) -> None:
+        self.stub("python3", "printf '/tmp/bad\\377dir\\n'")
+
+        await self.assertTheSentence(await self.browse())
+
+    async def test_the_fallback_dialogs_are_told_the_same_way(self) -> None:
+        self.stub("python3", 'echo "codify-picker:unavailable: PyGObject is not importable" >&2\nexit 3')
+        self.stub("zenity", "printf '/tmp/bad\\377dir\\n'")
+        self.stub("kdialog", f'echo "{self.chosen}"')  # a dialog that answered is not asked again
+
+        await self.assertTheSentence(await self.browse())
+
+    async def test_an_encoded_surrogate_is_not_text_either(self) -> None:
+        # CESU-style bytes for U+D800: Python's decoder refuses them, and so must the route.
+        self.stub("python3", "printf '/tmp/bad\\355\\240\\200dir\\n'")
+
+        r = await self.browse()
+
+        self.assertEqual(400, r.status_code, r.text)
+        self.assertEqual("invalid_root", r.json()["code"])
+        self.assertIn("\\xed\\xa0\\x80", r.json()["message"])
+
+    async def test_a_dialog_that_says_something_that_is_not_text_on_stderr_is_still_a_failure_in_words(self) -> None:
+        self.stub("python3", "printf 'boom \\377 in gtk\\n' >&2\nexit 1")
+
+        r = await self.browse()
+
+        self.assertEqual(503, r.status_code, r.text)
+        self.assertEqual("picker_unavailable", r.json()["code"])
+        self.assertIn("boom", r.json()["message"])
+
+    async def test_a_folder_with_a_name_that_is_text_but_not_ascii_is_still_chosen(self) -> None:
+        folder = self.base / "state" / "projé-日本"
+        folder.mkdir()
+        self.stub("python3", f'echo "{folder}"')
+
+        r = await self.browse()
+
+        self.assertEqual(200, r.status_code, r.text)
+        self.assertEqual(str(folder), r.json()["workspace"]["root_path"])
+
+    def test_the_gtk_script_writes_the_chosen_path_as_bytes(self) -> None:
+        # `print` would raise on a surrogate escape, after the person had chosen: the script writes the bytes it was
+        # given and leaves it to the engine to say what it cannot use.
+        from engine.app import _picker_command
+
+        argv, _env = _picker_command()
+        script = argv[argv.index("-c") + 1]
+
+        self.assertIn("sys.stdout.buffer.write(os.fsencode(dialog.get_filename())", script)
+        self.assertNotIn("print(dialog.get_filename())", script)
+
+
 if __name__ == "__main__":
     unittest.main()

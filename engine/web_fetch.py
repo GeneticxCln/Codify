@@ -178,7 +178,7 @@ class FetchPolicy:
 
 @dataclass(frozen=True)
 class Target:
-    """One address that passed the checks that need no network: where, and what to ask for."""
+    """One web address (URL) that passed the checks that need no network: where, and what to ask for."""
 
     url: str
     scheme: str
@@ -367,11 +367,6 @@ async def public_addresses(host: str, port: int, resolve: Resolver) -> list[str]
         key = ip.ipv4_mapped if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None else ip
         distinct.setdefault(key, address)
     return list(distinct.values())
-
-
-async def public_address(host: str, port: int, resolve: Resolver) -> str:
-    """The first of a host's checked addresses (see `public_addresses`)."""
-    return (await public_addresses(host, port, resolve))[0]
 
 
 def _budget(requested: int | None) -> int:

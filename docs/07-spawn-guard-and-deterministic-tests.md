@@ -155,7 +155,8 @@ file's neighbourhood on purpose: it shares `terminal::spawn_pty` and nothing els
 a machine is the one place an assistant's keystrokes run commands without `validate_argv` (docs/00 §6.6), so the thing
 that makes the second acceptable, the jail, is what the freeze pins: one builder, `bwrap`, and a test that the user's
 shell is not nameable from that file. The jail's claims are measured in a real `bwrap` and not read off its flags
-(`09` §14.11), which is why those tests need `bwrap` and fail loudly without it, as the rest of the suite does.
+(`09` §14.11), which is why those tests need `bwrap`, `unshare` and an unprivileged overlay mount, and fail loudly
+without them, as the rest of the suite does.
 
 The review conversation for a new spawn is written where the change happens:
 route it through an existing choke point, or add a justified entry and give it a

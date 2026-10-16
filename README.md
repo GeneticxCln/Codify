@@ -97,8 +97,10 @@ It looks for **Python 3.10+** with `venv` (3.10 is a real deployment floor: the 
 `python3 -m engine`), **Node 22.22.2+ / 24.15+ / 26+** (jsdom's range, which the UI suite inherits), **Rust
 stable** with `rustfmt` (rustup's default profile includes it, `--profile minimal` does not) and WebKitGTK 4.1 (2.40 or newer: the UI is
 built with Tailwind 4, which needs a Safari 16.4-class engine), GTK 3, libsoup 3, librsvg, OpenSSL and `pkg-config`, and a display for the Tauri leg (`xvfb` is used
-automatically on a headless machine). **bubblewrap** (`bwrap`) that can actually build a jail, because the machine tab
-is a jailed shell and its containment tests start real ones (WebKitGTK's own sandbox already uses it). PipeWire's `pw-record` is optional and only needed for the mic (see
+automatically on a headless machine). **bubblewrap** (`bwrap`) that can actually build a jail, and `unshare` (util-linux) on a kernel that lets an unprivileged
+user mount an overlay over a tmpfs (Linux 6.6+), because the machine tab is a jailed shell with its own copy of the project and
+its containment tests start real ones (WebKitGTK's own sandbox already uses bubblewrap). The app itself runs without the
+overlay, with the project read-only in the machine; `make ci` does not. PipeWire's `pw-record` is optional and only needed for the mic (see
 [Voice](#-voice)). It also checks this checkout's `.venv` against
 `pyproject.toml`, so a virtualenv made before a dependency was added is reported rather than quietly running.
 
@@ -538,6 +540,8 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/09`](docs/09-workspace-shell.md) | The workspace shell: conversations, tabs, panes, the embedded browser, the editor, the machine, what a turn is |
 | [`docs/10`](docs/10-agent-memory.md) | Agent memory: what was built, what was rejected |
 | [`docs/11`](docs/11-ruflo-audit.md) | The Ruflo audit: which ideas were borrowed, which were refused and why |
+| [`docs/12`](docs/12-scrapling-audit.md) | The Scrapling audit: `fetch_page`, a request the engine makes to an address a model chose, its rules, and what was refused |
+| [`docs/13`](docs/13-grepify-audit.md) | The Grepify audit: `scan_code`, the built-in scanner for code review, and what of Grepify was taken |
 
 ## 📂 Layout
 

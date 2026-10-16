@@ -1229,6 +1229,49 @@ class TestWhatAStepChanges(unittest.IsolatedAsyncioTestCase):
         self.assertIn("+value = 2", self._events(goal.id, "diff")[0]["unified_diff"])
         self.assertIn("a.py", self._committed())
 
+    async def test_a_scribe_that_answers_with_a_list_is_asked_once_more_and_the_commit_lands(self) -> None:
+        """`summary` and `commit_message` are text. A list is truthy, so it passed the emptiness check and then
+        reached `git commit` (and the log) as a non-string: a `TypeError` that no handler around the step names."""
+        goal, _ = await self._run({
+            "fixer": {"files": [{"path": "a.py", "action": "update", "content": "value = 5\n"}]},
+            "scribe": [
+                {"summary": ["did it"], "commit_message": ["feat: a list"]},
+                {"summary": "did it", "commit_message": "feat: text"},
+            ],
+        })
+
+        calls = self.provider.role_calls("scribe")
+        self.assertEqual(2, len(calls), "the scribe is asked once more, no more")
+        self.assertIn("commit_message", calls[1][2], "the reason is put to the model")
+        self.assertIn("a.py", self._committed())
+        self.assertEqual("COMPLETED", self.goals.steps(goal.id)[0].status)
+        log = subprocess.run(
+            ["git", "log", "-1", "--format=%s"], cwd=self.root, capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        self.assertEqual("feat: text", log)
+
+    async def test_a_scribe_that_never_answers_with_text_fails_the_step_by_name(self) -> None:
+        goal, _ = await self._run({
+            "fixer": {"files": [{"path": "a.py", "action": "update", "content": "value = 6\n"}]},
+            "scribe": [{"summary": 7, "commit_message": {"subject": "x"}}] * 2,
+        })
+
+        error = next(e for e in self.goals.events_after(goal.id, 0) if e.type == "error")
+        self.assertEqual("agent_output_invalid", error.payload["code"])
+        self.assertEqual("FAILED", self.goals.get(goal.id).status)
+        self.assertEqual(2, len(self.provider.role_calls("scribe")))
+
+    async def test_a_missing_scribe_field_still_fails_at_once_with_no_second_call(self) -> None:
+        # Unchanged behaviour: only a present value of the wrong type is put back to the model.
+        goal, _ = await self._run({
+            "fixer": {"files": [{"path": "a.py", "action": "update", "content": "value = 8\n"}]},
+            "scribe": [{"summary": "did it"}],
+        })
+
+        error = next(e for e in self.goals.events_after(goal.id, 0) if e.type == "error")
+        self.assertEqual("agent_output_invalid", error.payload["code"])
+        self.assertEqual(1, len(self.provider.role_calls("scribe")))
+
     async def test_the_commit_leaves_the_users_own_work_alone(self) -> None:
         (self.root / "user_wip.py").write_text("half-finished\n", encoding="utf-8")
         (self.root / "user_staged.py").write_text("staged by hand\n", encoding="utf-8")

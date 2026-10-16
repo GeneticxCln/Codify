@@ -344,6 +344,11 @@ class WorkspaceFileList(BaseModel):
     files: list[str]
     truncated: bool
     limit: int
+    # Names left out because they are not UTF-8 text (docs/04 section 4.0). The route sends this model with
+    # `response_model_exclude_defaults=True`, so the field is absent from the body unless it is non-zero and an ordinary
+    # workspace's response is byte-for-byte what it always was. The same option drops any later defaulted field of this
+    # model whose value equals its default: give such a field a reason before relying on it being sent.
+    non_utf8_names: int = 0
 
 
 class WorkspaceFile(BaseModel):

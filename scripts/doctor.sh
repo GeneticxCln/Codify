@@ -160,7 +160,7 @@ else
 fi
 echo
 
-echo "Machine tab (bubblewrap: 'make ci' needs it, because the machine's containment tests build a real jail)"
+echo "Machine tab (bubblewrap, unshare and an unprivileged overlay mount: 'make ci' needs all three, because the machine's containment and project-layer tests build real jails)"
 if have bwrap; then
   ok "bwrap ($(run bwrap --version 2>/dev/null))"
   # Asking is the only honest test: a kernel switch (kernel.unprivileged_userns_clone, user.max_user_namespaces)
@@ -177,9 +177,12 @@ else
   bad "bwrap (bubblewrap) is not installed, and the machine tab cannot be isolated without it" \
     "Arch/CachyOS: sudo pacman -S bubblewrap   Debian/Ubuntu: sudo apt install bubblewrap   Fedora: sudo dnf install bubblewrap  (WebKitGTK's own sandbox uses it too)"
 fi
-# A machine's own copy of the project needs an unprivileged overlay mount (docs/09 section 14.1a). It is a feature and not a
-# requirement: where it cannot be made the machine is read-only and says so, so this is a note and never a failure. The
-# asking is the same as the app's: a throwaway project, a tmpfs and an overlay in a user namespace of its own, and a
+# A machine's own copy of the project needs an unprivileged overlay mount (docs/09 section 14.1a). For the APP that is a
+# feature: where it cannot be made the machine is read-only and says so. For the GATE it is a requirement: five tests in
+# src-tauri/src/machine/tests/layer_facts.rs fail on a host without it (the probe test panics; three assert the machine
+# edits its own copy; one fills the layer and needs it to be there), and no test may skip itself out of a guarantee.
+# This script answers "does make ci work here", so it fails, and says in the same line that the app still
+# runs. The asking is the same as the app's: a throwaway project, a tmpfs and an overlay in a user namespace of its own, and a
 # directory deleted and made again, which is the part a filesystem without user.* attributes (a tmpfs before Linux 6.6) cannot do.
 if have unshare; then
   layer_dir="$(mktemp -d 2>/dev/null)" || layer_dir=""
@@ -195,12 +198,12 @@ if have unshare; then
   if [ -n "$layer_ok" ]; then
     ok "an unprivileged overlay mount works here: a machine edits its own copy of the project"
   else
-    note "an unprivileged overlay mount does not work here, so a machine's project will be read-only" \
-      "Not a failure. It needs a kernel that allows an overlay in a user namespace (Linux 5.11+) and, on a tmpfs, Linux 6.6+ (user.* attributes)."
+    bad "an unprivileged overlay mount does not work here: 'make check-tauri' fails the machine's project-layer tests (the app still runs; a machine's project is just read-only)" \
+      "A machine's own copy of the project needs a kernel that allows an overlay in a user namespace (Linux 5.11+) and, on a tmpfs, Linux 6.6+ (user.* attributes), and no AppArmor/sysctl block on user namespaces (see above). Without it the layer tests in src-tauri/src/machine/tests/layer_facts.rs fail by design; they are not skipped."
   fi
 else
-  note "unshare (util-linux) not found, so a machine's project will be read-only" \
-    "Not a failure. Arch/CachyOS: util-linux   Debian/Ubuntu: util-linux   Fedora: util-linux"
+  bad "unshare (util-linux) not found: 'make check-tauri' fails the machine's project-layer tests (the app still runs; a machine's project is just read-only)" \
+    "Arch/CachyOS: sudo pacman -S util-linux   Debian/Ubuntu: sudo apt install util-linux   Fedora: sudo dnf install util-linux"
 fi
 echo
 

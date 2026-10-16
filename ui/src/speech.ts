@@ -15,6 +15,7 @@
  *   arrive, and only once: opening a thread or restoring one from History never starts talking.
  */
 import { isGoalActive } from "./goalActions.ts";
+import { clipHead } from "./textCut.ts";
 import { isConversationalTurn, turnReply } from "./turnTranscript.ts";
 import type { ChatMessage } from "./types";
 
@@ -43,7 +44,7 @@ export function speakableText(markdown: string): string {
 /** Cut to what one request takes, at the last sentence end inside the limit when there is one. */
 export function clipForSpeech(text: string, max: number = MAX_SPEAK_CHARS): string {
   if (text.length <= max) return text;
-  const cut = text.slice(0, max);
+  const cut = clipHead(text, max);
   const end = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "), cut.lastIndexOf("\n"));
   return (end > max / 2 ? cut.slice(0, end + 1) : cut).trim();
 }

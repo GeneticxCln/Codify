@@ -365,7 +365,11 @@ Settled decisions:
   is a tab labelled "New chat" and opening one is indistinguishable from opening
   nothing. `threadTitleFromPrompt` (`ui/src/threadTitle.ts`) collapses the
   prompt's whitespace and cuts it at 60 characters **on a word boundary** — a
-  tab is 224px wide, and "so every row h" is a name you read twice. The turn
+  tab is 224px wide, and "so every row h" is a name you read twice. The cut counts
+  UTF-16 units but never ends between the halves of an emoji (`clipHead`,
+  `ui/src/textCut.ts`; the same cut names a restored legacy goal's thread and
+  clips read-aloud text): a lone half is refused by the engine (422), so the
+  thread would never have been created. The turn
   calls it only for a thread it can see is unnamed, so a name the user chose is
   never overwritten, and `nameThread` moves the *tab* with the rename, because a
   name the engine accepted that the strip never learned about is the same
@@ -2441,9 +2445,9 @@ the pipeline already makes, through the same service:
 | `fetch_page` | `engine/web_fetch.py` (`docs/12`) | the engine fetches one public page itself, with no tab involved: on for any public site unless a person narrowed or switched it off in Settings → Web pages, public addresses only, bounded, announced before it is made; the page is text from the web, quoted as untrusted |
 | `read_editor` | `SurfaceBridge`, the `editor` surface (`04` §9.1) | eyes on the person's editor, **unsaved text included**; quoted file text, in a fixed shape with caps |
 | `open_in_editor` | the same, `open` | hands that only point: show a file and a range; nothing on disk changes |
-| `edit_editor` | the same, `edit` | hands that change **the open buffer only**: one undoable edit marked as the assistant's, never saved. The person's own Save is the only door to the disk (docs/00 §6.9) |
+| `edit_editor` | the same, `edit` | hands that change **the open buffer only**: one undoable edit marked as the assistant's, never saved. The person's own Save is the only door to the disk (docs/00 §6.9); its text arguments are never healed (`VERBATIM_TOOLS`, §13.4) |
 | `read_machine` | `SurfaceBridge`, the `machine` surface (`04` §9.1) | eyes on a jailed shell the person opened: its screen and a bounded tail; program output, quoted, in a fixed shape with caps |
-| `run_in_machine` | the same, `run` | hands that type one command and bring back its output. **The one place a command runs without `validate_argv`** (docs/00 §6.6), and acceptable only because of the jail (§14); it cannot open or close a machine or change its network |
+| `run_in_machine` | the same, `run` | hands that type one command and bring back its output. **The one place a command runs without `validate_argv`** (docs/00 §6.6), and acceptable only because of the jail (§14); it cannot open or close a machine or change its network; its command is never healed either, because healing a lone surrogate would silently rewrite the command typed into a shell that deliberately has no `validate_argv`: it is refused, and the model gets "That was not run in the machine" (`VERBATIM_TOOLS`, §13.4) |
 | `key_in_machine` | the same, `key` | hands that press one *named* key from a fixed list; the engine never sends bytes |
 | `reset_machine` | the same, `reset` | recovery: starts a machine again from a clean project (§14.7a). It cannot open a machine or change its network or project; it ends what is running in it |
 | `recon` | `ExecutorService._librarian` | read-only, bounded rounds |
@@ -2500,6 +2504,10 @@ name list can see. `git branch` and `git tag` are now read-only only in their
 listing forms, which is why the rule is per-subcommand and not one shared set of
 listing flags (`-a` lists for one and annotates for the other). The caller is a
 model, and "the model asked for it" is not a reason to run `git commit`.
+
+Tool arguments are healed before dispatch, with two exceptions: `VERBATIM_TOOLS` (`edit_editor` and
+`run_in_machine`, §13.4) are never rewritten, because their text becomes the person's buffer or a command typed
+into the machine. See docs/04 §6 for the rule.
 
 ### 10.7 The loop terminates, and says so
 
@@ -2993,6 +3001,13 @@ durable in History, and the other three are not facts the engine keeps. The rule
   (`goal:<id>:<status>:<updated_at>`, `paused:<id>:<version>`, `plan:<id>:<version>`,
   `models:<fetched_at>:<diff>`), and an id already
   in the list is dropped. A goal that is retried and fails again is a new entry, because `updated_at` moved.
+  The id is not the only guard, because after Clear the list is empty and an id check suppresses nothing. Each
+  goal subscription (`subscribeToGoal` in `App.tsx`) also keeps the highest event sequence it has acted on,
+  starting at the `sinceSequence` floor given on Apply/Retry. An event at or below it is merged into the message
+  but triggers no goal refresh, no editor reload and no notification, so a reconnect replay cannot re-announce a
+  plan the person cleared. An event whose refresh or editor lookup failed is the exception: it is run again by
+  the next replay, whatever has arrived since. The mark belongs to one subscription and lives in memory, so after
+  an app reload the replay from 0 is acted on once, as before (docs/04 §6).
 * **Opening is reading.** Everything is marked read when the drawer opens, and as entries arrive while it
   stays open, so the header count clears at once. The dot on a row is for the ones that were new when the
   drawer opened, and it lasts as long as the drawer does, so the person can still see what they had not seen.
@@ -3387,6 +3402,8 @@ A turn whose only change was such an edit is **not** told "no file was changed" 
 in `ExecutorService._editor_edits` and read when the run ends): the conductor did what was asked, in the one place it may, and "ask again" would send the person back to a
 request that was carried out. A refused edit, or no edit, still gets the warning, because that is the case it exists for.
 
+**`VERBATIM_TOOLS = {edit_editor, run_in_machine}`** (`engine/conductor.py`) names the two tools whose text arguments the conductor never heals. They are the places the model's text becomes the person's buffer or a command typed into the machine, so a lone surrogate in any argument of either is refused by the conductor before the handler or the window is asked, with "That edit was not made." or "That was not run in the machine." naming the field; the text is never rewritten. Every other tool's arguments pass through `scrub_surrogates` in `Conductor._run_tool` before the handler sees them, so `run_command`'s argv is healed before `validate_argv` and what is validated is what runs (the rule is in docs/04 §6). A future tool whose text becomes a file, a path, a buffer or a typed command belongs in the set; `tests/test_conductor_surrogates.py` pins its exact membership.
+
 ### 13.5 Where an opened file goes, and what it never does
 
 `open_in_editor` is the assistant pointing. The rule is in `App.tsx` (`editorHost.openFile`) and is small on purpose:
@@ -3459,7 +3476,7 @@ A machine that could only *read* the project could not build it, run its tests o
 
 *How it is made.* `bwrap` 0.9 has no overlay option, and an overlay needs `CAP_SYS_ADMIN` in some user namespace, so the launcher puts one step in front of the jail: `unshare --user --map-root-user --mount` runs a short **fixed** script that mounts the tmpfs and the overlay (`userxattr`, which is what makes an unprivileged overlay possible) and `exec`s `bwrap` with the jail's own argv, binding the overlay's merged directory at `/work`. Paths arrive as the script's positional parameters, never as script text, and nothing in a request is ever part of it. Behind it the jail is the same jail: the same namespaces, no capabilities, the same environment, and the jail's user is told it is uid 1000 whoever started it.
 
-*It is a feature, not a requirement.* Whether a host can do this is asked by doing it (`layer::probe`): once per host, against a throwaway project, with the real script and a program that deletes a directory and makes it again, which is the part of an overlay a filesystem without `user.*` attributes cannot do (a tmpfs gains them in Linux 6.6). Where it cannot, or where `unshare` is missing or the project's path holds a `,`, `:` or `\` (an overlay's options cannot hold them), the machine is the read-only machine it always was, **no weaker a jail**, and says why in the pane and in what the assistant reads. The person's files are never written either way.
+*It is a feature of the app, not a requirement of running it; it is a requirement of the gate, because the tests that measure the layer fail without it (14.11).* Whether a host can do this is asked by doing it (`layer::probe`): once per host, against a throwaway project, with the real script and a program that deletes a directory and makes it again, which is the part of an overlay a filesystem without `user.*` attributes cannot do (a tmpfs gains them in Linux 6.6). Where it cannot, or where `unshare` is missing or the project's path holds a `,`, `:` or `\` (an overlay's options cannot hold them), the machine is the read-only machine it always was, **no weaker a jail**, and says why in the pane and in what the assistant reads. The person's files are never written either way.
 
 *What it costs, said plainly.* Files in the project that the person does not own (a build's leftovers owned by root) can be read but not modified inside the machine, because their owner does not exist in the machine's user namespace. The layer is memory: it counts against the computer even though the jail's processes' own memory is counted separately. **Nothing is copied out**: there is still no export door, and invariant 9 is unchanged; the layer is the machine's copy, not the person's.
 
@@ -3477,7 +3494,7 @@ A jail decides what code can *reach*, not how much of the computer it may *use*.
 
 There is **no path that starts the shell without the jail**: `open` builds exactly one command, for `bwrap`, and nothing in the file can name the user's shell (the spawn freeze, `07`, pins it). If `bwrap` is missing, or unprivileged user namespaces are
 switched off (some distributions do this by default), opening **fails with a sentence that says which** and nothing starts; the window shows it. A "bare shell so it still works" would hand an assistant the person's real account, which is the one outcome this exists to rule out.
-`make doctor` reports both conditions and how to fix them.
+`make doctor` reports both conditions and how to fix them. It also fails, with the app-still-runs wording, when `unshare` is missing or an unprivileged overlay mount is refused, because `make check-tauri` fails on those (14.11).
 
 ### 14.3 The network is the person's, chosen once
 
@@ -3541,12 +3558,14 @@ No seccomp filter (the namespaces and the empty capability set are real, and the
 
 ### 14.11 Proven, and not
 
-Proven, with a **real `bwrap` jail** and not by reading flags (`src-tauri/src/machine/`: 58 tests, 23 of which start one, and those **fail loudly without `bwrap`, `unshare` and user namespaces**, run both as root and as an unprivileged user, uid 1000, the case a person's machine is in):
+Proven, with a **real `bwrap` jail** and not by reading flags (`src-tauri/src/machine/`: 58 tests, 23 of which start one, and those **fail loudly without `bwrap`, `unshare` (util-linux) and user namespaces**, run both as root and as an unprivileged user, uid 1000, the case a person's machine is in):
 
 - *The jail.* A read-only project is read-only and the host's files are unchanged; the scratch is writable and is not the host's home; the environment holds none of the shell's variables; with no network only loopback exists and the host's loopback is unreachable, and with the network on the host's is reachable (so the limit of §14.3 is measured, not asserted); PID 1 is inside the jail, there are no capabilities and the user is unprivileged; Ctrl-C and job control work through the PTY; closing a machine ends everything running in it; a machine that exits says so; a cap on machines and on a write; the argv has no read-write bind but the layer's, and the machine's code has no path to the user's shell.
 - *The project layer (§14.1a).* A machine edits, appends, creates, deletes, makes and replaces directories and renames under `/work`, **and the host's directory is exactly what it was**: not a byte, not a name. Dropping the layer leaves the base untouched and a new machine starts clean. The layer has a size and filling it is a full disk in the machine and nothing more. A project the layer cannot hold (a `,` in its path) and a host that cannot make it are a read-only machine that says why. A stage in a base whose path an overlay cannot hold is refused and the base is left empty (`a_stage_that_cannot_be_made_safe_leaves_nothing_behind`, which also covers the probe and `make_layer`). A layered machine has no capabilities, an unprivileged user, its own PID namespace and none of the launcher's environment. The mount script is fixed text that names only its parameters.
 - *The guard (§14.1b).* A loop that never ends is ended by the kernel and the machine's shell carries on; a file past the limit cannot be written; a program that takes too much memory stops the machine **and the pane says why**, and nothing of it is left running; a busy but modest machine is left alone; the process tree is read from after the *last* parenthesis (a command may be called anything); the process-tree walk ends on a parent map with a cycle, a self-parent or a stale parent, and lists each process once (four tests over hand-built maps, each with a deadline); a tree's memory is the sum of its processes'.
 - *Reset (§14.7a).* A stopped machine is reset to a working, clean one that has the same id; a reset of a live machine ends everything it was running, releases the old layer, clears the screen, keeps the network and the size it was given, and is **not** announced as an exit.
+
+**What the gate needs, which the app does not** (§14.1a calls the layer a feature, and for the app it is): five of the layer tests in `src-tauri/src/machine/tests/layer_facts.rs` need the layer to exist. The probe test (`this_host_can_make_the_layer_and_leaves_nothing_behind_when_it_asks`) panics where it cannot be made; three (`writes_made_in_the_machine_stay_in_the_machine_and_the_hosts_files_are_untouched`, `dropping_the_layer_leaves_the_base_untouched_and_a_new_machine_starts_clean`, `a_layered_machine_is_the_same_jail_in_every_other_way`) assert `copy_on_write`; and one (`the_layer_has_a_size_and_filling_it_is_a_full_disk_in_the_machine_and_nothing_more`) fills the layer and has nothing to fill without it. So a host that cannot mount an unprivileged overlay over a tmpfs (Linux 6.6+ for `user.*` attributes on a tmpfs) fails `make check-tauri` even though the app runs there with a read-only `/work`. A skipped test would pass exactly where the guarantee is false, so they fail. `make doctor` fails on a missing `unshare` and on a refused overlay mount, and says the app still runs.
 
 Engine: `tests/test_machine_surface.py` (the op table, fixed shapes and caps, the quotation framing, no `open`, what a reset may carry and may not, the AST scan that nothing here can spawn or write), `test_surfaces.py`, `test_surface_routes.py`, `test_conductor.py`, `test_conductor_prompt.py`, `test_fake_conductor.py`, and `test_no_unguarded_spawns.py` for the one new process start (the layer's probe).
 Window: `machineTab.test.ts`, `tabBarMachine.test.ts`, `machineScreens.test.ts`, `machineSurface.test.ts`, `shellEvents.test.ts`, `commandPalette.test.ts`, `invokeArgs.test.ts` (the five machine commands' argument names against the Rust signatures: they were not pinned until this), and the whole App over a fake shell with **real xterm** in `machineApp.test.ts`. Each of those was mutation-surveyed in scratch copies and the survivors were turned into tests; for the layer, the guard and reset, 25 Rust and 27 window mutants were tried and all are killed.

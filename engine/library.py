@@ -109,6 +109,21 @@ def fts5_available() -> bool:
         return False
 
 
+def is_text_name(name: str) -> bool:
+    """False for a name that is not UTF-8 text: bytes on disk that `os.walk` could only keep as surrogate escapes.
+
+    A file called `b"bad\\xffname.txt"` comes back from the walk as `'bad\\udcffname.txt'`, a `str` that no provider
+    request, JSON response or SQLite binding can encode, and that no tool of this engine can name over the wire in the
+    first place (a model's JSON cannot spell the byte, and a query string's invalid UTF-8 becomes U+FFFD). The walkers
+    leave such a name, and a directory with one, out and count it; see `docs/04` section 4.0.
+    """
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _is_outside_symlink(root: Path, path: Path) -> bool:
     """True when path is a symlink escaping the workspace root.
 
@@ -163,14 +178,20 @@ def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) 
     matches: list[dict[str, Any]] = []
     files_scanned = 0
     files_skipped = 0
+    odd_names = 0
     truncated = False
     root = Path(root_path).resolve()
     for dirpath, dirnames, filenames in os.walk(root_path):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        odd_names += sum(not is_text_name(d) for d in dirnames)
+        dirnames[:] = [d for d in dirnames if is_text_name(d)]
         dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
         for name in sorted(filenames):
             if time.monotonic() > deadline:
                 raise TimeoutError()
+            if not is_text_name(name):
+                odd_names += 1
+                continue
             full = Path(dirpath) / name
             if _is_outside_symlink(root, full):
                 files_skipped += 1
@@ -203,7 +224,7 @@ def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) 
                 break
         if truncated:
             break
-    return {
+    result: dict[str, Any] = {
         "query": pattern,
         "glob": glob,
         "regex": True,
@@ -212,6 +233,9 @@ def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) 
         "files_skipped": files_skipped,
         "truncated": truncated,
     }
+    if odd_names:
+        result["non_utf8_names"] = odd_names
+    return result
 
 
 def _run_regex_worker(request: dict[str, Any]) -> dict[str, Any]:
@@ -404,16 +428,20 @@ class LibraryService:
             "truncated": True,
         }
 
-    def _walk_files(self, depth: int | None) -> Iterator[str]:
+    def _walk_files(self, depth: int | None, odd: list[int] | None = None) -> Iterator[str]:
         """Every file under the root as a relative path, directory by directory, skipping what is not source.
 
         `depth` stops the descent that many directories down (None: all the way). Never descends through a symlink that
-        points outside the workspace, and never into `SKIP_DIRS`.
+        points outside the workspace, and never into `SKIP_DIRS`. A name that is not UTF-8 text (`is_text_name`) is left
+        out, a directory with one with everything under it, and counted into `odd[0]` when the caller passes a list.
         """
         base_depth = len(Path(self.root).parts)
         root = Path(self.root).resolve()
         for dirpath, dirnames, filenames in os.walk(self.root):
             dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            if odd is not None:
+                odd[0] += sum(not is_text_name(d) for d in dirnames)
+            dirnames[:] = [d for d in dirnames if is_text_name(d)]
             # Never descend through a symlink pointing outside the workspace.
             kept = []
             for d in dirnames:
@@ -429,6 +457,10 @@ class LibraryService:
             if depth is not None and len(here.parts) - base_depth >= depth:
                 dirnames[:] = []
             for name in sorted(filenames):
+                if not is_text_name(name):
+                    if odd is not None:
+                        odd[0] += 1
+                    continue
                 yield str((here / name).relative_to(self.root))
 
     def tree(self, depth: int = 2) -> dict[str, Any]:
@@ -439,12 +471,16 @@ class LibraryService:
         """
         entries: list[str] = []
         truncated = False
-        for rel in self._walk_files(depth):
+        odd = [0]
+        for rel in self._walk_files(depth, odd):
             entries.append(rel)
             if len(entries) >= MAX_TREE_ENTRIES:
                 truncated = True
                 break
-        return {"files": entries, "truncated": truncated, "limit": MAX_TREE_ENTRIES}
+        result: dict[str, Any] = {"files": entries, "truncated": truncated, "limit": MAX_TREE_ENTRIES}
+        if odd[0]:
+            result["non_utf8_names"] = odd[0]
+        return result
 
     def list_files(self, limit: int) -> dict[str, Any]:
         """Every file path, to the bottom of the tree, for the editor's quick-open.
@@ -454,12 +490,16 @@ class LibraryService:
         bigger than `limit` is cut where the walk reaches it and says so.
         """
         found: list[str] = []
-        for rel in self._walk_files(None):
+        odd = [0]
+        for rel in self._walk_files(None, odd):
             found.append(rel)
             if len(found) > limit:
                 break
         truncated = len(found) > limit
-        return {"files": sorted(found[:limit]), "truncated": truncated, "limit": limit}
+        result: dict[str, Any] = {"files": sorted(found[:limit]), "truncated": truncated, "limit": limit}
+        if odd[0]:
+            result["non_utf8_names"] = odd[0]
+        return result
 
     # ── searching ──────────────────────────────────────────────────────────────
 
@@ -508,13 +548,19 @@ class LibraryService:
         matches: list[dict[str, Any]] = []
         files_scanned = 0
         files_skipped = 0
+        odd_names = 0
         truncated = False
         root = Path(self.root).resolve()
 
         for dirpath, dirnames, filenames in os.walk(self.root):
             dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            odd_names += sum(not is_text_name(d) for d in dirnames)
+            dirnames[:] = [d for d in dirnames if is_text_name(d)]
             dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
             for name in sorted(filenames):
+                if not is_text_name(name):
+                    odd_names += 1
+                    continue
                 full = Path(dirpath) / name
                 if _is_outside_symlink(root, full):
                     files_skipped += 1
@@ -548,7 +594,7 @@ class LibraryService:
             if truncated:
                 break
 
-        return {
+        result: dict[str, Any] = {
             "query": needle,
             "glob": glob,
             "matches": matches,
@@ -556,6 +602,9 @@ class LibraryService:
             "files_skipped": files_skipped,
             "truncated": truncated,
         }
+        if odd_names:
+            result["non_utf8_names"] = odd_names
+        return result
 
     def _search_keyword(self, query: str, glob: str | None) -> dict[str, Any]:
         """BM25-ranked keyword search over an in-memory FTS5 index.
@@ -584,12 +633,18 @@ class LibraryService:
         rows: list[tuple[str, str]] = []  # (path, whole file as one document)
         files_scanned = 0
         files_skipped = 0
+        odd_names = 0
         truncated = False
         root = Path(self.root).resolve()
         for dirpath, dirnames, filenames in os.walk(self.root):
             dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            odd_names += sum(not is_text_name(d) for d in dirnames)
+            dirnames[:] = [d for d in dirnames if is_text_name(d)]
             dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
             for name in sorted(filenames):
+                if not is_text_name(name):
+                    odd_names += 1
+                    continue
                 full = Path(dirpath) / name
                 if _is_outside_symlink(root, full):
                     files_skipped += 1
@@ -642,7 +697,7 @@ class LibraryService:
             if conn is not None:
                 conn.close()
 
-        return {
+        result = {
             "query": query,
             "glob": glob,
             "matches": [
@@ -655,6 +710,9 @@ class LibraryService:
             "strategy": "fts5_bm25",
             "fts5": True,
         }
+        if odd_names:
+            result["non_utf8_names"] = odd_names
+        return result
 
     def _search_regex(self, pattern: str, glob: str | None) -> dict[str, Any]:
         """Bounded regex search: the literal walker with pattern guards.
@@ -753,6 +811,14 @@ def format_search(result: dict[str, Any]) -> str:
     if result["files_skipped"]:
         skipped = result["files_skipped"]
         head += f", {skipped} unreadable or binary file{'s' if skipped != 1 else ''} skipped"
+    if result.get("non_utf8_names"):
+        odd = result["non_utf8_names"]
+        # A search cut short never reached the names after the cut, so its count is a floor, and says so.
+        floor = "at least " if result.get("truncated") else ""
+        head += (
+            f"; {floor}{odd} name{'s' if odd != 1 else ''} that {'are' if odd != 1 else 'is'} not valid UTF-8 left out, "
+            "so not searched"
+        )
     lines = [head]
     lines += [f"{m['path']}:{m['line']}: {m['text']}" for m in result["matches"]]
     return "\n".join(lines)
