@@ -186,6 +186,7 @@ The owner's answer to section 4's "if the owner says yes" was yes, so the recomm
 |---|---|---|
 | Resource limits on spawned children | `spawn_guard.Limits`, `docs/07` §1 | Built and tested against real guarded children |
 | A cancel signal for the scan worker | `library._run_regex_worker(request, cancel)`, `docs/07` §1 | Built and tested, and through the conductor's own tools |
+| Verification against a real Ghidra (item 6) | `scripts/check_ghidra.py`, `make check-ghidra` | Built and **run** against Ghidra 12.1.4, including the cancel; not part of the gate, and it fails rather than skips without Ghidra |
 | A Ghidra tool, `analyze_binary` | `engine/binary_analysis.py`, `engine/ghidra/CodifyExport.java`, `docs/04` §3.0.7 | Built: its own guarded spawn site, a one-shot `analyzeHeadless` on a hashed private copy, an engine-owned export script, the child limits, a stripped environment, a total deadline, a cancel-aware wait, a startup sweep of dead pids' run directories, a cache keyed by the file's bytes, output quoted as data. Tested against a stand-in `analyzeHeadless` (`tests/fake_ghidra.py`) |
 | A run token and a startup sweep (item 3) | `binary_analysis.sweep_stale_runs` | Built for the one place that leaves directories behind today. The machine tab already had its own (`sweep_stale`) |
 | Machine-readable `retryable` and a remediation on refusals (item 4) | `BinaryAnalysisError` and the sentence `analyze_binary` returns | Built for this tool. **Not** applied to every refusal in the conductor: those are sentences today, and a shape for all of them is a wider change |
@@ -194,11 +195,11 @@ The owner's answer to section 4's "if the owner says yes" was yes, so the recomm
 
 **Not built, and said so.**
 
-* **The export script has not run in a real Ghidra in this repository.** It was syntax-checked against stubs of the
-  `GhidraScript` calls it makes (`currentProgram`, `getFunctionManager().getFunctions`, `Function.getCallingFunctions`,
-  `getListing().getDefinedData`, `Data.hasStringValue`, `getSymbolTable().getExternalSymbols`, `getMemory().getBlocks`),
-  all long-stable, and the gate drives a stand-in for `analyzeHeadless`. Run a real analysis once before relying on it,
-  and expect to adjust a call if a release moved one.
+* **Only Ghidra 12.1.4 has run it.** The export script compiled and ran unchanged inside a real Ghidra 12.1.4 on the first
+  attempt (`make check-ghidra`, `docs/04` §3.0.7): real functions, imports, strings and sections, correct callers and
+  callees for a small C program, a cache hit on the second question, and a Cancel that killed the real JVM and its group
+  (only defunct entries remained, reaped within 1.5 s). Ghidra 11 is accepted by the version policy and has not been run.
+  The gate itself still drives a stand-in; `make check-ghidra` is the separate verification, outside `make ci`.
 * **No decompiler.** The one-shot design gives up interactive decompiling by design (section 4, item 2); it is a second
   decision if it is wanted.
 * **No network isolation of the JVM.** The child is given no socket by this code and its environment carries no proxy or

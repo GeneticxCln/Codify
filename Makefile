@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history hooks clean bench bench-smoke smoke-tabs
+.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history check-ghidra hooks clean bench bench-smoke smoke-tabs
 
 # A checkout's own virtualenv (`make setup` makes one) wins over whatever `python3` is on
 # PATH, so `make setup && make check` works with nothing activated. The floor leg sets
@@ -60,6 +60,7 @@ help:
 	@echo "  make bench        - Run the repo_scale tier against your configured models (spends tokens; BENCH_DRIVER=recipe for the fixed pipeline)"
 	@echo "  make check        - Run all verifications (ruff + mypy + UI tests + UI test typecheck + Python tests + stream tests + benchmark smoke + UI build + Tauri check)"
 	@echo "  make ci           - Run the whole CI gate locally: make check plus the declared $(PY_MIN) leg"
+	@echo "  make check-ghidra - Run analyze_binary against a REAL Ghidra (GHIDRA_INSTALL_DIR); fails without one, not part of ci"
 	@echo "  make check-history - Check that every commit in HISTORY_RANGE builds, not just the tip (default: origin/\$$branch..HEAD)"
 	@echo "  make ci-python-floor - Run only the $(PY_MIN) leg (uv or a system python$(PY_MIN) covers it)"
 	@echo "  make ci-report    - make ci, then publish the verdict on the commit as a GitHub status (needs gh; clean tree; pushed commit)"
@@ -336,6 +337,14 @@ HISTORY_FLAGS ?=
 
 check-history:
 	python3 scripts/check_history.py --range '$(HISTORY_RANGE)' $(HISTORY_FLAGS)
+
+# Not part of `check` or `ci`: it needs a real Ghidra (GHIDRA_INSTALL_DIR) and does not skip without one. The gate drives a
+# stand-in for analyzeHeadless; this is the check that the export script runs inside the real thing. Pass
+# GHIDRA_CHECK_ARGS="--cancel" to also check that a Cancel kills a real run.
+GHIDRA_CHECK_ARGS ?=
+
+check-ghidra:
+	python3 scripts/check_ghidra.py $(GHIDRA_CHECK_ARGS)
 
 # Install the versioned hooks: pre-commit runs the cheap legs (lint, typecheck) so the
 # obvious failure lands in your hands rather than two minutes into a push, and pre-push

@@ -445,6 +445,12 @@ def _rows(doc: dict[str, Any], key: str, cap: int) -> list[dict[str, Any]]:
     return [r for r in raw[:cap] if isinstance(r, dict)] if isinstance(raw, list) else []
 
 
+def _library(value: object) -> str:
+    """Ghidra files an import it could not tie to a library under the namespace `<EXTERNAL>`; that is no library name."""
+    name = _clean(value, 80)
+    return "" if name == "<EXTERNAL>" else name
+
+
 def _object(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -471,7 +477,7 @@ def _normalise(doc: dict[str, Any]) -> dict[str, Any]:
             for r in _rows(doc, "functions", caps["functions"])
         ],
         "imports": [
-            {"name": _clean(r.get("name", ""), 120), "library": _clean(r.get("library", ""), 80)}
+            {"name": _clean(r.get("name", ""), 120), "library": _library(r.get("library", ""))}
             for r in _rows(doc, "imports", caps["imports"])
         ],
         "strings": [

@@ -207,6 +207,14 @@ class TestTheAnswer(Case):
         self.assertIn("(0 match)", self.run_tool(view="functions", query="ma.n"))
         self.assertIn("(0 match)", self.run_tool(view="functions", query="(a+)+$"))
 
+    def test_an_import_ghidra_could_not_tie_to_a_library_is_listed_without_one(self) -> None:
+        fake_ghidra.set_mode(self.install, "ok", {**fake_ghidra.GOOD_EXPORT, "imports": [
+            {"name": "puts", "library": "<EXTERNAL>"}, {"name": "strcpy", "library": "libc.so.6"}]})
+        text = self.run_tool(view="imports")
+        self.assertIn("- puts\n", text + "\n")
+        self.assertNotIn("<EXTERNAL>", text)
+        self.assertIn("- strcpy  [libc.so.6]", text)
+
     def test_calls_shows_callers_and_callees_by_name_or_address(self) -> None:
         by_name = self.run_tool(view="calls", query="main")
         self.assertIn("called by: _start", by_name)

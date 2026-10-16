@@ -894,9 +894,14 @@ retry can help), `failed`, `no_export` and `bad_export`.
 
 **What a crash leaves.** A run directory named `<pid>-<token>`. The next run removes every one whose pid is dead.
 
-**What is not claimed.** The gate drives a stand-in for `analyzeHeadless` (`tests/fake_ghidra.py`) and compiles nothing of
-Ghidra's: the export script has been syntax-checked against stubs of the `GhidraScript` calls it uses, not run in a real
-install. A real-Ghidra check is a separate, named verification that fails where Ghidra is missing and is not part of the gate.
+**What is verified, and how.** The gate drives a stand-in for `analyzeHeadless` (`tests/fake_ghidra.py`), which proves the
+door and nothing of Ghidra's. `make check-ghidra` (`scripts/check_ghidra.py`) is the check against a real install: it analyses
+a small executable, checks every view and the cache, checks that no run directory is left, and with `GHIDRA_CHECK_ARGS="--cancel"`
+that a Cancel returns promptly and kills the whole real run. It fails where Ghidra is missing and is not part of `check` or `ci`.
+It has passed against Ghidra 12.1.4 (a nixpkgs build, which reports `application.release.name=NIX`); Ghidra 11 is accepted
+by the version policy but has not been run, and another 12.x is expected to work and has not been.
+
+**What is not claimed.**
 There is no network isolation on the child beyond what it is given (it is not given a socket by this code, and nothing here
 forbids one); and analysis, not the file, is what is trusted: a malformed binary is an input to Ghidra's parsers.
 
