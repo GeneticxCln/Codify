@@ -2441,9 +2441,9 @@ the pipeline already makes, through the same service:
 | `fetch_page` | `engine/web_fetch.py` (`docs/12`) | the engine fetches one public page itself, with no tab involved: on for any public site unless a person narrowed or switched it off in Settings → Web pages, public addresses only, bounded, announced before it is made; the page is text from the web, quoted as untrusted |
 | `read_editor` | `SurfaceBridge`, the `editor` surface (`04` §9.1) | eyes on the person's editor, **unsaved text included**; quoted file text, in a fixed shape with caps |
 | `open_in_editor` | the same, `open` | hands that only point: show a file and a range; nothing on disk changes |
-| `edit_editor` | the same, `edit` | hands that change **the open buffer only**: one undoable edit marked as the assistant's, never saved. The person's own Save is the only door to the disk (docs/00 §6.9) |
+| `edit_editor` | the same, `edit` | hands that change **the open buffer only**: one undoable edit marked as the assistant's, never saved. The person's own Save is the only door to the disk (docs/00 §6.9); its text arguments are never healed (`VERBATIM_TOOLS`, §13.4) |
 | `read_machine` | `SurfaceBridge`, the `machine` surface (`04` §9.1) | eyes on a jailed shell the person opened: its screen and a bounded tail; program output, quoted, in a fixed shape with caps |
-| `run_in_machine` | the same, `run` | hands that type one command and bring back its output. **The one place a command runs without `validate_argv`** (docs/00 §6.6), and acceptable only because of the jail (§14); it cannot open or close a machine or change its network |
+| `run_in_machine` | the same, `run` | hands that type one command and bring back its output. **The one place a command runs without `validate_argv`** (docs/00 §6.6), and acceptable only because of the jail (§14); it cannot open or close a machine or change its network; its command is never healed either, because healing a lone surrogate would silently rewrite the command typed into a shell that deliberately has no `validate_argv`: it is refused, and the model gets "That was not run in the machine" (`VERBATIM_TOOLS`, §13.4) |
 | `key_in_machine` | the same, `key` | hands that press one *named* key from a fixed list; the engine never sends bytes |
 | `reset_machine` | the same, `reset` | recovery: starts a machine again from a clean project (§14.7a). It cannot open a machine or change its network or project; it ends what is running in it |
 | `recon` | `ExecutorService._librarian` | read-only, bounded rounds |
@@ -2500,6 +2500,10 @@ name list can see. `git branch` and `git tag` are now read-only only in their
 listing forms, which is why the rule is per-subcommand and not one shared set of
 listing flags (`-a` lists for one and annotates for the other). The caller is a
 model, and "the model asked for it" is not a reason to run `git commit`.
+
+Tool arguments are healed before dispatch, with two exceptions: `VERBATIM_TOOLS` (`edit_editor` and
+`run_in_machine`, §13.4) are never rewritten, because their text becomes the person's buffer or a command typed
+into the machine. See docs/04 §6 for the rule.
 
 ### 10.7 The loop terminates, and says so
 
@@ -3393,6 +3397,8 @@ Invariant 9 is therefore unchanged for an agent, and widened by exactly one door
 A turn whose only change was such an edit is **not** told "no file was changed" (`run_chat` withholds that warning when `edit_editor` landed text, counted per goal
 in `ExecutorService._editor_edits` and read when the run ends): the conductor did what was asked, in the one place it may, and "ask again" would send the person back to a
 request that was carried out. A refused edit, or no edit, still gets the warning, because that is the case it exists for.
+
+**`VERBATIM_TOOLS = {edit_editor, run_in_machine}`** (`engine/conductor.py`) names the two tools whose text arguments the conductor never heals. They are the places the model's text becomes the person's buffer or a command typed into the machine, so a lone surrogate in any argument of either is refused by the conductor before the handler or the window is asked, with "That edit was not made." or "That was not run in the machine." naming the field; the text is never rewritten. Every other tool's arguments pass through `scrub_surrogates` in `Conductor._run_tool` before the handler sees them, so `run_command`'s argv is healed before `validate_argv` and what is validated is what runs (the rule is in docs/04 §6). A future tool whose text becomes a file, a path, a buffer or a typed command belongs in the set; `tests/test_conductor_surrogates.py` pins its exact membership.
 
 ### 13.5 Where an opened file goes, and what it never does
 

@@ -1768,20 +1768,25 @@ Readers that take `events.payload` from SQL without building an `Event` (the age
 One rule covers every place a lone surrogate can enter (a model's JSON can spell one as `\ud800`, and so can a
 file name the operating system supplies). Text a model wrote is HEALED (a lone surrogate becomes U+FFFD, with
 `models.scrub_surrogates`) wherever it becomes prose, a title, a note, a message, a prompt or a command line that
-goes through `validate_argv`. It is REFUSED (and the model asked once) wherever it becomes the person's file, path,
-editor buffer or a command typed into the machine shell. A name the operating system supplies that is not valid
+goes through `validate_argv`. It is REFUSED wherever it becomes the person's file or its path, an editor buffer or
+a command typed into the machine shell (the fixer is asked once; a conductor tool call is answered with a refusal
+sentence, below). A name the operating system supplies that is not valid
 UTF-8 is OMITTED: left out of listings and counted (§4.0), never shown with a spelling a model could write a file
 under. It appears escaped only inside a sentence about a file that cannot be addressed: a profile file's name in a
 problem sentence (`bad\udcff.json`), an ancestor named in the fixer's file-versus-folder refusal (§4.2), or the
 folder the picker was given (§3.0.1).
 
-Healed so far: events (above), every completion request body, the reply of every role but one, and a stored plan
-step's `suggested_paths` on read. `providers._healed_body` replaces a lone surrogate in the JSON body in the two
-functions all four providers send through, `_post_until_answered` (for `post_json` and `post_bytes`) and
-`open_stream`, whatever put it there (a reply echoed back, a stored row, a tool result). httpx cannot encode it,
-and that used to surface as a bare `UnicodeEncodeError` outside the fallback rules (`01` §5.0). The caller's own
-payload is not rewritten; a copy is sent. The guard test over `engine/providers.py` reads that file only; it is
-not a census of every outgoing request (`engine/model_catalog.py` also posts and swallows its exceptions).
+Healed: events (above), every completion request body, the reply of every role that goes through `run_agent`
+except the fixer, a stored plan step's `suggested_paths` on read, and the arguments of every conductor tool but two. `providers._healed_body` replaces a
+lone surrogate in the JSON body in the two functions all four providers send through, `_post_until_answered` (for
+`post_json` and `post_bytes`) and `open_stream`, whatever put it there (a reply echoed back, a stored row, a tool
+result). httpx cannot encode it, and that used to surface as a bare `UnicodeEncodeError` outside the fallback
+rules (`01` §5.0). The caller's own payload is not rewritten; a copy is sent. A body nested so deeply that the
+walk itself runs out of stack (a tool call's arguments are echoed back into the next request) is a `ProviderError`
+with the code `request_unsendable`, which is not in `FALLBACK_TRIGGER_CODES`: a second provider would be sent the
+same conversation. The guard test over
+`engine/providers.py` reads that file only; it is not a census of every outgoing request (`engine/model_catalog.py`
+also posts and swallows its exceptions).
 
 `VERBATIM_ROLES = {fixer}` (`engine/replies.py`) names the roles whose parsed reply `AgentOrchestrator._healed`
 hands back untouched, because the fixer's text becomes the person's files and paths and `fs.apply` phase one
@@ -1801,8 +1806,21 @@ an ASCII escape, so a path stored by an older engine reads back as the unencodab
 `GET /goals/{id}` and the fixer's prompt working for rows already in a database. No other column of a plan step
 could have been stored with one.
 
-Refused: the fixer's file path and content, in `fs.apply` phase one (§4.2). The rest of the rule is not applied
-yet: the conductor's tool arguments reach their handlers as written.
+`VERBATIM_TOOLS = {edit_editor, run_in_machine}` (`engine/conductor.py`) names the conductor tools whose text
+arguments are never healed. Every other tool's arguments are healed in `Conductor._run_tool` before the handler
+runs, so `run_command`'s argv is healed BEFORE `validate_argv` and the list that is validated is the list the
+sandbox runs. `edit_editor` puts the model's text into the person's buffer, and `run_in_machine` types a command
+into a shell that deliberately has no `validate_argv` (`00` §6.6), so a lone surrogate in any argument of either is
+refused before the handler or the window is asked, with a sentence that names the field ("That edit was not
+made." or "That was not run in the machine."); the text is never rewritten (`09` §13.4). `type_page` is healed on
+purpose: it types into a web page, never into a shell or a file. So are the path and glob arguments of the tools
+that only read (`read_file`, `open_in_editor`, `search_code`, `scan_code`, `git_history`): nothing is written
+through them, and a healed path almost always names a file that is not there; a file really named with U+FFFD is
+the one case the heal cannot tell apart. A future tool whose text becomes a file, a
+buffer or a typed command belongs in the set (`tests/test_conductor_surrogates.py` pins its exact membership).
+
+Refused: the fixer's file path and content, in `fs.apply` phase one (§4.2), and the text of `edit_editor` and the
+command of `run_in_machine` (above).
 
 The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
 once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with
