@@ -1755,13 +1755,31 @@ are untouched.
 
 Readers that take `events.payload` from SQL without building an `Event` (the agent and overview statistics,
 `/models/recent`, the previous turn's reply, `recall_events`) scrub with `models.loads_payload`,
-`models.scrub_payload_text` or `models.scrub_surrogates` instead, so rows written before the fix are healed on read there too. The
-guarantee covers events only: other stored text, such as a plan step's title and description, is not scrubbed,
-and sqlite refuses a lone surrogate there with an encoding error instead of storing it. File names are a
-different case and are not scrubbed: a name the operating system supplies that is not valid UTF-8 is handled at
-the walk, left out and counted, never given a spelling (§4.0). It appears escaped only inside a sentence about a
-file that cannot be addressed: a profile file's name in a problem sentence (`bad\udcff.json`), an ancestor named
-in the fixer's file-versus-folder refusal (§4.2), or the folder the picker was given (§3.0.1).
+`models.scrub_payload_text` or `models.scrub_surrogates` instead, so rows written before the fix are healed on read there too.
+
+One rule covers every place a lone surrogate can enter (a model's JSON can spell one as `\ud800`, and so can a
+file name the operating system supplies). Text a model wrote is HEALED (a lone surrogate becomes U+FFFD, with
+`models.scrub_surrogates`) wherever it becomes prose, a title, a note, a message, a prompt or a command line that
+goes through `validate_argv`. It is REFUSED (and the model asked once) wherever it becomes the person's file, path,
+editor buffer or a command typed into the machine shell. A name the operating system supplies that is not valid
+UTF-8 is OMITTED: left out of listings and counted (§4.0), never shown with a spelling a model could write a file
+under. It appears escaped only inside a sentence about a file that cannot be addressed: a profile file's name in a
+problem sentence (`bad\udcff.json`), an ancestor named in the fixer's file-versus-folder refusal (§4.2), or the
+folder the picker was given (§3.0.1).
+
+Healed so far: events (above) and every completion request body. `providers._healed_body` replaces a lone
+surrogate in the JSON body in the two functions all four providers send through, `_post_until_answered` (for
+`post_json` and `post_bytes`) and `open_stream`, whatever put it there (a reply echoed back, a stored row, a tool
+result). httpx cannot encode it, and that used to surface as a bare `UnicodeEncodeError` outside the fallback
+rules (`01` §5.0). The caller's own payload is not rewritten; a copy is sent. A body nested so deeply that the
+walk itself runs out of stack (a tool call's arguments are echoed back into the next request) is a `ProviderError`
+with the code `request_unsendable`, which is not in `FALLBACK_TRIGGER_CODES`: a second provider would be sent the
+same conversation. The guard test over
+`engine/providers.py` reads that file only; it is not a census of every outgoing request (`engine/model_catalog.py`
+also posts and swallows its exceptions). Refused: the fixer's file path and content, in `fs.apply` phase one
+(§4.2). The rest of the rule is not applied yet: a model's reply that becomes a plan step's title and description,
+a note or a commit message, and the conductor's tool arguments, reach their sinks as written, and sqlite refuses a
+lone surrogate in a stored column with an encoding error instead of storing it.
 
 The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
 once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with

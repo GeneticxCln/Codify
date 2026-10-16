@@ -451,6 +451,16 @@ for a code in `FALLBACK_TRIGGER_CODES` — the same set the roles use, defined i
 switch publishes `provider_fallback` then `agent_assigned`, because a silent
 switch credits the turn's answer to a model that never produced it.
 
+Every completion body goes through `_post_until_answered` (`post_json`, `post_bytes`) or `open_stream`, and both
+replace a lone surrogate in the JSON body with U+FFFD before anything is read from it or sent. httpx encodes
+`json=` as UTF-8 and a lone surrogate cannot be encoded: it used to raise a bare `UnicodeEncodeError`, a
+`ValueError` that is neither an `httpx.HTTPError` nor a `ProviderError`, so it skipped `FALLBACK_TRIGGER_CODES` and
+reached the goal as `agent_output_invalid`, `replay_failed` or `internal_error`. A request is prose to a model, so
+it is healed whatever put the surrogate there (the rule is in `04` §6). The caller's own payload is not rewritten;
+a copy is sent. `tests/test_provider_requests_surrogates.py` covers all four providers across `complete`,
+`complete_with_tools` and the streaming paths, and pins that these two functions are the only senders in
+`providers.py`.
+
 ### 5.1 Moves are the pipeline's own doors
 
 | Move | Routed through | Guarantee it inherits |

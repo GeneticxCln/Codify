@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 import httpx
 
 from engine import home
-from engine.models import AgentConfig, BUILTIN_PROVIDERS
+from engine.models import AgentConfig, BUILTIN_PROVIDERS, scrub_surrogates
 from engine.toolcall import (
     ToolCall,
     ToolReply,
@@ -204,6 +204,29 @@ def _known_secrets(kwargs: dict[str, Any]) -> tuple[str, ...]:
     return tuple(found)
 
 
+def _healed_body(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """`kwargs` with the JSON body's lone surrogates replaced by U+FFFD, and the same dict when there are none.
+
+    httpx encodes `json=` as UTF-8, and a lone surrogate cannot be: it raised a bare `UnicodeEncodeError`, a
+    `ValueError` that is neither an `httpx.HTTPError` nor a `ProviderError`, so it skipped the fallback rules and
+    reached the goal as `agent_output_invalid`, `replay_failed` or `internal_error`. A request is prose to a model,
+    so the text is healed (docs/04 section 6) here, in the two functions every completion body passes through,
+    whatever put the surrogate there: a model's reply echoed back, a stored row, a tool result.
+    """
+    body = kwargs.get("json")
+    if body is None:
+        return kwargs
+    try:
+        healed = scrub_surrogates(body)
+    except RecursionError:
+        # The walk needs a Python frame per level and `json.dumps` (httpx's encoder) copes with deeper: a tool call whose
+        # arguments `json.loads` accepted near the stack's limit is echoed back into the next request, and the bare
+        # `RuntimeError` skipped every rule above. It is not in FALLBACK_TRIGGER_CODES on purpose: a second provider is
+        # sent the same conversation, so it would fail the same way.
+        raise ProviderError("request_unsendable", "the request is nested too deeply to send") from None
+    return kwargs if healed is body else {**kwargs, "json": healed}
+
+
 def _unreachable(label: str, exc: httpx.HTTPError, attempt: int, known: tuple[str, ...]) -> ProviderError:
     tried = f" (after {attempt} attempts)" if attempt > 1 else ""
     return ProviderError(
@@ -285,6 +308,7 @@ async def _post_until_answered(
 ) -> httpx.Response:
     """The retry loop `post_json` and `post_bytes` share: a successful response, or a `ProviderError`."""
     limit = _attempts.get()
+    kwargs = _healed_body(kwargs)
     known = _known_secrets(kwargs)
     attempt = 0
     while True:
@@ -316,6 +340,7 @@ async def open_stream(
     a 503 — nothing has been delivered and repeating the request is safe.
     """
     limit = _attempts.get()
+    kwargs = _healed_body(kwargs)
     known = _known_secrets(kwargs)
     attempt = 0
     while True:
