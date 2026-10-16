@@ -1499,14 +1499,15 @@ async def get_ws(workspace_id: str, request: Request) -> Workspace:
     return workspaces.get(workspace_id)
 
 
-@app.get("/workspaces/{workspace_id}/files", response_model=WorkspaceFileList)
+@app.get("/workspaces/{workspace_id}/files", response_model=WorkspaceFileList, response_model_exclude_defaults=True)
 async def list_workspace_files(
     workspace_id: str, request: Request, limit: int = Query(5000, ge=1, le=10_000)
 ) -> WorkspaceFileList:
     """Every file path in the workspace, for the editor's quick-open.
 
     Skips the folders that are not source (`.git`, `node_modules`, caches, build output) and never follows a link out of
-    the workspace. Cut at `limit` with `truncated: true`, never silently.
+    the workspace. Cut at `limit` with `truncated: true`, never silently. A name that is not UTF-8 text is left out and
+    counted as `non_utf8_names`, a key that is present only when it is not zero (docs/04 section 4.0).
     """
     workspaces: WorkspaceService = request.app.state.workspaces
     workspace = workspaces.get(workspace_id)

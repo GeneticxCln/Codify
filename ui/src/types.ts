@@ -700,6 +700,8 @@ export interface WorkspaceFileList {
   /** The tree was bigger than `limit` and was cut. */
   truncated: boolean;
   limit: number;
+  /** Names left out because they are not UTF-8 text. Present only when there are any, and a floor when `truncated` (docs/04 section 4.0). */
+  non_utf8_names?: number;
 }
 
 /** `GET /workspaces/{id}/file`: one file as the editor holds it. `version` is what a save must name. */

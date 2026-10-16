@@ -98,6 +98,14 @@ class _Evidence(_ExecutorCore):
         matched: set[str] = set()
 
         listing = "\n".join(tree["files"]) or "(no files)"
+        # Only when there is one, so a workspace without such a name gets the prompt it always got.
+        odd = tree.get("non_utf8_names", 0)
+        # A tree cut at its entry limit never reached the names after the cut, so its count is a floor, and says so.
+        floor = "at least " if tree["truncated"] else ""
+        odd_note = (
+            f", {floor}{odd} name{'s' if odd != 1 else ''} that {'are' if odd != 1 else 'is'} not valid UTF-8 left out: "
+            "no tool here can open " + ("them" if odd != 1 else "it")
+        ) if odd else ""
         # A workspace that wrote down what it learned gets that read first. It
         # is a prior, never evidence: it enters the prompt and the pack's
         # `knowledge` block, and it does NOT enter `files`, so it cannot borrow
@@ -124,7 +132,8 @@ class _Evidence(_ExecutorCore):
                 f"Goal: {goal.title}\nDescription:\n{goal.description}\n\n"
                 f"{ask_section}"
                 f"Workspace tree (depth 2, {len(tree['files'])} entries"
-                f"{', TRUNCATED' if tree['truncated'] else ''}):\n{listing}\n\n"
+                f"{', TRUNCATED' if tree['truncated'] else ''}"
+                f"{odd_note}):\n{listing}\n\n"
                 f"{prior}"
             )
 

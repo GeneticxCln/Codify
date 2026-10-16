@@ -513,7 +513,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/workspaces` | — | `Workspace[]` |
 | `GET` | `/workspaces/{id}` | — | `Workspace` |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
-| `GET` | `/workspaces/{id}/files?limit=` | `limit` 1–10 000, default 5 000 | `{files, truncated, limit}` — every file path under the root, sorted, skipping `SKIP_DIRS` and links out of the workspace. See §3.0.3 |
+| `GET` | `/workspaces/{id}/files?limit=` | `limit` 1–10 000, default 5 000 | `{files, truncated, limit}`, plus `non_utf8_names` only when it is not zero (names that are not valid UTF-8 text, left out and counted; the route is sent with `response_model_exclude_defaults=True`, so an ordinary workspace's body is byte-identical) — every file path under the root, sorted, skipping `SKIP_DIRS` and links out of the workspace. See §3.0.3 and §4.0 |
 | `GET` | `/workspaces/{id}/file?path=` | — | `{path, content, version, size}`. 400 `file_escape` / `workspace_protected`, 404 `file_missing`, 422 `file_binary` / `file_not_text` / `file_too_large` / `file_access`. See §3.0.3 |
 | `PUT` | `/workspaces/{id}/file` | `{path, content, base_version}` extra=forbid | `{path, version, size}` — **a person's Save, the one writer besides the fixer** (`00` §6.9). Replaces a file that exists; never creates or deletes one. 409 `file_changed` (carries `current_version`) when the file is not the version that was opened; the same 400/404/422 refusals as the read. Refused means untouched. Commits nothing |
 | `DELETE` | `/workspaces/{id}?delete_goals={bool}` | — | forgets the folder; **never touches `root_path`**. 409 `workspace_not_empty` (with the goal count) unless the cascade is requested, 409 `workspace_has_active_goals` if anything is PLANNING/RUNNING |
@@ -700,7 +700,9 @@ window is the length of one `os.replace`. A client that wants to overwrite anywa
 `save_text`, any but `app.py` names `save_file`, or any conductor, executor, skill or surface module names either.
 
 The listing is not `LibraryService.tree` (two levels, 120 names, orientation for a model): it walks to the bottom, is
-sorted, and is cut at `limit` with `truncated: true` rather than silently. All three do their file work off the event
+sorted, and is cut at `limit` with `truncated: true` rather than silently. A name that is not valid UTF-8 text is left
+out and counted as `non_utf8_names`, a key present only when it is not zero (before this, one such file made the whole
+route a plain-text 500 and the Open-file palette silently empty); see §4.0. All three do their file work off the event
 loop, after the workspace is looked up on it.
 
 ### 3.0.2 Voice: dictation and read-aloud
@@ -834,8 +836,11 @@ symlinked profile file is not read. A profile can name nothing else: the worker 
 
 **The scan** runs in `engine/regex_worker.py` with `op: "scan"`, started by `library._run_regex_worker` (no new spawn
 site) and killed at the request's `budget_s` (15 s) plus the margin a search has. It walks in sorted order, skips test
-files (`is_test_path`; `include_tests` brings them back), generated and minified files, binary files, files over 2 MB
-and symlinks that leave the workspace, and stops, with the reason, at 800 files or the time budget. Comments (and, for
+files (`is_test_path`; `include_tests` brings them back), generated and minified files, binary files, files over 2 MB,
+symlinks that leave the workspace and names that are not valid UTF-8 text (left out and counted as `skipped.names`,
+present only when not zero; the Coverage line says `N names that are not valid UTF-8`, adding that a folder is one name and everything under it
+is unscanned), and stops, with the reason,
+at 800 files or the time budget. Comments (and, for
 `code` rules, string contents) are blanked by a heuristic tokenizer per language family, keeping newlines and columns.
 A line is scanned to 2,000 characters. A rule applies to the whole text and a hit is reported at the line it starts on;
 several on one line are one hit. At most 8 hits are kept per rule and 60 in a report; the rest are counted, up to 500
@@ -1001,6 +1006,18 @@ Requests are executed by `engine/library.py`:
   **exact-match table** of subcommands and the options each accepts (`engine/git_readonly.py`, §5
   below), so an option the table does not name is refused whatever git would have made of its
   spelling.
+
+**A name that is not UTF-8 text** (bytes such as `b"bad\xffname.txt"`, which `os.walk` can only hand back as a `str` of
+surrogate escapes that no provider body, JSON response or SQLite binding can encode) is left out of `tree`,
+`list_files`, every search strategy (substring, regex, keyword) and `scan_code`, and counted: `non_utf8_names` in
+the result, present only when it is not zero, so a workspace without such a name gets exactly the result it always
+got. A directory with such a name is left out with everything under it and counts once. The count is a floor when a
+listing is truncated, and it can include a name a glob would have excluded (the check runs before the glob). The
+model is told in words: `format_search` adds `; N name(s) that is/are not valid UTF-8 left out, so not searched` to
+its head line, and the librarian's tree header says `, N name(s) that is/are not valid UTF-8 left out: no tool here
+can open it/them` (both say "at least N" when the walk was cut short). The name itself is never given a spelling:
+the model's JSON cannot spell the byte, and a display escape such as `bad\xffname.txt` would be a literal file name
+that `fs.apply` would create next to the real one. Reading, resolving and writing are unchanged.
 
 A refused request is **feedback, not failure**: the refusal is returned to the librarian (so it can
 ask for something else) and logged at `warn`. The goal is unaffected.
@@ -1733,7 +1750,11 @@ Readers that take `events.payload` from SQL without building an `Event` (the age
 `/models/recent`, the previous turn's reply, `recall_events`) scrub with `models.loads_payload`,
 `models.scrub_payload_text` or `models.scrub_surrogates` instead, so rows written before the fix are healed on read there too. The
 guarantee covers events only: other stored text, such as a plan step's title and description, is not scrubbed,
-and sqlite refuses a lone surrogate there with an encoding error instead of storing it.
+and sqlite refuses a lone surrogate there with an encoding error instead of storing it. File names are a
+different case and are not scrubbed: a name the operating system supplies that is not valid UTF-8 is handled at
+the walk, left out and counted, never given a spelling (§4.0). It appears escaped only inside a sentence about a
+file that cannot be addressed: a profile file's name in a problem sentence (`bad\udcff.json`), or an ancestor
+named in the fixer's file-versus-folder refusal (§4.2).
 
 The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
 once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with

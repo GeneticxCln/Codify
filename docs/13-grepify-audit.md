@@ -58,8 +58,8 @@ scanned. Fixing goes through `plan` and the person's approval, like every other 
   (or `all`) scans. The result starts by saying the hits are **candidates, not vulnerabilities**, then groups hits by
   rule, most severe first, with the rule's reason and fix and each `path:line`, and ends with **coverage**: files
   scanned, and a number for each thing skipped (tests, generated or minified files, binary, over the size cap,
-  symlinks out of the workspace), files read only in part, lines cut, which file types it cannot read comments in,
-  and why a scan stopped early. It is in `BASE_TOOLS` and has no setting: it reads, like `search_code`.
+  symlinks out of the workspace, names that are not valid UTF-8 text), files read only in part, lines cut, which
+  file types it cannot read comments in, and why a scan stopped early. It is in `BASE_TOOLS` and has no setting: it reads, like `search_code`.
 * **Bounds:** 800 files, 200 KB read per file, a line is scanned to 2,000 characters, 8 hits kept per rule and 60 in a
   report (the rest counted, never silent), a rule dropped after 500 hits, 15 s. Several matches on one line are one hit.
 * **A workspace profile is data, never a capability**, the rule `engine/skills.py` states for skills. It arrives with a

@@ -54,8 +54,9 @@ Two rules make its evidence usable:
    lives, so there is no second validator to drift. `git commit`, `git add`, `rm`, `pytest` and
    `-C`/`--output` redirections are all refused there.
 2. **Every claim is checked.** A path is kept only if the librarian actually opened it, a search
-   showed a matching line in it, or it exists in the tree listing; anything else is dropped and
-   logged (`librarian cited N path(s) it never saw`). A confident list of files that do not exist is
+   showed a matching line in it, or it exists in the tree listing (a name that is not valid UTF-8 text is never
+   listed, so it cannot be cited as evidence; the tree header says how many were left out); anything else is
+   dropped and logged (`librarian cited N path(s) it never saw`). A confident list of files that do not exist is
    how "planning from the repository" becomes planning from a hallucination.
 
 **One thing is read *before* all of that, and is deliberately not evidence.** A workspace's

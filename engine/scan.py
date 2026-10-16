@@ -56,6 +56,7 @@ from engine.library import (
     RegexWorkerTimeout,
     _is_outside_symlink,
     _run_regex_worker,
+    is_text_name,
     looks_binary,
 )
 from engine.skills import NAME_RE
@@ -181,7 +182,7 @@ class ProfileSet:
 
 def _shown(value: object) -> str:
     """A bounded piece of untrusted text, for a sentence that reports a problem with it."""
-    text = str(value)
+    text = str(value).encode("utf-8", "backslashreplace").decode("utf-8")
     return text if len(text) <= _SHOWN else text[: _SHOWN - 1] + "…"
 
 
@@ -485,6 +486,7 @@ class _Tally:
     oversize: int = 0
     symlink: int = 0
     unreadable: int = 0
+    names: int = 0
     partial: int = 0
     long_lines: int = 0
     unmasked: int = 0
@@ -578,11 +580,16 @@ def scan_tree(
     root = Path(root_path).resolve()
     for dirpath, dirnames, filenames in os.walk(root_path):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        tally.names += sum(not is_text_name(d) for d in dirnames)
+        dirnames[:] = [d for d in dirnames if is_text_name(d)]
         dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
         for name in sorted(filenames):
             if time.monotonic() > deadline:
                 stopped = "time"
                 break
+            if not is_text_name(name):
+                tally.names += 1
+                continue
             full = Path(dirpath) / name
             if _is_outside_symlink(root, full):
                 tally.symlink += 1
@@ -632,6 +639,8 @@ def scan_tree(
         "skipped": {
             "tests": tally.tests, "generated": tally.generated, "binary": tally.binary,
             "oversize": tally.oversize, "symlink": tally.symlink, "unreadable": tally.unreadable,
+            # Only when there is one, so a workspace without such a name gets the report it always got.
+            **({"names": tally.names} if tally.names else {}),
         },
         "partial_files": tally.partial,
         "long_lines": tally.long_lines,
@@ -774,6 +783,7 @@ def format_scan(result: dict[str, Any], chosen: Sequence[Profile], profiles: Pro
         ("test files", skipped.get("tests", 0)), ("generated or minified", skipped.get("generated", 0)),
         ("binary", skipped.get("binary", 0)), ("over the size cap", skipped.get("oversize", 0)),
         ("symlinks out of the workspace", skipped.get("symlink", 0)), ("unreadable", skipped.get("unreadable", 0)),
+        ("names that are not valid UTF-8 (a folder is one name, and everything under it is unscanned)", skipped.get("names", 0)),
     ) if n]
     cover = [f"Coverage: {result.get('files_scanned', 0)} files scanned"]
     if reasons:

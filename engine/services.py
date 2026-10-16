@@ -652,7 +652,10 @@ class WorkspaceService:
 
     def list_files(self, workspace: Workspace, limit: int) -> WorkspaceFileList:
         found = LibraryService(workspace.root_path).list_files(limit)
-        return WorkspaceFileList(files=found["files"], truncated=found["truncated"], limit=found["limit"])
+        return WorkspaceFileList(
+            files=found["files"], truncated=found["truncated"], limit=found["limit"],
+            non_utf8_names=found.get("non_utf8_names", 0),
+        )
 
     def read_file(self, workspace: Workspace, path: str) -> WorkspaceFile:
         try:
