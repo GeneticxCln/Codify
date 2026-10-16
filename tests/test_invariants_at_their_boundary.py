@@ -572,6 +572,7 @@ MAY_WRITE = {
     "db.py": "creating the state directory the database lives in",
     "providers.py": "the keychain's file backend",
     "speech.py": "deletes its own dictation recordings, in the engine's private state directory; never a workspace",
+    "binary_analysis.py": "its run directories, copy of the analysed file and cache, all under the engine's private state directory (`CODIFY_HOME/binary-analysis`); never a workspace, which tests/test_binary_analysis.py shows is left byte-for-byte as it was",
     "app.py": "no file operation: `.rename()` and `.remove()` there are database services",
 }
 
