@@ -54,6 +54,28 @@ short the grace a test runner deliberately gets to shut its workers down, so a
 TERM whose sender is still alive forwards nothing — the command answers it. A TERM
 that arrives because the engine died is the one case that gets the group kill.
 
+**Resource limits are the third thing the guard does.** A wall-clock timeout bounds how long a child
+runs, not what it takes. `guarded_env(env, limits)` takes a `Limits` (address space, CPU seconds, file
+size, core size; each optional) and carries it in `CODIFY_SPAWN_LIMITS` as JSON; the guard applies it
+to itself with `setrlimit` just before starting the command, so the command is born under it and
+inherits it. Three rules, each pinned in `tests/test_spawn_limits.py` against a real guarded child:
+
+* **A limit is only ever lowered.** A request above the hard limit the guard inherited is clamped to
+  it, never raised, and a child cannot raise its own limit past the one it was given.
+* **A request the guard cannot trust is ignored, not guessed at.** An unknown name, a negative or
+  non-integer value, a boolean or malformed JSON applies nothing. A limit that cannot be set is
+  printed to the guard's stderr and the command still runs: a limit is a bound, not a gate on starting.
+* **A stale variable never leaks in.** `guarded_env` drops any `CODIFY_SPAWN_LIMITS` already in the
+  environment it was handed, so a child's limits are what its spawn site asked for, not what its
+  parent had.
+
+What each site asks for: a sandbox command (`SandboxService.COMMAND_LIMITS`) gets **no core file and
+a 2 GiB file-size cap**, and deliberately **no address-space or CPU cap**, because build tools, a JVM
+and Node reserve far more virtual memory than they use and the command already has a wall-clock
+timeout; the regex/scan worker (`library._regex_worker_limits`) gets **2 GiB of address space, its
+budget plus thirty seconds of CPU, and no core file**, because it holds a user-chosen pattern and a
+whole file in memory. A site that starts a long external analyser sets its own.
+
 ### The guarded spawn sites
 
 One table in the code (`tests/test_no_unguarded_spawns.py::GUARDED_SPAWN_SITES`)

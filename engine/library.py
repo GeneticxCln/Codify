@@ -31,7 +31,7 @@ from pathlib import Path
 
 from engine.fs import FileSystemService, PathEscapeError
 from engine.sandbox import CommandNotAllowed, SandboxService
-from engine.spawn_guard import guarded_argv, guarded_env
+from engine.spawn_guard import Limits, guarded_argv, guarded_env
 from collections.abc import Iterator
 from typing import Any
 
@@ -238,6 +238,18 @@ def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) 
     return result
 
 
+# The worker reads files and runs regexes; it needs a few hundred MiB at most. Its address space is capped so a pathological
+# input (a pattern that builds a huge match, a profile that reads a pathological file) costs a `MemoryError` in the worker
+# and not the machine's memory, and it writes nothing, so it leaves no core file.
+REGEX_WORKER_ADDRESS_SPACE = 2 * 1024**3
+
+
+def _regex_worker_limits(budget_s: float) -> Limits:
+    # CPU time is a second line behind the wall-clock kill: a worker that is somehow still burning a core when its
+    # clock should have ended it is stopped by the kernel as well.
+    return Limits(address_space=REGEX_WORKER_ADDRESS_SPACE, cpu_seconds=int(budget_s) + 30, core_bytes=0)
+
+
 def _run_regex_worker(request: dict[str, Any]) -> dict[str, Any]:
     """Run one regex scan in a worker process and return its reply, or raise ValueError.
 
@@ -249,7 +261,10 @@ def _run_regex_worker(request: dict[str, Any]) -> dict[str, Any]:
         guarded_argv([sys.executable, REGEX_WORKER]),
         cwd=request["root"],
         # What a stdlib script needs to start, and nothing of the engine's environment.
-        env=guarded_env({k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL") if k in os.environ}),
+        env=guarded_env(
+            {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL") if k in os.environ},
+            _regex_worker_limits(float(request["budget_s"])),
+        ),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

@@ -30,6 +30,13 @@ still reads the negative `Popen.returncode` it read before this guard existed �
 verifier's prompt quotes that number. A parent death is the one case the command does
 not get to choose: that is a group kill.
 
+**Resource limits.** A command can also be started under `Limits` (address space, CPU seconds, file size, core size),
+which the guard applies to *itself* with `setrlimit` just before it starts the command, so the command inherits
+them and cannot raise them past the hard limit. They are opt-in per spawn site (`guarded_env(env, limits=...)`) because
+the right numbers differ: a Python worker has a sane address-space cap, a JVM or Node reserves far more virtual memory than
+it uses and must be capped by its own heap flag instead, and a build tool writes large files. Nothing is applied that the
+engine's own limits already forbid: a request above the inherited hard limit is clamped to it, never raised.
+
 Stdin, stdout, stderr, the working directory and the environment are all inherited from
 the engine, unchanged: the guard passes its own handles to the command and prints
 nothing on the success path, so the captured output is the command's own.
@@ -38,11 +45,14 @@ nothing on the success path, so the captured output is the command's own.
 from __future__ import annotations
 
 import ctypes
+import json
 import os
+import resource
 import signal
 import subprocess
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 # The engine's own pid, handed to every guard. Absent only for a guard started by hand.
@@ -52,6 +62,79 @@ ENV_PARENT_PID = "CODIFY_SANDBOX_PARENT_PID"
 # with the workspace (or the repository) as its working directory, which is not on
 # `sys.path`, and with an environment that may carry no PYTHONPATH at all.
 SPAWN_GUARD = str(Path(__file__).resolve())
+
+
+# The limits a spawn site asked for, as JSON, for the guard to apply to itself before it starts the command.
+ENV_LIMITS = "CODIFY_SPAWN_LIMITS"
+
+
+@dataclass(frozen=True)
+class Limits:
+    """What a spawned command may not exceed. `None` leaves that resource as the engine has it.
+
+    * `address_space` — bytes of virtual memory (`RLIMIT_AS`). A process that asks for more gets `MemoryError` /
+      `ENOMEM`. Not for a JVM or Node: they reserve far more than they use.
+    * `cpu_seconds` — CPU time (`RLIMIT_CPU`): SIGXCPU at the soft limit, SIGKILL shortly after. A second line behind the
+      wall-clock timeout for a process that is alive but burning a core in a loop that ignores TERM.
+    * `file_bytes` — the largest file it may write (`RLIMIT_FSIZE`): the write fails with SIGXFSZ / `EFBIG`. A disk filler
+      stops at this, not at the disk.
+    * `core_bytes` — core dump size. 0 is the useful value: a crashing child leaves no multi-GiB file behind.
+    """
+
+    address_space: int | None = None
+    cpu_seconds: int | None = None
+    file_bytes: int | None = None
+    core_bytes: int | None = None
+
+    def to_env(self) -> str:
+        return json.dumps({k: v for k, v in (
+            ("as", self.address_space), ("cpu", self.cpu_seconds), ("fsize", self.file_bytes), ("core", self.core_bytes),
+        ) if v is not None})
+
+
+_RESOURCES = {
+    "as": resource.RLIMIT_AS,
+    "cpu": resource.RLIMIT_CPU,
+    "fsize": resource.RLIMIT_FSIZE,
+    "core": resource.RLIMIT_CORE,
+}
+
+
+def limits_from_env(env: Mapping[str, str] | None = None) -> dict[str, int]:
+    """The limits the launcher asked for, validated: known names, non-negative integers. Anything else is ignored."""
+    raw = (os.environ if env is None else env).get(ENV_LIMITS, "").strip()
+    if not raw:
+        return {}
+    try:
+        asked = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(asked, dict):
+        return {}
+    return {
+        name: value for name, value in asked.items()
+        if name in _RESOURCES and isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    }
+
+
+def apply_limits(asked: Mapping[str, int]) -> dict[str, int]:
+    """Set each limit on this process (soft and hard), never above what it already has; return what was set.
+
+    A request above the inherited hard limit is clamped to it. A resource the kernel refuses to lower is skipped, and the
+    guard says so on stderr: a limit that silently did not apply is the failure this exists to prevent.
+    """
+    applied: dict[str, int] = {}
+    for name, wanted in asked.items():
+        which = _RESOURCES[name]
+        _soft, hard = resource.getrlimit(which)
+        value = wanted if hard == resource.RLIM_INFINITY else min(wanted, hard)
+        try:
+            resource.setrlimit(which, (value, value))
+        except (ValueError, OSError) as exc:
+            print(f"[spawn-guard] could not apply the {name} limit {wanted}: {exc}", file=sys.stderr, flush=True)
+            continue
+        applied[name] = value
+    return applied
 
 
 def guarded_argv(argv: list[str]) -> list[str]:
@@ -68,14 +151,21 @@ def guarded_argv(argv: list[str]) -> list[str]:
     return [sys.executable, SPAWN_GUARD, *argv]
 
 
-def guarded_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """`env` (or this process's environment) carrying this process's pid.
+def guarded_env(env: Mapping[str, str] | None = None, limits: Limits | None = None) -> dict[str, str]:
+    """`env` (or this process's environment) carrying this process's pid, and the limits the command runs under.
 
     The pid is read at call time, never cached: the process spawning the guard is the
     one whose death the guard must notice, and that is not the process that imported
-    this module.
+    this module. `limits` is applied by the guard to the command and nothing else; without it the
+    command runs with the limits the engine has (a stale `CODIFY_SPAWN_LIMITS` in `env` is dropped).
     """
-    return {**(os.environ if env is None else env), ENV_PARENT_PID: str(os.getpid())}
+    out = {**(os.environ if env is None else env), ENV_PARENT_PID: str(os.getpid())}
+    out.pop(ENV_LIMITS, None)
+    if limits is not None:
+        asked = limits.to_env()
+        if asked != "{}":
+            out[ENV_LIMITS] = asked
+    return out
 
 # Half a second: the poll only decides how long a *hard-killed* engine's commands
 # linger — on Linux the death signal has already fired by then — and cheap is the
@@ -248,6 +338,8 @@ def main(argv: list[str]) -> int:
         guard.kill_group()
     arm_parent_death_signal()
     signal.signal(signal.SIGTERM, guard.on_term)
+    # After the death signal is armed, before the command exists: the command is born under them.
+    apply_limits(limits_from_env())
     try:
         # No new session, no new group, no env, no cwd: the command runs exactly where
         # and how the engine asked for it, one process deeper.

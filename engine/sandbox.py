@@ -14,7 +14,7 @@ from engine.fs import FileSystemService, PathEscapeError
 # The guard that makes "this command dies with the engine" true (see
 # engine/spawn_guard.py), including how it is launched: the argv shape and the pid
 # handover are the guard's own contract, so they are written down once, next to it.
-from engine.spawn_guard import guarded_argv, guarded_env
+from engine.spawn_guard import Limits, guarded_argv, guarded_env
 from typing import IO, Any
 
 PYTEST_FLAGS = {"-q", "-v", "--tb=short", "--no-header"}
@@ -74,6 +74,13 @@ CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 # What is kept of each stream *while the command runs*. Applied after `communicate()`, the cap above trimmed what was
 # stored and nothing else: a test stuck printing in a loop was buffered whole in the engine until its timeout (50 MiB
 # of output held 150 MiB). A UTF-8 character is at most four bytes, so this fills the character cap whatever the text.
+# What an allowlisted command may not exceed, applied by the spawn guard (`engine/spawn_guard.py`). Deliberately
+# not an address-space or CPU cap: a test run is a build tool, a browser or a JVM, which reserve far more virtual memory
+# than they use and use several cores for one wall-clock second. What is capped is what has no legitimate reason to be
+# large: a core dump (none), and one file written by one process (2 GiB), so a runaway writer ends at the cap and not at
+# the disk. The wall-clock timeout stays the bound on time.
+COMMAND_LIMITS = Limits(core_bytes=0, file_bytes=2 * 1024**3)
+
 MAX_KEPT_BYTES = MAX_COMMAND_OUTPUT_CHARS * 4
 _READ_CHUNK = 65536
 
@@ -349,10 +356,10 @@ class SandboxService:
             # no configured diff driver, no user config, no credentials in its environment,
             # and repository discovery that stops at the workspace.
             child_argv = [resolved, *git_readonly.runner_args(argv[1:])]
-            env = guarded_env(git_readonly.runner_env(os.environ, root_path))
+            env = guarded_env(git_readonly.runner_env(os.environ, root_path), COMMAND_LIMITS)
         else:
             child_argv = [resolved, *hardened_args(argv)]
-            env = guarded_env({k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME") if k in os.environ})
+            env = guarded_env({k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME") if k in os.environ}, COMMAND_LIMITS)
         try:
             proc = subprocess.Popen(  # noqa: S603 — the argv passed `validate_argv` above; guarded, own session, no shell
                 # One process deeper than the command itself: the guard leads the new

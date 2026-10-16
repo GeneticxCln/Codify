@@ -50,7 +50,8 @@ what is taken and refused, what a build would be, what the audit does not claim,
 
 Both were checked by search in this repository.
 
-1. **A spawned child has no resource limits.** `grep -rn "setrlimit\|RLIMIT\|preexec_fn\|prlimit" engine/` finds
+1. **A spawned child has no resource limits.** *(Closed: `spawn_guard.Limits`, `docs/07` §1.)* When this audit was
+   written, `grep -rn "setrlimit\|RLIMIT\|preexec_fn\|prlimit" engine/` found
    nothing. A command is bounded by a wall-clock timeout and an output cap, not by memory, CPU time or file size, and
    there is no network isolation either. A test suite that allocates until the machine swaps, or writes a
    file until the disk is full, is stopped only by the timeout. REA caps address space, file size, CPU and core size,
@@ -140,7 +141,8 @@ In order of value for cost; none of them needs Ghidra.
 
 1. **Resource limits for spawned children**, set in `spawn_guard.py` before it execs the command (address space, file
    size, CPU time, core size; clamped to the inherited limits). A test that a command allocating past the cap is
-   killed and says so.
+   killed and says so. *(Done. Sandbox commands get no core and a 2 GiB file cap, the scan worker 2 GiB of address
+   space and a CPU bound; a command's address space and CPU are left alone on purpose, `docs/07` §1.)*
 2. **A cancel signal for the file-scanning worker**, so a long worker is stoppable the way a command is. Needed before
    any long-running child.
 3. **A run token and a startup sweep for what a hard-killed engine leaves** (stale per-run directories of dead pids),
