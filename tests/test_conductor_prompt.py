@@ -38,7 +38,8 @@ NOT_TOOLS = {"task"}
 # candidates, because a model that reports a scanner's output unread is the failure the tool most invites.
 # Then to 3340 for `analyze_binary` (docs/14): a binary's names and strings are attacker-chosen text, and the same
 # one-clause rule that keeps a fetched page from being read as instructions belongs next to the tool's name.
-CEILING = 3340
+# Then to 3420 for `audit_usage` (docs/15): one clause telling the conductor its numbers are tokens and a finding is to be checked.
+CEILING = 3420
 
 
 class TestTheToolsAreNamed(unittest.TestCase):

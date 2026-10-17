@@ -115,6 +115,7 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
 | `13-grepify-audit.md` | The Grepify audit: `scan_code`, a built-in code-review scanner (curated rule profiles, comment and test skipping, candidates the model triages), its rules, and what of Grepify was and was not taken |
 | `12-scrapling-audit.md` | The Scrapling audit: the one tool built on its parser (`fetch_page`), the engine's rules for a request it makes to an address a model chose, and which of its fetchers, spiders, browsers and MCP server were refused and why |
 | `14-rea-audit.md` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine — what Ghidra would take (a dedicated door, a one-shot run, engine-owned limits), two gaps found here (no resource limits on a child, a worker that cannot be cancelled), and what was not built |
+| `15-xerg-audit.md` | The Xerg audit: `audit_usage`, a native read-only audit of wasted model calls in tokens (retry waste and the fix loop, descriptive signals, coverage first), built from what the engine already records, with tool-loop waste and cache churn reported as not measurable and no dollars (`04` §4.7); and what of Xerg's skill was and was not taken |
 
 ## 6. Invariants (non-negotiable)
 

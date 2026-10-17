@@ -1510,6 +1510,57 @@ class GoalService:
                 row["id"] = by_key.get(key, "")
         return rows
 
+    def usage_audit_events(
+        self,
+        workspace_id: str,
+        *,
+        window_days: int = 0,
+        limit: int | None = None,
+        now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """The events `engine/usage_audit.py` reads for one workspace: the newest `limit`, returned oldest first.
+
+        The query half of the `audit_usage` tool, beside `recall_events` and for the same reasons. **The workspace scope is in the
+        join**: another repository's goals are never read to be discarded. **The type list is the allow-list**
+        (`usage_audit.AUDIT_EVENT_TYPES`), so a payload the audit does not need (a diff, a page, a prompt) cannot reach it.
+        It is its own query, not a wider `_METRIC_EVENT_TYPES`: that tuple sizes the statistics screens' 20,000-row budget.
+
+        Newest-first inside, oldest-first out: the bound has to cut from the old end, and `metrics.recovered_steps` needs
+        chronological order. A row whose payload no longer parses is skipped, as the statistics sweep skips it.
+        """
+        from engine.usage_audit import AUDIT_EVENT_TYPES, MAX_AUDIT_EVENTS
+
+        placeholders = ",".join("?" for _ in AUDIT_EVENT_TYPES)
+        cutoff: float | None = None
+        if window_days > 0:
+            cutoff = (time.time() if now is None else now) - window_days * 86_400.0
+        scan = max(1, min(int(limit or MAX_AUDIT_EVENTS), MAX_AUDIT_EVENTS))
+        rows = self._db.execute(
+            f"""SELECT * FROM (
+                    SELECT e.type AS type, e.payload AS payload, e.timestamp AS timestamp,
+                           e.goal_id AS goal_id, e.step_id AS step_id, e.sequence AS sequence
+                    FROM events e
+                    JOIN goals g ON g.id = e.goal_id
+                    WHERE g.workspace_id = ?
+                      AND e.type IN ({placeholders})
+                      AND (? IS NULL OR e.timestamp >= ?)
+                    ORDER BY e.timestamp DESC, e.sequence DESC
+                    LIMIT ?
+                ) ORDER BY timestamp, sequence""",  # noqa: S608 — placeholders are `?`; the types are a fixed allow-list
+            (workspace_id, *AUDIT_EVENT_TYPES, cutoff, cutoff, scan),
+        ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = loads_payload(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            events.append({
+                "type": row["type"], "payload": payload, "timestamp": row["timestamp"],
+                "goal_id": row["goal_id"], "step_id": row["step_id"], "sequence": row["sequence"],
+            })
+        return events
+
     def observation_rows(
         self,
         workspace_id: str,

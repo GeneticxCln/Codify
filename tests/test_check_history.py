@@ -24,8 +24,13 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import signal
+import stat
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from scripts import check_history
@@ -248,6 +253,97 @@ class TestCleanupIsArmedBeforeTheSweep(unittest.TestCase):
         armed = {call.args[0] for call in set_handler.call_args_list}
         self.assertIn(signal.SIGINT, armed, "Ctrl-C mid-sweep would strand the worktrees")
         self.assertIn(signal.SIGTERM, armed, "a killed sweep would strand the worktrees")
+
+
+class TestTheInterpreterIsTheProjects(unittest.TestCase):
+    """Started as `python3 scripts/check_history.py` instead of `make check-history`, the system `python3` and the system `mypy`
+    ran every leg. Neither could import the engine's dependencies, so all 40 commits of a real range read as unbuildable and the
+    report looked like a finding. The Makefile puts `.venv/bin` ahead of PATH; this script now takes the same order itself.
+    """
+
+    def fake_venv(self, root: Path, *names: str) -> Path:
+        venv = root / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        for name in names:
+            tool = venv / "bin" / name
+            tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+        return venv
+
+    def test_a_venv_tool_beats_the_same_tool_on_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            venv = self.fake_venv(root, "ruff")
+            elsewhere = root / "other"
+            elsewhere.mkdir()
+            decoy = elsewhere / "ruff"
+            decoy.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            decoy.chmod(decoy.stat().st_mode | stat.S_IXUSR)
+            with patch.dict(os.environ, {"PATH": f"{elsewhere}{os.pathsep}{os.environ.get('PATH', '')}"}):
+                self.assertEqual(str(venv / "bin" / "ruff"), check_history._tool("ruff", venv))
+
+    def test_without_a_venv_a_tool_on_path_is_still_found_and_a_missing_one_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            nowhere = Path(tmp) / ".venv"
+            self.assertEqual("", check_history._tool("definitely-not-a-real-tool-xyz", nowhere))
+            self.assertTrue(check_history._tool("sh", nowhere).endswith("sh"))
+
+    def test_the_python_leg_runs_under_the_venv_interpreter_when_there_is_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            venv = self.fake_venv(Path(tmp), "python3")
+            legs = build_legs(venv, Path(tmp) / "node_modules")
+            python_leg = next(leg for leg in legs if leg.name == "python")
+            self.assertEqual(str(venv / "bin" / "python3"), python_leg.argv[0])
+            self.assertNotEqual(sys.executable, python_leg.argv[0])
+
+    def test_with_no_venv_the_python_leg_uses_the_interpreter_running_the_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            legs = build_legs(Path(tmp) / ".venv", Path(tmp) / "node_modules")
+            self.assertEqual(sys.executable, next(leg for leg in legs if leg.name == "python").argv[0])
+
+    def test_an_interpreter_that_cannot_import_the_engine_is_named_with_the_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            broken = Path(tmp) / "python3"
+            broken.write_text("#!/bin/sh\necho \"ModuleNotFoundError: No module named 'pydantic'\" >&2\nexit 1\n", encoding="utf-8")
+            broken.chmod(broken.stat().st_mode | stat.S_IXUSR)
+            problem = check_history.engine_deps_problem(str(broken))
+        self.assertIn("No module named 'pydantic'", problem)
+        self.assertIn("make check-history", problem)
+        self.assertIn(".venv/bin/python", problem)
+
+    def test_the_interpreter_running_these_tests_can_import_the_engine(self) -> None:
+        self.assertEqual("", check_history.engine_deps_problem(sys.executable))
+
+    def test_main_refuses_before_making_a_single_worktree(self) -> None:
+        err = io.StringIO()
+        with (
+            patch.object(check_history, "_commits_in_range", return_value=(["aaa1111", "bbb2222"], "")),
+            patch.object(check_history, "engine_deps_problem", return_value="the interpreter cannot import the engine"),
+            patch.object(check_history, "check_one") as check_one,
+            patch("tempfile.mkdtemp") as mkdtemp,
+            contextlib.redirect_stderr(err),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            code = check_history.main(["--range", "aaa1111..bbb2222", "--legs", "python"])
+        self.assertEqual(2, code)
+        self.assertIn("cannot import the engine", err.getvalue())
+        check_one.assert_not_called()
+        mkdtemp.assert_not_called()
+
+    def test_a_ui_only_run_does_not_need_the_engine_importable(self) -> None:
+        with (
+            patch.object(check_history, "_commits_in_range", return_value=(["aaa1111", "bbb2222"], "")),
+            patch.object(check_history, "engine_deps_problem", return_value="would refuse") as probe,
+            patch.object(check_history, "check_one", side_effect=KeyboardInterrupt),
+            patch.object(check_history, "_subject", return_value="s"),
+            patch.object(check_history, "_deps_moved", return_value=False),
+            patch("atexit.register"),
+            patch("scripts.check_history.signal.signal"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                check_history.main(["--range", "aaa1111..bbb2222", "--legs", "uitest"])
+        probe.assert_not_called()
 
 
 if __name__ == "__main__":

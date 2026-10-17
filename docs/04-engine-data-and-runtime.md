@@ -906,6 +906,31 @@ have not been run.
 There is no network isolation on the child beyond what it is given (it is not given a socket by this code, and nothing here
 forbids one); and analysis, not the file, is what is trusted: a malformed binary is an input to Ghidra's parsers.
 
+### 3.0.8 Usage audit: `audit_usage`
+
+A conductor tool with no route (`engine/usage_audit.py`; the method and every limit's reason is `docs/15`). It reads events the engine already
+records and reports where tokens went on work that had to be done again. It is held to what `recall` is: read-only, scoped by the goal's
+workspace in the SQL, and fed to the model as a bounded report.
+
+**The call.** `audit_usage(days?)`. `days` is the window (0 or omitted is all recorded time, at most 730); anything that is not an integer is
+all time. Nothing else the model says reaches a query, a path or a setting. The call writes one `log` event, as `recall` does.
+
+**The read.** `GoalService.usage_audit_events(workspace_id, window_days, limit)` selects `usage`, `agent_call_failed`, `stage_result`,
+`fix_retry`, `test_result`, `step_status`, `error`, `provider_fallback` and `agent_assigned` for the workspace's goals, the newest 20,000, returned
+oldest first. A separate query from the statistics sweeps on purpose: those fix their own budget and the frozen daily snapshots' meaning.
+
+**The report** is tokens only (no price table, §4.7) and bounded to 11,000 characters so the conductor's 12,000-character cut never takes its
+tail. In order: the coverage block (events read and whether the cap was hit, calls that booked no tokens, re-asks with no usage to measure, and the
+detectors that are **unavailable** with the capture that would enable them); the totals by role; the findings; the signals; one line on what to do next.
+
+| Finding | What counts |
+|---|---|
+| `retry-waste` | A same-model re-ask (`agent_call_failed` with `retrying: true`) pairs with the nearest earlier `usage` of the same goal, step and role. **Recovered** (the next result for that step and role is a normal `stage_result`): the first call's tokens are waste. **Unrecovered** (a `provider_fallback`, an `error`, or a stage that did not do its job): spend, not waste. **Unknown** (nothing followed): left out of every rate |
+| `fix-loop-retry-waste` | For a step `metrics.recovered_steps` says a retry got past: the fixer and verifier tokens recorded before its last `fix_retry` |
+
+Signals are descriptive and never waste: `context-outlier`, `context-growth`, `deep-conductor-loop` (against the live `conductor_max_turns`),
+`reask-rate` and `token-concentration`. Tool-loop waste and cache churn are not measured, because tool results and cache tokens are not recorded.
+
 ### 3.1.1 The same rule at the start of every goal
 
 `POST /settings/agents/repair` is an action, and an action nobody thinks to take
