@@ -210,15 +210,46 @@ def _git(argv: Sequence[str], cwd: Path | None = None) -> tuple[int, str]:
 
 
 def _tool(name: str, venv: Path) -> str:
-    """A dev tool from PATH or the project venv — the same fallback order the
-    Makefile uses, so a leg here fails exactly when `make ci` would."""
-    found = shutil.which(name)
-    if found:
-        return found
+    """A dev tool, the project venv's first and PATH's second.
+
+    The Makefile puts `.venv/bin` *ahead of* PATH, so the same order here makes a leg fail exactly when `make ci` would,
+    whichever way this script was started. With PATH first, running it as `python3 scripts/check_history.py` picked the
+    system `mypy`, which could not import the project's plugins, and every commit read as unbuildable.
+    """
     in_venv = venv / "bin" / name
     if in_venv.exists():
         return str(in_venv)
-    return ""
+    return shutil.which(name) or ""
+
+
+def _python(venv: Path) -> str:
+    """The interpreter that runs the test suite: the project venv's when there is one, else the one running this script.
+
+    Same reason as `_tool`: the engine's dependencies live in the venv, not in whatever `python3` happens to come first.
+    """
+    for name in ("python3", "python"):
+        candidate = venv / "bin" / name
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
+
+
+def engine_deps_problem(python: str) -> str:
+    """Why `python` cannot run the engine's tests, or "" when it can.
+
+    A commit is judged by its own code; an interpreter that cannot even import the engine makes *every* commit fail for a
+    reason that is this machine's. Reporting that as "N of N commits do not build" is a false alarm that looks like a finding,
+    so it is caught before any worktree is made and said in its own words.
+    """
+    code, output = _run([python, "-c", "import engine.models"], ROOT)
+    if code == 0:
+        return ""
+    last = (output.strip().splitlines() or ["no output"])[-1]
+    return (
+        f"{python} cannot import the engine ({last}), so every commit would read as broken for a reason that is this "
+        "machine's and not the commit's. Run it as `make check-history` (which puts .venv/bin first), or as "
+        "`.venv/bin/python scripts/check_history.py ...`, or `make setup` if there is no .venv."
+    )
 
 
 def build_legs(venv: Path, node_modules: Path) -> list[Leg]:
@@ -229,7 +260,7 @@ def build_legs(venv: Path, node_modules: Path) -> list[Leg]:
     return [
         Leg("lint", (_tool("ruff", venv) or "ruff", "check", "engine", "tests", "scripts", "benchmarks")),
         Leg("typecheck", (_tool("mypy", venv) or "mypy",)),
-        Leg("python", (sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py")),
+        Leg("python", (_python(venv), "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py")),
         Leg("tsc", (tsc, "--noEmit"), "ui"),
         Leg("tsc-tests", (tsc, "--noEmit", "-p", "tsconfig.test.json"), "ui"),
         Leg(
@@ -399,6 +430,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                   f"{[leg.name for leg in legs]}", file=sys.stderr)
             return 2
         legs = [leg for leg in legs if leg.name in wanted]
+
+    if any(leg.name in ("python", "typecheck") for leg in legs):
+        problem = engine_deps_problem(_python(venv))
+        if problem:
+            print(f"check-history: {problem}", file=sys.stderr)
+            return 2
 
     install = args.install_deps or _deps_moved(commits)
     parent = Path(args.worktrees) if args.worktrees else Path(tempfile.mkdtemp(prefix="codify-hist-"))
