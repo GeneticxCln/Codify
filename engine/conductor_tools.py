@@ -12,9 +12,9 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
-from engine import binary_analysis
+from engine import binary_analysis, usage_audit
 from engine.ask import AskRefused, parse_question
-from engine.conductor import EndTurn
+from engine.conductor import DEFAULT_MAX_TURNS, EndTurn
 from engine.executor_support import (
     AgentOutputInvalid,
     CriticRejection,
@@ -227,6 +227,7 @@ class ConductorTools:
         'search_code',
         'scan_code',
         'analyze_binary',
+        'audit_usage',
         'git_history',
         'run_command',
         'read_page',
@@ -437,6 +438,24 @@ class ConductorTools:
                 f"That analysis did not run ({exc.code}): {exc}"
                 f" Retrying {'may help' if exc.retryable else 'will not help until that changes'}."
             )
+
+    async def audit_usage(self, args: dict[str, Any]) -> str:
+        """Where this workspace's model calls were spent on work done again, in tokens (`engine/usage_audit.py`, `docs/15`).
+
+        Read-only and scoped by `goal.workspace_id` in the SQL, like `recall`: another repository's goals are never read to be
+        discarded. The model chooses only a window in days; nothing it says reaches a path, a query or a setting. The events are read
+        here (the engine's connection is the loop's) and the arithmetic runs off the loop, since it is a few tens of thousands of dicts.
+        """
+        days = args.get("days")
+        window = max(0, min(days, 730)) if isinstance(days, int) and not isinstance(days, bool) else 0
+        events = self.service.goals.usage_audit_events(self.goal.workspace_id, window_days=window)
+        turn_cap = self.service._settings_int("conductor_max_turns", DEFAULT_MAX_TURNS)
+        result = await asyncio.to_thread(usage_audit.audit, events, window, turn_cap=turn_cap)
+        self.service._log(
+            self.goal_id, None, "info",
+            f"conductor audited usage over {window or 'all'} day(s): {result['coverage']['events_read']} event(s)",
+        )
+        return usage_audit.format_audit(result)
 
     async def git_history(self, args: dict[str, Any]) -> str:
         # `GitService.read_only` owns the subcommand allowlist. The

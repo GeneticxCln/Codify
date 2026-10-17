@@ -728,6 +728,23 @@ ANALYZE_BINARY = ToolSpec(
     },
 )
 
+AUDIT_USAGE = ToolSpec(
+    name="audit_usage",
+    description=(
+        "Audit where this workspace's model calls were spent on work that had to be done again, in TOKENS (this engine keeps no "
+        "prices). It reports re-asked calls whose step then succeeded and fix attempts a later retry got past, plus descriptive "
+        "signals (prompt growth, deep conductor loops, re-ask rate). It opens with what it could not see: repeated tool calls and "
+        "cache churn are not measurable here, so an empty result is never 'no waste'. Read-only. Use it when asked about cost, "
+        "token use or wasted calls, then check a finding with `recall` before saying what to change."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "days": {"type": "integer", "description": "only the last N days; omit for all recorded time"},
+        },
+    },
+)
+
 GIT_HISTORY = ToolSpec(
     name="git_history",
     description=(
@@ -1398,7 +1415,7 @@ ASK_USER = ToolSpec(
 # The menu before a plan exists: the read tools, the skills, and the three moves
 # that produce a plan. Nothing here can change a file.
 BASE_TOOLS: tuple[ToolSpec, ...] = (
-    READ_FILE, SEARCH_CODE, SCAN_CODE, ANALYZE_BINARY, GIT_HISTORY, RUN_COMMAND, READ_PAGE, NAVIGATE_PAGE,
+    READ_FILE, SEARCH_CODE, SCAN_CODE, ANALYZE_BINARY, AUDIT_USAGE, GIT_HISTORY, RUN_COMMAND, READ_PAGE, NAVIGATE_PAGE,
     CLICK_PAGE, TYPE_PAGE, FETCH_PAGE, READ_EDITOR, OPEN_IN_EDITOR, EDIT_EDITOR, READ_MACHINE, RUN_IN_MACHINE, KEY_IN_MACHINE, RESET_MACHINE,
     RECALL, RECALL_THREADS, USE_SKILL, RECON,
     DESIGN, PLAN,

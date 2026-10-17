@@ -291,6 +291,12 @@ about a file runs one headless analysis of a private copy (the file is never run
 rest are answered from a cache; what comes back is the binary's own text and is handed to the model as data, not instructions.
 See [`docs/14`](docs/14-rea-audit.md) and `docs/04` §3.0.7.
 
+To see where model calls were spent on work done twice, the conductor has `audit_usage` and a built-in `usage-audit` skill. It reads
+the events this engine already records and reports, in **tokens** (there is no price table, on purpose), re-asked calls whose step then
+succeeded and fix attempts a retry got past, plus descriptive signals. It opens with what it could not see, and two kinds of waste
+(repeated tool calls, cache churn) are reported as not measurable here, so an empty result is never "no waste". It is the method of
+Xerg's agent skill, built natively and with none of its code. See [`docs/15`](docs/15-xerg-audit.md).
+
 ---
 
 ## 🎨 Appearance
@@ -549,6 +555,7 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/12`](docs/12-scrapling-audit.md) | The Scrapling audit: `fetch_page`, a request the engine makes to an address a model chose, its rules, and what was refused |
 | [`docs/13`](docs/13-grepify-audit.md) | The Grepify audit: `scan_code`, the built-in scanner for code review, and what of Grepify was taken |
 | [`docs/14`](docs/14-rea-audit.md) | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, and what was built from it (child resource limits, a cancellable scan worker, `analyze_binary` for Ghidra) |
+| [`docs/15`](docs/15-xerg-audit.md) | The Xerg audit: `audit_usage`, a native audit of wasted model calls in tokens, and what of Xerg's skill was taken |
 
 ## 📂 Layout
 
@@ -560,7 +567,7 @@ src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the emb
             the render-starvation watchdog
 tests/      Python suite; hermetic.py is the shared isolation bootstrap
 scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py
-docs/       00–14, the specifications this README summarises
+docs/       00–15, the specifications this README summarises
 ```
 
 ## 📄 License

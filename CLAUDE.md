@@ -18,7 +18,7 @@ and knowing which one you are in tells you what you may touch:
 |---|---|---|
 | Desktop shell | Rust / Tauri v2 | App lifecycle, owns the engine process, boot token |
 | UI | React 19 / TypeScript / Vite / Tailwind | Settings screen, goal chat, stats |
-| Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |The engine runs 8 fixed roles. `laya` (pre-flight gate) guards every request; the **conductor** — a loop, not a ninth role — then decides which of the other seven run and in what order, through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`) and *skills* it can load. The recipe that used to be compiled in — `librarian` → `design` → `planner` → `fixer` → `verifier` → `critic` → `scribe` — is now the built-in skill `ship-a-change` (`engine/builtin_skills/`), and a workspace can replace it. The directory's other built-ins are `context-transfer`, a recipe for packaging a degraded thread into one pasteable block for a new thread (load it when the thread is long enough that the model is losing track), and `security-review`, which sequences `scan_code` and `read_file` for a security review of the workspace. `fixer` is still the only writer and `verifier` still the only role that runs a command.
+| Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |The engine runs 8 fixed roles. `laya` (pre-flight gate) guards every request; the **conductor** — a loop, not a ninth role — then decides which of the other seven run and in what order, through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`) and *skills* it can load. The recipe that used to be compiled in — `librarian` → `design` → `planner` → `fixer` → `verifier` → `critic` → `scribe` — is now the built-in skill `ship-a-change` (`engine/builtin_skills/`), and a workspace can replace it. The directory's other built-ins are `context-transfer`, a recipe for packaging a degraded thread into one pasteable block for a new thread (load it when the thread is long enough that the model is losing track), and `security-review`, which sequences `scan_code` and `read_file` for a security review of the workspace. The fourth, `usage-audit`, has the conductor report wasted model calls honestly in tokens with `audit_usage`. `fixer` is still the only writer and `verifier` still the only role that runs a command.
 
 ## The gate is `make check` / `make ci`
 
@@ -82,6 +82,7 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
   toolcall.py     the neutral tool-calling shape and its four protocol translations
   spawn_guard.py process guard; every spawn routes through it, and it applies a spawn site's resource limits (`Limits`)
   binary_analysis.py  `analyze_binary`: Ghidra, one-shot, on a private copy; its own spawn site (docs/14 §4)
+  usage_audit.py  `audit_usage`: wasted model calls in tokens, a pure read over recorded events (docs/15)
   speech.py       voice: dictation and read-aloud through an OpenAI-compatible speech provider; the engine records the mic (pw-record)
   surfaces.py     the bridge for what the app window owns: the engine asks, the window answers, ops are fixed strings in a table;
                   surface_editor.py is the editor's table (`read_editor`, `open_in_editor`, `edit_editor`; none touches the disk),
@@ -93,7 +94,7 @@ scripts/        fake_ollama.py (drive a goal with no API keys; FAKE_CONDUCTOR=1 
                  drive_a_turn.py (drive a turn against a real local model; --approve presses Start),
                  make_logo.py, check_history.py (does every commit in a range build)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–14, below
+docs/           00–15, below
 .githooks/      versioned pre-commit / pre-push
 ```
 
@@ -158,6 +159,7 @@ docs/           00–14, below
 | `docs/13` | The Grepify audit: `scan_code`, the built-in scanner for code review (curated profiles, masking, workspace profiles as data), and what of Grepify was taken |
 | `docs/12` | The Scrapling audit: `fetch_page` (a request the engine makes to an address a model chose), its rules, and what of Scrapling was refused |
 | `docs/14` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, the design a Ghidra tool needs here (now built: `analyze_binary`), and the gaps it found (child resource limits and a cancellable worker, both closed) |
+| `docs/15` | The Xerg audit: `audit_usage`, the native audit of wasted model calls in tokens (coverage first; retry waste and the fix loop measured; tool-loop waste and cache churn reported as not measurable), and what of Xerg's skill was taken |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.

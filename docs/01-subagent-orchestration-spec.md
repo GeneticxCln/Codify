@@ -469,6 +469,7 @@ a copy is sent. `tests/test_provider_requests_surrogates.py` covers all four pro
 | `search_code` | `LibraryService.search` | same |
 | `scan_code` | `engine/scan.py` `run_scan`, in the regex worker (`op: scan`) | read-only like `search_code`: the same walk, skips and symlink rule, bounded, and honest about what it did not look at (`docs/13`). The patterns run in the guarded worker, killed at a hard limit, because a workspace profile is untrusted data (never a capability: the worker is handed only `id`, `pattern`, `flags`, `languages`, `where`). Hits are candidates, said first |
 | `analyze_binary` | `engine/binary_analysis.py`, its own guarded spawn site (`docs/14` §4) | read-only: Ghidra analyses a private copy of a workspace file (the file is never run and nothing is written to the workspace); the model supplies a path, a view from a fixed list and a literal filter, never a flag, a script or a regex; the output is the binary's own text, framed as data |
+| `audit_usage` | `engine/usage_audit.py`, over `GoalService.usage_audit_events` (`docs/15`) | read-only and workspace-scoped in the SQL like `recall`: wasted model calls in tokens (a re-ask whose step then succeeded, a fix attempt a retry got past) plus descriptive signals, coverage first, with the detectors it cannot run named; no price, no path, no query from the model |
 | `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` — the librarian's own validator (`engine/git_readonly.py`'s exact-match table), so the subcommand list and its option rules have one owner (`04` §5) |
 | `run_command` | `SandboxService.run_command` | `validate_argv` in `test` mode (docs/00 §6.6) **once the goal is approved** — the same stored-status gate as `write` (`_write_allowed`). Before that the mode is `read_only` (`ls`, `wc`, git history), because the test allowlist admits the repository's own code and a turn has no approval step; a command that would run once approved is refused with that reason, not deferred |
 | `read_page` | `WebviewBridge.read_page` | read-only; the page is the user's, the model cannot choose or change the URL, and the text returns quoted as untrusted (docs/03 §1.6) |
@@ -600,9 +601,10 @@ librarian, design, planner — whether or not the request needed them, which mad
 the sequence a property of the code rather than a decision of the decider. The
 seven stage moves replaced it, and the sequence they are used in is a *skill*
 (`engine/builtin_skills/ship-a-change.md`) rather than control flow. It is one
-of three built-ins in that directory, beside `context-transfer.md`, which is a
-recipe for handing a degraded thread to a new one, and `security-review.md`, which
-sequences `scan_code` and `read_file` for a security review (docs/13). See docs/09
+of four built-ins in that directory, beside `context-transfer.md`, which is a
+recipe for handing a degraded thread to a new one, `security-review.md`, which
+sequences `scan_code` and `read_file` for a security review (docs/13), and `usage-audit.md`,
+which has the conductor report wasted model calls honestly in tokens (docs/15). See docs/09
 §10.14.
 
 ### 5.2 Why `complete_with_tools` is a separate method
