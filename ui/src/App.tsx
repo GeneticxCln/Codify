@@ -1713,12 +1713,17 @@ export const App: React.FC = () => {
       setPendingBrowser({ tabId: id, error: classified.reason });
       return;
     }
+    // No pane has reported a size yet (the first link clicked in an answer, in a session that has had no browser
+    // tab): the shell refuses a page seated at 0x0 and nothing would ever retry. The tab takes the address instead,
+    // and the restore seat below opens it once the pane it mounts has measured itself.
+    const measured = browserBoundsRef.current;
+    if (!measured || measured.width <= 0 || measured.height <= 0) {
+      setTabState((prev) => openBrowserTab(prev, id, url, selectedWs?.id));
+      setPendingBrowser(null);
+      return;
+    }
     try {
-      await openBrowserWebview(
-        id,
-        url,
-        browserBoundsRef.current ?? { x: 0, y: 0, width: 0, height: 0 },
-      );
+      await openBrowserWebview(id, url, measured);
       // The shell has this page now, so the restore seat must not open it a
       // second time (see `attemptedSeats`).
       attemptedSeats.current.add(id);

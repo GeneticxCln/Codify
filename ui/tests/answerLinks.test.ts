@@ -31,7 +31,10 @@ const REPLY = [
 
 async function withAnswer(
   body: (ctx: AppContext) => Promise<void>,
-  extra: { shellFails?: Record<string, string> } = {},
+  extra: {
+    shellFails?: Record<string, string>;
+    shellAnswers?: Record<string, unknown | ((args: Record<string, unknown>) => unknown)>;
+  } = {},
 ): Promise<void> {
   await withApp(
     {
@@ -139,5 +142,35 @@ test("a page the shell refuses is reported where the person is looking, and the 
       assert.equal(ctx.dom.container.querySelector("h4")?.textContent, "The fix");
     },
     { shellFails: { codify_browser_open: refusal } },
+  );
+});
+
+test("the first link clicked, with no browser pane yet measured, still opens once the pane has a size", async () => {
+  // The shell refuses a page seated at 0x0 ("no size yet"), and a link click made a tab and asked for the page in the
+  // same breath, before any pane had reported a rectangle. The refusal was shown, the tab stayed empty, and nothing
+  // ever retried: the person had to retype an address they had just clicked.
+  const seated: Array<Record<string, unknown>> = [];
+  await withAnswer(
+    async (ctx) => {
+      await ctx.dom.click(answerButtons(ctx)[0]!);
+      await ctx.settle();
+      await ctx.settle();
+      assert.ok(seated.length >= 1, "the page was never opened");
+      const last = seated[seated.length - 1]!;
+      assert.equal(last.url, "https://example.com/guide");
+      const bounds = last.bounds as { width: number; height: number };
+      assert.ok(bounds.width > 0 && bounds.height > 0, "the page was seated without a size");
+      assert.ok(!ctx.dom.text().includes("no size yet"), "the person was shown the shell's refusal");
+    },
+    {
+      shellAnswers: {
+        codify_browser_open: (args: Record<string, unknown>) => {
+          const b = (args.bounds ?? {}) as { width?: number; height?: number };
+          if (!b.width || !b.height) throw new Error("browser pane has no size yet");
+          seated.push(args);
+          return null;
+        },
+      },
+    },
   );
 });
