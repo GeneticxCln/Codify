@@ -889,10 +889,37 @@ class TheDurableObservationStore(unittest.IsolatedAsyncioTestCase):
         self._record_scan(self.here.id)
         store = self._consolidated(self.here.id)
         self.assertEqual(len(store), 1, "one subject, one row — refined, not appended")
-        # The second scan re-saw the first event, so the count adds to 3, not 2:
-        # the store carries the whole scan, and the scan is the workspace's.
-        self.assertEqual(store[0]["proof"], 3)
+        # Two distinct events back it, so the proof is two. The second scan re-saw the first event and
+        # must not count it again.
+        self.assertEqual(store[0]["proof"], 2)
         self.assertEqual(len(store[0]["evidence"]), 2, "two distinct events back it now")
+
+    async def test_scanning_the_same_events_again_adds_no_proof_and_does_not_refresh_the_belief(self) -> None:
+        """Every run's end re-scans the recent events, so a second pass over unchanged events saw nothing new."""
+        thread = self._thread(self.here.id, "T")
+        run = self._run(self.here.id, thread.id, "run")
+        self._event(run.id, "error", {"code": "tests_failed", "message": "boom"})
+        self._record_scan(self.here.id)
+        first = self._consolidated(self.here.id)[0]
+        for _ in range(3):
+            self._record_scan(self.here.id)
+        again = self._consolidated(self.here.id)[0]
+        self.assertEqual(again["proof"], 1, "the same event was counted again")
+        self.assertEqual(again["refined_at"], first["refined_at"], "a belief nobody re-observed was refreshed")
+
+    async def test_events_with_their_ids_come_from_one_query_not_a_scan_of_the_table(self) -> None:
+        thread = self._thread(self.here.id, "T")
+        run = self._run(self.here.id, thread.id, "run")
+        made = self._event(run.id, "error", {"code": "tests_failed", "message": "boom"})
+        statements: list[str] = []
+        self.goals._db.set_trace_callback(statements.append)
+        try:
+            rows = self.goals.recall_events(self.here.id, with_ids=True)
+        finally:
+            self.goals._db.set_trace_callback(None)
+        self.assertEqual([r["id"] for r in rows], [made])
+        selects = [q for q in statements if q.lstrip().upper().startswith("SELECT") and "FROM events" in q]
+        self.assertEqual(1, len(selects), selects)
 
     async def test_another_workspaces_failure_stays_out_of_this_store(self) -> None:
         """The scope claim is the store's too: recording from workspace A's

@@ -186,8 +186,9 @@ takes from Hindsight. The engine's consolidation pass refines it: when a run
 reaches a terminal status (`ExecutorService._set_status` → `_consolidate`), it
 re-scans `recall_events` **with event ids**, distills, and calls
 `GoalService.record_observations`. A subject seen again gets its proof count
-*added* and its evidence ids merged (newest first, deduplicated) — not a second
-row. The lesson and example take the newest scan's wording, so a recovery
+raised by the events not already in its evidence, and those ids merged (newest first, deduplicated) — not a second
+row. A pass that sees nothing new changes neither the count nor the time it was last seen, because the pass runs at
+every run's end over the same recent events and would otherwise inflate both. The lesson and example take the newest scan's wording, so a recovery
 flipping a lesson positive survives the next scan. `step:`-subjects are never
 stored: one retry is pairing plumbing, not a durable belief.
 
