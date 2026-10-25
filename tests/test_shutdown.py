@@ -72,7 +72,9 @@ class TestShutdown(unittest.TestCase):
                 async def launch() -> None:
                     _spawn(app, driver(), goal.id)
 
-                client.portal.call(launch)  # type: ignore[union-attr]
+                portal = client.portal
+                assert portal is not None
+                portal.call(launch)
                 self.assertTrue(started.wait(5), "the stand-in driver never started")
         # The first call is the boot-time rescue, before the driver exists; the last is the shutdown's.
         self.assertTrue(stopped_when_recorded[-1], "the goal was recorded as failed while its driver still ran")
