@@ -30,6 +30,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -198,13 +199,60 @@ def configured(
     return out
 
 
+#: What a PipeWire tool needs from the environment to find the session's sound server, and nothing else.
+#: Exact names, plus the prefixes the sound stack itself reads.
+_RECORDER_ENV = (
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME", "XDG_CACHE_HOME", "DBUS_SESSION_BUS_ADDRESS",
+)
+_RECORDER_ENV_PREFIXES = ("PIPEWIRE_", "PULSE_", "WIREPLUMBER_", "SPA_")
+
+
+def _recorder_env(env: Mapping[str, str]) -> dict[str, str]:
+    """The environment a recorder is started with: the sound session's variables, not the engine's secrets.
+
+    The engine's environment carries provider API keys and the boot token. `pw-record` and `pw-dump` have no
+    use for them, and a tool that loads a plugin or writes a core dump would hand them on. A setup that needs
+    one more variable names it in `CODIFY_RECORDER_ENV` (comma separated); that is the person's decision, made
+    in the environment the engine was started from, and a model cannot make it.
+    """
+    extra = {name.strip() for name in env.get("CODIFY_RECORDER_ENV", "").split(",") if name.strip()}
+    return {
+        key: value for key, value in env.items()
+        if key in _RECORDER_ENV or key in extra or key.startswith(_RECORDER_ENV_PREFIXES)
+    }
+
+
+def sweep_recordings() -> int:
+    """Delete recordings a previous engine left behind, and return how many.
+
+    A recording lives in `CODIFY_HOME/dictation/` from the moment the recorder starts until a stop, a cancel,
+    a restart or a clean shutdown removes it. An engine that was killed (SIGKILL, a power cut) did none of
+    those, and nothing ever looked again, so the person's voice stayed on disk. Called once at boot, when no
+    recording can be in progress.
+    """
+    folder = home.codify_home() / "dictation"
+    removed = 0
+    try:
+        entries = list(folder.glob("*.wav"))
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            entry.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def _spawn(argv: list[str], *, stdout: int) -> subprocess.Popen[bytes]:
     """Start one PipeWire tool under the guard, in a session of its own, like the folder picker."""
     return subprocess.Popen(  # noqa: S603 — argv is a fixed PipeWire tool resolved by shutil.which, wrapped by guarded_argv right here; no shell
         guarded_argv(argv),
-        # PipeWire is found through XDG_RUNTIME_DIR and the session's own variables, so the
-        # environment passes through; the guard adds only the engine's pid.
-        env=guarded_env(dict(os.environ)),
+        # PipeWire is found through XDG_RUNTIME_DIR and the session's own variables, which are passed
+        # through; the engine's credentials are not (`_recorder_env`). The guard adds the engine's pid.
+        env=guarded_env(_recorder_env(os.environ)),
         stdin=subprocess.DEVNULL,
         stdout=stdout,
         stderr=subprocess.PIPE,

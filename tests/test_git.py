@@ -177,6 +177,23 @@ class TestGitService(GitTestBase):
         self.assertEqual(self.git_out("show", "--name-only", "--format=", rev).split(), ["*"])
         self.assertIn(" M user_wip.txt", self.porcelain(), "the user's edit was swept into the commit")
 
+    def test_a_read_only_answer_is_cut_where_it_is_read_not_after_all_of_it_is_in_memory(self) -> None:
+        """`git log -p --all` on a large repository was 40 MB, held whole (and decoded) before anything was cut."""
+        from engine.sandbox import MAX_KEPT_BYTES
+
+        self.write("big.txt", ("a line of a large file\n" * 80_000))
+        self.assertIsNotNone(self.git.commit(str(self.root), "feat: a large file", ["big.txt"]))
+        answer = self.git.read_only(str(self.root), ["show", "HEAD"])
+        self.assertLess(len(answer.encode("utf-8")), MAX_KEPT_BYTES + 1_000)
+        self.assertIn("output truncated", answer)
+
+    def test_a_small_read_only_answer_is_whole(self) -> None:
+        self.write("a.txt", "x\n")
+        self.assertIsNotNone(self.git.commit(str(self.root), "feat: small", ["a.txt"]))
+        answer = self.git.read_only(str(self.root), ["log", "-1", "--format=%s"])
+        self.assertIn("feat: small", answer)
+        self.assertNotIn("truncated", answer)
+
     def test_an_empty_path_list_commits_nothing_at_all(self) -> None:
         """A step that changed nothing must not commit what the user had staged."""
         self.write("user_staged.py", "staged before we ran\n")

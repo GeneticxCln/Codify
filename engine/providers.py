@@ -487,6 +487,24 @@ def trusts_proxy_env(base_url: str) -> bool:
     return not _is_loopback_host(host)
 
 
+def streaming_body(payload: dict[str, Any], base_url: str) -> dict[str, Any]:
+    """The request body for a streamed OpenAI-compatible completion.
+
+    OpenAI answers a stream with `usage: null` unless the request says `stream_options.include_usage`, so every
+    streamed role call booked no tokens there, and the statistics and the usage audit under-reported it. A
+    local server is left alone: one that does not know the option may answer 400, and the caller then falls
+    back to a blocking request that no longer streams.
+    """
+    body = {**payload, "stream": True}
+    try:
+        host = urlparse(base_url or "").hostname or ""
+    except ValueError:
+        host = ""
+    if host and not _is_loopback_host(host):
+        body["stream_options"] = {"include_usage": True}
+    return body
+
+
 def key_destination_problem(base_url: str) -> str | None:
     """Why a stored API key must not be sent to `base_url`, or None when it may be.
 
@@ -936,7 +954,7 @@ class OpenAICompatProvider(BaseProvider):
         async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             # Opening the stream is retried like any call; reading it is not (see `open_stream`).
             async with open_stream(
-                client, url, label="openai_compat", headers=headers, json={**payload, "stream": True}
+                client, url, label="openai_compat", headers=headers, json=streaming_body(payload, self._base_url)
             ) as response:
                 try:
                     async for chunk in self._stream_lines(response):

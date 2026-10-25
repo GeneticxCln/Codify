@@ -721,6 +721,20 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(r.json()["design_contract_path"], "")
 
+    async def test_pinning_reads_the_start_of_the_file_and_not_all_of_it(self) -> None:
+        """Only the first few kilobytes are sniffed for binary, so a large file must not be read whole."""
+        ws_dir = self.root / "ws-brand-large"
+        ws_dir.mkdir()
+        (ws_dir / "DESIGN.md").write_text("# brand\n" + "x" * 3_000_000, encoding="utf-8")
+        ws_id = (
+            await self.client.post("/workspaces", headers=self.headers, json={"name": "LARGE", "root_path": str(ws_dir)})
+        ).json()["id"]
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("the whole file was read")):
+            r = await self.client.put(
+                f"/workspaces/{ws_id}/design-contract", headers=self.headers, json={"path": "DESIGN.md"}
+            )
+        self.assertEqual(r.status_code, 200, r.text)
+
     async def test_pinning_refuses_what_it_cannot_read(self) -> None:
         """An escape or a typo is refused while the screen is open, not discovered
         as a mysterious absence of brand mid-goal."""

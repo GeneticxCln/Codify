@@ -294,6 +294,11 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     # un-started steps, IN_PROGRESS/COMPLETED for ones mid-flight); a retry
     # picks up from there. PAUSED is deliberately untouched — it is a state the
     # user chose, and /start handles it.
+    # A recording left by an engine that was killed outright: no recording can be in progress at boot.
+    try:
+        speech.sweep_recordings()
+    except Exception:
+        pass
     rescued = app.state.goals.fail_orphaned_active_goals()
     for goal_id, previous, message in rescued:
         try:
@@ -2356,7 +2361,7 @@ async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, 
     try:
         snapshots: StatsSnapshotService = request.app.state.stats_snapshots
         retention = request.app.state.settings.get_int("stats_retention_days")
-        due = snapshots.pending_days(goals, parsed, now, retention)
+        due = snapshots.pending_days(goals, parsed, now, retention, coverage.get("since"))
         if due:
             documents = await asyncio.to_thread(snapshots.build_documents, goals, parsed, due)
             snapshots.store(documents, now)

@@ -2262,6 +2262,10 @@ in Settings → Audio (docs/02 §3.2), and the engine side is in docs/04 §3.0.2
   therefore asks the engine to start PipeWire's `pw-record`, shows the elapsed time, and asks it
   to stop. The engine sends the recording to the dictation provider, answers with the words, and
   deletes the recording.
+  The recorder is started with the sound session's variables only (`XDG_RUNTIME_DIR`, `PIPEWIRE_*`, `PULSE_*`,
+  the session bus and the like), not the engine's environment, which holds provider keys and the boot token;
+  a setup that needs one more names it in `CODIFY_RECORDER_ENV`. A recording an engine that was killed
+  outright left behind is deleted at the next boot (`speech.sweep_recordings`).
 - **Dictation fills the prompt and never sends it.** The words are placed at the caret, read when
   they *arrive* rather than when the button was pressed, because the person may have typed on
   while speaking. A space is added only where two words would otherwise touch (`insertDictation`,

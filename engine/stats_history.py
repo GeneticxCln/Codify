@@ -75,16 +75,26 @@ class StatsSnapshotService:
     def __init__(self, conn: sqlite3.Connection):
         self._db = conn
 
-    def pending_days(self, goals: list[dict[str, Any]], events: list[dict[str, Any]], now: float, keep: int | None = None) -> list[str]:
+    def pending_days(
+        self, goals: list[dict[str, Any]], events: list[dict[str, Any]], now: float, keep: int | None = None,
+        since: float | None = None,
+    ) -> list[str]:
         """The past days with activity that have no frozen row yet, newest first, at most `MAX_FREEZE_PER_READ`.
 
         With a retention policy (`keep` > 0) only the newest `keep` active days are candidates, which is exactly
         the set `prune` leaves standing. Without that bound, every read froze every older active day and `prune`
         deleted them again straight away, so the next read froze them again: with 400 days of history and the
         default 90 that was about 25 seconds of work thrown away on each Stats open, on the event loop.
+
+        `since` is the instant from which the read behind `goals` and `events` is complete (the stats route's
+        `coverage.since`, None when no cap cut anything). A day that began before it is left unfrozen: its
+        document would be built without the goals or events the cap left out, and a frozen row is never
+        recomputed, so a wrong one would stay wrong for the rest of the retention window.
         """
         today = utc_day(now)
         past = [day for day in active_days(goals, events) if day < today]
+        if since is not None:
+            past = [day for day in past if _day_end(day) - _SECONDS_PER_DAY >= since]
         if keep is not None and keep > 0:
             past = past[-keep:]
         if not past:
@@ -130,7 +140,10 @@ class StatsSnapshotService:
             self._db.commit()
         return newest
 
-    def maybe_snapshot(self, conn: sqlite3.Connection, goals: list[dict[str, Any]], events: list[dict[str, Any]], now: float, keep: int | None = None) -> str | None:
+    def maybe_snapshot(
+        self, conn: sqlite3.Connection, goals: list[dict[str, Any]], events: list[dict[str, Any]], now: float,
+        keep: int | None = None, since: float | None = None,
+    ) -> str | None:
         """Freeze the past days that have none, the first time anyone looks.
 
         Judged from each day's own activity (a goal or event stamped inside it), not from the wall clock's
@@ -141,7 +154,7 @@ class StatsSnapshotService:
         """
         if not goals and not events:
             return None
-        due = self.pending_days(goals, events, now, keep)
+        due = self.pending_days(goals, events, now, keep, since)
         return self.store(self.build_documents(goals, events, due), now) if due else None
 
     def history(self, limit: int = 120) -> list[dict[str, Any]]:

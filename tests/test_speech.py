@@ -121,6 +121,9 @@ class SpeechCase(unittest.IsolatedAsyncioTestCase):
         self.log = self.root / "pw.log"
         env = mock.patch.dict(os.environ, {
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "STUB_PW_LOG": str(self.log),
+            # The stubs read their instructions from the environment; the recorder is given only the sound
+            # session's variables unless it is told of more.
+            "CODIFY_RECORDER_ENV": "STUB_PW_LOG,STUB_PW_DUMP_FAIL,STUB_PW_RECORD_FAIL,STUB_PW_RECORD_SILENT",
         })
         env.start()
         self.addCleanup(env.stop)
@@ -148,6 +151,61 @@ class SpeechCase(unittest.IsolatedAsyncioTestCase):
     def recordings(self) -> list[str]:
         folder = home.codify_home() / "dictation"
         return sorted(p.name for p in folder.glob("*")) if folder.exists() else []
+
+
+class TestWhatTheRecorderIsGiven(SpeechCase):
+    def test_a_variable_the_person_names_is_handed_over(self) -> None:
+        from engine.speech import _recorder_env
+
+        given = _recorder_env({"PATH": "/usr/bin", "MY_SOUND_THING": "1", "OPENAI_API_KEY": "sk-x",
+                               "CODIFY_RECORDER_ENV": "MY_SOUND_THING"})
+        self.assertIn("MY_SOUND_THING", given)
+        self.assertNotIn("OPENAI_API_KEY", given)
+
+    def test_the_engines_credentials_are_not_handed_to_the_recorder(self) -> None:
+        from engine.speech import _recorder_env
+
+        given = _recorder_env({
+            "PATH": "/usr/bin", "HOME": "/home/x", "XDG_RUNTIME_DIR": "/run/user/1000",
+            "PIPEWIRE_REMOTE": "pipewire-0", "PULSE_SERVER": "unix:/x", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x",
+            "OPENAI_API_KEY": "sk-secret", "ANTHROPIC_API_KEY": "sk-ant-secret", "CODIFY_BOOT_TOKEN": "tok",
+            "GITHUB_TOKEN": "ghp_x",
+        })
+        self.assertEqual(
+            {"PATH", "HOME", "XDG_RUNTIME_DIR", "PIPEWIRE_REMOTE", "PULSE_SERVER", "DBUS_SESSION_BUS_ADDRESS"},
+            set(given),
+        )
+
+    async def test_the_started_recorder_really_runs_without_them(self) -> None:
+        env_log = self.root / "env.log"
+        _executable(self.bin / "pw-record", "#!/bin/sh\nenv > " + str(env_log) + "\nsleep 5\n")
+        self.keychain.set_provider_key("openai", KEY)
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-should-not-reach-it", "XDG_RUNTIME_DIR": "/run/x"}):
+            self.recorder.start()
+        deadline = time.time() + 5
+        while not env_log.exists() and time.time() < deadline:
+            await asyncio.sleep(0.05)
+        text = env_log.read_text(encoding="utf-8") if env_log.exists() else ""
+        self.assertIn("XDG_RUNTIME_DIR=/run/x", text)
+        self.assertNotIn("OPENAI_API_KEY", text)
+
+
+class TestRecordingsLeftByAKilledEngine(SpeechCase):
+    def test_they_are_swept_at_boot_and_nothing_else_is_touched(self) -> None:
+        from engine.speech import sweep_recordings
+
+        folder = home.codify_home() / "dictation"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "a.wav").write_bytes(b"RIFF")
+        (folder / "b.wav").write_bytes(b"RIFF")
+        (folder / "notes.txt").write_text("not a recording", encoding="utf-8")
+        self.assertEqual(2, sweep_recordings())
+        self.assertEqual(["notes.txt"], self.recordings())
+
+    def test_a_missing_folder_is_nothing_to_sweep(self) -> None:
+        from engine.speech import sweep_recordings
+
+        self.assertEqual(0, sweep_recordings())
 
 
 class TestVoiceSettings(SpeechCase):

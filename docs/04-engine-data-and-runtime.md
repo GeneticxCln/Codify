@@ -475,6 +475,8 @@ CREATE TABLE engine_settings (
 -- count-based retention policy (`stats_retention_days`); only the newest
 -- `stats_retention_days` active days are ever frozen, so a pruned day is not
 -- frozen again on the next read, and one read freezes at most 31 days, newest first.
+-- A day that began before `coverage.since` (the instant from which a capped read is complete) is not frozen
+-- at all: a frozen row is never recomputed, so one built from a cut read would stay wrong.
 CREATE TABLE stats_snapshots (
   day TEXT PRIMARY KEY,
   document TEXT NOT NULL, -- the full overview document, JSON

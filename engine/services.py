@@ -627,7 +627,8 @@ class WorkspaceService:
                     f"no file at {relative!r} in this workspace — pin a contract that exists",
                 )
             try:
-                sniff = target.read_bytes()[:BINARY_SNIFF_BYTES]
+                with target.open("rb") as handle:
+                    sniff = handle.read(BINARY_SNIFF_BYTES)
             except OSError as exc:
                 raise ApiError(
                     400, "design_contract_unreadable",
@@ -1307,7 +1308,9 @@ class GoalService:
         self._db.commit()
         return goal
 
-    def turn_history(self, conversation_id: str, limit: int = 12) -> list[dict[str, str]]:
+    def turn_history(
+        self, conversation_id: str, limit: int = 12, *, exclude_goal_id: str | None = None,
+    ) -> list[dict[str, str]]:
         """This thread's earlier turns as (prompt, reply) pairs, oldest first.
 
         Derived from rows that already exist rather than stored, so there is no
@@ -1320,12 +1323,16 @@ class GoalService:
         is still returned, with an empty reply. Dropping it would lose the fact
         that the user asked something, and the next turn's model would then be
         told about a conversation with a hole in it.
+
+        `exclude_goal_id` is the turn being answered. It is already a row in the thread by the time it runs, so
+        without it the model was shown the question it was about to answer as an earlier turn, with
+        "(no answer)" under it.
         """
         rows = self._db.execute(
             """SELECT id, title, description FROM goals
-               WHERE conversation_id = ? AND mode = 'chat'
+               WHERE conversation_id = ? AND mode = 'chat' AND id IS NOT ?
                ORDER BY created_at DESC, id DESC LIMIT ?""",
-            (conversation_id, max(0, int(limit))),
+            (conversation_id, exclude_goal_id, max(0, int(limit))),
         ).fetchall()
         out: list[dict[str, str]] = []
         for r in reversed(rows):
@@ -1482,10 +1489,13 @@ class GoalService:
         if window_days > 0:
             cutoff = (time.time() if now is None else now) - window_days * 86_400.0
         scan = max(1, int(limit or MAX_SCAN_EVENTS))
+        # The id rides in the same query as the rows it names. A second query for "every event id in the
+        # workspace" to match them up afterwards read the whole table, on the event loop, at every run's end.
+        id_column = ", e.id AS id" if with_ids else ""
         rows = self._db.execute(
             f"""SELECT e.goal_id AS goal_id, e.step_id AS step_id, e.type AS type,
                        e.payload AS payload, e.timestamp AS timestamp,
-                       e.sequence AS sequence, g.title AS goal_title
+                       e.sequence AS sequence, g.title AS goal_title{id_column}
                 FROM events e
                 JOIN goals g ON g.id = e.goal_id
                 WHERE g.workspace_id = ?
@@ -1501,20 +1511,6 @@ class GoalService:
         for row in rows:
             if isinstance(row["payload"], str):
                 row["payload"] = scrub_payload_text(row["payload"])
-        if with_ids:
-            ids = self._db.execute(
-                """SELECT goal_id, step_id, type, sequence, id FROM events
-                   WHERE goal_id IN (
-                     SELECT id FROM goals WHERE workspace_id = ?
-                   )""",
-                (workspace_id,),
-            ).fetchall()
-            by_key: dict[tuple[str, str, str, int], str] = {}
-            for r in ids:
-                by_key[(r["goal_id"], r["step_id"] or "", r["type"], r["sequence"])] = r["id"]
-            for row in rows:
-                key = (row["goal_id"], row["step_id"] or "", row["type"], row["sequence"])
-                row["id"] = by_key.get(key, "")
         return rows
 
     def usage_audit_events(
@@ -1647,15 +1643,30 @@ class GoalService:
                     prior = json.loads(existing["evidence"] or "[]")
                 except (TypeError, ValueError):
                     prior = []
+                known = {str(e) for e in prior}
                 merged = list(dict.fromkeys([*evidence, *[str(e) for e in prior]]))
-                self._db.execute(
-                    """UPDATE observations SET lesson = ?, example = ?,
-                       proof = proof + ?, evidence = ?, refined_at = ?
-                       WHERE workspace_id = ? AND subject = ?""",
-                    (str(obs.get("lesson") or ""), str(obs.get("example") or ""),
-                     max(1, int(obs.get("proof") or 1)),
-                     json.dumps(merged[:20]), now, workspace_id, subject),
-                )
+                # Proof grows by the events not already counted. Every run's end re-scans the same recent
+                # events, so adding the scan's whole count each time made one error read "proof: 4" after four
+                # runs that never saw it again, and a belief nobody re-observed stayed out of the fade.
+                fresh = [e for e in evidence if e not in known]
+                if fresh:
+                    gained = max(1, min(int(obs.get("proof") or 1), len(fresh)))
+                    self._db.execute(
+                        """UPDATE observations SET lesson = ?, example = ?,
+                           proof = proof + ?, evidence = ?, refined_at = ?
+                           WHERE workspace_id = ? AND subject = ?""",
+                        (str(obs.get("lesson") or ""), str(obs.get("example") or ""),
+                         gained, json.dumps(merged[:20]), now, workspace_id, subject),
+                    )
+                else:
+                    # Nothing new was seen: the wording may have changed (a recovery), the count and the
+                    # time it was last seen may not.
+                    self._db.execute(
+                        """UPDATE observations SET lesson = ?, example = ?
+                           WHERE workspace_id = ? AND subject = ?""",
+                        (str(obs.get("lesson") or ""), str(obs.get("example") or ""),
+                         workspace_id, subject),
+                    )
             written += 1
         self._db.commit()
         return written
