@@ -235,9 +235,12 @@ class _Steps(_Design):
                 self._log(goal_id, step.id, "info", "cancelled — skipping the summary for this step")
                 return
             async with self._stage(goal_id, "scribe", "scribe", step.id) as scribe_stage:
-                scribe_stage.record(
-                    await self._scribe(goal_id, step, summaries, ws.root_path, goal.dry_run, outcome)
-                )
+                recorded = await self._scribe(goal_id, step, summaries, ws.root_path, goal.dry_run, outcome)
+                scribe_stage.record(recorded)
+            if recorded == "cancelled":
+                # The commit was skipped because the goal was cancelled; the step is not done, and saying
+                # so would hide that nothing was recorded for it.
+                return
         except CriticRejection:
             # Step remains IN_PROGRESS with review_notes, goal is PAUSED; human retry required
             return
@@ -1035,8 +1038,22 @@ class _Steps(_Design):
         )
         commands_left = MAX_CRITIC_COMMANDS
         prompt = base_prompt
+
+        def accept(reply: Any) -> None:
+            # `reasons` are joined into the step's review notes and shown to the person. A list of objects made
+            # `"\n".join` raise a `TypeError` that nothing around the step names (the goal failed as an internal
+            # error with its step unretryable), and a bare string was joined character by character. The model is
+            # told what is wrong and asked once more, like any reply the engine cannot use.
+            if not isinstance(reply, dict):
+                return
+            reasons_value = reply.get("reasons")
+            if reasons_value is None or reasons_value == []:
+                return
+            if not isinstance(reasons_value, list) or not all(isinstance(r, str) for r in reasons_value):
+                raise ValueError("the critic's reasons must be a list of text, one reason per item")
+
         while True:
-            out = await self.orchestrator.run_agent("critic", goal_id, step.id, prompt)
+            out = await self.orchestrator.run_agent("critic", goal_id, step.id, prompt, accept=accept)
             decision = out.get("decision")
             reasons = out.get("reasons") or []
             requested = out.get("run_command")

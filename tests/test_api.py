@@ -902,6 +902,47 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(r.status_code, 422)
 
+    async def test_input_a_client_can_send_is_a_refusal_and_never_a_500(self) -> None:
+        """Three spellings that reached a handler's own exception instead of a validation error."""
+        ws_dir = self.root / "ws-hostile"
+        ws_dir.mkdir()
+        ws_id = (
+            await self.client.post(
+                "/workspaces", headers=self.headers, json={"name": "HOSTILE", "root_path": str(ws_dir)}
+            )
+        ).json()["id"]
+
+        # A whitespace title over the 200-character cap used to split down to "" and fail Goal's own check.
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": " " * 250, "description": ""},
+        )
+        self.assertLess(r.status_code, 500, r.text)
+
+        goal = (
+            await self.client.post(
+                "/goals", headers=self.headers,
+                json={"workspace_id": ws_id, "title": "real", "description": "d"},
+            )
+        ).json()
+        # A version past SQLite's integer range overflowed the binding.
+        for action in ("start", "pause", "cancel"):
+            r = await self.client.post(
+                f"/goals/{goal['id']}/{action}", headers=self.headers, json={"expected_version": 2**63}
+            )
+            self.assertEqual(r.status_code, 422, f"{action}: {r.text}")
+        r = await self.client.patch(
+            f"/goals/{goal['id']}/steps/none", headers=self.headers,
+            json={"expected_version": 2**63, "title": "t"},
+        )
+        self.assertEqual(r.status_code, 422, r.text)
+
+        # A path component over the filesystem's name limit raised ENAMETOOLONG out of `is_file`.
+        r = await self.client.put(
+            f"/workspaces/{ws_id}/design-contract", headers=self.headers, json={"path": "a" * 300 + ".md"}
+        )
+        self.assertIn(r.status_code, (400, 422), r.text)
+
     async def test_a_design_goal_mode_round_trips_and_an_unknown_one_is_refused(self) -> None:
         """A goal's mode is what the client asked for and what storage keeps.
 

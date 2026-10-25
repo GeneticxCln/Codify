@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import difflib
 import hashlib
 import os
@@ -368,13 +369,17 @@ class FileSystemService:
             path = self.resolve(rel)
             if not path.is_file():
                 return None
-            size = path.stat().st_size
-            if size > MAX_DIFF_BYTES:
-                raw = path.read_bytes()[:MAX_DIFF_BYTES]
-            else:
-                raw = path.read_bytes()
+            # Only the prefix the cap can use is read, not the whole file to slice it afterwards.
+            with path.open("rb") as fh:
+                raw = fh.read(MAX_DIFF_BYTES)
+                cut = bool(fh.read(1))
             if looks_binary(raw):
                 return None
+            if cut:
+                # The cap is in bytes, so it can fall inside a character. A decoder that is not told the
+                # input has ended holds a trailing partial character back and still raises on bytes that
+                # are not UTF-8 at all, so a cut is not mistaken for binary.
+                return codecs.getincrementaldecoder("utf-8")().decode(raw, final=False)
             return raw.decode("utf-8")
         except (PathEscapeError, OSError, UnicodeDecodeError):
             return None

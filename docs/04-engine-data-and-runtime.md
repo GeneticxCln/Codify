@@ -119,7 +119,15 @@ handed — the verifier's, the critic's read-only probes and the conductor's `ru
 the command's whole process group as soon as it is set (exit `130`, below). A step that was mid-way stays as it
 was left; nothing re-opens `CANCELLED`. A refused cancel (`version_conflict`, `illegal_status`) stops nothing.
 **Pause does not do this**: it asks for a stop between steps, and Start resumes there
-(`tests/test_cancel_stops_work.py`).
+(`tests/test_cancel_stops_work.py`). The recipe's own stage guards (`_cancelled`) treat a `PAUSED` goal as still running, so a
+step that is mid-way finishes its review and its commit; a step whose scribe was cut short by a *cancel* is not recorded as
+`COMPLETED` (`TestCancelStopsBeforeCommit`).
+
+**A goal whose process is gone** (a boot after a crash, a graceful shutdown mid-run) is failed with `engine_restarted` or
+`engine_interrupted`, and its steps are repaired so it can be resumed: the steps that were in flight are marked `FAILED`, or,
+when none was, the first step that never ran. Retry accepts a `FAILED` step and Start refuses a `FAILED` goal, so without this
+the goal could not run again while its log said to retry it (`ExecutorService._fail_interrupted_steps`). The same repair
+applies to any failure raised with no step.
 
 **One driver per goal, held for the whole run** (review of 2026-09-29, finding 2). `run_chat` and `run_planning`
 claim the goal's driver (`claim_driver`) for as long as they run, as `start`, `retry` and `apply` already did.
@@ -1426,6 +1434,10 @@ or `request-changes` with ≥1 reason. See `01` §5.1.
 Both fields are text. A field that is present and is not text (a list or an object, which is truthy) is a reply the
 engine cannot use: the scribe is told which field and asked once more, like any reply `accept` refuses (§4.6), and a
 second such reply fails the step as `agent_output_invalid`. A field that is absent or empty fails at once.
+
+The critic's `reasons` are held to the same rule: they are joined into the step's review notes, so a value that is not a list of
+text (a list of objects, a bare string) is refused by `accept`, the critic is asked once more, and a second such reply fails the
+step as `agent_output_invalid` rather than as an internal error.
 
 ### 4.6 Which target a role is called on
 

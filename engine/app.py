@@ -339,6 +339,11 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
             await watch_task
         except asyncio.CancelledError:
             pass
+        except Exception as exc:
+            # The watcher ends loudly on a bug of its own (`CatalogWatch.run`). That is already over, and
+            # re-raising it here skipped everything below: the goals that were running would stay
+            # recorded as running.
+            print(f"catalog watcher had already stopped: {type(exc).__name__}: {exc}", file=sys.stderr)
         # A goal that was RUNNING a moment ago is not running now. The coroutine
         # driving it stops existing the moment this process does, and nothing else
         # will ever say so: the goal sits in the database claiming to be mid-run
@@ -346,6 +351,14 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
         # than a record. Recording it here is why the desktop shell asks this
         # process to stop before it kills it (`docs/09` §5.4.1) — a hard exit skips
         # this block entirely, and then the boot-time rescue is all there is.
+        # Stopped first: the commands a goal started and the coroutines driving it die with the process, but
+        # until then they keep running (and writing) under a record that says they ended.
+        driven = [gid for gid, tasks in list(_GOAL_TASKS.items()) if any(not t.done() for t in tasks)]
+        for goal_id in driven:
+            _stop_goal(app, goal_id)
+        pending = [t for gid in driven for t in _GOAL_TASKS.get(gid, ()) if not t.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=5)
         for goal_id, previous, message in app.state.goals.fail_orphaned_active_goals(
             "the engine is shutting down"
         ):

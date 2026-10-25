@@ -257,6 +257,16 @@ class ShellTabTestCase(unittest.IsolatedAsyncioTestCase):
         # instead of here.
         self.assertEqual(await self.list_tabs(), [])
 
+    async def test_brackets_nested_past_the_parsers_depth_are_refused_not_a_500(self) -> None:
+        """`json.loads` answers 15,000 brackets with a RecursionError, which is not a ValueError."""
+        response = await self.client.put(
+            "/shell/tabs",
+            json={"key": "deep", "position": 0, "kind": "browser", "payload": "[" * 15000 + "]" * 15000},
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(response.json()["code"], "invalid_tab_payload")
+        self.assertEqual(await self.list_tabs(), [])
+
     async def test_a_client_cannot_invent_the_timings(self) -> None:
         response = await self.client.put(
             "/shell/tabs",

@@ -405,6 +405,51 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Provider Keys", error.payload["message"])
         self.assertEqual(error.payload["role"], "planner")
 
+    async def _two_step_goal_left_running(self) -> tuple[Any, list[PlanStep]]:
+        self.mock_responses["planner"] = {
+            "steps": [
+                {"title": "Step 1", "description": "one", "suggested_paths": []},
+                {"title": "Step 2", "description": "two", "suggested_paths": []},
+            ]
+        }
+        goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="Orphan", description=""))
+        await self.executor.run_planning(goal.id)
+        self.goals.update_status(goal.id, goal.version + 1, "RUNNING")
+        return goal, self.goals.steps(goal.id)
+
+    async def test_a_goal_orphaned_mid_step_can_be_retried(self) -> None:
+        """A restart fails the goal; the step that was in flight must be the one a Retry can pick up.
+
+        The rescue called `_fail` with no step, so the step stayed IN_PROGRESS, `begin_retry` refused it
+        (409 step_not_retryable) and Start refuses a FAILED goal: nothing in the product could resume it,
+        while the log line said 'retry to run it again'.
+        """
+        goal, steps = await self._two_step_goal_left_running()
+        self.executor._set_step(goal.id, steps[0], "IN_PROGRESS")
+
+        for gid, _previous, _message in self.goals.fail_orphaned_active_goals():
+            self.executor._fail(gid, None, "engine_restarted", "engine restarted", role=None)
+
+        after = self.goals.steps(goal.id)
+        self.assertEqual(["FAILED", "PENDING"], [s.status for s in after])
+        failed = self.goals.get(goal.id)
+        self.assertEqual("FAILED", failed.status)
+        retried = self.executor.begin_retry(goal.id, steps[0].id, failed.version)
+        self.assertEqual(steps[0].id, retried.id)
+        self.executor.release_driver(goal.id)
+
+    async def test_a_goal_orphaned_between_steps_offers_the_next_step_to_retry(self) -> None:
+        goal, steps = await self._two_step_goal_left_running()
+        self.executor._set_step(goal.id, steps[0], "COMPLETED")
+
+        for gid, _previous, _message in self.goals.fail_orphaned_active_goals():
+            self.executor._fail(gid, None, "engine_restarted", "engine restarted", role=None)
+
+        self.assertEqual(["COMPLETED", "FAILED"], [s.status for s in self.goals.steps(goal.id)])
+        failed = self.goals.get(goal.id)
+        self.executor.begin_retry(goal.id, steps[1].id, failed.version)
+        self.executor.release_driver(goal.id)
+
     async def test_critic_rejection_and_retry(self) -> None:
         self.mock_responses["planner"] = {
             "steps": [{"title": "Step 1", "description": "Do something", "suggested_paths": []}]
@@ -1272,6 +1317,33 @@ class TestWhatAStepChanges(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("agent_output_invalid", error.payload["code"])
         self.assertEqual(1, len(self.provider.role_calls("scribe")))
 
+    async def test_a_critic_whose_reasons_are_not_text_is_asked_once_more(self) -> None:
+        """`reasons` are joined into the review notes. A list of objects raised a `TypeError` out of `join`, which
+        failed the goal as an internal error and left the step unretryable."""
+        goal, _ = await self._run({
+            "fixer": {"files": [{"path": "a.py", "action": "update", "content": "value = 9\n"}]},
+            "critic": [
+                {"decision": "request-changes", "reasons": [{"issue": "no tests"}]},
+                {"decision": "approve", "reasons": []},
+            ],
+            "scribe": {"summary": "did it", "commit_message": "feat: nine"},
+        })
+
+        calls = self.provider.role_calls("critic")
+        self.assertEqual(2, len(calls), "the critic is asked once more, no more")
+        self.assertIn("reasons", calls[1][2], "the reason is put to the model")
+        self.assertEqual("COMPLETED", self.goals.steps(goal.id)[0].status)
+
+    async def test_a_critic_that_never_answers_with_text_reasons_fails_the_step_by_name(self) -> None:
+        goal, _ = await self._run({
+            "fixer": {"files": [{"path": "a.py", "action": "update", "content": "value = 10\n"}]},
+            "critic": [{"decision": "request-changes", "reasons": "add tests"}] * 2,
+        })
+
+        error = next(e for e in self.goals.events_after(goal.id, 0) if e.type == "error")
+        self.assertEqual("agent_output_invalid", error.payload["code"])
+        self.assertEqual(2, len(self.provider.role_calls("critic")))
+
     async def test_the_commit_leaves_the_users_own_work_alone(self) -> None:
         (self.root / "user_wip.py").write_text("half-finished\n", encoding="utf-8")
         (self.root / "user_staged.py").write_text("staged by hand\n", encoding="utf-8")
@@ -1595,6 +1667,46 @@ class TestCancelStopsBeforeCommit(unittest.IsolatedAsyncioTestCase):
                          "the scribe must not run for a cancelled step")
         self.assertEqual([], self.executor.git.commits,  # type: ignore[attr-defined]
                          "nothing may be committed after a cancel, even from the late guard")
+
+
+    async def _park_then(self, status: str) -> None:
+        """Start the step, wait until the held call is parked, move the goal to `status`, release, finish."""
+        await self.executor.run_planning(self.goal.id)
+        step = self.goals.steps(self.goal.id)[0]
+        self.goals.update_status(self.goal.id, self.goal.version + 1, "RUNNING")
+        run_task = asyncio.create_task(self.executor.run_step(self.goal.id, step.id))
+        deadline = time.time() + 5
+        while not (self.root / "x.txt").exists() and time.time() < deadline:
+            await asyncio.sleep(0.01)
+        self.assertTrue(self.hold_released.wait(5), "the held call never parked")
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, g.version, status)
+        self.hold.set()
+        await asyncio.wait_for(run_task, timeout=5)
+
+    async def test_pause_during_the_verifier_lets_the_step_finish_and_commit(self) -> None:
+        """Pause asks for a stop between steps (docs/04 section 1.2); only Cancel stops the step that is running.
+
+        Treating a pause as a cancel abandoned the step after the fixer had written: no review, no commit, the step
+        left IN_PROGRESS, and a resume called the fixer again over files that were already there.
+        """
+        await self._park_then("PAUSED")
+
+        self.assertEqual(self.goals.get(self.goal.id).status, "PAUSED")
+        self.assertEqual(1, len(self.provider.critic_calls), "the paused step is still judged")
+        self.assertEqual(1, len(self.provider.scribe_calls), "and still recorded")
+        self.assertEqual(1, len(self.executor.git.commits))  # type: ignore[attr-defined]
+        self.assertEqual("COMPLETED", self.goals.steps(self.goal.id)[0].status)
+
+    async def test_cancel_during_the_scribe_does_not_mark_the_step_completed(self) -> None:
+        """The scribe answers 'cancelled' and nothing is committed; the step must not then be recorded as done."""
+        self.provider.hold_role = "scribe"
+        await self._park_then("CANCELLED")
+
+        self.assertEqual(self.goals.get(self.goal.id).status, "CANCELLED")
+        self.assertEqual([], self.executor.git.commits,  # type: ignore[attr-defined]
+                         "nothing may be committed after a cancel")
+        self.assertNotEqual("COMPLETED", self.goals.steps(self.goal.id)[0].status)
 
 
 class _HoldingProvider(BaseProvider):

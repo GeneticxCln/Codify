@@ -616,7 +616,12 @@ class WorkspaceService:
                     f"{relative!r} resolves outside this workspace — a brand contract "
                     f"must be a file inside {workspace.root_path}",
                 ) from exc
-            if not target.is_file():
+            try:
+                is_file = target.is_file()
+            except OSError:
+                # A name over the filesystem's limit (ENAMETOOLONG) names no file, however it is asked.
+                is_file = False
+            if not is_file:
                 raise ApiError(
                     400, "design_contract_missing",
                     f"no file at {relative!r} in this workspace — pin a contract that exists",
@@ -796,7 +801,9 @@ def split_title_description(title: str, description: str) -> tuple[str, str]:
         if cut > 0:
             head = head[:cut]
     full = f"{title}\n\n{description}" if description else title
-    return head.strip(), full[:20000]
+    # A title of nothing but whitespace strips to "", which `Goal` refuses; keep the unstripped head then,
+    # as a short whitespace title is kept.
+    return head.strip() or head, full[:20000]
 
 
 class ConversationService:
@@ -1090,7 +1097,7 @@ class ShellTabService:
         """
         try:
             json.loads(body.payload)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, RecursionError) as exc:
             raise ApiError(
                 422,
                 "invalid_tab_payload",

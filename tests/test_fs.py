@@ -175,6 +175,23 @@ class TestWhatApplyActuallyChanged(unittest.TestCase):
 
         self.assertEqual((self.root / "fresh.sh").stat().st_mode & 0o111, 0)
 
+    def test_a_large_file_cut_inside_a_character_still_reads_as_text(self) -> None:
+        """The cap is in bytes, and a multibyte character can straddle it; that is a cut, not binary."""
+        from engine.fs import MAX_DIFF_BYTES
+
+        body = "a" * (MAX_DIFF_BYTES - 1) + "é" + "b" * 10
+        (self.root / "big.txt").write_bytes(body.encode("utf-8"))
+        text = self.fs.read_text_or_none("big.txt")
+        self.assertIsNotNone(text)
+        assert text is not None
+        self.assertEqual(text, "a" * (MAX_DIFF_BYTES - 1))
+
+    def test_a_large_file_that_is_not_utf8_is_still_not_text(self) -> None:
+        from engine.fs import MAX_DIFF_BYTES
+
+        (self.root / "bad.txt").write_bytes(b"\xff\xfe" + b"a" * MAX_DIFF_BYTES)
+        self.assertIsNone(self.fs.read_text_or_none("bad.txt"))
+
     def test_read_text_or_none_is_none_exactly_when_there_is_no_text(self) -> None:
         (self.root / "ok.txt").write_text("text\n", encoding="utf-8")
         (self.root / "blob.bin").write_bytes(b"\x00\x01binary")
