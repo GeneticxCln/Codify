@@ -30,6 +30,7 @@ from engine.ask import (
 )
 from engine.conductor import ASK_USER, TOOLS, Conductor, EndTurn
 from engine.conductor_tools import ConductorTools
+from engine.models import TurnCreate
 from engine.skills import load_skills
 from engine.toolcall import DIALECTS, ToolReply, schema_problems
 from tests.test_conductor import ConductorTestCase, _call, _ToolProvider
@@ -315,6 +316,23 @@ class TestTheTurnThatAsks(ConductorTestCase):
         self.assertEqual({"text": "Which database?", "options": ["SQLite", "Postgres"]}, logs[0]["question"])
         self.assertEqual("COMPLETED", self.goals.get(self.goal.id).status)
         self.assertEqual([], self.goals.steps(self.goal.id))
+
+    async def test_the_next_turn_sees_the_thread_once_and_not_itself(self) -> None:
+        """The conductor is given the history as messages, so it must not also be in the prompt, and the turn
+        being answered is not an earlier turn: it showed up as 'User: ...' with 'Assistant: (no answer)'."""
+        first = _ToolProvider([
+            ToolReply(tool_calls=[_call("ask_user", question="Which database?", options=["SQLite", "Postgres"])]),
+        ])
+        await self._executor(first).run_chat(self.goal.id)
+        second_goal = self.goals.create_turn(self.thread.id, TurnCreate(prompt="Postgres"))
+
+        second = _ToolProvider([ToolReply(text="Postgres it is.")])
+        await self._executor(second).run_chat(second_goal.id)
+
+        sent = second.seen_messages[0]
+        text = "\n".join(str(m.get("content")) for m in sent)
+        self.assertEqual(1, text.count("Which database?"), "the earlier turn reached the model twice")
+        self.assertNotIn("(no answer)", text, "the turn being answered was shown as an unanswered earlier turn")
 
     async def test_a_turn_that_did_not_ask_carries_no_question(self) -> None:
         provider = _ToolProvider([ToolReply(text="Just an answer.")])

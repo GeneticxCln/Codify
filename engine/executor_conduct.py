@@ -1030,10 +1030,14 @@ class _Conduct(_Plan):
         menu = self.conductor_menu(goal_id)
 
         history = (
-            self.goals.turn_history(goal.conversation_id, TURN_HISTORY_TURNS)
+            self.goals.turn_history(goal.conversation_id, TURN_HISTORY_TURNS, exclude_goal_id=goal.id)
             if goal.conversation_id else []
         )
-        prompt = prompt_override if prompt_override is not None else self._turn_prompt(goal)
+        # The earlier turns go to the conductor as messages (`history`), so the prompt is not given them a
+        # second time.
+        prompt = (
+            prompt_override if prompt_override is not None else self._turn_prompt(goal, with_history=False)
+        )
         prompt = f"{prompt}\n\n{self._memory_brief(goal)}\n\n{self._intent_brief(intent)}"
         notes = self._todo_brief(goal_id)
         if notes:
@@ -1190,7 +1194,7 @@ class _Conduct(_Plan):
         )
         return _as_prose(str(raw)) or "(no answer)"
 
-    def _turn_prompt(self, goal: Goal) -> str:
+    def _turn_prompt(self, goal: Goal, *, with_history: bool = True) -> str:
         """The user's words, plus this thread's earlier turns.
 
         The history is capped by `GoalService.turn_history` and trimmed here, so
@@ -1198,8 +1202,8 @@ class _Conduct(_Plan):
         first, because the most recent exchange is what a follow-up refers to.
         """
         parts: list[str] = []
-        if goal.conversation_id:
-            history = self.goals.turn_history(goal.conversation_id, TURN_HISTORY_TURNS)
+        if goal.conversation_id and with_history:
+            history = self.goals.turn_history(goal.conversation_id, TURN_HISTORY_TURNS, exclude_goal_id=goal.id)
             if history:
                 lines = ["Earlier in this conversation:"]
                 for turn in history:

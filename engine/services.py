@@ -1307,7 +1307,9 @@ class GoalService:
         self._db.commit()
         return goal
 
-    def turn_history(self, conversation_id: str, limit: int = 12) -> list[dict[str, str]]:
+    def turn_history(
+        self, conversation_id: str, limit: int = 12, *, exclude_goal_id: str | None = None,
+    ) -> list[dict[str, str]]:
         """This thread's earlier turns as (prompt, reply) pairs, oldest first.
 
         Derived from rows that already exist rather than stored, so there is no
@@ -1320,12 +1322,16 @@ class GoalService:
         is still returned, with an empty reply. Dropping it would lose the fact
         that the user asked something, and the next turn's model would then be
         told about a conversation with a hole in it.
+
+        `exclude_goal_id` is the turn being answered. It is already a row in the thread by the time it runs, so
+        without it the model was shown the question it was about to answer as an earlier turn, with
+        "(no answer)" under it.
         """
         rows = self._db.execute(
             """SELECT id, title, description FROM goals
-               WHERE conversation_id = ? AND mode = 'chat'
+               WHERE conversation_id = ? AND mode = 'chat' AND id IS NOT ?
                ORDER BY created_at DESC, id DESC LIMIT ?""",
-            (conversation_id, max(0, int(limit))),
+            (conversation_id, exclude_goal_id, max(0, int(limit))),
         ).fetchall()
         out: list[dict[str, str]] = []
         for r in reversed(rows):
