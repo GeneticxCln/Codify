@@ -108,6 +108,31 @@ def _client(
     return httpx.AsyncClient(transport=httpx.MockTransport(_handler(routes, calls)))
 
 
+class TestADiscoveryErrorNeverCarriesTheKey(unittest.IsolatedAsyncioTestCase):
+    async def test_a_header_the_client_refuses_is_reported_without_its_value(self) -> None:
+        """httpx names the whole header value when it will not send one; a key with a newline is that."""
+
+        async def hold(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await asyncio.sleep(1)
+            writer.close()
+
+        server = await asyncio.start_server(hold, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            for protocol in ("openai_compat", "anthropic", "google"):
+                for key in ("plainsecretvalue99\n", "sk-ABCDEFGH12345678\n"):
+                    with self.subTest(protocol=protocol, key=key):
+                        target = ProviderTarget("p", protocol, f"http://127.0.0.1:{port}/v1", api_key=key)
+                        async with httpx.AsyncClient(trust_env=False) as client:
+                            result = await discover_provider(target, client=client)
+                        self.assertFalse(result.ok)
+                        self.assertTrue(result.error)
+                        self.assertNotIn(key.strip(), result.error or "")
+        finally:
+            server.close()
+            await server.wait_closed()
+
+
 class TestProtocolDiscovery(unittest.IsolatedAsyncioTestCase):
     async def test_openai_compat(self) -> None:
         calls: list[httpx.Request] = []

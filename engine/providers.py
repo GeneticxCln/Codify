@@ -239,7 +239,9 @@ def _interrupted(label: str, text: str, exc: httpx.HTTPError) -> ProviderError:
     """A stream that failed after it began. Not retried: the caller has already shown `text`."""
     return ProviderError(
         "provider_unreachable",
-        f"{label} stream interrupted after {len(text)} characters: {type(exc).__name__}: {exc}",
+        redact_secrets(
+            f"{label} stream interrupted after {len(text)} characters: {type(exc).__name__}: {exc}"
+        ),
     )
 
 
@@ -634,7 +636,7 @@ class BaseProvider(ABC):
         except ProviderError as exc:
             return False, exc.message
         except Exception as exc:
-            return False, str(exc)
+            return False, redact_secrets(str(exc))
         finally:
             _attempts.reset(once)
 

@@ -31,7 +31,12 @@ from typing import Any
 import httpx
 
 from engine.models import BUILTIN_PROVIDERS
-from engine.providers import ProviderError, key_destination_problem, validate_local_base_url
+from engine.providers import (
+    ProviderError,
+    key_destination_problem,
+    redact_secrets,
+    validate_local_base_url,
+)
 
 DISCOVERY_TIMEOUT_S = 8.0
 MAX_MODELS_PER_PROVIDER = 500
@@ -458,8 +463,16 @@ async def discover_provider(
             target.provider, target.protocol, ok=False, error=f"HTTP {status}{hint}"
         )
     except Exception as exc:
+        # An exception's text can carry the request it died on: httpx names the whole header value
+        # when it refuses one, and a key saved with a trailing newline is exactly that. The key is
+        # redacted as written and as a repr would spell it (`\n` for a newline), then by shape.
+        key = target.api_key
+        known = (key, key.strip(), key.encode("unicode_escape").decode("ascii"))
         return DiscoveryResult(
-            target.provider, target.protocol, ok=False, error=f"{type(exc).__name__}: {exc}"
+            target.provider,
+            target.protocol,
+            ok=False,
+            error=redact_secrets(f"{type(exc).__name__}: {exc}", known),
         )
     finally:
         if owns_client:
