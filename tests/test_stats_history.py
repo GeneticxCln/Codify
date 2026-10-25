@@ -355,6 +355,18 @@ class TestRetentionDoesNotCauseRework(StatsHistoryTestCase):
         self.assertEqual(len(self.days()), 3)
         self.assertEqual(self.snap.pending_days(goals, events, now, keep=3), [], "the 5 pruned days are asked for again")
 
+    def test_a_day_the_read_only_partly_covers_is_not_frozen(self) -> None:
+        """When a cap cut the read, `since` is the instant from which the numbers are complete. A day that began
+        before it would be frozen with the goals or events the cap left out missing, and a frozen row is never
+        recomputed."""
+        goals, events = self.history_for(10)
+        now = noon(10)
+        since = noon(6)  # days 0..5 started before the numbers are complete; day 6 began 12 hours before it
+        due = self.snap.pending_days(goals, events, now, since=since)
+        self.assertEqual(sorted(due), sorted(utc_day(noon(d)) for d in range(7, 10)))
+        self.snap.maybe_snapshot(self.conn, goals, events, now, since=since)
+        self.assertEqual(sorted(self.days()), sorted(utc_day(noon(d)) for d in range(7, 10)))
+
     def test_no_policy_keeps_asking_for_every_unfrozen_day(self) -> None:
         goals, events = self.history_for(5)
         self.assertEqual(len(self.snap.pending_days(goals, events, noon(5), keep=0)), 5)

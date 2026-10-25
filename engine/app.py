@@ -2356,7 +2356,7 @@ async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, 
     try:
         snapshots: StatsSnapshotService = request.app.state.stats_snapshots
         retention = request.app.state.settings.get_int("stats_retention_days")
-        due = snapshots.pending_days(goals, parsed, now, retention)
+        due = snapshots.pending_days(goals, parsed, now, retention, coverage.get("since"))
         if due:
             documents = await asyncio.to_thread(snapshots.build_documents, goals, parsed, due)
             snapshots.store(documents, now)
