@@ -472,6 +472,21 @@ def validate_local_base_url(url: str) -> None:
         raise ProviderError("invalid_base_url", "Local provider must use http (loopback only)")
 
 
+def trusts_proxy_env(base_url: str) -> bool:
+    """Whether a client for `base_url` may read `HTTP_PROXY` and friends from the environment.
+
+    An httpx client does by default, and a proxy set without a `NO_PROXY` entry for loopback would be
+    handed the prompt, the source and any key meant for a local model. A loopback address is asked
+    directly; a remote provider still goes through the proxy, which a corporate network may require.
+    A client given its own transport (a test's) ignores the proxy either way.
+    """
+    try:
+        host = urlparse(base_url or "").hostname or ""
+    except ValueError:
+        return True
+    return not _is_loopback_host(host)
+
+
 def key_destination_problem(base_url: str) -> str | None:
     """Why a stored API key must not be sent to `base_url`, or None when it may be.
 
@@ -665,7 +680,7 @@ class AnthropicProvider(BaseProvider):
 
     async def _messages(self, body: dict[str, Any]) -> Any:
         """POST /v1/messages: the one way both calls reach the API, so they cannot name different versions."""
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             return await post_json(
                 client,
                 f"{self._base_url}/v1/messages",
@@ -779,7 +794,7 @@ class OpenAICompatProvider(BaseProvider):
             "content-type": "application/json",
         }
         by_name = {t.name: t for t in tools}
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             data = await post_json(
                 client, url, label="openai_compat", headers=headers,
                 json={
@@ -860,7 +875,7 @@ class OpenAICompatProvider(BaseProvider):
                     return await self.complete(system_prompt, user_prompt, model, temperature, max_tokens)
                 finally:
                     self.on_delta = saved
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             try:
                 data = await post_json(
                     client,
@@ -896,7 +911,7 @@ class OpenAICompatProvider(BaseProvider):
         root = self._base_url.rsplit("/", 1)[0] if self._base_url.endswith("/chat/completions") else self._base_url
         models_url = f"{root}/models"
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=10, trust_env=trusts_proxy_env(self._base_url)) as client:
                 resp = await client.get(
                     models_url,
                     headers={"Authorization": f"Bearer {self._api_key}"},
@@ -918,7 +933,7 @@ class OpenAICompatProvider(BaseProvider):
         url = f"{self._base_url}/chat/completions"
         text = ""
         data: dict[str, Any] = {}
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             # Opening the stream is retried like any call; reading it is not (see `open_stream`).
             async with open_stream(
                 client, url, label="openai_compat", headers=headers, json={**payload, "stream": True}
@@ -992,7 +1007,7 @@ class OllamaProvider(BaseProvider):
         options: dict[str, Any] = {"temperature": temperature, "num_predict": max_tokens}
         if num_ctx is not None:
             options["num_ctx"] = num_ctx
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=180, trust_env=trusts_proxy_env(self._base_url)) as client:
             data = await post_json(
                 client,
                 f"{self._base_url}/api/chat",
@@ -1054,7 +1069,7 @@ class OllamaProvider(BaseProvider):
         # Nesting it under `options` is accepted-but-ignored, which would look
         # exactly like a setting that does nothing.
         keep_alive_field = {"keep_alive": keep_alive} if keep_alive is not None else {}
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=180, trust_env=trusts_proxy_env(self._base_url)) as client:
             if not stream:
                 data = await post_json(
                     client,
@@ -1151,7 +1166,7 @@ class GoogleProvider(BaseProvider):
         # wrong is a 400 from someone else's API, not an error in our code.
         url = f"{self._base_url}/models/{model}:generateContent"
         by_name = {t.name: t for t in tools}
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             data = await post_json(
                 client, url, label="google",
                 json={
@@ -1209,7 +1224,7 @@ class GoogleProvider(BaseProvider):
         }
         # The key travels in a header, not the URL: a query-string credential
         # lands in proxy/server access logs, and Google accepts the header form.
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             data = await post_json(
                 client, url, label="google", json=payload,
                 headers={"x-goog-api-key": self._api_key},

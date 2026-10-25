@@ -37,6 +37,11 @@ one (so `ProviderFactory.build` holds it for a row that got into the database so
 model discovery reports the refusal instead of requesting. The message names the host, never the URL,
 because a base URL can carry userinfo.
 
+A request to this machine also does not travel through a proxy: the provider, discovery and speech clients do not read
+the environment's proxy settings when the address is loopback (`providers.trusts_proxy_env`), because an `HTTP_PROXY` set
+without a loopback `NO_PROXY` would otherwise be handed the prompt, the source and the key meant for a local model. Remote providers
+still honour the environment's proxy.
+
 *What this does not do.* An `https` endpoint is trusted as much as its owner: pointing a keyed
 provider at `https://attacker.example` is still accepted, because a corporate gateway or OpenRouter
 looks exactly the same. Doing that needs the boot token, and a boot-token holder can already run the

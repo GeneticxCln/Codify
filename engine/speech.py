@@ -38,7 +38,14 @@ import httpx
 
 from engine import home
 from engine.models import BUILTIN_PROVIDERS
-from engine.providers import Keychain, ProviderError, key_destination_problem, post_bytes, post_json
+from engine.providers import (
+    Keychain,
+    ProviderError,
+    trusts_proxy_env,
+    key_destination_problem,
+    post_bytes,
+    post_json,
+)
 from engine.services import AgentRegistryService, ApiError, SettingsService, custom_provider_address
 from engine.spawn_guard import guarded_argv, guarded_env
 
@@ -135,7 +142,9 @@ async def transcribe(
     data = {"model": target.model, "response_format": "json"}
     if language.strip():
         data["language"] = language.strip()
-    async with httpx.AsyncClient(timeout=SPEECH_TIMEOUT_S, transport=transport) as client:
+    async with httpx.AsyncClient(
+        timeout=SPEECH_TIMEOUT_S, transport=transport, trust_env=trusts_proxy_env(target.base_url)
+    ) as client:
         reply = await post_json(
             client, f"{target.base_url}/audio/transcriptions",
             label=f"{target.provider} transcription",
@@ -155,7 +164,9 @@ async def synthesize(
     *, transport: httpx.AsyncBaseTransport | None = None,
 ) -> bytes:
     """Spoken audio (WAV) for `text`, from the provider's `/audio/speech`."""
-    async with httpx.AsyncClient(timeout=SPEECH_TIMEOUT_S, transport=transport) as client:
+    async with httpx.AsyncClient(
+        timeout=SPEECH_TIMEOUT_S, transport=transport, trust_env=trusts_proxy_env(target.base_url)
+    ) as client:
         audio = await post_bytes(
             client, f"{target.base_url}/audio/speech",
             label=f"{target.provider} speech",

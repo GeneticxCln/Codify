@@ -33,6 +33,7 @@ import httpx
 from engine.models import BUILTIN_PROVIDERS
 from engine.providers import (
     ProviderError,
+    trusts_proxy_env,
     key_destination_problem,
     redact_secrets,
     validate_local_base_url,
@@ -447,7 +448,9 @@ async def discover_provider(
 
     owns_client = client is None
     if client is None:
-        client = httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT_S)
+        client = httpx.AsyncClient(
+            timeout=DISCOVERY_TIMEOUT_S, trust_env=trusts_proxy_env(target.base_url)
+        )
     try:
         models = await asyncio.wait_for(
             discoverer(target, client), timeout=DISCOVERY_TIMEOUT_S
@@ -628,17 +631,23 @@ class ModelCatalogService:
                 return {**self._cache, "cached": True}  # type: ignore[dict-item]
 
             targets = _targets(self._registry, self._keychain)
-            async with httpx.AsyncClient(
-                timeout=DISCOVERY_TIMEOUT_S, transport=self._transport
-            ) as client:
-                try:
-                    results = await asyncio.gather(
-                        *(discover_provider(t, client=client) for t in targets)
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    results = []
+            try:
+                if self._transport is not None:
+                    # A test's transport answers for everyone, so one client serves all the targets.
+                    async with httpx.AsyncClient(
+                        timeout=DISCOVERY_TIMEOUT_S, transport=self._transport
+                    ) as client:
+                        results = await asyncio.gather(
+                            *(discover_provider(t, client=client) for t in targets)
+                        )
+                else:
+                    # Each target builds its own client, because whether the environment's proxy may be
+                    # used depends on where that target is (`trusts_proxy_env`).
+                    results = await asyncio.gather(*(discover_provider(t) for t in targets))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                results = []
 
             models: list[dict[str, Any]] = []
             for result in results:
