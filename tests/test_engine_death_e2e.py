@@ -49,6 +49,7 @@ import time
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from unittest import mock
 from typing import IO, Any, NamedTuple
 
 import httpx
@@ -245,10 +246,16 @@ def _alive(pid: int) -> bool:
     An orphaned engine that has already exited can sit as a zombie until whoever
     inherited it reaps it: dead, holding no socket and no database lock, but still
     present in `/proc`. Reading the state letter is what tells those two apart.
+
+    A process that ends between the open and the read makes that read fail with ESRCH
+    (`ProcessLookupError`) rather than ENOENT — `/proc/<pid>/stat` opens for a process on
+    its way out and then cannot be read. That is the same fact as a missing file, so the
+    caller is told dead rather than handed an exception; a hosted runner hit exactly this
+    while the engine was exiting under the parent-death test below.
     """
     try:
         state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split(") ", 1)[1][0]
-    except (FileNotFoundError, IndexError):
+    except (FileNotFoundError, IndexError, ProcessLookupError):
         return False
     return state != "Z"
 
@@ -399,3 +406,17 @@ class EngineDeathE2E(unittest.IsolatedAsyncioTestCase):
                 if _alive(engine_pid):
                     os.kill(engine_pid, signal.SIGKILL)
                 _reap(boot.proc)
+
+
+class AliveTests(unittest.TestCase):
+    """The liveness probe on its own, because the tests above depend on it while a process dies."""
+
+    def test_a_process_that_ends_between_the_open_and_the_read_is_dead(self) -> None:
+        # `/proc/<pid>/stat` opens for a process that is already on its way out, and the read
+        # then fails with ESRCH rather than the open failing with ENOENT. Uncaught, that race
+        # reached CI as a traceback in the parent-death test instead of the engine's death.
+        with mock.patch.object(Path, "read_text", side_effect=ProcessLookupError(3, "No such process")):
+            self.assertFalse(_alive(12345))
+
+    def test_a_live_process_is_alive(self) -> None:
+        self.assertTrue(_alive(os.getpid()))
