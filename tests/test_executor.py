@@ -1272,6 +1272,33 @@ class TestWhatAStepChanges(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("agent_output_invalid", error.payload["code"])
         self.assertEqual(1, len(self.provider.role_calls("scribe")))
 
+    async def test_a_critic_whose_reasons_are_not_text_is_asked_once_more(self) -> None:
+        """`reasons` are joined into the review notes. A list of objects raised a `TypeError` out of `join`, which
+        failed the goal as an internal error and left the step unretryable."""
+        goal, _ = await self._run({
+            "fixer": {"files": [{"path": "a.py", "action": "update", "content": "value = 9\n"}]},
+            "critic": [
+                {"decision": "request-changes", "reasons": [{"issue": "no tests"}]},
+                {"decision": "approve", "reasons": []},
+            ],
+            "scribe": {"summary": "did it", "commit_message": "feat: nine"},
+        })
+
+        calls = self.provider.role_calls("critic")
+        self.assertEqual(2, len(calls), "the critic is asked once more, no more")
+        self.assertIn("reasons", calls[1][2], "the reason is put to the model")
+        self.assertEqual("COMPLETED", self.goals.steps(goal.id)[0].status)
+
+    async def test_a_critic_that_never_answers_with_text_reasons_fails_the_step_by_name(self) -> None:
+        goal, _ = await self._run({
+            "fixer": {"files": [{"path": "a.py", "action": "update", "content": "value = 10\n"}]},
+            "critic": [{"decision": "request-changes", "reasons": "add tests"}] * 2,
+        })
+
+        error = next(e for e in self.goals.events_after(goal.id, 0) if e.type == "error")
+        self.assertEqual("agent_output_invalid", error.payload["code"])
+        self.assertEqual(2, len(self.provider.role_calls("critic")))
+
     async def test_the_commit_leaves_the_users_own_work_alone(self) -> None:
         (self.root / "user_wip.py").write_text("half-finished\n", encoding="utf-8")
         (self.root / "user_staged.py").write_text("staged by hand\n", encoding="utf-8")

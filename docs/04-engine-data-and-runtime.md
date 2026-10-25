@@ -1427,6 +1427,10 @@ Both fields are text. A field that is present and is not text (a list or an obje
 engine cannot use: the scribe is told which field and asked once more, like any reply `accept` refuses (§4.6), and a
 second such reply fails the step as `agent_output_invalid`. A field that is absent or empty fails at once.
 
+The critic's `reasons` are held to the same rule: they are joined into the step's review notes, so a value that is not a list of
+text (a list of objects, a bare string) is refused by `accept`, the critic is asked once more, and a second such reply fails the
+step as `agent_output_invalid` rather than as an internal error.
+
 ### 4.6 Which target a role is called on
 
 Every agent call goes through `AgentOrchestrator.run_agent`, which builds the targets it may use — the
