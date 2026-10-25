@@ -242,6 +242,19 @@ class TestOpenAIStreaming(_ServerMixin):
         self.assertEqual(out, "hello")
         self.assertEqual(usage and usage[0], {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7})
 
+    def test_a_remote_stream_asks_for_its_usage_and_a_local_one_does_not(self) -> None:
+        """OpenAI sends `usage: null` on a stream unless asked, so streamed calls booked no tokens."""
+        from engine.providers import streaming_body
+
+        payload = {"model": "m1", "messages": []}
+        remote = streaming_body(payload, "https://api.openai.com/v1")
+        self.assertEqual({"include_usage": True}, remote.get("stream_options"))
+        self.assertIs(True, remote["stream"])
+        for local in ("http://127.0.0.1:1234/v1", "http://localhost:8080/v1", "http://[::1]:8000/v1"):
+            with self.subTest(local=local):
+                self.assertNotIn("stream_options", streaming_body(payload, local))
+        self.assertNotIn("stream_options", payload, "the caller's payload must not be changed")
+
     def test_a_server_that_rejects_streaming_falls_back_to_blocking(self) -> None:
         server = self._start(advertise=False, reject_stream=True)
         provider = OpenAICompatProvider("test-key", self.base)
