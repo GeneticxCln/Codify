@@ -1359,6 +1359,19 @@ class Keychain:
             # if it were empty is recoverable (the key can be re-entered).
             return {}
 
+    def _private_parent(self) -> None:
+        """Make the store's directory, and close it to everyone else only if it is Codify's own.
+
+        The state directory, and one this call just created, are Codify's to make private. A directory
+        the person chose with `CODIFY_SECRETS=$HOME/keys.json` held other things before the store came
+        and is not ours to chmod; the file inside is 0600 either way. Same rule as `home.ensure_private_dir`.
+        """
+        parent = self._secrets_path.parent
+        existed = parent.exists()
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not existed or parent.resolve() == home.codify_home().resolve():
+            home.tighten_to_owner(parent)
+
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
         """Hold the store's lock across a whole read-modify-write.
@@ -1369,11 +1382,7 @@ class Keychain:
         and best-effort where `flock` is unavailable, as before: without it, saves are last-writer-wins.
         """
         path = self._secrets_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            path.parent.chmod(0o700)
-        except OSError:
-            pass
+        self._private_parent()
         try:
             import fcntl
         except ImportError:  # pragma: no cover - not a Linux concern, kept for the fallback's sake
@@ -1389,11 +1398,7 @@ class Keychain:
     def _write_file(self, data: dict[str, str]) -> None:
         """Replace the store atomically, from a temporary file of its own. Callers hold `_locked()`."""
         path = self._secrets_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            path.parent.chmod(0o700)
-        except OSError:
-            pass
+        self._private_parent()
         # `mkstemp` creates the file already 0600 and under a name no other writer shares, so there is no
         # window where plaintext keys are world-readable and no second writer to truncate this one's file.
         fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
