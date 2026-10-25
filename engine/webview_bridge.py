@@ -50,6 +50,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from engine.models import strip_invisible
+
 
 #: How much page text one read may bring back. A model reading a documentation
 #: page needs a few thousand characters; a model reading a page can otherwise
@@ -629,7 +631,7 @@ def _clean_result(payload: Any, budget: int) -> dict[str, Any]:
     """
     data = payload if isinstance(payload, dict) else {}
     text = data.get("text")
-    text = text if isinstance(text, str) else ""
+    text = strip_invisible(text) if isinstance(text, str) else ""
     truncated = bool(data.get("truncated")) or len(text) > budget
     return {
         "url": _clip(data.get("url"), 500),
@@ -666,7 +668,7 @@ def _clean_links(raw: Any) -> list[dict[str, str]]:
             continue
         kept.append({
             "text": _clip(item.get("t"), 80),
-            "href": href[:500],
+            "href": _clip(href, 500),
         })
     return kept
 
@@ -674,7 +676,10 @@ def _clean_links(raw: Any) -> list[dict[str, str]]:
 def _clip(value: Any, limit: int) -> str:
     if not isinstance(value, str):
         return ""
-    return value[:limit]
+    # Invisible characters are removed before the cut, so what is left is what a person can see and the
+    # limit counts characters that count: `fetch_page` has always done this, and a page the user has open is
+    # no more trusted than one the engine fetched.
+    return strip_invisible(value)[:limit]
 
 
 def format_navigation(result: dict[str, Any]) -> str:

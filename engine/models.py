@@ -573,6 +573,20 @@ def _scrub_text(text: str) -> str:
     return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
 
 
+#: Characters that carry nothing a reader can see, and so can carry instructions only a model reads: zero-width
+#: and bidirectional controls (embeddings, overrides and isolates), the word joiners, the BOM, the variation
+#: selectors, and the Unicode "tag" block. One definition, because three copies of it had drifted apart.
+INVISIBLE_CHARS = re.compile(
+    "[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufe00-\ufe0f"
+    "\U000e0000-\U000e007f\U000e0100-\U000e01ef]"
+)
+
+
+def strip_invisible(text: str) -> str:
+    """`text` without the characters in `INVISIBLE_CHARS`."""
+    return INVISIBLE_CHARS.sub("", text)
+
+
 def scrub_surrogates(value: Any) -> Any:
     """`value` with every lone surrogate in its strings replaced by U+FFFD.
 

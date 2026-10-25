@@ -54,6 +54,7 @@ from typing import Any
 
 from engine.fs import FileSystemService, GitMetadataError, PathEscapeError
 from engine.home import codify_home, ensure_private_dir
+from engine.models import strip_invisible
 from engine.sandbox import CANCEL_POLL_S, SandboxService
 from engine.spawn_guard import Limits, guarded_argv, guarded_env
 
@@ -91,7 +92,6 @@ SCRIPT_SOURCE = Path(__file__).resolve().parent / "ghidra" / SCRIPT_NAME
 #: No address-space cap: a JVM reserves far more virtual memory than it uses, and `-Xmx` is the heap's bound.
 ANALYSIS_LIMITS = Limits(cpu_seconds=int(ANALYSIS_DEADLINE_S) * 4, file_bytes=4 * 1024**3, core_bytes=0)
 
-_INVISIBLE = re.compile("[​-‏‪-‮⁠-⁤﻿\U000e0000-\U000e007f]")
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 _MAXMEM = re.compile(r"[1-9][0-9]{0,3}[MmGg]")
 
@@ -128,7 +128,7 @@ def state_dir() -> Path:
 
 def _clean(text: object, limit: int = TEXT_CLIP) -> str:
     """One piece of the binary's own text, made safe to put in front of a model: no control or invisible characters."""
-    s = _INVISIBLE.sub("", str(text)).replace("\xa0", " ")
+    s = strip_invisible(str(text)).replace("\xa0", " ")
     s = _CONTROL.sub("", s).replace("\r", " ").replace("\n", " ")
     s = s.encode("utf-8", "replace").decode("utf-8", "replace")
     return s if len(s) <= limit else s[: limit - 1] + "…"
