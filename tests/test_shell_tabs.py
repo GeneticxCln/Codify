@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from typing import Any
 
@@ -258,11 +259,19 @@ class ShellTabTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.list_tabs(), [])
 
     async def test_brackets_nested_past_the_parsers_depth_are_refused_not_a_500(self) -> None:
-        """`json.loads` answers 15,000 brackets with a RecursionError, which is not a ValueError."""
-        response = await self.client.put(
-            "/shell/tabs",
-            json={"key": "deep", "position": 0, "kind": "browser", "payload": "[" * 15000 + "]" * 15000},
-        )
+        """`json.loads` answers a payload nested past its limit with a RecursionError, which is not a ValueError.
+
+        Where that limit is depends on the interpreter (3.14 parses 15,000 brackets without complaint), so the
+        parser's refusal is simulated rather than provoked: what is under test is the route's answer to it.
+        """
+        refusing = mock.MagicMock(wraps=json)
+        refusing.loads.side_effect = RecursionError("maximum recursion depth exceeded")
+        # Only the service's own parse is replaced; the request body is read with the real `json`.
+        with mock.patch("engine.services.json", refusing):
+            response = await self.client.put(
+                "/shell/tabs",
+                json={"key": "deep", "position": 0, "kind": "browser", "payload": "[[[[]]]]"},
+            )
         self.assertEqual(response.status_code, 422, response.text)
         self.assertEqual(response.json()["code"], "invalid_tab_payload")
         self.assertEqual(await self.list_tabs(), [])
