@@ -4,6 +4,7 @@ import os
 import shutil
 import signal
 import subprocess
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from engine.sandbox import (
     READ_ONLY_GIT_SUBCOMMANDS,
     CommandNotAllowed,
     SandboxService,
+    _Drain,
+    _settle,
     validate_argv,
 )
 from engine.spawn_guard import guarded_argv, guarded_env
@@ -70,8 +73,13 @@ class GitService:
         cwd: str,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        capped: bool = False,
     ) -> subprocess.CompletedProcess[bytes]:
         """Run one git command under the guard, capturing raw output.
+
+        `capped` keeps only the first `MAX_KEPT_BYTES` of each stream (the sandbox's own `_Drain`, which still
+        reads the rest so git is never blocked on a full pipe). A model-chosen read can name a whole history,
+        and `communicate()` holds all of it, then decodes all of it, before anything is cut.
 
         `env=None` means "inherit this process's environment". Only the engine's own
         fixed commands (`status --porcelain`, `init`) still do; the one caller whose
@@ -95,6 +103,21 @@ class GitService:
             # as SandboxService.run_command does it.
             start_new_session=True,
         )
+        if capped:
+            drains = (_Drain(proc.stdout), _Drain(proc.stderr))
+            deadline = time.monotonic() + (timeout if timeout is not None else 1e9)
+            if not _settle(proc, drains, deadline):
+                SandboxService._kill_group(proc.pid)
+                if not _settle(proc, drains, time.monotonic() + 5):
+                    SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
+                    _settle(proc, drains, time.monotonic() + 5)
+                raise subprocess.TimeoutExpired(proc.args, timeout or 0.0)
+            marker = b"\n\xe2\x80\xa6 (output truncated)"
+            return subprocess.CompletedProcess(
+                proc.args, proc.returncode,
+                bytes(drains[0].kept) + (marker if drains[0].truncated else b""),
+                bytes(drains[1].kept) + (marker if drains[1].truncated else b""),
+            )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -120,6 +143,7 @@ class GitService:
         cwd: str,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        capped: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         """Same, as text — deliberately decoding UTF-8 with replacement.
 
@@ -128,7 +152,7 @@ class GitService:
         `UnicodeDecodeError` out of a read. Git writes paths as UTF-8 bytes (that is
         also why `_tracked_files` reads them itself).
         """
-        res = self._run_bytes(args, cwd=cwd, env=env, timeout=timeout)
+        res = self._run_bytes(args, cwd=cwd, env=env, timeout=timeout, capped=capped)
         return subprocess.CompletedProcess(
             res.args,
             res.returncode,
@@ -207,6 +231,7 @@ class GitService:
                 cwd=str(Path(root_path).resolve()),
                 env=git_readonly.runner_env(os.environ, root_path),
                 timeout=self.read_only_timeout_s,
+                capped=True,
             )
         except subprocess.TimeoutExpired:
             return (
