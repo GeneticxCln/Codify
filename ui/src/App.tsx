@@ -3349,12 +3349,17 @@ export const App: React.FC = () => {
       setMessages((prev) =>
         prev.map((m) => (m.id === assistantMsgId ? { ...m, goal } : m)),
       );
-      const fullGoal = await getGoal(goal.id);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantMsgId ? { ...m, goal: fullGoal } : m,
-        ),
-      );
+      try {
+        const fullGoal = await getGoal(goal.id);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId ? { ...m, goal: fullGoal } : m,
+          ),
+        );
+      } catch {
+        // The turn exists and is running. A read that failed after it (an engine mid-restart) is not a failed
+        // dispatch: the message keeps the goal the dispatch returned, and the stream below brings the rest.
+      }
 
       // Connect WebSocket telemetry
       subscribeToGoal(goal.id, assistantMsgId);

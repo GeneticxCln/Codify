@@ -184,3 +184,30 @@ test("an option the model filled with markup is text on a button, never an eleme
     assert.equal(choices(ctx)[1]!.textContent, "<b>bold</b>");
   });
 });
+
+test("a turn that was created is not reported as failed because the read that follows it failed", async () => {
+  // `createTurn` and the `getGoal` after it shared one try/catch, so an engine that blinked in between made the turn
+  // "Failed to dispatch" on screen, with no stream opened for a goal that was running: the answer arrived on the
+  // engine and was never shown until the thread was reopened.
+  await withApp(
+    {
+      conversations: [THREAD],
+      goals: [turn("g1", 10)] as never,
+      goalEvents: { g1: eventsFor("g1", QUESTION) } as never,
+      answers: { "GET /goals/goal-1": { status: 503, body: { code: "unavailable", message: "engine is restarting" } } },
+    },
+    async (ctx) => {
+      await ctx.dom.click(ctx.dom.container.querySelector('[data-thread-row="true"]') as Element);
+      await ctx.settle();
+      await ctx.dom.click(choices(ctx)[1]!);
+      await ctx.settle();
+      await ctx.settle();
+      assert.equal(turnsSent(ctx).length, 1, "the turn was not sent");
+      assert.doesNotMatch(ctx.dom.text(), /Execution failed|Failed to dispatch/, "a created turn was reported as failed");
+      assert.ok(
+        ctx.sockets.some((s) => s.url.includes("/goals/goal-1")),
+        "no stream was opened for the goal that was created",
+      );
+    },
+  );
+});
