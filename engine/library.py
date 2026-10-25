@@ -800,7 +800,9 @@ class LibraryService:
             # Compiling is safe and fast; *matching* is the part that is not. Checking the
             # syntax here spares a process for the commonest mistake a model makes.
             re.compile(pattern, re.IGNORECASE)
-        except re.error as exc:
+        except (re.error, OverflowError, RecursionError) as exc:
+            # `a{99999999999}` is an OverflowError and a deeply nested group a RecursionError, neither of
+            # which is a `re.error`; left alone they end the goal instead of refusing the pattern.
             raise ValueError(f"invalid regex: {exc}") from exc
 
         reply = _run_regex_worker({

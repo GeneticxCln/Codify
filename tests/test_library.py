@@ -170,6 +170,11 @@ class TestLibrarianReads(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.lib.search("([unclosed", regex=True)
 
+    def test_regex_search_rejects_a_pattern_the_compiler_overflows_on_as_a_valueerror(self) -> None:
+        """`OverflowError` is not a `re.error`; the librarian's caller catches only `ValueError`."""
+        with self.assertRaises(ValueError):
+            self.lib.search("a{99999999999}", regex=True)
+
     def test_regex_search_rejects_an_oversized_pattern(self) -> None:
         with self.assertRaises(ValueError):
             self.lib.search("a" * 201, regex=True)
