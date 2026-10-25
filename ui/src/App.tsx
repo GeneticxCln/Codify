@@ -626,65 +626,72 @@ export const App: React.FC = () => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const probe = async () => {
       if (cancelled) return;
-      // **Ask the shell before believing the address we cached.** `api.ts`
-      // seeds `currentEngine` from `localStorage`, and that is a fact about a
-      // *previous* process — an address that can name a live engine belonging
-      // to somebody else: another build, another `CODIFY_HOME`, or a test run
-      // whose window shares this WebKit profile (a dev server is one origin,
-      // so `localStorage` is one origin's). A health check cannot tell "our
-      // engine" from "an engine": the cached token is a real one and the other
-      // engine answers as authenticated. So the shell — the only party that
-      // watched *this* window's handshake — is asked first, and its answer is
-      // applied before anything reads or writes the strip. The cost of not
-      // asking is measured, and it landed in the developer's real strip: a
-      // `make smoke-tabs` run wrote its own tab into whichever engine the cache
-      // named, once per run, 129 rows of `example.com/tabs-smoke` deep.
-      //
-      // Outside the shell there is nothing to ask and the cached pair is the
-      // only address there is; `refreshEngineInfoFromIpc` returns null there
-      // (see its doc), so the standalone browser build is unchanged.
-      const fromShell = await refreshEngineInfoFromIpc();
-      if (cancelled) return;
-      if (fromShell) {
-        // A different engine is a different set of configured providers, so
-        // the two loads the recovery path below already makes are made here
-        // too — once, because this only answers when the pair *changed*.
-        loadWorkspacesRef.current?.();
-        loadModelsRef.current?.(true);
-      }
-      let health = await checkEngineHealth();
-      if (cancelled) return;
-      // Ask the shell for fresh connection info on **either** half of a stale
-      // connection, not just the authenticated one. `ok && !authenticated` is
-      // the case this recovery was built for — some engine *is* there, it just
-      // does not know us. But `!ok` has a second reading the old guard
-      // silently dropped: nothing answered at the port we hold, and the reason
-      // may be that the engine is alive somewhere else. The shell tracks the
-      // live process's handshake, so it is the one party that can say; a
-      // changed answer is applied and the probe re-runs immediately. Without
-      // this, an engine that moved ports after a restart (or a desktop app
-      // whose localStorage names a port another session chose) leaves the
-      // window red until a restart of the whole app — `!ok` was read as "the
-      // engine is down", and "down somewhere else" is a different fact.
-      if ((health.ok && !health.authenticated) || !health.ok) {
-        const fresh = await refreshEngineInfoFromIpc();
+      try {
+        // **Ask the shell before believing the address we cached.** `api.ts`
+        // seeds `currentEngine` from `localStorage`, and that is a fact about a
+        // *previous* process — an address that can name a live engine belonging
+        // to somebody else: another build, another `CODIFY_HOME`, or a test run
+        // whose window shares this WebKit profile (a dev server is one origin,
+        // so `localStorage` is one origin's). A health check cannot tell "our
+        // engine" from "an engine": the cached token is a real one and the other
+        // engine answers as authenticated. So the shell — the only party that
+        // watched *this* window's handshake — is asked first, and its answer is
+        // applied before anything reads or writes the strip. The cost of not
+        // asking is measured, and it landed in the developer's real strip: a
+        // `make smoke-tabs` run wrote its own tab into whichever engine the cache
+        // named, once per run, 129 rows of `example.com/tabs-smoke` deep.
+        //
+        // Outside the shell there is nothing to ask and the cached pair is the
+        // only address there is; `refreshEngineInfoFromIpc` returns null there
+        // (see its doc), so the standalone browser build is unchanged.
+        const fromShell = await refreshEngineInfoFromIpc();
         if (cancelled) return;
-        if (fresh) {
-          // `refreshEngineInfoFromIpc` has already applied the new port and token
-          // to the API client; nothing else kept a copy of them to update.
+        if (fromShell) {
+          // A different engine is a different set of configured providers, so
+          // the two loads the recovery path below already makes are made here
+          // too — once, because this only answers when the pair *changed*.
           loadWorkspacesRef.current?.();
-          // A fresh token may point at a different engine (and therefore a
-          // different set of configured providers) — re-discover its models.
           loadModelsRef.current?.(true);
-          // Connection info changed — re-probe right away with the new token.
-          health = await checkEngineHealth();
-          if (cancelled) return;
         }
+        let health = await checkEngineHealth();
+        if (cancelled) return;
+        // Ask the shell for fresh connection info on **either** half of a stale
+        // connection, not just the authenticated one. `ok && !authenticated` is
+        // the case this recovery was built for — some engine *is* there, it just
+        // does not know us. But `!ok` has a second reading the old guard
+        // silently dropped: nothing answered at the port we hold, and the reason
+        // may be that the engine is alive somewhere else. The shell tracks the
+        // live process's handshake, so it is the one party that can say; a
+        // changed answer is applied and the probe re-runs immediately. Without
+        // this, an engine that moved ports after a restart (or a desktop app
+        // whose localStorage names a port another session chose) leaves the
+        // window red until a restart of the whole app — `!ok` was read as "the
+        // engine is down", and "down somewhere else" is a different fact.
+        if ((health.ok && !health.authenticated) || !health.ok) {
+          const fresh = await refreshEngineInfoFromIpc();
+          if (cancelled) return;
+          if (fresh) {
+            // `refreshEngineInfoFromIpc` has already applied the new port and token
+            // to the API client; nothing else kept a copy of them to update.
+            loadWorkspacesRef.current?.();
+            // A fresh token may point at a different engine (and therefore a
+            // different set of configured providers) — re-discover its models.
+            loadModelsRef.current?.(true);
+            // Connection info changed — re-probe right away with the new token.
+            health = await checkEngineHealth();
+            if (cancelled) return;
+          }
+        }
+        setEngineUp(health.ok);
+        setAuthOk(health.authenticated);
+      } catch {
+        // A probe that throws is a probe that failed; the poll goes on (`finally`), and the pill keeps
+        // what it last said until an answer changes it.
+      } finally {
+        // Always rescheduled. A throw out of one tick (a shell call that rejects) used to end the poll for
+        // good, with `engineUp` stuck and everything gated on it never starting.
+        if (!cancelled) timer = setTimeout(probe, document.hidden ? 15000 : 3000);
       }
-      setEngineUp(health.ok);
-      setAuthOk(health.authenticated);
-      const next = document.hidden ? 15000 : 3000;
-      timer = setTimeout(probe, next);
     };
     // The auth-stale banner's "Retry now" runs the same probe — one code path
     // for the automatic check and the user's, so a retry cannot disagree with
