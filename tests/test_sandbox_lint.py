@@ -148,8 +148,8 @@ class TestTheValidator(unittest.TestCase):
 class TestTheEngineAddsTheSafetyFlags(unittest.TestCase):
     def test_what_the_child_is_handed(self) -> None:
         for argv, expected in (
-            (["ruff", "check", "src"], ["check", "--no-cache", "--output-format=concise", "src"]),
-            (["ruff", "check"], ["check", "--no-cache", "--output-format=concise"]),
+            (["ruff", "check", "src"], ["check", "--no-cache", "--no-fix", "--output-format=concise", "src"]),
+            (["ruff", "check"], ["check", "--no-cache", "--no-fix", "--output-format=concise"]),
             (["mypy", "--strict", "pkg"], ["--cache-dir=/dev/null", "--strict", "pkg"]),
             (["tsc", "--noEmit", "-p", "ui"], ["--pretty", "false", "--noEmit", "-p", "ui"]),
             (["cargo", "clippy", "--lib"], ["clippy", "--lib", "--", "-D", "warnings"]),
@@ -195,6 +195,21 @@ class TestARealRun(unittest.TestCase):
         with self.assertRaises(CommandNotAllowed):
             self.sandbox.run_command(str(self.root), ["ruff", "check", "--fix", "bad.py"])
         self.assertEqual("import os\n", (self.root / "bad.py").read_text(encoding="utf-8"))
+
+    def test_a_workspace_config_that_says_fix_does_not_make_ruff_edit(self) -> None:
+        """`fix = true` in the repository's own config is the common spelling, and it is not the model's flag."""
+        self._need("ruff")
+        (self.root / "pyproject.toml").write_text("[tool.ruff]\nfix = true\n", encoding="utf-8")
+        (self.root / "bad.py").write_text("import os\n", encoding="utf-8")
+        result = self.sandbox.run_command(str(self.root), ["ruff", "check"])
+        self.assertEqual(1, result["exit_code"], result)
+        self.assertEqual("import os\n", (self.root / "bad.py").read_text(encoding="utf-8"))
+
+    def test_an_argfile_cannot_carry_the_flags_the_allowlist_refuses(self) -> None:
+        """pytest and mypy expand `@file` into arguments, which would be flags nobody validated."""
+        for argv in (["pytest", "@args.txt"], ["mypy", "@flags.txt", "a.py"], ["ruff", "check", "@x"]):
+            with self.subTest(argv=argv), self.assertRaises(CommandNotAllowed):
+                self.sandbox.run_command(str(self.root), argv)
 
     def test_ruff_passes_a_clean_file(self) -> None:
         self._need("ruff")

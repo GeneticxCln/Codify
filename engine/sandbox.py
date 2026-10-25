@@ -37,7 +37,10 @@ class CommandNotAllowed(Exception):
         self.code = "command_not_allowed"
 
 def _is_workspace_path(fs: FileSystemService, token: str) -> bool:
-    if token.startswith("-"):
+    # `@name` is not a path to the tools that take it: pytest and mypy read the file and splice its
+    # lines in as arguments, so it would carry flags past the exact-spelling lists. `./@name` is
+    # still a path.
+    if token.startswith(("-", "@")):
         return False
     try:
         fs.resolve(token)
@@ -209,14 +212,15 @@ def hardened_args(argv: list[str]) -> list[str]:
 
     A linter is safe to admit because of this function and not because of what the model asked for.
     The flags are the engine's, appended after validation, so no spelling the model chooses can
-    remove them: ruff and mypy keep no cache in the workspace, tsc prints plain text, and clippy
+    remove them: ruff and mypy keep no cache in the workspace, ruff never applies a fix, tsc prints plain text, and clippy
     fails on a warning (a lint that exits 0 on a warning is a lint nobody reads).
 
     `argv` must already have passed `validate_argv`; for any other command this is `argv[1:]`.
     """
     cmd, rest = argv[0], argv[1:]
     if cmd == "ruff":
-        return ["check", "--no-cache", "--output-format=concise", *rest[1:]]
+        # `--no-fix` because a repository's own `fix = true` would otherwise make this write.
+        return ["check", "--no-cache", "--no-fix", "--output-format=concise", *rest[1:]]
     if cmd == "mypy":
         return ["--cache-dir=/dev/null", *rest]
     if cmd == "tsc":

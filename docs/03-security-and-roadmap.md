@@ -59,7 +59,7 @@ The UI holds the token **in memory** when it runs under the desktop shell: it as
   `ruff check`, `mypy`, `tsc --noEmit`, `cargo check|clippy`, `go vet` and `make lint|typecheck` are `test`-mode
   commands (`04` §5), refused in `read_only` and so refused to the librarian and to a turn before approval.
   Per binary, what they run: `ruff` and `tsc` read the repository's config and source and run no repository code
-  (ruff with `--no-cache`, tsc with `--noEmit`); `mypy` imports the plugins a `mypy.ini` / `pyproject.toml` names,
+  (ruff with `--no-cache --no-fix`, tsc with `--noEmit`); `mypy` imports the plugins a `mypy.ini` / `pyproject.toml` names,
   `cargo check|clippy` runs a `build.rs` and proc-macros, `go vet` can start the C compiler for cgo, and `make`
   runs whatever the target says. Those four are covered by the sentence above (approving a goal in an untrusted
   repository is approving that repository's tooling); the first two do not widen it. The model never supplies

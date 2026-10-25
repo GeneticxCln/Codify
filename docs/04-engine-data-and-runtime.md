@@ -1735,7 +1735,9 @@ Anything else → `command_not_allowed`. No shell (`shell=False`).
 are `test`-mode commands, so they sit behind the same approval gate as `pytest`**: `read_only` refuses all
 of them, and the conductor's `run_command` is `read_only` until the goal is `RUNNING`. They are admitted because
 of what the *engine* adds after validation (`sandbox.hardened_args`), never because of anything the model
-supplies: ruff runs with `--no-cache --output-format=concise`, mypy with `--cache-dir=/dev/null`, tsc with
+supplies: ruff runs with `--no-cache --no-fix --output-format=concise` (`--no-fix` because a repository's own
+`fix = true` would otherwise make it edit), a token starting with `@` is refused as a path (pytest and mypy splice an
+argument file's lines in as flags, past the exact-spelling lists), mypy with `--cache-dir=/dev/null`, tsc with
 `--pretty false` (and the model must name `--noEmit`), and clippy as `cargo clippy … -- -D warnings`, so a
 warning fails the run. The model is given no way to ask a checker to *edit* (`ruff --fix`, `ruff format`,
 `ruff --add-noqa`, `cargo clippy --fix`), to *install* (`mypy --install-types`), to *name* an interpreter, a
