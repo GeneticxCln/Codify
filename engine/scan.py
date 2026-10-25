@@ -56,6 +56,7 @@ from engine.library import (
     SKIP_DIRS,
     RegexWorkerTimeout,
     _is_outside_symlink,
+    _is_plain_file,
     _run_regex_worker,
     is_text_name,
     looks_binary,
@@ -614,6 +615,9 @@ def scan_tree(
                 stopped = "files"
                 break
             try:
+                if not _is_plain_file(full):
+                    tally.unreadable += 1
+                    continue
                 size = full.stat().st_size
                 if size > MAX_INDEX_BYTES:
                     tally.oversize += 1

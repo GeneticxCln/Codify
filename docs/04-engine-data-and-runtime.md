@@ -844,7 +844,8 @@ symlinked profile file is not read. A profile can name nothing else: the worker 
 **The scan** runs in `engine/regex_worker.py` with `op: "scan"`, started by `library._run_regex_worker` (no new spawn
 site) and killed at the request's `budget_s` (15 s) plus the margin a search has. It walks in sorted order, skips test
 files (`is_test_path`; `include_tests` brings them back), generated and minified files, binary files, files over 2 MB,
-symlinks that leave the workspace and names that are not valid UTF-8 text (left out and counted as `skipped.names`,
+symlinks that leave the workspace or land in `.git` (the same refusal as `read_file`), anything that is not a regular file (a pipe would block
+the thread that opened it for good) and names that are not valid UTF-8 text (left out and counted as `skipped.names`,
 present only when not zero; the Coverage line says `N names that are not valid UTF-8`, adding that a folder is one name and everything under it
 is unscanned), and stops, with the reason,
 at 800 files or the time budget. Comments (and, for
