@@ -437,11 +437,15 @@ export const StatsPanel: React.FC = () => {
   const [importBusy, setImportBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [failures, setFailures] = useState<FailureBreakdown | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setFailed(false);
+    // The last window's numbers are not this window's. Left on screen they read as its figures, and when this
+    // read fails the banner would sit above them.
+    setStats(null);
     fetchStatsOverview(windowDays)
       .then((s) => {
         if (!cancelled) setStats(s);
@@ -580,6 +584,7 @@ export const StatsPanel: React.FC = () => {
   const exportHistory = async () => {
     if (history.length === 0 && importedHistory.length === 0) return;
     setExporting(true);
+    setExportError(null);
     try {
       // The chart intentionally loads a short tail; the export asks the engine
       // for every retained frozen day, including days outside that tail.
@@ -591,6 +596,8 @@ export const StatsPanel: React.FC = () => {
       );
     } catch (err) {
       console.error("stats history export failed", err);
+      // A button that was pressed and then did nothing is worse than one that says it could not.
+      setExportError("Could not export the history from the engine.");
     } finally {
       setExporting(false);
     }
@@ -670,6 +677,11 @@ export const StatsPanel: React.FC = () => {
           <FileDown className="w-3.5 h-3.5" />
           {exporting ? "Exporting…" : "Export frozen history"}
         </button>
+        {exportError && (
+          <span role="alert" className="text-2xs text-codify-danger-ink">
+            {exportError}
+          </span>
+        )}
       </div>
       {importedFileName && (
         <p className="text-2xs text-codify-info text-right leading-relaxed">
