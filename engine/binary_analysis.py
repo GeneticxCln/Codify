@@ -303,12 +303,22 @@ def _cache_get(path: Path) -> dict[str, Any] | None:
 def _cache_put(path: Path, doc: dict[str, Any]) -> None:
     ensure_private_dir(path.parent)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(doc, handle)
-    os.replace(tmp, path)
-    kept = sorted((p for p in path.parent.glob("*.json")), key=lambda p: p.stat().st_mtime, reverse=True)
-    for old in kept[CACHE_KEEP:]:
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # a write that failed halfway leaves nothing behind to be mistaken for a cache
+        raise
+    dated: list[tuple[float, Path]] = []
+    for entry in path.parent.glob("*.json"):
+        try:
+            dated.append((entry.stat().st_mtime, entry))
+        except OSError:
+            continue  # another engine pruned it between the listing and the stat
+    dated.sort(key=lambda item: item[0], reverse=True)
+    for _, old in dated[CACHE_KEEP:]:
         old.unlink(missing_ok=True)
 
 
@@ -512,13 +522,35 @@ def analyse(
     cached = _cache_get(_cache_path(sha, install)) if sha else None
     if cached is not None:
         return {"doc": cached, "sha256": sha, "ghidra": install.version, "cached": True}
-    with _RUN_LOCK:
+    _acquire_run_lock(cancel)
+    try:
         cached = _cache_get(_cache_path(sha, install)) if sha else None
         if cached is not None:
             return {"doc": cached, "sha256": sha, "ghidra": install.version, "cached": True}
         ran_sha, doc = _run_ghidra(install, source, cancel, env)
-        _cache_put(_cache_path(ran_sha, install), doc)
+        try:
+            _cache_put(_cache_path(ran_sha, install), doc)
+        except OSError:
+            # The analysis succeeded; failing to remember it (a full disk, another engine pruning the
+            # same folder) costs a repeat run next time and must not cost this answer.
+            pass
+    finally:
+        _RUN_LOCK.release()
     return {"doc": doc, "sha256": ran_sha, "ghidra": install.version, "cached": False}
+
+
+def _acquire_run_lock(cancel: threading.Event | None) -> None:
+    """Take the one-analysis-at-a-time lock, giving up if the goal is cancelled while waiting for it.
+
+    A plain `with _RUN_LOCK` waits as long as the analysis in front of it runs, up to its five-minute limit,
+    and a cancel cannot reach a thread parked there: the goal said stopped and the call lingered.
+    """
+    while not _RUN_LOCK.acquire(timeout=0.2):
+        if cancel is not None and cancel.is_set():
+            raise BinaryAnalysisError("cancelled", "Stopped: the goal was cancelled while another analysis was running.")
+    if cancel is not None and cancel.is_set():
+        _RUN_LOCK.release()
+        raise BinaryAnalysisError("cancelled", "Stopped: the goal was cancelled before the analysis started.")
 
 
 def _hash_file(path: Path) -> str:

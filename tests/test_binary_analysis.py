@@ -229,6 +229,53 @@ class TestTheAnswer(Case):
         self.assertEqual(1, len(fake_ghidra.records(self.install)))
         self.assertIn("from an earlier run", text)
 
+    def test_a_cancel_reaches_a_call_that_is_waiting_for_another_analysis(self) -> None:
+        """One analysis runs at a time. A call queued behind it used to wait out the whole run, up to five
+        minutes, whatever the goal's signal said."""
+        stop = threading.Event()
+        ba._RUN_LOCK.acquire()
+
+        def release_if_held() -> None:
+            if ba._RUN_LOCK.locked():
+                ba._RUN_LOCK.release()
+
+        self.addCleanup(release_if_held)
+        threading.Timer(0.3, stop.set).start()
+        started = time.monotonic()
+        error = self.refusal(cancel=stop)
+        self.assertEqual("cancelled", error.code)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual([], fake_ghidra.records(self.install), "Ghidra must not have been started")
+
+    def test_a_cache_that_cannot_be_written_does_not_cost_the_answer(self) -> None:
+        with mock.patch.object(ba, "_cache_put", side_effect=OSError("disk full")):
+            text = self.run_tool()
+        self.assertIn("Ghidra", text)
+
+    def test_a_cache_write_that_fails_halfway_leaves_no_temporary_file(self) -> None:
+        target = self.state / "cache" / "x.json"
+        with mock.patch.object(json, "dump", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                ba._cache_put(target, {"a": 1})
+        self.assertEqual([], [p.name for p in target.parent.iterdir()])
+
+    def test_a_cache_file_pruned_by_another_engine_mid_listing_is_not_an_error(self) -> None:
+        folder = self.state / "cache"
+        folder.mkdir(parents=True)
+        for n in range(ba.CACHE_KEEP + 3):
+            (folder / f"{n:03d}.json").write_text("{}", encoding="utf-8")
+        real = Path.stat
+        gone = folder / "000.json"
+
+        def vanishing(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self == gone:
+                raise FileNotFoundError(str(self))
+            return real(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "stat", vanishing):
+            ba._cache_put(folder / "new.json", {"a": 1})
+        self.assertTrue((folder / "new.json").exists())
+
     def test_other_bytes_are_analysed_again(self) -> None:
         self.run_tool()
         (self.root / "other.bin").write_bytes(BINARY + b"!")
