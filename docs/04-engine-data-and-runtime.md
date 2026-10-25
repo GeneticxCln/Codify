@@ -119,7 +119,9 @@ handed — the verifier's, the critic's read-only probes and the conductor's `ru
 the command's whole process group as soon as it is set (exit `130`, below). A step that was mid-way stays as it
 was left; nothing re-opens `CANCELLED`. A refused cancel (`version_conflict`, `illegal_status`) stops nothing.
 **Pause does not do this**: it asks for a stop between steps, and Start resumes there
-(`tests/test_cancel_stops_work.py`).
+(`tests/test_cancel_stops_work.py`). The recipe's own stage guards (`_cancelled`) treat a `PAUSED` goal as still running, so a
+step that is mid-way finishes its review and its commit; a step whose scribe was cut short by a *cancel* is not recorded as
+`COMPLETED` (`TestCancelStopsBeforeCommit`).
 
 **One driver per goal, held for the whole run** (review of 2026-09-29, finding 2). `run_chat` and `run_planning`
 claim the goal's driver (`claim_driver`) for as long as they run, as `start`, `retry` and `apply` already did.

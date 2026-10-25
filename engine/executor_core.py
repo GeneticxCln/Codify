@@ -415,7 +415,12 @@ class _ExecutorCore:
         return None
 
     def _cancelled(self, goal_id: str) -> bool:
-        """True when the goal was cancelled (or otherwise left RUNNING) mid-step.
+        """True when the goal was cancelled (or otherwise left RUNNING) mid-step. A pause is not that.
+
+        Pause "asks for a stop between steps" (docs/04 section 1.2) and `POST /goals/{id}/cancel` says the
+        same of itself: a paused goal's running step finishes, because its files are already on disk and
+        throwing the review and the commit away would make Start call the fixer again over them. The one
+        thing a pause does stop is a write that has not happened yet (`_approval_withdrawn`).
 
         `_run_steps` only checks status *between* steps, so without this a cancel
         landing mid-step changed nothing: the step ran to the end — including the
@@ -423,7 +428,7 @@ class _ExecutorCore:
         to the user's repository is the one act a cancel must be able to prevent,
         so the stages that lead to it re-check before doing irreversible work.
         """
-        return self.goals.get(goal_id).status != "RUNNING"
+        return self.goals.get(goal_id).status not in ("RUNNING", "PAUSED")
 
     def _test_result(
         self,

@@ -235,9 +235,12 @@ class _Steps(_Design):
                 self._log(goal_id, step.id, "info", "cancelled — skipping the summary for this step")
                 return
             async with self._stage(goal_id, "scribe", "scribe", step.id) as scribe_stage:
-                scribe_stage.record(
-                    await self._scribe(goal_id, step, summaries, ws.root_path, goal.dry_run, outcome)
-                )
+                recorded = await self._scribe(goal_id, step, summaries, ws.root_path, goal.dry_run, outcome)
+                scribe_stage.record(recorded)
+            if recorded == "cancelled":
+                # The commit was skipped because the goal was cancelled; the step is not done, and saying
+                # so would hide that nothing was recorded for it.
+                return
         except CriticRejection:
             # Step remains IN_PROGRESS with review_notes, goal is PAUSED; human retry required
             return

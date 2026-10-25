@@ -1624,6 +1624,46 @@ class TestCancelStopsBeforeCommit(unittest.IsolatedAsyncioTestCase):
                          "nothing may be committed after a cancel, even from the late guard")
 
 
+    async def _park_then(self, status: str) -> None:
+        """Start the step, wait until the held call is parked, move the goal to `status`, release, finish."""
+        await self.executor.run_planning(self.goal.id)
+        step = self.goals.steps(self.goal.id)[0]
+        self.goals.update_status(self.goal.id, self.goal.version + 1, "RUNNING")
+        run_task = asyncio.create_task(self.executor.run_step(self.goal.id, step.id))
+        deadline = time.time() + 5
+        while not (self.root / "x.txt").exists() and time.time() < deadline:
+            await asyncio.sleep(0.01)
+        self.assertTrue(self.hold_released.wait(5), "the held call never parked")
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, g.version, status)
+        self.hold.set()
+        await asyncio.wait_for(run_task, timeout=5)
+
+    async def test_pause_during_the_verifier_lets_the_step_finish_and_commit(self) -> None:
+        """Pause asks for a stop between steps (docs/04 section 1.2); only Cancel stops the step that is running.
+
+        Treating a pause as a cancel abandoned the step after the fixer had written: no review, no commit, the step
+        left IN_PROGRESS, and a resume called the fixer again over files that were already there.
+        """
+        await self._park_then("PAUSED")
+
+        self.assertEqual(self.goals.get(self.goal.id).status, "PAUSED")
+        self.assertEqual(1, len(self.provider.critic_calls), "the paused step is still judged")
+        self.assertEqual(1, len(self.provider.scribe_calls), "and still recorded")
+        self.assertEqual(1, len(self.executor.git.commits))  # type: ignore[attr-defined]
+        self.assertEqual("COMPLETED", self.goals.steps(self.goal.id)[0].status)
+
+    async def test_cancel_during_the_scribe_does_not_mark_the_step_completed(self) -> None:
+        """The scribe answers 'cancelled' and nothing is committed; the step must not then be recorded as done."""
+        self.provider.hold_role = "scribe"
+        await self._park_then("CANCELLED")
+
+        self.assertEqual(self.goals.get(self.goal.id).status, "CANCELLED")
+        self.assertEqual([], self.executor.git.commits,  # type: ignore[attr-defined]
+                         "nothing may be committed after a cancel")
+        self.assertNotEqual("COMPLETED", self.goals.steps(self.goal.id)[0].status)
+
+
 class _HoldingProvider(BaseProvider):
     """Scripted replies, with one role's call parked on an Event mid-flight.
 
