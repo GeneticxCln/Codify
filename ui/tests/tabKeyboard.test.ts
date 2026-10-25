@@ -40,7 +40,7 @@ test("the right arrow moves to the next tab, focusing it and selecting it", asyn
     const focused = await mount(dom, "a");
     await dom.press(tabs(dom)[0], "ArrowRight");
     assert.deepEqual(focused, ["b"]);
-    assert.equal(dom.window.document.activeElement, tabs(dom)[1], "the keyboard focus did not follow");
+    assert.ok(dom.window.document.activeElement === tabs(dom)[1], "the keyboard focus did not follow");
   });
 });
 
