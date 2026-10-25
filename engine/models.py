@@ -545,10 +545,15 @@ class PlanStep(BaseModel):
     last_agent_role: AgentRole | None = None
 
 
+# The largest integer SQLite binds. A client-supplied version above it is an OverflowError in the driver, so the
+# models refuse it as a 422 instead.
+SQLITE_INT_MAX = 2**63 - 1
+
+
 class PlanStepUpdate(BaseModel):
     """Patch for a single plan step (pre-execution editing of plan-only goals)."""
     model_config = {"extra": "forbid"}
-    expected_version: int
+    expected_version: int = Field(..., ge=0, le=SQLITE_INT_MAX)
     title: str | None = Field(None, min_length=1, max_length=200)
     description: str | None = Field(None, min_length=1, max_length=20000)
     suggested_paths: list[str] | None = Field(None, max_length=50)
@@ -798,7 +803,7 @@ class TurnCreate(BaseModel):
 
 class VersionedAction(BaseModel):
     model_config = {"extra": "forbid"}
-    expected_version: int = Field(..., ge=0)
+    expected_version: int = Field(..., ge=0, le=SQLITE_INT_MAX)
 
 
 class SpeakRequest(BaseModel):
