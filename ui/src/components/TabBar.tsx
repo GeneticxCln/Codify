@@ -167,6 +167,31 @@ export const TabBar: React.FC<TabBarProps> = ({
               }
               data-in-split={inSplit ? "true" : undefined}
               onClick={() => onFocus(tab.id)}
+              onKeyDown={(event) => {
+                // A key on the tab's own close button is that button's. Only the tab itself answers here.
+                if (event.target !== event.currentTarget) return;
+                const siblings = Array.from(
+                  event.currentTarget.parentElement?.querySelectorAll<HTMLElement>('[role="tab"]') ?? [],
+                );
+                const at = siblings.indexOf(event.currentTarget);
+                let to = -1;
+                if (event.key === "ArrowRight") to = (at + 1) % siblings.length;
+                else if (event.key === "ArrowLeft") to = (at - 1 + siblings.length) % siblings.length;
+                else if (event.key === "Home") to = 0;
+                else if (event.key === "End") to = siblings.length - 1;
+                else if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onFocus(tab.id);
+                  return;
+                }
+                if (to < 0 || at < 0) return;
+                event.preventDefault();
+                // Selection follows focus. Only the active tab is in the Tab order, so the one the arrow
+                // reached is focused by hand (a tab with tabindex -1 can be), and then made the active one.
+                siblings[to]?.focus();
+                const id = tabs[to]?.id;
+                if (id) onFocus(id);
+              }}
               onContextMenu={
                 onMenu
                   ? (event) => {
