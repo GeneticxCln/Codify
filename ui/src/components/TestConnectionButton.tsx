@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { readRejection } from "../rejection.ts";
 import { Play, CheckCircle2, XCircle, Loader2 } from "lucide-react";
 
 interface TestConnectionButtonProps {
@@ -16,7 +17,7 @@ export const TestConnectionButton: React.FC<TestConnectionButtonProps> = ({ onTe
       const res = await onTest();
       setResult(res);
     } catch (err: any) {
-      setResult({ ok: false, message: err.message || "Failed to test connection" });
+      setResult({ ok: false, message: readRejection(err, "Failed to test connection") });
     } finally {
       setTesting(false);
     }

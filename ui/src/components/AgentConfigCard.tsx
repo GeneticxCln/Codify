@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { readRejection } from "../rejection.ts";
 import {
   AgentCallStat,
   AgentConfig,
@@ -238,7 +239,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
       clearTimeout(savedTimer.current);
       savedTimer.current = setTimeout(() => setSaved(false), 2500);
     } catch (err: any) {
-      setSaveError(err.message || "Failed to save configuration");
+      setSaveError(readRejection(err, "Failed to save configuration"));
     } finally {
       setSaving(false);
     }
