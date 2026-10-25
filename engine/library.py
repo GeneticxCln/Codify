@@ -24,13 +24,14 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
 
-from engine.fs import FileSystemService, PathEscapeError
+from engine.fs import GIT_DIRNAME, FileSystemService, PathEscapeError
 from engine.sandbox import CANCEL_POLL_S, CommandNotAllowed, SandboxService
 from engine.spawn_guard import Limits, guarded_argv, guarded_env
 from collections.abc import Iterator
@@ -126,19 +127,36 @@ def is_text_name(name: str) -> bool:
 
 
 def _is_outside_symlink(root: Path, path: Path) -> bool:
-    """True when path is a symlink escaping the workspace root.
+    """True when path is a symlink the walkers must not open: out of the workspace, or into git's metadata.
 
     os.walk does not follow dir symlinks by default, but a symlinked *file*
     is still opened and read — leaking /etc/passwd into match events. Skip
-    those; read() already refuses them via fs.resolve().
+    those; read() already refuses them via fs.resolve(). A link that lands in `.git`
+    is refused for the same reason `fs.resolve` refuses it: `.git/config` holds the
+    remote's URL, and a URL can carry a token.
     """
     try:
         if not path.is_symlink():
             return False
         real = path.resolve()
-        return real != root and root not in real.parents
+        if real != root and root not in real.parents:
+            return True
+        return GIT_DIRNAME in real.relative_to(root).parts
     except OSError:
         return True
+
+
+def _is_plain_file(path: Path) -> bool:
+    """True when path (followed through a symlink) is a regular file, the only thing that is safe to open to read.
+
+    A FIFO reports size 0, so it passes every size check, and opening it for reading blocks until a writer
+    appears, which in a workspace is never. The worker thread that opened it is gone for good, and a cancel
+    cannot reach a thread stuck inside `open`. A socket or a device is no better.
+    """
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode)
+    except OSError:
+        return False
 
 
 class ReadResult(dict[str, Any]):
@@ -208,7 +226,7 @@ def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) 
                 truncated = True
                 break
             try:
-                if full.stat().st_size > MAX_INDEX_BYTES:
+                if not _is_plain_file(full) or full.stat().st_size > MAX_INDEX_BYTES:
                     files_skipped += 1
                     continue
                 raw = full.read_bytes()[:MAX_SCAN_BYTES]
@@ -349,6 +367,8 @@ class LibraryService:
         resolved = self._fs.resolve(path)
         if resolved.is_dir():
             raise IsADirectoryError(f"{path} is a directory")
+        if resolved.exists() and not _is_plain_file(resolved):
+            raise ValueError(f"{path} is not a regular file (a pipe, socket or device) and is not opened")
         total_size = resolved.stat().st_size
         rel = str(resolved.relative_to(self.root))
         if offset is not None or limit is not None:
@@ -619,10 +639,10 @@ class LibraryService:
                     truncated = True
                     break
                 try:
-                    if (Path(dirpath) / name).stat().st_size > MAX_INDEX_BYTES:
+                    if not _is_plain_file(full) or full.stat().st_size > MAX_INDEX_BYTES:
                         files_skipped += 1
                         continue
-                    raw = (Path(dirpath) / name).read_bytes()[:MAX_SCAN_BYTES]
+                    raw = full.read_bytes()[:MAX_SCAN_BYTES]
                 except OSError:
                     files_skipped += 1
                     continue
@@ -703,7 +723,7 @@ class LibraryService:
                     truncated = True
                     break
                 try:
-                    if full.stat().st_size > MAX_INDEX_BYTES:
+                    if not _is_plain_file(full) or full.stat().st_size > MAX_INDEX_BYTES:
                         files_skipped += 1
                         continue
                     raw = full.read_bytes()[:MAX_SCAN_BYTES]
@@ -780,7 +800,9 @@ class LibraryService:
             # Compiling is safe and fast; *matching* is the part that is not. Checking the
             # syntax here spares a process for the commonest mistake a model makes.
             re.compile(pattern, re.IGNORECASE)
-        except re.error as exc:
+        except (re.error, OverflowError, RecursionError) as exc:
+            # `a{99999999999}` is an OverflowError and a deeply nested group a RecursionError, neither of
+            # which is a `re.error`; left alone they end the goal instead of refusing the pattern.
             raise ValueError(f"invalid regex: {exc}") from exc
 
         reply = _run_regex_worker({

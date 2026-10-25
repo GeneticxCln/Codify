@@ -8,11 +8,14 @@ anything (an escape, a write command, or a forbidden binary is refused).
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import os
 import tempfile
+import threading
 import unittest
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
-from engine.fs import PathEscapeError
+from engine.fs import GitMetadataError, PathEscapeError
 from engine.library import (
     MAX_READ_CHARS,
     LibraryService,
@@ -36,6 +39,66 @@ def _make_workspace(root: Path) -> None:
     (root / "node_modules").mkdir()
     (root / "node_modules" / "dep.js").write_text("greet()\n", encoding="utf-8")
     (root / "binary.dat").write_bytes(b"\x00\x01\x02greet")
+
+
+class TestTheWalkersOpenOnlyWhatIsSafeToOpen(unittest.TestCase):
+    """A symlink into git's metadata, and a pipe, are two ways a file in the workspace is not a file to read."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        _make_workspace(self.root)
+        (self.root / ".git").mkdir()
+        (self.root / ".git" / "config").write_text(
+            '[remote "origin"]\n\turl = https://user:SECRETTOKEN@example.test/r.git\n', encoding="utf-8"
+        )
+        self.lib = LibraryService(str(self.root))
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _run_with_deadline(self, fn: Callable[..., object], *args: Any, **kwargs: Any) -> dict[str, object]:
+        """Run `fn` on a thread and fail, rather than hang, when it does not come back."""
+        box: dict[str, object] = {}
+
+        def target() -> None:
+            try:
+                box["value"] = fn(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 — the test reports whatever it was
+                box["error"] = exc
+
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        thread.join(5)
+        self.assertFalse(thread.is_alive(), "the call is stuck opening a pipe")
+        return box
+
+    def test_a_link_into_git_metadata_is_not_searched(self) -> None:
+        os.symlink(".git/config", self.root / "cfg.txt")
+        for mode in (None, "keyword"):
+            with self.subTest(mode=mode):
+                res = self.lib.search("SECRETTOKEN", mode=mode)
+                self.assertEqual([], res["matches"], res)
+        res = self.lib.search("SECRETTOKEN", regex=True)
+        self.assertEqual([], res["matches"], res)
+
+    def test_a_link_into_git_metadata_is_not_read(self) -> None:
+        os.symlink(".git/config", self.root / "cfg.txt")
+        with self.assertRaises(GitMetadataError):
+            self.lib.read("cfg.txt")
+
+    def test_a_pipe_does_not_hang_a_search(self) -> None:
+        os.mkfifo(self.root / "pipe")
+        for mode in (None, "keyword"):
+            with self.subTest(mode=mode):
+                box = self._run_with_deadline(self.lib.search, "greet", mode=mode)
+                self.assertNotIn("error", box, box)
+
+    def test_a_pipe_is_refused_by_read_instead_of_opened(self) -> None:
+        os.mkfifo(self.root / "pipe")
+        box = self._run_with_deadline(self.lib.read, "pipe")
+        self.assertIn("error", box)
+        self.assertIn("regular file", str(box["error"]))
 
 
 class TestLibrarianReads(unittest.TestCase):
@@ -106,6 +169,11 @@ class TestLibrarianReads(unittest.TestCase):
     def test_regex_search_rejects_an_invalid_pattern_as_a_valueerror(self) -> None:
         with self.assertRaises(ValueError):
             self.lib.search("([unclosed", regex=True)
+
+    def test_regex_search_rejects_a_pattern_the_compiler_overflows_on_as_a_valueerror(self) -> None:
+        """`OverflowError` is not a `re.error`; the librarian's caller catches only `ValueError`."""
+        with self.assertRaises(ValueError):
+            self.lib.search("a{99999999999}", regex=True)
 
     def test_regex_search_rejects_an_oversized_pattern(self) -> None:
         with self.assertRaises(ValueError):

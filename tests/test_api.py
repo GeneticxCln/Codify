@@ -383,6 +383,20 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(openai["storage_detail"])
 
+    async def test_a_pasted_key_loses_its_newline_and_a_spaced_one_is_refused(self) -> None:
+        """A header cannot carry a newline, and the client's refusal names the whole header value."""
+        r = await self.client.post(
+            "/settings/keys", json={"provider": "openai", "api_key": "sk-pasted\n"}, headers=self.headers
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(app.state.keychain.get_provider_key("openai"), "sk-pasted")
+        for bad in ("sk with space", "sk-in\nside", "   "):
+            with self.subTest(key=bad):
+                r = await self.client.post(
+                    "/settings/keys", json={"provider": "openai", "api_key": bad}, headers=self.headers
+                )
+                self.assertEqual(r.status_code, 422, r.text)
+
     async def test_saving_a_key_without_a_keyring_is_a_clear_error(self) -> None:
         """A machine with no OS keyring must get an explained 503, not a 500."""
         from engine.providers import ProviderError

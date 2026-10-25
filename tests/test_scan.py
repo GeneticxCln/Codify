@@ -488,6 +488,15 @@ class TestWorkspaceProfiles(Workspace):
         self.assertIsNone(found.get("mine"))
         self.assertTrue(any("bytes, so it was skipped" in p for p in found.problems))
 
+    def test_a_profile_nested_past_the_parsers_depth_is_skipped_and_the_rest_still_load(self) -> None:
+        """100,000 brackets fit under the size cap and are a RecursionError, which is not a ValueError."""
+        directory = self.root / scan.PROFILES_DIRNAME
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "deep.json").write_text("[" * 100_000, encoding="utf-8")
+        found = load_profiles(str(self.root))
+        self.assertTrue(any("not valid JSON" in p for p in found.problems), found.problems)
+        self.assertTrue(found.profiles, "the built-in profiles went with it")
+
     def test_more_profile_files_than_the_cap_are_not_all_read(self) -> None:
         for n in range(scan.MAX_WORKSPACE_PROFILES + 5):
             self.profile(f"p{n:02d}")

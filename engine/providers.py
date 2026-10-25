@@ -239,7 +239,9 @@ def _interrupted(label: str, text: str, exc: httpx.HTTPError) -> ProviderError:
     """A stream that failed after it began. Not retried: the caller has already shown `text`."""
     return ProviderError(
         "provider_unreachable",
-        f"{label} stream interrupted after {len(text)} characters: {type(exc).__name__}: {exc}",
+        redact_secrets(
+            f"{label} stream interrupted after {len(text)} characters: {type(exc).__name__}: {exc}"
+        ),
     )
 
 
@@ -470,6 +472,21 @@ def validate_local_base_url(url: str) -> None:
         raise ProviderError("invalid_base_url", "Local provider must use http (loopback only)")
 
 
+def trusts_proxy_env(base_url: str) -> bool:
+    """Whether a client for `base_url` may read `HTTP_PROXY` and friends from the environment.
+
+    An httpx client does by default, and a proxy set without a `NO_PROXY` entry for loopback would be
+    handed the prompt, the source and any key meant for a local model. A loopback address is asked
+    directly; a remote provider still goes through the proxy, which a corporate network may require.
+    A client given its own transport (a test's) ignores the proxy either way.
+    """
+    try:
+        host = urlparse(base_url or "").hostname or ""
+    except ValueError:
+        return True
+    return not _is_loopback_host(host)
+
+
 def key_destination_problem(base_url: str) -> str | None:
     """Why a stored API key must not be sent to `base_url`, or None when it may be.
 
@@ -634,7 +651,7 @@ class BaseProvider(ABC):
         except ProviderError as exc:
             return False, exc.message
         except Exception as exc:
-            return False, str(exc)
+            return False, redact_secrets(str(exc))
         finally:
             _attempts.reset(once)
 
@@ -663,7 +680,7 @@ class AnthropicProvider(BaseProvider):
 
     async def _messages(self, body: dict[str, Any]) -> Any:
         """POST /v1/messages: the one way both calls reach the API, so they cannot name different versions."""
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             return await post_json(
                 client,
                 f"{self._base_url}/v1/messages",
@@ -777,7 +794,7 @@ class OpenAICompatProvider(BaseProvider):
             "content-type": "application/json",
         }
         by_name = {t.name: t for t in tools}
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             data = await post_json(
                 client, url, label="openai_compat", headers=headers,
                 json={
@@ -858,7 +875,7 @@ class OpenAICompatProvider(BaseProvider):
                     return await self.complete(system_prompt, user_prompt, model, temperature, max_tokens)
                 finally:
                     self.on_delta = saved
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             try:
                 data = await post_json(
                     client,
@@ -894,7 +911,7 @@ class OpenAICompatProvider(BaseProvider):
         root = self._base_url.rsplit("/", 1)[0] if self._base_url.endswith("/chat/completions") else self._base_url
         models_url = f"{root}/models"
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=10, trust_env=trusts_proxy_env(self._base_url)) as client:
                 resp = await client.get(
                     models_url,
                     headers={"Authorization": f"Bearer {self._api_key}"},
@@ -916,7 +933,7 @@ class OpenAICompatProvider(BaseProvider):
         url = f"{self._base_url}/chat/completions"
         text = ""
         data: dict[str, Any] = {}
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             # Opening the stream is retried like any call; reading it is not (see `open_stream`).
             async with open_stream(
                 client, url, label="openai_compat", headers=headers, json={**payload, "stream": True}
@@ -990,7 +1007,7 @@ class OllamaProvider(BaseProvider):
         options: dict[str, Any] = {"temperature": temperature, "num_predict": max_tokens}
         if num_ctx is not None:
             options["num_ctx"] = num_ctx
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=180, trust_env=trusts_proxy_env(self._base_url)) as client:
             data = await post_json(
                 client,
                 f"{self._base_url}/api/chat",
@@ -1052,7 +1069,7 @@ class OllamaProvider(BaseProvider):
         # Nesting it under `options` is accepted-but-ignored, which would look
         # exactly like a setting that does nothing.
         keep_alive_field = {"keep_alive": keep_alive} if keep_alive is not None else {}
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=180, trust_env=trusts_proxy_env(self._base_url)) as client:
             if not stream:
                 data = await post_json(
                     client,
@@ -1149,7 +1166,7 @@ class GoogleProvider(BaseProvider):
         # wrong is a 400 from someone else's API, not an error in our code.
         url = f"{self._base_url}/models/{model}:generateContent"
         by_name = {t.name: t for t in tools}
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             data = await post_json(
                 client, url, label="google",
                 json={
@@ -1207,7 +1224,7 @@ class GoogleProvider(BaseProvider):
         }
         # The key travels in a header, not the URL: a query-string credential
         # lands in proxy/server access logs, and Google accepts the header form.
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
             data = await post_json(
                 client, url, label="google", json=payload,
                 headers={"x-goog-api-key": self._api_key},
@@ -1342,6 +1359,19 @@ class Keychain:
             # if it were empty is recoverable (the key can be re-entered).
             return {}
 
+    def _private_parent(self) -> None:
+        """Make the store's directory, and close it to everyone else only if it is Codify's own.
+
+        The state directory, and one this call just created, are Codify's to make private. A directory
+        the person chose with `CODIFY_SECRETS=$HOME/keys.json` held other things before the store came
+        and is not ours to chmod; the file inside is 0600 either way. Same rule as `home.ensure_private_dir`.
+        """
+        parent = self._secrets_path.parent
+        existed = parent.exists()
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not existed or parent.resolve() == home.codify_home().resolve():
+            home.tighten_to_owner(parent)
+
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
         """Hold the store's lock across a whole read-modify-write.
@@ -1352,11 +1382,7 @@ class Keychain:
         and best-effort where `flock` is unavailable, as before: without it, saves are last-writer-wins.
         """
         path = self._secrets_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            path.parent.chmod(0o700)
-        except OSError:
-            pass
+        self._private_parent()
         try:
             import fcntl
         except ImportError:  # pragma: no cover - not a Linux concern, kept for the fallback's sake
@@ -1372,11 +1398,7 @@ class Keychain:
     def _write_file(self, data: dict[str, str]) -> None:
         """Replace the store atomically, from a temporary file of its own. Callers hold `_locked()`."""
         path = self._secrets_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            path.parent.chmod(0o700)
-        except OSError:
-            pass
+        self._private_parent()
         # `mkstemp` creates the file already 0600 and under a name no other writer shares, so there is no
         # window where plaintext keys are world-readable and no second writer to truncate this one's file.
         fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")

@@ -240,6 +240,9 @@ class GitService:
             return None
         cwd = str(Path(root_path).resolve())
         env = self._workspace_env()
+        # The paths are file names, not patterns: a step can write a file called `*` or `[id]`, and
+        # `git add -A -- *` would stage the user's other work.
+        env["GIT_LITERAL_PATHSPECS"] = "1"
         env["GIT_AUTHOR_NAME"] = author_name
         env["GIT_AUTHOR_EMAIL"] = author_email
         env["GIT_COMMITTER_NAME"] = author_name

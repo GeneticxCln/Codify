@@ -544,7 +544,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/settings/laya` | — | gate capability report (`sdk` \| `llm-fallback` \| `skipped`) |
 | `GET` | `/settings/runtime` | — | the engine's self-check (`engine/capabilities.py`): which interpreter is running, whether *it* can import the gate's SDK, and any warnings. Separate from `/settings/laya` because that route also honours `CODIFY_LAYA_SDK` and this one is a fact about the interpreter — a gate can be off because it was told to be or because the package is not there, and those need different fixes. Names filesystem paths, so it is behind the boot token like everything else |
 | `GET` | `/settings/keys` | — | per-provider key status + `storage`/`storage_detail`/`storage_reason` (`04` §7) |
-| `POST` | `/settings/keys` | `{provider, api_key}` | `{ok, provider, storage}` |
+| `POST` | `/settings/keys` | `{provider, api_key}` (surrounding whitespace is stripped; whitespace or a control character inside is `422`, because an HTTP client would refuse the header later and put its value in the message) | `{ok, provider, storage}` |
 | `GET` | `/settings/agents` | — | `AgentConfig[]`, fixed role order |
 | `GET` | `/settings/agents/stats` | query: `limit` | per-role last call / last error / counts, from the event log, plus `runs` / `success_rate` / `outcomes` / `tokens` measured over every run the log holds (§4.7). The rate is about the *role* — did it do its job — not about the goal, which is the other question and is answered by `/stats/overview` |
 | `POST` | `/settings/agents/repair` | — | `RepairReport` (`04` §3.1) |
@@ -844,7 +844,8 @@ symlinked profile file is not read. A profile can name nothing else: the worker 
 **The scan** runs in `engine/regex_worker.py` with `op: "scan"`, started by `library._run_regex_worker` (no new spawn
 site) and killed at the request's `budget_s` (15 s) plus the margin a search has. It walks in sorted order, skips test
 files (`is_test_path`; `include_tests` brings them back), generated and minified files, binary files, files over 2 MB,
-symlinks that leave the workspace and names that are not valid UTF-8 text (left out and counted as `skipped.names`,
+symlinks that leave the workspace or land in `.git` (the same refusal as `read_file`), anything that is not a regular file (a pipe would block
+the thread that opened it for good) and names that are not valid UTF-8 text (left out and counted as `skipped.names`,
 present only when not zero; the Coverage line says `N names that are not valid UTF-8`, adding that a folder is one name and everything under it
 is unscanned), and stops, with the reason,
 at 800 files or the time budget. Comments (and, for
@@ -1735,7 +1736,9 @@ Anything else → `command_not_allowed`. No shell (`shell=False`).
 are `test`-mode commands, so they sit behind the same approval gate as `pytest`**: `read_only` refuses all
 of them, and the conductor's `run_command` is `read_only` until the goal is `RUNNING`. They are admitted because
 of what the *engine* adds after validation (`sandbox.hardened_args`), never because of anything the model
-supplies: ruff runs with `--no-cache --output-format=concise`, mypy with `--cache-dir=/dev/null`, tsc with
+supplies: ruff runs with `--no-cache --no-fix --output-format=concise` (`--no-fix` because a repository's own
+`fix = true` would otherwise make it edit), a token starting with `@` is refused as a path (pytest and mypy splice an
+argument file's lines in as flags, past the exact-spelling lists), mypy with `--cache-dir=/dev/null`, tsc with
 `--pretty false` (and the model must name `--noEmit`), and clippy as `cargo clippy … -- -D warnings`, so a
 warning fails the run. The model is given no way to ask a checker to *edit* (`ruff --fix`, `ruff format`,
 `ruff --add-noqa`, `cargo clippy --fix`), to *install* (`mypy --install-types`), to *name* an interpreter, a

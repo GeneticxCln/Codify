@@ -737,6 +737,20 @@ class ProviderKeyUpdate(BaseModel):
     provider: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
     api_key: str = Field(..., min_length=1, max_length=4096)
 
+    @field_validator("api_key")
+    @classmethod
+    def _a_key_is_one_token(cls, value: str) -> str:
+        """A pasted key arrives with a newline on it, and a header cannot carry one.
+
+        Stripped rather than refused, because the newline is the paste and not the key. What is left
+        must have no whitespace or control character in it: that is not a key, and an HTTP client
+        would refuse it later, with the value in its message.
+        """
+        value = value.strip()
+        if not value or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+            raise ValueError("an API key has no spaces or control characters in it")
+        return value
+
 
 class TurnCreate(BaseModel):
     """One turn in a thread: what the user said, and nothing else.

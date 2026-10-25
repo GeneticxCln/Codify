@@ -167,6 +167,11 @@ class WebviewBridge:
 
     def __init__(self) -> None:
         self._pending: dict[str, _Pending] = {}
+        # Ids already given to a shell. The shell re-polls the moment it has
+        # spawned work for a question, so without this the same question comes
+        # straight back and the click or typed text runs again, once per poll,
+        # until an answer lands. Same rule as `SurfaceBridge._handed`.
+        self._handed: set[str] = set()
         # When a shell was last heard from, or None if never. A timestamp
         # rather than a flag so "attached" can expire — see ATTACHED_WINDOW_S.
         self._last_seen: float | None = None
@@ -358,6 +363,7 @@ class WebviewBridge:
             return await asyncio.wait_for(pending.future, READ_TIMEOUT_S)
         except asyncio.TimeoutError:
             self._pending.pop(pending.id, None)
+            self._handed.discard(pending.id)
             raise BridgeRefused(
                 "The browser did not answer within "
                 f"{READ_TIMEOUT_S:.0f}s. That usually means the tab is loading "
@@ -367,6 +373,7 @@ class WebviewBridge:
             ) from None
         finally:
             self._busy = False
+            self._handed.discard(pending.id)
             if pending.id in self._pending:
                 self._pending.pop(pending.id, None)
 
@@ -413,7 +420,7 @@ class WebviewBridge:
         while True:
             item = self._oldest()
             if item is not None:
-                return _wire_request(item)
+                return self._hand_out(item)
             remaining = deadline - loop.time()
             if remaining <= 0:
                 return None
@@ -423,8 +430,9 @@ class WebviewBridge:
             # poll expired — the lost-wakeup that makes a bridge look broken
             # for exactly one poll interval.
             self._wake.clear()
-            if self._oldest() is not None:
-                return _wire_request(self._oldest())  # type: ignore[arg-type]
+            item = self._oldest()
+            if item is not None:
+                return self._hand_out(item)
             try:
                 await asyncio.wait_for(self._wake.wait(), remaining)
             except asyncio.TimeoutError:
@@ -448,6 +456,7 @@ class WebviewBridge:
         pending = self._pending.pop(str(request_id or ""), None)
         if pending is None or pending.future.done():
             return False
+        self._handed.discard(pending.id)
         if not ok:
             pending.future.set_exception(BridgeRefused(_refusal(payload)))
             return True
@@ -465,6 +474,7 @@ class WebviewBridge:
         pending = self._pending.pop(str(request_id or ""), None)
         if pending is None or pending.future.done():
             return False
+        self._handed.discard(pending.id)
         pending.future.set_exception(
             BridgeRefused(
                 "The browser gave up on that before it had an answer. Ask "
@@ -475,9 +485,14 @@ class WebviewBridge:
 
     def _oldest(self) -> _Pending | None:
         """The question asked first, so answers come back in asking order."""
-        if not self._pending:
-            return None
-        return next(iter(self._pending.values()))
+        for pending in self._pending.values():
+            if pending.id not in self._handed:
+                return pending
+        return None
+
+    def _hand_out(self, pending: _Pending) -> dict[str, Any]:
+        self._handed.add(pending.id)
+        return _wire_request(pending)
 
 
 def _wire_request(pending: _Pending) -> dict[str, Any]:

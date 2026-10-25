@@ -8,9 +8,11 @@ per-provider reasons — never a plausible-looking list compiled into the binary
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from typing import Any
 from collections.abc import Callable
 
@@ -106,6 +108,65 @@ def _client(
     routes: dict[str, tuple[int, Any]], calls: list[httpx.Request] | None = None
 ) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(_handler(routes, calls)))
+
+
+class TestADiscoveryErrorNeverCarriesTheKey(unittest.IsolatedAsyncioTestCase):
+    async def test_a_header_the_client_refuses_is_reported_without_its_value(self) -> None:
+        """httpx names the whole header value when it will not send one; a key with a newline is that."""
+
+        async def hold(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await asyncio.sleep(1)
+            writer.close()
+
+        server = await asyncio.start_server(hold, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            for protocol in ("openai_compat", "anthropic", "google"):
+                for key in ("plainsecretvalue99\n", "sk-ABCDEFGH12345678\n"):
+                    with self.subTest(protocol=protocol, key=key):
+                        target = ProviderTarget("p", protocol, f"http://127.0.0.1:{port}/v1", api_key=key)
+                        async with httpx.AsyncClient(trust_env=False) as client:
+                            result = await discover_provider(target, client=client)
+                        self.assertFalse(result.ok)
+                        self.assertTrue(result.error)
+                        self.assertNotIn(key.strip(), result.error or "")
+        finally:
+            server.close()
+            await server.wait_closed()
+
+
+class TestALocalServerIsNotAskedThroughTheEnvironmentsProxy(unittest.IsolatedAsyncioTestCase):
+    async def test_a_proxy_in_the_environment_is_not_given_a_loopback_request(self) -> None:
+        """A proxy set without a loopback NO_PROXY would otherwise be handed the prompt meant for a local model."""
+        seen: list[bytes] = []
+
+        async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            seen.append(await reader.readuntil(b"\r\n\r\n"))
+            body = b'{"models": []}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+                + body
+            )
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(answer, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        # Port 1 refuses: a request that goes to the "proxy" fails instead of reaching the server above.
+        proxied = {"HTTP_PROXY": "http://127.0.0.1:1", "ALL_PROXY": "http://127.0.0.1:1"}
+        try:
+            with patch.dict(os.environ, proxied):
+                for gone in ("NO_PROXY", "no_proxy", "http_proxy", "all_proxy"):
+                    os.environ.pop(gone, None)
+                target = ProviderTarget("ollama", "ollama", f"http://127.0.0.1:{port}", needs_key=False)
+                result = await discover_provider(target)
+        finally:
+            server.close()
+            await server.wait_closed()
+        self.assertTrue(result.ok, result.error)
+        self.assertTrue(seen, "the request never reached the local server")
+        self.assertTrue(seen[0].startswith(b"GET /api/tags"), seen[0][:60])
 
 
 class TestProtocolDiscovery(unittest.IsolatedAsyncioTestCase):

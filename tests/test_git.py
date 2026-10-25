@@ -164,6 +164,19 @@ class TestGitService(GitTestBase):
         self.assertIn("?? user_wip.py", status, "untracked work stays untracked")
         self.assertIn("A  user_staged.py", status, "the user's staged file stays staged")
 
+    def test_a_path_that_looks_like_a_glob_is_a_file_name_and_nothing_wider(self) -> None:
+        """Pathspecs are patterns unless told otherwise, and a file a step wrote can be called `*`."""
+        self.write("user_wip.txt", "committed long ago\n")
+        self.assertIsNotNone(self.git.commit(str(self.root), "chore: baseline", ["user_wip.txt"]))
+        self.write("user_wip.txt", "edited by hand since\n")
+        self.write("*", "a file whose name is a glob\n")
+
+        rev = self.git.commit(str(self.root), "feat: the odd file", ["*"])
+        assert rev is not None
+        self.assertEqual(self.committed_paths(rev), {"*", "user_wip.txt"})
+        self.assertEqual(self.git_out("show", "--name-only", "--format=", rev).split(), ["*"])
+        self.assertIn(" M user_wip.txt", self.porcelain(), "the user's edit was swept into the commit")
+
     def test_an_empty_path_list_commits_nothing_at_all(self) -> None:
         """A step that changed nothing must not commit what the user had staged."""
         self.write("user_staged.py", "staged before we ran\n")

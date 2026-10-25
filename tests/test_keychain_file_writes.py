@@ -154,5 +154,15 @@ class TestThePermissions(KeychainCase):
                 self.assertEqual(0o600, stat.S_IMODE(extra.stat().st_mode), f"{extra.name} is not private")
 
 
+    def test_a_directory_the_person_chose_keeps_its_mode(self) -> None:
+        """`CODIFY_SECRETS=$HOME/keys.json` must not turn `$HOME` into a 0700 directory."""
+        self.dir.mkdir()
+        self.dir.chmod(0o755)
+        self.keychain().set_provider_key("openai", "sk-secret-value")
+
+        self.assertEqual(0o755, stat.S_IMODE(self.dir.stat().st_mode))
+        self.assertEqual(0o600, stat.S_IMODE(self.path.stat().st_mode))
+
+
 if __name__ == "__main__":
     unittest.main()

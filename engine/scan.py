@@ -56,6 +56,7 @@ from engine.library import (
     SKIP_DIRS,
     RegexWorkerTimeout,
     _is_outside_symlink,
+    _is_plain_file,
     _run_regex_worker,
     is_text_name,
     looks_binary,
@@ -310,7 +311,9 @@ def _read_profile(path: Path, source: str, problems: list[str]) -> Profile | Non
     except (OSError, UnicodeDecodeError):
         problems.append(f"{label}: could not be read, so it was skipped")
         return None
-    except ValueError:
+    except (ValueError, RecursionError):
+        # A file of nothing but `[` is valid to the size cap and a RecursionError to the parser, which is
+        # not a ValueError; uncaught it takes every profile in the workspace, the built-ins included, with it.
         problems.append(f"{label}: is not valid JSON, so it was skipped")
         return None
     return _parse_profile(data, source, label, problems)
@@ -614,6 +617,9 @@ def scan_tree(
                 stopped = "files"
                 break
             try:
+                if not _is_plain_file(full):
+                    tally.unreadable += 1
+                    continue
                 size = full.stat().st_size
                 if size > MAX_INDEX_BYTES:
                     tally.oversize += 1

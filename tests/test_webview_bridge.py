@@ -204,6 +204,36 @@ class TestTheBridgeRefusesRatherThanHangs(BridgeTestCase):
         self.assertFalse(self.bridge.state()["busy"])
 
 
+    async def test_a_question_is_handed_to_the_shell_once_however_often_it_polls(self) -> None:
+        """The shell re-polls the moment it has spawned work, so a question must not come back.
+
+        Without a handed set the same click or typed text is given out again on
+        every poll until an answer lands, and the page runs it once per poll.
+        """
+        self.bridge.note_shell()
+        polls: list[dict[str, Any] | None] = []
+
+        async def shell() -> None:
+            first = await self.bridge.next_request(wait_s=2.0)
+            assert first is not None
+            polls.append(first)
+            polls.append(await self.bridge.next_request(wait_s=0.05))
+            polls.append(await self.bridge.next_request(wait_s=0.05))
+            self.bridge.answer(first["id"], True, PAGE)
+
+        shell_task = asyncio.create_task(shell())
+        await self.bridge.read_page()
+        await shell_task
+        self.assertIsNotNone(polls[0])
+        self.assertEqual(polls[1:], [None, None], "the same question was handed out again")
+
+    async def test_a_handed_question_does_not_outlive_its_answer(self) -> None:
+        self.bridge.note_shell()
+        await self.ask()
+        await self.ask()
+        self.assertEqual(self.bridge._handed, set())
+
+
 class TestWhatComesBackIsDataAndNothingElse(BridgeTestCase):
     async def test_only_the_known_fields_survive(self) -> None:
         """A page cannot introduce a field the formatter does not print.

@@ -443,6 +443,10 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
         ),
         # Half a pair names nothing to call. FastAPI validates the body before the handler looks the
         # conversation up, so the id need not exist for the refusal to be seen.
+        "ProviderKeyUpdate._a_key_is_one_token": (
+            "POST", "/settings/keys",
+            lambda ws: {"provider": "openai", "api_key": "two words"},
+        ),
         "TurnCreate._a_pair_or_nothing": (
             "POST", "/conversations/c-none/turns",
             lambda ws: {"prompt": "hi", "provider": "openai"},
