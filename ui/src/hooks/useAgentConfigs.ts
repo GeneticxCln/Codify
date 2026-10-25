@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import type { AgentConfig, AgentConfigPatch, AgentRole } from "../types.ts";
 import { tauriInvoke } from "../api";
+import { readRejection } from "../rejection.ts";
 
 /**
  * What the hook hands back. Exported so one component can own the store and
@@ -21,7 +22,7 @@ export function useAgentConfigs() {
       setConfigs(res);
       setError(null);
     } catch (err: any) {
-      setError(err.message || "Failed to load agent configs");
+      setError(readRejection(err, "Failed to load agent configs"));
     } finally {
       setLoading(false);
     }

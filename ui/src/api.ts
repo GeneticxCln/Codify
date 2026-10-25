@@ -441,9 +441,22 @@ export async function saveEngineSettings(
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
-    throw new Error(detail || `HTTP ${res.status}`);
+    // The engine's refusal is `{"code", "message"}`; the sentence is what a card should show. Text that is not
+    // that shape (a proxy's page, an older engine) is shown as it is.
+    throw new Error(sentenceOf(detail) || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+/** The sentence in a refusal body, the body itself when it is not one, or "" when there is nothing. */
+function sentenceOf(body: string): string {
+  try {
+    const sentence = readErrorBody(JSON.parse(body)).message;
+    if (sentence.trim()) return sentence;
+  } catch {
+    /* not JSON: its own words are the better ones */
+  }
+  return body.trim();
 }
 
 /**
@@ -1560,7 +1573,9 @@ export async function checkEngineHealth(): Promise<HealthStatus> {
     });
     if (res.status === 401) return { ok: true, authenticated: false };
     if (!res.ok) return { ok: false, authenticated: false };
-    return res.json();
+    // Awaited here so a body that is not JSON (another local server on this port) is caught below as "no
+    // engine", instead of rejecting out of the probe and stopping the poll for good.
+    return await res.json();
   } catch {
     return { ok: false, authenticated: false };
   }

@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState } from "react";
+import { useStickToBottom } from "../stickToBottom";
 import type { AgentRole, ChatMessage, Event, PlanStep } from "../types";
 import {
   DesignDeliverableCard,
@@ -893,9 +894,8 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   // user clicking a button that appears to do nothing.
   const [exportError, setExportError] = useState<string | null>(null);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  // Follows the end while the reader is at it; a reader who scrolled up to read is left where they are.
+  useStickToBottom(bottomRef, messages.length, messages);
 
   // Read answers aloud as they arrive, when Settings → Audio says to. `answersToRead` decides which
   // (only turns this window saw unfinished, each once); whether to is asked of the engine when one

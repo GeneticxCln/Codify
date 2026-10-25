@@ -54,6 +54,10 @@ function overview(models: number, coverage?: unknown) {
 }
 
 interface World {
+  /** Answer `/stats/overview` for a window, possibly late: for a test about what shows while a read is in flight. */
+  overviewAnswer?: (windowDays: number) => Response | Promise<Response>;
+  /** Refuse the full-history read that the export makes (`limit=0`). */
+  failExport?: boolean;
   days?: number;
   models?: number;
   coverage?: unknown;
@@ -62,9 +66,12 @@ interface World {
 async function withPanel(world: World, body: (dom: Dom) => Promise<void>): Promise<void> {
   await withDom(async (dom) => {
     globalThis.fetch = (async (input: RequestInfo | URL) => {
-      const path = new URL(String(input)).pathname;
+      const url = new URL(String(input));
+      const path = url.pathname;
+      if (path === "/stats/overview" && world.overviewAnswer) return world.overviewAnswer(Number(url.searchParams.get("window")));
       if (path === "/stats/overview") return json(overview(world.models ?? 3, world.coverage));
       if (path === "/stats/failures") return json({ total: 0, retries: 0, causes: [], by_role: {}, by_stage: {}, window_days: 0, recovered: 0, recovery_rate: null, generated_at: NOW_S });
+      if (path === "/stats/history" && world.failExport && url.searchParams.get("limit") === "0") return json({ message: "no" }, 500);
       if (path === "/stats/history") return json({ days: frozenDays(world.days ?? 0) });
       if (path === "/stats/import") return json({ imported: false, days: [], source: null, imported_at: null });
       throw new Error(`no answer for ${path}`);
@@ -189,5 +196,36 @@ test("'All' over a read the engine cut says so; a window inside the read does no
 test("an engine that does not report coverage shows no notice", async () => {
   await withPanel({}, async (dom) => {
     assert.doesNotMatch(dom.text(), /These totals count/);
+  });
+});
+
+test("choosing another window does not leave the last window's numbers on screen while the new ones load", async () => {
+  // The old numbers stayed until the new read landed, and if it failed the error banner sat above the old window's
+  // figures, which read as that window's.
+  let release: (r: Response) => void = () => {};
+  const held = new Promise<Response>((resolve) => {
+    release = resolve;
+  });
+  await withPanel(
+    { overviewAnswer: (days) => (days === 7 ? held : json(overview(3))) },
+    async (dom) => {
+      assert.match(dom.text(), /5 goals in view/, "the first window never loaded");
+      await dom.click(dom.byButton("7d"));
+      await dom.settle();
+      assert.doesNotMatch(dom.text(), /5 goals in view/, "the last window's count is still shown under the new window");
+      assert.match(dom.text(), /Loading statistics/);
+      release(json({ ...overview(3), goals: { ...overview(3).goals, goals: 2 } }));
+      for (let i = 0; i < 4; i++) await dom.settle();
+      assert.match(dom.text(), /2 goals in view/);
+    },
+  );
+});
+
+test("a failed history export says so", async () => {
+  await withPanel({ days: 3, failExport: true }, async (dom) => {
+    await dom.click(dom.byButton("Export frozen history"));
+    for (let i = 0; i < 4; i++) await dom.settle();
+    assert.match(dom.text(), /Could not export/);
+    dom.takeConsoleErrors();
   });
 });

@@ -278,3 +278,25 @@ test("a popup announcement that fails validation opens nothing", async () => {
     assert.equal(commands(ctx.shell, "codify_browser_open").length, 1, "a malformed announcement reached the shell");
   });
 });
+
+test("the page-event subscriptions are made once, not again every time a tab changes", async () => {
+  // The effect depended on a callback that is rebuilt whenever the tab list changes, so every title, every
+  // redirect and every new tab unsubscribed and resubscribed. Events fired in the gap between the two were lost,
+  // and each pass cleared the loading-expiry timers while leaving the ids marked, so a page that never reported
+  // Finished (a TLS interstitial) pulsed forever.
+  await withApp({ viewport: VIEWPORT }, async (ctx) => {
+    await seatAPage(ctx, "https://example.com/a");
+    const tabId = commands(ctx.shell, "codify_browser_open")[0].tabId;
+    const listens = () =>
+      ctx.shell.args.filter((a, i) => ctx.shell.calls[i] === "plugin:event|listen" && a.event === "browser-page-loading").length;
+    const before = listens();
+    assert.ok(before >= 1, "the app never subscribed to the page's loading event");
+    await ctx.emit("browser-page-titled", { tab_id: tabId, url: "https://example.com/a", title: "First" });
+    await ctx.settle();
+    await ctx.emit("browser-page-titled", { tab_id: tabId, url: "https://example.com/a", title: "Second" });
+    await ctx.settle();
+    await ctx.emit("browser-page-loaded", { tab_id: tabId, url: "https://example.com/b" });
+    await ctx.settle();
+    assert.equal(listens(), before, "the subscription was torn down and remade after the tab list changed");
+  });
+});

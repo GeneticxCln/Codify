@@ -133,6 +133,9 @@ const SidebarRow: React.FC<{
     data-thread-row="true"
     data-thread-id={conversation.id}
     onKeyDown={(event) => {
+      // Only a key pressed on the row itself. The Rename and Archive buttons are inside it, and a key that
+      // bubbles up from one is that button's press: cancelling it here made both unusable from the keyboard.
+      if (event.target !== event.currentTarget) return;
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
         onSelect(conversation.id);
@@ -196,12 +199,16 @@ const SidebarRow: React.FC<{
         <div className="text-2xs text-codify-muted">archived</div>
       )}
     </div>
-    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
+    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
       <IconButton
         label="Rename conversation"
         title="Rename conversation"
         size="sm"
-        onClick={() => onRename(conversation.id, threadTitle(conversation))}
+        onClick={(event) => {
+          // The row opens the thread on a click; a click on one of its buttons is not that.
+          event.stopPropagation();
+          onRename(conversation.id, threadTitle(conversation));
+        }}
       >
         <Pencil className="w-3 h-3" />
       </IconButton>
@@ -209,7 +216,10 @@ const SidebarRow: React.FC<{
         label="Archive conversation"
         title="Archive conversation"
         size="sm"
-        onClick={() => onArchive(conversation.id)}
+        onClick={(event) => {
+          event.stopPropagation();
+          onArchive(conversation.id);
+        }}
       >
         <Archive className="w-3 h-3" />
       </IconButton>
