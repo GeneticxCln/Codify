@@ -1984,6 +1984,14 @@ export const App: React.FC = () => {
   // title (the tab shows what the page calls itself). Payloads for tabs
   // that are gone are dropped by the reader and the reducers' own kind
   // check, not by luck.
+  // The newest `notePageNavigation`, read by the subscription below. The callback is rebuilt whenever the tab list
+  // changes (it reads the tab's history), and depending on it re-ran the subscription on every title, redirect and new
+  // tab: an unlisten and a listen with a gap between them in which events were lost.
+  const notePageNavigationRef = useRef(notePageNavigation);
+  useEffect(() => {
+    notePageNavigationRef.current = notePageNavigation;
+  }, [notePageNavigation]);
+
   useEffect(() => {
     let unlisteners: Array<() => void> = [];
     let cancelled = false;
@@ -1998,7 +2006,7 @@ export const App: React.FC = () => {
           // the user clicked inside a page is a visit the stack would otherwise
           // never hear of — Back would then have nothing to offer but the last
           // address they typed. `notePageNavigation` tells the two apart.
-          notePageNavigation(fact.tab_id, fact.url);
+          notePageNavigationRef.current(fact.tab_id, fact.url);
         }
       );
       const offLoaded = await listenShellEvent<unknown>(
@@ -2034,12 +2042,19 @@ export const App: React.FC = () => {
     return () => {
       cancelled = true;
       unlisteners.forEach((off) => off());
-      // And every expiry timer: a listener teardown that left one behind
-      // would setState on an unmounted tree.
-      loadingTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-      loadingTimersRef.current.clear();
     };
-  }, [startLoading, stopLoading, notePageNavigation]);
+  }, [startLoading, stopLoading]);
+
+  // Every expiry timer, when the app goes away: one left behind would setState on an unmounted tree. Not part of
+  // the subscription above, whose teardown is not the app's: clearing the timers there left their ids marked as
+  // loading with nothing left to unmark them.
+  useEffect(() => {
+    const timers = loadingTimersRef.current;
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+      timers.clear();
+    };
+  }, []);
 
   // ── the terminal's three moves ─────────────────────────────────────────
   //
