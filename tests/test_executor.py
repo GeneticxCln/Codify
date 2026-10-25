@@ -405,6 +405,51 @@ class TestExecutorService(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Provider Keys", error.payload["message"])
         self.assertEqual(error.payload["role"], "planner")
 
+    async def _two_step_goal_left_running(self) -> tuple[Any, list[PlanStep]]:
+        self.mock_responses["planner"] = {
+            "steps": [
+                {"title": "Step 1", "description": "one", "suggested_paths": []},
+                {"title": "Step 2", "description": "two", "suggested_paths": []},
+            ]
+        }
+        goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="Orphan", description=""))
+        await self.executor.run_planning(goal.id)
+        self.goals.update_status(goal.id, goal.version + 1, "RUNNING")
+        return goal, self.goals.steps(goal.id)
+
+    async def test_a_goal_orphaned_mid_step_can_be_retried(self) -> None:
+        """A restart fails the goal; the step that was in flight must be the one a Retry can pick up.
+
+        The rescue called `_fail` with no step, so the step stayed IN_PROGRESS, `begin_retry` refused it
+        (409 step_not_retryable) and Start refuses a FAILED goal: nothing in the product could resume it,
+        while the log line said 'retry to run it again'.
+        """
+        goal, steps = await self._two_step_goal_left_running()
+        self.executor._set_step(goal.id, steps[0], "IN_PROGRESS")
+
+        for gid, _previous, _message in self.goals.fail_orphaned_active_goals():
+            self.executor._fail(gid, None, "engine_restarted", "engine restarted", role=None)
+
+        after = self.goals.steps(goal.id)
+        self.assertEqual(["FAILED", "PENDING"], [s.status for s in after])
+        failed = self.goals.get(goal.id)
+        self.assertEqual("FAILED", failed.status)
+        retried = self.executor.begin_retry(goal.id, steps[0].id, failed.version)
+        self.assertEqual(steps[0].id, retried.id)
+        self.executor.release_driver(goal.id)
+
+    async def test_a_goal_orphaned_between_steps_offers_the_next_step_to_retry(self) -> None:
+        goal, steps = await self._two_step_goal_left_running()
+        self.executor._set_step(goal.id, steps[0], "COMPLETED")
+
+        for gid, _previous, _message in self.goals.fail_orphaned_active_goals():
+            self.executor._fail(gid, None, "engine_restarted", "engine restarted", role=None)
+
+        self.assertEqual(["COMPLETED", "FAILED"], [s.status for s in self.goals.steps(goal.id)])
+        failed = self.goals.get(goal.id)
+        self.executor.begin_retry(goal.id, steps[1].id, failed.version)
+        self.executor.release_driver(goal.id)
+
     async def test_critic_rejection_and_retry(self) -> None:
         self.mock_responses["planner"] = {
             "steps": [{"title": "Step 1", "description": "Do something", "suggested_paths": []}]

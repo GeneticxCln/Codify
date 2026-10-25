@@ -788,9 +788,30 @@ class _ExecutorCore:
                 self._set_step(goal_id, step, "FAILED")
             except Exception:
                 pass
+        else:
+            self._fail_interrupted_steps(goal_id)
         try:
             self._set_status(goal_id, "FAILED", step_id)
         except Exception:
+            pass
+
+    def _fail_interrupted_steps(self, goal_id: str) -> None:
+        """Give a goal that failed without naming a step the step a Retry can pick up.
+
+        A restart, a shutdown and any exception that escapes a step all fail the goal with no step. Retry
+        accepts a `FAILED` step (or an `IN_PROGRESS` one with review notes) and Start refuses a `FAILED`
+        goal, so a goal whose steps were left `IN_PROGRESS` or `PENDING` could never run again, while the log
+        said to retry it. The steps that were in flight are failed; if none was, the first step that never
+        ran is, so Retry re-opens it and the driver carries on from there.
+        """
+        try:
+            steps = self.goals.steps(goal_id)
+            in_flight = [s for s in steps if s.status == "IN_PROGRESS" and not s.review_notes]
+            targets = in_flight or [s for s in steps if s.status == "PENDING"][:1]
+            for step in targets:
+                self._set_step(goal_id, step, "FAILED")
+        except Exception:
+            # Best effort, like the rest of `_fail`: the goal's own status below is the record that matters.
             pass
 
     def _log(self, goal_id: str, step_id: str | None, level: str, message: str) -> None:

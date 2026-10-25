@@ -123,6 +123,12 @@ was left; nothing re-opens `CANCELLED`. A refused cancel (`version_conflict`, `i
 step that is mid-way finishes its review and its commit; a step whose scribe was cut short by a *cancel* is not recorded as
 `COMPLETED` (`TestCancelStopsBeforeCommit`).
 
+**A goal whose process is gone** (a boot after a crash, a graceful shutdown mid-run) is failed with `engine_restarted` or
+`engine_interrupted`, and its steps are repaired so it can be resumed: the steps that were in flight are marked `FAILED`, or,
+when none was, the first step that never ran. Retry accepts a `FAILED` step and Start refuses a `FAILED` goal, so without this
+the goal could not run again while its log said to retry it (`ExecutorService._fail_interrupted_steps`). The same repair
+applies to any failure raised with no step.
+
 **One driver per goal, held for the whole run** (review of 2026-09-29, finding 2). `run_chat` and `run_planning`
 claim the goal's driver (`claim_driver`) for as long as they run, as `start`, `retry` and `apply` already did.
 The conductor's `plan` move leaves the goal `PENDING` while the turn goes on to write its answer, and `PENDING` is
