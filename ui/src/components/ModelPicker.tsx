@@ -131,7 +131,12 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
       close();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
+      if (e.key === "Escape") {
+        // This Escape is spent on the list. The Settings modal listens for it on the window, above this
+        // document, and would close too, discarding whatever was unsaved behind the list.
+        e.stopPropagation();
+        close();
+      }
     };
     document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("keydown", onKey);
