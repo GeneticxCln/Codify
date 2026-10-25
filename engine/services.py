@@ -627,7 +627,8 @@ class WorkspaceService:
                     f"no file at {relative!r} in this workspace — pin a contract that exists",
                 )
             try:
-                sniff = target.read_bytes()[:BINARY_SNIFF_BYTES]
+                with target.open("rb") as handle:
+                    sniff = handle.read(BINARY_SNIFF_BYTES)
             except OSError as exc:
                 raise ApiError(
                     400, "design_contract_unreadable",
