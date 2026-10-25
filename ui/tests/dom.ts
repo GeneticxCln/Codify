@@ -192,6 +192,49 @@ export interface FetchAttempt {
   body: string | null;
 }
 
+/** Anything that can run work inside React's `act`: a `Dom`, or the mounted App's context. */
+export interface Waiter {
+  act<T>(body: () => T | Promise<T>): Promise<T>;
+}
+
+export interface WaitOptions {
+  /** How long to keep asking, in real milliseconds. */
+  timeoutMs?: number;
+  /** How long to let the app work between two asks, in real milliseconds. */
+  intervalMs?: number;
+  /** What the test saw when it gave up, so a lost wait names the state it was in. */
+  describe?: () => string;
+}
+
+/**
+ * Wait until `check` holds, letting the app's own timers and state updates run
+ * in the meantime.
+ *
+ * A fixed sleep is a bet on how long the machine takes; this is a bet on the
+ * condition, and a lost bet says which condition never held. The waiting runs
+ * inside `act` (the move `dom.settle` makes): the app updates in that time, and
+ * an update landing between two `act`s is one React was never told about.
+ */
+export async function waitFor(
+  waiter: Waiter,
+  label: string,
+  check: () => boolean,
+  options: WaitOptions = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 6000;
+  const intervalMs = options.intervalMs ?? 25;
+  const started = Date.now();
+  for (;;) {
+    if (check()) return;
+    const waited = Date.now() - started;
+    if (waited >= timeoutMs) {
+      const saw = options.describe?.();
+      throw new Error(`waited ${waited}ms for ${label}${saw ? `; ${saw}` : ""}`);
+    }
+    await waiter.act(() => new Promise<void>((resolve) => setTimeout(resolve, intervalMs)));
+  }
+}
+
 /** jsdom has no layout, so the things `src/` asks the browser for must be answered. */
 function installEnvironment(
   win: Window & typeof globalThis,
