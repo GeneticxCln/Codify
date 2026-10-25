@@ -24,7 +24,7 @@ import { registerTsx } from "./tsxLoader.ts";
 registerTsx();
 
 const React = (await import("react")).default;
-const { withDom } = await import("./dom.ts");
+const { waitFor, withDom } = await import("./dom.ts");
 const h = React.createElement;
 
 /**
@@ -423,6 +423,32 @@ test("the same wait inside dom.act is not a warning, and act hands back what its
     });
     assert.equal(returned, 7);
     assert.equal(dom.text(), "late");
+  });
+});
+
+test("waitFor asks until the condition holds, instead of spending all the time it was given", async () => {
+  await withDom(async (dom) => {
+    let ticks = 0;
+    const timer = setInterval(() => void (ticks += 1), 10);
+    try {
+      await waitFor(dom, "three ticks", () => ticks >= 3, { timeoutMs: 2000, intervalMs: 5 });
+      assert.ok(ticks >= 3, `returned with ${ticks} ticks`);
+    } finally {
+      clearInterval(timer);
+    }
+  });
+});
+
+test("a wait that loses says what it was waiting for and what it saw", async () => {
+  await withDom(async (dom) => {
+    await assert.rejects(
+      waitFor(dom, "a condition that never holds", () => false, {
+        timeoutMs: 60,
+        intervalMs: 10,
+        describe: () => "saw the same thing every time",
+      }),
+      /waited \d+ms for a condition that never holds; saw the same thing every time/,
+    );
   });
 });
 

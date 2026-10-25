@@ -159,8 +159,11 @@ suite to it: `withDom` collects everything the page prints with `console.error` 
 fails a test that finished with any of it left (`dom.takeConsoleErrors()` is how a
 test that expects a complaint takes it), and the failure names the lines of `src/`
 and `tests/` that made the update. A change to the store, the editor or the clock
-that a test makes itself goes through `dom.act`, and a real-time wait goes inside
-one (`dom.act(() => sleep(ms))`); the warning "not wrapped in act" is a true
+that a test makes itself goes through `dom.act`, and waiting for something to
+happen goes through `waitFor(ctx, label, check)`, which runs its sleeps inside
+`act` and names the condition it never saw. A plain `dom.act(() => sleep(ms))`
+is only for a claim about *absence* — that an event must not arrive — because a
+fixed delay is a bet on the machine; the warning "not wrapped in act" is a true
 statement that the next assertion may have run before the screen did.
 
 **And when a control has to be *used*, there is now a DOM for it.** The rules

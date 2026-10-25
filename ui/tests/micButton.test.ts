@@ -14,7 +14,7 @@ registerTsx();
 
 import type { AppContext, EngineCall } from "./appHarness.ts";
 
-const { withApp } = await import("./appHarness.ts");
+const { withApp, waitFor } = await import("./appHarness.ts");
 const { withDom } = await import("./dom.ts");
 const React = (await import("react")).default;
 const h = React.createElement;
@@ -139,7 +139,7 @@ test("at the engine's limit the recording is transcribed, not lost", async () =>
     },
     async (ctx) => {
       await ctx.dom.click(ctx.dom.byLabel("Dictate"));
-      await ctx.act(() => new Promise((resolve) => setTimeout(resolve, 700)));
+      await waitFor(ctx, "the recording's limit to stop it", () => posted(ctx.engine, "/audio/dictation/stop") === 1, { timeoutMs: 5000 });
       await ctx.settle();
 
       assert.equal(posted(ctx.engine, "/audio/dictation/stop"), 1);
