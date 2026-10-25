@@ -10,7 +10,7 @@ registerTsx();
 
 import type { AppContext } from "./appHarness.ts";
 
-const { withApp, conversation } = await import("./appHarness.ts");
+const { withApp, waitFor, conversation } = await import("./appHarness.ts");
 
 const THREAD = conversation({ id: "c1", title: "Thread" });
 const goalRow = (over: Record<string, unknown> = {}) => ({
@@ -28,7 +28,6 @@ const LOG = [
 ];
 const goalSockets = (ctx: AppContext) => ctx.sockets.filter((s) => s.url.endsWith("/ws/goals/g1"));
 const goalGets = (ctx: AppContext): number => ctx.engine.filter((c) => c.method === "GET" && c.path === "/goals/g1").length;
-const wait = (ctx: AppContext, ms: number): Promise<void> => ctx.act(() => new Promise<void>((r) => setTimeout(r, ms)));
 const bell = (ctx: AppContext): HTMLElement =>
   [...(ctx.dom.container.querySelector("header") as HTMLElement).querySelectorAll("button")].find((b) => /^Notifications/.test(b.getAttribute("aria-label") ?? "")) as HTMLElement;
 const badge = (ctx: AppContext): string => (bell(ctx).textContent ?? "").replace(/Notifications/, "").trim();
@@ -45,8 +44,9 @@ async function withWatchedGoal(body: (ctx: AppContext) => Promise<void>): Promis
 /** Drop the goal's socket and wait out the real 1 s backoff for the one that replaces it. */
 async function reconnect(ctx: AppContext, from: number): Promise<ReturnType<typeof goalSockets>[number]> {
   await goalSockets(ctx)[from - 1]!.drop(1006);
-  const deadline = Date.now() + 6000;
-  while (goalSockets(ctx).length < from + 1 && Date.now() < deadline) await wait(ctx, 50);
+  await waitFor(ctx, `the goal stream to reconnect (${from + 1} sockets)`, () => goalSockets(ctx).length >= from + 1, {
+    describe: () => `the window has ${goalSockets(ctx).length}`,
+  });
   const next = goalSockets(ctx)[from]!;
   assert.ok(next, "the stream did not reconnect");
   await next.open();
@@ -314,9 +314,7 @@ test("a poll answered after a newer refresh does not put the older goal back", a
       await ctx.settle();
       engineGoal = ctx.engineGoal("g1");
       armed = true;
-      const deadline = Date.now() + 5000;
-      while (!held && Date.now() < deadline) await wait(ctx, 50);
-      assert.ok(held, "the poll never sent its read");
+      await waitFor(ctx, "the poll's read", () => held, { timeoutMs: 5000, intervalMs: 50 });
 
       Object.assign(ctx.engineGoal("g1")!, { status: "COMPLETED", version: 4 });
       const s1 = goalSockets(ctx)[0]!;

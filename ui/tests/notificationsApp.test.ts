@@ -15,8 +15,9 @@ registerTsx();
 
 import type { AppContext, AppOptions } from "./appHarness.ts";
 
-const { withApp, conversation } = await import("./appHarness.ts");
+const { withApp, waitFor, conversation } = await import("./appHarness.ts");
 const { engineNoticeTiming } = await import("../src/useNotifications.ts");
+const { ENGINE_STATE_COPY } = await import("../src/statusTone.ts");
 
 // Long enough for a flap to be cancelled, short enough that a test does not sit waiting for the real four seconds.
 engineNoticeTiming.settleMs = 40;
@@ -35,6 +36,11 @@ const rows = (ctx: AppContext): string[] =>
   [...(drawer(ctx)?.querySelectorAll("button:not([aria-label]), div.rounded-lg") ?? [])].map((r) => (r.textContent ?? "").replace(/\s+/g, " ").trim());
 const open = (ctx: AppContext): Promise<void> => ctx.dom.click(bell(ctx));
 const stored = (ctx: AppContext): unknown[] => JSON.parse(ctx.dom.window.localStorage.getItem(STORAGE_KEY) ?? "[]");
+/** The header pill's own words — the state a person can see, rather than a probe the test assumed landed. */
+const pill = (ctx: AppContext): string => {
+  const labels: string[] = Object.values(ENGINE_STATE_COPY).map((copy) => copy.label);
+  return [...header(ctx).querySelectorAll("span")].find((s) => labels.includes((s.textContent ?? "").trim()))?.textContent?.trim() ?? "";
+};
 
 const THREAD = conversation({ id: "c1", title: "Thread" });
 const goalRow = (over: Record<string, unknown> = {}) => ({
@@ -301,8 +307,7 @@ test("an engine that refuses the token is announced once, and again when it reco
   const shortened = engineNoticeTiming.settleMs;
   engineNoticeTiming.settleMs = 300;
   await withApp(options, async (ctx) => {
-    await ctx.act(() => new Promise<void>((r) => setTimeout(r, engineNoticeTiming.settleMs * 3)));
-    await ctx.settle();
+    await waitFor(ctx, "the refused-token notice", () => badge(ctx) === "1", { timeoutMs: 5000 });
     assert.equal(badge(ctx), "1");
     await open(ctx);
     assert.match(rows(ctx)[0]!, /Engine refused the token/);
@@ -310,9 +315,8 @@ test("an engine that refuses the token is announced once, and again when it reco
 
     options.health = "up";
     await ctx.dom.click(ctx.dom.byButton("Retry now"));
-    await ctx.act(() => new Promise<void>((r) => setTimeout(r, engineNoticeTiming.settleMs * 3)));
-    await ctx.settle();
     await open(ctx);
+    await waitFor(ctx, "the connection-restored notice", () => /Engine connection restored/.test(rows(ctx)[0] ?? ""), { timeoutMs: 5000 });
     assert.match(rows(ctx)[0]!, /Engine connection restored/, `rows: ${rows(ctx).join(" || ")}`);
     assert.equal(rows(ctx).length, 2);
   }).finally(() => {
@@ -323,16 +327,22 @@ test("an engine that refuses the token is announced once, and again when it reco
 test("an engine that goes away and comes back is two notices, and a flap that reverses inside the settle time is none", async () => {
   const options: AppOptions = {};
   await withApp(options, async (ctx) => {
-    await ctx.act(() => new Promise<void>((r) => setTimeout(r, engineNoticeTiming.settleMs * 3)));
+    await waitFor(ctx, "the opening probe to settle on a live engine", () => pill(ctx) === ENGINE_STATE_COPY.live.label);
     // Down, then back before the settle time passes: the connection never settled, so it is not news.
     const longer = engineNoticeTiming.settleMs;
-    engineNoticeTiming.settleMs = 5000;
+    engineNoticeTiming.settleMs = 6000;
     options.health = "down";
-    await ctx.act(() => new Promise<void>((r) => setTimeout(r, 3300)));
-    await ctx.settle();
+    await waitFor(ctx, "the pill to say the engine is offline", () => pill(ctx) === ENGINE_STATE_COPY.offline.label);
+    const downAt = Date.now();
+
     options.health = "up";
-    await ctx.act(() => new Promise<void>((r) => setTimeout(r, 3300)));
-    await ctx.settle();
+    await waitFor(ctx, "the pill to say the engine is live again", () => pill(ctx) === ENGINE_STATE_COPY.live.label);
+    // The claim is about the notice this flap must *not* produce, so the wait has to outlast the settle time the down
+    // state started — measured from the state change itself, so a slow probe does not shorten the window. The poll is
+    // 3 s and the settle time 6 s: a reversal slower than that is not a flap, and would prove nothing either way.
+    assert.ok(Date.now() - downAt < engineNoticeTiming.settleMs, "the reversal outlasted the settle time, so this was not a flap");
+    const left = engineNoticeTiming.settleMs - (Date.now() - downAt);
+    await ctx.act(() => new Promise<void>((r) => setTimeout(r, left + 250)));
     engineNoticeTiming.settleMs = longer;
     assert.equal(badge(ctx), "", "a flap that reversed inside the settle time was announced");
   });

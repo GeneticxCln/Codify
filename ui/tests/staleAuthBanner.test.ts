@@ -29,7 +29,7 @@ import { STALE_AUTH_FIX, ENGINE_STATE_COPY } from "../src/statusTone.ts";
 
 const { staleAuthPasteLines, copyText } = await import("../src/components/StaleAuthBanner.tsx");
 const { storedEngineInfo } = await import("../src/api.ts");
-const { withApp } = await import("./appHarness.ts");
+const { waitFor, withApp } = await import("./appHarness.ts");
 const { withDom } = await import("./dom.ts");
 
 test("the fix is a decision with a shape, not a floating string", () => {
@@ -203,8 +203,8 @@ test("dismissing hides the banner, and the next probe puts the true state back",
     await dom.click(dom.byButton("Dismiss"));
     await settle();
     assert.ok(banner(dom.container) === null, "Dismiss did not hide the banner");
-    // The poll is 3 s while the window is visible.
-    await act(() => new Promise<void>((r) => setTimeout(r, 3300)));
+    // The poll is 3 s while the window is visible; wait for the banner rather than betting on the clock.
+    await waitFor({ act }, "the banner to return on the next probe", () => banner(dom.container) !== null);
     await settle();
     assert.ok(banner(dom.container), "the connection is still refused but the banner stayed gone");
   });

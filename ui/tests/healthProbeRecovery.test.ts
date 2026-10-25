@@ -47,7 +47,7 @@ import assert from "node:assert/strict";
 import { registerTsx } from "./tsxLoader.ts";
 registerTsx();
 
-const { withDom } = await import("./dom.ts");
+const { waitFor, withDom } = await import("./dom.ts");
 
 const React = (await import("react")).default;
 const h = React.createElement;
@@ -215,16 +215,10 @@ test("a dead port makes the probe ask the shell, apply the moved pair, and go li
       // the schedule instead of a ref matters: the automatic path is the one
       // the bug lived in, and a test that drove `forceHealthProbeRef` by hand
       // would pass with the automatic half removed.
-      const deadline = Date.now() + 8000;
-      const act = React.act as (body: () => Promise<void> | void) => Promise<void>;
-      while (Date.now() < deadline && !healthUrls().some((u) => u.includes(`:${FRESH_PORT}/`))) {
-        // The sleep runs *inside* `act` (the same move `dom.settle` makes):
-        // the poll's state updates land during it, and a window of real time
-        // spent outside `act` is what turns a passing test into a warning.
-        await act(async () => {
-          await new Promise((r) => setTimeout(r, 25));
-        });
-      }
+      await waitFor(dom, `a health probe at ${FRESH_PORT}`, () => healthUrls().some((u) => u.includes(`:${FRESH_PORT}/`)), {
+        timeoutMs: 8000,
+        describe: () => `the probes were ${JSON.stringify(healthUrls())}`,
+      });
       await dom.settle();
 
       // 1. The fix's fingerprint: the shell was asked *again*, after the move.

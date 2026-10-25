@@ -15,9 +15,12 @@
  *   next list;
  * - websockets: silent, since nothing here listens for a stream.
  */
-import { withDom } from "./dom.ts";
+import { waitFor, withDom } from "./dom.ts";
 import type { Dom } from "./dom.ts";
 import type { Conversation } from "../src/types.ts";
+
+/** The harness's condition wait, so an App test needs one import rather than two. */
+export { waitFor };
 
 export interface EngineCall {
   method: string;
@@ -780,9 +783,14 @@ export async function withApp(
 
       const settle = async (): Promise<void> => {
         await dom.settle();
+        // The extra turns let timers, frames and socket callbacks run. They are inside `act` for the same reason
+        // `dom.settle`'s two are: the App probes its engine every three seconds, and a probe that lands in a turn
+        // spent outside `act` is an update React was never told about — the warning the harness fails a test for.
         for (let i = 0; i < 6; i++) {
-          await new Promise((r) => setTimeout(r, 0));
-          await new Promise((r) => requestAnimationFrame(() => r(null)));
+          await dom.act(async () => {
+            await new Promise((r) => setTimeout(r, 0));
+            await new Promise((r) => requestAnimationFrame(() => r(null)));
+          });
         }
       };
       await dom.render(

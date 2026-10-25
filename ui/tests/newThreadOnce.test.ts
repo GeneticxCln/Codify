@@ -19,7 +19,7 @@ registerTsx();
 
 import type { EngineCall } from "./appHarness.ts";
 
-const { withApp, conversation } = await import("./appHarness.ts");
+const { withApp, waitFor, conversation } = await import("./appHarness.ts");
 
 const PROMPT = "QUOKKA-77 fresh thread prompt";
 
@@ -143,7 +143,7 @@ test("a message sent while the thread is still being read back is not drawn twic
     await dom.press(composer(dom.container), "Enter");
     // The turn is dispatched; the engine now holds it; the send's own read of it is held. (Waiting happens inside `act`: the
     // window keeps working while the test waits, and what it does in that time is what the test is about.)
-    for (let i = 0; i < 100 && !engine.some((c) => c.method === "POST" && c.path === "/conversations/c-old/turns"); i++) await act(() => sleep(10));
+    await waitFor({ act }, "the turn to be dispatched", () => engine.some((c) => c.method === "POST" && c.path === "/conversations/c-old/turns"));
     await act(() => sleep(80));
     releaseThreadRead(); // the thread's read now lists a turn the screen is already showing
     await act(() => sleep(150));

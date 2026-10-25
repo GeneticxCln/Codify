@@ -15,7 +15,7 @@ registerTsx();
 
 import type { AppContext, HarnessSocket } from "./appHarness.ts";
 
-const { withApp } = await import("./appHarness.ts");
+const { withApp, waitFor } = await import("./appHarness.ts");
 const { CONNECTION_PROVEN_MS } = await import("../src/engineStream.ts");
 
 const engineSockets = (ctx: AppContext): HarnessSocket[] => ctx.sockets.filter((s) => s.url.endsWith("/ws/engine"));
@@ -28,11 +28,9 @@ const wait = (ctx: AppContext, ms: number): Promise<void> => ctx.act(() => new P
 
 /** Wait until the app has opened `n` engine sockets (the backoff is real time), then return the newest. */
 async function nthEngineSocket(ctx: AppContext, n: number): Promise<HarnessSocket> {
-  const deadline = Date.now() + 6000;
-  while (engineSockets(ctx).length < n) {
-    if (Date.now() > deadline) throw new Error(`the app opened ${engineSockets(ctx).length} engine sockets, wanted ${n}`);
-    await wait(ctx, 50);
-  }
+  await waitFor(ctx, `the app to open ${n} engine sockets`, () => engineSockets(ctx).length >= n, {
+    describe: () => `it opened ${engineSockets(ctx).length}`,
+  });
   return engineSockets(ctx)[n - 1]!;
 }
 
@@ -66,8 +64,7 @@ test("a proven connection that is lost and proven again re-reads the catalogue o
     assert.equal(rereads(ctx), before, "the reconnect re-read before it was proven");
     // Real timers on a loaded machine: poll for the re-read rather than trusting one fixed sleep, then
     // wait a little longer to show it was one and not several.
-    const deadline = Date.now() + 5000;
-    while (rereads(ctx) === before && Date.now() < deadline) await wait(ctx, 100);
+    await waitFor(ctx, "the catalogue re-read", () => rereads(ctx) > before, { timeoutMs: 5000, intervalMs: 100 });
     await wait(ctx, 300);
     await ctx.settle();
     assert.equal(rereads(ctx), before + 1, "a proven reconnect should re-read exactly once");
@@ -89,8 +86,7 @@ test("a start whose first sockets were refused re-reads the catalogue once when 
     const accepted = await nthEngineSocket(ctx, 3);
     await accepted.open();
     assert.equal(rereads(ctx), before, "the accepted socket re-read before it was proven");
-    const deadline = Date.now() + 5000;
-    while (rereads(ctx) === before && Date.now() < deadline) await wait(ctx, 100);
+    await waitFor(ctx, "the catalogue re-read", () => rereads(ctx) > before, { timeoutMs: 5000, intervalMs: 100 });
     await wait(ctx, 300);
     await ctx.settle();
     assert.equal(rereads(ctx), before + 1, "the first proven connection after refusals should re-read exactly once");

@@ -42,6 +42,8 @@ import {
   withEditorApp,
 } from "./editorHarness.ts";
 
+const { waitFor } = await import("./appHarness.ts");
+
 const STORAGE_KEY = "CODIFY_TABS";
 
 // ── finding a file ───────────────────────────────────────────────────────────
@@ -468,8 +470,9 @@ test("a reconnect that replays a file change already handled reads neither the g
     const reads = () => ctx.engine.filter((c) => c.path === "/goals/g1" || c.path.endsWith("/file")).length;
     const seen = reads();
     await goalSocket(ctx).drop(1006);
-    const deadline = Date.now() + 6000;
-    while (ctx.sockets.filter((s) => s.url.endsWith("/ws/goals/g1")).length < 2 && Date.now() < deadline) await beat(50);
+    await waitFor(ctx, "the goal's stream to reconnect", () =>
+      ctx.sockets.filter((s) => s.url.endsWith("/ws/goals/g1")).length >= 2,
+    );
     const second = ctx.sockets.filter((s) => s.url.endsWith("/ws/goals/g1"))[1]!;
     await second.open();
     await second.deliver(summary(5, ["src/main.py"]));
@@ -499,8 +502,9 @@ test("a file change whose goal lookup failed reaches the editor when the replay 
 
       down = false;
       await goalSocket(ctx).drop(1006);
-      const deadline = Date.now() + 6000;
-      while (ctx.sockets.filter((s) => s.url.endsWith("/ws/goals/g1")).length < 2 && Date.now() < deadline) await beat(50);
+      await waitFor(ctx, "the goal's stream to reconnect", () =>
+        ctx.sockets.filter((s) => s.url.endsWith("/ws/goals/g1")).length >= 2,
+      );
       const second = ctx.sockets.filter((s) => s.url.endsWith("/ws/goals/g1"))[1]!;
       await second.open();
       await second.deliver(summary(5, ["src/main.py"]));
