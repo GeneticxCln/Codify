@@ -855,11 +855,13 @@ symlinked profile file is not read. A profile can name nothing else: the worker 
 **The scan** runs in `engine/regex_worker.py` with `op: "scan"`, started by `library._run_regex_worker` (no new spawn
 site) and killed at the request's `budget_s` (15 s) plus the margin a search has. It walks in sorted order, skips test
 files (`is_test_path`; `include_tests` brings them back), generated and minified files, binary files, files over 2 MB,
-symlinks that leave the workspace or land in `.git` (the same refusal as `read_file`), anything that is not a regular file (a pipe would block
-the thread that opened it for good) and names that are not valid UTF-8 text (left out and counted as `skipped.names`,
-present only when not zero; the Coverage line says `N names that are not valid UTF-8`, adding that a folder is one name and everything under it
-is unscanned), and stops, with the reason,
-at 800 files or the time budget. Comments (and, for
+symlinks that leave the workspace or land in `.git` (the same refusal as `read_file`), anything that is not a regular
+file (a pipe would block the thread that opened it for good), names that are not valid UTF-8 text (left out and counted
+as `skipped.names`, present only when not zero; the Coverage line says `N names that are not valid UTF-8`, adding that a
+folder is one name and everything under it is unscanned) and the directories `library.SKIP_DIRS` names — the last of
+which the Coverage line lists as `not scanned: …`, the same disclosure `search_code` makes, because a whole tree no file
+in the report came from is the one exclusion a per-file reason cannot show. It stops, with the reason, at 800 files or
+the time budget. Comments (and, for
 `code` rules, string contents) are blanked by a heuristic tokenizer per language family, keeping newlines and columns.
 A line is scanned to 2,000 characters. A rule applies to the whole text and a hit is reported at the line it starts on;
 several on one line are one hit. At most 8 hits are kept per rule and 60 in a report; the rest are counted, up to 500
@@ -868,8 +870,9 @@ per rule.
 **The result** is text, built to arrive whole: the conductor cuts any tool result over 12,000 characters to its first two
 thirds, so the report is held to `REPORT_CHARS` (11,000) and puts what was **not** seen before what was found. In order: the
 caveat (candidates, not vulnerabilities, and the quoted text is workspace text), a label if a workspace profile was used,
-the counts by severity, the **coverage** line (files scanned and a number for each skip, files read in part, lines cut,
-the file types it cannot read comments in), why it stopped early, any profile problems, then each rule's group (severity,
+the counts by severity, the **coverage** line (files scanned and a number for each skip, the directories the walk
+refused by name, files read in part, lines cut, the file types it cannot read comments in), why it stopped early, any
+profile problems, then each rule's group (severity,
 CWE, title, why, fix, then `path:line  excerpt`), and the next step. Rule groups that do not fit are not cut mid-line: they
 are named and counted ("N more rule groups matched and are not shown"). Errors the model is told in a sentence:
 `That scan did not run: <reason>`.
@@ -1081,7 +1084,18 @@ Requests are executed by `engine/library.py`:
 
 - `reads` → `LibraryService.read`, capped at `MAX_READ_CHARS` and reporting `truncated`.
 - `searches` → literal case-insensitive substring search by default, skipping VCS internals and
-  package caches, capped at `MAX_MATCHES` / `MAX_FILES_SCANNED` and reporting both. A request may
+  package caches, capped at `MAX_MATCHES` / `MAX_FILES_SCANNED` and reporting both. **Every directory it did not walk
+  is named, not left to be inferred**, and so is every other way its answer can be partial. Three of those were
+  silent or indistinguishable, and each has its own key and its own sentence in the header: `skipped_dirs` names the
+  directories the walk refused (collected by `library._walkable`, members of `SKIP_DIRS` by construction and so never
+  workspace text, capped at `SHOWN_SKIPPED_DIRS`, present only when there is one — a needle under a pruned `dist/`
+  used to come back as `0 matches` with `files_skipped: 0` beside it); `stopped` says which cap ended the walk
+  (`"files"` for `MAX_FILES_SCANNED`, `"matches"` for the match cap, absent when nothing was cut — a bare `TRUNCATED`
+  covered "listed every match there was" and "never opened the later files" alike, and the reader's next move
+  differs: a `glob` narrows the walk, nothing narrows a list that is already everything); and `byte_capped` counts
+  the files read only to their first `MAX_SCAN_BYTES` bytes, past which nothing was searched. The match cap is exact
+  in both directions: one row past `MAX_MATCHES` is fetched and dropped, so a list that fills the cap exactly is
+  complete and is not called cut. A workspace with none of the three gets the result it always got. A request may
   opt into regex with `{"query": …, "regex": true}` (and may narrow it with `glob`): a
   model-supplied pattern is untrusted input, so it is bounded at `MAX_REGEX_PATTERN` (200 chars),
   and an invalid or oversized pattern comes back as a refusal, not a crash. The *match* runs in a

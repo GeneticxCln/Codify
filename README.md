@@ -558,6 +558,7 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/14`](docs/14-rea-audit.md) | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, and what was built from it (child resource limits, a cancellable scan worker, `analyze_binary` for Ghidra) |
 | [`docs/15`](docs/15-xerg-audit.md) | The Xerg audit: `audit_usage`, a native audit of wasted model calls in tokens, and what of Xerg's skill was taken |
 | [`docs/16`](docs/16-deepinfer-and-cmux-audit.md) | The DeepInfer and cmux audit: what is portable from a serving framework and an agent terminal, what is refused and by which invariant, and the plan |
+| [`docs/17`](docs/17-leanrea-audit.md) | The leanrea audit: the routing-table skill that argues against REA's 207 tools — what of it this engine already is, and the one gap its trap list found in `search_code` |
 
 ## 📂 Layout
 
@@ -569,7 +570,7 @@ src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the emb
             the render-starvation watchdog
 tests/      Python suite; hermetic.py is the shared isolation bootstrap
 scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py
-docs/       00–16, the specifications this README summarises
+docs/       00–17, the specifications this README summarises
 ```
 
 ## 📄 License

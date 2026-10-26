@@ -18,7 +18,7 @@ and knowing which one you are in tells you what you may touch:
 |---|---|---|
 | Desktop shell | Rust / Tauri v2 | App lifecycle, owns the engine process, boot token |
 | UI | React 19 / TypeScript / Vite / Tailwind | Settings screen, goal chat, stats |
-| Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |The engine runs 8 fixed roles. `laya` (pre-flight gate) guards every request; the **conductor** — a loop, not a ninth role — then decides which of the other seven run and in what order, through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`) and *skills* it can load. The recipe that used to be compiled in — `librarian` → `design` → `planner` → `fixer` → `verifier` → `critic` → `scribe` — is now the built-in skill `ship-a-change` (`engine/builtin_skills/`), and a workspace can replace it. The directory's other built-ins are `context-transfer`, a recipe for packaging a degraded thread into one pasteable block for a new thread (load it when the thread is long enough that the model is losing track), and `security-review`, which sequences `scan_code` and `read_file` for a security review of the workspace. The fourth, `usage-audit`, has the conductor report wasted model calls honestly in tokens with `audit_usage`. `fixer` is still the only writer and `verifier` still the only role that runs a command.
+| Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |The engine runs 8 fixed roles. `laya` (pre-flight gate) guards every request; the **conductor** — a loop, not a ninth role — then decides which of the other seven run and in what order, through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`) and *skills* it can load. The recipe that used to be compiled in — `librarian` → `design` → `planner` → `fixer` → `verifier` → `critic` → `scribe` — is now the built-in skill `ship-a-change` (`engine/builtin_skills/`), and a workspace can replace it. The directory's other built-ins are `context-transfer`, a recipe for packaging a degraded thread into one pasteable block for a new thread (load it when the thread is long enough that the model is losing track), and `security-review`, which sequences `scan_code` and `read_file` for a security review of the workspace. The fourth, `usage-audit`, has the conductor report wasted model calls honestly in tokens with `audit_usage`, and the fifth, `inspect-an-artifact`, orders `analyze_binary`, `read_file`, `search_code` and `scan_code` for a question about a compiled file or a generated bundle, which is the order that keeps Ghidra's minutes off the cheap path. `fixer` is still the only writer and `verifier` still the only role that runs a command.
 
 ## The gate is `make check` / `make ci`
 
@@ -94,7 +94,7 @@ scripts/        fake_ollama.py (drive a goal with no API keys; FAKE_CONDUCTOR=1 
                  drive_a_turn.py (drive a turn against a real local model; --approve presses Start),
                  make_logo.py, check_history.py (does every commit in a range build)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–16, below
+docs/           00–17, below
 .githooks/      versioned pre-commit / pre-push
 ```
 
@@ -161,6 +161,7 @@ docs/           00–16, below
 | `docs/14` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, the design a Ghidra tool needs here (now built: `analyze_binary`), and the gaps it found (child resource limits and a cancellable worker, both closed) |
 | `docs/15` | The Xerg audit: `audit_usage`, the native audit of wasted model calls in tokens (coverage first; retry waste and the fix loop measured; cache reads and writes measured as a signal, never a saving; tool-loop waste reported as not measurable), and what of Xerg's skill was taken |
 | `docs/16` | The DeepInfer and cmux audit: what is portable from a serving framework and an agent terminal (terminal OSC notifications into the inbox, bounded transcript replay, JSON-schema replies, prompt-prefix reuse), what is refused and by which invariant, and the plan |
+| `docs/17` | The leanrea audit: the 8 KB routing-table skill that argues against REA's 207 tools — what is already this engine's design, the gap its trap list found (`search_code` hides its own pruned directories), the measured cost of one conductor call, and the two small rows proposed |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.
