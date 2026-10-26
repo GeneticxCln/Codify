@@ -37,8 +37,9 @@
  *   workspace.
  * - **This session only.** Nothing here reaches disk, `localStorage`, or the
  *   engine. The content is whatever the user typed and whatever commands printed,
- *   and `docs/09` §2 is where this project keeps its reasoning about what belongs
- *   in `~/.codify`. That reasoning is not settled, so nothing is written.
+ *   and `docs/09` §2.2 records the decision: it stays in memory, because the
+ *   stream can contain a secret and nothing in the PTY path can tell one from
+ *   source code.
  * - **Bounded.** A long build would otherwise grow without limit for as long as
  *   the app is open.
  *

@@ -252,10 +252,10 @@ path; `docs/01` §5.3.*
 
 ### Ship 3 — decisions, not code
 
-**8. A page snapshot with element references.** *Decision first.*
-Only worth doing if the browser actions stay switched on. The rule that has to be written before any code: a snapshot
-carries roles, names and refs and **never a field's contents**, is bounded in size, and its refs are valid only for the
-snapshot they came from. `docs/13`'s masking and `docs/09`'s "the page still has nothing" are the precedents.
+**8. A page snapshot with element references.** *Decided: taken under the rules in `docs/09` §7.6; not built.*
+Only while `browser_actions` is on, because it exists to aim a click or a type. A snapshot carries roles, names and refs
+and **never a field's contents**, is bounded in size, and its refs are valid only for the snapshot they came from; it
+adds no verb beyond the clicks and types that already exist.
 
 **9. Does a terminal's output ever reach the disk?** *Decision first.*
 cmux restores scrollback across restarts. This project deliberately does not, and `terminalHistory.ts` says why: shell
@@ -263,7 +263,7 @@ output is whatever was on screen, including `cat .env`. The recommendation is **
 opt-in, read-only (a record, labelled as one, that never accepts a keystroke), written through the clipboard history's
 secret-skipping rules, and its size bounded — and `docs/09` §2.2 now records the decision: not yet.
 
-**Status.** Items 1–7 are built; items 8 and 9 remain decisions, not code (item 9's is recorded in `docs/09` §2.2). Two limits are stated rather than
+**Status.** Items 1–7 are built; items 8 and 9 are decisions, not code, and both are recorded (`docs/09` §7.6 and §2.2). Two limits are stated rather than
 papered over: item 5's retry-waste reduction has not been measured on a real task, and item 7's live-provider
 confirmation — a multi-call turn reporting cache reads — has not been run here; its request body and fallback are
 tested. Item 5 also proves the schema it sends, not that a provider honours it. Item 1's OSC 99 is read one
@@ -288,8 +288,8 @@ sequence at a time (kitty's chunked and base64 forms are refused rather than hal
   description of the contract with nothing checking it.
 - **One route, already swept:** item 3 adds `GET /workspaces/{id}/git`, and `test_every_route_is_authenticated.py` is
   the test that must see it.
-- **Two decisions before their code:** item 8 (what a snapshot may carry) and item 9 (whether shell output is ever
-  written). Neither blocks Ships 1 and 2.
+- **Two decisions, now written:** item 8 (`docs/09` §7.6: taken under its rules, not built) and item 9 (`docs/09`
+  §2.2: not yet). Neither blocks Ships 1 and 2.
 - **The order to build them in:** 1 (the visible one), 4 (the cheapest engine win), 6, 5, 2, 3, 7. Items 2 and 3 do not
   depend on 1; 7 depends on 6.
 - **The gate is the usual one:** `make check` / `make ci`, plus `make check-tauri` for item 1. Nothing here needs a new

@@ -1127,7 +1127,7 @@ backlog — is already where the badge's evidence is.
 |---|---|
 | **The byte stream, not the screen** | Serializing xterm's own buffer with `addon-serialize` is a closer match and captures a full-screen program the way the user last saw it. The stream wins because it needs no extra dependency, is always current rather than captured at a chosen moment, and survives xterm being disposed at all — which a buffer snapshot only does if something remembered to take it. |
 | **Per workspace, not per terminal** | The question being asked is "what was I doing *here*", and "here" is the workspace. Two terminal tabs in one workspace share a tail, so a second tab shows the first one's session. That is the feature, not a leak. |
-| **This session only — never disk, `localStorage`, or the engine** | The content is whatever the user typed and whatever commands printed. `docs/09` §2 is where this project keeps its reasoning about what belongs in `~/.codify`, and that reasoning is not settled, so nothing is written. A durable version is a real decision, not a follow-up: a file in `CODIFY_HOME` written by `terminal.rs`, bounded and garbage-collectable, which is also where it could be *deleted* on request. `localStorage` would be neither. |
+| **This session only — never disk, `localStorage`, or the engine** | The content is whatever the user typed and whatever commands printed. `docs/09` §2.2 records the decision: it stays in memory, because the stream can contain a secret and nothing in the PTY path can tell one from source code. A durable version would be a new decision, not a follow-up: a file in `CODIFY_HOME` written by `terminal.rs`, bounded and garbage-collectable, which is also where it could be *deleted* on request. `localStorage` would be neither. |
 | **Bounded at 64 KiB, trimmed on every append** | Trimming on read instead means a terminal left open through a long build grows without limit for as long as the app is open. What survives is the *end* of the log: nobody scrolls back a megabyte to find the line they wanted. |
 | **A cut inside a surrogate pair is dropped** | A JS string is UTF-16 and the limit is applied by slicing, so a cut between the halves of an emoji leaves a lone high surrogate. It renders as a replacement character at the top of every restore after, because the stored tail is the cut one. |
 | **A cut mid-line is dropped** | `terminal.rs` reads in 4 KiB chunks, so a tail almost always stops mid-line. Replaying half a command above a new prompt reads as corruption rather than as a boundary. |
@@ -2208,6 +2208,58 @@ and which `browser/smoke.rs`'s probe uses. The title renames the tab, and a
 user reading a page while the model reads it too is not the smoke's throwaway
 webview. `webview_bridge.rs` explains the rest, including why the script tries
 `fetch`, `Image().src` and `sendBeacon` rather than one of them.
+
+### 7.6 A page snapshot (decided, not built)
+
+**Decision: take it, under the rules below, and only while `browser_actions`
+is on.** The four verbs in §7.5 read text or act through a CSS selector, so the
+model has to reconstruct a page's structure from prose before it can aim. A
+snapshot of the accessibility tree gives it roles, names and a reference to aim
+at — not a new power, a better address for the click and type verbs that
+already exist. With actions off it has no job; `read_page` already covers
+reading, so it is not offered.
+
+**What a node carries is a closed set.** `ref`, `role` and `name` — the
+accessible name, control characters stripped and clipped to 120 characters —
+and the boolean `disabled`. Nothing else is copied: no `value`, no selected
+option, no slider position, no filename, no text of a `contenteditable`, no
+placeholder and no `aria-valuenow`/`aria-valuetext`. This is the one rule the
+page does not get to negotiate. A field's *contents* are what the person put
+there, and a snapshot that carried them would turn "let the model find the
+button" into "let the model read the form". A page can still put a secret in a
+label, alt text or an `aria-label`; that is page-authored text, and it is
+already quoted as untrusted by `read_page`. The snapshot formatter is a literal
+dict, like every other answer in §7.5, so a page cannot add a key of its own.
+
+**Refs belong to one snapshot.** The window mints them while it builds the
+answer and keeps the element map that gives them meaning; the page never sees
+or supplies one. A ref is dead after a new snapshot, a navigation or a reload,
+and a click or type that carries one is refused with a sentence telling the
+model to take a snapshot again — never resolved against the current page,
+because "the third button" from thirty seconds ago is exactly how a click lands
+on the wrong thing. A ref is not a selector and is never persisted.
+
+**It is a read, so its bounds are a read's bounds.** At most 300 nodes and
+12,000 characters, the same ceiling as `read_page`'s default budget, with a
+sentence saying the tree was cut and how. An optional CSS selector scopes it to
+a subtree, with the same length and emptiness checks the other verbs apply
+locally. It takes its turn in the bridge's one-operation-at-a-time queue, so it
+cannot interleave with a navigation the user is watching.
+
+**What a ref can do is what a selector can do today.** Clicking one runs the
+same click script, including the refusal of a disabled control; typing into one
+runs the same type script, including "typed and pressed nothing"; every
+navigation the click causes meets the same `parse_navigation` and
+`on_navigation` guard. A snapshot cannot open a tab, read a field, submit a
+form or reach a page the user is not on. It is available only for the active
+tab, resolved the way §7.5 resolves it, and every name in it is the page's
+claim, quoted as such.
+
+**Not built.** There is no `snapshot_page` op, script or test yet; this section
+is the contract an implementation has to meet. When one is written it joins the
+browser surface's read ops (§7.5, §10.6), and its tests are the rules above: a
+value never appears, the bound holds, a stale ref is refused, a closed tab kills
+it, and a snapshot cannot be taken with `browser_actions` off.
 
 ## 8. The keyboard layer (built)
 
