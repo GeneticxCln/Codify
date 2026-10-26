@@ -215,8 +215,8 @@ export async function tauriInvoke<T>(cmd: string, args?: Record<string, any>): P
  * had and the user saw nothing happen at all.
  */
 const NEEDS_DESKTOP_SHELL =
-  "The browser and terminal panes need the Codify desktop shell — the engine " +
-  "serves no HTTP equivalent, so these commands exist only in the app.";
+  "The browser, terminal and machine panes need the Codify desktop shell, and so does the " +
+  "update check — the engine serves no HTTP equivalent, so these commands exist only in the app.";
 
 async function fallbackHttpInvoke<T>(cmd: string, args?: Record<string, any>): Promise<T> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
@@ -280,6 +280,8 @@ async function fallbackHttpInvoke<T>(cmd: string, args?: Record<string, any>): P
     case "codify_browser_devtools_close":
     case "codify_browser_devtools_state":
     case "codify_browser_devtools_available":
+    case "codify_update_check":
+    case "codify_update_download":
     case "codify_terminal_open":
     case "codify_terminal_write":
     case "codify_terminal_resize":
@@ -1573,6 +1575,67 @@ export async function getAppFacts(): Promise<AppFacts | null> {
   } catch {
     return null;
   }
+}
+
+/** Which package a copy of the app takes. The shell decides it, never the page. */
+export type UpdatePackage = "deb" | "appimage" | "source";
+
+/**
+ * What the shell answered about a newer release.
+ *
+ * `message` is the sentence to show when there is nothing to download — up to date, a check
+ * that could not run (GitHub unreachable, rate-limited, no release published yet), or a
+ * newer release this install cannot use (a checkout, or a release with no package for this
+ * machine). It is `null` exactly when `asset` is set, so the pane renders an offer or a
+ * sentence and never both. The shell answers `null`-message failures as an answer rather than
+ * an error on purpose: "I could not reach GitHub" and "you are up to date" are both things to
+ * read, and only one of them is a bug (`docs/18` §4).
+ */
+export interface UpdateCheck {
+  current: string;
+  latest: string | null;
+  tag: string | null;
+  published_at: string | null;
+  /** The release's page, as text. This app opens no external browser. */
+  url: string;
+  package: UpdatePackage;
+  asset: string | null;
+  asset_bytes: number | null;
+  available: boolean;
+  message: string | null;
+}
+
+export interface UpdateDownload {
+  path: string;
+  bytes: number;
+  package: UpdatePackage;
+  tag: string;
+  /** What to do with the file, as text. The shell runs none of it. */
+  next_step: string;
+}
+
+/**
+ * Is there a newer release, and is there a package this install can use?
+ *
+ * Only ever a person's click: nothing calls this on mount or on a timer, because an app that
+ * asks GitHub about itself every launch is an app that phones home (docs/18 §4). The shell
+ * contacts api.github.com with no key and nothing about this machine, and answers a refusal
+ * as a sentence rather than throwing.
+ */
+export async function checkForUpdate(): Promise<UpdateCheck> {
+  return tauriInvoke<UpdateCheck>("codify_update_check");
+}
+
+/**
+ * Download the release package for this install into the person's downloads folder.
+ *
+ * Takes no argument, and that is the shell's guarantee rather than this signature's: the page
+ * cannot name a file or an address, so the asset is re-derived there for this install and its
+ * architecture, and only GitHub's own hosts are fetched from. Nothing is installed — the
+ * answer carries the path and the sentence telling the person what to run.
+ */
+export async function downloadUpdate(): Promise<UpdateDownload> {
+  return tauriInvoke<UpdateDownload>("codify_update_download");
 }
 
 /**

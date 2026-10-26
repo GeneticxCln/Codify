@@ -1,5 +1,8 @@
 #!/bin/sh
-# Put Codify in this user's applications menu and on their PATH — no installer, no root.
+# Put this checkout of Codify in the user's applications menu and on their PATH — no root, and
+# nothing written outside their own XDG directories. Not the packaged install: that is the deb
+# or the AppImage `make package-app` builds (docs/18), which puts the shell in /usr and still
+# wants this checkout beside it for the engine.
 #
 #   scripts/install-local.sh            install (after `make build-app`)
 #   scripts/install-local.sh uninstall  remove exactly what install wrote

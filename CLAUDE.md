@@ -94,7 +94,7 @@ scripts/        fake_ollama.py (drive a goal with no API keys; FAKE_CONDUCTOR=1 
                  drive_a_turn.py (drive a turn against a real local model; --approve presses Start),
                  make_logo.py, check_history.py (does every commit in a range build)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–17, below
+docs/           00–18, below
 .githooks/      versioned pre-commit / pre-push
 ```
 
@@ -161,6 +161,7 @@ docs/           00–17, below
 | `docs/14` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, the design a Ghidra tool needs here (now built: `analyze_binary`), and the gaps it found (child resource limits and a cancellable worker, both closed) |
 | `docs/15` | The Xerg audit: `audit_usage`, the native audit of wasted model calls in tokens (coverage first; retry waste and the fix loop measured; cache reads and writes measured as a signal, never a saving; tool-loop waste reported as not measurable), and what of Xerg's skill was taken |
 | `docs/16` | The DeepInfer and cmux audit: what is portable from a serving framework and an agent terminal (terminal OSC notifications into the inbox, bounded transcript replay, JSON-schema replies, prompt-prefix reuse), what is refused and by which invariant, and the plan |
+| `docs/18` | Release and updates: a release is a tag (three files and the tag must agree, `scripts/release_notes.py`), the deb and AppImage hold the shell and not the engine, the workflow's decisions, and what the About tab's update button does and refuses — one GET to GitHub when a person clicks, a package written to their downloads folder, nothing installed |
 | `docs/17` | The leanrea audit: the 8 KB routing-table skill that argues against REA's 207 tools — what is already this engine's design, the gap its trap list found (`search_code` hides its own pruned directories), the measured cost of one conductor call, and the two small rows proposed |
 
 If your change alters a documented contract, update the matching doc in the same

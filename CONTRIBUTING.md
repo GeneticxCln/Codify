@@ -243,7 +243,7 @@ credentials with `CODIFY_HOME` and disables the OS keychain (see
 `engine/home.py`). If your change needs state, put it under `CODIFY_HOME`.
 
 **`CLAUDE.md` is a distillation, not a second source of truth.** It is the
-agent-facing version of this file and `docs/00`–`17`, and it is deliberately
+agent-facing version of this file and `docs/00`–`18`, and it is deliberately
 short: depth is a pointer, not a copy. When the two disagree, this file and
 `docs/` win and `CLAUDE.md` is the bug —
 `tests/test_claude_md_contracts.py` fails if the invariants it quotes drift
@@ -328,7 +328,7 @@ in the open text (unsaved: it never writes). The run exits non-zero unless it co
 
 ## Docs
 
-Architecture lives in `docs/00`–`17` (`07` is the spawn guard and the
+Architecture lives in `docs/00`–`18` (`07` is the spawn guard and the
 deterministic tests; `08` is the benchmark harness and the vendoring policy;
 `10` is the agent-memory model; `11` is the Ruflo audit; `12` is the Scrapling audit; `13` is the Grepify audit; `14` is the REA audit; `15` is the Xerg audit; `16` is the DeepInfer and cmux audit and its plan; `17` is the leanrea audit). If
 your change alters a documented contract — orchestration, settings, security,

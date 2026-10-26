@@ -298,9 +298,11 @@ or 175%, **125% by default**. It is client-side display state, like the theme: i
 
 ### 3.4 The About tab
 
-Settings → About (`AboutPane.tsx`, last tab) says what this app is and what it is running on. It is
-**read-only**, so it can never be a second writer of agent config (§1), and it prints only what the app
-can truthfully know:
+Settings → About (`AboutPane.tsx`, last tab) says what this app is and what it is running on. It
+**writes no configuration** — never a second writer of agent config (§1) — and prints only what the app
+can truthfully know. It has exactly one write in it, the update package below, and exactly one request
+that is not a model provider's, the update check; both are a person's to start, and both are specified
+in `18` §4.
 
 * **Version.** The desktop shell's own name, version and Tauri version, read through Tauri's app API
   (`getAppFacts` in `api.ts`; `core:app` is already granted, so no capability of its own). Under the
@@ -311,15 +313,25 @@ can truthfully know:
   what it can import). The engine has no version of its own, so none is invented: it ships in the same
   checkout as the app, and the interpreter line is what tells two installs apart. **The boot token is
   never shown.**
+* **Updates.** A **Check for updates** button, and what it answers with: the release's version and
+  publication date and the file for this install, or a sentence (`1.0.0 is the newest release.`, a
+  newer release with no package for this machine, or why the check could not run — `null` is never
+  rendered as "up to date"). The second press downloads that file into the downloads folder and shows
+  where it went and the command to run; the shell installs nothing. The button is absent in the
+  standalone browser preview, which has no shell to ask, and the pane says so instead. Nothing is
+  checked until it is pressed, which is the property the pane's own sentence about what leaves this
+  machine now names: one unauthenticated request to `github.com/GeneticxCln/Codify` with nothing about
+  this machine in it. The release's page is shown as text, like the project facts below, because this
+  pane opens no browser. Full behaviour, refusals and where the file lands: `18` §4.
 * **Where things live.** `~/.codify` (or `$CODIFY_HOME`), as text: no route exposes the data folder, and
   adding one only to print a path was not worth a new engine contract.
 * **Keyboard shortcuts**, from `SHORTCUT_HELP` in `shortcuts.ts`. Each line carries a real key event
   that `shortcuts.test.ts` resolves through `resolveShortcut`, and a second assertion pins the set of
   actions, so a binding that changes, or a shortcut added without a line, fails a test instead of
   leaving this tab describing keys that no longer do that.
-* **Project facts** (repository, licence, where the specification is) as plain text rather than links:
-  the page is not a browser, and an external link opened from here would be a navigation the app has no
-  reason to offer.
+* **Project facts** (repository, licence, where the specification is, the release page) as plain text
+  rather than links: the page is not a browser, and an external link opened from here would be a
+  navigation the app has no reason to offer.
 
 The palette (Ctrl+K) lists it as `About Codify`, and Appearance as `Appearance, themes & UI scale` so
 that searching "scale" finds the UI scale.

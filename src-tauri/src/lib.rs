@@ -3,6 +3,7 @@ mod engine_log;
 mod engine_protocol;
 mod machine;
 mod terminal;
+mod update;
 mod webview_bridge;
 
 use serde::{Deserialize, Serialize};
@@ -914,6 +915,32 @@ async fn codify_browser_devtools_state(
 #[tauri::command]
 async fn codify_browser_devtools_available() -> Result<bool, String> {
     Ok(browser::devtools_available())
+}
+
+/// Is there a newer release of Codify, and is there a package this install can use?
+///
+/// The deciding lives in `update.rs`, which is pure enough to be tested; this is the
+/// app handle. It answers with a sentence rather than an error when it cannot check,
+/// because "I could not reach GitHub" and "you are up to date" are answers the pane
+/// shows the same way, and only one of them is a bug in this app (docs/18 §4).
+#[tauri::command]
+async fn codify_update_check(app: tauri::AppHandle) -> Result<update::UpdateCheck, String> {
+    let current = app.package_info().version.to_string();
+    Ok(update::check(&current, update::package_for_this_install()).await)
+}
+
+/// Download the release package for this install, into the person's downloads folder.
+///
+/// Takes no argument on purpose: the frontend cannot name a file or an address, so the
+/// asset is re-derived here from the same release the check read, and only GitHub's own
+/// hosts are ever fetched from. Nothing is installed by this — the answer carries the
+/// sentence telling the person what to run (docs/18 §4).
+#[tauri::command]
+async fn codify_update_download(app: tauri::AppHandle) -> Result<update::UpdateDownload, String> {
+    let current = app.package_info().version.to_string();
+    let resolved = app.path().download_dir().ok();
+    let into = update::download_dir_for(resolved, std::env::var("HOME").ok())?;
+    update::fetch_package(&current, update::package_for_this_install(), into).await
 }
 
 /// Return the current engine connection info so the UI can build its HTTP client.
@@ -2111,6 +2138,8 @@ pub fn run() {
             codify_browser_devtools_close,
             codify_browser_devtools_state,
             codify_browser_devtools_available,
+            codify_update_check,
+            codify_update_download,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codify application")

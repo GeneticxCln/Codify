@@ -73,7 +73,8 @@ PNG_PATHS = [
     TAURI_ICONS / "128x128.png",
     TAURI_ICONS / "128x128@2x.png",  # 256px
 ]
-# No `.ico` and no `.icns`: Codify is a Linux desktop app and ships no installer, so no other
+# No `.ico` and no `.icns`: Codify is a Linux desktop app, and both packages it ships (a deb
+# and an AppImage, docs/18) are assembled by Tauri's Linux bundlers, which read PNGs — so no other
 # platform's icon container has a reader.
 
 # Geometry is a 24×24 unit grid, scaled to the render size. One scale, so the

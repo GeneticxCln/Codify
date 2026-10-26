@@ -250,6 +250,44 @@ jail, and each one is written here with how it is held:
 **What this does not claim.** It is a jail on the **host's kernel**, not a virtual machine: there is **no seccomp filter**, so the host kernel's whole syscall surface is reachable from inside it, and a kernel vulnerability that can be reached from an unprivileged
 user namespace is not contained by anything here, and **no limit set here is a defence against a kernel fault**: the jail has no kernel of its own to fail. There is no cgroup memory limit (the guard polls, and a program can allocate faster than it looks); a delegated cgroup would be stronger where one exists and is not built because it cannot be tested without systemd. Some distributions switch unprivileged user namespaces off, and then a machine cannot be opened at all (`make doctor` says so). A seccomp filter is the next hardening step and a VM backend the stronger one (`09` §14.9).
 
+### 1.12 The update check: the one request that is not a model provider's (`built`)
+
+The About tab can ask whether a newer release exists and fetch the package for this install (`18`
+§4). It is the only address this app ever contacts that is neither the engine nor a model provider
+configured for it, so the whole of it is written here:
+
+- **One address.** `https://api.github.com/repos/GeneticxCln/Codify/releases/latest`, and a
+  release asset's own `browser_download_url` when a person asks for the download. Nothing a model,
+  a skill, a workspace file or the webview can supply ever becomes an address: the download command
+  takes no argument and re-derives its asset in Rust.
+- **Only GitHub's hosts, over https, and through redirects.** Checked against a written-out host list
+  — never a suffix test, which `evil-github.com` and `github.com.evil.example` would both pass — and
+  parsed with the `url` crate, so credentials in the authority (`https://github.com@evil.example/`)
+  cannot disguise the host that is actually reached. The same function is the HTTP client's redirect
+  policy, so a 302 cannot leave GitHub either.
+- **No credentials and no identifiers.** The request is unauthenticated: no boot token, no provider
+  key, no machine id, no account. What it carries is an `Accept` header and a `User-Agent` naming the
+  app's version.
+- **A person starts it.** Nothing in the app calls it on mount or on a timer. GitHub's
+  unauthenticated limit (60 requests an hour per address) is therefore a limit this app cannot reach
+  by existing, only by being clicked, and the sentence a refusal produces says the limit is GitHub's.
+- **It writes one file, into the downloads folder**, and nothing else: the release asset, named as
+  the release names it (a name that is a path is refused), never past 256 MiB. It installs nothing,
+  runs nothing, escalates nothing and replaces no binary — the `apt` and `chmod +x` lines it answers
+  with are text for the person to run (`18` §4).
+- **It writes no configuration.** The About tab stays free of the settings routes (§1's one-mutator
+  rule): the only thing it can change on this machine is a file in the downloads folder.
+- **Granted to the app's own webview and to nobody else.** `allow-codify-update-check` and
+  `allow-codify-update-download` in `src-tauri/permissions/shell.json`, referenced only by
+  `capabilities/default.json` (`webviews: ["main"]`), so a `browser-*` page holds neither the check
+  nor the download.
+
+**What this does not claim.** Asking GitHub discloses to GitHub that this machine asked (an IP
+address in their logs, as any request would) — it is unauthenticated, not anonymous through a proxy,
+and no attempt is made to hide it. And the download is not verified: a `.deb` or `.AppImage` is
+fetched over TLS from GitHub's own hosts and its checksum is not compared with anything, because
+signing releases is the not-built half of `18` §5, not something this covers.
+
 ## 2. Persistence layer
 
 Single file. **No `agents.db`.**
