@@ -108,6 +108,16 @@ The build step is one command, `cargo tauri build`, because the target list live
 `tauri.conf.json`; a list repeated in the workflow would be a second place to forget. Tauri's own
 `beforeBuildCommand` builds the UI first, so the window carries the real frontend.
 
+**Both hooks say where to run, and that is not decoration.** A Tauri hook runs with its working
+directory set to the *frontend* directory — the resolved `frontendDist`, here `ui/dist` — not to
+`src-tauri`, so the obvious `"cd ../ui && npm run build"` is wrong in a way nothing local shows: it
+reads correctly and fails on the runner with `sh: 1: cd: can't cd to ../ui`. The CLI changes into the
+tauri directory itself first (`set_current_dir(dirs.tauri)` in `tauri-cli`), and a hook's own `cwd`
+overrides the frontend default, so `{"script": "npm run build", "cwd": "../ui"}` is the checkout's UI
+folder under both `cargo tauri build` and `cargo tauri dev` — every caller reaches the CLI from
+`src-tauri`, which is what makes `../ui` unambiguous. This was the first release's only failure, and
+it is written here rather than left in the workflow log.
+
 After it, one step collects `*.deb` and `*.AppImage` into `dist/`, writes `SHA256SUMS`, and **fails
 if the bundler produced fewer than two files**. A release with no assets looks published and cannot
 be installed, which is worse than a failed run: the update button would offer a version with nothing
