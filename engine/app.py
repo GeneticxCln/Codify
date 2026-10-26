@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse
 from engine import capabilities, home, speech, watchdog
 from engine.db import connect
 from engine.executor import ExecutorService
+from engine.git import GitService
 from engine.laya import LayaService
 from engine.role_repair import plan_role_repair
 from engine.spawn_guard import guarded_argv, guarded_env
@@ -81,6 +82,7 @@ from engine.models import (
     WorkspaceFileList,
     WorkspaceFileSave,
     WorkspaceFileSaved,
+    WorkspaceGit,
     loads_payload,
 )
 from engine.providers import Keychain, ProviderError, ProviderFactory
@@ -1561,6 +1563,20 @@ async def list_ws(request: Request) -> list[Workspace]:
 async def get_ws(workspace_id: str, request: Request) -> Workspace:
     workspaces: WorkspaceService = request.app.state.workspaces
     return workspaces.get(workspace_id)
+
+
+@app.get("/workspaces/{workspace_id}/git", response_model=WorkspaceGit)
+async def get_workspace_git(workspace_id: str, request: Request) -> WorkspaceGit:
+    """The workspace's branch and working-tree state, for the panel header.
+
+    A quiet 200 for the three cases that are not a branch (not a repository, no commits, detached HEAD):
+    `branch` is null and `reason` says which it is, so the header can show nothing rather than an error
+    banner about a folder the person already knows about (`docs/04` §6).
+    """
+    workspaces: WorkspaceService = request.app.state.workspaces
+    workspace = workspaces.get(workspace_id)
+    state = await asyncio.to_thread(GitService().status, workspace.root_path)
+    return WorkspaceGit(**state)
 
 
 @app.get("/workspaces/{workspace_id}/files", response_model=WorkspaceFileList, response_model_exclude_defaults=True)

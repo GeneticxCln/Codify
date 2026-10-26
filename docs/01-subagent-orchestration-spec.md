@@ -156,6 +156,16 @@ providers accept both keywords and ignore them, because they are part of the sig
 provider in this repo shares and a protocol that did not take them would be a different
 signature to stub at every call site.
 
+`complete` also takes a keyword-only `json_schema` (`engine.replies.REPLY_SCHEMAS`), on the same terms: every
+protocol accepts it, and only the OpenAI-compatible adapter sends it. Where that endpoint advertises
+`json_schema` for the model, the role's closed object goes on the wire as `response_format: {type:
+"json_schema", strict: true}`; a model that advertises only `json_object` is sent object mode, and one that
+advertises neither gets no `response_format` at all. The advertisement is read per model from the same
+`/models` body (docs/06 §5) — a `capabilities` object, or a router's `supported_parameters` list — and a
+request the server refuses is retried one rung down and remembered for that
+model. The schema never replaces the parser: `coerce_object` and each role's reader still decide what the
+reply means, so a provider that ignores the field costs nothing but the tokens it always did.
+
 **`temperature` is the local model's.** Ollama reads it from `options`, on every path. An `openai_compat` endpoint gets it
 when it is a local server (`is_local_endpoint`: loopback or a private address, decided by parsing the address and
 never by its spelling; LM Studio, vLLM and llama.cpp) and not when it is hosted. Anthropic and Google never do:
@@ -678,6 +688,24 @@ is a 400 on each. OpenAI and Ollama take an empty string and keep it.
   and answers the other three that the budget is spent), and a call to a tool
   that is not on the current menu is refused rather than dispatched from the
   table, so a model cannot run a move it was never offered by naming it.
+- **What is replayed is bounded too.** A turn of fourteen calls used to re-send every tool result it had ever
+  collected, each clipped at 12,000 characters: a hundred thousand characters of evidence in a local model's
+  32k-token window. `bound_replay` runs before every model call and replaces the *oldest* tool results with a
+  stub until the transcript is under `MAX_CONTEXT_CHARS` (60,000 characters), keeping the newest
+  `KEEP_WHOLE_RESULTS` (4) whole. A stub names the tool, the size it was and that it can be read again. User
+  and assistant messages are never touched — the person's words and the model's own replies are the
+  conversation, not evidence — and a tool message keeps its `tool_call_id`. Stubbing is idempotent, a result
+  already smaller than the stub is left alone, and the newest result is kept even when it alone exceeds the
+  budget. The effect is visible afterwards in `audit_usage`'s `context-growth` signal (`docs/15` §4).
+- **The one stable prefix is paid for once, where the protocol can say so.** Every call in a turn re-sends the same
+  system prompt, so it is the only prompt prefix whose cache write is read back. `_call` passes
+  `cache_prefix=True` on every call; only Anthropic consumes it, marking the **system block alone** with
+  `cache_control: {"type": "ephemeral"}` — never the tool schemas or the transcript, which are not a stable
+  prefix. A one-shot role call goes through `complete` and is never marked: its write premium would be paid and
+  never read. No token threshold is invented — below the provider's minimum nothing is cached and the provider
+  reports zero — and a request that refuses the mark is retried once without it and remembered on that provider,
+  exactly as a rejected `response_format` falls back. Whether it ever hits is recorded by `normalize_usage` and
+  shown by `audit_usage`'s `cache-reads` signal (`docs/16` items 6–7).
 - **The menu narrows with the state.** `write`, `verify`, `review`,
   `summarize` and `todo` are only offered once `plan` has produced a step for
   them to act on (`todo` is the note a step's next run reads, so a plain question

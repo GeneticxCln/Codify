@@ -51,7 +51,7 @@ class MockProvider(BaseProvider):
         temperature: float,
         max_tokens: int,
         *,
-        num_ctx: int | None = None, keep_alive: str | None = None,
+        num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         self.calls.append({
             "system_prompt": system_prompt,
@@ -535,7 +535,7 @@ class _ScriptedProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         role = next(
             (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -881,7 +881,7 @@ class _FailingProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         # Real providers report their token usage through the sink the
         # orchestrator attaches; the double does the same so latency tests can
@@ -953,7 +953,7 @@ class _QueuedProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         role = self.current_role or "unknown"
         self.calls.append((role, system_prompt, user_prompt))
@@ -1439,7 +1439,7 @@ class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
         async def completing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
-            *, num_ctx: int | None = None, keep_alive: str | None = None,
+            *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -1729,7 +1729,7 @@ class _HoldingProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         role = next(
             (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -1810,7 +1810,7 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
         async def completing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
-            *, num_ctx: int | None = None, keep_alive: str | None = None,
+            *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -1936,7 +1936,7 @@ class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
         async def completing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
-            *, num_ctx: int | None = None, keep_alive: str | None = None,
+            *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -2051,7 +2051,7 @@ class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
         async def completing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
-            *, num_ctx: int | None = None, keep_alive: str | None = None,
+            *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
         ) -> str:
             text = await real_complete(system_prompt, user_prompt, model, temperature, max_tokens)
             scripted._report_usage("ollama", {"response": text, "prompt_eval_count": 10, "eval_count": 5})
@@ -2104,25 +2104,65 @@ class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
 
     async def test_normalize_usage_handles_every_provider_dialect(self) -> None:
         from engine.providers import normalize_usage
+
+        def usage(inp: int, out: int, read: int = 0, write: int = 0) -> dict[str, int]:
+            return {"input_tokens": inp, "output_tokens": out, "total_tokens": inp + out,
+                    "cache_read_tokens": read, "cache_write_tokens": write}
+
         self.assertEqual(
-            normalize_usage("anthropic", {"usage": {"input_tokens": 3, "output_tokens": 4}}),
-            {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+            normalize_usage("anthropic", {"usage": {"input_tokens": 3, "output_tokens": 4}}), usage(3, 4),
         )
         self.assertEqual(
-            normalize_usage("openai_compat", {"usage": {"prompt_tokens": 3, "completion_tokens": 4}}),
-            {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+            normalize_usage("openai_compat", {"usage": {"prompt_tokens": 3, "completion_tokens": 4}}), usage(3, 4),
         )
         self.assertEqual(
-            normalize_usage("google", {"usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 4}}),
-            {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+            normalize_usage("google", {"usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 4}}), usage(3, 4),
         )
-        self.assertEqual(
-            normalize_usage("ollama", {"prompt_eval_count": 3, "eval_count": 4}),
-            {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
-        )
+        self.assertEqual(normalize_usage("ollama", {"prompt_eval_count": 3, "eval_count": 4}), usage(3, 4))
         # No usage at all is normal for some local servers.
         self.assertIsNone(normalize_usage("ollama", {"response": "hi"}))
         self.assertIsNone(normalize_usage("openai_compat", {"usage": {"prompt_tokens": "x"}}))
+
+    async def test_cache_tokens_are_kept_and_never_make_a_call_look_cheaper(self) -> None:
+        from engine.providers import normalize_usage
+
+        # Anthropic's `input_tokens` excludes both cache counts, so they are added to the prompt: a cached call
+        # must not book a smaller prompt than the same call without a cache. They stay visible as their own counts.
+        anthropic = normalize_usage("anthropic", {
+            "usage": {
+                "input_tokens": 3, "output_tokens": 4,
+                "cache_read_input_tokens": 100, "cache_creation_input_tokens": 20,
+            },
+        })
+        self.assertEqual(anthropic, {
+            "input_tokens": 123, "output_tokens": 4, "total_tokens": 127,
+            "cache_read_tokens": 100, "cache_write_tokens": 20,
+        })
+
+        # OpenAI's `prompt_tokens` already includes `cached_tokens`, so the count is recorded but not added. A
+        # provider reports reads, not writes, so the write count is zero rather than unknown.
+        openai = normalize_usage("openai_compat", {
+            "usage": {
+                "prompt_tokens": 103, "completion_tokens": 4,
+                "prompt_tokens_details": {"cached_tokens": 100},
+            },
+        })
+        self.assertEqual(openai, {
+            "input_tokens": 103, "output_tokens": 4, "total_tokens": 107,
+            "cache_read_tokens": 100, "cache_write_tokens": 0,
+        })
+
+        # A malformed details block is zero, not a lost usage record, and a provider that has no cache fields
+        # reports zero rather than leaving the audit to guess.
+        self.assertEqual(
+            normalize_usage("openai_compat", {"usage": {"prompt_tokens": 5, "completion_tokens": 2, "prompt_tokens_details": "x"}}),
+            {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7, "cache_read_tokens": 0, "cache_write_tokens": 0},
+        )
+        self.assertEqual(
+            normalize_usage("anthropic", {"usage": {"input_tokens": 5, "output_tokens": 2, "cache_read_input_tokens": True}}),
+            {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7, "cache_read_tokens": 0, "cache_write_tokens": 0},
+            "a boolean is not a token count",
+        )
 
 class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
     """Opt-in per-goal parallelism for independent steps.
@@ -2199,7 +2239,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
         async def completing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
-            *, num_ctx: int | None = None, keep_alive: str | None = None,
+            *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -2700,7 +2740,7 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
         async def streaming(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
-            *, num_ctx: int | None = None, keep_alive: str | None = None,
+            *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -2824,7 +2864,7 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
         async def failing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
-            *, num_ctx: int | None = None, keep_alive: str | None = None,
+            *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -2903,7 +2943,7 @@ class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
         async def completing(
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
-            *, num_ctx: int | None = None, keep_alive: str | None = None,
+            *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"

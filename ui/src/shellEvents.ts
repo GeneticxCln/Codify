@@ -100,6 +100,52 @@ export const TERMINAL_OUTPUT = "terminal-output";
 export const TERMINAL_EXIT = "terminal-exit";
 
 /**
+ * A program in a terminal asked for attention, in one of the standard escape sequences (OSC 9, 777 or 99).
+ *
+ * The sequence is still in the output as well, so the person can see in their terminal exactly what the program
+ * wrote; this is the same bytes read a second way. `seq` is the shell's own count for that terminal, so the
+ * window's id (`terminal:<id>:<seq>`) makes two prints two entries and a re-delivered event one.
+ */
+export const TERMINAL_NOTIFICATION = "terminal-notification";
+
+/** The payload of `terminal-notification`. */
+export interface TerminalNotification {
+  /** The terminal that printed it — the tab's own id, `term-3`. */
+  id: string;
+  /** This shell's count for this terminal; monotonic within one session. */
+  seq: number;
+  /** May be empty: OSC 9 carries only a body, and OSC 99's title half carries only a title. */
+  title: string;
+  body: string;
+}
+
+/**
+ * A `terminal-notification` payload, or null when it is not one.
+ *
+ * Validated rather than cast, like the readers above: the payload crosses a process boundary and feeds an inbox
+ * entry, so a sequence whose fields are the right shape but the wrong types must make no entry rather than one
+ * that says `undefined`. The two halves are trimmed here and an empty pair is refused — the shell already clips
+ * them, and this is the second half of that promise rather than a second opinion. `seq` is what makes the entry's
+ * id stable, so it must be a whole number; a missing one cannot be invented without risking a duplicate.
+ */
+export function readTerminalNotification(payload: unknown): TerminalNotification | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const { id, seq, title, body } = payload as {
+    id?: unknown;
+    seq?: unknown;
+    title?: unknown;
+    body?: unknown;
+  };
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) return null;
+  if (typeof title !== "string" || typeof body !== "string") return null;
+  const named = title.trim();
+  const said = body.trim();
+  if (named.length === 0 && said.length === 0) return null;
+  return { id, seq, title: named, body: said };
+}
+
+/**
  * The one chunk of `terminal-output`, or null when the payload is not one.
  *
  * Validated for the same reason [`readBrowserPopupRequested`] is, and one step

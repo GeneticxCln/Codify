@@ -193,6 +193,33 @@ engine has *confirmed* it and then stopped listing it.
   never re-decoded (a decode mints a fresh `id`), and the no-op answer is the
   *same* object. `ui/tests/layoutSync.test.ts` pins this contract directly.
 
+### 2.2 Terminal scrollback is not written to disk
+
+`terminalHistory.ts` keeps a bounded tail of each workspace's shell output **in
+memory, for this session only**, and the decision recorded here is that it stays
+there: no row in `codify.db`, no `localStorage`, no file under `~/.codify`.
+
+The reason is what the tail contains. It is the byte stream the shell emitted,
+not a summary the app produced: whatever a command printed, including
+`cat .env`, a token pasted into a prompt, or a `curl` that echoed a header.
+Nothing in the PTY path redacts that, and there is no moment where the engine
+could tell a secret from source code. The one store that already faces the same
+problem is the clipboard history, and it can afford to guess because it is
+looking at one copied value; a terminal record is a log of forty minutes, and
+the same heuristics applied to it would either discard most of the scrollback or
+keep the part that matters least. A record that cannot tell what is secret is
+not written to the directory that also holds provider keys.
+
+The cost is stated: quitting the app loses scrollback. Closing and reopening a
+terminal tab inside the same run does not — `terminalHistory.ts` holds the tail
+per workspace until the app exits, which is the case the feature exists for.
+
+If this is ever reopened (`docs/16` §6 item 9), the shape is already decided
+too: opt-in, read-only (a record, never a pane that accepts a keystroke),
+written through the clipboard history's secret-skipping rules, and bounded the
+way it is bounded in memory today. It would be a new decision with its own
+tests, not a flag on this one.
+
 ## 3. HTTP surface
 
 | Route | What it is for |
@@ -285,6 +312,16 @@ Settled decisions:
   conversations. The API query is scoped by `workspace_id`; the client caches
   lists by workspace, ignores stale fetches, and the sidebar filters again at
   its boundary. With no project selected the panel says so and shows no threads.
+  **The project name is a header, not a label**: under it sit two quiet lines and
+  nothing else. The first is the workspace's git state — branch, a dot when the
+  tree is dirty, and `↑`/`↓` counts against the upstream — from
+  `GET /workspaces/{id}/git` (`04` §3), refetched on a workspace switch, on window
+  focus and when a `step_status` lands, with a 5 s cache and no timer. A folder
+  that is not a repository, a repository with no commits and a detached HEAD show
+  nothing: each is a true answer, not an error banner. The second line is the
+  newest unread notification's title (§10.18), and it is absent when the inbox is
+  empty. `ui/tests/workspaceGit.test.ts` and `notificationsApp.test.ts` render the
+  header and pin both.
   `ui/tests/shell.test.ts` covers placement, the absence of the panel's new-tab
   control, scope isolation, and the empty-project state;
   `ui/tests/tabStripInteraction.test.ts` covers the control itself and the fact
@@ -838,9 +875,32 @@ the module's own docs:
 
 Commands: `codify_terminal_open`, `codify_terminal_write`,
 `codify_terminal_resize`, `codify_terminal_close`. Events: `terminal-output`,
-`terminal-exit`. Twenty Rust tests pin the refusals, the reaping, the read path and
-the batching below; the freeze is mutation-tested — a rogue `Command::new(...).spawn()` in
-`src-tauri/src/` fails `tests/test_no_unguarded_spawns.py`.
+`terminal-exit`, `terminal-notification`. The Rust tests in this module pin the refusals, the reaping, the read
+path, the batching below and the notification scan; the freeze is mutation-tested — a rogue
+`Command::new(...).spawn()` in `src-tauri/src/` fails `tests/test_no_unguarded_spawns.py`.
+
+#### A program can ask for attention
+
+A CLI agent that finishes, or needs an answer, says so in the standard way: an OSC escape sequence on its
+output. Nothing read one, because the bytes went to xterm and stopped there, so the terminal pane was deaf
+to the one thing a person running an agent in it most needs. `OscScan` now reads three forms out of the same
+text the pane is given — `ESC ] 9 ; text` (iTerm2/Growl), `ESC ] 777 ; notify ; title ; body` (rxvt) and
+`ESC ] 99 ; metadata ; payload` (kitty, as one sequence: base64 payloads are refused rather than half-decoded
+and chunked ones are not reassembled) — and `open` emits `terminal-notification` with the terminal id, a
+sequence number and the two halves.
+
+Three rules about it, because it is a new way for a *program* to reach the window:
+
+* **The text is never changed.** The scan reads a copy; xterm is given exactly what the shell wrote, so a
+  sequence a person can see is not one the app quietly ate.
+* **It is bounded.** Title 120 and body 300 characters, control bytes become spaces, an unterminated
+  sequence is dropped with the scan and one longer than 8 KiB is abandoned as it is read.
+* **A sequence is a report, not a capability.** Nothing here becomes input, argv or a path. The window's
+  rules for the entry — at most one per terminal per 3 s, none while that tab is in front, none for a
+  terminal this window never opened — are §10.18's, in `ui/src/notifications.ts`.
+
+The machine's reader keeps using `pump_output`, which has no notification callback at all: whether a
+surface has an inbox is that surface's decision, not something it inherits from sharing a reader.
 
 The reader thread is `pump_output`, taken out of `open` so it needs no
 `AppHandle`: two of those tests drive a **real PTY** through it (a shell printing
@@ -2199,6 +2259,15 @@ Decisions, and why:
 - A thread with no title is "New chat" in the palette, matching
   `Sidebar.threadTitle` — two surfaces that named the same row differently
   would be a bug the eye would find first.
+- **While anything in the inbox is unread, the palette opens with one extra row: `Needs you`.**
+  It jumps to the newest unread entry's own destination — a goal, a settings page or a terminal tab —
+  through the same handler a drawer row uses, and it is listed first because it is the only row that is
+  about something waiting rather than somewhere to go. `newestUnread` decides which entry, by `at` rather
+  than list position; when everything is read the row is absent. **No new chord comes with it**: every remaining
+  Ctrl+letter is a control character to a focused terminal (`Ctrl+U` is kill-line), so `Ctrl+K` then Enter is
+  the shortest path that does not steal the shell's keys (`shortcuts.ts`), and `SHORTCUT_HELP` is unchanged.
+  `ui/tests/commandPalette.test.ts` pins the row's presence and order; `notificationsApp.test.ts` mounts the
+  window and checks the three destinations (`docs/16` item 2).
 
 Honest limit: this layer is registered in the DOM, the *last* stop — a compositor
 or window manager that consumes a keystroke before the webview reaches it (a desktop that
@@ -2444,7 +2513,7 @@ the pipeline already makes, through the same service:
 | `search_code` | `LibraryService.search` | same |
 | `scan_code` | `engine/scan.py` (`docs/13`) | curated review rules over the workspace in the regex worker: read-only, bounded, hits are candidates at `path:line`, a workspace's own profile is data and its wording is labelled as the repository's |
 | `analyze_binary` | `engine/binary_analysis.py` (`docs/14` §4) | what Ghidra knows about a compiled workspace file, from a **one-shot** `analyzeHeadless` on a hashed private copy and an engine-owned export script: the file is never run and the workspace is never written; the engine's own spawn site under the guard's limits and a cancel-aware wait; the binary's names and strings come back clipped, stripped of control and invisible characters and framed as data; a refusal is one sentence with its code, whether a retry could help, and the fix |
-| `audit_usage` | `engine/usage_audit.py` (`docs/15`) | where this workspace's model calls were spent on work done twice, in tokens, from events already recorded: read-only, workspace-scoped in SQL, coverage and the detectors it cannot run (tool-loop waste, cache churn) stated first; one optional `days` argument and nothing else reaches the engine |
+| `audit_usage` | `engine/usage_audit.py` (`docs/15`) | where this workspace's model calls were spent on work done twice, in tokens, from events already recorded: read-only, workspace-scoped in SQL, coverage and the detector it cannot run (tool-loop waste) stated first, cache reads and writes reported as a signal and never a saving; one optional `days` argument and nothing else reaches the engine |
 | `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` → `engine/git_readonly.py`: subcommands, their exact options, and every positional, one owner; 60 s bound, no credentials in the child's environment |
 | `run_command` | `SandboxService.run_command` | `validate_argv`, `test` mode (docs/00 §6.6) once the goal is approved; `read_only` before that, so a turn cannot start the repository's code |
 | `read_page`, `navigate_page`, `click_page`, `type_page` | `WebviewBridge` (`§7.3`, `§7.5`) | `read_page` is independent; navigation/click/type require explicit `browser_actions` consent (off by default), every navigation meets the shell's guard, and typing may send text as it is entered |
@@ -3002,6 +3071,7 @@ durable in History, and the other three are not facts the engine keeps. The rule
 | **Plan ready for approval** | A `goal_status` that finds the goal `PENDING` and the plan will really wait: plan-only, dry-run, or a composer mode other than Direct Apply. | In Direct Apply the plan starts itself (the poll starts a `PENDING` goal), so "waiting for you" would be false. |
 | **Engine connection** | A change that **held for 4 s**: offline, back, token refused, restored. The engine's last stderr line is the offline detail. | `checking` never settles. The first settled state is only a baseline, so an engine that is up when the window opens says nothing, and a flap that reverses inside the settle time is one that never happened. |
 | **Model list change** | A `model_catalog_changed` frame with something in it, counted per provider (added and removed). docs/06 §6. | An empty diff, `model_catalog_checked`, and a payload that does not read. |
+| **A program in a terminal** | A `terminal-notification` the shell read out of the PTY (OSC 9/777/99, §7.1), for a terminal whose tab exists **and is not in front** — the active tab, or either pane of a split that is showing. | The tab in front is the one being watched; a terminal this window never opened names nothing; a second report within 3 s of one from the same terminal is dropped, and a dropped report does not move that clock. |
 
 * **No duplicates, because the engine replays.** Every entry has an id that names the event
   (`goal:<id>:<status>:<updated_at>`, `paused:<id>:<version>`, `plan:<id>:<version>`,
@@ -3018,8 +3088,16 @@ durable in History, and the other three are not facts the engine keeps. The rule
   stays open, so the header count clears at once. The dot on a row is for the ones that were new when the
   drawer opened, and it lasts as long as the drawer does, so the person can still see what they had not seen.
   The drawer also offers **Mark all read** and **Clear**.
+* **Two ways to the newest one without opening the drawer.** The panel header carries its title as the quiet
+  second line under the project name (§4), and while anything is unread the command palette lists a **Needs you**
+  row first (§8). Both call the same `newestUnread` and open through the same handler as a drawer row; neither
+  adds a chord, and the header line is absent — not replaced by a placeholder — when the inbox is empty.
 * **A row goes where the event is.** A goal reopens the way History reopens one (`restoreGoal`); an engine
-  entry opens Settings on About, which holds the engine card, and a model entry opens Provider Keys.
+  entry opens Settings on About, which holds the engine card, and a model entry opens Provider Keys. A terminal
+  entry focuses the tab the shell named, if this window still has it.
+* **A terminal entry is live-only.** A terminal's id is `term-3` and its report count restarts at 1 in every
+  session, so a stored entry would either collide with this run's first report or point at a shell that is gone.
+  The kind is accepted from an event and refused on load, the same way a terminal tab is not restored.
 * **Remembered, and never trusted.** The list (newest first, capped at 100) is stored under
   `CODIFY_NOTIFICATIONS` and read back through a validator: a bad entry is dropped on its own and never
   repaired, a list that cannot be read is an empty list, a storage that throws is an empty list on load and

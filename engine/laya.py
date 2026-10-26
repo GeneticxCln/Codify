@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from engine.providers import BaseProvider
+from engine.replies import REPLY_SCHEMAS
 
 # ── Typed questions ─────────────────────────────────────────────────────────
 # Mirrors Laya's own schema shape: each question declares its primitive
@@ -517,6 +518,9 @@ class LayaService:
                 max_tokens=cfg.max_tokens,
                 num_ctx=getattr(cfg, "ollama_num_ctx", None),
                 keep_alive=getattr(cfg, "ollama_keep_alive", None),
+                # The gate's typed contract, where the endpoint can take a schema. The SDK path above never
+                # reaches this call; this is the LLM fallback, whose answer is read by `_extract_json`.
+                json_schema=REPLY_SCHEMAS["laya"],
             )
         parsed = _extract_json(raw)
         answers = parsed.get("answers", parsed) if isinstance(parsed, dict) else {}

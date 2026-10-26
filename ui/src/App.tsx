@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import {
   Workspace,
+  WorkspaceGit,
   ChatMessage,
   Conversation,
   EngineInfo,
@@ -79,6 +80,7 @@ import {
   upsertShellTab,
   deleteShellTab,
   listWorkspaceFiles,
+  getWorkspaceGit,
   nextSurfaceRequest,
   answerSurface,
 } from "./api";
@@ -187,7 +189,15 @@ import { readSidebarOpen, writeSidebarOpen } from "./sidebarPref";
 import { closeDrawer, nextDrawer, type Drawer } from "./drawers";
 import { useSidebarYield } from "./useSidebarYield";
 import { useEngineNotices, useNotifications } from "./useNotifications";
-import { catalogNotification, goalNotification, pausedNotification, planNotification, type AppNotification } from "./notifications";
+import {
+  catalogNotification,
+  goalNotification,
+  newestUnread,
+  pausedNotification,
+  planNotification,
+  terminalNotification,
+  type AppNotification,
+} from "./notifications";
 import { NotificationsDrawer } from "./components/NotificationsDrawer";
 import { ClipboardDrawer } from "./components/ClipboardDrawer";
 import { useClipboardHistory } from "./useClipboardHistory";
@@ -209,8 +219,10 @@ import {
   readMachineExit,
   readMachineOutput,
   readTerminalExit,
+  readTerminalNotification,
   readTerminalOutput,
   TERMINAL_EXIT,
+  TERMINAL_NOTIFICATION,
   TERMINAL_OUTPUT,
 } from "./shellEvents";
 import {
@@ -271,6 +283,8 @@ const ENGINE_STDERR_TAIL = 60;
 export const App: React.FC = () => {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWs, setSelectedWs] = useState<Workspace | undefined>();
+  /** The selected workspace's branch and working-tree state, for the panel header (`docs/16` item 3). */
+  const [workspaceGit, setWorkspaceGit] = useState<WorkspaceGit | null>(null);
   // Model catalog: discovered from every configured provider by the engine.
   // Nothing here is hardcoded — an empty list means nothing is configured yet.
   /**
@@ -518,6 +532,46 @@ export const App: React.FC = () => {
   useEffect(() => {
     selectedWorkspaceIdRef.current = selectedWs?.id;
   }, [selectedWs?.id]);
+
+  // Five seconds of cache and no timer: the header is refreshed by the things that can change it — a workspace
+  // switch, the window regaining focus, and a step finishing on the goal stream — because a branch does not
+  // move unless something moved it. The cache is also what keeps those three triggers from becoming three
+  // requests when they land together. `force` is for the triggers that *know* a step just ended: after a write
+  // or a commit, a cached answer is exactly the stale one.
+  const gitRead = useRef<{ id: string; at: number; value: WorkspaceGit } | null>(null);
+  const loadWorkspaceGit = useCallback(async (id: string, force = false) => {
+    const cached = gitRead.current;
+    if (!force && cached?.id === id && Date.now() - cached.at < 5_000) {
+      setWorkspaceGit(cached.value);
+      return;
+    }
+    try {
+      const value = await getWorkspaceGit(id);
+      gitRead.current = { id, at: Date.now(), value };
+      if (selectedWorkspaceIdRef.current === id) setWorkspaceGit(value);
+    } catch {
+      // A header line is not worth an error banner: the engine's refusal already had its say elsewhere, and
+      // a workspace whose git cannot be read simply shows nothing true about it.
+      if (selectedWorkspaceIdRef.current === id) setWorkspaceGit(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!selectedWs) {
+      setWorkspaceGit(null);
+      return;
+    }
+    setWorkspaceGit(null);
+    void loadWorkspaceGit(selectedWs.id);
+  }, [selectedWs?.id, loadWorkspaceGit]);
+
+  useEffect(() => {
+    const id = selectedWs?.id;
+    if (!id) return;
+    const onFocus = () => void loadWorkspaceGit(id, true);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [selectedWs?.id, loadWorkspaceGit]);
   const updateWorkspaceConversations = useCallback(
     (
       workspaceId: string,
@@ -555,6 +609,9 @@ export const App: React.FC = () => {
   // (`notifications.ts` says what is in it and what is not).
   const inbox = useNotifications();
   const notify = inbox.notify;
+  // The one entry the palette can jump to and the panel header can name. By `at`, not list position, so a stored
+  // list and a live one agree about which report is the latest (`newestUnread`).
+  const newestUnreadNotice = useMemo(() => newestUnread(inbox.items), [inbox.items]);
   // What was copied, cut or pasted in this window, kept in this window (`clipboardHistory.ts`, `docs/09` §11).
   const clipboard = useClipboardHistory();
   const recordClip = clipboard.record;
@@ -1013,6 +1070,47 @@ export const App: React.FC = () => {
   const mainRef = useRef<HTMLElement>(null);
   // A split puts two tabs side by side (`panes.ts`, `docs/09` §12). `shownSplit` is what it is showing right now.
   const { shown: shownSplit, split, setSplit } = useSplit(tabState);
+
+  // A program in a terminal can ask for attention with OSC 9/777/99. The shell reads the sequence out of the PTY
+  // (`terminal.rs`), because the bytes are there even when no pane is mounted; this decides what the person is
+  // told. "In front" is the active tab **or either pane of a split that is really showing**: a terminal the person
+  // is looking at is not news. One whose tab this window never opened names nothing at all. The three-second gap
+  // lives in `notifications.ts`, and the clock kept here is never moved for a report that was dropped.
+  const terminalNoticeAt = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    let off: (() => void) | undefined;
+    void listenShellEvent<unknown>(TERMINAL_NOTIFICATION, (payload) => {
+      const notice = readTerminalNotification(payload);
+      if (!notice) return;
+      const tabs = tabStateRef.current;
+      const tab = tabs.tabs.find(
+        (t) => t.kind === "terminal" && t.id === notice.id
+      );
+      if (!tab) return;
+      const visible =
+        tabs.activeId === tab.id ||
+        (shownSplit !== null &&
+          (shownSplit.left.id === tab.id || shownSplit.right.id === tab.id));
+      if (visible) return;
+      const at = Date.now();
+      const entry = terminalNotification(
+        { ...notice, tabId: tab.id },
+        at,
+        terminalNoticeAt.current.get(tab.id)
+      );
+      if (!entry) return;
+      terminalNoticeAt.current.set(tab.id, at);
+      notify(entry);
+    }).then((unlisten) => {
+      if (cancelled) unlisten();
+      else off = unlisten;
+    });
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, [notify, shownSplit]);
   const sidebarYielded = useSidebarYield(mainRef, drawer, Boolean(shownSplit));
   const sidebarShown = sidebarOpen && !sidebarYielded;
   // Pressing the toggle while the panel is out of the way because of a drawer or a split means "show it", and the
@@ -1346,8 +1444,9 @@ export const App: React.FC = () => {
         conversations,
         split: { showing: Boolean(shownSplit) },
         files: paletteFiles,
+        unread: inbox.items,
       }),
-    [tabState, conversations, shownSplit, paletteFiles],
+    [tabState, conversations, shownSplit, paletteFiles, inbox.items],
   );
 
   // Every close in the shell goes through here — the strip's close button, the
@@ -2647,7 +2746,11 @@ export const App: React.FC = () => {
         openSettings(item.settingsTab);
         break;
       case "action":
-        if (item.action.type === "close-split") closeSplit();
+        if (item.action.type === "focus-newest-unread") {
+          // The newest entry decides its own destination: a goal, a settings page or a tab. A terminal entry that
+          // names a closed tab is dropped by the handler (`handleOpenNotification`), exactly as it is from the drawer.
+          if (newestUnreadNotice) handleOpenNotification(newestUnreadNotice);
+        } else if (item.action.type === "close-split") closeSplit();
         else if (item.action.type === "new-machine") void handleOpenMachine(item.action.network);
         else if (item.action.type === "split-new-terminal") void splitWithNew("terminal");
         else if (item.action.type === "split-new-browser") void splitWithNew("browser");
@@ -2779,6 +2882,11 @@ export const App: React.FC = () => {
           ev.type === "step_status" ||
           ev.type === "plan_updated"
         ) {
+          // A step changing state is what a write or a commit looks like from here: the branch and dirty flag
+          // the header shows are stale the moment one lands, so this trigger skips the cache.
+          if (ev.type === "step_status" && selectedWorkspaceIdRef.current) {
+            void loadWorkspaceGit(selectedWorkspaceIdRef.current, true);
+          }
           const ticket = goalReads.current.begin(goalId);
           getGoal(goalId)
             .then((refreshed) => {
@@ -2858,7 +2966,7 @@ export const App: React.FC = () => {
         },
       });
     },
-    [notify],
+    [notify, loadWorkspaceGit],
   );
 
   // Goal history: every goal the engine has persisted for the selected
@@ -2997,7 +3105,11 @@ export const App: React.FC = () => {
       const target = item.target;
       if (!target) return;
       if (target.kind === "goal") void restoreGoal(target.goalId);
-      else openSettings(target.tab);
+      else if (target.kind === "settings") openSettings(target.tab);
+      else if (tabStateRef.current.tabs.some((t) => t.id === target.tabId)) {
+        // A tab that has been closed since is not a place to go: the strip keeps the entry and drops the jump.
+        setTabState((prev) => focusTab(prev, target.tabId));
+      }
     },
     // `openSettings` is a plain function that only sets two pieces of state, so it is stable in effect.
     [restoreGoal],
@@ -4060,6 +4172,8 @@ export const App: React.FC = () => {
             onOpenTerminal={() => void handleOpenTerminal()}
             onOpenMachine={() => void handleOpenMachine(false)}
             onOpenSettings={() => setIsSettingsOpen(true)}
+            latestUnread={newestUnreadNotice?.title ?? null}
+            git={workspaceGit}
             loading={conversationsLoading}
           />
         )}

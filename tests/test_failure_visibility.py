@@ -39,7 +39,7 @@ class _VerifierScript(_Counting):
 
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         if "You are Codify Verifier" in system_prompt and self.verifier_replies:
             self.asked["verifier"] = self.asked.get("verifier", 0) + 1

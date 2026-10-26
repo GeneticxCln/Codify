@@ -21,6 +21,7 @@ from engine.models import AgentConfig, AgentRole, Event, EventType, scrub_surrog
 from engine.providers import BaseProvider, FALLBACK_TRIGGER_CODES, ProviderError
 from engine.replies import (
     REPLY_KEYS,
+    REPLY_SCHEMAS,
     REPLY_TOLERATES_TRUNCATION,
     REFUSED_FIELDS,
     VERBATIM_ROLES,
@@ -274,6 +275,8 @@ class AgentOrchestrator:
                     # mypy could not catch.
                     num_ctx=None,
                     keep_alive=None,
+                    # The gate's typed contract; the SDK path never reaches this closure.
+                    json_schema=REPLY_SCHEMAS["laya"],
                 )
             finally:
                 # The provider is shared across roles and reused for a replay, so
@@ -558,6 +561,9 @@ class AgentOrchestrator:
                     max_tokens=target.max_tokens,
                     num_ctx=target.ollama_num_ctx,
                     keep_alive=target.ollama_keep_alive,
+                    # The role's reply shape, where the endpoint can take one (docs/16 item 5). The parser is
+                    # unchanged: a schema narrows what a model writes, it never becomes what the engine trusts.
+                    json_schema=REPLY_SCHEMAS.get(role),
                 )
             except ProviderError as exc:
                 flush_deltas()
@@ -643,6 +649,7 @@ class AgentOrchestrator:
                     max_tokens=target.max_tokens,
                     num_ctx=target.ollama_num_ctx,
                     keep_alive=target.ollama_keep_alive,
+                    json_schema=REPLY_SCHEMAS.get(role),
                 )
             except ProviderError as exc:
                 self.goals.publish(self._event(

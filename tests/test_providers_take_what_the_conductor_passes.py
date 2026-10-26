@@ -1,6 +1,7 @@
 """Every provider accepts what the conductor's loop passes it (found by the first end-to-end conductor run).
 
-`Conductor._call` passes `num_ctx` and `keep_alive` to `complete_with_tools` on every call. Only
+`Conductor._call` passes `num_ctx`, `keep_alive` and (since item 7 of `docs/16`) `cache_prefix` to
+`complete_with_tools` on every call. Only
 `OllamaProvider.complete_with_tools` took them: the base class, `AnthropicProvider`, `OpenAICompatProvider` and
 `GoogleProvider` did not, so on any of those the first call raised `TypeError: ... got an unexpected keyword
 argument 'num_ctx'` and the turn ended `internal_error`. The conductor worked on Ollama and nowhere else — OpenAI,
@@ -45,14 +46,15 @@ class TestTheSignatureIsTheSameEverywhere(unittest.TestCase):
             names,
         )
 
-    def test_complete_with_tools_takes_num_ctx_and_keep_alive_as_keywords(self) -> None:
+    def test_complete_with_tools_takes_every_keyword_the_conductor_passes(self) -> None:
+        expected = {"num_ctx": None, "keep_alive": None, "cache_prefix": False}
         for cls in _provider_classes():
             with self.subTest(provider=cls.__name__):
                 params = inspect.signature(cls.complete_with_tools).parameters
-                for name in ("num_ctx", "keep_alive"):
+                for name, default in expected.items():
                     self.assertIn(name, params, f"{cls.__name__}.complete_with_tools has no {name}")
                     self.assertEqual(inspect.Parameter.KEYWORD_ONLY, params[name].kind, name)
-                    self.assertIsNone(params[name].default, name)
+                    self.assertEqual(default, params[name].default, name)
 
     def test_no_override_drops_a_parameter_the_base_class_declares(self) -> None:
         # The general form of the mistake: a provider that overrides a method with fewer parameters than the
@@ -72,11 +74,15 @@ class TestTheSignatureIsTheSameEverywhere(unittest.TestCase):
                     self.assertEqual([], [p for p in base if p not in params])
 
     def test_complete_takes_them_too(self) -> None:
+        # `json_schema` is the role reply shape (`docs/16` item 5). It follows the same rule as the other two:
+        # accepted by every adapter, read only by the protocol that has a field for it.
         for cls in _provider_classes():
             with self.subTest(provider=cls.__name__):
                 params = inspect.signature(cls.complete).parameters
-                self.assertIn("num_ctx", params)
-                self.assertIn("keep_alive", params)
+                for name in ("num_ctx", "keep_alive", "json_schema"):
+                    self.assertIn(name, params)
+                    self.assertEqual(inspect.Parameter.KEYWORD_ONLY, params[name].kind, name)
+                self.assertIsNone(params["json_schema"].default)
 
 
 class _Chat:
@@ -134,6 +140,8 @@ class TestAConductorTurnOnARealOpenAICompatibleServer(unittest.TestCase):
 
         self.assertEqual("It returns a greeting.", answer)
         self.assertEqual(1, len(server.bodies), "the provider never reached the server")
+        # The cache mark is Anthropic's field; a protocol without one must not receive it.
+        self.assertNotIn("cache_control", json.dumps(server.bodies[0]))
 
 
 if __name__ == "__main__":

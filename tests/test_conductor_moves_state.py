@@ -48,7 +48,7 @@ class _Counting(ScriptedProvider):
 
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         for role in self.roles:
             if f"You are Codify {role.capitalize()}" in system_prompt:

@@ -70,6 +70,7 @@ class _Driving(_VerifierScript):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]], tools: list[ToolSpec], model: str,
         temperature: float, max_tokens: int, *, num_ctx: int | None = None, keep_alive: str | None = None,
+        cache_prefix: bool = False,
     ) -> ToolReply:
         self.seen_messages.append([dict(m) for m in messages])
         if self.on_call is not None:

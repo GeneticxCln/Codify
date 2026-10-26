@@ -76,7 +76,7 @@ class ScriptedProvider(BaseProvider):
 
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         system_prompt.encode("utf-8")
         user_prompt.encode("utf-8")

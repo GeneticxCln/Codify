@@ -38,11 +38,11 @@ class _Metered(_ToolProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]],
         tools: list[ToolSpec], model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
         reply = await super().complete_with_tools(
             system_prompt, messages, tools, model, temperature, max_tokens,
-            num_ctx=num_ctx, keep_alive=keep_alive,
+            num_ctx=num_ctx, keep_alive=keep_alive, cache_prefix=cache_prefix,
         )
         self._report_usage("openai_compat", _usage_block())
         return reply
@@ -52,11 +52,11 @@ class _MeteredDying(_DyingProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]],
         tools: list[ToolSpec], model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
         reply = await super().complete_with_tools(
             system_prompt, messages, tools, model, temperature, max_tokens,
-            num_ctx=num_ctx, keep_alive=keep_alive,
+            num_ctx=num_ctx, keep_alive=keep_alive, cache_prefix=cache_prefix,
         )
         self._report_usage("openai_compat", _usage_block())
         return reply

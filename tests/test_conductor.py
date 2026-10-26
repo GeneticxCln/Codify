@@ -98,7 +98,7 @@ class _ToolProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         # Keyed on the role's own self-description rather than a loose
         # substring: the planner's prompt *mentions* a design contract, so a
@@ -117,7 +117,7 @@ class _ToolProvider(BaseProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]],
         tools: list[ToolSpec], model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
         self.seen_tools.append([t.name for t in tools])
         self.seen_messages.append([dict(m) for m in messages])
@@ -132,7 +132,7 @@ class _PlainProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         return "a plain answer"
 
@@ -155,7 +155,7 @@ class _DyingProvider(_ToolProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]],
         tools: list[ToolSpec], model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
         self.attempts.append(model)
         self.served += 1
@@ -163,6 +163,7 @@ class _DyingProvider(_ToolProvider):
             raise ProviderError(self.fail_on[self.served], "the endpoint refused the call")
         return await super().complete_with_tools(
             system_prompt, messages, tools, model, temperature, max_tokens,
+            cache_prefix=cache_prefix,
         )
 
 

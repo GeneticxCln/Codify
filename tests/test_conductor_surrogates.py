@@ -73,13 +73,14 @@ class Scripted(BaseProvider):
 
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         return "unused"
 
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]], tools: list[ToolSpec], model: str,
         temperature: float, max_tokens: int, *, num_ctx: int | None = None, keep_alive: str | None = None,
+        cache_prefix: bool = False,
     ) -> ToolReply:
         self.seen.append([dict(m) for m in messages])
         return self.replies.pop(0) if self.replies else ToolReply(text="done")

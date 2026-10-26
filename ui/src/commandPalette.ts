@@ -16,6 +16,7 @@
  */
 
 import { canPair } from "./panes.ts";
+import { newestUnread, type AppNotification } from "./notifications.ts";
 import type { Tab } from "./tabs";
 import type { Conversation, SettingsTab } from "./types";
 
@@ -27,6 +28,8 @@ export type PaletteItemKind = "tab" | "conversation" | "settings" | "action" | "
 
 /** What a split action asks the shell to do. Data, like everything here: the jump is one `switch` in `App.tsx`. */
 export type PaletteAction =
+  /** Jump to the newest unread notification's goal, settings page or tab (`newestUnread`). */
+  | { type: "focus-newest-unread" }
   | { type: "close-split" }
   | { type: "new-machine"; network: boolean }
   | { type: "split-new-terminal" }
@@ -82,6 +85,12 @@ export interface PaletteSources {
    * are none to offer. They are searched, not browsed: see [`filterPalette`].
    */
   files?: readonly string[];
+  /**
+   * The inbox, newest-first, as `useNotifications` holds it. Only the unread entries matter here: while any is
+   * unread the palette opens with a way to the newest one. Absent means the caller has no inbox to offer, which is
+   * the same as an empty one.
+   */
+  unread?: readonly AppNotification[];
 }
 
 /** How many files one query may show. A common word matches thousands of paths, and a list that long is not a result. */
@@ -115,7 +124,11 @@ const KIND_LABEL: Record<PaletteItemKind, string> = {
 };
 
 /**
- * Every item, in strip/list order: open tabs, then threads, then settings.
+ * Every item, in strip/list order: what needs you, then open tabs, then threads, then settings.
+ *
+ * "What needs you" is one row and only while something is unread, so an inbox nobody has read is reachable without
+ * opening the drawer first. It is data like every other row: `App.tsx` decides what the jump does, and
+ * `notifications.ts` decides which entry is newest (`newestUnread`).
  *
  * A thread that is already open appears in both groups on purpose — both
  * resolve to the same jump (`openConversation` focuses the tab that thread
@@ -128,6 +141,18 @@ const KIND_LABEL: Record<PaletteItemKind, string> = {
  * surfaces disagree about what a row is.
  */
 export function buildPaletteItems(sources: PaletteSources): PaletteItem[] {
+  const newest = sources.unread ? newestUnread(sources.unread) : null;
+  const needsYou: PaletteItem[] = newest
+    ? [{
+        id: "action:focus-newest-unread",
+        kind: "action",
+        // Its own heading rather than "Split": this row is not about a split, and a heading that said it was would
+        // be the palette telling the person something false about what pressing it does.
+        label: "Needs you",
+        title: `Newest unread: ${newest.title}`,
+        action: { type: "focus-newest-unread" },
+      }]
+    : [];
   const tabs: PaletteItem[] = sources.tabs.map((tab) => ({
     id: `tab:${tab.id}`,
     kind: "tab" as const,
@@ -157,7 +182,7 @@ export function buildPaletteItems(sources: PaletteSources): PaletteItem[] {
     title: path,
     path,
   }));
-  return [...tabs, ...conversations, ...settings, ...machineActions(), ...splitActions(sources), ...files];
+  return [...needsYou, ...tabs, ...conversations, ...settings, ...machineActions(), ...splitActions(sources), ...files];
 }
 
 /**

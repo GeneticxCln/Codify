@@ -34,6 +34,7 @@ import type {
   WorkspaceFile,
   WorkspaceFileList,
   WorkspaceFileSaved,
+  WorkspaceGit,
   SurfaceRequest,
 } from "./types.ts";
 
@@ -779,6 +780,21 @@ export async function listWorkspaceFiles(workspace_id: string, limit?: number): 
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) throw await engineError(res, "Failed to list the workspace's files");
+  return res.json();
+}
+
+/**
+ * A workspace's branch and working-tree state, for the panel header.
+ *
+ * A quiet answer, not an error, for a folder that is not a repository, one with no commits and a detached HEAD:
+ * `branch` is null and `reason` says which. The header shows nothing for those rather than an error banner.
+ */
+export async function getWorkspaceGit(workspace_id: string): Promise<WorkspaceGit> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/workspaces/${encodeURIComponent(workspace_id)}/git`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to read the workspace's git state");
   return res.json();
 }
 

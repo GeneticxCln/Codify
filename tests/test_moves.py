@@ -58,7 +58,7 @@ class _FailingConductor(_ToolProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]],
         tools: list[Any], model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
         raise ProviderError("upstream_error", "the endpoint refused the tool call")
 

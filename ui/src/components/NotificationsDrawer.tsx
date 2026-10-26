@@ -81,8 +81,8 @@ export const NotificationsDrawer: React.FC<{
             <Bell className="w-5 h-5" aria-hidden="true" />
             <p className="font-semibold text-codify-secondary">Nothing yet</p>
             <p className="leading-relaxed">
-              Goals that finish or fail, plans waiting for your approval, engine connection changes and model
-              list changes show up here.
+              Goals that finish or fail, plans waiting for your approval, engine connection changes, model
+              list changes and programs in a terminal asking for attention show up here.
             </p>
           </div>
         ) : (

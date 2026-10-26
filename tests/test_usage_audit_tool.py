@@ -79,8 +79,18 @@ class TestWhatACallAnswers(AuditToolCase):
         answer = await self.table()["audit_usage"]({})
         self.assertIn("every matching event was read", answer)
         self.assertIn("tool-loop-waste: UNAVAILABLE", answer)
-        self.assertIn("cache-churn: UNAVAILABLE", answer)
+        self.assertIn("which write a later read repaid is not recorded", answer)
         self.assertIn("says nothing about the detectors marked UNAVAILABLE", answer)
+
+    async def test_cache_counts_reach_the_answer_as_a_signal_and_never_as_a_saving(self) -> None:
+        self.put("usage", {
+            "role": "planner", "provider": "anthropic", "model": "m",
+            "input_tokens": 1_000, "output_tokens": 100,
+            "cache_read_tokens": 900, "cache_write_tokens": 0,
+        })
+        answer = await self.table()["audit_usage"]({})
+        self.assertIn("cache-reads: 900 input tokens over 1 of 1 calls", answer)
+        self.assertIn("not as a saving", answer)
 
     async def test_days_bounds_the_window_and_a_bad_value_is_all_time_not_an_error(self) -> None:
         self.put("usage", {"role": "planner", "input_tokens": 5_000, "output_tokens": 0}, at=time.time() - 30 * 86_400)

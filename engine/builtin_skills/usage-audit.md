@@ -16,16 +16,17 @@ show, and check a finding against the evidence before anyone acts on it.
 1. **Run it.** Call `audit_usage`. Pass `days` only if the person asked about a period; otherwise read everything recorded.
 2. **Say what it could not see first.** The report opens with a coverage block. Repeat its limits before any total or
    conclusion: how many events were read and whether the cap was reached, that failed calls book no tokens, that HTTP-level
-   retries are invisible, and which detectors are UNAVAILABLE. The unavailable ones (repeated tool calls, cache churn) are
-   not "zero"; they are unmeasured.
+   retries are invisible, what the cache counts can and cannot answer, and which detectors are UNAVAILABLE. The unavailable
+   one (repeated tool calls) is not "zero"; it is unmeasured.
 3. **Never turn "no findings" into "no waste".** If the report finds nothing, say that this window showed no recorded re-ask
    or fix-loop retry, and that the unmeasured kinds could still exist. Do the same when a number is small.
 4. **Keep the three outcomes apart.** A re-ask whose step then succeeded is *waste*. A re-ask that did not recover is spend
    that the retry did not buy back: report it, but do not call it waste. A re-ask with no outcome yet is unfinished and is
    left out of every rate.
-5. **Treat signals as observations.** Prompt growth, deep conductor loops, re-ask rate and token concentration describe what
-   happened. None is a defect by itself, and none comes with a recommended change. A high re-ask rate on one model is a reason
-   to look at that model's replies, not proof the model is bad.
+5. **Treat signals as observations.** Prompt growth, deep conductor loops, re-ask rate, token concentration and cache reads
+   describe what happened. None is a defect by itself, and none comes with a recommended change. Cache reads are not a saving:
+   those tokens are inside the input totals. A high re-ask rate on one model is a reason to look at that model's replies, not
+   proof the model is bad.
 6. **Check before you recommend.** For any finding you want to act on, use `recall` with the role, the stage name or the error
    code to see the underlying events, and read what actually happened. Do not recommend a change from a summary row alone.
 7. **Report.** Lead with coverage, then the findings with their evidence, then the signals, then what you would look at next.

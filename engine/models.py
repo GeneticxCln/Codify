@@ -373,6 +373,24 @@ class WorkspaceFileSaved(BaseModel):
     size: int
 
 
+class WorkspaceGit(BaseModel):
+    """A workspace's repository state, for the panel header (`GET /workspaces/{id}/git`, `docs/04` §6).
+
+    Every field is a quiet answer rather than an error: a folder that is not a repository, a repository with
+    no commits and a detached head all return 200 with `branch: null` and a sentence in `reason`, because
+    "there is no branch to show" is true, not a failed request. `dirty` counts a change of any kind git's
+    porcelain output names — a staged edit, an unstaged one, an untracked file — and `ahead`/`behind` are 0
+    when there is no upstream to compare with.
+    """
+
+    branch: str | None = None
+    detached: bool = False
+    dirty: bool = False
+    ahead: int = 0
+    behind: int = 0
+    reason: str | None = None
+
+
 class Conversation(BaseModel):
     """A thread of turns in a workspace — the thing a tab points at.
 

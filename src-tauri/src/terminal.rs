@@ -129,6 +129,22 @@ pub struct TerminalOutput {
     pub data: String,
 }
 
+/// Sent on `terminal-notification` when a program in a terminal asks for attention.
+///
+/// A **report, not a request**: the window may put it in the inbox, and nothing here becomes input, argv
+/// or a path. The sequence itself is in the ordinary output as well, so xterm sees exactly what the
+/// program wrote; this is the same bytes read a second way.
+///
+/// `seq` is this shell's count for this terminal, so a program that prints the sequence twice is two
+/// entries and a repeated delivery of one event is one (the window's id is `terminal:<id>:<seq>`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalNotification {
+    pub id: String,
+    pub seq: u64,
+    pub title: String,
+    pub body: String,
+}
+
 /// Sent on `terminal-exit` when a shell finishes, so the pane can say so.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalExit {
@@ -195,6 +211,187 @@ fn shell_command(cwd: PathBuf) -> CommandBuilder {
 /// *incomplete* sequence are held back and prefixed to the next chunk; bytes
 /// that are genuinely invalid are replaced at once, so bad input can never stall
 /// the stream waiting for a completion that will not come.
+/// The longest title and body a notification carries: the same numbers `ui/src/notifications.ts` clips
+/// to, so a sequence can never ask the inbox for more room than an entry has.
+const NOTICE_TITLE_CHARS: usize = 120;
+const NOTICE_BODY_CHARS: usize = 300;
+
+/// The longest unterminated OSC sequence held while waiting for its terminator. A program printing
+/// `ESC ]` and nothing else costs this much and no more; past it the sequence is given up on and the
+/// stream is read from after it.
+const OSC_PENDING_CHARS: usize = 8 * 1024;
+
+/// One notification a program printed: what the sequence said, cleaned and clipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OscNotice {
+    pub title: String,
+    pub body: String,
+}
+
+/// Finds the desktop-notification escape sequences a program prints, and holds the one that straddles a read.
+///
+/// The three forms recognised, and nothing else:
+///
+/// * `ESC ] 9 ; text BEL|ST` — iTerm2's Growl notification. `ESC ] 9 ; 4 ; …` is a *progress report* on the
+///   same number and is deliberately not one: a build's percentage is not news, and it is printed often.
+/// * `ESC ] 777 ; notify ; title ; body BEL|ST` — rxvt-unicode's, which carries a title.
+/// * `ESC ] 99 ; metadata ; payload BEL|ST` — kitty's, to the extent one sequence can be read. The metadata
+///   is inspected only for `p=` (title or body) and `e=` (base64); a base64 payload is refused rather than
+///   half-decoded, and kitty's chunked form (`d=`/`i=`) is not reassembled, so each sequence is its own report.
+///
+/// **The text is never changed.** The caller passes every byte on to xterm; this only *reads* it, which is
+/// why a sequence xterm would ignore cannot become a notification the person cannot see in their terminal.
+/// A sequence with no terminator by the end of the stream is dropped with the scan, and one longer than
+/// [`OSC_PENDING_CHARS`] is dropped as it arrives, so a program printing `ESC ]` forever costs bounded
+/// memory rather than a growing string.
+#[derive(Default)]
+pub(crate) struct OscScan {
+    pending: String,
+}
+
+impl OscScan {
+    /// The notifications completed by `text`, and the tail a later read must complete.
+    pub(crate) fn push(&mut self, text: &str) -> Vec<OscNotice> {
+        self.pending.push_str(text);
+        let mut found = Vec::new();
+        loop {
+            let Some(start) = self.pending.find("\x1b]") else {
+                // Ordinary output, with one exception: a final ESC may be the first byte of a sequence that
+                // continues in the next read, so it is kept and the rest is not.
+                let keep = if self.pending.ends_with('\x1b') {
+                    self.pending.len() - 1
+                } else {
+                    self.pending.len()
+                };
+                self.pending.drain(..keep);
+                break;
+            };
+            // Drop what came before the sequence: it is output, and none of it is ours to keep.
+            self.pending.drain(..start);
+            let Some((end, terminator)) = osc_end(&self.pending[2..]) else {
+                if self.pending.chars().count() > OSC_PENDING_CHARS {
+                    // Not a notification this build can read (or not a notification at all): give up on it and
+                    // keep looking after its introducer, so its payload cannot pin memory.
+                    self.pending.drain(..2);
+                    continue;
+                }
+                break;
+            };
+            // A terminator far past the cap does not save the sequence: giving up on it and rescanning from
+            // after its introducer is what keeps a later, valid notification in the same read from being
+            // swallowed into this one's (clipped) body.
+            if self.pending[2..2 + end].chars().count() > OSC_PENDING_CHARS {
+                self.pending.drain(..2);
+                continue;
+            }
+            let payload = self.pending[2..2 + end].to_string();
+            self.pending.drain(..2 + end + terminator);
+            if let Some(notice) = osc_notice(&payload) {
+                found.push(notice);
+            }
+        }
+        found
+    }
+}
+
+/// Where an OSC sequence starting at 0 (`ESC ]`) ends: the index of its terminator in `body` and how long
+/// the terminator is. BEL is one byte; ST is `ESC \`, two. Whichever comes first ends it.
+fn osc_end(body: &str) -> Option<(usize, usize)> {
+    let bel = body.find('\x07');
+    let st = body.find("\x1b\\");
+    match (bel, st) {
+        (Some(b), Some(s)) => Some(if b < s { (b, 1) } else { (s, 2) }),
+        (Some(b), None) => Some((b, 1)),
+        (None, Some(s)) => Some((s, 2)),
+        (None, None) => None,
+    }
+}
+
+/// The notification an OSC payload carries, or `None` when it is a sequence this build does not read.
+fn osc_notice(payload: &str) -> Option<OscNotice> {
+    let mut fields = payload.split(';');
+    match fields.next()? {
+        "9" => {
+            let text = fields.collect::<Vec<_>>().join(";");
+            let text = text.trim_start();
+            // `9;4;<state>[;<percent>]` is Windows Terminal's progress report, not a notification.
+            if text.trim().is_empty() || text == "4" || text.starts_with("4;") {
+                return None;
+            }
+            Some(notice("", text))
+        }
+        "777" => {
+            if fields.next()? != "notify" {
+                return None;
+            }
+            let title = fields.next().unwrap_or("");
+            let body = fields.collect::<Vec<_>>().join(";");
+            if title.trim().is_empty() && body.trim().is_empty() {
+                return None;
+            }
+            Some(notice(title, &body))
+        }
+        "99" => {
+            // `99;metadata;payload`: no payload means no notification, and a metadata field the build does not
+            // understand is ignored rather than refused — except base64, which would be a report of bytes.
+            let rest = fields.collect::<Vec<_>>().join(";");
+            let (meta, text) = rest.split_once(';')?;
+            let mut part = "body";
+            for pair in meta.split(':') {
+                let Some((key, value)) = pair.split_once('=') else {
+                    continue;
+                };
+                match key {
+                    "e" if value == "1" => return None,
+                    "p" => part = value,
+                    _ => {}
+                }
+            }
+            if text.trim().is_empty() {
+                return None;
+            }
+            Some(if part == "title" {
+                notice(text, "")
+            } else {
+                notice("", text)
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A notice with both halves cleaned: control bytes are spaces (a title is drawn on one line), runs of
+/// spaces are collapsed, and each half is clipped to what an inbox entry holds.
+fn notice(title: &str, body: &str) -> OscNotice {
+    OscNotice {
+        title: clean(title, NOTICE_TITLE_CHARS),
+        body: clean(body, NOTICE_BODY_CHARS),
+    }
+}
+
+fn clean(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut spaces = false;
+    let mut taken = 0;
+    for ch in text.chars() {
+        let ch = if ch.is_control() { ' ' } else { ch };
+        if ch == ' ' {
+            if spaces {
+                continue;
+            }
+            spaces = true;
+        } else {
+            spaces = false;
+        }
+        if taken == max_chars {
+            break;
+        }
+        out.push(ch);
+        taken += 1;
+    }
+    out.trim().to_string()
+}
+
 #[derive(Default)]
 pub(crate) struct Utf8Chunker {
     pending: Vec<u8>,
@@ -360,6 +557,34 @@ pub(crate) fn pump_output<R: Read + Send + 'static>(reader: R, mut on_text: impl
     let _ = reader_thread.join();
 }
 
+/// Read a PTY to its end, handing its text to `on_text` and any notification a program printed to `on_notify`.
+///
+/// A wrapper around [`pump_output`], so the batching, the reader thread and their tests are the same code. The
+/// scan runs on the text a batch carries, and a notification found in it is handed over *after* that batch's
+/// text: both callbacks run on the emitting thread, so a notification can never arrive ahead of the output
+/// that made it. A sequence split across two batches is completed by [`OscScan`]'s tail, which is the whole
+/// reason the scan is stateful.
+///
+/// The machine's reader keeps using [`pump_output`], so a machine's shell cannot raise a terminal notification by
+/// accident: whether a surface has an inbox is that surface's decision, not a consequence of sharing a reader.
+pub(crate) fn pump_output_noticing<R: Read + Send + 'static>(
+    reader: R,
+    mut on_text: impl FnMut(String),
+    mut on_notify: impl FnMut(OscNotice),
+) {
+    let mut scan = OscScan::default();
+    pump_output(reader, move |text| {
+        // The text first: the sequence is part of what the program wrote, so the window hears the bytes before
+        // it hears what they asked for. Reversing these two lines made a notification arrive ahead of the line
+        // that caused it, which is exactly what the feature's first rule forbids.
+        let notices = scan.push(&text);
+        on_text(text);
+        for notice in notices {
+            on_notify(notice);
+        }
+    });
+}
+
 /// Open a terminal in `root_path`, and start feeding its output to the app.
 ///
 /// Returns the session id. The reading half runs on its own thread: a shell that
@@ -391,15 +616,32 @@ pub fn open(
         let for_thread = id.clone();
         std::thread::spawn(move || {
             use tauri::Emitter;
-            pump_output(reader, |text| {
-                let _ = sink.emit(
-                    "terminal-output",
-                    TerminalOutput {
-                        id: for_thread.clone(),
-                        data: text,
-                    },
-                );
-            });
+            // This terminal's own count, so two prints are two entries and one event delivered twice is one.
+            let mut seq: u64 = 0;
+            pump_output_noticing(
+                reader,
+                |text| {
+                    let _ = sink.emit(
+                        "terminal-output",
+                        TerminalOutput {
+                            id: for_thread.clone(),
+                            data: text,
+                        },
+                    );
+                },
+                |notice| {
+                    seq += 1;
+                    let _ = sink.emit(
+                        "terminal-notification",
+                        TerminalNotification {
+                            id: for_thread.clone(),
+                            seq,
+                            title: notice.title,
+                            body: notice.body,
+                        },
+                    );
+                },
+            );
             let _ = sink.emit("terminal-exit", TerminalExit { id: for_thread });
         });
 
@@ -518,6 +760,152 @@ fn open_count(sessions: &Arc<Mutex<Terminals>>) -> usize {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn an_osc_9_split_across_three_reads_is_one_notification() {
+        // A read ends wherever it ends: the introducer, the payload and the terminator can each arrive in a
+        // different one, which is the whole reason the scan keeps a tail.
+        let mut scan = OscScan::default();
+        assert!(scan.push("build ").is_empty());
+        assert!(scan.push("\x1b]9;the bu").is_empty());
+        assert_eq!(
+            scan.push("ild finished\x07and the prompt"),
+            vec![OscNotice {
+                title: String::new(),
+                body: "the build finished".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_three_forms_are_read_and_the_rest_is_left_alone() {
+        let mut scan = OscScan::default();
+        let found = scan.push(concat!(
+            "\x1b]0;a title\x07", // xterm's title: not a notification
+            "\x1b]9;4;1;70\x07",  // a progress report on OSC 9: not a notification
+            "\x1b]9;hello\x07",
+            "\x1b]777;notify;Build;done\x1b\\",
+            "\x1b]99;p=title;Deploy\x07",
+            "\x1b]99;e=1;p=body;QUJD\x07", // base64: refused rather than half-decoded
+            "\x1b]777;title;ignored\x07",  // 777 without `notify` is another command
+        ));
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert_eq!(found[0].body, "hello");
+        assert_eq!(found[1].title, "Build");
+        assert_eq!(found[1].body, "done");
+        assert_eq!(found[2].title, "Deploy");
+    }
+
+    #[test]
+    fn an_unterminated_sequence_is_dropped_and_a_flood_costs_bounded_memory() {
+        let mut scan = OscScan::default();
+        assert!(scan.push("\x1b]9;never finished").is_empty());
+
+        // A sequence with no terminator past the cap is given up on; a fresh one in the next read is still read.
+        let mut flood = String::from("\x1b]9;");
+        flood.push_str(&"x".repeat(OSC_PENDING_CHARS + 10));
+        assert!(scan.push(&flood).is_empty());
+        assert_eq!(
+            scan.push("\x1b]9;after\x07"),
+            vec![OscNotice {
+                title: String::new(),
+                body: "after".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_flood_that_ends_beside_a_real_notice_does_not_swallow_it() {
+        // The flood has no intended end, but the valid sequence after it provides the BEL that a naive scan
+        // would read as the flood's terminator. The whole thing would then become one clipped notice and the
+        // real notification would never be emitted.
+        let mut scan = OscScan::default();
+        let mut read = String::from("\x1b]9;");
+        read.push_str(&"x".repeat(OSC_PENDING_CHARS + 10));
+        read.push_str("\x1b]9;after\x07");
+
+        assert_eq!(
+            scan.push(&read),
+            vec![OscNotice {
+                title: String::new(),
+                body: "after".to_string(),
+            }],
+            "a real notification was lost inside an over-long sequence"
+        );
+    }
+
+    #[test]
+    fn a_notification_is_cleaned_and_clipped_before_it_is_announced() {
+        let mut scan = OscScan::default();
+        let long = format!("\x1b]9;line one\nline two   {}\x07", "y".repeat(400));
+        let found = scan.push(&long);
+        assert_eq!(found.len(), 1);
+        assert!(
+            !found[0].body.contains('\n'),
+            "a control byte reached the inbox"
+        );
+        assert!(found[0].body.chars().count() <= NOTICE_BODY_CHARS);
+        assert!(found[0].body.starts_with("line one line two"));
+    }
+
+    #[test]
+    fn a_notice_is_handed_over_after_its_batch_and_the_text_is_untouched() {
+        let events = std::cell::RefCell::new(Vec::<String>::new());
+        pump_output_noticing(
+            std::io::Cursor::new(b"before \x1b]9;done\x07 after".to_vec()),
+            |t| events.borrow_mut().push(format!("text:{t}")),
+            |n| events.borrow_mut().push(format!("notice:{}", n.body)),
+        );
+        let events = events.into_inner();
+        let notice_at = events
+            .iter()
+            .position(|e| e.strip_prefix("notice:") == Some("done"))
+            .expect("the notification was not handed over");
+        let text_at = events
+            .iter()
+            .position(|e| e.starts_with("text:"))
+            .expect("the batch text was not handed over");
+        assert!(
+            text_at < notice_at,
+            "a notification arrived ahead of the output that made it: {events:?}"
+        );
+        let text: String = events
+            .iter()
+            .filter_map(|e| e.strip_prefix("text:"))
+            .collect();
+        assert_eq!(
+            text, "before \x1b]9;done\x07 after",
+            "the scan changed what xterm is given"
+        );
+    }
+
+    #[test]
+    fn the_window_names_the_events_this_module_emits() {
+        // No type system spans a Rust string and a TypeScript constant, so the file that must agree with
+        // these literals is read: the same move `browser/tests.rs` and `machine/tests.rs` make.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has a parent")
+            .join("ui/src/shellEvents.ts");
+        let text = fs::read_to_string(&path).expect("ui/src/shellEvents.ts");
+        for event in ["terminal-output", "terminal-exit", "terminal-notification"] {
+            assert!(
+                text.contains(&format!("\"{event}\"")),
+                "ui/src/shellEvents.ts does not name {event:?} — the shell emits it and the window would never hear it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_machines_reader_has_no_notifications_to_raise() {
+        // Structural, not a flag: `pump_output` has no notification callback at all, so a machine's shell
+        // cannot reach the terminal inbox by printing the sequence.
+        let mut texts = Vec::new();
+        pump_output(std::io::Cursor::new(b"\x1b]9;done\x07".to_vec()), |t| {
+            texts.push(t)
+        });
+        assert_eq!(texts.concat(), "\x1b]9;done\x07");
+    }
 
     #[test]
     fn a_terminal_refuses_a_workspace_with_no_root() {

@@ -48,10 +48,12 @@ class _Recording(_ToolProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]], tools: list[ToolSpec], model: str,
         temperature: float, max_tokens: int, *, num_ctx: int | None = None, keep_alive: str | None = None,
+        cache_prefix: bool = False,
     ) -> ToolReply:
         self.models.append(model)
         return await super().complete_with_tools(
             system_prompt, messages, tools, model, temperature, max_tokens, num_ctx=num_ctx, keep_alive=keep_alive,
+            cache_prefix=cache_prefix,
         )
 
 
@@ -60,7 +62,7 @@ class _Plain(BaseProvider):
 
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         return "ok"
 

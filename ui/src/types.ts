@@ -720,6 +720,21 @@ export interface WorkspaceFileSaved {
 }
 
 /**
+ * `GET /workspaces/{id}/git`: the branch and working-tree state in the panel header.
+ *
+ * `branch` is null for the three cases that have no branch — not a repository, no commits yet, a detached HEAD —
+ * and `reason` says which. `dirty` is any changed or untracked path; `ahead`/`behind` are 0 without an upstream.
+ */
+export interface WorkspaceGit {
+  branch: string | null;
+  detached: boolean;
+  dirty: boolean;
+  ahead: number;
+  behind: number;
+  reason: string | null;
+}
+
+/**
  * One question the engine puts to the app window (`GET /surfaces/next`): which surface, which of its fixed operations,
  * which workspace it is about, and the arguments the engine has already checked against that operation's shape.
  */

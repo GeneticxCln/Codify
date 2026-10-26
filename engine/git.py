@@ -7,6 +7,7 @@ import subprocess
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 # The read-only argv law lives in `engine/sandbox.py` and it is the *only*
 # copy: the librarian's `run_command(mode="read_only")` and this class's
@@ -63,6 +64,86 @@ class GitService:
     def is_git_repo(self, root_path: str) -> bool:
         git_dir = Path(root_path).resolve() / ".git"
         return git_dir.exists()
+
+    def status(self, root_path: str) -> dict[str, Any]:
+        """The repository's branch and working-tree state, for the panel header.
+
+        Reads `git status --porcelain=v2 --branch` through the same hardening as a model's read-only git
+        (`git_readonly.runner_args` and `runner_env`, which sets `GIT_OPTIONAL_LOCKS=0` so a status does not
+        refresh and rewrite the index). It is not a new spawn site: `_run_text` is the class's one door.
+
+        Three answers are quiet rather than errors, because each is a true statement a person can read and
+        act on: a folder that is not a repository, a repository with no commits yet, and a detached HEAD. In
+        all three `branch` is None and `reason` says which one it is; anything else returns the branch, whether
+        the tree is dirty, and how far it has drifted from its upstream. `ahead`/`behind` stay 0 when there is
+        no upstream — git reports no `branch.ab` line at all, and inventing one would be a claim about a
+        comparison that never happened.
+        """
+        clean: dict[str, Any] = {
+            "branch": None, "detached": False, "dirty": False,
+            "ahead": 0, "behind": 0, "reason": None,
+        }
+        if not self.is_git_repo(root_path):
+            return {**clean, "reason": "This workspace is not a git repository."}
+        try:
+            res = self._run_text(
+                git_readonly.runner_args(["status", "--porcelain=v2", "--branch"]),
+                cwd=str(Path(root_path).resolve()),
+                env=git_readonly.runner_env(os.environ, root_path),
+                timeout=self.read_only_timeout_s,
+                capped=True,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                **clean,
+                "reason": f"git status did not finish in {self.read_only_timeout_s:g}s.",
+            }
+        except OSError as exc:
+            return {**clean, "reason": f"git status could not run: {exc}"}
+        if res.returncode != 0:
+            said = (res.stderr or res.stdout or "").strip().splitlines()
+            return {**clean, "reason": said[0] if said else "git status failed."}
+
+        branch: str | None = None
+        detached = False
+        unborn = False
+        dirty = False
+        ahead = 0
+        behind = 0
+        for line in res.stdout.splitlines():
+            if line.startswith("# branch.oid "):
+                unborn = line[len("# branch.oid "):].strip() == "(initial)"
+            elif line.startswith("# branch.head "):
+                head = line[len("# branch.head "):].strip()
+                if head == "(detached)":
+                    detached = True
+                elif head and head != "(unknown)":
+                    branch = head
+            elif line.startswith("# branch.ab "):
+                # `# branch.ab +3 -2`: the counts against the upstream, when there is one.
+                for word in line.split()[2:]:
+                    try:
+                        if word.startswith("+"):
+                            ahead = int(word[1:])
+                        elif word.startswith("-"):
+                            behind = int(word[1:])
+                    except ValueError:
+                        continue
+            elif line and not line.startswith("#"):
+                # A `1`/`2`/`u` record is a changed or unmerged path, `?` an untracked one. `!` is only
+                # printed with `--ignored`, which is not asked for, so it cannot make a clean tree dirty here.
+                dirty = True
+
+        if detached:
+            return {**clean, "detached": True, "dirty": dirty, "ahead": ahead, "behind": behind,
+                    "reason": "HEAD is detached; there is no branch to show."}
+        if unborn:
+            return {**clean, "dirty": dirty, "ahead": ahead, "behind": behind,
+                    "reason": "This repository has no commits yet."}
+        return {
+            "branch": branch, "detached": False, "dirty": dirty,
+            "ahead": ahead, "behind": behind, "reason": None,
+        }
 
     # ── the one way this class starts a process ─────────────────────────
 

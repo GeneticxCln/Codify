@@ -1,7 +1,7 @@
 # CLAUDE.md — working rules for this repository
 
 **This file is a distillation, not a second source of truth.** Everything below is
-sourced from `CONTRIBUTING.md` and `docs/00`–`13`; where this file and either of
+sourced from `CONTRIBUTING.md` and `docs/00`–`16`; where this file and either of
 those disagree, **they win and this file is the bug**. `tests/test_claude_md_contracts.py`
 fails if the invariants quoted here drift from `docs/00` §6, so that is enforced, not
 merely intended.
@@ -94,7 +94,7 @@ scripts/        fake_ollama.py (drive a goal with no API keys; FAKE_CONDUCTOR=1 
                  drive_a_turn.py (drive a turn against a real local model; --approve presses Start),
                  make_logo.py, check_history.py (does every commit in a range build)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–15, below
+docs/           00–16, below
 .githooks/      versioned pre-commit / pre-push
 ```
 
@@ -159,7 +159,8 @@ docs/           00–15, below
 | `docs/13` | The Grepify audit: `scan_code`, the built-in scanner for code review (curated profiles, masking, workspace profiles as data), and what of Grepify was taken |
 | `docs/12` | The Scrapling audit: `fetch_page` (a request the engine makes to an address a model chose), its rules, and what of Scrapling was refused |
 | `docs/14` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, the design a Ghidra tool needs here (now built: `analyze_binary`), and the gaps it found (child resource limits and a cancellable worker, both closed) |
-| `docs/15` | The Xerg audit: `audit_usage`, the native audit of wasted model calls in tokens (coverage first; retry waste and the fix loop measured; tool-loop waste and cache churn reported as not measurable), and what of Xerg's skill was taken |
+| `docs/15` | The Xerg audit: `audit_usage`, the native audit of wasted model calls in tokens (coverage first; retry waste and the fix loop measured; cache reads and writes measured as a signal, never a saving; tool-loop waste reported as not measurable), and what of Xerg's skill was taken |
+| `docs/16` | The DeepInfer and cmux audit: what is portable from a serving framework and an agent terminal (terminal OSC notifications into the inbox, bounded transcript replay, JSON-schema replies, prompt-prefix reuse), what is refused and by which invariant, and the plan |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.

@@ -431,7 +431,7 @@ class UsageReportingProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         if self.usage_sink is not None:
             self.usage_sink({"input_tokens": 100, "output_tokens": 50, "total_tokens": 150})

@@ -293,9 +293,10 @@ See [`docs/14`](docs/14-rea-audit.md) and `docs/04` §3.0.7.
 
 To see where model calls were spent on work done twice, the conductor has `audit_usage` and a built-in `usage-audit` skill. It reads
 the events this engine already records and reports, in **tokens** (there is no price table, on purpose), re-asked calls whose step then
-succeeded and fix attempts a retry got past, plus descriptive signals. It opens with what it could not see, and two kinds of waste
-(repeated tool calls, cache churn) are reported as not measurable here, so an empty result is never "no waste". It is the method of
-Xerg's agent skill, built natively and with none of its code. See [`docs/15`](docs/15-xerg-audit.md).
+succeeded and fix attempts a retry got past, plus descriptive signals. It opens with what it could not see: repeated tool calls are
+reported as not measurable, and prompt-cache reads and writes are shown as a signal — never a saving — with the churn rate it cannot
+know, so an empty result is never "no waste". It is the method of Xerg's agent skill, built natively and with none of its code. See
+[`docs/15`](docs/15-xerg-audit.md).
 
 ---
 
@@ -556,6 +557,7 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/13`](docs/13-grepify-audit.md) | The Grepify audit: `scan_code`, the built-in scanner for code review, and what of Grepify was taken |
 | [`docs/14`](docs/14-rea-audit.md) | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, and what was built from it (child resource limits, a cancellable scan worker, `analyze_binary` for Ghidra) |
 | [`docs/15`](docs/15-xerg-audit.md) | The Xerg audit: `audit_usage`, a native audit of wasted model calls in tokens, and what of Xerg's skill was taken |
+| [`docs/16`](docs/16-deepinfer-and-cmux-audit.md) | The DeepInfer and cmux audit: what is portable from a serving framework and an agent terminal, what is refused and by which invariant, and the plan |
 
 ## 📂 Layout
 
@@ -567,7 +569,7 @@ src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the emb
             the render-starvation watchdog
 tests/      Python suite; hermetic.py is the shared isolation bootstrap
 scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py
-docs/       00–15, the specifications this README summarises
+docs/       00–16, the specifications this README summarises
 ```
 
 ## 📄 License

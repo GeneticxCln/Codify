@@ -63,6 +63,20 @@ test("unread arithmetic: counted, cleared, and a clear of nothing is the same li
   assert.deepEqual(list.map((n) => n.read), [false, true, false], "marking read mutated its input");
 });
 
+test("newestUnread is the unread entry with the latest timestamp, not the first array slot", () => {
+  // The list is newest-first when `appendNotification` writes it, but the palette and the panel header should not
+  // depend on that: a stored list merged with a live one may arrive in another order, and jumping to the
+  // second-newest entry would be wrong in a way the append tests cannot see.
+  const older = note("older", { at: 1_000 });
+  const newer = note("newer", { at: 9_000 });
+  const read = note("read", { at: 10_000, read: true });
+  assert.equal(N.newestUnread([older, newer, read])?.id, "newer");
+  assert.equal(N.newestUnread([newer, older])?.id, "newer");
+  assert.equal(N.newestUnread([read, note("still", { at: 2_000 })])?.id, "still");
+  assert.equal(N.newestUnread([]), null, "an empty inbox named an entry");
+  assert.equal(N.newestUnread([note("a", { read: true })]), null, "an all-read inbox named an entry");
+});
+
 // ── what is stored ──────────────────────────────────────────────────────────
 
 test("a list survives a round trip exactly", () => {
@@ -276,6 +290,63 @@ test("a long list of providers is the first three and a count, and the id names 
 
 test("a custom provider is shown readably, never by a raw slug", () => {
   assert.equal(N.catalogNotification({ added: { "my-gateway": ["m"] }, removed: {}, fetched_at: 1 }, 5)!.detail, "My Gateway +1");
+});
+
+// ── source 5: a program in a terminal ───────────────────────────────────────
+
+const terminal = (over: Record<string, unknown> = {}) => ({
+  id: "term-1",
+  seq: 1,
+  tabId: "term-1",
+  title: "Build",
+  body: "finished",
+  ...over,
+});
+
+test("a terminal notification points at the tab it came from, and its id names the print", () => {
+  const n = N.terminalNotification(terminal(), 1_000)!;
+  assert.equal(n.id, "terminal:term-1:1");
+  assert.deepEqual(
+    { kind: n.kind, tone: n.tone, title: n.title, detail: n.detail, target: n.target },
+    { kind: "terminal", tone: "info", title: "Build", detail: "finished", target: { kind: "tab", tabId: "term-1" } },
+  );
+  // Two prints are two entries; the same print delivered twice is one, because the id carries the sequence.
+  assert.notEqual(N.terminalNotification(terminal({ seq: 2 }), 5_000)!.id, n.id);
+  assert.equal(N.terminalNotification(terminal(), 5_000)!.id, n.id);
+});
+
+test("the half a sequence carries becomes the heading when it is the only half", () => {
+  const bodyOnly = N.terminalNotification(terminal({ title: "", body: "the build failed" }), 1)!;
+  assert.deepEqual({ title: bodyOnly.title, detail: bodyOnly.detail }, { title: "the build failed", detail: undefined });
+  const titleOnly = N.terminalNotification(terminal({ title: "Deploy", body: "" }), 1)!;
+  assert.deepEqual({ title: titleOnly.title, detail: titleOnly.detail }, { title: "Deploy", detail: undefined });
+});
+
+test("a terminal that prints in a loop is one entry per gap, and a dropped report does not move the clock", () => {
+  assert.ok(N.terminalNotification(terminal(), 10_000));
+  assert.equal(
+    N.terminalNotification(terminal({ seq: 2 }), 12_999, 10_000),
+    null,
+    "a report inside the gap was shown",
+  );
+  assert.ok(
+    N.terminalNotification(terminal({ seq: 2 }), 13_000, 10_000),
+    "a report exactly at the gap was dropped",
+  );
+});
+
+test("a terminal notification with nothing to say, or nowhere to go, is not one", () => {
+  assert.equal(N.terminalNotification(terminal({ title: "  ", body: " " }), 1), null);
+  assert.equal(N.terminalNotification(terminal({ tabId: "" }), 1), null);
+});
+
+test("a terminal entry does not survive a restart: its id and its shell belong to one run", () => {
+  const entry = N.terminalNotification(terminal(), 1)!;
+  const parsed = N.parseNotifications(N.serializeNotifications([entry]));
+  assert.equal(parsed.length, 0, "a stored terminal entry came back, and `term-1:1` happens again next launch");
+  // The list itself still round-trips everything that is not a terminal.
+  const other = N.goalNotification(goal(), 1)!;
+  assert.equal(N.parseNotifications(N.serializeNotifications([entry, other])).length, 1);
 });
 
 // ── words ───────────────────────────────────────────────────────────────────

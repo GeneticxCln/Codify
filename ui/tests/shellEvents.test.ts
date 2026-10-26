@@ -34,6 +34,8 @@ import {
   readMachineExit,
   readMachineOutput,
   readBrowserPopupRequested,
+  readTerminalNotification,
+  TERMINAL_NOTIFICATION,
 } from "../src/shellEvents.ts";
 
 test("the event name is the one the shell emits", () => {
@@ -106,6 +108,53 @@ test("a machine's output and exit are their own events, and are read as strictly
   assert.equal(readMachineExit({ id: "mach-1" }), "mach-1");
   for (const payload of [null, undefined, "mach-1", 4, [], {}, { id: "" }, { id: 7 }]) {
     assert.equal(readMachineExit(payload), null, `${JSON.stringify(payload)} was read as an exit`);
+  }
+});
+
+test("a terminal's notification is read as its two halves, and nothing else", () => {
+  assert.equal(TERMINAL_NOTIFICATION, "terminal-notification");
+  assert.deepEqual(
+    readTerminalNotification({ id: "term-3", seq: 7, title: "Build", body: "finished", when: 1 }),
+    { id: "term-3", seq: 7, title: "Build", body: "finished" },
+  );
+  // OSC 9 carries only a body and OSC 99's title half only a title; both are real, and the window
+  // decides which one becomes the entry's heading.
+  assert.deepEqual(readTerminalNotification({ id: "term-1", seq: 0, title: "", body: "done" }), {
+    id: "term-1",
+    seq: 0,
+    title: "",
+    body: "done",
+  });
+  assert.deepEqual(readTerminalNotification({ id: "term-1", seq: 1, title: "Deploy", body: "" }), {
+    id: "term-1",
+    seq: 1,
+    title: "Deploy",
+    body: "",
+  });
+  // Each of these reaches an inbox entry. A payload with the right shape and the wrong types must
+  // make none rather than one that says "undefined" — and `seq` is the entry's identity.
+  for (const payload of [
+    null,
+    undefined,
+    "term-1",
+    42,
+    [],
+    {},
+    { id: "", seq: 1, title: "x", body: "y" },
+    { id: 7, seq: 1, title: "x", body: "y" },
+    { id: "term-1", title: "x", body: "y" },
+    { id: "term-1", seq: "1", title: "x", body: "y" },
+    { id: "term-1", seq: -1, title: "x", body: "y" },
+    { id: "term-1", seq: 1.5, title: "x", body: "y" },
+    { id: "term-1", seq: 1, body: "y" },
+    { id: "term-1", seq: 1, title: "x", body: null },
+    { id: "term-1", seq: 1, title: "   ", body: "  " },
+  ]) {
+    assert.equal(
+      readTerminalNotification(payload),
+      null,
+      `${JSON.stringify(payload)} was read as a notification`,
+    );
   }
 });
 

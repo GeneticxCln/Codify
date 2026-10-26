@@ -17,10 +17,13 @@ silently stops matching the provider is worse than no price.
 What the engine records decides what can be measured (`docs/15` §3), and the report says so instead of pretending:
 
 * *Retry waste* (a same-model re-ask, and a fix-loop attempt a later retry got past): measurable.
-* *Tool-loop waste* and *cache churn*: **not measurable today.** Tool results are never persisted and no provider adapter parses
-  cache tokens, so those two are reported as unavailable, with the capture that would enable them.
-* *Signals* (context growth, context outliers, deep conductor loops, re-ask rate, token concentration): descriptive. They carry the
-  numbers they came from, are never classified as waste, and never recommend a change.
+* *Tool-loop waste*: **not measurable today.** Tool results are never persisted, so an identical repeated call with an identical
+  result cannot be shown; it is reported as unavailable, with the capture that would enable it.
+* *Cache use*: **measured as the provider reports it.** A `usage` event carries `cache_read_tokens` and `cache_write_tokens`, so the
+  audit can say how much of the prompt came from a cache and how much was written to one. Which write a later read repaid is not
+  recorded, so there is no churn *rate*; the counts are a signal, never a saving (the tokens are inside `input_tokens` either way).
+* *Signals* (context growth, context outliers, deep conductor loops, re-ask rate, token concentration, cache reads): descriptive.
+  They carry the numbers they came from, are never classified as waste, and never recommend a change.
 
 Pure functions over parsed event dicts (`{type, payload, timestamp, goal_id, step_id, sequence}`), the shape `engine/metrics.py`
 takes, so the arithmetic is tested without a server. It reads nothing, writes nothing and starts nothing.
@@ -71,11 +74,13 @@ UNAVAILABLE: dict[str, str] = {
         "tool results are never stored and arguments survive only as a clipped log line, so an identical repeated call with an "
         "identical result cannot be shown. Enabling it would mean recording a hash of each call's arguments and result."
     ),
-    "cache-churn": (
-        "no provider adapter reads prompt-cache token counts and no request asks for caching, so there is no cache lifecycle to "
-        "price. Enabling it would mean capturing cache read and write tokens."
-    ),
 }
+
+#: Said in the coverage block, not the unavailable list: what cache counts can and cannot answer.
+CACHE_COVERAGE = (
+    "cache reads and writes come from the provider's usage block; which write a later read repaid is not recorded, so the counts "
+    "are shown but a churn rate is not"
+)
 
 
 def _int(value: Any) -> int:
@@ -85,6 +90,10 @@ def _int(value: Any) -> int:
 
 def _tokens(payload: dict[str, Any]) -> tuple[int, int]:
     return _int(payload.get("input_tokens")), _int(payload.get("output_tokens"))
+
+
+def _cache_tokens(payload: dict[str, Any]) -> tuple[int, int]:
+    return _int(payload.get("cache_read_tokens")), _int(payload.get("cache_write_tokens"))
 
 
 def _payload(event: dict[str, Any]) -> dict[str, Any]:
@@ -237,6 +246,7 @@ def _loops(events: list[dict[str, Any]], turn_cap: int) -> tuple[int, list[dict[
 
 def _signals(
     events: list[dict[str, Any]], reasks: list[dict[str, Any]], calls: dict[str, list[int]], turn_cap: int,
+    cache: dict[str, int],
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
 
@@ -248,6 +258,14 @@ def _signals(
         median, p90 = percentile(sizes, 50), percentile(sizes, 90)
         if median and p90 and p90 >= median * OUTLIER_P90_OVER_MEDIAN and p90 - median >= OUTLIER_MIN_EXCESS:
             out.append({"id": "context-outlier", "role": role, "calls": len(sizes), "median_input": median, "p90_input": p90})
+
+    # Cache use: how much of the prompt a provider served from a cache, and what was written to one. Measured, not saved.
+    if cache["read"] or cache["write"]:
+        out.append({
+            "id": "cache-reads", "calls": cache["calls"], "of": cache["of"],
+            "read_tokens": cache["read"], "write_tokens": cache["write"],
+            "share": _share(cache["read"], cache["input"]),
+        })
 
     seen, growth, deep = _loops(events, turn_cap)
     if growth:
@@ -286,19 +304,29 @@ def audit(
     )
 
     calls: dict[str, list[int]] = {}
-    totals = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+    totals = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}
     role_tokens: dict[str, int] = {}
+    cache: dict[str, int] = {"read": 0, "write": 0, "calls": 0, "of": 0, "input": 0}
     failed_without_tokens = 0
     for event in inside:
         payload = _payload(event)
         if event.get("type") == "usage":
             tokens_in, tokens_out = _tokens(payload)
+            cache_read, cache_write = _cache_tokens(payload)
             role = str(payload.get("role") or "")
             calls.setdefault(role, []).append(tokens_in)
             totals["calls"] += 1
             totals["input_tokens"] += tokens_in
             totals["output_tokens"] += tokens_out
+            totals["cache_read_tokens"] += cache_read
+            totals["cache_write_tokens"] += cache_write
             role_tokens[role] = role_tokens.get(role, 0) + tokens_in + tokens_out
+            cache["read"] += cache_read
+            cache["write"] += cache_write
+            cache["of"] += 1
+            cache["input"] += tokens_in
+            if cache_read or cache_write:
+                cache["calls"] += 1
         elif event.get("type") == "agent_call_failed" and payload.get("retrying") is not True:
             failed_without_tokens += 1
     total = totals["input_tokens"] + totals["output_tokens"]
@@ -315,7 +343,7 @@ def audit(
             "examples": sorted(fix_loops, key=lambda f: -f["tokens"])[:EXAMPLES],
         },
     ]
-    signals = _signals(inside, reasks, calls, turn_cap)
+    signals = _signals(inside, reasks, calls, turn_cap, cache)
     if total > 0:
         top_role, top_tokens = max(role_tokens.items(), key=lambda kv: kv[1])
         if _share(top_tokens, total) >= CONCENTRATION_SHARE:
@@ -332,6 +360,7 @@ def audit(
             "span_days": round((max(stamps) - min(stamps)) / 86400, 1) if len(stamps) > 1 else 0.0,
             "failed_calls_without_tokens": failed_without_tokens,
             "reasks_without_usage": unpriced,
+            "cache": CACHE_COVERAGE,
             "unavailable": dict(UNAVAILABLE),
         },
         "totals": {**totals, "total_tokens": total, "by_role": sorted(role_tokens.items(), key=lambda kv: -kv[1])},
@@ -370,6 +399,7 @@ def format_audit(result: dict[str, Any]) -> str:
     if cov["reasks_without_usage"]:
         lines.append(f"- {_n(cov['reasks_without_usage'])} re-asks had no recorded usage to measure and are not counted")
     lines.append("- HTTP-level retries inside one call are not recorded; only a same-model re-ask and the fix loop are visible")
+    lines.append(f"- cache: {cov['cache']}")
     for name, why in cov["unavailable"].items():
         lines.append(f"- {name}: UNAVAILABLE — {why}")
     lines += [
@@ -415,6 +445,12 @@ def format_audit(result: dict[str, Any]) -> str:
             lines.append(f"- context-growth: {sig['loops']} of {sig['of']} conductor loops ended with a prompt at least {GROWTH_FACTOR}x the size of their first")
         elif kind == "deep-conductor-loop":
             lines.append(f"- deep-conductor-loop: {sig['loops']} of {sig['of']} conductor loops used at least {int(DEEP_LOOP_SHARE * 100)}% of the turn cap")
+        elif kind == "cache-reads":
+            lines.append(
+                f"- cache-reads: {_n(sig['read_tokens'])} input tokens over {sig['calls']} of {sig['of']} calls were served from a "
+                f"provider's prompt cache ({int(sig['share'] * 100)}% of all input tokens), and {_n(sig['write_tokens'])} were written "
+                "to one. They are counted inside the input tokens above, not as a saving"
+            )
         elif kind == "reask-rate":
             lines.append(f"- reask-rate: {_text(sig['role'])} on {_text(sig['model']) or 'an unknown model'} was re-asked on {sig['reasks']} of {sig['calls']} recorded calls ({int(sig['rate'] * 100)}%)")
         elif kind == "token-concentration":
