@@ -53,11 +53,12 @@ from engine.library import (
     MAX_INDEX_BYTES,
     MAX_REGEX_PATTERN,
     MAX_SCAN_BYTES,
-    SKIP_DIRS,
+    SHOWN_SKIPPED_DIRS,
     RegexWorkerTimeout,
     _is_outside_symlink,
     _is_plain_file,
     _run_regex_worker,
+    _walkable,
     is_text_name,
     looks_binary,
 )
@@ -587,9 +588,13 @@ def scan_tree(
         ))
     tally = _Tally()
     stopped = ""
+    # The directories this walk refuses are named in the report, never silently dropped: see `_walkable`. The scan
+    # made the same promise the search does, and it was the one place in the report where a whole tree could vanish
+    # without a word — a `dist/` full of minified bundles counted in no reason at all.
+    pruned: set[str] = set()
     root = Path(root_path).resolve()
     for dirpath, dirnames, filenames in os.walk(root_path):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        dirnames[:] = _walkable(dirnames, pruned)
         tally.names += sum(not is_text_name(d) for d in dirnames)
         dirnames[:] = [d for d in dirnames if is_text_name(d)]
         dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
@@ -657,6 +662,7 @@ def scan_tree(
         },
         "partial_files": tally.partial,
         "long_lines": tally.long_lines,
+        **({"skipped_dirs": sorted(pruned)} if pruned else {}),
         "masked_files": tally.masked,
         "unmasked_files": tally.unmasked,
         "unmasked_exts": dict(sorted(tally.unmasked_exts.items(), key=lambda kv: (-kv[1], kv[0]))[:_SHOWN_COUNT]),
@@ -801,6 +807,17 @@ def format_scan(result: dict[str, Any], chosen: Sequence[Profile], profiles: Pro
     cover = [f"Coverage: {result.get('files_scanned', 0)} files scanned"]
     if reasons:
         cover.append("skipped " + ", ".join(reasons))
+    # The directories no file in this report came from. Naming them is the difference between "no rule matched" and
+    # "no rule matched in what was walked", and a reader who needs a vendored or generated tree knows it is there.
+    pruned = [str(name) for name in (result.get("skipped_dirs") or [])]
+    if pruned:
+        shown = ", ".join(pruned[:SHOWN_SKIPPED_DIRS])
+        if len(pruned) > SHOWN_SKIPPED_DIRS:
+            shown += f" and {len(pruned) - SHOWN_SKIPPED_DIRS} more"
+        cover.append(
+            f"not scanned: {shown} (directories this scan skips by name — "
+            "nothing inside them was scanned)"
+        )
     if result.get("partial_files"):
         cover.append(f"{result['partial_files']} large files read only in part")
     if result.get("long_lines"):

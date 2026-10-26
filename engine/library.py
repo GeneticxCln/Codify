@@ -80,12 +80,39 @@ SKIP_DIRS = {
     ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", "dist", "build",
     "target", ".next", ".nuxt", ".cache", "vendor", ".idea", ".vscode",
 }
+
+# How many of the pruned directories a reply names before it counts the rest. There are twenty names in
+# `SKIP_DIRS` and a workspace can nest them, so the header's job is to point at where an answer might be, not to
+# enumerate a tree.
+SHOWN_SKIPPED_DIRS = 8
 MAX_INDEX_BYTES = 2_000_000
 
 
 def looks_binary(sample: bytes) -> bool:
     """A NUL byte in the first block means this is not text worth quoting."""
     return b"\x00" in sample
+
+
+def _walkable(dirnames: list[str], pruned: set[str]) -> list[str]:
+    """The subdirectories of one level a walk descends into, recording the ones it refuses.
+
+    `SKIP_DIRS` is a deliberate structural exclusion — build output, dependency trees, caches — and it used to be a
+    silent one: a needle that lived only under `dist/` came back as `0 matches in N files`, with `files_skipped: 0`
+    beside it saying nothing had been skipped, because those files were never in the walker's count of what it saw.
+    A reader is owed the difference between "not there" and "not looked at", so every strategy reports the names it
+    met on the way past.
+
+    **The names reported are members of `SKIP_DIRS`, never workspace text**: a directory is added here because it
+    matched that constant, so a header built from this set quotes this module's own vocabulary. A repository cannot
+    put words of its own into the reply through it, however it names its directories.
+    """
+    kept: list[str] = []
+    for name in dirnames:
+        if name in SKIP_DIRS:
+            pruned.add(name)
+        else:
+            kept.append(name)
+    return sorted(kept)
 
 
 def fts5_available() -> bool:
@@ -202,10 +229,13 @@ def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) 
     files_scanned = 0
     files_skipped = 0
     odd_names = 0
+    pruned: set[str] = set()
+    byte_capped = 0
     truncated = False
+    stopped = ""
     root = Path(root_path).resolve()
     for dirpath, dirnames, filenames in os.walk(root_path):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        dirnames[:] = _walkable(dirnames, pruned)
         odd_names += sum(not is_text_name(d) for d in dirnames)
         dirnames[:] = [d for d in dirnames if is_text_name(d)]
         dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
@@ -224,12 +254,19 @@ def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) 
                 continue
             if files_scanned >= MAX_FILES_SCANNED:
                 truncated = True
+                stopped = "files"
                 break
             try:
-                if not _is_plain_file(full) or full.stat().st_size > MAX_INDEX_BYTES:
+                if not _is_plain_file(full):
+                    files_skipped += 1
+                    continue
+                size = full.stat().st_size
+                if size > MAX_INDEX_BYTES:
                     files_skipped += 1
                     continue
                 raw = full.read_bytes()[:MAX_SCAN_BYTES]
+                if size > MAX_SCAN_BYTES:
+                    byte_capped += 1
             except OSError:
                 files_skipped += 1
                 continue
@@ -240,8 +277,12 @@ def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) 
             for lineno, line in enumerate(text_lines(raw.decode("utf-8", errors="replace")), 1):
                 if rx.search(line):
                     matches.append({"path": rel, "line": lineno, "text": line.strip()[:240]})
-                    if len(matches) >= MAX_MATCHES:
+                    if len(matches) > MAX_MATCHES:
+                        # The same one-past-the-cap rule the substring strategy uses, so an exactly-full list is not
+                        # reported as a cut one. The matching line itself is dropped with the rest.
                         truncated = True
+                        stopped = "matches"
+                        matches = matches[:MAX_MATCHES]
                         break
             if truncated:
                 break
@@ -258,6 +299,12 @@ def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) 
     }
     if odd_names:
         result["non_utf8_names"] = odd_names
+    if pruned:
+        result["skipped_dirs"] = sorted(pruned)
+    if stopped:
+        result["stopped"] = stopped
+    if byte_capped:
+        result["byte_capped"] = byte_capped
     return result
 
 
@@ -616,11 +663,14 @@ class LibraryService:
         files_scanned = 0
         files_skipped = 0
         odd_names = 0
+        pruned: set[str] = set()
+        byte_capped = 0
         truncated = False
+        stopped = ""
         root = Path(self.root).resolve()
 
         for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            dirnames[:] = _walkable(dirnames, pruned)
             odd_names += sum(not is_text_name(d) for d in dirnames)
             dirnames[:] = [d for d in dirnames if is_text_name(d)]
             dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
@@ -637,12 +687,19 @@ class LibraryService:
                     continue
                 if files_scanned >= MAX_FILES_SCANNED:
                     truncated = True
+                    stopped = "files"
                     break
                 try:
-                    if not _is_plain_file(full) or full.stat().st_size > MAX_INDEX_BYTES:
+                    if not _is_plain_file(full):
+                        files_skipped += 1
+                        continue
+                    size = full.stat().st_size
+                    if size > MAX_INDEX_BYTES:
                         files_skipped += 1
                         continue
                     raw = full.read_bytes()[:MAX_SCAN_BYTES]
+                    if size > MAX_SCAN_BYTES:
+                        byte_capped += 1
                 except OSError:
                     files_skipped += 1
                     continue
@@ -653,8 +710,13 @@ class LibraryService:
                 for lineno, line in enumerate(text_lines(raw.decode("utf-8", errors="replace")), 1):
                     if lowered in line.lower():
                         matches.append({"path": rel, "line": lineno, "text": line.strip()[:240]})
-                        if len(matches) >= MAX_MATCHES:
+                        # One row past the cap is what makes the claim exact: a file holding exactly MAX_MATCHES hits
+                        # is complete, and calling it truncated would be the same kind of untrue statement as the
+                        # other direction. The extra row proves there is more; it is dropped, not shown.
+                        if len(matches) > MAX_MATCHES:
                             truncated = True
+                            stopped = "matches"
+                            matches = matches[:MAX_MATCHES]
                             break
                 if truncated:
                     break
@@ -671,6 +733,12 @@ class LibraryService:
         }
         if odd_names:
             result["non_utf8_names"] = odd_names
+        if pruned:
+            result["skipped_dirs"] = sorted(pruned)
+        if stopped:
+            result["stopped"] = stopped
+        if byte_capped:
+            result["byte_capped"] = byte_capped
         return result
 
     def _search_keyword(self, query: str, glob: str | None) -> dict[str, Any]:
@@ -701,10 +769,13 @@ class LibraryService:
         files_scanned = 0
         files_skipped = 0
         odd_names = 0
+        pruned: set[str] = set()
+        byte_capped = 0
         truncated = False
+        stopped = ""
         root = Path(self.root).resolve()
         for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            dirnames[:] = _walkable(dirnames, pruned)
             odd_names += sum(not is_text_name(d) for d in dirnames)
             dirnames[:] = [d for d in dirnames if is_text_name(d)]
             dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
@@ -721,12 +792,19 @@ class LibraryService:
                     continue
                 if files_scanned >= MAX_FILES_SCANNED:
                     truncated = True
+                    stopped = "files"
                     break
                 try:
-                    if not _is_plain_file(full) or full.stat().st_size > MAX_INDEX_BYTES:
+                    if not _is_plain_file(full):
+                        files_skipped += 1
+                        continue
+                    size = full.stat().st_size
+                    if size > MAX_INDEX_BYTES:
                         files_skipped += 1
                         continue
                     raw = full.read_bytes()[:MAX_SCAN_BYTES]
+                    if size > MAX_SCAN_BYTES:
+                        byte_capped += 1
                 except OSError:
                     files_skipped += 1
                     continue
@@ -745,10 +823,14 @@ class LibraryService:
             conn.executemany("INSERT INTO docs VALUES (?, ?)", rows)
             # An explicit ORDER BY bm25: FTS5's default order for MATCH is
             # unspecified, and the ranking *is* this strategy's point.
+            #
+            # One more row than the cap is asked for, so "there were more" is an
+            # answer rather than a guess: an answer that exactly fills the cap is
+            # complete, and `truncated` stays false for it.
             hits = conn.execute(
                 "SELECT path, bm25(docs) FROM docs WHERE docs MATCH ? "
                 "ORDER BY bm25(docs) LIMIT ?",
-                (query, MAX_MATCHES),
+                (query, MAX_MATCHES + 1),
             ).fetchall()
         except _sqlite3.Error:
             # A query FTS5 itself refuses (a stray operator in the terms, say)
@@ -763,6 +845,15 @@ class LibraryService:
         finally:
             if conn is not None:
                 conn.close()
+
+        if len(hits) > MAX_MATCHES:
+            # The LIMIT cut the answer. Say so, as the substring and regex
+            # strategies do, or a model reads "40 matches" as every file that
+            # contains the word. Which cap it was is named, so the header says
+            # what happened rather than that something did.
+            truncated = True
+            stopped = "matches"
+            hits = hits[:MAX_MATCHES]
 
         result = {
             "query": query,
@@ -779,13 +870,19 @@ class LibraryService:
         }
         if odd_names:
             result["non_utf8_names"] = odd_names
+        if pruned:
+            result["skipped_dirs"] = sorted(pruned)
+        if stopped:
+            result["stopped"] = stopped
+        if byte_capped:
+            result["byte_capped"] = byte_capped
         return result
 
     def _search_regex(self, pattern: str, glob: str | None, cancel: threading.Event | None = None) -> dict[str, Any]:
         """Bounded regex search: the literal walker with pattern guards.
 
-        Same walker shape as `search` — SKIP_DIRS, binary sniff, byte caps — so the two
-        report identically. A pattern that runs over the time budget aborts the whole search
+        Same walker shape as `search` — SKIP_DIRS, binary sniff, byte caps, and the same `skipped_dirs` account of
+        the directories the walk refused — so the two report identically. A pattern that runs over the time budget aborts the whole search
         with ValueError (reported to the model as a refusal, the same way an invalid pattern
         is) rather than hanging the engine or silently returning partial results.
 
@@ -876,10 +973,46 @@ def format_search(result: dict[str, Any]) -> str:
     elif strategy == "substring_fallback":
         head += " — keyword index unavailable; literal substring results instead"
     if result["truncated"]:
-        head += " (TRUNCATED — results are partial)"
+        # Which cap ended it, when the walk knows. Three different facts used to read as the same word: a search
+        # that listed every match there was and a search that never opened the later files both said "partial", and
+        # the reader's next move differs — `glob` narrows the walk, nothing narrows a list of everything.
+        why = str(result.get("stopped") or "")
+        if why == "files":
+            head += (
+                f" (TRUNCATED — the walk stopped at its limit of {MAX_FILES_SCANNED} files, "
+                "so later files were not searched; narrow it with `glob`)"
+            )
+        elif why == "matches":
+            head += (
+                f" (TRUNCATED — the limit of {MAX_MATCHES} matches was reached, "
+                "so later matches are not listed)"
+            )
+        else:
+            head += " (TRUNCATED — results are partial)"
+    # Files longer than `MAX_SCAN_BYTES` are searched only in their first slice of bytes, and that used to be as
+    # silent as the pruned directories: a needle past the slice in a large file came back as no match at all.
+    if result.get("byte_capped"):
+        capped = int(result["byte_capped"])
+        head += (
+            f"; {capped} file{'s' if capped != 1 else ''} read only in part "
+            f"(the first {MAX_SCAN_BYTES:,} bytes of each were searched)"
+        )
     if result["files_skipped"]:
         skipped = result["files_skipped"]
         head += f", {skipped} unreadable or binary file{'s' if skipped != 1 else ''} skipped"
+    # The directories the walk refused, named. Without this the header's counts describe only the files that were
+    # opened, and a reader takes "0 matches in 412 files" as an answer about the workspace: a needle living in
+    # `dist/`, `vendor/` or `node_modules/` reads as absent, and `files_skipped: 0` says nothing was skipped. The
+    # consequence is spelled out because it is the whole point of the clause.
+    pruned = [str(name) for name in (result.get("skipped_dirs") or [])]
+    if pruned:
+        shown = ", ".join(pruned[:SHOWN_SKIPPED_DIRS])
+        if len(pruned) > SHOWN_SKIPPED_DIRS:
+            shown += f" and {len(pruned) - SHOWN_SKIPPED_DIRS} more"
+        head += (
+            f"; not searched: {shown} (directories this search skips by name — "
+            "nothing inside them is in this result)"
+        )
     if result.get("non_utf8_names"):
         odd = result["non_utf8_names"]
         # A search cut short never reached the names after the cut, so its count is a floor, and says so.

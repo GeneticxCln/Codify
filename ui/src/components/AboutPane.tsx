@@ -1,19 +1,26 @@
-import React, { useEffect, useState } from "react";
-import { Info, Keyboard, FolderOpen, Cpu, Globe } from "lucide-react";
+import React, { useCallback, useEffect, useState } from "react";
+import { Info, Keyboard, FolderOpen, Cpu, Globe, RefreshCw, Download } from "lucide-react";
 
 import {
   checkEngineHealth,
+  checkForUpdate,
+  downloadUpdate,
   getAppFacts,
   getEngineInfo,
   underShell,
   type AppFacts,
   type HealthStatus,
+  type UpdateCheck,
+  type UpdateDownload,
 } from "../api";
+import { readRejection } from "../rejection";
 import { SHORTCUT_HELP } from "../shortcuts";
 import { EngineRuntimeCard } from "./EngineRuntimeCard";
+import { Button } from "./ui/Button";
 import { Panel } from "./ui/Panel";
 
 const REPO = "github.com/GeneticxCln/Codify";
+const RELEASES = "github.com/GeneticxCln/Codify/releases";
 
 /** One `label: value` line, the shape every section here uses. */
 const Row: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
@@ -31,17 +38,186 @@ function healthWords(health: HealthStatus | null): string {
 }
 
 /**
+ * A package's size in units a person reads, because the raw byte count is not one.
+ *
+ * Decimal megabytes, which are the ones a release page and a file manager print: 18,000,000
+ * bytes is "18 MB" there and would be "17 MB" in binary mebibytes, and a size that disagrees
+ * with the page the same file is on reads as a different file.
+ */
+function megabytes(bytes: number | null): string {
+  if (bytes === null || bytes <= 0) return "";
+  const mb = bytes / 1_000_000;
+  return mb >= 10 ? ` — about ${Math.round(mb)} MB` : ` — about ${mb.toFixed(1)} MB`;
+}
+
+/** The version a release is, for a sentence: its tag, or its number, or what we have. */
+function releaseName(check: UpdateCheck): string {
+  return check.tag ?? check.latest ?? "a newer release";
+}
+
+/**
+ * What the update button is doing, in one value rather than four flags.
+ *
+ * `failed` keeps the check it was working from, so a download that failed still offers the
+ * download again; `answered` with no asset is a real answer — up to date, a checkout, a
+ * release with no package for this machine — and renders the shell's own sentence.
+ */
+type UpdateState =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "answered"; check: UpdateCheck }
+  | { kind: "downloading"; check: UpdateCheck }
+  | { kind: "downloaded"; check: UpdateCheck; download: UpdateDownload }
+  | { kind: "failed"; check: UpdateCheck | null; message: string };
+
+/** The update section: a check a person starts, and the package it hands them. */
+const UpdatePanel: React.FC = () => {
+  const [state, setState] = useState<UpdateState>({ kind: "idle" });
+
+  const check = useCallback(async () => {
+    setState({ kind: "checking" });
+    try {
+      setState({ kind: "answered", check: await checkForUpdate() });
+    } catch (err) {
+      setState({ kind: "failed", check: null, message: readRejection(err) });
+    }
+  }, []);
+
+  const fetch = useCallback(async (known: UpdateCheck) => {
+    setState({ kind: "downloading", check: known });
+    try {
+      setState({ kind: "downloaded", check: known, download: await downloadUpdate() });
+    } catch (err) {
+      setState({ kind: "failed", check: known, message: readRejection(err) });
+    }
+  }, []);
+
+  const busy = state.kind === "checking" || state.kind === "downloading";
+  // The offer survives a *failed download*: that failure is about the download, and the release
+  // is still there to try again. It does not survive a failed check, which has no release at all.
+  const known =
+    state.kind === "answered" || state.kind === "downloading" || state.kind === "failed"
+      ? state.check
+      : null;
+
+  return (
+    <Panel
+      title={
+        <>
+          <RefreshCw className="w-3.5 h-3.5" /> Updates
+        </>
+      }
+    >
+      <div className="space-y-2">
+        {state.kind === "idle" && (
+          <p className="text-xs text-codify-muted leading-relaxed">
+            Codify can ask GitHub whether a newer release exists, and hand you the package for
+            this install. Nothing is checked until you ask: one request to{" "}
+            <span className="font-mono">{REPO}</span>, with no key and nothing about this
+            machine, and it installs nothing — the package is written to your Downloads folder
+            and the command to run is printed for you.
+          </p>
+        )}
+
+        {state.kind === "checking" && (
+          <p className="text-xs text-codify-muted">Checking {REPO}…</p>
+        )}
+
+        {known?.asset && (
+          <>
+            <Row label="Available">
+              {releaseName(known)} — you are running {known.current}
+            </Row>
+            {known.published_at && (
+              <Row label="Published">{known.published_at.slice(0, 10)}</Row>
+            )}
+            <p className="text-2xs text-codify-muted leading-relaxed">
+              {known.asset}
+              {megabytes(known.asset_bytes)} is the package for this install. Its page, for
+              reading, is <span className="font-mono">{known.url}</span>.
+            </p>
+          </>
+        )}
+
+        {state.kind === "answered" && !state.check.asset && (
+          <p className="text-xs text-codify-secondary leading-relaxed">
+            {state.check.message ?? `You are running ${state.check.current}.`}
+          </p>
+        )}
+
+        {state.kind === "downloading" && known?.asset && (
+          <p className="text-xs text-codify-muted">
+            Downloading {known.asset}
+            {megabytes(known.asset_bytes)}. A package is tens of megabytes, so this can take a
+            minute.
+          </p>
+        )}
+
+        {state.kind === "downloaded" && (
+          <>
+            <Row label="Written">
+              {state.download.path} ({state.download.bytes.toLocaleString()} bytes)
+            </Row>
+            {/* The command, as text in its own block: it is long, it is meant to be copied, and
+                the shell that downloaded the file runs none of it (docs/18 §4). */}
+            <pre className="text-2xs font-mono whitespace-pre-wrap break-all text-codify-secondary bg-codify-raised border border-codify-border rounded-lg p-2">
+              {state.download.next_step}
+            </pre>
+          </>
+        )}
+
+        {state.kind === "failed" && (
+          <p className="text-xs text-codify-danger leading-relaxed">{state.message}</p>
+        )}
+
+        {/* A shell that is not here cannot know a version, fetch a file or name a folder, and
+            the sentence says that rather than showing a button that would fail. */}
+        {!underShell() ? (
+          <p className="text-2xs text-codify-muted leading-relaxed">
+            The update check needs the desktop shell, so it cannot run in this browser preview.
+            The releases are at <span className="font-mono">{RELEASES}</span>.
+          </p>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              tone={known?.asset ? "subtle" : "primary"}
+              onClick={() => void check()}
+              disabled={busy}
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              {state.kind === "idle" ? "Check for updates" : "Check again"}
+            </Button>
+            {known?.asset && state.kind !== "downloaded" && (
+              <Button tone="primary" onClick={() => void fetch(known)} disabled={busy}>
+                <Download className="w-3.5 h-3.5" />
+                {state.kind === "downloading" ? "Downloading…" : `Download ${known.asset}`}
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+};
+
+/**
  * Settings → About: what this app is and what it is running on.
  *
- * Read-only, as docs/02 §3.3 requires, and it says only what the app can truthfully know: the shell's
- * own version when there is a shell (`getAppFacts`), the engine's interpreter and health from the
- * routes that already report them, the port it is connected to, where the data lives, and the
- * keyboard shortcuts straight from the table the keyboard layer is tested against (`SHORTCUT_HELP`).
- * The engine has no version of its own to print, so none is invented: the engine ships in the same
+ * Says only what the app can truthfully know: the shell's own version when there is a shell
+ * (`getAppFacts`), the engine's interpreter and health from the routes that already report
+ * them, the port it is connected to, where the data lives, and the keyboard shortcuts
+ * straight from the table the keyboard layer is tested against (`SHORTCUT_HELP`). The engine
+ * has no version of its own to print, so none is invented: the engine ships in the same
  * checkout as the app, and the interpreter line is what tells two installs apart.
  *
- * The boot token is never shown. The port is not a secret and is what a person needs when something
- * else has to find the engine.
+ * The boot token is never shown. The port is not a secret and is what a person needs when
+ * something else has to find the engine.
+ *
+ * It is the one place in Settings that *writes* something — the release package, into the
+ * person's Downloads folder, when they press Download — and it still writes no
+ * configuration: agent config comes from the settings routes alone (docs/02 §1). The update
+ * check is also the one request this app makes that is not a model provider's, so it is
+ * named in the sentence above it and made only on a click (docs/18 §4).
  */
 export const AboutPane: React.FC = () => {
   const [app, setApp] = useState<AppFacts | null | undefined>(undefined);
@@ -68,7 +244,8 @@ export const AboutPane: React.FC = () => {
         <div className="space-y-1.5">
           <p className="text-xs text-codify-muted leading-relaxed">
             A local-first, multi-agent AI coding assistant. Your code, your keys and your history stay on
-            this machine; the only requests that leave it go to the model providers you configure.
+            this machine; the only requests that leave it go to the model providers you configure, plus the one
+            GitHub asks for below when you press Check for updates.
           </p>
           {app === undefined ? (
             <Row label="Version">checking…</Row>
@@ -87,6 +264,8 @@ export const AboutPane: React.FC = () => {
           <Row label="Licence">MIT</Row>
         </div>
       </Panel>
+
+      <UpdatePanel />
 
       <Panel title={<><Cpu className="w-3.5 h-3.5" /> Engine</>}>
         <div className="space-y-2">

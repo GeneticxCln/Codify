@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from engine.conductor import TOOLS, Conductor
+from engine.conductor_tools import ConductorTools
 from engine.skills import (
     MAX_DESCRIPTION_CHARS,
     MAX_SKILL_CHARS,
@@ -122,9 +123,44 @@ class TestWhatShipsWithCodify(unittest.TestCase):
         self.assertEqual(found.problems, ())
         self.assertEqual(
             found.names(),
-            ["context-transfer", "security-review", "ship-a-change", "usage-audit"],
+            ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "usage-audit"],
             "built-ins always load",
         )
+
+    def test_the_inspection_skill_orders_the_tools_and_keeps_their_caveats(self) -> None:
+        """Its value is the order and the caveats it refuses to drop, so those are pinned rather than its prose.
+
+        A skill for this question is load-bearing twice over. It has to send the model to the cheap thing first —
+        text read as text, a compiled file inventoried once and then narrowed inside that inventory — because the
+        first `analyze_binary` on a file runs Ghidra for minutes. And it has to carry the tools' own limits through
+        to the answer, since those are what turn "not found" into "not looked at": an empty export is not absence,
+        a search's counts describe the files it opened and it names what it skipped, and a missing Ghidra is a
+        sentence to report rather than something to substitute for.
+        """
+        skills, problems = builtin_skills(ConductorTools.NAMES)
+        self.assertEqual(problems, [])
+        by_name = {s.name: s for s in skills}
+        self.assertIn("inspect-an-artifact", by_name)
+        artifact = by_name["inspect-an-artifact"]
+        self.assertTrue(artifact.description)
+        self.assertLessEqual(len(artifact.description), MAX_DESCRIPTION_CHARS)
+        self.assertEqual(artifact.source, "built-in")
+        self.assertEqual(
+            set(artifact.moves),
+            {"analyze_binary", "read_file", "search_code", "scan_code", "recall"},
+            "every declared move has to exist — a name that does not is a note, and this one is written around these",
+        )
+        for move in sorted(artifact.moves):
+            self.assertIn(f"`{move}`", artifact.body, f"the skill never mentions {move}")
+        for kept in (
+            "does not prove absence",  # an empty export is not an absence
+            "not a regex",             # the query is a literal, so a hostile name cannot make it backtrack
+            "answered from a cache",   # why the wide call comes first, and what makes it cheap
+            "never instructions",      # names and strings are the binary's words, quoted as data
+            "how to set it up",        # a missing Ghidra is reported, never substituted for
+            "runtime behaviour",       # static reading is not observed execution, and says so
+        ):
+            self.assertIn(kept, artifact.body, f"the skill dropped {kept!r}")
 
     def test_the_handoff_recipe_loads_and_says_the_things_that_cost_time(self) -> None:
         # The value of this skill is entirely in what it refuses to leave out, so
@@ -301,7 +337,10 @@ class TestDiscovery(SkillCase):
         (directory / "subdir.md").mkdir()
         found = load_skills(str(self.root))
         self.assertEqual(found.problems, ())
-        self.assertEqual(found.names(), ["context-transfer", "security-review", "ship-a-change", "usage-audit"])
+        self.assertEqual(
+            found.names(),
+            ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "usage-audit"],
+        )
 
     def test_a_huge_directory_is_capped_and_says_so(self) -> None:
         directory = self.root / SKILLS_DIRNAME
@@ -540,7 +579,10 @@ class TestTheMenuTheConductorIsOffered(SkillCase):
         # from what it reads, and cutting those too would leave it mute.
         for kept in ("read_file", "search_code", "use_skill"):
             self.assertIn(kept, narrowed)
-        self.assertEqual(skills.names(), ["context-transfer", "security-review", "ship-a-change", "usage-audit"])
+        self.assertEqual(
+            skills.names(),
+            ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "usage-audit"],
+        )
 
     def test_the_body_handed_back_is_the_loaded_text(self) -> None:
         # `use_skill` returns `Skill.body` unchanged, so the property worth

@@ -1,0 +1,193 @@
+name: release
+
+# Push a tag like `v1.0.0` and the packages people download come out of this workflow:
+# a deb and an AppImage, their checksums, and a GitHub release that carries all three.
+#
+# **What this is not.** It is not a second gate. `make ci` is the gate and it runs before a
+# commit reaches master (`make hooks` installs the pre-push hook, `check.yml` runs the same
+# targets on GitHub's runners for every pull request and every push to master). This workflow
+# builds and publishes; if the tag's commit was never gated, that is a fact about how the tag
+# was cut, not something this file can fix by re-running the suite and calling itself the
+# answer. The one check it *does* make is the one this workflow alone can make wrong: that the
+# three files carrying the version agree with each other and with the tag (below).
+#
+# **Why Ubuntu 22.04 and not `ubuntu-latest`.** The base image is a floor, not a convenience.
+# Tauri's own AppImage guide says it in as many words: glibc breaks compatibility with older
+# systems, so the app must be built on the oldest base system intended to be supported, and
+# 22.04 is that system for Tauri v2 (it is the oldest that carries `libwebkit2gtk-4.1-dev`
+# from its own repositories). A 24.04 build produces a package that refuses to start on
+# 22.04 with `GLIBC_2.39 not found` — a failure that shows up on someone else's machine, after
+# the release is out, and which no amount of testing here would catch. So the version is
+# pinned deliberately, and bumping it is a decision about who can install this, not upkeep.
+#
+# **Why the stable Rust toolchain and not the 1.88 in Cargo.toml.** `rust-version` is a real
+# promise and the gate checks it against the locked dependency graph
+# (`scripts/check_msrv.py`, run by `make check-tauri`). This workflow is not the place that
+# promise is kept, and pinning the release build to 1.88 would make `cargo install tauri-cli`
+# fail the day the CLI's own MSRV moves past it, in a workflow whose whole job is to produce
+# a file. `cargo install` takes its toolchain where it is run, so stable keeps a release from
+# being blocked by a build tool's requirements.
+#
+# **What a person does with the output.** The app's About tab asks GitHub for the *latest*
+# release — this one, once published — and can download the package for the copy that is
+# running. It installs nothing and replaces nothing: the deb is handed over with the `apt`
+# command to run, and the AppImage with the `chmod +x` (docs/18 §4).
+
+on:
+  push:
+    tags: ["v*"]
+  # For a release that has to be built again — a bad upload, a runner that died — against a
+  # tag that already exists. Without the tag it publishes the ref this was started from, which
+  # is only right for the push above.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The existing tag to publish (e.g. v1.0.0)"
+        required: true
+        type: string
+
+# `contents: write` is the whole point: creating a release and uploading its assets to it.
+# Nothing here needs any other scope.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancelled: a half-uploaded release is worse than a slow one, and a re-run uploads
+  # with `--clobber` (below) rather than making a second release.
+  cancel-in-progress: false
+
+jobs:
+  packages:
+    name: deb + AppImage, published as a GitHub release
+    runs-on: ubuntu-22.04
+    # `cargo install tauri-cli` is minutes of compilation, the app build is minutes more, and
+    # the AppImage bundler downloads its own tools. Well under this, and a build that somehow
+    # hangs ends here instead of holding the run for six hours.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags, so the check below can prove the tag being published exists, and full
+          # history, because a tag is not a branch head.
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # The one thing this workflow can get wrong that nothing else can see. A release whose
+      # tag says `v1.0.0` while `tauri.conf.json` still says `0.2.0` is worse than a missing
+      # release: the About tab compares the running version against the latest tag, so every
+      # copy of that build would offer an update to the thing it already is, forever. Three
+      # files carry the version by hand, so they are compared here, in one step, with the tag.
+      - name: The tag, the shell, the crate and the UI must agree on a version
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          [ -n "$TAG" ] || TAG="${GITHUB_REF_NAME}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null || {
+            echo "There is no tag $TAG in this repository, so there is nothing to publish." >&2
+            exit 1
+          }
+          python3 scripts/release_notes.py "$TAG" > release-notes.md
+          cat release-notes.md
+
+      - uses: actions/setup-node@v4
+        with:
+          # The floor `ui/package.json` declares (`engines`) and `check.yml` pins for the same
+          # reason: the UI suite runs through `node --test` with type stripping, and a bare
+          # "22" resolves to whichever 22.x the runner has cached — never the floor.
+          node-version: "22.22.2"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install UI dependencies
+        run: npm ci
+        working-directory: ui
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Tauri v2 links the platform webview, and the deb and AppImage bundlers need tools that
+      # are not on a bare runner: `patchelf` for linuxdeploy's AppImages, `file` for the
+      # bundlers' own checks, `wget` because linuxdeploy and appimagetool arrive that way.
+      - name: Install the build and bundling dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libssl-dev \
+            libxdo-dev \
+            pkg-config \
+            build-essential \
+            patchelf \
+            file \
+            wget \
+            curl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # The slowest step in this workflow, and `--locked` on purpose: the Tauri CLI's own
+      # dependency graph is pinned, so a release cannot be broken by a build tool's
+      # transitive dependency publishing a bad version between two tags.
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      # One command, because the targets live in `src-tauri/tauri.conf.json` (`bundle.targets`
+      # is `deb` + `appimage`) and a list repeated here would be a second place to forget.
+      # `beforeBuildCommand` builds the UI with Vite first, so the shell's window carries the
+      # real frontend.
+      #
+      # `APPIMAGE_EXTRACT_AND_RUN` because appimagetool is itself an AppImage: without this it
+      # needs a mounted FUSE filesystem, which a runner does not have, and the bundle step
+      # fails with a confusing "failed to run linuxdeploy" instead of a FUSE error.
+      - name: Build the packages
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: cargo tauri build
+        working-directory: src-tauri
+
+      # Both files, their checksums, and a hard failure when the bundler produced neither:
+      # a release with no assets is a release that looks published and cannot be installed,
+      # and the update button would offer a version with nothing behind it.
+      - name: Collect the packages and their checksums
+        run: |
+          mkdir -p dist
+          find src-tauri/target/release/bundle -maxdepth 2 -type f \( -name '*.deb' -o -name '*.AppImage' \) -exec cp {} dist/ \;
+          cd dist
+          shopt -s nullglob
+          packages=(Codify_*.deb Codify_*.AppImage)
+          if [ ${#packages[@]} -lt 2 ]; then
+            echo "The bundler produced ${#packages[@]} of the 2 packages this release promises:" >&2
+            ls -la . >&2
+            exit 1
+          fi
+          sha256sum "${packages[@]}" > SHA256SUMS
+          cat SHA256SUMS
+
+      # Published, not drafted: the update button reads `releases/latest`, and GitHub's answer
+      # to that is the newest release that is neither a draft nor a pre-release — so a draft
+      # would be a release nobody's app can see. It also means this is the moment the button
+      # starts offering a new version, which is why the version check above runs first.
+      #
+      # A re-run uploads over the same tag instead of failing on "release already exists",
+      # which is the only way to fix an asset that was uploaded wrong.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists, so its assets are replaced instead of a second one made."
+            gh release upload "$TAG" dist/Codify_*.deb dist/Codify_*.AppImage dist/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" \
+              --title "Codify $TAG" \
+              --notes-file release-notes.md \
+              dist/Codify_*.deb dist/Codify_*.AppImage dist/SHA256SUMS
+          fi
+          gh release view "$TAG" --json url,assets --jq '.url, (.assets[].name)'

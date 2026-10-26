@@ -127,9 +127,17 @@ codify                 # from any directory, or from the applications menu
 make uninstall-local   # removes exactly those three files
 ```
 
-Codify targets Linux desktops and ships **no installer or AppImage**. Everything lands under your own `~/.local`;
-no root is involved. **Moving or deleting the checkout breaks the entry**, because the launcher finds the project
-root from where it lives.
+Codify targets Linux desktops and comes two ways. A **package** — a deb or an AppImage, built from a tag by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) and downloaded from the releases page — or the
+**checkout**, which is what `make install-local` above puts in your applications menu: a `codify` command and a menu
+entry under your own `~/.local`, no root involved. **Moving or deleting the checkout breaks the entry**, because the
+launcher finds the project root from where it lives.
+
+Either way the shell needs this checkout: it starts `python3 -m engine` from it, so a package with no checkout beside
+it opens a window that says so rather than opening empty — see [`docs/18`](docs/18-release-and-updates.md). The app
+also has a **Check for updates** button on Settings → About, which asks GitHub for the newest release when you press
+it and can download the package for the copy you are running. It never installs anything, and its request is the only
+one this app makes that is not one of your model providers'.
 
 > **Do not launch it with a bare `cargo run`.** That is a *dev* build: the window loads `http://localhost:5173`
 > and shows a connection error unless a Vite dev server is already running, which looks exactly like an app whose
@@ -558,6 +566,8 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/14`](docs/14-rea-audit.md) | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, and what was built from it (child resource limits, a cancellable scan worker, `analyze_binary` for Ghidra) |
 | [`docs/15`](docs/15-xerg-audit.md) | The Xerg audit: `audit_usage`, a native audit of wasted model calls in tokens, and what of Xerg's skill was taken |
 | [`docs/16`](docs/16-deepinfer-and-cmux-audit.md) | The DeepInfer and cmux audit: what is portable from a serving framework and an agent terminal, what is refused and by which invariant, and the plan |
+| [`docs/17`](docs/17-leanrea-audit.md) | The leanrea audit: the routing-table skill that argues against REA's 207 tools — what of it this engine already is, and the one gap its trap list found in `search_code` |
+| [`docs/18`](docs/18-release-and-updates.md) | Release and updates: a release is a tag, what the deb and AppImage hold, how the release workflow is built, and what the About tab's update button does and refuses |
 
 ## 📂 Layout
 
@@ -569,7 +579,7 @@ src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the emb
             the render-starvation watchdog
 tests/      Python suite; hermetic.py is the shared isolation bootstrap
 scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py
-docs/       00–16, the specifications this README summarises
+docs/       00–18, the specifications this README summarises
 ```
 
 ## 📄 License

@@ -1,10 +1,11 @@
-"""Codify starts from the applications menu, with no installer (audit of 2026-09-29, Phase 4).
+"""Codify starts from the applications menu out of a checkout, with no root (audit of 2026-09-29, Phase 4).
 
 The shell runs `python3 -m engine` from the checkout and knew the checkout only as its working
 directory. Opened from a menu entry — the working directory is `$HOME` — it failed with "No engine to
 run" before it started anything, and there was no launcher script and no menu entry anywhere. The
-Linux answer to "no installer" is two small files in the user's own XDG directories, and these tests
-pin what they promise:
+Answer for a checkout is two small files in the user's own XDG directories — a *packaged* install
+is the deb or AppImage of `docs/18`, and it still wants this checkout beside it for the engine —
+and these tests pin what the checkout's own launcher promises:
 
 * `scripts/codify` finds the checkout from *its own location*, however it was reached (a symlink on
   PATH is how it is normally reached), hands it to the shell as `CODIFY_ROOT`, and starts the

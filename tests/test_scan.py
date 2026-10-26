@@ -419,6 +419,20 @@ class TestTheWalk(Workspace):
         self.assertEqual(self.walk(budget_s=-1.0)["stopped"], "time")
         self.assertEqual(self.walk()["stopped"], "")
 
+    def test_a_directory_the_walk_refused_is_a_name_and_not_a_silence(self) -> None:
+        """The walk prunes these by name, so the report names them: a `dist/` full of bundles used to vanish."""
+        self.write("app.py", "x = 1\n")
+        self.write("dist/bundle.py", "eval(x)\n")
+        self.write("node_modules/pkg/y.py", "eval(x)\n")
+        self.write(".cache/z.py", "eval(x)\n")
+        result = self.walk()
+        self.assertEqual(result["findings"], [], "the only hit lives in a directory this walk refuses")
+        self.assertEqual(result["skipped_dirs"], [".cache", "dist", "node_modules"])
+
+    def test_a_workspace_without_one_gets_the_result_it_always_got(self) -> None:
+        self.write("app.py", "x = 1\n")
+        self.assertNotIn("skipped_dirs", self.walk())
+
 
 class TestWorkspaceProfiles(Workspace):
     def test_a_workspace_profile_is_loaded_beside_the_built_ins(self) -> None:
@@ -598,6 +612,20 @@ class TestRunningAScan(Workspace):
         text = run_scan(str(self.root), profile="secrets")
         self.assertIn("No rule matched.", text)
         self.assertNotIn("secure", text.lower())
+
+    def test_the_clean_bill_says_which_directories_it_was_never_about(self) -> None:
+        """"No rule matched" is about the tree that was walked. The Coverage line says where that tree stopped."""
+        self.write("ok.py", "x = 1\n")
+        self.write("vendor/lib.py", "password = 'hunter2'\n")
+        self.write("dist/app.js", "const k = 'sk-live-ABCDEFGHIJKLMNOP'\n")
+        text = run_scan(str(self.root), profile="secrets")
+        self.assertIn("No rule matched.", text)
+        self.assertIn("Coverage: 1 files scanned", text)
+        self.assertIn("not scanned: dist, vendor", text)
+        self.assertIn("nothing inside them was scanned", text)
+        # In the Coverage sentence, like every other account of what was not seen — the part that runs before the
+        # findings, which is the part the conductor's clipping has never dropped (docs/14 §3).
+        self.assertIn("not scanned: dist, vendor", text.split("Coverage:")[1])
 
     def test_all_runs_every_profile_and_a_name_that_does_not_exist_lists_the_ones_that_do(self) -> None:
         self.write("a.py", "eval(x)\nverify = False\nrequests.get(u, verify=False)\n")

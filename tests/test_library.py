@@ -17,7 +17,10 @@ from unittest.mock import patch
 
 from engine.fs import GitMetadataError, PathEscapeError
 from engine.library import (
+    MAX_MATCHES,
     MAX_READ_CHARS,
+    MAX_SCAN_BYTES,
+    SHOWN_SKIPPED_DIRS,
     LibraryService,
     fts5_available,
     format_read,
@@ -290,6 +293,191 @@ class TestKeywordSearch(unittest.TestCase):
         self.assertEqual(res["files_scanned"], 3)
         self.assertEqual(res["matches"][0]["path"], "providers.py")
         self.assertEqual(res["matches"][0]["line"], 2)
+
+    def test_hitting_the_match_cap_is_reported_as_truncated(self) -> None:
+        """A cut answer must not be described as the whole one.
+
+        Substring and regex searches set `truncated` when they stop at
+        `MAX_MATCHES`; the keyword strategy asked for exactly the cap and kept
+        `truncated: False`, so its header read "40 matches" with no sign that
+        anything after them had been left out.
+        """
+        for number in range(MAX_MATCHES + 5):
+            (self.root / f"many{number:02d}.py").write_text("needleword = 1\n", encoding="utf-8")
+        res = self.lib.search("needleword", mode="keyword")
+        self.assertEqual(res["strategy"], "fts5_bm25")
+        self.assertEqual(len(res["matches"]), MAX_MATCHES)
+        self.assertTrue(res["truncated"])
+        self.assertIn("TRUNCATED", format_search(res))
+
+    def test_exactly_the_cap_is_complete_and_not_called_truncated(self) -> None:
+        """The extra row is what makes the claim exact, in both directions."""
+        for number in range(MAX_MATCHES):
+            (self.root / f"many{number:02d}.py").write_text("needleword = 1\n", encoding="utf-8")
+        res = self.lib.search("needleword", mode="keyword")
+        self.assertEqual(len(res["matches"]), MAX_MATCHES)
+        self.assertFalse(res["truncated"])
+        self.assertNotIn("TRUNCATED", format_search(res))
+
+
+class TestTheSearchesNameWhatTheWalkRefused(unittest.TestCase):
+    """"0 matches in 3 files" is an answer about the files that were opened, not about the workspace.
+
+    `SKIP_DIRS` is a deliberate structural exclusion — build output, dependency trees, caches — and it used to be a
+    silent one. A needle that lived only under `dist/` came back as an absence with `files_skipped: 0` beside it,
+    saying nothing had been skipped, because those files were never in the walker's count of what it saw. Every
+    strategy now names the directories it met and refused, and says what that means to the reader of the header,
+    who is a model deciding whether the answer it has is complete.
+
+    The regex strategy goes through `engine/regex_worker.py`, so its case also proves the account survives the
+    worker's one JSON reply.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        (self.root / "src").mkdir()
+        (self.root / "src" / "app.py").write_text("greet = 1\n", encoding="utf-8")
+        (self.root / "dist").mkdir()
+        (self.root / "dist" / "bundle.py").write_text("ONLY_IN_DIST = 1\n", encoding="utf-8")
+        (self.root / "node_modules" / "pkg").mkdir(parents=True)
+        (self.root / "node_modules" / "pkg" / "index.js").write_text("greet();\n", encoding="utf-8")
+        (self.root / ".cache").mkdir()
+        (self.root / ".cache" / "notes.md").write_text("greet\n", encoding="utf-8")
+        self.lib = LibraryService(str(self.root))
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_every_strategy_names_the_directories_it_did_not_walk(self) -> None:
+        for kwargs in ({}, {"regex": True}, {"mode": "keyword"}):
+            with self.subTest(**kwargs):
+                result = self.lib.search("greet", **kwargs)
+                self.assertEqual([".cache", "dist", "node_modules"], result["skipped_dirs"])
+                self.assertEqual(["src/app.py"], [m["path"] for m in result["matches"]])
+                rendered = format_search(result)
+                self.assertIn("not searched: .cache, dist, node_modules", rendered)
+
+    def test_a_needle_inside_an_excluded_directory_is_not_reported_as_absent(self) -> None:
+        """The failure this exists for: the string is in the workspace, and the answer must not read as absence."""
+        result = self.lib.search("ONLY_IN_DIST")
+        self.assertEqual([], result["matches"])
+        self.assertEqual(1, result["files_scanned"], "only src/app.py was ever opened")
+        rendered = format_search(result)
+        self.assertIn("0 matches", rendered)
+        self.assertIn("not searched: .cache, dist, node_modules", rendered)
+        self.assertIn("nothing inside them is in this result", rendered)
+
+    def test_only_the_excluded_names_are_reported(self) -> None:
+        """The clause lists this module's own vocabulary: an unusual directory is unusual, not excluded."""
+        (self.root / "generated").mkdir()
+        (self.root / "generated" / "kept.py").write_text("greet = 2\n", encoding="utf-8")
+        result = self.lib.search("greet")
+        self.assertIn("generated/kept.py", [m["path"] for m in result["matches"]])
+        self.assertNotIn("generated", result["skipped_dirs"])
+
+    def test_the_list_is_capped_and_counts_what_it_held_back(self) -> None:
+        for name in ("build", "target", "vendor", ".next", ".nuxt", ".ruff_cache", "venv"):
+            (self.root / name).mkdir()
+        result = self.lib.search("greet")
+        self.assertEqual(10, len(result["skipped_dirs"]))
+        rendered = format_search(result)
+        self.assertIn(f"and {10 - SHOWN_SKIPPED_DIRS} more", rendered)
+
+    def test_a_workspace_without_one_gets_the_header_it_always_got(self) -> None:
+        with tempfile.TemporaryDirectory() as plain:
+            (Path(plain) / "a.txt").write_text("needle\n", encoding="utf-8")
+            lib = LibraryService(plain)
+            for kwargs in ({}, {"regex": True}, {"mode": "keyword"}):
+                with self.subTest(**kwargs):
+                    result = lib.search("needle", **kwargs)
+                    self.assertNotIn("skipped_dirs", result)
+                    self.assertNotIn("not searched", format_search(result))
+
+
+class TestTheSearchesNameTheirOtherStructuralSilences(unittest.TestCase):
+    """Two more ways a search is partial without saying so: the file cap, and a file read only in part.
+
+    `MAX_FILES_SCANNED` ended a walk, and `MAX_SCAN_BYTES` meant every file was read only to its first slice of
+    bytes — so a needle in the tail of a large file, or in a file the walk never reached, came back as no match at
+    all. "TRUNCATED — results are partial" also collapsed two different facts into one word: listing every match
+    there was, and never opening the later files. The reader's next move differs (narrow the walk, or list what is
+    there), so the header now says which cap ended it.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.lib = LibraryService(str(self.root))
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_a_walk_cut_at_the_file_cap_says_which_cap_and_what_to_do(self) -> None:
+        for n in range(5):
+            (self.root / f"f{n}.py").write_text("needle\n", encoding="utf-8")
+        with patch("engine.library.MAX_FILES_SCANNED", 3):
+            result = self.lib.search("needle")
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["stopped"], "files")
+        self.assertEqual(result["files_scanned"], 3)
+        rendered = format_search(result)
+        # The sentence names the cap the walk was given. The number is read from the constant the walk used, which
+        # the patch above lowered only for the walk, so the assertion is about the sentence, not about 800.
+        self.assertIn("the walk stopped at its limit of", rendered)
+        self.assertIn("later files were not searched", rendered)
+        self.assertIn("narrow it with `glob`", rendered)
+
+    def _one_needle_a_file(self, count: int) -> None:
+        """`count` files, one line each: one match per file, so all three strategies count the same thing."""
+        for number in range(count):
+            (self.root / f"many{number:03d}.py").write_text("needle\n", encoding="utf-8")
+
+    def test_a_walk_cut_at_the_match_cap_says_that_instead(self) -> None:
+        self._one_needle_a_file(MAX_MATCHES + 5)
+        for kwargs in ({}, {"regex": True}, {"mode": "keyword"}):
+            with self.subTest(**kwargs):
+                result = self.lib.search("needle", **kwargs)
+                self.assertEqual(result["stopped"], "matches")
+                self.assertEqual(len(result["matches"]), MAX_MATCHES)
+                rendered = format_search(result)
+                self.assertIn(f"the limit of {MAX_MATCHES} matches was reached", rendered)
+                self.assertNotIn("later files were not searched", rendered)
+
+    def test_a_list_that_exactly_fills_the_cap_is_not_called_cut(self) -> None:
+        """The claim has to be exact in both directions: naming the cap made a wrong one louder."""
+        self._one_needle_a_file(MAX_MATCHES)
+        for kwargs in ({}, {"regex": True}, {"mode": "keyword"}):
+            with self.subTest(**kwargs):
+                result = self.lib.search("needle", **kwargs)
+                self.assertEqual(len(result["matches"]), MAX_MATCHES)
+                self.assertFalse(result["truncated"])
+                self.assertNotIn("TRUNCATED", format_search(result))
+
+    def test_a_file_read_only_in_part_is_counted_and_said(self) -> None:
+        """The needle is past `MAX_SCAN_BYTES` in a file that is otherwise searched: no match, and now a reason."""
+        (self.root / "big.py").write_text(
+            "x = 1\n" + "# pad\n" * (MAX_SCAN_BYTES // 6 + 100) + "NEEDLE_PAST_THE_CAP = 1\n", encoding="utf-8"
+        )
+        result = self.lib.search("NEEDLE_PAST_THE_CAP")
+        self.assertEqual([], result["matches"])
+        self.assertEqual(1, result["byte_capped"])
+        self.assertEqual(1, result["files_scanned"], "the file is still one the walk read")
+        self.assertIn(
+            f"1 file read only in part (the first {MAX_SCAN_BYTES:,} bytes of each were searched)",
+            format_search(result),
+        )
+
+    def test_a_whole_small_tree_says_none_of_it(self) -> None:
+        (self.root / "a.py").write_text("needle\n", encoding="utf-8")
+        for kwargs in ({}, {"regex": True}, {"mode": "keyword"}):
+            with self.subTest(**kwargs):
+                result = self.lib.search("needle", **kwargs)
+                self.assertNotIn("stopped", result)
+                self.assertNotIn("byte_capped", result)
+                rendered = format_search(result)
+                self.assertNotIn("TRUNCATED", rendered)
+                self.assertNotIn("read only in part", rendered)
 
 
 class TestLibrarianReadsMore(unittest.TestCase):
