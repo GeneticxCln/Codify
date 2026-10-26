@@ -18,6 +18,12 @@
 //!   document, with a User-Agent naming this app's version, is the whole of it.
 //! * **A person starts it.** Nothing here runs on a timer or on mount, so Codify is not a
 //!   program that phones home on every launch. The check runs when someone clicks it.
+//! * **While a download runs, it says how far it has come — and nothing else.** A package is tens
+//!   of megabytes and takes minutes, which is long enough that a button with one sentence under it
+//!   reads as a button that did nothing. So the shell announces its receipts as they arrive
+//!   ([`announce`], one message per whole percent rather than one per network chunk) and the window
+//!   draws a bar from them. The payload is a byte count and the size the server announced: no
+//!   address, no path, nothing about the machine, and nothing in the window acts on it.
 //! * **It installs nothing.** A package is written where downloads go, and the sentence
 //!   saying what to do next is *text*. This module never spawns a process, never escalates
 //!   and never touches the copy of Codify that is running: no `sudo`, no `dpkg`, no
@@ -37,6 +43,13 @@ pub(crate) const RELEASES_API: &str =
 
 /// Where a person is sent when this module will not fetch something for them.
 pub(crate) const RELEASES_PAGE: &str = "https://github.com/GeneticxCln/Codify/releases";
+
+/// The event the shell emits while a download is running, naming how far it has come.
+///
+/// Named here rather than in `lib.rs` so that the module owning the download owns the name, and so
+/// the test at the bottom of this file can read `ui/src/shellEvents.ts` and fail if the window has
+/// stopped looking for it — the same move `terminal.rs` makes for its three.
+pub(crate) const UPDATE_PROGRESS_EVENT: &str = "update-progress";
 
 /// The hosts an answer — or a redirect — may come from.
 ///
@@ -529,6 +542,52 @@ pub(crate) async fn check(current: &str, package: Package) -> UpdateCheck {
     }
 }
 
+// ── How far the download has come ───────────────────────────────────────────
+
+/// How far a download has come, as the About pane's bar needs it.
+///
+/// The window is told this and nothing else — a byte count and, when the server sent one, the size
+/// it announced up front. No address, no path, nothing about the machine: the person clicked
+/// Download in this window, and this is the same fact the button already draws (docs/18 §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct UpdateProgress {
+    /// Bytes received so far.
+    pub received: u64,
+    /// The size the server announced, or `None` when it announced none. The pane falls back to the
+    /// size the release reported, and shows a size-less wait only when neither of them exists.
+    pub total: Option<u64>,
+}
+
+/// How far apart the announcements are when there is no size to take a percentage of.
+const ANNOUNCE_EVERY_WITHOUT_A_TOTAL: u64 = 4 * 1024 * 1024;
+
+/// Is this receipt worth a message to the window?
+///
+/// A response body arrives in thousands of chunks, and one message each would be thousands of IPC
+/// messages to move a bar from 0 to 100 — every one of them a hop into the webview that is already
+/// doing the work of drawing it. So this decides, purely, which receipts are sent: the first byte
+/// (which is what moves the pane off "starting"), one per whole percent, and — from the caller, not
+/// from here — the last. `announced` is the byte count that was last sent.
+///
+/// A server that sends no `Content-Length` leaves no percentage to divide by, and the interval
+/// becomes a size instead. That is why this is a function of three values and not a loop: the one
+/// interesting decision in the download path is testable without a network.
+pub(crate) fn announce(received: u64, total: Option<u64>, announced: Option<u64>) -> bool {
+    if received == 0 {
+        return false;
+    }
+    match (announced, total) {
+        (None, _) => true,
+        (Some(last), Some(total)) if total > 0 => {
+            // `saturating_mul`, because a `Content-Length` is the server's number and can claim
+            // more bytes than a percentage of them fits in.
+            let percent = |count: u64| count.min(total).saturating_mul(100) / total;
+            percent(received) > percent(last)
+        }
+        (Some(last), _) => received >= last.saturating_add(ANNOUNCE_EVERY_WITHOUT_A_TOTAL),
+    }
+}
+
 // ── Writing the package ─────────────────────────────────────────────────────
 
 /// Where a downloaded package is written.
@@ -620,6 +679,7 @@ pub(crate) async fn fetch_package(
     current: &str,
     package: Package,
     into: PathBuf,
+    on_progress: &(dyn Fn(UpdateProgress) + Send + Sync),
 ) -> Result<UpdateDownload, String> {
     if package.extension().is_none() {
         return Err(format!(
@@ -669,7 +729,7 @@ pub(crate) async fn fetch_package(
              {RELEASES_PAGE}"
         ));
     }
-    let response = client
+    let mut response = client
         .get(&url)
         .send()
         .await
@@ -680,19 +740,48 @@ pub(crate) async fn fetch_package(
             "GitHub answered {status} for {name}, so nothing was written"
         ));
     }
-    if let Some(length) = response
-        .content_length()
-        .filter(|length| *length > MAX_ASSET_BYTES)
-    {
+    // Read as the server sends it rather than in one `bytes()`, because a download a person is
+    // watching has to be able to say how far it has come before it is over. Everything the size
+    // checks below do is still done — the announced length is refused up front, and what actually
+    // arrives is counted as it arrives, so a URL that streams forever ends in a sentence instead of
+    // in an out-of-memory kill.
+    let total = response.content_length();
+    if let Some(length) = total.filter(|length| *length > MAX_ASSET_BYTES) {
         return Err(format!(
             "{name} is {length} bytes, past this app's limit of {MAX_ASSET_BYTES}; take it from \
              {RELEASES_PAGE}"
         ));
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|err| format!("the download of {name} stopped part-way ({err})"))?;
+    let mut bytes: Vec<u8> = Vec::with_capacity(total.unwrap_or(0).min(MAX_ASSET_BYTES) as usize);
+    let mut announced: Option<u64> = None;
+    loop {
+        let chunk = response
+            .chunk()
+            .await
+            .map_err(|err| format!("the download of {name} stopped part-way ({err})"))?;
+        let Some(chunk) = chunk else { break };
+        bytes.extend_from_slice(&chunk);
+        let received = bytes.len() as u64;
+        if received > MAX_ASSET_BYTES {
+            return Err(format!(
+                "{name} passed this app's limit of {MAX_ASSET_BYTES} bytes while it was being read, \
+                 so nothing was written; take it from {RELEASES_PAGE}"
+            ));
+        }
+        if announce(received, total, announced) {
+            announced = Some(received);
+            on_progress(UpdateProgress { received, total });
+        }
+    }
+    // The end is always announced, so a bar cannot stop at 97% — and only when there is an end to
+    // announce: an empty body is refused by `write_asset` below, with its own sentence.
+    let arrived = bytes.len() as u64;
+    if arrived > 0 && announced != Some(arrived) {
+        on_progress(UpdateProgress {
+            received: arrived,
+            total,
+        });
+    }
     let path = write_asset(&into, &name, &bytes).await?;
     Ok(UpdateDownload {
         path: path.display().to_string(),
@@ -1163,6 +1252,69 @@ mod tests {
         let empty = block_on(write_asset(&scratch, DEB, b"")).expect_err("empty");
         assert!(empty.contains("empty"), "{empty}");
         assert!(!scratch.exists(), "a refused write left a directory behind");
+    }
+
+    #[test]
+    fn progress_is_announced_a_whole_percent_at_a_time() {
+        // The first byte is always worth saying: it is what moves the pane off "starting".
+        assert!(announce(1, Some(1_000), None));
+        assert!(!announce(0, Some(1_000), None), "nothing has arrived");
+        // Then once a percent, and not once a chunk.
+        assert!(announce(20, Some(1_000), Some(10)), "2% after 1%");
+        assert!(!announce(19, Some(1_000), Some(10)), "still 1%");
+        assert!(!announce(10, Some(1_000), Some(10)));
+        // A total of zero is a server's answer and not a percentage to divide by.
+        assert!(!announce(5, Some(0), Some(1)));
+        // Past the announced size — a lying `Content-Length` — the bar is full and stays full.
+        assert!(!announce(2_000, Some(1_000), Some(1_000)));
+    }
+
+    #[test]
+    fn a_download_that_never_says_how_big_it_is_is_announced_every_few_megabytes() {
+        assert!(announce(1, None, None));
+        assert!(
+            !announce(1_000, None, Some(1)),
+            "a kilobyte later is not news"
+        );
+        assert!(announce(1 + ANNOUNCE_EVERY_WITHOUT_A_TOTAL, None, Some(1)));
+    }
+
+    #[test]
+    fn a_whole_appimage_is_a_hundred_messages_and_not_a_thousand() {
+        // An AppImage arrives as about a thousand 90 KB chunks. One message each would be a
+        // thousand hops into the webview that is drawing the bar; one per percent is the point of
+        // `announce`, so this is the count that says it holds.
+        let (chunk, total) = (90_000u64, 90_000_000u64);
+        let mut announced: Option<u64> = None;
+        let mut messages = 0u64;
+        for step in 1..=(total / chunk) {
+            let received = step * chunk;
+            if announce(received, Some(total), announced) {
+                announced = Some(received);
+                messages += 1;
+            }
+        }
+        // The first byte, one per whole percent, and the end: a hundred and one, or thereabouts.
+        assert!(
+            (100..=102).contains(&messages),
+            "{messages} messages to move one bar from 0 to 100"
+        );
+    }
+
+    #[test]
+    fn the_window_names_the_event_progress_is_announced_with() {
+        // No type system spans a Rust string and a TypeScript constant, so the file that must agree
+        // with this literal is read — the same move `terminal.rs` and `machine.rs` make.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has a parent")
+            .join("ui/src/shellEvents.ts");
+        let text = std::fs::read_to_string(&path).expect("ui/src/shellEvents.ts");
+        assert!(
+            text.contains(&format!("\"{UPDATE_PROGRESS_EVENT}\"")),
+            "ui/src/shellEvents.ts does not name {UPDATE_PROGRESS_EVENT:?} — the shell emits it and \
+             the pane's bar would never move"
+        );
     }
 
     #[test]

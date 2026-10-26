@@ -316,7 +316,8 @@ in `18` §4.
 * **Updates.** A **Check for updates** button, and what it answers with: the release's version and
   publication date and the file for this install, or a sentence (`1.0.0 is the newest release.`, a
   newer release with no package for this machine, or why the check could not run — `null` is never
-  rendered as "up to date"). The second press downloads that file into the downloads folder and shows
+  rendered as "up to date"). The second press downloads that file into the downloads folder — showing
+  how far it has come, from the shell's own `update-progress` announcements (`18` §4) — and shows
   where it went and the command to run; the shell installs nothing. The button is absent in the
   standalone browser preview, which has no shell to ask, and the pane says so instead. Nothing is
   checked until it is pressed, which is the property the pane's own sentence about what leaves this

@@ -1,4 +1,10 @@
 import { readErrorBody } from "./errorBody.ts";
+import {
+  UPDATE_PROGRESS,
+  listenShellEvent,
+  readUpdateProgress,
+  type UpdateProgress,
+} from "./shellEvents.ts";
 import type {
   AgentCallStat,
   AgentConfig,
@@ -1633,9 +1639,30 @@ export async function checkForUpdate(): Promise<UpdateCheck> {
  * cannot name a file or an address, so the asset is re-derived there for this install and its
  * architecture, and only GitHub's own hosts are fetched from. Nothing is installed — the
  * answer carries the path and the sentence telling the person what to run.
+ *
+ * `onProgress` is called as the shell announces its receipts, and only while this call is in
+ * flight: the subscription is taken here and dropped in the `finally`, so a pane that unmounts, a
+ * download that fails and a second click all leave nobody listening. It is optional, and a caller
+ * that passes nothing is the same download with nothing watching it.
+ *
+ * Outside the desktop shell there is no shell event bus at all, and `listenShellEvent` says so by
+ * resolving to a no-op — the invoke below then refuses with its own sentence (`engineFailureReason`
+ * in this file is the same posture), so a browser preview still says what happened.
  */
-export async function downloadUpdate(): Promise<UpdateDownload> {
-  return tauriInvoke<UpdateDownload>("codify_update_download");
+export async function downloadUpdate(
+  onProgress?: (progress: UpdateProgress) => void,
+): Promise<UpdateDownload> {
+  const unlisten = onProgress
+    ? await listenShellEvent<unknown>(UPDATE_PROGRESS, (payload) => {
+        const progress = readUpdateProgress(payload);
+        if (progress !== null) onProgress(progress);
+      })
+    : () => {};
+  try {
+    return await tauriInvoke<UpdateDownload>("codify_update_download");
+  } finally {
+    unlisten();
+  }
 }
 
 /**

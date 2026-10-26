@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history check-ghidra hooks clean bench bench-smoke smoke-tabs
+.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history check-ghidra verify-package hooks clean bench bench-smoke smoke-tabs
 
 # A checkout's own virtualenv (`make setup` makes one) wins over whatever `python3` is on
 # PATH, so `make setup && make check` works with nothing activated. The floor leg sets
@@ -63,6 +63,7 @@ help:
 	@echo "  make ci           - Run the whole CI gate locally: make check plus the declared $(PY_MIN) leg"
 	@echo "  make check-ghidra - Run analyze_binary against a REAL Ghidra (GHIDRA_INSTALL_DIR); fails without one, not part of ci"
 	@echo "  make check-history - Check that every commit in HISTORY_RANGE builds, not just the tip (default: origin/\$$branch..HEAD)"
+	@echo "  make verify-package - Check downloaded packages against a release's own SHA256SUMS (FILES=…, SUMS=…, TAG=…)"
 	@echo "  make ci-python-floor - Run only the $(PY_MIN) leg (uv or a system python$(PY_MIN) covers it)"
 	@echo "  make ci-report    - make ci, then publish the verdict on the commit as a GitHub status (needs gh; clean tree; pushed commit)"
 	@echo "  make hooks        - Install the git hooks (pre-commit: lint+typecheck, pre-push: 'make ci')"
@@ -361,6 +362,23 @@ GHIDRA_CHECK_ARGS ?=
 
 check-ghidra:
 	python3 scripts/check_ghidra.py $(GHIDRA_CHECK_ARGS)
+
+# The one question the About tab's Download button cannot answer for you: is the file that landed
+# the file that was published? A truncated download looks like a whole file to `apt`, and the
+# release workflow writes a `SHA256SUMS` asset beside the packages for exactly this (`docs/18` §3,
+# §5). Local and deliberately not part of `check` or `ci`: it reaches GitHub for the release's
+# checksums unless you point it at one you already have, which is not something a gate may do.
+#
+#   make verify-package                              # whatever is in ~/Downloads
+#   make verify-package FILES="~/Downloads/Codify_1.0.0_amd64.deb"
+#   make verify-package SUMS=~/Downloads/SHA256SUMS   # the checksums you already downloaded
+#   make verify-package TAG=v1.0.0                    # a named release instead of the newest
+#
+# It is not a signature, and it does not claim to be: the checksums come from the same place the
+# package did, so this catches a corrupted or re-uploaded file, not a hostile GitHub. The script
+# prints that sentence with its verdict rather than leaving it in this comment.
+verify-package:
+	python3 scripts/verify_package.py $(FILES) $(if $(SUMS),--sums "$(SUMS)") $(if $(TAG),--tag "$(TAG)")
 
 # Install the versioned hooks: pre-commit runs the cheap legs (lint, typecheck) so the
 # obvious failure lands in your hands rather than two minutes into a push, and pre-push

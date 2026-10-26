@@ -139,6 +139,12 @@ also has a **Check for updates** button on Settings → About, which asks GitHub
 it and can download the package for the copy you are running. It never installs anything, and its request is the only
 one this app makes that is not one of your model providers'.
 
+A package you downloaded can be checked against its release's own `SHA256SUMS` before you install it:
+`make verify-package` (or `make verify-package FILES=~/Downloads/Codify_1.0.0_amd64.deb`). That says the file is whole
+and is the one that release published. It is not a signature — the checksums come from the same place the package did
+— so it catches a truncated or re-uploaded file, not a hostile one; [`docs/18`](docs/18-release-and-updates.md) §5 is
+what it does and does not claim.
+
 > **Do not launch it with a bare `cargo run`.** That is a *dev* build: the window loads `http://localhost:5173`
 > and shows a connection error unless a Vite dev server is already running, which looks exactly like an app whose
 > panes are not wired.
