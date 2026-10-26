@@ -26,6 +26,7 @@ import {
   type PaletteItem,
   type PaletteSources,
 } from "../src/commandPalette.ts";
+import type { AppNotification } from "../src/notifications.ts";
 import type { Tab } from "../src/tabs.ts";
 import type { Conversation } from "../src/types.ts";
 
@@ -55,6 +56,16 @@ const sources = (over: Partial<PaletteSources> = {}): PaletteSources => ({
   tabs: [],
   activeId: null,
   conversations: [],
+  ...over,
+});
+
+const note = (over: Partial<AppNotification> = {}): AppNotification => ({
+  id: "n1",
+  kind: "goal",
+  tone: "success",
+  title: "Goal finished",
+  at: 1_000,
+  read: false,
   ...over,
 });
 
@@ -94,6 +105,33 @@ test("items come in strip order: tabs, then conversations, then settings", () =>
       "action:new-machine", "action:new-machine-network",
     ]
   );
+});
+
+test("the newest unread entry is the first row, and only while something is unread", () => {
+  const items = buildPaletteItems(
+    sources({ tabs: [tab({ id: "tab-1" })], unread: [note({ at: 1_000 }), note({ id: "n2", title: "Plan ready", at: 5_000 })] })
+  );
+  const first = items[0];
+  assert.equal(first.id, "action:focus-newest-unread");
+  assert.equal(first.kind, "action");
+  assert.equal(first.label, "Needs you", "the row is filed under the split heading");
+  assert.equal(first.title, "Newest unread: Plan ready");
+  assert.deepEqual(first.kind === "action" ? first.action : null, { type: "focus-newest-unread" });
+
+  // Everything read is nothing to jump to, and no inbox at all is the same answer.
+  assert.ok(!buildPaletteItems(sources({ unread: [note({ read: true })] })).some((i) => i.id === "action:focus-newest-unread"));
+  assert.ok(!buildPaletteItems(sources()).some((i) => i.id === "action:focus-newest-unread"));
+});
+
+test("a row that needs you is rendered under its own heading, not under Split", () => {
+  const markup = render({
+    open: true,
+    items: buildPaletteItems(sources({ tabs: [tab({ id: "tab-1" })], activeId: "tab-1", split: { showing: false }, unread: [note()] })),
+  });
+  const shown = text(markup);
+  assert.ok(shown.includes("Needs you"), `the heading is missing: ${shown.slice(0, 200)}`);
+  assert.ok(shown.includes("Newest unread: Goal finished"));
+  assert.ok(shown.includes("Split"), "the split actions lost their heading when the unread row used a label");
 });
 
 test("the active tab is marked, and settings land on the right dialog page", () => {

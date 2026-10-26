@@ -220,7 +220,7 @@ the UI's copy a member behind both.
 | `fixer_pass` | step | `{attempt, max_passes, passes_left}` — the fixer asked for another pass of its own (bounded by `MAX_FIXER_PASSES`) |
 | `plan_consult` | — | `{refused, material_chars}` — the planner reopened the frozen evidence pack (`MAX_PLANNER_CONSULTS`) |
 | `agent_call_failed` | any | `{role, provider, model, target: "primary"\|"fallback", code, message, duration_ms}` — a provider call that failed; the record the Settings screen's "last error" reads. `role` is one of the eight roles or `conductor` (the loop's own call, which has no role row; the Settings screen lists only the eight) |
-| `usage` | any | `{role, provider, model, duration_ms, input_tokens, output_tokens, total_tokens}` — one per successful model call; feeds `/goals/{id}/usage`, the audit document, and the stats rollups. `duration_ms` is absent on events written before it existed. `role` is one of the eight roles or `conductor`: the conductor loop borrows the scribe's *configuration* but is booked under its own name, so `/goals/{id}/usage` and the Stats "by role" table show what the loop spent apart from the scribe's own calls. Before this a conductor-driven goal booked none of its loop's calls at all |
+| `usage` | any | `{role, provider, model, duration_ms, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens}` — one per successful model call; feeds `/goals/{id}/usage`, the audit document, and the stats rollups. The two cache counts are the part of `input_tokens` the provider served from, or wrote to, a prompt cache; both are always present (0 where the provider reports none or has no cache), Anthropic's counts are added into `input_tokens` because its `input_tokens` excludes them, and `total_tokens` stays input + output so a cached call never books a smaller prompt than the same call without a cache. `duration_ms` is absent on events written before it existed. `role` is one of the eight roles or `conductor`: the conductor loop borrows the scribe's *configuration* but is booked under its own name, so `/goals/{id}/usage` and the Stats "by role" table show what the loop spent apart from the scribe's own calls. Before this a conductor-driven goal booked none of its loop's calls at all |
 | `model_delta` | any | `{role, provider, model, text, final}` — a streaming snapshot of the reply so far (self-contained, ~every 400 ms); `final: true` closes the card, and once it lands the stream's earlier snapshots have their `text` blanked and `compacted: true` set (each repeats all the text before it, so keeping them was quadratic: 88 events / 106 KB for a 561-token reply). The rows stay: a goal's sequence is dense from 1 and a client tells a lost event by a gap. Chat-render only |
 | `error` | any | `{code: str, message: str, role: str \| null}` |
 | `todo_updated` | — | `{items: [{id, text, status}]}` — the conductor's own todo list (`engine/todo.py`), published whole every time the conductor changes it, so the newest event *is* the list. `status` is `pending`\|`doing`\|`done`\|`dropped`; an item is one line of at most 160 characters, a list holds at most 20 items, and one run changes it at most 40 times. It is the model's note to its next run, put back in its prompt as *its own notes, not instructions*: nothing in the engine reads it to decide anything, it is never shown to a sub-agent, and `recall` cannot return it (not in `RECALLABLE`). Item text can echo what the model read, so it is third-party text and the UI draws it as plain text |
@@ -522,6 +522,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `POST` | `/workspaces/browse` | — | `{cancelled:true}` (the person closed the dialog — the only silent outcome) \| `{cancelled:false, workspace}` \| **503 `picker_unavailable`** with the reason and the way out (no dialog could open, or one did not answer within `PICKER_TIMEOUT_S`, 120 s, and was killed with everything it started) \| **400 `invalid_root`** when the chosen folder's path is not valid UTF-8 text (the dialog worked; the folder cannot be a workspace). See "Folder dialog" below |
 | `GET` | `/workspaces` | — | `Workspace[]` |
 | `GET` | `/workspaces/{id}` | — | `Workspace` |
+| `GET` | `/workspaces/{id}/git` | — | `{branch, detached, dirty, ahead, behind, reason}` — the panel header's branch and working-tree read (`09` §4). A folder that is not a repository, one with no commits and a detached HEAD are three quiet 200s: `branch` is null and `reason` says which. `dirty` is any changed, staged, unmerged or untracked path; `ahead`/`behind` are 0 without an upstream. Read through `GitService._run_text` and the read-only git table's hardening (`GIT_OPTIONAL_LOCKS=0`), so it adds no spawn site |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
 | `GET` | `/workspaces/{id}/files?limit=` | `limit` 1–10 000, default 5 000 | `{files, truncated, limit}`, plus `non_utf8_names` only when it is not zero (names that are not valid UTF-8 text, left out and counted; the route is sent with `response_model_exclude_defaults=True`, so an ordinary workspace's body is byte-identical) — every file path under the root, sorted, skipping `SKIP_DIRS` and links out of the workspace. See §3.0.3 and §4.0 |
 | `GET` | `/workspaces/{id}/file?path=` | — | `{path, content, version, size}`. 400 `file_escape` / `workspace_protected`, 404 `file_missing`, 422 `file_binary` / `file_not_text` / `file_too_large` / `file_access`. See §3.0.3 |
@@ -931,8 +932,9 @@ all time. Nothing else the model says reaches a query, a path or a setting. The 
 oldest first. A separate query from the statistics sweeps on purpose: those fix their own budget and the frozen daily snapshots' meaning.
 
 **The report** is tokens only (no price table, §4.7) and bounded to 11,000 characters so the conductor's 12,000-character cut never takes its
-tail. In order: the coverage block (events read and whether the cap was hit, calls that booked no tokens, re-asks with no usage to measure, and the
-detectors that are **unavailable** with the capture that would enable them); the totals by role; the findings; the signals; one line on what to do next.
+tail. In order: the coverage block (events read and whether the cap was hit, calls that booked no tokens, re-asks with no usage to measure,
+what the cache counts can and cannot answer, and the detectors that are **unavailable** with the capture that would enable them); the totals
+by role; the findings; the signals; one line on what to do next.
 
 | Finding | What counts |
 |---|---|
@@ -940,7 +942,9 @@ detectors that are **unavailable** with the capture that would enable them); the
 | `fix-loop-retry-waste` | For a step `metrics.recovered_steps` says a retry got past: the fixer and verifier tokens recorded before its last `fix_retry` |
 
 Signals are descriptive and never waste: `context-outlier`, `context-growth`, `deep-conductor-loop` (against the live `conductor_max_turns`),
-`reask-rate` and `token-concentration`. Tool-loop waste and cache churn are not measured, because tool results and cache tokens are not recorded.
+`reask-rate`, `token-concentration` and `cache-reads` (the input tokens a provider served from a prompt cache, as a share of input, and what
+was written to one — counted inside the input tokens, never as a saving). Tool-loop waste is not measured, because tool results are not
+recorded. Which cache write a later read repaid is not recorded either, so no churn rate is claimed.
 
 ### 3.1.1 The same rule at the start of every goal
 

@@ -8,10 +8,11 @@ import type { Event, Goal, ModelCatalogChanged, SettingsTab } from "./types.ts";
  *
  * ## What they are, and are not
  *
- * Four kinds of event, each a fact only *this window* saw happen: a goal this window was watching
+ * Five kinds of event, each a fact only *this window* saw happen: a goal this window was watching
  * finished, failed or was paused by the engine (the critic asked for changes, or the conductor could not
  * finish a step); a plan came back and is waiting for the person to approve it; the engine
- * connection changed; a provider's model list moved. They are kept on the client and nowhere else.
+ * connection changed; a provider's model list moved; a program in a terminal asked for attention with
+ * one of the standard escape sequences. They are kept on the client and nowhere else.
  * A goal's result is already durable (History has it), and the other three are not facts the engine
  * keeps, so a server-side list would have had nothing to hold that the window did not already know.
  * In-app only: no desktop notification, no sound. The button is in the header and the list is a
@@ -35,6 +36,12 @@ import type { Event, Goal, ModelCatalogChanged, SettingsTab } from "./types.ts";
  *   does not duplicate `CODIFY_SEEN_MODELS`: that decides what is *new*, this reports what *changed*.
  * - **No duplicates.** An id names the event, and the engine replays goal events on every reconnect,
  *   so the same ending can arrive twice; the second is dropped.
+ * - **A terminal is rate-limited and quiet while it has the screen.** A build script can print the
+ *   sequence in a loop, and a notification about the terminal you are looking at is not news. Both
+ *   checks live here, so the rule has a test that needs no renderer.
+ * - **A terminal entry is not restored.** It names a live shell, and `term-1:1` happens again next
+ *   launch: a stored one would either collide with this run's first report or jump to a shell that is
+ *   gone. A terminal tab is not restored either, for the same reason.
  *
  * What is deliberately not here: the error banner (mirroring it would flood), a missing key (a derived
  * state the App cannot see), the motion banner, and any "you have mail" count that is not about
@@ -44,13 +51,19 @@ import type { Event, Goal, ModelCatalogChanged, SettingsTab } from "./types.ts";
  * thin part that holds the list and the timer.
  */
 
-export type NotificationKind = "goal" | "plan" | "engine" | "models";
+export type NotificationKind = "goal" | "plan" | "engine" | "models" | "terminal";
 export type NotificationTone = "success" | "danger" | "warning" | "info";
 
 /** Where clicking a notification goes. A closed set: a stored one that is not in it is dropped on load. */
 export type NotificationTarget =
   | { kind: "goal"; goalId: string }
-  | { kind: "settings"; tab: SettingsTab };
+  | { kind: "settings"; tab: SettingsTab }
+  /**
+   * A tab in this window. Accepted from a live event and **never stored**: a terminal id is `term-3` in every
+   * session, so a stored jump would land on this run's third terminal — a different shell, possibly a different
+   * workspace. `validTarget` refuses it on load, and a terminal entry is not restored at all.
+   */
+  | { kind: "tab"; tabId: string };
 
 export interface AppNotification {
   /** Names the event, so the same event can be recognised if it arrives twice. */
@@ -73,7 +86,7 @@ const MAX_TITLE = 120;
 const MAX_DETAIL = 300;
 const MAX_ID = 200;
 
-const KINDS: ReadonlySet<string> = new Set(["goal", "plan", "engine", "models"]);
+const KINDS: ReadonlySet<string> = new Set(["goal", "plan", "engine", "models", "terminal"]);
 const TONES: ReadonlySet<string> = new Set(["success", "danger", "warning", "info"]);
 const SETTINGS_TABS: ReadonlySet<string> = new Set(["keys", "agents", "audio", "appearance", "about"]);
 
@@ -94,6 +107,23 @@ export function unreadCount(list: readonly AppNotification[]): number {
   return list.reduce((n, item) => (item.read ? n : n + 1), 0);
 }
 
+/**
+ * The unread entry that happened last, or null when nothing is unread.
+ *
+ * By `at` rather than by list position: the list is newest-first when this app writes it, but a caller that
+ * merged stored and live entries should not have to know that, and an inbox that jumped to the second-newest
+ * entry because a list arrived in another order would be wrong in a way no test of `appendNotification` sees.
+ * Ties keep the earlier entry, which is the newest-first list's own answer.
+ */
+export function newestUnread(list: readonly AppNotification[]): AppNotification | null {
+  let newest: AppNotification | null = null;
+  for (const item of list) {
+    if (item.read) continue;
+    if (newest === null || item.at > newest.at) newest = item;
+  }
+  return newest;
+}
+
 /** Everything read. Returns the same array when nothing was unread, so opening a drawer on an empty inbox does not re-render. */
 export function markAllRead(list: readonly AppNotification[]): AppNotification[] {
   if (unreadCount(list) === 0) return list as AppNotification[];
@@ -102,17 +132,24 @@ export function markAllRead(list: readonly AppNotification[]): AppNotification[]
 
 // ── what is stored ──────────────────────────────────────────────────────────
 
-/** Whether one stored entry is a notification this build can draw. Never repaired: it is kept as it is or dropped. */
+/**
+ * The target a stored entry carries: the target, `undefined` for one that is recognised but cannot be stored (a
+ * tab), or `null` for one this build cannot read, which drops the whole entry rather than inventing a destination.
+ */
 function validTarget(raw: unknown): NotificationTarget | undefined | null {
   if (raw === undefined) return undefined;
   if (!raw || typeof raw !== "object") return null;
   const t = raw as { kind?: unknown; goalId?: unknown; tab?: unknown };
+  // A tab target is recognised and deliberately not stored (`NotificationTarget`): `undefined` says recognisable
+  // but not storable, where `null` would drop the whole row. (A terminal entry is dropped before this anyway.)
+  if (t.kind === "tab") return undefined;
   if (t.kind === "goal" && typeof t.goalId === "string" && t.goalId.length > 0 && t.goalId.length <= MAX_ID) {
     return { kind: "goal", goalId: t.goalId };
   }
   if (t.kind === "settings" && typeof t.tab === "string" && SETTINGS_TABS.has(t.tab)) {
     return { kind: "settings", tab: t.tab as SettingsTab };
   }
+  // `{kind: "tab"}` is deliberately not a storable target: see `NotificationTarget`.
   return null;
 }
 
@@ -122,6 +159,10 @@ function validEntry(raw: unknown): AppNotification | null {
   if (typeof e.id !== "string" || e.id.length === 0 || e.id.length > MAX_ID) return null;
   if (typeof e.kind !== "string" || !KINDS.has(e.kind)) return null;
   if (typeof e.tone !== "string" || !TONES.has(e.tone)) return null;
+  // A terminal entry names a live shell: its id is `terminal:<term>:<seq>`, unique within one run and repeated
+  // next launch (`term-1:1` happens again), so restoring it would either collide with this run's first report or
+  // point at a shell that no longer exists. Terminal tabs are not restored either, for the same reason.
+  if (e.kind === "terminal") return null;
   if (typeof e.title !== "string" || e.title.length === 0) return null;
   if (e.detail !== undefined && typeof e.detail !== "string") return null;
   if (typeof e.at !== "number" || !Number.isFinite(e.at)) return null;
@@ -366,6 +407,48 @@ export function catalogNotification(payload: unknown, now: number): AppNotificat
     at: now,
     read: false,
     target: { kind: "settings", tab: "keys" },
+  };
+}
+
+/**
+ * The least time between two entries from one terminal. A shell can print the sequence in a loop — a build
+ * script that wraps every command does — and an inbox that reports the same terminal forty times is an inbox
+ * nobody reads. Three seconds is the smallest gap that still lets a person see two real results arrive.
+ */
+export const TERMINAL_NOTICE_MIN_GAP_MS = 3_000;
+
+/**
+ * A program in a terminal asked for attention (`terminal-notification`, OSC 9/777/99).
+ *
+ * `tabId` is the tab the shell's event names, resolved by the window, and the entry points at it — a live tab
+ * target, never a stored one (`NotificationTarget` says why). `lastAt` is the previous entry this terminal made
+ * in this window, if any; a report inside [`TERMINAL_NOTICE_MIN_GAP_MS`] of it is dropped. The caller keeps that
+ * timestamp, and must not move it on a dropped report: a script printing faster than the gap would otherwise
+ * push the next real entry out forever.
+ *
+ * An OSC 9 carries only a body and an OSC 99 title half only a title, so whichever half is present becomes the
+ * title (the one line a drawer reads first) and the other becomes the detail, when both are there.
+ */
+export function terminalNotification(
+  notice: { id: string; seq: number; tabId: string; title: string; body: string },
+  now: number,
+  lastAt?: number,
+): AppNotification | null {
+  const named = notice.title.trim();
+  const said = notice.body.trim();
+  if (!notice.tabId || (named.length === 0 && said.length === 0)) return null;
+  if (lastAt !== undefined && now - lastAt < TERMINAL_NOTICE_MIN_GAP_MS) return null;
+  const heading = named.length > 0 ? named : said;
+  const detail = named.length > 0 && said.length > 0 ? said : undefined;
+  return {
+    id: `terminal:${notice.id}:${notice.seq}`,
+    kind: "terminal",
+    tone: "info",
+    title: clip(heading, MAX_TITLE),
+    ...(detail ? { detail: clip(detail, MAX_DETAIL) } : {}),
+    at: now,
+    read: false,
+    target: { kind: "tab", tabId: notice.tabId },
   };
 }
 

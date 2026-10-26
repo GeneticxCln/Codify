@@ -162,7 +162,7 @@ class TestWhatReachesAModel(unittest.IsolatedAsyncioTestCase):
 
             class Provider(BaseProvider):
                 async def complete(self, system_prompt: str, user_prompt: str, model: str, temperature: float,
-                                   max_tokens: int, *, num_ctx: int | None = None, keep_alive: str | None = None) -> str:
+                                   max_tokens: int, *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None) -> str:
                     role = next((r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown")
                     sent_as_a_request(user_prompt)
                     if role == "librarian":
@@ -208,11 +208,12 @@ class TestTheConductor(ConductorTestCase):
         class Encoding(_ToolProvider):
             async def complete_with_tools(self, system_prompt: str, messages: list[dict[str, Any]], tools: Any,
                                           model: str, temperature: float, max_tokens: int, *,
-                                          num_ctx: int | None = None, keep_alive: str | None = None) -> ToolReply:
+                                          num_ctx: int | None = None, keep_alive: str | None = None,
+                                          cache_prefix: bool = False) -> ToolReply:
                 sent_as_a_request(json.dumps(to_ollama_messages(messages), ensure_ascii=False))
                 return await super().complete_with_tools(
                     system_prompt, messages, tools, model, temperature, max_tokens,
-                    num_ctx=num_ctx, keep_alive=keep_alive,
+                    num_ctx=num_ctx, keep_alive=keep_alive, cache_prefix=cache_prefix,
                 )
 
         for call in (_call("search_code", query="needle"), _call("search_code", query="needle", regex=True),

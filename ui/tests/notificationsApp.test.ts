@@ -1,5 +1,5 @@
 /**
- * Notifications, through the whole App: the button, the drawer, and the four sources actually connected.
+ * Notifications, through the whole App: the button, the drawer, and the five sources actually connected.
  *
  * `notifications.test.ts` holds the rules. What it cannot show is that `App.tsx` calls them: that the end
  * of a goal this window watched becomes an entry, that a catalogue frame the engine pushed is no longer
@@ -345,6 +345,131 @@ test("an engine that goes away and comes back is two notices, and a flap that re
     await ctx.act(() => new Promise<void>((r) => setTimeout(r, left + 250)));
     engineNoticeTiming.settleMs = longer;
     assert.equal(badge(ctx), "", "a flap that reversed inside the settle time was announced");
+  });
+});
+
+test("a program in a terminal asking for attention is one entry, and its row goes to that tab", async () => {
+  await withThread([], async (ctx) => {
+    const terminalButton = ctx.dom.container.querySelector('button[title^="Terminal"]') as HTMLElement | null;
+    assert.ok(terminalButton, "the sidebar has no Terminal control");
+    await ctx.dom.click(terminalButton);
+    await ctx.settle();
+
+    // The terminal is the tab in front: the person is looking at it, so this is not news.
+    await ctx.emit("terminal-notification", { id: "term-1", seq: 1, title: "Build", body: "finished" });
+    await ctx.settle();
+    assert.equal(badge(ctx), "", "the person was watching the terminal and was told about it");
+
+    // A notification from a terminal this window never opened names nothing at all.
+    await ctx.emit("terminal-notification", { id: "term-9", seq: 1, title: "Ghost", body: "" });
+    await ctx.settle();
+    assert.equal(badge(ctx), "", "a closed terminal's report made an entry");
+
+    // Behind the chat tab now: this one is news.
+    await ctx.dom.click(ctx.dom.container.querySelector('[data-thread-row="true"]') as Element);
+    await ctx.settle();
+    await ctx.emit("terminal-notification", { id: "term-1", seq: 2, title: "Build", body: "finished" });
+    await ctx.settle();
+    assert.equal(badge(ctx), "1");
+    await open(ctx);
+    const listed = rows(ctx).join(" ").replace(/\s+/g, "");
+    assert.match(listed, /Build/);
+    assert.match(listed, /finished/);
+
+    // And the row goes where the event is: the terminal's tab, not the chat's.
+    await ctx.dom.click(ctx.dom.byText("Build").closest("button") as Element);
+    await ctx.settle();
+    const shown = [...ctx.dom.container.querySelectorAll('[role="tab"]')].find((t) =>
+      /Terminal/.test(t.textContent ?? ""),
+    );
+    assert.equal(shown?.getAttribute("aria-selected"), "true", "the row did not go to the terminal's tab");
+  });
+});
+
+// ── the palette and the panel header: what needs you, without opening the drawer ─────────────────
+
+/** Ctrl+K from the window, the way the shortcut is actually pressed. */
+const openPalette = async (ctx: AppContext): Promise<void> => {
+  await ctx.dom.press(ctx.dom.window.document.body, "k", { code: "KeyK", ctrlKey: true });
+  await ctx.settle();
+};
+
+/** The panel header's quiet second line — the newest unread title, or empty. */
+const sidebarHeader = (ctx: AppContext): string =>
+  (ctx.dom.container.querySelector('div[role="heading"][aria-level="2"]')?.textContent ?? "").replace(/\s+/g, " ").trim();
+
+const paletteRows = (ctx: AppContext): string[] =>
+  [...ctx.dom.container.querySelectorAll('[role="option"]')].map((row) => (row.textContent ?? "").replace(/\s+/g, " ").trim());
+
+test("the panel header names the newest unread entry, and stops naming it once it is read", async () => {
+  await withThread([goalRow()], async (ctx) => {
+    assert.doesNotMatch(sidebarHeader(ctx), /Goal finished/, "an empty inbox put a line in the header");
+
+    await endGoal(ctx, "COMPLETED");
+    assert.match(sidebarHeader(ctx), /Goal finished/, "the newest unread entry is not under the project name");
+
+    // Opening the drawer is reading the list (`docs/09` §10.18), so the line goes too.
+    await open(ctx);
+    assert.doesNotMatch(sidebarHeader(ctx), /Goal finished/, "a read entry still names itself in the header");
+  });
+});
+
+test("the palette's first row goes to the newest unread goal", async () => {
+  await withThread([goalRow()], async (ctx) => {
+    await endGoal(ctx, "COMPLETED");
+    await openPalette(ctx);
+
+    const rows = paletteRows(ctx);
+    assert.match(rows[0] ?? "", /Newest unread: Goal finished/, `first row: ${rows[0] ?? "(none)"}`);
+    assert.match(ctx.dom.byLabel("Palette results").textContent ?? "", /Needs you/, "the unread row is filed under the split heading");
+
+    await ctx.dom.press(ctx.dom.byLabel("Command palette"), "Enter");
+    await ctx.settle();
+    await ctx.settle();
+    assert.ok(
+      ctx.engine.some((call) => call.method === "GET" && call.path === "/goals/g1"),
+      "the palette's first row did not reopen the goal it named",
+    );
+  });
+});
+
+test("the palette's first row goes to the settings page an engine entry names", async () => {
+  const entry = {
+    id: "engine:offline:5", kind: "engine", tone: "danger", title: "Engine went offline",
+    at: Date.now(), read: false, target: { kind: "settings", tab: "about" },
+  };
+  await withApp({ localStorage: { [STORAGE_KEY]: JSON.stringify([entry]) } }, async (ctx) => {
+    assert.equal(badge(ctx), "1");
+    await openPalette(ctx);
+    assert.match(paletteRows(ctx)[0] ?? "", /Newest unread: Engine went offline/);
+
+    await ctx.dom.press(ctx.dom.byLabel("Command palette"), "Enter");
+    await ctx.settle();
+    await ctx.settle();
+    assert.match(ctx.dom.text(), /Keyboard shortcuts/, "the palette did not land on the About page the entry points at");
+  });
+});
+
+test("the palette's first row goes to the terminal tab a terminal entry names", async () => {
+  await withThread([], async (ctx) => {
+    const terminalButton = ctx.dom.container.querySelector('button[title^="Terminal"]') as HTMLElement | null;
+    assert.ok(terminalButton, "the sidebar has no Terminal control");
+    await ctx.dom.click(terminalButton);
+    await ctx.settle();
+    // Behind the chat tab now, so the report is news rather than something the person is watching.
+    await ctx.dom.click(ctx.dom.container.querySelector('[data-thread-row="true"]') as Element);
+    await ctx.settle();
+    await ctx.emit("terminal-notification", { id: "term-1", seq: 7, title: "Build", body: "finished" });
+    await ctx.settle();
+    assert.equal(badge(ctx), "1");
+
+    await openPalette(ctx);
+    assert.match(paletteRows(ctx)[0] ?? "", /Newest unread: Build/);
+    await ctx.dom.press(ctx.dom.byLabel("Command palette"), "Enter");
+    await ctx.settle();
+
+    const shown = [...ctx.dom.container.querySelectorAll('[role="tab"]')].find((t) => /Terminal/.test(t.textContent ?? ""));
+    assert.equal(shown?.getAttribute("aria-selected"), "true", "the palette did not go to the terminal's tab");
   });
 });
 

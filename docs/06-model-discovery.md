@@ -154,6 +154,12 @@ is therefore visible in the already-open app, with no restart and no reinstall.
 
 `context_tokens` is `null` when the provider did not say (§2.1). `conductor` is added after the cache (§2.1).
 
+The same provider body is read a second way by the OpenAI-compatible adapter: an entry's `capabilities`
+(`json_schema` / `json_object`) or, where a router publishes that shape instead, its `supported_parameters`
+(`structured_outputs` / `response_format`) picks the structured-output rung for **that model** (`01` §2.1,
+`docs/16` item 5). It is deliberately not copied into this response — no surface draws it, and a capability the UI showed
+would freeze an advertisement that can change per model — so this route's body is unchanged by that read.
+
 An id is not unique across providers (the same model can be served locally and by an API), so the UI
 keys selections on the `(provider, id)` pair.
 

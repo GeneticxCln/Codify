@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 
 from engine.providers import OpenAICompatProvider, OllamaProvider
+from engine.replies import REPLY_SCHEMAS
 
 
 def openai_reply(content: str) -> dict[str, Any]:
@@ -21,11 +22,15 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
     """
 
     def __init__(self, advertise: bool, reject_json_mode: bool, reject_stream: bool = False,
-                 split_usage: bool = False, models: list[Any] | None = None):
+                 split_usage: bool = False, models: list[Any] | None = None,
+                 reject_json_schema: bool = False):
         self.advertise = advertise
         # When set, /v1/models answers exactly this list: real servers do not all shape the entries alike.
         self.models = models
         self.reject_json_mode = reject_json_mode
+        # Reject the schema rung alone, so the downgrade to `json_object` is observable without the
+        # object rung being refused too.
+        self.reject_json_schema = reject_json_schema
         self.reject_stream = reject_stream
         # split_usage: emit the usage block on its own chunk, ahead of the
         # finish chunk — the shape real providers produce when the usage
@@ -86,7 +91,11 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
                         self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
                     self.wfile.write(b"data: [DONE]\n\n")
                     return
-                if server.reject_json_mode and "response_format" in server.post_bodies[-1]:
+                response_format = server.post_bodies[-1].get("response_format")
+                if response_format and (
+                    server.reject_json_mode
+                    or (server.reject_json_schema and response_format.get("type") == "json_schema")
+                ):
                     self.send_error(400, "response_format is not supported")
                     return
                 body = json.dumps(openai_reply("ok")).encode()
@@ -104,8 +113,11 @@ class _FakeOpenAIServer(ThreadingHTTPServer):
 
 class _ServerMixin(unittest.TestCase):
     def _start(self, advertise: bool, reject_json_mode: bool = False, reject_stream: bool = False,
-               split_usage: bool = False, models: list[Any] | None = None) -> _FakeOpenAIServer:
-        server = _FakeOpenAIServer(advertise, reject_json_mode, reject_stream, split_usage, models)
+               split_usage: bool = False, models: list[Any] | None = None,
+               reject_json_schema: bool = False) -> _FakeOpenAIServer:
+        server = _FakeOpenAIServer(
+            advertise, reject_json_mode, reject_stream, split_usage, models, reject_json_schema,
+        )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
@@ -204,6 +216,125 @@ class TestJsonModeCapability(_ServerMixin):
 
         self.assertFalse(any("response_format" in b for b in server.post_bodies))
 
+    def test_openrouters_supported_parameters_are_read_as_the_capability(self) -> None:
+        """OpenRouter advertises structured output per model as a parameter list, not as `capabilities`.
+
+        These are the three shapes its `/v1/models` really returns: a model with `structured_outputs` takes
+        a JSON schema, one with `response_format` alone takes JSON mode, and one with neither is sent no
+        field. Before this was read, every hosted OpenRouter model resolved to `None` and item 5's schema
+        rung was unreachable against the provider it was built for.
+        """
+        cases = [
+            (["tools", "response_format", "structured_outputs"], "json_schema"),
+            (["tools", "response_format"], "json_object"),
+            (["tools"], None),
+        ]
+        for params, expected in cases:
+            with self.subTest(params=params):
+                server = self._start(
+                    advertise=False, models=[{"id": "m1", "supported_parameters": params}],
+                )
+                provider = self._provider(self.base)
+
+                self.assertEqual(self._complete_with_schema(provider), "ok")
+
+                if expected is None:
+                    self.assertNotIn("response_format", server.post_bodies[0])
+                else:
+                    self.assertEqual(expected, server.post_bodies[0]["response_format"]["type"])
+
+    def test_an_odd_supported_parameters_entry_does_not_hide_a_capable_model_after_it(self) -> None:
+        server = self._start(advertise=False, models=[
+            {"id": "odd", "supported_parameters": "tools"},
+            {"id": "m1", "supported_parameters": ["structured_outputs"]},
+        ])
+        provider = self._provider(self.base)
+
+        self.assertEqual(self._complete_with_schema(provider), "ok")
+
+        self.assertEqual("json_schema", server.post_bodies[0]["response_format"]["type"])
+
+    # ── item 5 of `docs/16`: ask for the reply shape, not just for JSON ────────────────────────────────
+
+    def _complete_with_schema(self, provider: OpenAICompatProvider, model: str = "m1") -> str:
+        import asyncio
+
+        return asyncio.run(
+            provider.complete("sys", "user", model, 0.0, 64, json_schema=REPLY_SCHEMAS["fixer"])
+        )
+
+    def test_a_schema_capable_model_receives_the_roles_schema(self) -> None:
+        server = self._start(
+            advertise=False, models=[{"id": "m1", "capabilities": {"json_schema": True}}],
+        )
+        provider = self._provider(self.base)
+
+        self.assertEqual(self._complete_with_schema(provider), "ok")
+
+        response_format = server.post_bodies[0]["response_format"]
+        self.assertEqual("json_schema", response_format["type"])
+        self.assertEqual(REPLY_SCHEMAS["fixer"], response_format["json_schema"]["schema"])
+        self.assertIs(True, response_format["json_schema"]["strict"])
+
+    def test_an_object_only_model_gets_json_object_even_when_a_schema_is_offered(self) -> None:
+        server = self._start(
+            advertise=False, models=[{"id": "m1", "capabilities": {"json_object": True}}],
+        )
+        provider = self._provider(self.base)
+
+        self.assertEqual(self._complete_with_schema(provider), "ok")
+
+        self.assertEqual({"type": "json_object"}, server.post_bodies[0]["response_format"])
+
+    def test_the_capability_is_read_per_model_not_for_the_whole_endpoint(self) -> None:
+        server = self._start(advertise=False, models=[
+            {"id": "schema-model", "capabilities": {"json_schema": True}},
+            {"id": "object-model", "capabilities": {"json_object": True}},
+        ])
+        provider = self._provider(self.base)
+
+        self._complete_with_schema(provider, "schema-model")
+        self._complete_with_schema(provider, "object-model")
+
+        self.assertEqual(1, server.models_requests, "the probe must run once, not once per model")
+        self.assertEqual("json_schema", server.post_bodies[0]["response_format"]["type"])
+        self.assertEqual("json_object", server.post_bodies[1]["response_format"]["type"])
+
+    def test_a_rejected_schema_downgrades_to_object_and_is_remembered(self) -> None:
+        server = self._start(
+            advertise=False, reject_json_schema=True,
+            models=[{"id": "m1", "capabilities": {"json_schema": True}}],
+        )
+        provider = self._provider(self.base)
+
+        self.assertEqual(self._complete_with_schema(provider), "ok")
+        self.assertEqual(2, len(server.post_bodies), "the rejected schema was not retried as an object")
+        self.assertEqual("json_schema", server.post_bodies[0]["response_format"]["type"])
+        self.assertEqual("json_object", server.post_bodies[1]["response_format"]["type"])
+
+        # The next call starts at the rung that worked instead of paying the refused one again.
+        self.assertEqual(self._complete_with_schema(provider), "ok")
+        self.assertEqual(3, len(server.post_bodies))
+        self.assertEqual("json_object", server.post_bodies[2]["response_format"]["type"])
+
+    def test_two_rejections_step_all_the_way_down_to_plain_prose(self) -> None:
+        server = self._start(
+            advertise=False, reject_json_mode=True,
+            models=[{"id": "m1", "capabilities": {"json_schema": True}}],
+        )
+        provider = self._provider(self.base)
+
+        self.assertEqual(self._complete_with_schema(provider), "ok")
+
+        self.assertEqual(3, len(server.post_bodies), "schema → object → plain is three requests in one call")
+        self.assertEqual("json_schema", server.post_bodies[0]["response_format"]["type"])
+        self.assertEqual("json_object", server.post_bodies[1]["response_format"]["type"])
+        self.assertNotIn("response_format", server.post_bodies[2])
+
+        self.assertEqual(self._complete_with_schema(provider), "ok")
+        self.assertEqual(4, len(server.post_bodies), "the third call still sent a field the server refused")
+        self.assertNotIn("response_format", server.post_bodies[3])
+
 
 class TestOpenAIStreaming(_ServerMixin):
     """With on_delta attached the provider streams SSE and assembles the text."""
@@ -225,7 +356,10 @@ class TestOpenAIStreaming(_ServerMixin):
 
         self.assertEqual(out, "hello")
         self.assertEqual(seen, ["hel", "hello"], "each callback carries the full text so far")
-        self.assertEqual(usage and usage[0], {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7})
+        self.assertEqual(usage and usage[0], {
+            "input_tokens": 5, "output_tokens": 2, "total_tokens": 7,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+        })
         self.assertTrue(all(b.get("stream") is True for b in server.post_bodies))
 
     def test_usage_on_a_separate_chunk_survives_the_finish_merge(self) -> None:
@@ -240,7 +374,10 @@ class TestOpenAIStreaming(_ServerMixin):
         out, _seen = self._run(provider)
 
         self.assertEqual(out, "hello")
-        self.assertEqual(usage and usage[0], {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7})
+        self.assertEqual(usage and usage[0], {
+            "input_tokens": 5, "output_tokens": 2, "total_tokens": 7,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+        })
 
     def test_a_remote_stream_asks_for_its_usage_and_a_local_one_does_not(self) -> None:
         """OpenAI sends `usage: null` on a stream unless asked, so streamed calls booked no tokens."""

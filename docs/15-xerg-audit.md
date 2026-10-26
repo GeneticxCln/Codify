@@ -16,8 +16,8 @@ about the *method the skill describes*, and every claim about Xerg here is a sta
 
 | What the skill does | Here | Why |
 |---|---|---|
-| Three evidence-strict findings: retry waste, tool-loop waste, cache churn | **Retry waste taken** (re-ask and fix loop). **Tool-loop waste and cache churn reported as unavailable** | The engine records what retry waste needs and does not record what the other two need (section 3) |
-| Seven neutral signals | **Five built in the same spirit** (context outliers and growth, deep loops, re-ask rate, token concentration). Not built: cache-read and Max Mode concentration (no such data here), fixed cadence (not attempted), and "premium model on routine work" (refused) | The last needs a list of which models are premium, and this project has no hardcoded model lists (`CLAUDE.md`). The others need data the engine does not record |
+| Three evidence-strict findings: retry waste, tool-loop waste, cache churn | **Retry waste taken** (re-ask and fix loop). **Tool-loop waste reported as unavailable; cache use measured as the provider reports it** | The engine records what retry waste needs; tool results are not recorded, and cache counts are recorded but not linked to the read that repays a write (section 3) |
+| Seven neutral signals | **Six built in the same spirit** (context outliers and growth, deep loops, re-ask rate, token concentration, cache reads). Not built: Max Mode concentration (no such data here), fixed cadence (not attempted), and "premium model on routine work" (refused) | The last needs a list of which models are premium, and this project has no hardcoded model lists (`CLAUDE.md`). The others need data the engine does not record |
 | Dollars, from a reviewed local pricing catalogue | **Refused** | `engine/metrics.py` and `docs/04` §4.7 deliberately keep no price table: a price that silently stops matching the provider is worse than none. Everything here is tokens |
 | Coverage before totals; zero findings is never "no waste"; unavailable detectors named | **Taken, as code and as skill text** | The strongest part of the skill, and the part `docs/13` learned the hard way (a report whose tail was cut) |
 | Waste only when a failed chain ends in a successful attempt | **Taken** | A re-ask that did not recover is spend, not waste; one with no outcome yet is left out of every rate (`engine/metrics.py` rule 1) |
@@ -40,8 +40,11 @@ Read from the code (`engine/agent_orchestrator.py`, `engine/conductor.py`, `engi
 * **Tool-loop waste: not measurable.** A tool call is recorded only as a clipped log line (first and last 100 characters of its arguments); its
   result is never stored; refused calls are not logged at all. An identical repeated call with an identical result cannot be shown.
   Enabling it would mean recording a hash of each call's arguments and result (section 6).
-* **Cache churn: not measurable, and probably not applicable.** No provider adapter parses cache token counts and no request asks for caching,
-  so there is no cache lifecycle to price.
+* **Cache use: measurable as far as providers report it** (since `docs/16` item 6). `normalize_usage` reads Anthropic's
+  `cache_read_input_tokens`/`cache_creation_input_tokens` and OpenAI's `prompt_tokens_details.cached_tokens` into every `usage` event, with
+  the cache tokens inside `input_tokens` so a cached call never looks cheaper. What is not recorded is which write a later read repaid, so the
+  audit reports reads and writes but no churn *rate*. The conductor now marks its system block cacheable on Anthropic (`docs/16` item 7), so a
+  multi-call turn can report reads; a one-shot role call still reports zero.
 * **What no detector can see.** HTTP-level retries inside one call are invisible (they only lengthen its duration). A failed provider call or a
   stream cut mid-body books no tokens, so the tokens it spent are in no total; the audit counts those calls so the gap is stated.
 
@@ -64,13 +67,15 @@ twelve are counted rather than dropped (the lesson of `docs/14` §8, the `scan_c
 * **Findings** (evidence-strict): `retry-waste` (recovered / unrecovered / unknown, each with its tokens) and `fix-loop-retry-waste`.
 * **Signals** (descriptive, never waste, never a recommendation): `context-outlier` (a role's p90 prompt far above its median),
   `context-growth` (a conductor loop whose prompt tripled), `deep-conductor-loop` (a loop that used most of the real turn cap),
-  `reask-rate` (per role and model, with its counts) and `token-concentration`. Their thresholds are constants in the module; a shown signal
-  always carries the numbers it came from.
+  `reask-rate` (per role and model, with its counts), `token-concentration` and `cache-reads` (the input tokens served from a prompt cache,
+  as a share of input, and what was written to one — counted inside the input tokens, never as a saving). Their thresholds are constants in the module; a shown signal
+  always carries the numbers it came from. `context-growth` is also how the loop's bounded replay is checked after the
+  fact: a long turn whose transcript is stubbed should stop tripling (`docs/01` §5.3).
 
 ## 5. What this does not claim
 
 * **It is not a bill.** Tokens are what the provider reported; nothing here is a price, a saving or a forecast.
-* **Zero findings is not "no waste".** Two kinds of waste are not measured at all, and a third is measured only for the two retry shapes the
+* **Zero findings is not "no waste".** Tool-loop waste is not measured at all, and retry waste is measured only for the two shapes the
   engine can see.
 * **A finding is a pattern in recorded events, not a diagnosis.** A high re-ask rate on one model is a reason to read that model's replies.
 * **It covers one workspace**, the one the goal belongs to, and the newest 20,000 events of the types it reads. Reaching that cap is reported.
@@ -82,8 +87,9 @@ twelve are counted rather than dropped (the lesson of `docs/14` §8, the `scan_c
 * **Tool-loop waste** needs the call's arguments and result *hashed* at the point they are known (`Conductor._run_tool`) and recorded as a
   structured field, plus whether the call failed. That changes the event contract (`engine/models.py` `EventType`, `docs/04`'s event table,
   `ui/src/types.ts`, `tests/test_event_type_contract.py`), so it is its own change, with its own decision about what a hash may reveal.
-* **Cache churn** needs the adapters to read cache read and write tokens (`normalize_usage`) and, for Anthropic, a request that actually
-  asks for caching; until then there is nothing to churn.
+* **Cache reuse** is built (`docs/16` items 6–7): the counts are recorded and the conductor marks its system prefix cacheable on Anthropic, so
+  the audit shows whether it hit. A churn *rate* would still need the provider to report which write a read repaid, or the engine to track a
+  prefix id across calls — nothing records that today.
 * **Dollars** would reverse `docs/04` §4.7. The only form that fits its reasoning is a rate file the person supplies and owns, with every
   figure labelled an estimate from their rates; nothing bundled and nothing fetched.
 * **A results pane** needs a read-only route in `docs/04` that takes the boot token, a section in the statistics drawer, and mounted tests

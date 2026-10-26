@@ -187,16 +187,24 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             </li>
           )}
           {matches.map((item, i) => {
-            const firstOfKind = i === 0 || matches[i - 1].kind !== item.kind;
             const isSelected = i === selected;
+            // The group is the *label*, not the kind: "Needs you", "Machine" and "Split" are all actions, and a
+            // heading keyed by kind put the machine rows under "Split" and then swallowed the split heading after
+            // them. A non-action item's label is its kind's own name, so one comparison covers both shapes.
+            const heading = item.kind === "action" ? item.label : GROUP_HEADING[item.kind];
+            const previous = matches[i - 1];
+            const previousHeading = previous === undefined
+              ? null
+              : previous.kind === "action" ? previous.label : GROUP_HEADING[previous.kind];
+            const firstOfGroup = heading !== previousHeading;
             return (
               <React.Fragment key={item.id}>
-                {firstOfKind && (
+                {firstOfGroup && (
                   <li
                     role="presentation"
                     className="px-3 pt-2.5 pb-1 text-2xs uppercase tracking-wider text-codify-muted"
                   >
-                    {GROUP_HEADING[item.kind]}
+                    {heading}
                   </li>
                 )}
                 <li

@@ -39,6 +39,152 @@ BARE_ARRAY_KEYS: dict[str, tuple[str, str]] = {
     "planner": ("steps", "title"),
 }
 
+# ── the reply shape, as a schema ─────────────────────────────────────────────
+#
+# Sent to a provider that advertises `json_schema` (docs/16 item 5), so "answer with this object" is a wire
+# guarantee rather than prompt advice. Every object is closed (`additionalProperties: false`) and every property
+# is required: that is what OpenAI's strict mode demands, and it makes the schema a complete description rather
+# than a hint. A field a parser treats as optional is *nullable* here instead of absent — the model says null,
+# it does not omit the key — so a schema can never make a reply that the parser would accept unreachable.
+#
+# The test that keeps this honest is `tests/test_reply_schemas.py`: every key a parser reads appears here as a
+# required property, and every object recursively obeys both rules. Without it this is a second description of
+# the contract with nothing checking that the two agree.
+
+Schema = dict[str, Any]
+
+
+def _closed(properties: dict[str, Any]) -> Schema:
+    """A closed object with every property required — the only object shape strict structured output allows."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(properties),
+        "properties": properties,
+    }
+
+
+def _array(items: Schema) -> Schema:
+    return {"type": "array", "items": items}
+
+
+def _nullable(schema: Schema) -> Schema:
+    """`schema` or explicit null. A nullable field, never an absent one (see the section comment)."""
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+_STRING: Schema = {"type": "string"}
+_STRING_OR_NULL: Schema = {"type": ["string", "null"]}
+_STRINGS: Schema = _array(_STRING)
+
+# A path to read, with the line range a large file needs. The plain-string form is the other half of the anyOf.
+_READ: Schema = _closed({
+    "path": _STRING,
+    "offset": {"type": "integer"},
+    "limit": {"type": ["integer", "null"]},
+})
+_SEARCH: Schema = _closed({
+    "query": _STRING,
+    "regex": {"type": "boolean"},
+    "glob": _STRING_OR_NULL,
+})
+_ARGV_LIST: Schema = _array(_STRING)
+_ARGVS: Schema = _array(_ARGV_LIST)
+
+REPLY_SCHEMAS: dict[str, Schema] = {
+    "laya": _closed({
+        "answers": _closed({
+            "intent": _closed({
+                "choice": {"enum": ["code_change", "question", "ops_command", "other"]},
+                "confidence": {"type": "number"},
+            }),
+            "risk": _closed({"score": {"type": "number"}, "confidence": {"type": "number"}}),
+            "prompt_injection": _closed({"noul": {"type": "number"}}),
+            "needs_clarification": _closed({"noul": {"type": "number"}}),
+        }),
+    }),
+    "librarian": _closed({
+        "summary": _STRING_OR_NULL,
+        "files": _array(_closed({"path": _STRING, "why": _STRING})),
+        "symbols": _array(_closed({"name": _STRING, "path": _STRING})),
+        "conventions": _STRINGS,
+        "test_command": _nullable(_STRINGS),
+        "risks": _STRINGS,
+        # Each entry is a path or a line range; `anyOf` is spelled through `_nullable`'s helper only for null,
+        # so the union is written here rather than as a required two-shape object.
+        "reads": _array({"anyOf": [_STRING, _READ]}),
+        "searches": _array({"anyOf": [_STRING, _SEARCH]}),
+        "git": _ARGVS,
+        "run": _ARGVS,
+        "enough": {"type": "boolean"},
+    }),
+    "design": _closed({
+        "applies": {"type": "boolean"},
+        "artifact": {
+            "enum": [
+                "web_prototype", "page", "dashboard", "deck", "mobile",
+                "document", "component", "style_system", "other",
+            ]
+        },
+        "direction": _STRING,
+        "design_system": _closed({"name": _STRING, "source": _STRING_OR_NULL}),
+        "tokens": _closed({
+            "colors": _array(_closed({"name": _STRING, "value": _STRING})),
+            "typography": _array(_closed({"name": _STRING, "value": _STRING})),
+            "spacing": _STRINGS,
+            "radii": _STRINGS,
+        }),
+        "components": _array(_closed({"name": _STRING, "purpose": _STRING})),
+        "conventions": _STRINGS,
+        "constraints": _STRINGS,
+        "acceptance": _STRINGS,
+        "design_md": _STRING_OR_NULL,
+    }),
+    "planner": _closed({
+        "steps": {
+            **_array(_closed({
+                "title": _STRING,
+                "description": _STRING,
+                "suggested_paths": _STRINGS,
+            })),
+            "maxItems": 20,
+        },
+        "consult": _nullable(_closed({
+            "reads": _array({"anyOf": [_STRING, _READ]}),
+            "searches": _array({"anyOf": [_STRING, _SEARCH]}),
+            "git": _ARGVS,
+            "run": _ARGVS,
+        })),
+    }),
+    "fixer": _closed({
+        "files": _array(_closed({
+            "path": _STRING,
+            "action": {"enum": ["create", "update", "delete", "edit"]},
+            "content": _STRING_OR_NULL,
+            "edits": _nullable(_array(_closed({
+                "old_text": _STRING,
+                "new_text": _STRING,
+                "count": {"type": "integer"},
+            }))),
+        })),
+        "needs_another_pass": {"type": "boolean"},
+    }),
+    "verifier": _closed({
+        "argv": _nullable(_ARGV_LIST),
+        "verdict": {"enum": ["pass", "fail", "skip"]},
+        "explanation": _STRING,
+    }),
+    "critic": _closed({
+        "decision": _nullable({"enum": ["approve", "request-changes"]}),
+        "reasons": _STRINGS,
+        "run_command": _nullable(_ARGV_LIST),
+    }),
+    "scribe": _closed({
+        "summary": _STRING,
+        "commit_message": _STRING,
+    }),
+}
+
 # The roles whose reply text becomes the person's files (a path, a file's content, an edit's new text). A lone
 # surrogate in the reply of any other role that goes through `run_agent` is healed to U+FFFD before the reply is
 # accepted, because there it lands in prose: a step title, a review note, a commit message, a prompt. (The gate's

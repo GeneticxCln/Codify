@@ -67,7 +67,7 @@ class CannedProvider(BaseProvider):
         temperature: float,
         max_tokens: int,
         *,
-        num_ctx: int | None = None, keep_alive: str | None = None,
+        num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         role = self.current_role or "unknown"
         self.calls.append(role)
@@ -87,7 +87,7 @@ class CannedProvider(BaseProvider):
         model: str,
         temperature: float,
         max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
         """The scripted conductor's next move, rebuilt from the transcript like a model with no memory of its own.
 

@@ -43,8 +43,14 @@ class Timeline:
             "timestamp": 1_000.0 + self._seq if at is None else at,
         })
 
-    def usage(self, role: str, tokens_in: int, tokens_out: int, step: str | None = "s1", model: str = "m") -> None:
-        self.add("usage", {"role": role, "provider": "p", "model": model, "input_tokens": tokens_in, "output_tokens": tokens_out}, step)
+    def usage(
+        self, role: str, tokens_in: int, tokens_out: int, step: str | None = "s1", model: str = "m",
+        cache_read: int = 0, cache_write: int = 0,
+    ) -> None:
+        payload = {"role": role, "provider": "p", "model": model, "input_tokens": tokens_in, "output_tokens": tokens_out}
+        if cache_read or cache_write:
+            payload.update({"cache_read_tokens": cache_read, "cache_write_tokens": cache_write})
+        self.add("usage", payload, step)
 
     def reask(self, role: str, step: str | None = "s1", model: str = "m") -> None:
         self.add("agent_call_failed", {"role": role, "provider": "p", "model": model, "code": "agent_output_invalid", "retrying": True}, step)
@@ -258,6 +264,66 @@ class TestSignals(unittest.TestCase):
         self.assertEqual({"retry-waste", "fix-loop-retry-waste"}, {f["id"] for f in result["findings"]})
 
 
+class TestCacheUse(unittest.TestCase):
+    """Cache counts are measured and reported, and never counted as a saving (`docs/16` item 6)."""
+
+    def test_cache_tokens_are_totalled_and_stay_inside_the_input(self) -> None:
+        t = Timeline()
+        t.usage("planner", 1_000, 100, step=None, cache_read=800, cache_write=50)
+        t.usage("critic", 500, 50, step=None)
+        totals = audit(t.events)["totals"]
+        self.assertEqual(1_500, totals["input_tokens"])
+        self.assertEqual(800, totals["cache_read_tokens"])
+        self.assertEqual(50, totals["cache_write_tokens"])
+        self.assertEqual(1_650, totals["total_tokens"], "cache tokens are part of input, never added to it again")
+
+    def test_cache_reads_are_a_signal_with_their_share_and_never_a_finding(self) -> None:
+        t = Timeline()
+        t.usage("planner", 1_000, 100, step=None, cache_read=600)
+        t.usage("planner", 1_000, 100, step=None, cache_read=200)
+        result = audit(t.events)
+        sig = next(s for s in result["signals"] if s["id"] == "cache-reads")
+        self.assertEqual(
+            {"calls": 2, "of": 2, "read_tokens": 800, "write_tokens": 0, "share": 0.4},
+            {k: sig[k] for k in ("calls", "of", "read_tokens", "write_tokens", "share")},
+        )
+        self.assertNotIn("cache-reads", {f["id"] for f in result["findings"]})
+
+    def test_a_write_with_no_read_is_shown_not_hidden(self) -> None:
+        # A write premium paid with nothing read back is exactly what a person would want to see; the audit
+        # can show the spend but not whether the entry was ever read, and says so.
+        t = Timeline()
+        t.usage("planner", 1_000, 100, step=None, cache_write=900)
+        text = format_audit(audit(t.events))
+        self.assertIn("0 input tokens over 1 of 1 calls", text)
+        self.assertIn("900 were written to one", text)
+        self.assertIn("not as a saving", text)
+
+    def test_no_cache_counts_means_no_signal(self) -> None:
+        t = Timeline()
+        t.usage("planner", 100, 10, step=None)
+        self.assertEqual([], [s for s in audit(t.events)["signals"] if s["id"] == "cache-reads"])
+
+    def test_a_malformed_cache_count_is_zero_not_a_total(self) -> None:
+        events: list[dict[str, Any]] = [{
+            "type": "usage",
+            "payload": {"role": "x", "input_tokens": 10, "output_tokens": 1,
+                        "cache_read_tokens": "many", "cache_write_tokens": -5},
+            "timestamp": 1.0, "goal_id": "g", "step_id": None, "sequence": 1,
+        }]
+        result = audit(events)
+        self.assertEqual((0, 0), (result["totals"]["cache_read_tokens"], result["totals"]["cache_write_tokens"]))
+        self.assertEqual([], [s for s in result["signals"] if s["id"] == "cache-reads"])
+
+    def test_the_report_says_cache_reads_are_input_not_a_saving(self) -> None:
+        t = Timeline()
+        t.usage("planner", 1_000, 100, step=None, cache_read=800, cache_write=50)
+        text = format_audit(audit(t.events))
+        self.assertIn("cache-reads: 800 input tokens over 1 of 1 calls", text)
+        self.assertIn("80% of all input tokens", text)
+        self.assertIn("counted inside the input tokens above, not as a saving", text)
+
+
 class TestHonesty(unittest.TestCase):
     def test_what_was_not_seen_comes_before_what_was_found(self) -> None:
         t = Timeline()
@@ -266,12 +332,13 @@ class TestHonesty(unittest.TestCase):
         self.assertLess(text.index("Coverage"), text.index("Findings"))
         self.assertLess(text.index("Coverage"), text.index("Total recorded"))
 
-    def test_both_unmeasurable_detectors_are_named_unavailable_with_the_capture_that_would_enable_them(self) -> None:
+    def test_what_is_still_unmeasurable_is_named_with_the_capture_that_would_enable_it(self) -> None:
         text = format_audit(audit([]))
         self.assertIn("tool-loop-waste: UNAVAILABLE", text)
-        self.assertIn("cache-churn: UNAVAILABLE", text)
         self.assertIn("recording a hash of each call's arguments and result", text)
-        self.assertIn("capturing cache read and write tokens", text)
+        # Cache counts are measured now (item 6 of `docs/16`); what is not recorded is which write a read repaid.
+        self.assertNotIn("cache-churn: UNAVAILABLE", text)
+        self.assertIn("which write a later read repaid is not recorded", text)
 
     def test_an_empty_result_never_says_there_is_no_waste(self) -> None:
         text = format_audit(audit([]))
@@ -367,7 +434,7 @@ class TestTheReportArrivesWhole(unittest.TestCase):
 
     def test_signals_beyond_the_cap_are_counted_not_dropped(self) -> None:
         text = format_audit(audit(self.worst_case(), turn_cap=14))
-        shown = sum(1 for ln in text.splitlines() if ln.startswith(("- context-", "- deep-", "- reask-", "- token-")))
+        shown = sum(1 for ln in text.splitlines() if ln.startswith(("- context-", "- deep-", "- reask-", "- token-", "- cache-")))
         self.assertLessEqual(shown, MAX_SIGNAL_LINES)
         if "more signal(s) not shown" in text:
             self.assertEqual(MAX_SIGNAL_LINES, shown)

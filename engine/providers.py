@@ -400,6 +400,13 @@ def normalize_usage(provider: str, data: dict[str, Any]) -> dict[str, Any] | Non
     them — which is why nobody can answer "what did this goal cost in
     tokens". Returns None when the response carries no usage at all (some
     local servers do not).
+
+    `cache_read_tokens` and `cache_write_tokens` are how much of the prompt the
+    provider served from, or wrote to, a prompt cache. They are always present,
+    zero when the provider reports nothing, so the audit can say "zero" and
+    "not offered" the same way. They are part of `input_tokens`, never extra:
+    a cached call must not read as cheaper than the same call without a cache
+    (`engine/usage_audit.py` reports the reads as a signal, never a saving).
     """
     # Runtime guard: normalize_usage is called with parsed JSON, and the
     # isinstance keeps a malformed payload from crashing the recorder.
@@ -407,10 +414,18 @@ def normalize_usage(provider: str, data: dict[str, Any]) -> dict[str, Any] | Non
         return None  # type: ignore[unreachable]
     if provider == "anthropic":
         u = data.get("usage") or {}
-        return _mk_usage(u.get("input_tokens"), u.get("output_tokens"))
+        # Anthropic's `input_tokens` EXCLUDES both cache counts, so they are
+        # added here; OpenAI's `prompt_tokens` already includes its cached ones.
+        return _mk_usage(
+            u.get("input_tokens"), u.get("output_tokens"),
+            u.get("cache_read_input_tokens"), u.get("cache_creation_input_tokens"),
+            cache_in_input=True,
+        )
     if provider == "openai_compat":
         u = data.get("usage") or {}
-        return _mk_usage(u.get("prompt_tokens"), u.get("completion_tokens"))
+        details = u.get("prompt_tokens_details")
+        cached = details.get("cached_tokens") if isinstance(details, dict) else 0
+        return _mk_usage(u.get("prompt_tokens"), u.get("completion_tokens"), cached)
     if provider == "google":
         u = data.get("usageMetadata") or {}
         return _mk_usage(u.get("promptTokenCount"), u.get("candidatesTokenCount"))
@@ -419,15 +434,32 @@ def normalize_usage(provider: str, data: dict[str, Any]) -> dict[str, Any] | Non
     return None
 
 
-def _mk_usage(inp: Any, out: Any) -> dict[str, Any] | None:
+def _count(value: Any) -> int:
+    """A cache count from a response, 0 for anything that is not a plain non-negative integer."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _mk_usage(
+    inp: Any, out: Any, cache_read: Any = 0, cache_write: Any = 0, *, cache_in_input: bool = False,
+) -> dict[str, Any] | None:
+    """One usage block, normalized. `cache_in_input` says the provider's input count leaves cache tokens out."""
     try:
         i = int(inp) if inp is not None else 0
         o = int(out) if out is not None else 0
     except (TypeError, ValueError):
         return None
+    read, write = _count(cache_read), _count(cache_write)
+    if cache_in_input:
+        i += read + write
     if i <= 0 and o <= 0:
         return None
-    return {"input_tokens": i, "output_tokens": o, "total_tokens": i + o}
+    return {
+        "input_tokens": i,
+        "output_tokens": o,
+        "total_tokens": i + o,
+        "cache_read_tokens": read,
+        "cache_write_tokens": write,
+    }
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -547,8 +579,9 @@ def require_safe_key_destination(api_key: str | None, base_url: str) -> None:
 class BaseProvider(ABC):
     # Optional callback: providers that receive token usage in their responses
     # invoke it with a normalized dict {input_tokens, output_tokens,
-    # total_tokens} after each successful call. The orchestrator attaches a
-    # recorder; anything else (health probes, settings tests) leaves it None.
+    # total_tokens, cache_read_tokens, cache_write_tokens} after each
+    # successful call. The orchestrator attaches a recorder; anything else
+    # (health probes, settings tests) leaves it None.
     usage_sink: Callable[[dict[str, Any]], None] | None = None
     # Optional callback for streamed replies: invoked with the full text
     # accumulated so far, whenever the server yields more. The orchestrator
@@ -561,12 +594,19 @@ class BaseProvider(ABC):
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> str: ...
     # `num_ctx` is Ollama's per-request context window and `keep_alive` is how
     # long it holds the model afterwards. Both are keyword-only with a default on
     # every provider so the callers can pass them uniformly; only Ollama consumes
     # either (see there), because OpenAI-style APIs size the window server-side
     # and have no resident process to keep alive.
+    #
+    # `json_schema` is the role reply's shape (`engine.replies.REPLY_SCHEMAS`), and it follows the same rule:
+    # accepted by every adapter, read by the one protocol with a field for it (OpenAI-compatible, where the
+    # server has to advertise `json_schema` for the rung to be used). A provider that cannot express a schema
+    # must still accept the keyword — an adapter that raised `TypeError` here would take every role down on
+    # the other protocols, which is exactly the mistake `num_ctx` once made.
 
     @property
     def supports_tools(self) -> bool:
@@ -587,13 +627,15 @@ class BaseProvider(ABC):
         model: str,
         temperature: float,
         max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
         """One turn of a tool-calling conversation. Overridden per protocol.
 
         `num_ctx` and `keep_alive` are keyword-only with a default on **every** provider, as they are on
-        `complete`: the conductor passes both on every call, and only Ollama consumes either. A provider
-        that omitted them raised `TypeError` on its first call, which is how the conductor came to work on
+        `complete`: the conductor passes both on every call, and only Ollama consumes either. `cache_prefix`
+        travels on every call too, and only Anthropic reads it — the one protocol here with a field that marks
+        a prompt-cacheable block; the others either cache on their own or have no such field. A provider that
+        omitted one of these raised `TypeError` on its first call, which is how the conductor came to work on
         Ollama and nowhere else (`tests/test_providers_take_what_the_conductor_passes.py`).
 
         Deliberately a *separate* method from `complete` rather than an extra
@@ -695,6 +737,10 @@ class AnthropicProvider(BaseProvider):
         require_safe_key_destination(api_key, base_url)
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
+        # Whether this endpoint still accepts `cache_control`. It starts true and a refusal turns it off for the
+        # rest of the provider's life, so a proxy or a model without prompt caching answers without the mark and
+        # does not pay a rejected request on every call (the flag `_json_mode` keeps for `response_format`).
+        self._prompt_cache = True
 
     async def _messages(self, body: dict[str, Any]) -> Any:
         """POST /v1/messages: the one way both calls reach the API, so they cannot name different versions."""
@@ -715,7 +761,11 @@ class AnthropicProvider(BaseProvider):
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> str:
+        # `json_schema` is accepted and not sent: this protocol has no field for a reply schema here, and an
+        # adapter that refused the keyword would fail every role before its first request. The system prompt
+        # still asks for one JSON object, and `engine.replies` still reads it the same way.
         data = await self._messages({
             "model": model,
             "max_tokens": max_tokens,
@@ -739,15 +789,30 @@ class AnthropicProvider(BaseProvider):
         model: str,
         temperature: float,
         max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
-        data = await self._messages({
+        body: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "system": system_prompt,
             "tools": [t.to_anthropic() for t in tools],
             "messages": to_anthropic_messages(messages),
-        })
+        }
+        if cache_prefix and self._prompt_cache:
+            # The conductor re-sends this one system prompt on every call of a turn, which is the one prefix whose
+            # cache write is read back. ONLY the system block is marked: the tool schemas and the transcript are
+            # not a stable prefix, and a one-shot role call never asks for this (its `complete` body is unmarked).
+            body["system"] = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+        try:
+            data = await self._messages(body)
+        except ProviderError as exc:
+            if not (cache_prefix and self._prompt_cache and refused_the_request(exc)):
+                raise
+            # The API refused the mark. Drop it for this endpoint and retry once, exactly as a rejected
+            # `response_format` does; the model or a proxy in front of it may predate prompt caching.
+            self._prompt_cache = False
+            body["system"] = system_prompt
+            data = await self._messages(body)
         self._report_usage("anthropic", data)
         blocks = [b for b in (data.get("content") or []) if isinstance(b, dict)]
         text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
@@ -765,6 +830,24 @@ class AnthropicProvider(BaseProvider):
         return reply
 
 
+def _response_format(capability: str | None, schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The `response_format` for one model, or None when it advertises no rung.
+
+    A schema-capable model is sent the actual role schema when the caller has one; a caller with no schema
+    (a health probe, a test connection) asks only for an object, which is a rung the model also advertises.
+    An object-only model is never sent a schema: it would 400, and the fallback would spend a request learning
+    what `/models` already said.
+    """
+    if capability == "schema" and schema is not None:
+        return {
+            "type": "json_schema",
+            "json_schema": {"name": "codify_role_reply", "schema": schema, "strict": True},
+        }
+    if capability in ("schema", "object"):
+        return {"type": "json_object"}
+    return None
+
+
 class OpenAICompatProvider(BaseProvider):
     def __init__(self, api_key: str | None, base_url: str):
         require_safe_key_destination(api_key, base_url)
@@ -772,9 +855,11 @@ class OpenAICompatProvider(BaseProvider):
         self._base_url = base_url.rstrip("/")
         # A role's temperature goes to a local server (LM Studio, vLLM, llama.cpp) and to no hosted one.
         self._local = is_local_endpoint(self._base_url)
-        # Three states: None = not probed yet, True/False = probed. Cached per
-        # provider instance so the capability probe runs once, not per call.
-        self._json_mode: bool | None = None
+        # The structured-output rung each model advertises: "schema" (a JSON schema is honoured), "object"
+        # (only json mode), or None. Probed once for the endpoint and then read per model, because the
+        # advertisement is per model — asking whether *any* listed model supported it sent a field a different
+        # model rejected. A refused rung is written back here, so the downgrade is remembered for that model.
+        self._json_capabilities: dict[str, str | None] | None = None
 
     @property
     def supports_tools(self) -> bool:
@@ -788,7 +873,7 @@ class OpenAICompatProvider(BaseProvider):
         model: str,
         temperature: float,
         max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
         # One call per provider class rather than four: every `openai_compat`
         # entry in BUILTIN_PROVIDERS (openai, deepseek, openrouter, groq, and
@@ -847,20 +932,21 @@ class OpenAICompatProvider(BaseProvider):
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> str:
         if not self._api_key:
             raise ProviderError("missing_api_key", "API key is not set")
         url = f"{self._base_url}/chat/completions"
-        # Every role here answers JSON by contract (default_prompts.py). Asking
-        # for structured output turns "please emit JSON" from prompt advice into
-        # a wire guarantee on servers that support it.
+        # Every role here answers JSON by contract (default_prompts.py). Asking for structured output turns
+        # "please emit JSON" from prompt advice into a wire guarantee on servers that support it — and where the
+        # server advertises `json_schema`, the role's whole reply shape goes on the wire (docs/16 item 5).
         #
-        # It is opt-in per server because a strict server rejects the unknown
-        # field outright (some vLLM versions 400 on response_format) — one
-        # broken endpoint must not take every role's replies down. On the first
-        # 400 that mentions the field, remember it and retry plainly.
-        if self._json_mode is None:
-            self._json_mode = await self._supports_json_mode(url)
+        # It is opt-in per model because a strict server rejects the field outright (some vLLM versions 400 on
+        # response_format) — one broken endpoint must not take every role's replies down. A refusal downgrades
+        # that model one rung (schema → object → plain) and is remembered, so the rejected request is paid once.
+        if self._json_capabilities is None:
+            self._json_capabilities = await self._discover_json_capabilities()
+        capability = self._json_capabilities.get(model)
         payload = {
             "model": model,
             **({"temperature": temperature} if self._local else {}),
@@ -870,8 +956,9 @@ class OpenAICompatProvider(BaseProvider):
                 {"role": "user", "content": user_prompt},
             ],
         }
-        if self._json_mode:
-            payload["response_format"] = {"type": "json_object"}
+        response_format = _response_format(capability, json_schema)
+        if response_format is not None:
+            payload["response_format"] = response_format
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "content-type": "application/json",
@@ -890,44 +977,54 @@ class OpenAICompatProvider(BaseProvider):
                 saved = self.on_delta
                 self.on_delta = None
                 try:
-                    return await self.complete(system_prompt, user_prompt, model, temperature, max_tokens)
+                    return await self.complete(
+                        system_prompt, user_prompt, model, temperature, max_tokens,
+                        num_ctx=num_ctx, keep_alive=keep_alive, json_schema=json_schema,
+                    )
                 finally:
                     self.on_delta = saved
         async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
-            try:
-                data = await post_json(
-                    client,
-                    url,
-                    label="openai_compat",
-                    headers=headers,
-                    json=payload,
-                )
-            except ProviderError as exc:
-                if not (self._json_mode and refused_the_request(exc)):
-                    raise
-                # This server rejects the field: stop sending it.
-                self._json_mode = False
-                payload.pop("response_format", None)
-                data = await post_json(
-                    client,
-                    url,
-                    label="openai_compat",
-                    headers=headers,
-                    json=payload,
-                )
+            while True:
+                try:
+                    data = await post_json(
+                        client,
+                        url,
+                        label="openai_compat",
+                        headers=headers,
+                        json=payload,
+                    )
+                    break
+                except ProviderError as exc:
+                    if "response_format" not in payload or not refused_the_request(exc):
+                        raise
+                    # This model rejects the rung it advertised. Step down one: schema → object → plain, and
+                    # never put the rung back for this model in this provider's life.
+                    capability = "object" if capability == "schema" else None
+                    if self._json_capabilities is not None:
+                        self._json_capabilities[model] = capability
+                    response_format = _response_format(capability, json_schema)
+                    if response_format is None:
+                        payload.pop("response_format", None)
+                    else:
+                        payload["response_format"] = response_format
         self._report_usage("openai_compat", data)
         return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
 
-    async def _supports_json_mode(self, url: str) -> bool:
-        """Ask /v1/models whether this server advertises structured output.
+    async def _discover_json_capabilities(self) -> dict[str, str | None]:
+        """Ask /v1/models which structured-output rung each model advertises.
 
-        Conservative by design: any ambiguity (no route, odd body, no json
-        schema capability anywhere) means "don't send the field", because the
-        cost of a false positive is a 400 on every call, and the cost of a
-        false negative is just the old prompt-level behavior.
+        Two real shapes are read, because hosted routers do not use the same one: a `capabilities` object
+        (`json_schema` / `json_object`), and OpenRouter's `supported_parameters` list, where
+        `structured_outputs` is schema mode and `response_format` alone is object mode. Missing both is no
+        capability.
+
+        Conservative by design: no route, an odd body, or an entry this build cannot read means that model has
+        no capability, because the cost of a false positive is a 400 on a real call and the cost of a false
+        negative is the old prompt-level behavior.
         """
         root = self._base_url.rsplit("/", 1)[0] if self._base_url.endswith("/chat/completions") else self._base_url
         models_url = f"{root}/models"
+        found: dict[str, str | None] = {}
         try:
             async with httpx.AsyncClient(timeout=10, trust_env=trusts_proxy_env(self._base_url)) as client:
                 resp = await client.get(
@@ -935,16 +1032,33 @@ class OpenAICompatProvider(BaseProvider):
                     headers={"Authorization": f"Bearer {self._api_key}"},
                 )
             if resp.status_code != 200:
-                return False
+                return found
             for m in (resp.json() or {}).get("data", []):
                 # An entry shaped differently from the rest is skipped, not fatal: the blanket `except` below
                 # would turn it into "not supported" for every model listed after it.
-                caps = m.get("capabilities") if isinstance(m, dict) else None
-                if isinstance(caps, dict) and (caps.get("json_schema") or caps.get("json_object")):
-                    return True
-            return False
+                if not isinstance(m, dict) or not isinstance(m.get("id"), str):
+                    continue
+                caps = m.get("capabilities")
+                if isinstance(caps, dict) and caps.get("json_schema"):
+                    found[m["id"]] = "schema"
+                    continue
+                if isinstance(caps, dict) and caps.get("json_object"):
+                    found[m["id"]] = "object"
+                    continue
+                # OpenRouter publishes the same fact per model as a list of parameter names. A model that
+                # supports structured outputs lists `structured_outputs`; one that only takes a JSON-mode
+                # request lists `response_format` without it.
+                params = m.get("supported_parameters")
+                if isinstance(params, list) and "structured_outputs" in params:
+                    found[m["id"]] = "schema"
+                elif isinstance(params, list) and "response_format" in params:
+                    found[m["id"]] = "object"
+                else:
+                    found[m["id"]] = None
+            return found
         except Exception:
-            return False
+            return found
+
 
     async def _complete_streaming(self, payload: dict[str, Any], headers: dict[str, Any]) -> str:
         """One streaming pass over the SSE body; returns the full reply text."""
@@ -1007,7 +1121,7 @@ class OllamaProvider(BaseProvider):
         model: str,
         temperature: float,
         max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
         # `/api/chat` rather than `/api/generate`: only the chat endpoint takes
         # a `tools` array and returns `message.tool_calls`. The generate
@@ -1069,7 +1183,10 @@ class OllamaProvider(BaseProvider):
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> str:
+        # `json_schema` is accepted and not sent: this call already sends `format: "json"`, which is Ollama's
+        # object-mode rung, and its schema form is not part of the protocol this engine targets.
         stream = self.on_delta is not None
         # `num_ctx` is the one option here that changes *what the model can
         # see*. Without it Ollama sizes the window from its own default (4096)
@@ -1175,7 +1292,7 @@ class GoogleProvider(BaseProvider):
         model: str,
         temperature: float,
         max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
         # Google's function calling is the one dialect here that is not
         # OpenAI-shaped: `functionDeclarations` on the tool list, and the
@@ -1233,7 +1350,10 @@ class GoogleProvider(BaseProvider):
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> str:
+        # `json_schema` is accepted and not sent: this protocol's schema field is a separate generation config
+        # this adapter does not build, and a reply schema is prompt material here.
         url = f"{self._base_url}/models/{model}:generateContent"
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},

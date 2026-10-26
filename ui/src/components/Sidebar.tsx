@@ -14,7 +14,7 @@ import { IconButton } from "./ui/IconButton";
 import { ThreadMenu } from "./ThreadMenu";
 import { newThreadParentId } from "../threadMenu";
 import { UNTITLED_THREAD_TITLE, threadLabel } from "../threadTitle";
-import type { Conversation, Workspace } from "../types";  /**
+import type { Conversation, Workspace, WorkspaceGit } from "../types";  /**
    * The side panel: which project is selected, which threads belong to it, and
    * the action to add a project.
    *
@@ -71,6 +71,18 @@ export interface SidebarProps {
   /** Open a machine with no network. The one with a network is opened from the command palette, on purpose. */
   onOpenMachine?: () => void;
   onOpenSettings?: () => void;
+  /**
+   * The newest unread notification's title, shown quietly under the project name; absent or null when the inbox
+   * is empty. A second line rather than a badge: the header's count already says how many, and the person needs
+   * to know *what* is waiting without opening the drawer (`docs/16` item 2).
+   */
+  latestUnread?: string | null;
+  /**
+   * The selected workspace's repository state, when it has one worth showing (`docs/16` item 3). Absent, null or
+   * a state with no branch and nothing to report leaves the header as it was: a folder that is not a repository
+   * is a fact, not a warning banner.
+   */
+  git?: WorkspaceGit | null;
   /** Set by the shell when the engine is unreachable, so the list can say so. */
   loading?: boolean;
 }
@@ -241,6 +253,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenTerminal,
   onOpenMachine,
   onOpenSettings,
+  latestUnread = null,
+  git = null,
   loading = false,
 }) => {
   const selectedWorkspace = workspaces.find(
@@ -358,10 +372,46 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <span className="text-2xs text-codify-muted uppercase tracking-wide">
           Threads
         </span>
-        <span className="text-2xs text-codify-secondary truncate">
-          {selectedWorkspace?.name ??
-            (selectedWorkspaceId ? "Project" : "No project selected")}
-        </span>
+        <div className="min-w-0 text-right">
+          <div className="text-2xs text-codify-secondary truncate">
+            {selectedWorkspace?.name ??
+              (selectedWorkspaceId ? "Project" : "No project selected")}
+          </div>
+          {git && (git.branch || git.dirty || git.ahead > 0 || git.behind > 0) ? (
+            <div className="flex items-center justify-end gap-1 text-2xs text-codify-muted min-w-0">
+              {git.branch ? (
+                <span className="truncate" title={git.branch}>
+                  {git.branch}
+                </span>
+              ) : null}
+              {git.dirty ? (
+                <span
+                  role="img"
+                  aria-label="Uncommitted changes"
+                  title="Uncommitted changes"
+                  className="text-codify-warning"
+                >
+                  ●
+                </span>
+              ) : null}
+              {git.ahead > 0 ? (
+                <span aria-label={`${git.ahead} ahead`} title={`${git.ahead} commit${git.ahead === 1 ? "" : "s"} ahead`}>
+                  ↑{git.ahead}
+                </span>
+              ) : null}
+              {git.behind > 0 ? (
+                <span aria-label={`${git.behind} behind`} title={`${git.behind} commit${git.behind === 1 ? "" : "s"} behind`}>
+                  ↓{git.behind}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+          {latestUnread ? (
+            <div className="text-2xs text-codify-muted truncate" title={latestUnread}>
+              {latestUnread}
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto flex flex-col gap-0.5">

@@ -35,7 +35,7 @@ class _AnswersPlainly(_ToolProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         if system_prompt == CHAT_SYSTEM_PROMPT:
             return PLAIN_ANSWER
@@ -49,7 +49,7 @@ class _FailingConductorThatAnswersPlainly(_FailingConductor):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         if system_prompt == CHAT_SYSTEM_PROMPT:
             return PLAIN_ANSWER

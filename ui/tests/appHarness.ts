@@ -32,6 +32,12 @@ export interface EngineCall {
 export interface AppOptions {
   /** Workspaces the engine reports. The first is auto-selected by the app. */
   workspaces?: Array<{ id: string; name: string; root_path: string }>;
+  /**
+   * `GET /workspaces/{id}/git`, keyed by workspace id. A workspace not named here answers as the engine answers a
+   * folder that is not a repository: 200, `branch: null`, a reason. That keeps every existing App test running
+   * against the same header it had before the line existed.
+   */
+  git?: Record<string, { branch: string | null; detached: boolean; dirty: boolean; ahead: number; behind: number; reason: string | null }>;
   /** Conversations the engine already holds. */
   conversations?: Conversation[];
   /**
@@ -323,6 +329,15 @@ export async function withApp(
   }
   const diskSaves: AppContext["disk"]["saves"] = [];
   const fileRoute = (path: string, method: string, query: URLSearchParams, payload: Record<string, unknown> | null): Response | null => {
+    const gitState = /^\/workspaces\/([^/]+)\/git$/.exec(path);
+    if (gitState && method === "GET") {
+      const wanted = decodeURIComponent(gitState[1]!);
+      return respond(
+        options.git?.[wanted] ?? {
+          branch: null, detached: false, dirty: false, ahead: 0, behind: 0, reason: "not a git repository",
+        },
+      );
+    }
     const files = /^\/workspaces\/([^/]+)\/files$/.exec(path);
     if (files && method === "GET") {
       const ws = decodeURIComponent(files[1]!);

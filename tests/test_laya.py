@@ -161,7 +161,7 @@ class _StubProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt, "model": model})
         chosen = self.reply
@@ -732,7 +732,7 @@ class _AccountingStubProvider(_StubProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
     ) -> str:
         if self.usage_sink is not None:
             self.usage_sink({"input_tokens": 31, "output_tokens": 12, "total_tokens": 43})

@@ -105,6 +105,19 @@ from engine.toolcall import ToolReply, ToolSpec, coerce_arguments
 # MAX_PLANNER_CONSULTS, for the same reason.
 MAX_TOOL_RESULT_CHARS = 12000
 
+# The longest the loop's own transcript may be, in characters, before its oldest tool results are replaced by a
+# stub. A local 32k-token window is roughly 128k characters of prose; this leaves room for the system prompt, the
+# tool schemas a call carries and the reply, and is about 15k tokens of conversation.
+MAX_CONTEXT_CHARS = 60_000
+
+# How many of the newest tool results are never stubbed, whatever the budget. The step being worked on is the
+# evidence the next call is about; an older read is what "call it again" is for.
+KEEP_WHOLE_RESULTS = 4
+
+# The opening of a stub. Repeated so a result already reduced is recognised and passed over (the bound runs before
+# every model call, and a message it stubbed on one call is still there on the next).
+_DROPPED_PREFIX = "[dropped: "
+
 # The cap is on *model calls*, not tool calls, because a model call is what
 # costs money and time. A *turn* needs only a handful ("look at this, look at
 # that, now answer"). A *step of an approved plan* needs more: its four moves
@@ -214,6 +227,55 @@ class ToolCallLedger(Protocol):
     """
 
     def open(self, request: ToolCallRequest) -> CallBooks: ...
+
+
+def bound_replay(
+    messages: list[dict[str, Any]],
+    *,
+    budget: int = MAX_CONTEXT_CHARS,
+    keep: int = KEEP_WHOLE_RESULTS,
+) -> int:
+    """Replace the oldest tool results with a stub until the transcript fits `budget`.
+
+    DeepInfer's SWA bounded replay, applied to a conversation rather than a KV cache: the newest evidence stays
+    whole and the oldest is reduced to one line that says what it was and that it can be fetched again. User and
+    assistant messages are never touched — the person's words and the model's own replies are the conversation,
+    not evidence — and a tool message keeps its `tool_call_id`, because the protocol pairs it with the call that
+    asked for it.
+
+    Returns how many results were stubbed, so a test can see the bound at work. Stubbing is idempotent: a result
+    already reduced is passed over, which is what makes it safe to call before every model call. A single result
+    larger than the stub is the only thing replaced; one already smaller is better left alone.
+    """
+
+    def size(message: dict[str, Any]) -> int:
+        return len(str(message.get("content") or ""))
+
+    total = sum(size(message) for message in messages)
+    if total <= budget:
+        return 0
+    tools = [
+        index for index, message in enumerate(messages)
+        if message.get("role") == "tool" and message.get("content")
+    ]
+    # The newest results are the ones this call is about; `keep=0` is for a caller that wants only the budget.
+    stubbable = tools[:-keep] if keep > 0 else tools
+    stubbed = 0
+    for index in stubbable:
+        if total <= budget:
+            break
+        message = messages[index]
+        original = str(message.get("content") or "")
+        if original.startswith(_DROPPED_PREFIX):
+            continue
+        name = str(message.get("name") or "tool")
+        stub = f"{_DROPPED_PREFIX}{name} returned {len(original):,} characters; call it again if you need it]"
+        if len(stub) >= len(original):
+            continue
+        message["content"] = stub
+        total -= len(original) - len(stub)
+        stubbed += 1
+    return stubbed
 
 
 def _clip(value: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
@@ -382,6 +444,11 @@ class Conductor:
                     self.system_prompt, messages, self.tools, self.model,
                     temperature=CALL_TEMPERATURE, max_tokens=CALL_MAX_TOKENS,
                     num_ctx=self.num_ctx, keep_alive=self.keep_alive,
+                    # This loop is the one caller that re-sends the same system prompt many times in one turn,
+                    # so it is the one caller whose prompt-cache write can be read back. Only a protocol with a
+                    # field for it acts on this (Anthropic's `cache_control`); every other provider ignores it,
+                    # and a one-shot role call never asks.
+                    cache_prefix=True,
                 )
             except ProviderError as exc:
                 if books is not None:
@@ -439,6 +506,10 @@ class Conductor:
         while True:
             if self._is_cancelled():
                 return ""
+            # Bound what is replayed before the call: a 14-call turn can otherwise carry a hundred thousand
+            # characters of tool results into a window that holds a third of that. The newest results stay whole;
+            # an older one becomes a line that says what it was and that it can be read again.
+            bound_replay(messages)
             # Refresh the permission before asking the model; a save made while a turn is running must take
             # effect on its next model call, not only on the next turn or the next dispatch.
             self._refresh_menu()
@@ -733,8 +804,9 @@ AUDIT_USAGE = ToolSpec(
     description=(
         "Audit where this workspace's model calls were spent on work that had to be done again, in TOKENS (this engine keeps no "
         "prices). It reports re-asked calls whose step then succeeded and fix attempts a later retry got past, plus descriptive "
-        "signals (prompt growth, deep conductor loops, re-ask rate). It opens with what it could not see: repeated tool calls and "
-        "cache churn are not measurable here, so an empty result is never 'no waste'. Read-only. Use it when asked about cost, "
+        "signals (prompt growth, deep conductor loops, re-ask rate, prompt-cache reads). It opens with what it could not see: "
+        "repeated tool calls are not measurable here, and cache counts say what was read and written but not what a later read "
+        "repaid, so an empty result is never 'no waste'. Read-only. Use it when asked about cost, "
         "token use or wasted calls, then check a finding with `recall` before saying what to change."
     ),
     parameters={
