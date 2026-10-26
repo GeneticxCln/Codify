@@ -15,6 +15,8 @@ import {
 } from "../api";
 import { readRejection } from "../rejection";
 import { SHORTCUT_HELP } from "../shortcuts";
+import type { UpdateProgress } from "../shellEvents";
+import { size, updateLine, updatePercent } from "../updateProgress";
 import { EngineRuntimeCard } from "./EngineRuntimeCard";
 import { Button } from "./ui/Button";
 import { Panel } from "./ui/Panel";
@@ -46,8 +48,7 @@ function healthWords(health: HealthStatus | null): string {
  */
 function megabytes(bytes: number | null): string {
   if (bytes === null || bytes <= 0) return "";
-  const mb = bytes / 1_000_000;
-  return mb >= 10 ? ` — about ${Math.round(mb)} MB` : ` — about ${mb.toFixed(1)} MB`;
+  return ` — about ${size(bytes)}`;
 }
 
 /** The version a release is, for a sentence: its tag, or its number, or what we have. */
@@ -66,9 +67,45 @@ type UpdateState =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "answered"; check: UpdateCheck }
-  | { kind: "downloading"; check: UpdateCheck }
+  | { kind: "downloading"; check: UpdateCheck; progress: UpdateProgress | null }
   | { kind: "downloaded"; check: UpdateCheck; download: UpdateDownload }
   | { kind: "failed"; check: UpdateCheck | null; message: string };
+
+/**
+ * How far a download has come, as a bar under the sentence that started it.
+ *
+ * The bar and the caption are drawn from the same two numbers, so they cannot disagree. A
+ * percentage is reported to assistive technology only when there is one: a download whose size
+ * nobody announced has no figure to give, and inventing one would read as a number that is
+ * wrong. That case is the slow pulse in the accent colour instead — motion-safe, because a
+ * person who asked for no motion gets a still bar and the caption says the same thing in words.
+ */
+const DownloadBar: React.FC<{
+  asset: string;
+  progress: UpdateProgress | null;
+  expected: number | null;
+}> = ({ asset, progress, expected }) => {
+  const percent = updatePercent(progress, expected);
+  return (
+    <div
+      role="progressbar"
+      aria-label={`Downloading ${asset}`}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={percent ?? undefined}
+      className="h-1.5 w-full overflow-hidden rounded-sm border border-codify-border bg-codify-raised"
+    >
+      <div
+        className={
+          percent === null
+            ? "h-full w-full bg-codify-accent/40 motion-safe:animate-pulse"
+            : "h-full bg-codify-accent"
+        }
+        style={percent === null ? undefined : { width: `${percent}%` }}
+      />
+    </div>
+  );
+};
 
 /** The update section: a check a person starts, and the package it hands them. */
 const UpdatePanel: React.FC = () => {
@@ -84,9 +121,15 @@ const UpdatePanel: React.FC = () => {
   }, []);
 
   const fetch = useCallback(async (known: UpdateCheck) => {
-    setState({ kind: "downloading", check: known });
+    setState({ kind: "downloading", check: known, progress: null });
     try {
-      setState({ kind: "downloaded", check: known, download: await downloadUpdate() });
+      const download = await downloadUpdate((progress) => {
+        // The only download on screen is this one: the button is disabled while this runs, so there
+        // is no second download whose receipts could arrive here, and the subscription ends with
+        // the call that started it.
+        setState({ kind: "downloading", check: known, progress });
+      });
+      setState({ kind: "downloaded", check: known, download });
     } catch (err) {
       setState({ kind: "failed", check: known, message: readRejection(err) });
     }
@@ -146,11 +189,21 @@ const UpdatePanel: React.FC = () => {
         )}
 
         {state.kind === "downloading" && known?.asset && (
-          <p className="text-xs text-codify-muted">
-            Downloading {known.asset}
-            {megabytes(known.asset_bytes)}. A package is tens of megabytes, so this can take a
-            minute.
-          </p>
+          <>
+            <p className="text-xs text-codify-muted">
+              Downloading {known.asset}
+              {megabytes(known.asset_bytes)}. A package is tens of megabytes, so this can take a
+              minute.
+            </p>
+            <DownloadBar
+              asset={known.asset}
+              progress={state.progress}
+              expected={known.asset_bytes}
+            />
+            <p className="text-2xs text-codify-muted">
+              {updateLine(state.progress, known.asset_bytes)}
+            </p>
+          </>
         )}
 
         {state.kind === "downloaded" && (
@@ -218,6 +271,10 @@ const UpdatePanel: React.FC = () => {
  * configuration: agent config comes from the settings routes alone (docs/02 §1). The update
  * check is also the one request this app makes that is not a model provider's, so it is
  * named in the sentence above it and made only on a click (docs/18 §4).
+ *
+ * A download is minutes long, so the button says how far it has come while it runs, from the
+ * shell's own announcements (`update-progress` → `updateProgress.ts`). Nothing else in the pane
+ * is live: what it is, what it is running on, and what to do with the file once it lands.
  */
 export const AboutPane: React.FC = () => {
   const [app, setApp] = useState<AppFacts | null | undefined>(undefined);

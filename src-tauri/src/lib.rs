@@ -935,12 +935,27 @@ async fn codify_update_check(app: tauri::AppHandle) -> Result<update::UpdateChec
 /// asset is re-derived here from the same release the check read, and only GitHub's own
 /// hosts are ever fetched from. Nothing is installed by this — the answer carries the
 /// sentence telling the person what to run (docs/18 §4).
+///
+/// While it runs it announces how far it has come, on `update-progress`, and that is the only
+/// thing this command says before it answers. The payload carries a byte count and the size
+/// GitHub announced, so the pane can draw a bar without a second request; it is emitted to every
+/// window, which is this one, and the pane's listener stops with the call that started it.
 #[tauri::command]
 async fn codify_update_download(app: tauri::AppHandle) -> Result<update::UpdateDownload, String> {
     let current = app.package_info().version.to_string();
     let resolved = app.path().download_dir().ok();
     let into = update::download_dir_for(resolved, std::env::var("HOME").ok())?;
-    update::fetch_package(&current, update::package_for_this_install(), into).await
+    let sink = app.clone();
+    update::fetch_package(
+        &current,
+        update::package_for_this_install(),
+        into,
+        &move |progress| {
+            use tauri::Emitter;
+            let _ = sink.emit(update::UPDATE_PROGRESS_EVENT, progress);
+        },
+    )
+    .await
 }
 
 /// Return the current engine connection info so the UI can build its HTTP client.

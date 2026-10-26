@@ -198,6 +198,28 @@ written when a person asks for it. `codify_update_download` **takes no argument*
 skill, or anything else that can call `invoke` — cannot choose what is fetched or where it goes: the
 asset is re-derived in Rust from the same release the check read.
 
+**How far it has come, while it runs.** A package is tens of megabytes and the download takes
+minutes, which is long enough that a button with one sentence under it reads as a button that did
+nothing. So the body is read in chunks as the server sends them, and the shell announces its receipts
+on `update-progress`; the pane draws a bar and a line from them (`updateProgress.ts`, and `DownloadBar`
+in `AboutPane.tsx`). Three things about it are decisions rather than details:
+
+* **The announcements are throttled to the bar's own resolution.** One message per network chunk would
+  be thousands of hops into the webview that is drawing the bar, so `announce` in `update.rs` sends one
+  per whole percent — plus the first byte, which is what moves the pane off "starting", and the last,
+  which is what stops a bar at 97% — and a 90 MB AppImage is a hundred-odd messages rather than a
+  thousand. A server that sends no `Content-Length` leaves no percentage to divide by, and the
+  interval becomes one message every 4 MB.
+* **A bar with no figure to report is not a bar at zero.** When neither the response nor the release
+  metadata carries a size, the pane says how many bytes have arrived and draws no fill, rather than
+  dividing by a number nobody has. Nothing is reported to assistive technology as a percentage in that
+  state, and the percentage that *is* reported is floored: a rounded bar at 100% while bytes are still
+  arriving says the download is finished when it is not.
+* **The payload is only a byte count.** Bytes received, and the size the server announced — no address,
+  no path, nothing about the machine. Nothing acts on it either: the command's own answer is still what
+  says where the file landed, and the subscription ends with the call that started it (`downloadUpdate`
+  in `api.ts`), so a failed download or a pane that went away leaves nobody listening.
+
 It installs nothing. The deb is handed over with the `apt` command to run; the AppImage with
 `chmod +x`. That text is *text*: this module never spawns a process, never escalates and never
 replaces the copy that is running, and it writes no configuration — agent config comes from the
@@ -206,7 +228,41 @@ other (`allow-codify-update-check`, `allow-codify-update-download` in
 `src-tauri/permissions/shell.json`, referenced only by `capabilities/default.json`'s
 `webviews: ["main"]`), so a `browser-*` page holds none of it.
 
-## 5. What is not here, and what it would take
+## 5. Checking what you downloaded
+
+The Download button hands you a package and the command to install it. What it cannot tell you is
+whether the bytes that landed are the bytes that were published: a connection that drops part-way
+leaves a file `apt` will happily try to unpack, and an asset can be re-uploaded after the page you
+read was rendered. The release workflow writes `sha256sum` output into a `SHA256SUMS` asset beside
+the two packages (§3), so there is something to check against:
+
+```
+make verify-package                                # whatever Codify packages are in ~/Downloads
+make verify-package FILES=~/Downloads/Codify_1.0.0_amd64.deb
+make verify-package SUMS=~/Downloads/SHA256SUMS     # the checksums you already downloaded
+make verify-package TAG=v1.0.0                      # a named release instead of the newest
+```
+
+`scripts/verify_package.py` hashes each file in blocks — an AppImage is tens of megabytes, and there
+is no reason to hold one in memory for its digest — and compares it with the release's own line for
+that name. Three failures are told apart, because each needs a different action: a file that is not
+there; a file the release never listed, which is a different release or a browser's `(1)` suffix on
+the name and *not* a corrupt download; and a file whose bytes are not the published ones, which
+prints both digests so the reader can see which side is wrong. A `SHA256SUMS` file that is not
+`sha256sum` output at all is refused by line number rather than reported as "nothing matched", and a
+tag that is not a tag (`--tag ../../etc`) never reaches an address. It exits 0 when everything
+matched, 1 when anything did not, and 2 when there was nothing to check.
+
+**It is not a signature, and it says so in its own output.** The checksums come from the same place
+the package did, over the same connection, so anyone who could serve a wrong package could serve
+matching checksums beside it. What a pass claims is the case that actually happens: the file is the
+one that release published, and it is whole. A real signature needs a key held in CI and a public key
+pinned in the app — the decision §6 defers along with self-updating.
+
+Local, and deliberately not part of `make check` or `make ci`: it reaches GitHub for the checksums
+unless you point it at a file you already have, and the gate may not depend on the network.
+
+## 6. What is not here, and what it would take
 
 * **No self-updating.** The Tauri updater plugin would let the app replace its own binary after
   checking a signature. That is a different decision from this one, not a later step of it: it needs

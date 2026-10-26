@@ -215,6 +215,51 @@ export function readMachineExit(payload: unknown): string | null {
 }
 
 /**
+ * How far the shell's download of a release package has come.
+ *
+ * A package is tens of megabytes and the download takes minutes, so the button that started it
+ * says where it has got to over the whole of that time rather than standing on one sentence and
+ * looking broken. The shell sends one of these per whole percent — plus the first byte and the
+ * last, which are what move a bar off "starting" and onto 100% — so this is a hundred-odd messages
+ * over a download, not the thousands of chunks the file actually arrives in.
+ *
+ * It is the only thing the shell says while the download runs, and it is deliberately small: bytes
+ * received, and the size the server announced. The window draws it (`updateProgress.ts`), and
+ * nothing acts on it — the answer to the command is still what says where the file landed.
+ */
+export const UPDATE_PROGRESS = "update-progress";
+
+/** The payload `update-progress` carries. */
+export interface UpdateProgress {
+  /** Bytes received so far. */
+  received: number;
+  /**
+   * The size the server announced up front, or null when it announced none — a server that sends
+   * no `Content-Length`. Null is "size unknown", never "nothing left": the pane falls back to the
+   * size the release reported and shows a bar that cannot fill only when neither exists.
+   */
+  total: number | null;
+}
+
+/**
+ * An `update-progress` payload, or null when it is not one.
+ *
+ * Validated rather than cast, like every reader here, and for the same reason: the payload crosses
+ * a process boundary and feeds a bar that is drawn from it, so a `received` that is not a count
+ * must move nothing rather than paint `NaN` across the pane. A `total` that is present must be a
+ * size — zero and a negative mean the emitting end is not describing this download, and a bar that
+ * divided by them would read 0% or worse for the whole of a download that is going fine.
+ */
+export function readUpdateProgress(payload: unknown): UpdateProgress | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const { received, total } = payload as { received?: unknown; total?: unknown };
+  if (typeof received !== "number" || !Number.isInteger(received) || received < 0) return null;
+  if (total === null || total === undefined) return { received, total: null };
+  if (typeof total !== "number" || !Number.isInteger(total) || total <= 0) return null;
+  return { received, total };
+}
+
+/**
  * Subscribe to a shell event; resolves to the unsubscribe function.
  *
  * Resolving to a function even when there is nothing to subscribe to is the
