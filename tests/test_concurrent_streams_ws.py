@@ -41,10 +41,14 @@ answer 409 (`version_conflict` or `illegal_status`) to a request whose *moment*
 was valid. The lifecycle tasks retry exactly those two codes — re-read the
 version, re-send, deadline-bounded; any other refusal, or a goal that reached a
 terminal state before the request could matter, still fails loudly. Pacing makes
-the window; nothing here depends on winning a lottery. And a WebSocket that
-dies mid-drain is diagnosed rather than divined: the close names itself in the
-assertion, and the engine's stderr tail is printed whenever the test fails,
-because the cause of a 1011 lives on the server side.
+the window; nothing here depends on winning a lottery. A resume can meet one
+more legal race: `PAUSED` is written before the old step runner has unwound, so
+`POST /start` may answer `409 driver_busy` for the moment that runner is still
+leaving; `_pause_resume` retries **only** that code, against the same deadline,
+and any other refusal still fails at once. And a WebSocket that dies mid-drain
+is diagnosed rather than divined: the close names itself in the assertion, and
+the engine's stderr tail is printed whenever the test fails, because the cause of
+a 1011 lives on the server side.
 """
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
@@ -531,11 +535,26 @@ class TestConcurrentGoalsOverRealWebSockets(unittest.IsolatedAsyncioTestCase):
         # Hold the pause briefly so the PAUSED spell is real on the wire.
         await asyncio.sleep(0.3)
 
-        r = await client.post(
-            f"/goals/{goal_id}/start",
-            json={"expected_version": (await client.get(f"/goals/{goal_id}")).json()["version"]},
-        )
-        self.assertEqual(r.status_code, 200, "resume from PAUSED must be accepted")
+        # The status is PAUSED before the old step runner has necessarily
+        # unwound. Start refuses while that driver still owns the goal —
+        # `driver_busy`, the one refusal that *will* clear. Retry only it,
+        # re-reading the version each time; everything else is a broken premise.
+        resume_deadline = time.monotonic() + 20
+        while True:
+            detail = (await client.get(f"/goals/{goal_id}")).json()
+            r = await client.post(
+                f"/goals/{goal_id}/start",
+                json={"expected_version": detail["version"]},
+            )
+            if r.status_code == 200:
+                break
+            if (
+                r.status_code != 409
+                or r.json().get("code") != "driver_busy"
+                or time.monotonic() >= resume_deadline
+            ):
+                self.fail(f"resume from PAUSED was refused: {r.status_code} {r.text}")
+            await asyncio.sleep(0.05)
 
         # And let it finish, like any run.
         deadline = time.monotonic() + 60
