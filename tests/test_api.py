@@ -668,6 +668,29 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.json()["code"], "workspace_has_active_goals")
         self.assertEqual(r.json()["goal_id"], goal_id, "the refusal names what to cancel first")
 
+    async def test_delete_workspace_refuses_a_goal_that_is_driven_but_not_running(self) -> None:
+        """A turn's plan leaves the goal PENDING while its conductor still works.
+
+        The cascade used to read only the status column, so this goal — which the
+        goal-delete route protects through `is_driving` — was deleted underneath a
+        live coroutine.
+        """
+        ws_id, goal_id = await self._seed_workspace_with_goal("ws-del-driven", terminal="PENDING")
+        executor = app.state.executor
+        self.assertTrue(executor.claim_driver(goal_id))
+        try:
+            r = await self.client.delete(
+                f"/workspaces/{ws_id}?delete_goals=true", headers=self.headers
+            )
+            self.assertEqual(r.status_code, 409, r.text)
+            self.assertEqual(r.json()["code"], "workspace_has_active_goals")
+            self.assertEqual(r.json()["goal_id"], goal_id)
+            self.assertEqual(
+                (await self.client.get(f"/goals/{goal_id}", headers=self.headers)).status_code, 200
+            )
+        finally:
+            executor.release_driver(goal_id)
+
     async def test_delete_empty_workspace_needs_no_cascade_flag(self) -> None:
         ws_dir = self.root / "ws-del-empty"
         ws_dir.mkdir()
@@ -956,6 +979,86 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
             f"/workspaces/{ws_id}/design-contract", headers=self.headers, json={"path": "a" * 300 + ".md"}
         )
         self.assertIn(r.status_code, (400, 422), r.text)
+
+    async def test_a_lone_surrogate_in_an_id_or_endpoint_is_refused_before_storage(self) -> None:
+        """A `\\ud800` is valid JSON and not UTF-8, and these fields reached SQLite and a response.
+
+        `GoalCreate.workspace_id`, `ConversationCreate.parent_id` and the agent's endpoint
+        fields were plain `str`s with no cap, so pydantic accepted the surrogate: the
+        first two raised `UnicodeEncodeError` from the SQLite binding, and the endpoint
+        was stored and then could not be written into the response. All of them are
+        bounded now, which is also what makes the engine refuse rather than heal text the
+        *client* supplied (docs/04 §6): nothing reaches the database or a row, and the
+        refusal is the ordinary `invalid_request` shape.
+        """
+        ws_dir = self.root / "ws-surrogates"
+        ws_dir.mkdir()
+        ws_id = (
+            await self.client.post(
+                "/workspaces", headers=self.headers,
+                json={"name": "SURROGATES", "root_path": str(ws_dir)},
+            )
+        ).json()["id"]
+        app.state.conversations = ConversationService(app.state.conn)
+        goal = (
+            await self.client.post(
+                "/goals", headers=self.headers,
+                json={"workspace_id": ws_id, "title": "t", "description": "d"},
+            )
+        ).json()
+        lone = "\ud800"
+
+        def counts() -> tuple[int, int]:
+            return (
+                app.state.conn.execute("SELECT count(*) FROM goals").fetchone()[0],
+                app.state.conn.execute("SELECT count(*) FROM conversations").fetchone()[0],
+            )
+
+        before = counts()
+        fixer_base_url = app.state.registry.get_config("fixer").base_url
+        cases = [
+            ("POST", "/goals", {"workspace_id": f"a{lone}b", "title": "t"}),
+            ("POST", "/goals", {
+                "workspace_id": ws_id, "conversation_id": f"a{lone}b", "title": "t",
+            }),
+            ("POST", "/goals", {
+                "workspace_id": ws_id, "title": "t",
+                "provider": f"a{lone}b", "model": "m",
+            }),
+            ("POST", "/goals", {
+                "workspace_id": ws_id, "title": "t",
+                "provider": "openai", "model": f"a{lone}b",
+            }),
+            ("POST", "/conversations", {"workspace_id": f"a{lone}b"}),
+            ("POST", "/conversations", {
+                "workspace_id": ws_id, "parent_id": f"a{lone}b",
+            }),
+            ("PUT", f"/goals/{goal['id']}/conversation", {
+                "conversation_id": f"a{lone}b",
+            }),
+            ("PUT", "/settings/agents/fixer", {
+                "provider": "openai", "base_url": f"http://x{lone}.test",
+            }),
+            ("PUT", "/settings/agents/fixer", {
+                "fallback_provider": "openai", "fallback_model_name": "m",
+                "fallback_base_url": f"http://x{lone}.test",
+            }),
+        ]
+        for method, path, body in cases:
+            with self.subTest(method=method, path=path, fields=sorted(body)):
+                r = await self.client.request(
+                    method, path, headers={**self.headers, "content-type": "application/json"},
+                    # `json=` would try to encode the surrogate on the client; the engine
+                    # receives the same bytes a lenient JSON writer sends.
+                    content=json.dumps(body),
+                )
+                self.assertEqual(422, r.status_code, r.text)
+                self.assertEqual("invalid_request", r.json()["code"])
+        self.assertEqual(counts(), before, "a refused identifier or endpoint changed a row")
+        self.assertEqual(
+            app.state.registry.get_config("fixer").base_url, fixer_base_url,
+            "a refused endpoint was stored anyway",
+        )
 
     async def test_a_design_goal_mode_round_trips_and_an_unknown_one_is_refused(self) -> None:
         """A goal's mode is what the client asked for and what storage keeps.
@@ -2866,6 +2969,27 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
             json={"expected_version": g.version},
         )
         self.assertEqual(r.status_code, 200)
+
+    async def test_a_malformed_base_url_is_a_4xx_not_a_500(self) -> None:
+        """Text `urlparse` cannot read is still user input, and gets a refusal.
+
+        `http://[::1` raises inside both the local-provider validator and the
+        engine-settings URL check; neither named the ValueError, so the route
+        answered 500 for a body it was supposed to validate.
+        """
+        r = await self.client.put(
+            "/settings/agents/scribe", headers=self.headers,
+            json={"provider": "ollama", "base_url": "http://[::1"},
+        )
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertEqual(r.json()["code"], "invalid_base_url")
+
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers,
+            json={"stt_base_url": "http://[::1"},
+        )
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertEqual(r.json()["code"], "invalid_value")
 
     def test_ws_refuses_an_unknown_goal_after_auth(self) -> None:
         """Authenticated socket to a goal that does not exist → close 4404.

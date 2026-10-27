@@ -16,7 +16,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from collections.abc import AsyncIterator, Callable, Iterator
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 import httpx
 
@@ -478,6 +478,23 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _parse_base_url(url: str) -> ParseResult | None:
+    """A URL's parts, or None when the text is not one this module can read.
+
+    `urlparse` itself raises on an unmatched bracket (`http://[::1`), and its
+    `hostname`/`port` properties raise on that and on an out-of-range port. Those
+    are user input in every settings body, so every caller here needs the same
+    total answer rather than a `ValueError` that becomes a 500. Both properties
+    are touched here, where the catch is, so no caller can reach them unprepared.
+    """
+    try:
+        parsed = urlparse(url or "")
+        _ = parsed.hostname, parsed.port
+    except ValueError:
+        return None
+    return parsed
+
+
 def is_local_endpoint(base_url: str) -> bool:
     """True when `base_url` is a server on this machine or this network: loopback, or a private/link-local address.
 
@@ -486,7 +503,10 @@ def is_local_endpoint(base_url: str) -> bool:
     Decided by parsing the address, like `_is_loopback_host`; a hostname that is not a literal address is not
     assumed local, because nothing here can tell where it points.
     """
-    host = (urlparse(base_url or "").hostname or "").lower().strip("[]")
+    parsed = _parse_base_url(base_url)
+    if parsed is None:
+        return False
+    host = (parsed.hostname or "").lower().strip("[]")
     if _is_loopback_host(host):
         return True
     try:
@@ -497,8 +517,8 @@ def is_local_endpoint(base_url: str) -> bool:
 
 
 def validate_local_base_url(url: str) -> None:
-    parsed = urlparse(url)
-    if not _is_loopback_host(parsed.hostname or ""):
+    parsed = _parse_base_url(url)
+    if parsed is None or not _is_loopback_host(parsed.hostname or ""):
         raise ProviderError("invalid_base_url", "Local provider base_url must point at localhost")
     if parsed.scheme != "http":
         raise ProviderError("invalid_base_url", "Local provider must use http (loopback only)")
@@ -512,11 +532,10 @@ def trusts_proxy_env(base_url: str) -> bool:
     directly; a remote provider still goes through the proxy, which a corporate network may require.
     A client given its own transport (a test's) ignores the proxy either way.
     """
-    try:
-        host = urlparse(base_url or "").hostname or ""
-    except ValueError:
+    parsed = _parse_base_url(base_url)
+    if parsed is None:
         return True
-    return not _is_loopback_host(host)
+    return not _is_loopback_host(parsed.hostname or "")
 
 
 def streaming_body(payload: dict[str, Any], base_url: str) -> dict[str, Any]:
@@ -528,10 +547,8 @@ def streaming_body(payload: dict[str, Any], base_url: str) -> dict[str, Any]:
     back to a blocking request that no longer streams.
     """
     body = {**payload, "stream": True}
-    try:
-        host = urlparse(base_url or "").hostname or ""
-    except ValueError:
-        host = ""
+    parsed = _parse_base_url(base_url)
+    host = (parsed.hostname or "") if parsed is not None else ""
     if host and not _is_loopback_host(host):
         body["stream_options"] = {"include_usage": True}
     return body
@@ -546,12 +563,11 @@ def key_destination_problem(base_url: str) -> str | None:
     other protocol, and every request would carry the key in the clear to whoever listened
     there. The message names the host, never the URL: a base URL can carry userinfo.
     """
-    parsed = urlparse(base_url or "")
-    try:
-        host = parsed.hostname or ""
-        port = parsed.port
-    except ValueError:
-        host, port = "", None
+    parsed = _parse_base_url(base_url)
+    if parsed is None:
+        return "That address is not a valid http(s) endpoint, so a stored API key will not be sent to it."
+    host = parsed.hostname or ""
+    port = parsed.port
     if parsed.scheme not in ("http", "https") or not host:
         # Named by scheme and host, like every other refusal here: the address itself can carry a password in its
         # userinfo, and this sentence is shown to a person and stored in a 400's body.

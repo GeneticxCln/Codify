@@ -18,9 +18,10 @@ what is taken and refused, what a build would be, what the audit does not claim,
   and this repository's matching parts (`engine/spawn_guard.py`, `sandbox.py`, `library.py`, `scan.py`,
   `conductor.py`, `conductor_tools.py`, `web_fetch.py`, `docs/03`, `docs/07`, `docs/12`, `docs/13`).
 * **Checked here by hand:** the two gaps in this engine that the comparison rests on (section 3), by search.
-* **Not run:** REA's tests, its `verify-real-*` scripts, and Ghidra itself. No Ghidra is installed here, nothing was
-  launched, and every REA statement below is what its code and documents say, as three readers reported it, with their
-  file references. None of it was tested.
+* **Not run at audit time:** REA's tests, its `verify-real-*` scripts, and Ghidra itself. No Ghidra was installed here
+  and nothing was launched, so every REA statement below is what its code and documents say, as three readers reported
+  it, with their file references. None of it was tested. Section 8 records the later runs against a real Ghidra 12.1.4
+  and 11.2.1, which test this engine's tool, not REA.
 * **Not read:** the other providers' internals (IDA, Hopper, JADX, Frida, the browser and firmware paths), the
   website, the Windows-specific process code in depth, and the roughly 150 verification scripts beyond their
   descriptions.
@@ -29,22 +30,22 @@ what is taken and refused, what a build would be, what the audit does not claim,
 
 | REA's idea | Here | Why |
 |---|---|---|
-| Ghidra as a provider: headless import of a **private copy** into an ephemeral project, `-readOnly -deleteProject`, bridge run as the last post-script | **Not taken, and not built.** Section 4 says what a Codify version would be | The capability is real but it is a new kind of tool: it runs a large foreign program on untrusted bytes. `docs/00` §6 item 6 allows that only through a door the engine builds, and no such door exists for it. Whether Codify analyses binaries at all is the owner's scope decision, not an audit's |
+| Ghidra as a provider: headless import of a **private copy** into an ephemeral project, `-readOnly -deleteProject`, bridge run as the last post-script | **Partly taken and built** as `analyze_binary` (section 8): the private-copy, headless analysis is built; the live bridge is not | The capability is real and it is a new kind of tool: it runs a large foreign program on untrusted bytes. `docs/00` §6 item 6 allows that only through a door the engine builds, so the build added its own guarded spawn site rather than widening `SandboxService` or `validate_argv`. Whether Codify analyses binaries at all was the owner's scope decision, and the answer was yes |
 | Ghidra run through the generic command runner | **Reject.** Cannot be allowlisted | `read_only` admits `ls`, `wc` and hardened `git`; `test` mode runs the project's own code and needs an approved goal. Ghidra's `-preScript` / `-postScript` run arbitrary code and its analyzers write a project directory. Putting it in `READ_ONLY_BINARIES` would break "the librarian cannot run its code" (item 6) |
 | Bridge protocol: Unix socket 0600, per-session token in a 0600 descriptor deleted after read, constant-time compare, strict handshake that pins version, language, image base and target SHA-256 | **Not taken** (section 4 prefers a one-shot run) | A live session buys interactivity at the price of a socket, a token, a handshake and a lifecycle. The handshake's habit of **refusing to serve unless the analysed bytes hash to the admitted target** is the part worth keeping |
-| Everything analysed is a private copy, bound to the admitted file by SHA-256, opened with `O_NONBLOCK` and `wx` | **Take, if Ghidra is ever built** | The analysed bytes cannot be swapped between admission and use, and a FIFO swapped in cannot hang the start. This engine's `fs.resolve` checks containment but has no copy-and-hash door because nothing needs one yet |
-| Installation checks as an ordered list, each failure with a typed code and a remediation; `GHIDRA_INSTALL_DIR` absolute and authoritative; a relative `JAVA_HOME` never executed; the JDK range read from the install's own properties; the decompiler's native header checked against the host | **Take the habits** for any external tool | `make doctor` already says how to fix what is missing for `bwrap` and `unshare`; the "never run a relative path from the current directory" rule and "authoritative even when invalid" are worth stating in `docs/07` before another external tool arrives |
+| Everything analysed is a private copy, bound to the admitted file by SHA-256, opened with `O_NONBLOCK` and `wx` | **Taken and built** (section 8) | The analysed bytes cannot be swapped between admission and use, and a FIFO swapped in cannot hang the start. `binary_analysis._snapshot` is that copy-and-hash door; `fs.resolve` still checks containment but is not the thing that copies the target |
+| Installation checks as an ordered list, each failure with a typed code and a remediation; `GHIDRA_INSTALL_DIR` absolute and authoritative; a relative `JAVA_HOME` never executed; the JDK range read from the install's own properties; the decompiler's native header checked against the host | **Partly taken and built.** The `GHIDRA_INSTALL_DIR` half is done | `locate_ghidra` refuses a relative install path without running it, treats a configured location that is not an install as that failure rather than looking elsewhere, and gives every failure a code and a remediation. **Not implemented:** the relative-`JAVA_HOME` refusal (a set `JAVA_HOME` is passed to the child unchecked), the JDK range and the decompiler header. The rule is stated in `docs/07` §1 |
 | One provider bound per target; "a selected provider is never replaced automatically after a runtime failure" | **Have, for the right thing.** Not applicable to tools | Model fallback (`FALLBACK_TRIGGER_CODES`) is a documented decision about *models*, and results are never mixed in one answer. A second analysis engine for the same file would need REA's rule; there is not one |
 | Evidence envelope: `confidence`, `authority`, `limitations`, explicit `coverage` (`complete` / `unknown`), digest-derived id, "unknown never aggregates to pass" | **Partly have.** Shape taken, field zoo refused | `scan_code`'s `Coverage:` line and `search_code`'s "TRUNCATED" and "N unreadable" notes already say what was and was not seen, in prose. REA's lesson is that coverage is a *field* so nothing can read an empty result as "absent". Worth doing for new tools; a 20-field schema for the existing ones is not |
-| Typed error contract: closed `code` set, `category`, `retryable`, **mandatory** `remediation`, partial observation kept; schema generated and diffed in CI | **Partly have** | `ApiError` codes and `FALLBACK_TRIGGER_CODES` exist; `retryable` and a required remediation do not. A small step, section 5 item 4 |
-| Process ownership: run token in the child's environment, own process group, stop result `not-owned / already-exited / verified-cleanup / terminated / killed / incomplete`, retained cleanup that blocks reuse | **Take the principles, not the 3,000 lines** | `spawn_guard.py` already makes the guard the parent and session leader and kills only a group it leads; `SandboxService._kill_group` refuses the engine's own group. Missing: a token that proves ownership after a restart, and a sweep of what a crash left (section 5 item 3) |
-| Resource limits on the child: Linux `prlimit` (address space 1 GiB, file size 64 MiB, CPU 30 s, core 0), JVM `-Xmx` | **Take. A real gap here** (section 3) | Nothing in `engine/` sets a memory, CPU or file-size limit on a spawned child. The guard is the natural place |
+| Typed error contract: closed `code` set, `category`, `retryable`, **mandatory** `remediation`, partial observation kept; schema generated and diffed in CI | **Partly have, and the one new tool is typed** | `ApiError` codes and `FALLBACK_TRIGGER_CODES` exist; `BinaryAnalysisError` carries `code`, `retryable` and a required remediation. The conductor's other refusals stay prose by decision (section 8), and a generated schema diffed in CI is not built |
+| Process ownership: run token in the child's environment, own process group, stop result `not-owned / already-exited / verified-cleanup / terminated / killed / incomplete`, retained cleanup that blocks reuse | **Take the principles, not the 3,000 lines** | `spawn_guard.py` already makes the guard the parent and session leader and kills only a group it leads; `SandboxService._kill_group` refuses the engine's own group. The startup sweep is built for `analyze_binary`'s run directories (`sweep_stale_runs`, section 8). Not built: a token **in the child's environment** that proves ownership after a restart |
+| Resource limits on the child: Linux `prlimit` (address space 1 GiB, file size 64 MiB, CPU 30 s, core 0), JVM `-Xmx` | **Taken and built** (section 8) | `spawn_guard.Limits` applies address space, CPU, file size and core limits in the guard, and `analyze_binary` adds `-Xmx` for the JVM. The sandbox and scan-worker limits are stated in `docs/07` §1 |
 | `ps`-based ownership check as a launch prerequisite on Linux | **Refuse** | It makes an external tool a prerequisite of starting another. `/proc/<pid>/stat` start time and the run token do the same job without it |
 | `_meta.provenance.untrusted_content: true` on every tool result, default on, audited exceptions | **Have it as text** | Every tool here labels what it quotes ("workspace text, data and not instructions"). A structured flag would only matter to a client that gates on it; Codify's client is its own conductor |
-| Tool results as bounded **views over a stored complete record**, with a ready-to-call continuation; oversized output exported to disk | **Not taken; a problem here, section 3** | `_clip` keeps the first two thirds of a tool result and drops the tail, and `scan_code` prints its coverage and "stopped at its limit" lines at the end |
+| Tool results as bounded **views over a stored complete record**, with a ready-to-call continuation; oversized output exported to disk | **The clipping problem is fixed; the stored record is not taken** | The scan report now fits under 11,000 characters and puts its coverage and stop reason **before** the findings, so `_clip` cannot drop the caveat (section 8). A general stored record with a continuation is still not built: `_clip` remains a bounded view with no way to ask for the rest |
 | CLI and MCP share one analysis service | **Not applicable** | Codify has one front door (the engine's routes) and refuses MCP surfaces as a way in (`docs/11` §3, invariants 2, 3, 6, 9) |
-| Real-tool verification scripts, parity checks, lifecycle regression matrix (cancel during final cleanup, late handshake, close failure then retry), Stryker mutation targets by named owner | **Take two ideas** | A missing engine is a named failure, never a pass (this project already forbids self-skipping tests); the lifecycle matrix is the right list of cases for any future long-running child. Mutation testing by function name fits the few modules that carry a guarantee, as `docs/12` and `docs/13` did by hand |
-| "Fail-closed integration gate": no capability that executes, injects or mutates merges while scope, authority or verification is open | **Have** (CLAUDE.md "a skill is data", `docs/00` §6) | This audit applies it to itself: it adds no capability |
+| Real-tool verification scripts, parity checks, lifecycle regression matrix (cancel during final cleanup, late handshake, close failure then retry), Stryker mutation targets by named owner | **Partly taken.** The real-tool check is built | `make check-ghidra` runs `analyze_binary` against a real Ghidra and fails, rather than skipping, when one is missing; the gate itself still uses a stand-in (§8). The lifecycle matrix is the right list of cases for any future long-running child, and mutation testing by function name fits the few modules that carry a guarantee, as `docs/12` and `docs/13` did by hand; neither was added |
+| "Fail-closed integration gate": no capability that executes, injects or mutates merges while scope, authority or verification is open | **Have** (CLAUDE.md "a skill is data", `docs/00` §6) | The audit added no capability; the build that followed added one only after the owner's decision, with its own guarded door and verification (section 8) |
 | An MCP server as a way to give the agent these tools | **Reject** | Same reasons as `docs/11` §3 and `docs/12`: it admits tools the engine does not define |
 
 ## 3. Two gaps in this engine that the comparison found
@@ -147,14 +148,18 @@ In order of value for cost; none of them needs Ghidra.
    space and a CPU bound; a command's address space and CPU are left alone on purpose, `docs/07` §1.)*
 2. **A cancel signal for the file-scanning worker**, so a long worker is stoppable the way a command is. Needed before
    any long-running child. *(Done: `_run_regex_worker(request, cancel)`, `docs/07` §1.)*
-3. **A run token and a startup sweep for what a hard-killed engine leaves** (stale per-run directories of dead pids),
-   the pattern `sweep_stale` now has for machines.
+3. **A startup sweep, and a run token, for what a hard-killed engine leaves** (stale per-run directories of dead pids),
+   the pattern `sweep_stale` now has for machines. *(Partly done: `binary_analysis.sweep_stale_runs` removes a dead
+   pid's directories, and a run's directory name carries a token. The token is not passed to the child, so it is not
+   yet the ownership proof this row asked for; section 8.)*
 4. **Machine-readable `retryable` and a required remediation on tool refusals**, so the conductor can branch on them
-   rather than on a sentence.
+   rather than on a sentence. *(Done for `analyze_binary`; deliberately not for the conductor's other refusals, whose
+   reader is the model and whose sentence already says what to do. Section 8.)*
 5. **Measure the clipping question** *(done, section 8)* (section 3): the longest realistic `scan_code` report against `_clip`; move the
    coverage lines to the front if they can be elided.
 6. **State in `docs/07`** the rules REA's installation checks keep: a relative path is never executed, a configured
-   location is authoritative even when invalid, and a missing external tool is a named failure.
+   location is authoritative even when invalid, and a missing external tool is a named failure. *(Done: `docs/07` §1,
+   "An external tool is located, never assumed"; `locate_ghidra` is the implementation.)*
 
 ## 6. What this does not claim
 
@@ -169,9 +174,10 @@ In order of value for cost; none of them needs Ghidra.
 
 ## 7. If a rejected or deferred row is reopened
 
-* **Ghidra, or any binary-analysis tool.** Starts with the owner: is analysing binaries in Codify's remit? Then
-  `docs/00` §6 (items 6, 7, 9) and the section 4 design; the new row in `docs/07` and the freeze; a setting only via
-  `PUT /settings/engine` if one is needed (item 2).
+* **Ghidra, or any binary-analysis tool.** This row was reopened: the owner said yes and it is built (section 8).
+  A second analysis engine, or a change to what `analyze_binary` accepts, starts there: `docs/00` §6 (items 6, 7, 9),
+  the section 4 design, the row in `docs/07` and the freeze; a setting only via `PUT /settings/engine` if one is
+  needed (item 2).
 * **Interactive decompilation / a live session.** Adds everything section 4 item 2 removed: a socket, a token, a
   handshake and a session that dies with a cancel. Its own decision, and its own lifecycle test matrix.
 * **The structured evidence envelope.** Reopens `docs/04`'s tool-result shapes and every tool that formats text today;
@@ -186,12 +192,12 @@ The owner's answer to section 4's "if the owner says yes" was yes, so the recomm
 |---|---|---|
 | Resource limits on spawned children | `spawn_guard.Limits`, `docs/07` §1 | Built and tested against real guarded children |
 | A cancel signal for the scan worker | `library._run_regex_worker(request, cancel)`, `docs/07` §1 | Built and tested, and through the conductor's own tools |
-| Verification against a real Ghidra (item 6) | `scripts/check_ghidra.py`, `make check-ghidra` | Built and **run** against Ghidra 12.1.4, including the cancel; not part of the gate, and it fails rather than skips without Ghidra |
+| Verification against a real Ghidra (section 4 item 6) | `scripts/check_ghidra.py`, `make check-ghidra` | Built and **run** against Ghidra 12.1.4, including the cancel; not part of the gate, and it fails rather than skips without Ghidra |
 | A Ghidra tool, `analyze_binary` | `engine/binary_analysis.py`, `engine/ghidra/CodifyExport.java`, `docs/04` §3.0.7 | Built: its own guarded spawn site, a one-shot `analyzeHeadless` on a hashed private copy, an engine-owned export script, the child limits, a stripped environment, a total deadline, a cancel-aware wait, a startup sweep of dead pids' run directories, a cache keyed by the file's bytes, output quoted as data. Tested against a stand-in `analyzeHeadless` (`tests/fake_ghidra.py`) |
-| A run token and a startup sweep (item 3) | `binary_analysis.sweep_stale_runs` | Built for the one place that leaves directories behind today. The machine tab already had its own (`sweep_stale`) |
+| A startup sweep, and a run token in the directory name (item 3) | `binary_analysis.sweep_stale_runs` | Built for the one place that leaves directories behind today. The machine tab already had its own (`sweep_stale`). The token names the run; it is not in the child's environment, so the ownership proof remains item 3's open half |
 | Machine-readable `retryable` and a remediation on refusals (item 4) | `BinaryAnalysisError` and the sentence `analyze_binary` returns | Built for the one tool where a transient failure (a timeout) differs from a permanent one. **Deliberately not applied to the conductor's other refusals**: REA's flag exists for MCP clients that are programs and branch on a field, but the consumer of every tool result here is the model, which reads the sentence, and those sentences already say what to do next (`Refused, and retrying will not help: ...`, `That call failed: ...`, "ask the person to open a machine"). Converting about 25 hand-written refusals to a structured shape would change text that tests and prompts quote and buy no behaviour. Reopen it if a program, not a model, ever consumes a tool result |
 | The `_clip` question (item 5) | `scan.format_scan`, `docs/04` §3.0.6, `tests/test_scan_report_fits.py` | Measured with the real profiles: a scan with hits in about 20 rules was 14,000 characters and `_clip` dropped the coverage line, the stop line and the next step. The report is now built to fit under 11,000, puts coverage and the stop reason **before** the findings, and names the rule groups it held back |
-| The rules REA's installation checks keep (item 6) | `locate_ghidra`, `docs/04` §3.0.7 | A relative path is never executed, a configured location is authoritative even when invalid, a missing tool is a named failure; `make doctor` reports the install |
+| The rules REA's installation checks keep (section 5 item 6) | `locate_ghidra`, `docs/04` §3.0.7 | A relative path is never executed, a configured location is authoritative even when invalid, a missing tool is a named failure; `make doctor` reports the install |
 
 **Not built, and said so.**
 

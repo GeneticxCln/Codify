@@ -83,6 +83,13 @@ The conductor's `search_code` and `scan_code` pass `cancel_signal(goal_id)`. Wit
 single `communicate(timeout=...)` it always was. Pinned in `tests/test_regex_worker_cancel.py` and, for the
 conductor's wiring, `tests/test_scan_tool.py`.
 
+**An external tool is located, never assumed.** `analyze_binary`'s Ghidra is the one external analyser the engine
+starts. `GHIDRA_INSTALL_DIR`, when set, is authoritative and must be an absolute path: a configured location that does
+not hold the expected files is a named failure, never a reason to look elsewhere, and a relative path is never
+executed. A missing tool is a named failure with its install instruction (`make doctor`), never a silent skip and
+never a substitute the model chose (`docs/14` §5 item 6, `docs/04` §3.0.7). The other guarded sites are engine-owned
+binaries or a person's own shell, not a tool a model can point at.
+
 ### The guarded spawn sites
 
 One table in the code (`tests/test_no_unguarded_spawns.py::GUARDED_SPAWN_SITES`)
@@ -304,13 +311,16 @@ two clients acting on one view of a goal. It is also what makes every client —
 the chat, the CLI, and this suite — a fetch-then-act: read a version, then act on
 it. Anything that moves the goal in between is a race the caller can lose, and the
 engine reports the loss in exactly two ways, with a third answer that is not a
-race at all:
+race at all. One racer is not a version move but a **driver claim**: `apply` and a
+step retry both claim the goal's driver in the request handler, before their work is
+spawned, so the loser is answered `driver_busy` now instead of by a background task
+that would have reported "already driving" as the goal's failure:
 
 | Answer | Meaning | Correct response |
 |---|---|---|
 | `409 version_conflict` | the version moved; the intent did not | re-read, re-send |
 | `409 illegal_status` | the *status* moved | the act may already be in place, or the goal went somewhere the act cannot follow |
-| any other refusal (`plan_only`, `not_dry_run`, `nothing_to_apply`, `goal_in_progress`, `step_not_pending`) | a premise error: the request cannot succeed as written | raise at once, with the body |
+| any other refusal (`plan_only`, `not_dry_run`, `nothing_to_apply`, `goal_in_progress`, `driver_busy`, `step_not_pending`) | a premise error: the request cannot succeed as written | raise at once, with the body |
 
 ### 6.1 The audit
 

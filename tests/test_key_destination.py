@@ -62,7 +62,12 @@ class TestWhereAKeyMayGo(unittest.TestCase):
                 self.assertIsNotNone(key_destination_problem(url))
 
     def test_things_that_are_not_http_endpoints_at_all_are_not(self) -> None:
-        for url in ("", "ftp://example.test", "file:///etc/passwd", "example.test", "http://", "https://"):
+        for url in (
+            "", "ftp://example.test", "file:///etc/passwd", "example.test", "http://", "https://",
+            # Text the URL parser itself refuses. It used to raise ValueError
+            # out of a function whose whole contract is "a reason, or None".
+            "http://[::1", "https://example.test:not-a-port",
+        ):
             with self.subTest(url=url):
                 self.assertIsNotNone(key_destination_problem(url))
 

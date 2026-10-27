@@ -101,8 +101,9 @@ Illegal transition → `409` `illegal_status`.
 
 **A terminal status is final, with two documented exceptions.** `GoalService.update_status` refuses to move a
 goal out of `COMPLETED`, `FAILED` or `CANCELLED` — except `COMPLETED → RUNNING` and `FAILED → RUNNING`, which
-are how `POST /goals/{id}/apply` and the step retry re-open a finished goal. Nothing re-opens `CANCELLED`:
-retry, apply and start all refuse it. Repeating the status a goal already has is not a move. This is the
+are how `POST /goals/{id}/apply` and the step retry re-open a finished goal, and apply refuses a goal whose
+`plan_only` is set even when it is `COMPLETED`: enabling execution is the switch that lets the stored proposals
+be written. Nothing re-opens `CANCELLED`: retry, apply and start all refuse it. Repeating the status a goal already has is not a move. This is the
 rule that keeps a runner that finishes after a Cancel from undoing it: `run_chat` used to end with an
 unconditional `COMPLETED` that overwrote `CANCELLED` and published the reply anyway (audit of 2026-09-29,
 M1). Alongside it, `ExecutorService._set_status` is a quiet no-op on a cancelled goal (so a runner that lost
@@ -130,7 +131,10 @@ the goal could not run again while its log said to retry it (`ExecutorService._f
 applies to any failure raised with no step.
 
 **One driver per goal, held for the whole run** (review of 2026-09-29, finding 2). `run_chat` and `run_planning`
-claim the goal's driver (`claim_driver`) for as long as they run, as `start`, `retry` and `apply` already did.
+claim the goal's driver (`claim_driver`) for as long as they run, as `start` and `retry` already did. `apply` now claims
+in the request handler too, before it spawns the work: the guards used to run and *then* the coroutine claimed, so two
+requests could both pass and the loser's `driver_busy` was reported by `_spawn` as a goal failure while the winner was
+still writing. The claim is released in the coroutine's `finally`, so a failure after the claim cannot strand it.
 The conductor's `plan` move leaves the goal `PENDING` while the turn goes on to write its answer, and `PENDING` is
 what Start accepts — so without the claim, Start then began a second driver on a goal whose turn was still going
 (two conductors writing the same steps, the turn's own `write` gate opening the moment the status read `RUNNING`),
@@ -527,7 +531,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/workspaces/{id}/files?limit=` | `limit` 1–10 000, default 5 000 | `{files, truncated, limit}`, plus `non_utf8_names` only when it is not zero (names that are not valid UTF-8 text, left out and counted; the route is sent with `response_model_exclude_defaults=True`, so an ordinary workspace's body is byte-identical) — every file path under the root, sorted, skipping `SKIP_DIRS` and links out of the workspace. See §3.0.3 and §4.0 |
 | `GET` | `/workspaces/{id}/file?path=` | — | `{path, content, version, size}`. 400 `file_escape` / `workspace_protected`, 404 `file_missing`, 422 `file_binary` / `file_not_text` / `file_too_large` / `file_access`. See §3.0.3 |
 | `PUT` | `/workspaces/{id}/file` | `{path, content, base_version}` extra=forbid | `{path, version, size}` — **a person's Save, the one writer besides the fixer** (`00` §6.9). Replaces a file that exists; never creates or deletes one. 409 `file_changed` (carries `current_version`) when the file is not the version that was opened; the same 400/404/422 refusals as the read. Refused means untouched. Commits nothing |
-| `DELETE` | `/workspaces/{id}?delete_goals={bool}` | — | forgets the folder; **never touches `root_path`**. 409 `workspace_not_empty` (with the goal count) unless the cascade is requested, 409 `workspace_has_active_goals` if anything is PLANNING/RUNNING |
+| `DELETE` | `/workspaces/{id}?delete_goals={bool}` | — | forgets the folder; **never touches `root_path`**. 409 `workspace_not_empty` (with the goal count) unless the cascade is requested, 409 `workspace_has_active_goals` if anything is PLANNING/RUNNING **or a live driver holds it** — a turn's `plan` move leaves the goal PENDING while its conductor still runs, so the status column alone was not enough |
 | `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, mode?, provider?, model?, trace?}` extra=forbid — `mode` is `"normal"` \| `"design"` (`04` §4.0a.2) \| `"knowledge"` (`04` §4.9); `trace` records the run's model calls (`04` §8) | `Goal` |
 | `GET` | `/goals` | query: `workspace_id?`, `status?`, `limit` (1–200, default 50), `offset` | `Goal[]` — active goals first, then newest |
 | `GET` | `/goals/{id}` | — | `Goal` + `steps: PlanStep[]` |
@@ -540,7 +544,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/goals/{id}/events?after={seq}` | — | `Event[]` where `sequence > after` |
 | `GET` | `/goals/{id}/usage` | — | token totals + `parallel_peak`/`parallel_waves` (from `usage` events) |
 | `GET` | `/goals/{id}/audit` | — | the goal's audit document (plan edits, fallbacks, fix retries, errors, outcomes, usage, silent roles) |
-| `POST` | `/goals/{id}/apply` | `{expected_version}` | replays a completed dry-run's stored proposals for real |
+| `POST` | `/goals/{id}/apply` | `{expected_version}` | replays a completed dry-run's stored proposals for real. 409 `plan_only` (enable execution first), `not_dry_run`, `illegal_status`, `version_conflict`, `nothing_to_apply`, `driver_busy`. The driver is **claimed before the response**, so a duplicate Apply, or a Retry racing it, is refused instead of failing the run it could not start. The status moves in the background; the response is not a read of the goal |
 | `POST` | `/goals/{id}/enable-execution` | `{expected_version}` | lifts the `plan_only` guard (`Goal`) |
 | `GET` | `/goals/{id}/trace` | — | the recording's summary: `calls`, `by_role`, `prompts_kept`, `recording_error`, and `recorded[]` (`seq`, `role`, `model`, `prompt_hash`, tokens, `duration_ms`). Never the prompt text — that is a deliberate second step, not something a panel opens on load (`04` §8). 404 `unknown_goal` |
 | `PUT` | `/goals/{id}/trace` | `{enabled}` extra=forbid | `Goal`. 409 `trace_locked` when enabling a goal that is no longer PLANNING — a recording that starts halfway is a trace of half a run. Disabling is always allowed |
@@ -1940,7 +1944,10 @@ Refused: the fixer's file path and content, in `fs.apply` phase one (§4.2), the
 command of `run_in_machine` (above), and a request body the person sent to `PUT /settings/engine` or
 `POST /stats/import`: it is their own text, kept and echoed, so a lone surrogate anywhere in it is a 422
 `invalid_value` naming the top-level key, and nothing is stored (before, a setting earlier in the body was saved and
-the answer then could not be written, a 500).
+the answer then could not be written, a 500). The identifiers and endpoint fields of the other request bodies are
+bounded for the same reason (`workspace_id`, `conversation_id`, `parent_id`, a goal's `provider`/`model`, an agent's
+`base_url`/`fallback_base_url`): a plain `str` accepts a lone surrogate, and the request then either cannot bind it
+to SQLite or cannot write it into the response, so it is an `invalid_request` 422 before a row or a setting changes.
 
 The handler **reads its socket as well as writing it**, and a client that leaves ends the handler at
 once. It used to write only, so a departed client was noticed when a `send` failed — which a goal with
@@ -1949,8 +1956,10 @@ on each terminal status) left a poller re-reading the goal four times a second f
 CPU went 0.2 % → 3.6 % → 7.0 % → 13.9 % of a core over 50, 200 and 500 views, until restart (audit of
 2026-09-29, M9; `tests/test_ws_goal_lifecycle.py`). Frames a client sends are ignored. Close codes the
 client may act on: `4401` bad token, `4404` no such goal (checked only *after* auth, so an
-unauthenticated peer cannot probe ids). Neither changes by asking again, so `ui/src/goalStream.ts`
-treats both as final — no reconnect, `onGone(code)` — while any other close reconnects with backoff.
+unauthenticated peer cannot probe ids). `4404` cannot change by asking again, so `ui/src/goalStream.ts`
+treats it as final (`onGone(4404)`, no reconnect). `4401` can: a restarted engine may come back on the same port
+with a new token, and every `connect()` re-reads `getEngineInfo()`, so the stream backs off and retries with the fresh
+pair instead of leaving a goal dead for the life of the window. Any other close reconnects with backoff too.
 The backoff counter resets only after a connection has stayed open for the stability window
 (`STABLE_CONNECTION_MS`, 10 s, in `ui/src/goalStream.ts`), not on open, because the engine accepts the upgrade
 before it authenticates and replays the log from 0, so an open that dies right after (1011, 1006) would
@@ -1995,7 +2004,7 @@ that wants one must take the proof rule above, timer included.) The app re-reads
 `onConnected` that follows any `onReconnecting` (every close counts, a rejected socket as much as a lost one),
 once per run of closes; at mount nothing has closed, so a healthy start does not re-read (docs/06 §6).
 
-One frame exists today:
+Two frames exist today:
 
 | frame | payload | when |
 |---|---|---|

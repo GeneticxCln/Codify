@@ -15,14 +15,14 @@
 
 ```python
 def validate_local_base_url(url: str) -> None:
-    parsed = urlparse(url)
-    if parsed.hostname not in ("127.0.0.1", "localhost"):
-        raise ValueError("Local provider base_url must point at localhost")
+    parsed = _parse_base_url(url)  # None for text the URL parser refuses
+    if parsed is None or not _is_loopback_host(parsed.hostname or ""):
+        raise ProviderError("invalid_base_url", "Local provider base_url must point at localhost")
     if parsed.scheme != "http":
-        raise ValueError("Local provider must use http (loopback only)")
+        raise ProviderError("invalid_base_url", "Local provider must use http (loopback only)")
 ```
 
-Without this, a malicious or careless `base_url` could turn Coder/Tester/etc. into an SSRF vector against internal network services.
+Without this, a malicious or careless `base_url` could turn Coder/Tester/etc. into an SSRF vector against internal network services. `_parse_base_url` is total: `urlparse` raises on an unmatched bracket and `.port` on an out-of-range one, and those are user input in a settings body, so each is the same `invalid_base_url` refusal rather than a `ValueError` escaping the route as a 500.
 
 **The other direction: a stored key follows the URL.** That guard covers the `ollama` protocol only, so
 for a long time `PUT /settings/agents/scribe {"provider": "openai", "base_url": "http://10.0.0.5:8080"}`
@@ -387,5 +387,22 @@ What is left of the 1 s is the two sweeps (`_load_stats`, `_load_metrics`, about
 | `max_calls_per_goal` | Not on `AgentConfig`. Tester: at most one argv run + one verdict call per step attempt. |
 | SQLite path | `~/.codify/codify.db` — or `CODIFY_DB` / `CODIFY_HOME`, resolved in `engine/home.py` only. |
 | Redirected run | Never touches the real keychain (`04` §2.0). |
+
+### 4.1 Operational gaps left open
+
+These are behaviours the 2026-10-27 audit changed *towards* a safer answer but did not make instantaneous
+or absolute. They are written down so the next reader does not mistake a documented limit for an oversight.
+
+- **Apply answers before the goal moves.** The route claims the driver synchronously, which is what makes a
+duplicate Apply or a racing Retry a `409 driver_busy` instead of a failed goal. The goal's status and version
+still move in the background task, so `{"applied": true}` is a claim, not a read: follow the goal stream or
+`GET /goals/{id}` when the state itself matters.
+- **A refused token heals on a retry, not at once.** `goalStream` now retries `4401` with backoff and re-reads
+`getEngineInfo()` on every attempt, because a restarted engine can return on the same port with a new token.
+The token the shell exposes is refreshed by the App's health probe (about every 3 s), so recovery can take one
+backoff step longer than the probe. A `4404` is still final: no such goal does not become one by asking again.
+- **An address is validated for shape, not reachability.** A malformed base URL is now a `4xx` instead of a
+parser exception escaping as `500`, but a well-formed address that nothing answers is still saved and reports its
+failure on the first request. Validation does not make a network call, by design: Settings must work offline.
 
 Argv table, WS/auth handshake, HTTP catalog: `04`.

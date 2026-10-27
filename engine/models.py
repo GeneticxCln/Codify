@@ -301,7 +301,7 @@ class AgentConfigUpdate(BaseModel):
     protocol: ProviderProtocol | None = None
     model_name: str | None = Field(None, max_length=128)
     api_key: str | None = Field(None, min_length=1, max_length=4096)
-    base_url: str | None = None
+    base_url: str | None = Field(None, max_length=2048)
     system_prompt_override: str | None = Field(None, max_length=SYSTEM_PROMPT_OVERRIDE_MAX)
     temperature: float | None = Field(None, ge=0.0, le=2.0)
     max_tokens: int | None = Field(None, gt=0, le=200000)
@@ -316,7 +316,7 @@ class AgentConfigUpdate(BaseModel):
     )
     fallback_model_name: str | None = Field(None, max_length=128)
     fallback_protocol: ProviderProtocol | None = None
-    fallback_base_url: str | None = None
+    fallback_base_url: str | None = Field(None, max_length=2048)
 
 
 class Workspace(BaseModel):
@@ -442,9 +442,13 @@ class ConversationCreate(BaseModel):
     """
 
     model_config = {"extra": "forbid"}
-    workspace_id: str
+    # Bounded here as well as at the table, because a lone surrogate in an id is
+    # accepted by a plain `str` and then cannot be bound to SQLite: the request
+    # used to reach the driver and answer 500. Every id the engine issues is a
+    # UUID, so this is a ceiling, not a shape the API relies on.
+    workspace_id: str = Field(..., min_length=1, max_length=64)
     title: str = Field("", max_length=20000)
-    parent_id: str | None = None
+    parent_id: str | None = Field(None, max_length=64)
 
 
 class ConversationUpdate(BaseModel):
@@ -722,17 +726,17 @@ class GoalConversationUpdate(BaseModel):
     """
 
     model_config = {"extra": "forbid"}
-    conversation_id: str = Field(..., min_length=1)
+    conversation_id: str = Field(..., min_length=1, max_length=64)
 
 
 class GoalCreate(BaseModel):
     model_config = {"extra": "forbid"}
-    workspace_id: str
+    workspace_id: str = Field(..., min_length=1, max_length=64)
     # Which thread to append this run to. Optional, and a *known* field: the
     # `extra: "forbid"` above is invariant 2 (docs/00 §6.2) and adding a field
     # the API actually accepts does not weaken it — `agent_config` and anything
     # else unlisted are still refused.
-    conversation_id: str | None = None
+    conversation_id: str | None = Field(None, max_length=64)
     # Chat UIs send the whole prompt as `title`; accept up to the description
     # cap and let GoalService.split_title_description normalize it down to a
     # 200-char title. The Goal model (storage/response) still enforces 200.
@@ -765,8 +769,11 @@ class GoalCreate(BaseModel):
     # later with `PUT /goals/{id}/trace` before the run starts; both are the
     # user asking for a recording they can delete.
     trace: bool = False
-    provider: str | None = None
-    model: str | None = None
+    # Recorded on the goal and read back into a JSON response, so these carry
+    # the settings' own caps: a plain `str` accepts a lone surrogate, which no
+    # response can encode.
+    provider: str | None = Field(None, max_length=64)
+    model: str | None = Field(None, max_length=128)
 
 
 class ProviderKeyUpdate(BaseModel):

@@ -495,8 +495,16 @@ class _Reply:
 
 
 def _host_header(target: Target) -> str:
+    """The `Host` header, with a port only when it is not the default *for this scheme*.
+
+    Omitting every 80 or 443 was wrong for the cross-scheme spellings the
+    allowlist admits: `http://host:443` is a non-default port and needs it in
+    `Host`, and so does `https://host:80`. RFC 9110 makes the default depend on
+    the scheme, not on the number alone.
+    """
     shown = f"[{target.host}]" if ":" in target.host else target.host
-    return shown if target.port in (80, 443) else f"{shown}:{target.port}"
+    default = 443 if target.scheme == "https" else 80
+    return shown if target.port == default else f"{shown}:{target.port}"
 
 
 def _type_name(content_type: str) -> str:

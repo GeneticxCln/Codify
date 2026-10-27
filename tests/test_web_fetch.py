@@ -724,6 +724,27 @@ class TestWhatTheRequestIs(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen[0].headers["host"], "docs.example:8080")
         self.assertEqual(seen[0].url.port, 8080)
 
+    async def test_80_and_443_are_default_only_for_their_own_scheme(self) -> None:
+        """`http://host:443` and `https://host:80` still name their port.
+
+        The allowlist admits both numbers on both schemes, and `Host` used to omit
+        either number wherever it appeared. A virtual host listening on 443 for
+        plain http then received a `Host` for port 80.
+        """
+        for url, wanted in (
+            ("http://docs.example:443/", "docs.example:443"),
+            ("https://docs.example:80/", "docs.example:80"),
+        ):
+            with self.subTest(url=url):
+                seen: list[httpx.Request] = []
+                await get(url, recording(seen), table={"docs.example": [PUBLIC]})
+                self.assertEqual(seen[0].headers["host"], wanted)
+
+        # And the ordinary spelling still carries no redundant port.
+        seen = []
+        await get("https://docs.example/", recording(seen), table={"docs.example": [PUBLIC]})
+        self.assertEqual(seen[0].headers["host"], "docs.example")
+
     async def test_nothing_about_the_person_or_the_workspace_is_sent(self) -> None:
         seen: list[httpx.Request] = []
         await get("https://docs.example/", recording(seen))

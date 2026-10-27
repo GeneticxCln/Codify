@@ -40,8 +40,9 @@ serving optimisation is portable **only** if it changes what is sent, or what is
 **cmux is a terminal for other people's agents**: a Ghostty-based macOS app whose additions are vertical tabs, split
 panes, an in-app browser, an inbox fed by terminal escape sequences and agent hooks, and a CLI plus socket API over all
 of it. Codify's shell already has the tabs, the splits, a real PTY, a browser the model may read and move, an editor, a
-jailed machine, and an inbox (`docs/09` §10.18). So the overlap is large and the honest gap is one thing: **the terminal
-pane is deaf.** A program running in it can ask for attention in the standard way and nothing here hears it.
+jailed machine, and an inbox (`docs/09` §10.18). So the overlap is large and the honest gap was one thing: **the terminal
+pane was deaf.** A program running in it could ask for attention in the standard way and nothing here heard it. It is
+built now (§6 item 1).
 
 ## 3. DeepInfer: the table
 
@@ -52,9 +53,9 @@ pane is deaf.** A program running in it can ask for attention in the standard wa
 | DSpark / confidence-scheduled verification (speculative decoding) | **Refused** | Decoding happens on the other side of the wire |
 | Asynchronous batch scheduler | **Refused** | There is no batch here: one role call is one request, and the provider batches it or does not |
 | Batch-invariant inference | **Refused, and the claim it protects is already policy** | No client can hold a hosted model to it; `docs/08` §6 already says a number from a hosted model is a sample and repeats are the only honest answer |
-| **SWA bounded replay** | **Taken as an idea, not as code** | Replaying a *bounded suffix* rather than everything is the right shape for the conductor's growing transcript — plan item 4 |
+| **SWA bounded replay** | **Taken as an idea, and built as `bound_replay`** — §6 item 4 | Replaying a *bounded suffix* rather than everything is the right shape for the conductor's growing transcript; `bound_replay` in `engine/conductor.py` drops the oldest tool results first and never a person's or the model's own words |
 | **Deterministic sampling** (fixed `seq_seed`) | **Refused** | A seed is a request, not a guarantee: a hosted provider may ignore it, and on a local server batching can change the result anyway — which is why DeepInfer ships *batch-invariant inference* as a separate feature. `docs/08` §6 already answers a number that moves: repeat the run |
-| **Structured outputs** (regex / JSON schema / EBNF) | **JSON schema taken** where the endpoint advertises it — plan item 5; regex and EBNF refused | Every role already answers JSON by contract, and `providers.py` already asks for `json_object` where a server admits to supporting it. The next rung is the actual schema. A grammar is a second language to maintain for replies that are already objects |
+| **Structured outputs** (regex / JSON schema / EBNF) | **JSON schema taken, and built** — §6 item 5; regex and EBNF refused | Every role already answers JSON by contract, and `providers.py` asks for the role's own schema where a model advertises `json_schema`, one rung down at `json_object` where it does not. A grammar is a second language to maintain for replies that are already objects |
 | **KV-cache retention measured in days** (deployment Q&A) | **Taken, and built** — items 6–7 | The client-side analogue is prompt caching: a stable prefix is cheaper and faster when the provider reports a hit. This reopened `docs/15`'s cache row: the adapters had to read cache token counts (item 6) before a prefix could be repaid (item 7) |
 | "Required for a complete inference service (not included in this release)" | **Already the house style** | `docs/12` §4, `13` §5, `14` §6 and `15` §5 all state what is missing rather than only what works |
 | Benchmark provenance: the GPU count, one scale-up domain, and the script that reproduces it | **Already the house style** | `docs/08` §6 and §8 — what a number may claim, and the setup that lets someone else rebuild it |
@@ -68,10 +69,10 @@ which is what `docs/15`'s `audit_usage` already measures, in tokens, from events
 
 | What it does | Here | Why |
 |---|---|---|
-| **OSC 9 / 99 / 777 terminal notifications**, plus `cmux notify` and agent hooks | **Taken, and built** — §6 item 1 | The standard escape sequences are data a program emits, not a capability it gains. Nothing in `terminal.rs` reads an OSC sequence today: the bytes go to xterm and stop there |
-| **Notification panel, unread badges, jump to the most recent unread** | **Partly taken** — plan item 2 | The inbox, its unread count and the per-tab unread dot already exist (`docs/09` §10.18). What is missing is a way to the newest one that is about something (the palette), and the latest line beside the project name |
+| **OSC 9 / 99 / 777 terminal notifications**, plus `cmux notify` and agent hooks | **Taken, and built** — §6 item 1 | The standard escape sequences are data a program emits, not a capability it gains. Before this, the bytes in `terminal.rs` went to xterm unchanged; `OscScan` now reads one out as an inbox entry and still passes it through |
+| **Notification panel, unread badges, jump to the most recent unread** | **Taken, and built** — §6 item 2 | The inbox, its unread count and the per-tab unread dot already existed (`docs/09` §10.18); this added the palette's `Needs you` row, which opens the newest unread, and the latest line beside the project name |
 | Notification *rings* around panes | **Refused** | Decoration on state the tab strip and the inbox already show |
-| Sidebar metadata: git branch, PR status/number, cwd, listening ports, latest notification | **Partly taken** — items 2 and 3 | Branch and dirty count are a read of the workspace's own git, through the existing read-only table, and are shown on the panel header's project line. PR status needs a GitHub token and a request that leaves the machine; listening ports need the process table outside the workspace |
+| Sidebar metadata: git branch, PR status/number, cwd, listening ports, latest notification | **Partly taken, and the branch half is built** — §6 items 2 and 3 | Branch, dirty count and ahead/behind are a read of the workspace's own git, through the existing read-only table, and are shown on the panel header's project line. PR status needs a GitHub token and a request that leaves the machine; listening ports need the process table outside the workspace |
 | In-app browser beside the terminal, with a scriptable API | **Already built** | `docs/09` §7.2–7.5, and `navigate_page`/`click_page`/`type_page` behind a setting |
 | Snapshot the accessibility tree, click by element ref, read console and network | **Not now** — item 8, as a decision | Clicking by role and name beats guessing selectors; it also needs a rule about what a snapshot may contain (never a field's value) that this repository would have to own |
 | Vertical tabs, horizontal/vertical splits | **Already built** | `docs/09`, and §12 for the paired pane |
@@ -306,8 +307,9 @@ sequence at a time (kitty's chunked and base64 forms are refused rather than hal
 - **The borrowed ideas are ordinary.** Notifications from escape sequences, bounded transcript replay, JSON-schema
   replies and cache accounting are not inventions of either project; they are the ideas those two put in front of us
   in a form worth copying into our own words.
-- **The plan is a proposal.** Every item still owes its own doc update, its own test, and its own decision about what
-  it refuses.
+- **The plan was a proposal, and items 1–7 are built.** Each one has its own doc update and test; items 8 and 9 are
+  recorded decisions, not code. The limits listed in §6's status stand, including the two that were not verified
+  against a live provider here.
 
 ## 9. If a row is reopened
 

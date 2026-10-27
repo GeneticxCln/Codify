@@ -274,17 +274,30 @@ class _Steps(_Design):
             return
         self._set_step(goal_id, step, "COMPLETED")
 
-    async def apply_goal(self, goal_id: str) -> Goal:
+    async def apply_goal(self, goal_id: str, *, driver_claimed: bool = False) -> Goal:
         """Replay a completed dry-run's proposed changes for real.
 
         Writes the exact file contents the fixer proposed (no new LLM fixer
         calls), then re-runs verifier/critic/scribe per step as a normal
         execution, committing as it goes.
+
+        `driver_claimed` exists for the HTTP route, which claims the driver
+        **synchronously** before spawning this coroutine. Without that, two
+        Apply requests (or Apply and a step Retry) both passed the route's
+        guards, and the loser's `driver_busy` surfaced through `_spawn` as a
+        failure that marked the goal FAILED while the winner was still working.
+        The route owns the release contract in that case; this method still
+        releases in `finally`, so a failed setup cannot strand the claim.
         """
         goal = self.goals.get(goal_id)
+        if goal.plan_only:
+            raise ApiError(
+                409, "plan_only",
+                "goal is plan-only; enable execution first via /goals/{id}/enable-execution",
+            )
         if goal.status not in ("COMPLETED", "FAILED"):
             raise ApiError(409, "illegal_status", f"cannot apply from {goal.status}")
-        if not self.claim_driver(goal_id):
+        if not driver_claimed and not self.claim_driver(goal_id):
             raise ApiError(409, "driver_busy", "another driver is already running this goal")
         try:
             return await self._apply_goal_locked(goal_id)

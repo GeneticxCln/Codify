@@ -37,6 +37,16 @@ class TestLocalBaseUrl(unittest.TestCase):
                 with self.assertRaises(ProviderError):
                     validate_local_base_url(url)
 
+    def test_text_the_url_parser_cannot_read_is_a_refusal_not_a_crash(self) -> None:
+        # `urlparse` raises on an unmatched bracket and `.port` on an
+        # out-of-range one. Both are user input from Settings, and both used to
+        # escape this function as a ValueError (a 500 from the route).
+        for url in ("http://[::1", "http://127.0.0.1:99999", "http://127.0.0.1:not-a-port"):
+            with self.subTest(url=url):
+                with self.assertRaises(ProviderError) as caught:
+                    validate_local_base_url(url)
+                self.assertEqual("invalid_base_url", caught.exception.code)
+
 
 if __name__ == "__main__":
     unittest.main()

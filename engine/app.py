@@ -1379,8 +1379,15 @@ def _clean_engine_string(key: str, value: Any) -> str:
     if key in SLUG_SETTINGS and text and not PROVIDER_SLUG_RE.match(text):
         raise ApiError(422, "invalid_value", f"{key} is not a provider slug")
     if key in URL_SETTINGS and text:
-        parsed = urlparse(text)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        # `urlparse` raises on an unmatched bracket and `hostname` on the same
+        # input; a settings body is user input, so a malformed address is a 422
+        # here, not a 500 from a parser exception nobody named.
+        try:
+            parsed = urlparse(text)
+            valid_url = parsed.scheme in ("http", "https") and bool(parsed.hostname)
+        except ValueError:
+            valid_url = False
+        if not valid_url:
             raise ApiError(422, "invalid_value", f"{key} must be an http(s) address, such as http://127.0.0.1:8000/v1")
     if key == "web_fetch_hosts":
         # Stored in the one spelling the fetch reads, and refused rather than repaired when an entry is not a
@@ -1655,7 +1662,12 @@ async def delete_ws(
       used to produce.
     """
     workspaces: WorkspaceService = request.app.state.workspaces
-    return workspaces.delete(workspace_id, delete_goals=delete_goals)
+    executor = getattr(request.app.state, "executor", None)
+    return workspaces.delete(
+        workspace_id,
+        delete_goals=delete_goals,
+        is_driving=executor.is_driving if executor is not None else None,
+    )
 
 
 @app.post("/conversations", response_model=Conversation)
@@ -2721,13 +2733,26 @@ async def apply_goal(goal_id: str, body: VersionedAction, request: Request) -> d
     returned success unconditionally, so "apply" on a goal with nothing
     proposed looked like it worked and quietly did nothing.
 
-    `expected_version` closes the double-apply window: applying flips the
-    goal's version (stored proposals are cleared, status moves), so a second
-    apply from a client that planned against the pre-apply view must 409, not
-    re-run — two applies would mark a healthy goal FAILED via the guard below.
+    `expected_version` catches a client answering from a stale view, and the
+    **synchronous driver claim below** is what actually closes the double-apply
+    window. The version alone was not enough: the background task had not moved
+    the goal yet, so two requests could both pass every guard, and the loser's
+    `driver_busy` reached `_spawn` as a failure that marked the healthy apply
+    FAILED. A step Retry on the same FAILED dry run could race it the same way.
+
+    The stored proposals are deliberately kept after a run: they are the audit
+    record of exactly what was reviewed, and `dry_run=False` is what refuses a
+    second apply.
     """
     goals = request.app.state.goals
+    executor: ExecutorService = request.app.state.executor
     g = goals.get(goal_id)
+    if g.plan_only:
+        raise ApiError(
+            409,
+            "plan_only",
+            "goal is plan-only; enable execution first via /goals/{id}/enable-execution",
+        )
     if not g.dry_run:
         raise ApiError(409, "not_dry_run", "only dry-run goals can be applied")
     if g.status not in ("COMPLETED", "FAILED"):
@@ -2736,7 +2761,11 @@ async def apply_goal(goal_id: str, body: VersionedAction, request: Request) -> d
         raise ApiError(409, "version_conflict", "version mismatch", {"current": g.model_dump()})
     if not goals.has_proposed_files(goal_id):
         raise ApiError(409, "nothing_to_apply", "dry-run produced no proposed changes")
-    _spawn(request.app, request.app.state.executor.apply_goal(goal_id), goal_id)
+    # Claimed here, not in the spawned task: the request that cannot run must be
+    # refused now, and the winner must own the goal before this handler returns.
+    if not executor.claim_driver(goal_id):
+        raise ApiError(409, "driver_busy", "another driver is already running this goal")
+    _spawn(request.app, executor.apply_goal(goal_id, driver_claimed=True), goal_id)
     return {"applied": True, "goal_id": goal_id}
 
 

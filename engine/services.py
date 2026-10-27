@@ -711,7 +711,13 @@ class WorkspaceService:
             return ApiError(422, "file_access", f"{label} could not be read or written: {exc.detail}")
         raise exc
 
-    def delete(self, workspace_id: str, *, delete_goals: bool = False) -> dict[str, Any]:
+    def delete(
+        self,
+        workspace_id: str,
+        *,
+        delete_goals: bool = False,
+        is_driving: Callable[[str], bool] | None = None,
+    ) -> dict[str, Any]:
         """Forget a workspace, and optionally the goal history recorded against it.
 
         Only Codify's records are removed. The directory at `root_path` is never
@@ -738,22 +744,35 @@ class WorkspaceService:
                 {"goals": goals, "workspace_id": workspace_id},
             )
         if goals:
-            # Refuse while anything is still in flight: a PLANNING or RUNNING
-            # goal has a live coroutine that will keep publishing events for a
-            # row that no longer exists. Cancel it first.
+            # Refuse while anything is still in flight. The status query alone
+            # was not enough: a turn's `plan` move leaves the goal PENDING while
+            # its conductor is still running, and the goal-delete route already
+            # consults the executor's live driver set for exactly that case.
+            # Deleting the row under that coroutine leaves it publishing events
+            # for a goal that no longer exists.
             live = self._db.execute(
                 """SELECT id, title, status FROM goals
-                   WHERE workspace_id = ? AND status IN ('PLANNING', 'RUNNING')
-                   LIMIT 1""",
+                   WHERE workspace_id = ?
+                   ORDER BY created_at ASC, id ASC""",
                 (workspace_id,),
-            ).fetchone()
-            if live is not None:
-                phase = "planning" if live["status"] == "PLANNING" else "running"
+            ).fetchall()
+            blocked = next(
+                (
+                    row for row in live
+                    if row["status"] in ("PLANNING", "RUNNING")
+                    or (is_driving is not None and is_driving(row["id"]))
+                ),
+                None,
+            )
+            if blocked is not None:
+                phase = "planning" if blocked["status"] == "PLANNING" else "running"
+                if blocked["status"] not in ("PLANNING", "RUNNING"):
+                    phase = "still being worked on"
                 raise ApiError(
                     409, "workspace_has_active_goals",
-                    f"goal {live['title']!r} is still {phase}; "
+                    f"goal {blocked['title']!r} is {phase}; "
                     "cancel it before deleting its workspace",
-                    {"goal_id": live["id"], "workspace_id": workspace_id},
+                    {"goal_id": blocked["id"], "workspace_id": workspace_id},
                 )
             events = self._db.execute(
                 """SELECT count(*) FROM events

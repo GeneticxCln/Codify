@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import httpx
 from httpx import ASGITransport
@@ -23,7 +24,7 @@ from engine.laya import GateCall, LayaDecision, LayaService
 from engine.models import ROLES, AgentConfig, AgentConfigUpdate, Goal
 from engine.providers import BaseProvider, Keychain, ProviderFactory
 from engine.sandbox import SandboxService
-from engine.services import AgentRegistryService, GoalService, WorkspaceService
+from engine.services import AgentRegistryService, ApiError, GoalService, WorkspaceService
 from tests.versioned import post_versioned_async
 
 PROPOSED = "hello from a dry run\n"
@@ -129,10 +130,15 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
         workspace_id: str = r.json()["id"]
         return workspace_id
 
-    async def _mk_goal(self, ws_id: str, *, dry_run: bool) -> dict[str, Any]:
+    async def _mk_goal(
+        self, ws_id: str, *, dry_run: bool, plan_only: bool = False
+    ) -> dict[str, Any]:
         r = await self.client.post(
             "/goals",
-            json={"workspace_id": ws_id, "title": "Add banner", "description": "d", "dry_run": dry_run},
+            json={
+                "workspace_id": ws_id, "title": "Add banner", "description": "d",
+                "dry_run": dry_run, "plan_only": plan_only,
+            },
             headers=self.headers,
         )
         self.assertEqual(r.status_code, 200, r.text)
@@ -199,6 +205,138 @@ class TestApplyFlow(unittest.IsolatedAsyncioTestCase):
 
         # Every step ran for real: no step may be left PENDING.
         self.assertTrue(all(s.status == "COMPLETED" for s in self.goals.steps(goal_id)))
+
+    async def test_apply_refuses_a_goal_switched_back_to_plan_only(self) -> None:
+        """`plan_only` is an execution switch, and Apply must read it too.
+
+        `_replay_files` writes through `fs.apply` directly instead of the fixer's
+        `_write_allowed` gate, so without this guard a dry run that was switched
+        back to plan-only still wrote every stored proposal. The route refuses it
+        and the executor refuses it again for any caller that reaches it directly.
+        """
+        _, goal_id = await self._run_dry_run()
+        self.goals.set_plan_only(goal_id, True)
+        version = self.goals.get(goal_id).version
+
+        r = await self.client.post(
+            f"/goals/{goal_id}/apply", headers=self.headers,
+            json={"expected_version": version},
+        )
+
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()["code"], "plan_only")
+        self.assertFalse((self.ws_dir / "banner.txt").exists(), "a plan-only goal wrote a file")
+        self.assertFalse(app.state.executor.is_driving(goal_id), "a refused apply claimed the driver")
+
+        # And the service itself refuses, so a second door cannot bypass the route.
+        with self.assertRaises(ApiError) as caught:
+            await app.state.executor.apply_goal(goal_id)
+        self.assertEqual(caught.exception.code, "plan_only")
+
+    async def test_a_second_apply_is_refused_before_the_first_finishes(self) -> None:
+        """The route claims the driver synchronously, so a duplicate cannot fail the run.
+
+        The guards used to run, then the work was spawned: two requests both passed,
+        the second task lost `claim_driver`, and `_spawn` reported that loss as a
+        goal failure while the first apply was still writing.
+        """
+        _, goal_id = await self._run_dry_run()
+        executor = app.state.executor
+        version = self.goals.get(goal_id).version
+        release = asyncio.Event()
+
+        async def held(gid: str) -> Goal:
+            await release.wait()
+            return self.goals.get(gid)
+
+        with mock.patch.object(executor, "_apply_goal_locked", held):
+            first = await self.client.post(
+                f"/goals/{goal_id}/apply", headers=self.headers,
+                json={"expected_version": version},
+            )
+            self.assertEqual(first.status_code, 200, first.text)
+            self.assertTrue(executor.is_driving(goal_id), "the route did not claim the driver")
+
+            second = await self.client.post(
+                f"/goals/{goal_id}/apply", headers=self.headers,
+                json={"expected_version": version},
+            )
+            self.assertEqual(second.status_code, 409, second.text)
+            self.assertEqual(second.json()["code"], "driver_busy")
+            self.assertNotEqual(
+                self.goals.get(goal_id).status, "FAILED",
+                "the duplicate apply failed the goal it could not start",
+            )
+
+            release.set()
+            for _ in range(100):
+                if not executor.is_driving(goal_id):
+                    break
+                await asyncio.sleep(0.01)
+            self.assertFalse(executor.is_driving(goal_id), "the held apply never released its driver")
+
+    async def test_a_step_retry_racing_an_apply_is_refused_and_does_not_fail_the_goal(self) -> None:
+        """An Apply that claimed the driver first owns the goal; a Retry must lose cleanly.
+
+        Both requests are legal against the same FAILED dry run: Apply accepts
+        COMPLETED/FAILED, and a failed step is retryable. Before Apply claimed
+        the driver synchronously, the retry could take it while Apply's work was
+        still being spawned, and Apply's background `driver_busy` then reached
+        `_spawn` as a failure that marked the goal FAILED underneath the retry.
+        The retry must answer 409 and leave the winner's claim — and the step it
+        would have reset — untouched.
+        """
+        # A dry run that failed verification: it has a stored proposal (so Apply
+        # is legal) and a FAILED step (so Retry is legal) at the same time.
+        self.provider.by_role["verifier"] = {
+            "argv": None, "verdict": "fail", "explanation": "assertion error",
+        }
+        ws_id = await self._mk_workspace()
+        goal = await self._mk_goal(ws_id, dry_run=True)
+        await self._wait_for_status(goal["id"], {"PENDING"})
+        await post_versioned_async(self.client, goal["id"], "start", headers=self.headers)
+        failed = await self._wait_for_status(goal["id"], {"FAILED"})
+        self.assertTrue(self.goals.has_proposed_files(goal["id"]))
+        step = self.goals.steps(goal["id"])[0]
+        self.assertEqual(step.status, "FAILED")
+
+        executor = app.state.executor
+        release = asyncio.Event()
+
+        async def held(gid: str) -> Goal:
+            await release.wait()
+            return self.goals.get(gid)
+
+        with mock.patch.object(executor, "_apply_goal_locked", held):
+            applied = await self.client.post(
+                f"/goals/{goal['id']}/apply", headers=self.headers,
+                json={"expected_version": failed.version},
+            )
+            self.assertEqual(applied.status_code, 200, applied.text)
+            self.assertTrue(executor.is_driving(goal["id"]), "the apply did not claim the driver")
+
+            retried = await self.client.post(
+                f"/goals/{goal['id']}/steps/{step.id}/retry", headers=self.headers,
+                json={"expected_version": failed.version},
+            )
+            self.assertEqual(retried.status_code, 409, retried.text)
+            self.assertEqual(retried.json()["code"], "driver_busy")
+            self.assertEqual(self.goals.get(goal["id"]).status, "FAILED")
+            self.assertEqual(
+                self.goals.steps(goal["id"])[0].status, "FAILED",
+                "the losing retry reset a step the apply is responsible for",
+            )
+            self.assertTrue(
+                executor.is_driving(goal["id"]),
+                "the losing retry released the apply's driver",
+            )
+
+            release.set()
+            for _ in range(100):
+                if not executor.is_driving(goal["id"]):
+                    break
+                await asyncio.sleep(0.01)
+            self.assertFalse(executor.is_driving(goal["id"]), "the held apply never released its driver")
 
     async def test_apply_guards_answer_409_instead_of_faking_success(self) -> None:
         ws_id = await self._mk_workspace()

@@ -3132,7 +3132,10 @@ durable in History, and the other three are not facts the engine keeps. The rule
   in the list is dropped. A goal that is retried and fails again is a new entry, because `updated_at` moved.
   The id is not the only guard, because after Clear the list is empty and an id check suppresses nothing. Each
   goal subscription (`subscribeToGoal` in `App.tsx`) also keeps the highest event sequence it has acted on,
-  starting at the `sinceSequence` floor given on Apply/Retry. An event at or below it is merged into the message
+  starting at the `sinceSequence` floor given on Apply/Retry **and at the events a restore or a thread hydration
+  just fetched**. Those two doorways are why the floor is not only an Apply/Retry concern: both can open a goal
+  that is RUNNING while its log still holds the earlier COMPLETED/FAILED event, and a replay from 0 would be read
+  as the live run's terminal, closing the stream before its first new event. An event at or below the floor is merged into the message
   but triggers no goal refresh, no editor reload and no notification, so a reconnect replay cannot re-announce a
   plan the person cleared. An event whose refresh or editor lookup failed is the exception: it is run again by
   the next replay, whatever has arrived since. The mark belongs to one subscription and lives in memory, so after

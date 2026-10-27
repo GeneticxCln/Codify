@@ -610,7 +610,7 @@ and `tests/test_failure_visibility.py` for the output.
 librarian, design, planner — whether or not the request needed them, which made
 the sequence a property of the code rather than a decision of the decider. The
 seven stage moves replaced it, and the sequence they are used in is a *skill*
-(`engine/builtin_skills/ship-a-change.md`) rather than control flow. It isone of five built-ins in that directory, beside `context-transfer.md`, which is a
+(`engine/builtin_skills/ship-a-change.md`) rather than control flow. It is one of five built-ins in that directory, beside `context-transfer.md`, which is a
 recipe for handing a degraded thread to a new one, `security-review.md`, which
 sequences `scan_code` and `read_file` for a security review (docs/13), `usage-audit.md`,
 which has the conductor report wasted model calls honestly in tokens (docs/15), and

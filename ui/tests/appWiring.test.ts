@@ -258,6 +258,146 @@ test("restoring a goal that predates threads files it under a title that does no
   });
 });
 
+// ── a live goal reopened from history keeps streaming ────────────────────
+//
+// Apply and Retry move a COMPLETED/FAILED goal back to RUNNING, and the event log
+// keeps the terminal event that ended the previous run. A stream that replays the
+// log from 0 reads that history as *this* run's ending: it closes itself, drops the
+// handle and tells the app the goal is done before a single new event arrives.
+// Both doors into a running goal floor the replay at what the page already fetched.
+
+const REOPENED_EVENTS = [
+  { id: "e1", goal_id: "g-live", step_id: null, type: "goal_status", payload: { status: "PLANNING" }, timestamp: 1, sequence: 1 },
+  { id: "e2", goal_id: "g-live", step_id: null, type: "goal_status", payload: { status: "COMPLETED" }, timestamp: 2, sequence: 2 },
+  { id: "e3", goal_id: "g-live", step_id: null, type: "goal_status", payload: { status: "RUNNING" }, timestamp: 3, sequence: 3 },
+];
+const REOPENED = {
+  id: "g-live", conversation_id: "c1", workspace_id: "ws-a", title: "Reopened goal",
+  description: "Reopened goal", status: "RUNNING", mode: "normal", version: 3, steps: [], created_at: 1,
+};
+
+const goalSocket = (ctx: { sockets: Array<{ url: string }> }, goalId: string) =>
+  ctx.sockets.find((s) => s.url.endsWith(`/ws/goals/${goalId}`)) as
+    | { url: string; closed: boolean; deliver(frame: unknown): Promise<void> }
+    | undefined;
+
+test("restoring a live goal floors its replay at the events it fetched", async () => {
+  await withApp(
+    { conversations: [conversation({ id: "c1", title: "Reopened" })], goals: [REOPENED], goalEvents: { "g-live": REOPENED_EVENTS } },
+    async (ctx) => {
+      const { dom, settle } = ctx;
+      const history = [...dom.container.querySelectorAll("button")].find((b) =>
+        (b.getAttribute("title") ?? "").startsWith("Goal history"),
+      );
+      assert.ok(history, "the header has no History control");
+      await dom.click(history);
+      await settle();
+      const row = [...dom.container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Reopened goal"));
+      assert.ok(row, "History did not list the live goal");
+      await dom.click(row);
+      await settle();
+
+      const socket = goalSocket(ctx, "g-live");
+      assert.ok(socket, "restoring a live goal opened no stream");
+      // Sequence 2 is the previous run's COMPLETED. It is already in the transcript
+      // the restore fetched, so it is history, not the end of this stream.
+      await socket.deliver(REOPENED_EVENTS[1]);
+      assert.equal(socket.closed, false, "a replayed terminal event closed the reopened goal's stream");
+    },
+  );
+});
+
+test("opening a thread whose turn is live floors the replay the same way", async () => {
+  await withApp(
+    { conversations: [conversation({ id: "c1", title: "Reopened" })], goals: [REOPENED], goalEvents: { "g-live": REOPENED_EVENTS } },
+    async (ctx) => {
+      const { dom, settle } = ctx;
+      const row = dom.container.querySelector('[data-thread-row="true"]');
+      assert.ok(row, "the panel did not list the thread");
+      await dom.click(row);
+      await settle();
+      await settle();
+
+      const socket = goalSocket(ctx, "g-live");
+      assert.ok(socket, "a live turn in the opened thread did not stream");
+      await socket.deliver(REOPENED_EVENTS[1]);
+      assert.equal(socket.closed, false, "a replayed terminal event closed the thread's live stream");
+    },
+  );
+});
+
+test("hydration trusts the goal's status over the turn list it read earlier", async () => {
+  // The turn list is read before the per-goal reads. An Apply in between moves a
+  // COMPLETED goal to RUNNING; subscribing on the older turn status left the live
+  // turn with no stream at all.
+  const staleTurns = [
+    { goal_id: "g-live", conversation_id: "c1", prompt: "Reopened goal", status: "COMPLETED", created_at: 1 },
+  ];
+  await withApp(
+    {
+      conversations: [conversation({ id: "c1", title: "Reopened" })],
+      goals: [REOPENED],
+      goalEvents: { "g-live": REOPENED_EVENTS },
+      answers: { "GET /conversations/c1/turns": { body: staleTurns } },
+    },
+    async (ctx) => {
+      const { dom, settle } = ctx;
+      const row = dom.container.querySelector('[data-thread-row="true"]');
+      assert.ok(row, "the panel did not list the thread");
+      await dom.click(row);
+      await settle();
+      await settle();
+
+      const socket = goalSocket(ctx, "g-live");
+      assert.ok(socket, "the turn list's stale COMPLETED status stopped the live goal streaming");
+      await socket.deliver(REOPENED_EVENTS[1]);
+      assert.equal(socket.closed, false, "the replayed terminal event closed the stream");
+    },
+  );
+});
+
+test("deleting a workspace with live goals closes their streams before their messages go", async () => {
+  // A cascade delete removes goals the transcript is still streaming. The map entry
+  // used to be deleted without closing the socket, so a reconnecting stream had no
+  // owner: the unmount cleanup walks the map and never found it, and the engine's
+  // 4404 is no help while the engine is down or restarting.
+  let deletes = 0;
+  const answers = {
+    "DELETE /workspaces/ws-a": () => {
+      deletes += 1;
+      return deletes === 1
+        ? { status: 409, body: { code: "workspace_not_empty", message: "this workspace has goals", goals: 1 } }
+        : { body: { workspace_id: "ws-a", goals_deleted: 1 } };
+    },
+  };
+  await withApp(
+    { conversations: [conversation({ id: "c1", title: "Live" })], goals: [REOPENED], answers },
+    async (ctx) => {
+      const { dom, settle } = ctx;
+      const row = dom.container.querySelector('[data-thread-row="true"]');
+      assert.ok(row, "the panel did not list the thread");
+      await dom.click(row);
+      await settle();
+      await settle();
+      const socket = goalSocket(ctx, "g-live");
+      assert.ok(socket, "the live goal opened no stream");
+
+      dom.window.confirm = () => true;
+      const picker = dom.container.querySelector('button[title="/tmp/e2e-alpha"]');
+      assert.ok(picker, "the composer has no workspace picker");
+      await dom.click(picker);
+      const remove = dom.container.querySelector('button[aria-label="Remove workspace Alpha"]');
+      assert.ok(remove, "the workspace picker has no Remove control");
+      await dom.click(remove);
+      await settle();
+      await settle();
+
+      assert.equal(deletes, 2, "the cascade was not confirmed and retried");
+      assert.equal(socket.closed, true, "a stream outlived the workspace whose goals were deleted");
+    },
+  );
+});
+
 test("a turn names an unnamed thread from its prompt, and the thread's tab follows", async () => {
   const unnamed = conversation({ id: "c-open", title: "" });
   await withApp({ conversations: [unnamed], storedTabs: stripOn("c-open") }, async ({ dom, engine, settle, tabs }) => {

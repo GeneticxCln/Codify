@@ -23,8 +23,12 @@ import { getEngineInfo } from "./api.ts";
  *   note above), a goal with no events sends no frame to prove it by, and nothing needed the
  *   signal. A caller that wants one must take `engineStream`'s proof rule, timer included.
  * - The engine closes with 4404 (there is no such goal) or 4401 (the token was refused).
- *   Neither changes by asking again, so those closes are final: no reconnect, and `onGone`
- *   says which. Reconnecting at the 16 s cap forever was a request nothing could answer.
+ *   4404 is final: no reconnect, and `onGone` says so. Reconnecting at the 16 s cap forever
+ *   was a request nothing could answer. 4401 is not final, unlike what this stream first
+ *   assumed: a restarted engine can come back on the same port with a new token, and
+ *   `connect()` re-reads `getEngineInfo()` every time, so the retry that used to be a
+ *   request nothing could answer is now how the stream heals. `engineStream` already
+ *   retries 4401 for exactly this reason.
  */
 export const STABLE_CONNECTION_MS = 10_000;
 
@@ -37,7 +41,7 @@ export function openGoalStream(opts: {
   onEvent: (ev: Event) => void;
   onTerminal?: (ev: Event) => void;
   onReconnecting?: (attempt: number) => void;
-  /** The engine ended the stream for good (4404 no such goal, 4401 refused token). */
+  /** The engine ended the stream for good (4404: there is no such goal). */
   onGone?: (code: number) => void;
   /** Events with sequence <= this are replayed history: never terminal. */
   sinceSequence?: number;
@@ -60,7 +64,6 @@ export function openGoalStream(opts: {
   const TERMINAL = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
   // `engine/app.py` `ws_goal`: 4404 after auth for an unknown goal, 4401 for a bad token.
   const CLOSE_NO_SUCH_GOAL = 4404;
-  const CLOSE_REFUSED = 4401;
 
   const connect = () => {
     if (destroyed) return;
@@ -71,18 +74,27 @@ export function openGoalStream(opts: {
       return;
     }
 
-    ws = new WebSocket(`ws://127.0.0.1:${engine.port}/ws/goals/${goalId}`);
+    const sock = new WebSocket(`ws://127.0.0.1:${engine.port}/ws/goals/${goalId}`);
+    ws = sock;
+    // Per socket. A reconnect and `close()` both replace `ws`, so a handler a
+    // superseded socket delivers late must not act for the socket that replaced
+    // it: a stale close used to clear the new socket's stability timer and open
+    // a second stream for the same goal. `engineStream.ts` guards its handlers
+    // the same way, for the same reason.
+    const current = () => !destroyed && ws === sock;
 
-    ws.onopen = () => {
+    sock.onopen = () => {
+      if (!current()) return;
       clearStableTimer();
       stableTimer = setTimeout(() => {
         stableTimer = null;
         attempt = 0;
       }, STABLE_CONNECTION_MS);
-      ws!.send(JSON.stringify({ type: "auth", token: engine.token }));
+      sock.send(JSON.stringify({ type: "auth", token: engine.token }));
     };
 
-    ws.onmessage = (e) => {
+    sock.onmessage = (e) => {
+      if (!current()) return;
       try {
         const ev: Event = JSON.parse(e.data);
         onEvent(ev);
@@ -92,7 +104,10 @@ export function openGoalStream(opts: {
           if (!destroyed) {
             destroyed = true;
             clearStableTimer();
-            ws?.close();
+            // Dropped before closing: the close this asks for is not news, and
+            // a handler that arrives afterwards has no socket to act for.
+            ws = null;
+            sock.close();
           }
         }
       } catch (err) {
@@ -100,21 +115,27 @@ export function openGoalStream(opts: {
       }
     };
 
-    ws.onclose = (e) => {
+    sock.onclose = (e) => {
+      // A close from a socket that is no longer the current one — one that was
+      // reconnected over, or one `close()` ended — is history, not an event.
+      if (ws !== sock) return;
+      ws = null;
       clearStableTimer();
       if (destroyed) return;
-      if (e?.code === CLOSE_NO_SUCH_GOAL || e?.code === CLOSE_REFUSED) {
+      if (e?.code === CLOSE_NO_SUCH_GOAL) {
         destroyed = true;
         onGone?.(e.code);
         return;
       }
+      // 4401 falls through to the backoff: the token may have rotated with a
+      // restarted engine, and the next `connect()` reads the fresh pair.
       attempt += 1;
       const delay = Math.min(1000 * 2 ** (attempt - 1), 16000);
       onReconnecting?.(attempt);
       retryTimer = setTimeout(connect, delay);
     };
 
-    ws.onerror = () => {
+    sock.onerror = () => {
       // onclose fires after onerror; reconnect is handled there.
     };
   };
@@ -126,9 +147,13 @@ export function openGoalStream(opts: {
       destroyed = true;
       clearStableTimer();
       if (retryTimer) clearTimeout(retryTimer);
-      // Guard: close() may run before the socket finished constructing.
+      retryTimer = null;
+      // Taken before the handle is dropped, so the socket still closes; the
+      // handlers see `ws !== sock` and do not treat it as a dropped connection.
+      const sock = ws;
+      ws = null;
       try {
-        ws?.close();
+        sock?.close();
       } catch {
         /* noop */
       }

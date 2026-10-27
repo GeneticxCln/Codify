@@ -139,9 +139,10 @@ test("unparseable frames do not reach onEvent", () => {
 
 // ── M9: a close the engine meant is not a dropped connection ─────────────────────────────────
 //
-// The engine closes with 4404 when the goal is gone and 4401 when the token was refused. Neither
-// changes on its own, and reconnecting forever at a 16 s cadence just re-asks a question that has
-// been answered. An ordinary drop (1006, a restarted engine) must still reconnect.
+// The engine closes with 4404 when the goal is gone and 4401 when the token was refused. 4404 does
+// not change on its own, so reconnecting at a 16 s cadence just re-asks a question that has been
+// answered. 4401 can change: a restarted engine may return with a new token on the same port, and
+// each `connect()` re-reads the pair. An ordinary drop (1006) must still reconnect.
 
 test("a close for 'no such goal' (4404) is final: no reconnect, and the caller is told", () => {
   mock.timers.enable({ apis: ["setTimeout"] });
@@ -168,18 +169,25 @@ test("a close for 'no such goal' (4404) is final: no reconnect, and the caller i
   }
 });
 
-test("a close for a refused token (4401) is final too", () => {
+test("a refused token (4401) reconnects, because the token can have rotated", () => {
   mock.timers.enable({ apis: ["setTimeout"] });
   try {
     sockets.length = 0;
     const gone: number[] = [];
-    const handle = openGoalStream({ goalId: "goal-1", onEvent: () => {}, onGone: (code) => gone.push(code) });
+    const told: number[] = [];
+    const handle = openGoalStream({
+      goalId: "goal-1",
+      onEvent: () => {},
+      onGone: (code) => gone.push(code),
+      onReconnecting: (n) => told.push(n),
+    });
     lastSocket().onclose?.({ code: 4401 });
 
-    mock.timers.tick(120_000);
-
-    assert.equal(sockets.length, 1);
-    assert.deepEqual(gone, [4401]);
+    assert.equal(sockets.length, 1, "reconnects wait for their delay");
+    assert.deepEqual(gone, [], "a refused token is not a gone goal");
+    assert.deepEqual(told, [1]);
+    mock.timers.tick(1000);
+    assert.equal(sockets.length, 2, "the stream did not ask again with the fresh token");
     handle.close();
   } finally {
     mock.timers.reset();
@@ -382,6 +390,44 @@ test("a connection dropped one tick before the window does not reset the backoff
   }
 });
 
+test("a late close from a superseded socket cannot open a second stream", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    sockets.length = 0;
+    const told: number[] = [];
+    const events: number[] = [];
+    const handle = openGoalStream({
+      goalId: "goal-1",
+      onEvent: (ev) => events.push(ev.sequence),
+      onReconnecting: (n) => told.push(n),
+    });
+    const first = lastSocket();
+    first.onclose?.({ code: 1006 });
+    mock.timers.tick(1000);
+
+    const second = lastSocket();
+    assert.equal(sockets.length, 2);
+    second.onopen?.();
+
+    // The first socket's close arrives late, after the second one is live. It
+    // must not clear the new socket's stability timer, count as another
+    // failure, or reconnect over a stream that is already open.
+    first.onclose?.({ code: 1006 });
+    mock.timers.tick(16_000);
+
+    assert.equal(sockets.length, 2, "a stale close opened a duplicate stream");
+    assert.deepEqual(told, [1], "the stale close counted as a new failure");
+
+    // Its frames are history too: one live socket, one delivery.
+    (first.onmessage as any)?.({ data: JSON.stringify(goalEvent(7, "RUNNING")) });
+    (second.onmessage as any)?.({ data: JSON.stringify(goalEvent(8, "RUNNING")) });
+    assert.deepEqual(events, [8]);
+    handle.close();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test("close() while the stability timer is pending leaves nothing that fires later", () => {
   mock.timers.enable({ apis: ["setTimeout"] });
   const timers = trackTimers();
@@ -452,35 +498,67 @@ test("a terminal event inside the window closes the stream and leaves no timer",
   }
 });
 
-test("4401 and 4404 after an open stay final and clear the stability timer", () => {
-  for (const code of [4401, 4404]) {
-    mock.timers.enable({ apis: ["setTimeout"] });
-    const timers = trackTimers();
-    try {
-      sockets.length = 0;
-      const gone: number[] = [];
-      const told: number[] = [];
-      openGoalStream({
-        goalId: "goal-1",
-        onEvent: () => {},
-        onGone: (c) => gone.push(c),
-        onReconnecting: (n) => told.push(n),
-      });
-      const ws = lastSocket();
-      ws.onopen?.();
-      assert.equal(timers.pending(), 1, `${code}: the stability timer should be armed`);
+test("4404 after an open stays final and clears the stability timer", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const timers = trackTimers();
+  try {
+    sockets.length = 0;
+    const gone: number[] = [];
+    const told: number[] = [];
+    openGoalStream({
+      goalId: "goal-1",
+      onEvent: () => {},
+      onGone: (c) => gone.push(c),
+      onReconnecting: (n) => told.push(n),
+    });
+    const ws = lastSocket();
+    ws.onopen?.();
+    assert.equal(timers.pending(), 1, "the stability timer should be armed");
 
-      ws.onclose?.({ code });
-      assert.equal(timers.pending(), 0, `${code} left the stability timer pending`);
-      assert.deepEqual(gone, [code]);
+    ws.onclose?.({ code: 4404 });
+    assert.equal(timers.pending(), 0, "4404 left the stability timer pending");
+    assert.deepEqual(gone, [4404]);
 
-      mock.timers.tick(10 * STABLE_CONNECTION_MS);
-      assert.equal(sockets.length, 1, `${code}: a socket was reopened`);
-      assert.deepEqual(told, []);
-    } finally {
-      timers.restore();
-      mock.timers.reset();
-    }
+    mock.timers.tick(10 * STABLE_CONNECTION_MS);
+    assert.equal(sockets.length, 1, "a socket was reopened for a goal that does not exist");
+    assert.deepEqual(told, []);
+  } finally {
+    timers.restore();
+    mock.timers.reset();
+  }
+});
+
+test("4401 after an open clears the stability timer and reconnects", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const timers = trackTimers();
+  try {
+    sockets.length = 0;
+    const gone: number[] = [];
+    const told: number[] = [];
+    openGoalStream({
+      goalId: "goal-1",
+      onEvent: () => {},
+      onGone: (c) => gone.push(c),
+      onReconnecting: (n) => told.push(n),
+    });
+    const ws = lastSocket();
+    ws.onopen?.();
+    assert.equal(timers.pending(), 1, "the stability timer should be armed");
+
+    ws.onclose?.({ code: 4401 });
+    // One timer, and it is the reconnect: the stability timer is gone, and a 4401
+    // is not final because the next connect re-reads the engine's token.
+    assert.equal(timers.pending(), 1, "4401 left the stability timer armed, or scheduled no retry");
+    assert.deepEqual(gone, []);
+    assert.deepEqual(told, [1]);
+    mock.timers.tick(999);
+    assert.equal(sockets.length, 1, "reconnected before the 1 s backoff");
+    mock.timers.tick(1);
+    assert.equal(sockets.length, 2);
+    assert.equal(timers.pending(), 0, "the reconnect left the old stability timer pending");
+  } finally {
+    timers.restore();
+    mock.timers.reset();
   }
 });
 

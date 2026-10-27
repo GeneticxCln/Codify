@@ -13,7 +13,7 @@ table buy anything an engine like this does not already have, and did leanrea's 
 tool this engine already ships?** The second half of that found one. It is in the reply header of `search_code`.
 
 The document follows `docs/11`–`16`: what was read, what is taken and refused (and by which invariant), what was
-measured here, what is proposed, and what reopens a row.
+measured here, what was proposed and what was built, and what reopens a row.
 
 **Nothing was copied.** leanrea is MIT (`AICodeKing`, 2026), so copying its text would be permitted, and it is still
 not done: `docs/08` and `CONTRIBUTING.md` say no third-party source is committed to this repository, and `docs/16`
@@ -80,9 +80,9 @@ this engine's doctrine. The audit's work is in the fourth.
 | leanrea's idea | Here | Why |
 |---|---|---|
 | Work on a copy, never the original | **Have** | `analyze_binary` copies the target into a private run directory (`wx`, `O_NONBLOCK`, bound to the admitted file by SHA-256), and the machine tab edits its own copy of the project (`docs/09` §14, `docs/14` §4 item 2) |
-| Route by `file` and magic bytes first; the cheapest inventory next; decompile or read code only after that | **Partly have — in the tools, nowhere in words** | `analyze_binary`'s one-shot export *is* the cheap inventory, and `read_file`/`search_code` are the targeted reads. What does not exist is a skill that orders them for an artifact question, and §5 item 2 proposes one. The order is not enforceable here and should not be: it is instructions, which is what a skill is for |
+| Route by `file` and magic bytes first; the cheapest inventory next; decompile or read code only after that | **Have** (built; §8) | `analyze_binary`'s one-shot export *is* the cheap inventory, and `read_file`/`search_code` are the targeted reads. `engine/builtin_skills/inspect-an-artifact.md` orders them for an artifact question, and every step is a call the conductor already had. The order is not enforceable here and should not be: it is instructions, which is what a skill is for |
 | Slice a minified or huge file, never `cat` it; cap every output | **Partly have** | `read_file` caps at 8,000 characters and 400 lines and says when it truncated. A **single-line** minified file cannot be paged by line at all, and the tool that can slice it — `search_code` with `regex`, the `.{0,200}NEEDLE.{0,200}` idiom — is not named for that use in any prompt or skill. Instructions again, not capability |
-| "Always search with `rg -uu`; `rg` skips hidden and ignored files, and bundlers hide code in `.webpack/` and `.vite/`" | **Have, the other way round — and one real gap** | This engine's own walkers do *not* skip hidden directories (measured, §4.1: a needle in `.webpack/bundle.js` is found), and the exclusions they do apply are a fixed list of 20 names. But they apply them **silently**, which is §4.1's finding — and note the direction of it: leanrea's trap is about a search that hides files, and this engine's is about a search that hides its *own* hiding |
+| "Always search with `rg -uu`; `rg` skips hidden and ignored files, and bundlers hide code in `.webpack/` and `.vite/`" | **Have, the other way round — and one real gap, since closed (§8)** | This engine's own walkers do *not* skip hidden directories (measured, §4.1: a needle in `.webpack/bundle.js` is found), and the exclusions they do apply are a fixed list of 20 names. They applied them **silently**, which was §4.1's finding — and note the direction of it: leanrea's trap is about a search that hides files, and this engine's was about a search that hid its *own* hiding |
 | Mark every claim **seen** (cite file/offset or a symbol) or **inferred**; a fact you did not find is **unknown**, not "absent" | **Have, in four places** | The scan's `Coverage:` line, `analyze_binary`'s "an empty result does not prove absence", `security-review`'s Confirmed / Needs context / False positive, and `usage-audit`'s "unmeasured is not zero". This is `docs/13`–`15`'s doctrine; leanrea arrives at the same rule from a benchmark, which is a second opinion and not a new one |
 | Grant the tool no more than it needs; keep the interface small | **Have, structurally** | The conductor's menu is a closed set of 31 engine-defined calls, narrowed by state (the five step moves are not offered until a plan exists; browser actions only when the person allowed them), and a skill can sequence those calls and never add one. It is the property `engine/skills.py`'s docstring is written to state |
 | Turns cost more than bytes: aim for two to four, batch the probes, stop re-verifying what you saw | **Have** | The conductor prompt's "your calls are limited… do not re-read what you already have", `DEFAULT_MAX_TURNS`, and `audit_usage` measuring what a turn actually spent (`docs/15`) |
@@ -96,9 +96,9 @@ this engine's doctrine. The audit's work is in the fourth.
 
 ## 4. What the comparison found here
 
-### 4.1 `search_code` does not say which directories it never walked
+### 4.1 `search_code` did not say which directories it never walked
 
-**Measured.** Four files holding one needle, in a tree this audit made:
+**Measured before the fix in §8.** Four files holding one needle, in a tree this audit made:
 
 ```
 src/app.js              MARKER_NEEDLE_XYZ …
@@ -123,18 +123,18 @@ Why this is a defect and not a preference, in this project's own words:
   states the same rule from the other side ("a librarian that silently sees one third of a repository produces
   confident wrong answers"), and `docs/14`'s coverage row made it a field requirement. It is the rule the whole
   librarian is built around, and the search header is the one place it is not kept.
-* `_search_regex`'s docstring claims the search and the scan "report identically". They do not: `scan_code` prints a
-  `Coverage:` line **before** its findings naming every reason a file was left out (test files, generated or
+* `_search_regex`'s docstring claimed the search and the scan "report identically". They did not then: `scan_code`
+  printed a `Coverage:` line **before** its findings naming every reason a file was left out (test files, generated or
   minified, binary, over the size cap, symlinks out of the workspace, unreadable, names that are not valid UTF-8),
-  and `format_search` prints one merged count, `N unreadable or binary files skipped`.
-* Neither tool counts a **directory** pruned from the walk. `library.SKIP_DIRS` holds 20 names — `.git`, `.hg`,
+  and `format_search` printed one merged count, `N unreadable or binary files skipped`.
+* Neither tool counted a **directory** pruned from the walk. `library.SKIP_DIRS` holds 20 names — `.git`, `.hg`,
   `.svn`, `node_modules`, `__pycache__`, `.venv`, `venv`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `.tox`,
   `dist`, `build`, `target`, `.next`, `.nuxt`, `.cache`, `vendor`, `.idea`, `.vscode` — and every strategy
-  (`_search_substring`, `_search_keyword`, `scan_regex`, and `scan_tree` beside them) filters `dirnames` against it
-  and reports nothing back. A repository that keeps code in `dist/`, a Next.js tree whose real modules are under a pruned
-  `.next/`, a workspace whose only consumer of a symbol is inside `vendor/`: every one of those answers is an
-  absence. The scan's "generated or minified" count does not cover it — that counter is a *file-name* pattern
-  (`*.min.js`, `*.map`, `*.lock`, `*_pb2.py`), and a plain `.py` under `dist/` is in no category at all.
+  (`_search_substring`, `_search_keyword`, `scan_regex`, and `scan_tree` beside them) filtered `dirnames` against it
+  and reported nothing back. A repository that keeps code in `dist/`, a Next.js tree whose real modules are under a pruned
+  `.next/`, a workspace whose only consumer of a symbol is inside `vendor/`: every one of those answers was an
+  absence. The scan's "generated or minified" count did not cover it — that counter is a *file-name* pattern
+  (`*.min.js`, `*.map`, `*.lock`, `*_pb2.py`), and a plain `.py` under `dist/` was in no category at all.
 
 This matters more here than it would in leanrea, because leanrea's reader is a model that then runs its own command
 and can look again. A conductor reading `0 matches in 412 files` has no second look: `docs/13` and `docs/14` both
@@ -159,21 +159,21 @@ warns about):
 |---|---|
 | `CONDUCTOR_SYSTEM_PROMPT` | 3,370 |
 | the 25 base tool schemas (name, description, parameters) | 21,019 |
-| the skill menu — every built-in's name and description, never a body | 774 |
-| **fixed surface, plan not yet approved** | **≈ 25,163 (~6.3k tokens)** |
-| the 5 step moves' schemas, added once a plan exists | + 3,138, ≈ 28,301 (~7.1k tokens) |
-| the four built-in skill bodies, in total, and only on `use_skill` | 15,805 (2,705–5,440 each) |
+| the skill menu — every built-in's name and description, never a body | 991 |
+| **fixed surface, plan not yet approved** | **≈ 25,380 (~6.3k tokens)** |
+| the 5 step moves' schemas, added once a plan exists | + 3,138, ≈ 28,518 (~7.1k tokens) |
+| the five built-in skill bodies, in total, and only on `use_skill` | 20,306 (2,705–5,440 each) |
 
 Two things follow, and both are the answer to leanrea's headline rather than a criticism of it. First, **the tool
 surface is not this engine's problem**: 31 engine-defined calls against REA's 207, and the whole fixed surface is
 about 1.6% of the 400.7k-token row leanrea measured for REA with tool search off — and about twice what invoking
 leanrea's own 8 KB skill added to its context (+3.1k). There is no argument here for a cheaper routing mechanism on
 cost grounds alone, which is worth having written down before somebody builds one. Second, **83% of what a call pays is tool definitions**
-(21,019 of 25,163 characters), so if that number ever does need to come down, that is where it lives — schema
+(21,019 of 25,380 characters), so if that number ever does need to come down, that is where it lives — schema
 prose, not the system prompt and not the skills.
 
 The skill design is already leanrea's, and slightly better: a body costs nothing until `use_skill` reads it, so all
-four built-ins together cost the menu's 774 characters, while leanrea pays its whole 8 KB to invoke its one skill.
+five built-ins together cost the menu's 991 characters, while leanrea pays its whole 8 KB to invoke its one skill.
 
 ### 4.3 The parts of leanrea that do not transfer at all
 
@@ -184,7 +184,7 @@ rules, fetches pages the person allowed, and runs Ghidra on one binary when aske
 "route before you read", "mark what you did not see") apply here; its table of nineteen rows does not, and copying
 it in would be a document about somebody else's machine.
 
-## 5. What could be built, if the owner wants any of it
+## 5. What could be built, and what was
 
 In order of value for cost. None of the three adds a capability, and the first two are the two halves of one idea.
 Items 1 and 2 are built (§8); item 3 is not.
@@ -193,10 +193,10 @@ Items 1 and 2 are built (§8); item 3 is not.
    `engine/library.py` (one counter and one clause in `format_search`), `engine/scan.py`'s coverage line, and
    `docs/04` §4.0 (the search strategies) with §3.0.6 (the scan's coverage line), plus a test that a needle living only under `dist/` is reported as *not searched there* rather
    than as absent. No new tool, no new argument, no widening: the walk is unchanged, only its account of itself.
-   This is the one row this audit would build.
+   This was the priority row, and it is built (§8).
 2. **A built-in skill that orders an artifact question** — `engine/builtin_skills/inspect-an-artifact.md`, in the
    shape of `security-review` and `usage-audit` (`moves: analyze_binary, read_file, search_code, scan_code, recall`).
-   What it would say, in this engine's terms and this repo's own words:
+   *(Built; §8.)* What it says, in this engine's terms and this repo's own words:
    * route first — ask the workspace what a file *is* (`read_file` a few bytes, or the `file`-shaped facts the walk
      already gives) before reading it as source;
    * the cheap inventory before the reading: `analyze_binary` for a compiled file, `search_code` for a symbol's

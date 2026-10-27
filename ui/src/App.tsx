@@ -2823,6 +2823,19 @@ export const App: React.FC = () => {
     [updateWorkspaceConversations],
   );
 
+  /** Drop a goal's stream: forget the handle, then close the socket.
+   *
+   * Deleting the map entry alone left a reconnecting socket with no owner:
+   * the unmount cleanup walks the map, so it could never close it. The engine's
+   * 4404 usually ends it, but not while the engine is down or restarting.
+   */
+  const forgetGoalStream = useCallback((goalId: string) => {
+    const stream = goalStreams.current[goalId];
+    if (!stream) return;
+    delete goalStreams.current[goalId];
+    stream.close();
+  }, []);
+
   // Subscribe to live goal events via WebSocket (reconnects with backoff,
   // closes itself when the goal reaches a terminal status).
   const subscribeToGoal = useCallback(
@@ -3088,7 +3101,12 @@ export const App: React.FC = () => {
         setDrawer((open) => closeDrawer(open, "history"));
         const terminal = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
         if (!terminal.has(goal.status)) {
-          subscribeToGoal(goalId, assistantMsg.id);
+          // Floor the replay at what was just fetched. A goal re-opened by Apply
+          // or Retry is RUNNING while its log still holds the earlier
+          // COMPLETED/FAILED event; replaying it from 0 would be read as the
+          // live run's terminal, closing this stream before its first event.
+          const lastSeq = Math.max(0, ...events.map((event) => event.sequence));
+          subscribeToGoal(goalId, assistantMsg.id, lastSeq);
         }
       } catch (err: any) {
         setError(readRejection(err, "Failed to restore goal"));
@@ -3204,9 +3222,20 @@ export const App: React.FC = () => {
         // A turn that is not over keeps streaming into the very message it was
         // hydrated from, so a thread whose last turn was in flight when the window
         // closed goes on updating from here rather than freezing mid-answer.
-        for (const { turn } of fetched) {
-          if (!TERMINAL_STATUSES.has(turn.status)) {
-            subscribeToGoal(turn.goal_id, turnMessageIds(turn.goal_id).assistant);
+        // Floor each replay at the events just fetched: an Apply or Retry leaves
+        // a live RUNNING goal whose log still contains its earlier terminal event,
+        // and a replay from 0 would close the new stream on that history.
+        for (const { turn, goal, events } of fetched) {
+          // The goal's status, not the turn's: the turn list was read before the
+          // per-goal reads, and an Apply between them moves a COMPLETED goal to
+          // RUNNING. Trusting the older list would leave the live turn frozen.
+          if (!TERMINAL_STATUSES.has(goal.status)) {
+            const lastSeq = Math.max(0, ...events.map((event) => event.sequence));
+            subscribeToGoal(
+              turn.goal_id,
+              turnMessageIds(turn.goal_id).assistant,
+              lastSeq,
+            );
           }
         }
       } catch (err: any) {
@@ -3532,7 +3561,7 @@ export const App: React.FC = () => {
       const version = msg?.goal?.version ?? 0;
       await applyGoal(goalId, version);
       if (msg) {
-        delete goalStreams.current[goalId];
+        forgetGoalStream(goalId);
         // Floor the replay at the last event already rendered so the server's
         // event replay can't close the stream before live events arrive.
         const lastSeq = Math.max(
@@ -3719,6 +3748,7 @@ export const App: React.FC = () => {
     setError(null);
     try {
       const removed = await deleteGoal(goalId);
+      forgetGoalStream(goalId);
       // The card disappearing is the feedback, matching how the rest of the app
       // reports a successful mutation. The engine's counts are what the confirm
       // dialog promised; if they ever disagree with the dialog's wording, that
@@ -3731,7 +3761,6 @@ export const App: React.FC = () => {
       // a card left behind would be a goal the engine has already forgotten.
       setMessages((prev) => prev.filter((m) => m.goal?.id !== goalId));
       setHistory((prev) => prev.filter((g) => g.id !== goalId));
-      delete goalStreams.current[goalId];
       autoStartedGoals.current.delete(goalId);
     } catch (err: any) {
       setError(readRejection(err, "Failed to delete goal"));
@@ -3777,7 +3806,11 @@ export const App: React.FC = () => {
           setSelectedWs((current) =>
             current?.id === workspaceId ? undefined : current,
           );
-          // A cascade removed goals the transcript may still be showing.
+          // A cascade removed goals the transcript may still be showing. Close
+          // their streams before the messages carrying the ids go away.
+          for (const m of messages) {
+            if (m.goal?.workspace_id === workspaceId) forgetGoalStream(m.goal.id);
+          }
           setMessages((prev) =>
             prev.filter((m) => !m.goal || m.goal.workspace_id !== workspaceId),
           );
@@ -3806,7 +3839,7 @@ export const App: React.FC = () => {
       // stream before the retry's own events arrive.
       const msg = messages.find((m) => m.goal?.id === goalId);
       if (msg) {
-        delete goalStreams.current[goalId];
+        forgetGoalStream(goalId);
         const lastSeq = Math.max(
           0,
           ...(msg.events || []).map((e) => e.sequence),
