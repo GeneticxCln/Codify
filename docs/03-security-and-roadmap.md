@@ -77,7 +77,11 @@ The UI holds the token **in memory** when it runs under the desktop shell: it as
   the way an escape does) when anything tries to write into one that predates the rule — if it is `$HOME`
   or contains it (that is `/` and `/home` too), one of the system directories themselves (`/etc`, `/usr`,
   `/var`, `/tmp`, and `/bin`/`/lib*` however they resolve), inside `~/.ssh`, `~/.gnupg`, `~/.aws` or
-  `~/.kube`, or Codify's own state directory. The reason is that an approved goal writes through the same
+  `~/.kube`, Codify's own state directory, or one of the directories whose contents run at the next login
+  (`fs.AUTORUN_DIRS`: `~/.config/autostart`, `~/.config/systemd`, `~/.config/environment.d`, `~/.local/bin`,
+  `~/.local/share/applications`, `~/.local/share/systemd`) — inside one, or *containing* one, so `~/.config`
+  and `~/.local` are refused while `~/.config/nvim` is not (audit of 2026-10-29: `~/.config` was accepted, and a
+  goal there could plant a startup entry). The reason is that an approved goal writes through the same
   `apply` as any source file, so a `$HOME` workspace could rewrite `~/.bashrc` or
   `~/.ssh/authorized_keys` (audit of 2026-09-29, L3). It is about the root, not about file names: a
   dotfiles repository *below* `$HOME` owns a `.ssh/config` and a `.bashrc` that are only files in a repo,
