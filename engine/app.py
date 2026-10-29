@@ -35,7 +35,7 @@ from engine.spawn_guard import guarded_argv, guarded_env
 from engine.stats import build_overview, normalize_window
 from engine.trace import TraceService
 from engine.surfaces import SurfaceAnswer, SurfaceBridge
-from engine.web_fetch import MAX_HOSTS_CHARS, parse_hosts
+from engine.web_fetch import parse_hosts
 from engine.webview_bridge import BridgeAnswer, WebviewBridge
 from engine.metrics import (
     STAGE_SUCCESS_OUTCOMES,
@@ -1276,33 +1276,12 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
 # rather than the truthiness trap it would be for a number someone chooses.
 ENGINE_SWITCH_SETTINGS = frozenset({"conductor_drives_execution", "tts_auto_read", "browser_actions"})
 
-# The conductor's own provider and model, keyed to the longest value each
-# accepts. They are settings rather than an `AgentConfig` row because
-# docs/00 §6.1 fixes `AgentRole` at eight and a row in `agent_configs` *is* a
-# role (see `SettingsService.STRING_SPEC` for the same argument on that side).
-ENGINE_STRING_SETTINGS: dict[str, int] = {
-    "conductor_provider": 64,
-    "conductor_model": 128,
-    "conductor_fallback_provider": 64,
-    "conductor_fallback_model": 128,
-    # Voice (Settings → Audio, engine/speech.py): which provider and model turn
-    # speech into text and back, the voice that reads, and the microphone. Engine
-    # settings rather than a role for the conductor's reason: neither is a stage.
-    "stt_provider": 64,
-    "stt_model": 128,
-    "stt_language": 16,
-    "tts_provider": 64,
-    "tts_model": 128,
-    "tts_voice": 64,
-    # A PipeWire node name; empty is the session's default source.
-    "audio_input": 200,
-    # A custom speech provider's own address (a local speech server, say), so it
-    # needs no agent role to define it. Built-in providers ignore it.
-    "stt_base_url": 500,
-    "tts_base_url": 500,
-    # The sites `fetch_page` may read when `web_fetch` is 1. 200 is what `SettingsService.set_str` stores.
-    "web_fetch_hosts": MAX_HOSTS_CHARS,
-}
+# The string settings (the conductor's own provider and model, voice, web pages), keyed to the longest
+# value each accepts. They are settings rather than an `AgentConfig` row because docs/00 §6.1 fixes
+# `AgentRole` at eight and a row in `agent_configs` *is* a role (see `SettingsService.STRING_SPEC` for the
+# same argument on that side). The table is the service's own, so what is advertised, what is validated
+# here and what `set_str` stores are one number per key.
+ENGINE_STRING_SETTINGS: dict[str, int] = SettingsService.STRING_LIMITS
 
 # The slug shape `AgentConfigUpdate` enforces, so a conductor pointed at a
 # provider that cannot exist is refused here for the same reason it would be
@@ -1402,9 +1381,8 @@ def _clean_engine_string(key: str, value: Any) -> str:
             )
         written = ", ".join(hosts)
         # Bounded after normalising, not only before: the stored form is longer than what was typed (one space per
-        # separator, and an IDN name is longer as punycode), and `set_str` would cut it at 200 characters, which
-        # would chop the last site to a name that matches nothing. Refused instead, so the list that was saved is
-        # the list that was shown.
+        # separator, and an IDN name is longer as punycode), and `set_str` refuses anything past the limit. Refused
+        # here, with the sentence that says why, so the list that was saved is the list that was shown.
         if len(written) > limit:
             raise ApiError(
                 422, "invalid_value",

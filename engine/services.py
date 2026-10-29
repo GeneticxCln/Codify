@@ -25,6 +25,7 @@ from engine.fs import (
     protected_root_reason,
 )
 from engine.library import LibraryService
+from engine.web_fetch import MAX_HOSTS_CHARS
 from engine.models import (
     BUILTIN_PROVIDERS,
     PAUSE_CODES,
@@ -173,6 +174,34 @@ class SettingsService:
         "web_fetch_hosts": "",
     }
 
+    # The longest value each string key holds, and the one place that says so: `PUT /settings/engine` validates
+    # against it and `GET` advertises it (`engine/app.py` `ENGINE_STRING_SETTINGS` is this table), and `set_str`
+    # stores up to it. `set_str` used to cut every value at 200, so a 300-character speech server address that the
+    # screen was told it could save (500) was stored as a different address, with no error.
+    STRING_LIMITS: dict[str, int] = {
+        "conductor_provider": 64,
+        "conductor_model": 128,
+        "conductor_fallback_provider": 64,
+        "conductor_fallback_model": 128,
+        # Voice (Settings → Audio, engine/speech.py): which provider and model turn
+        # speech into text and back, the voice that reads, and the microphone. Engine
+        # settings rather than a role for the conductor's reason: neither is a stage.
+        "stt_provider": 64,
+        "stt_model": 128,
+        "stt_language": 16,
+        "tts_provider": 64,
+        "tts_model": 128,
+        "tts_voice": 64,
+        # A PipeWire node name; empty is the session's default source.
+        "audio_input": 200,
+        # A custom speech provider's own address (a local speech server, say), so it
+        # needs no agent role to define it. Built-in providers ignore it.
+        "stt_base_url": 500,
+        "tts_base_url": 500,
+        # The sites `fetch_page` may read when `web_fetch` is 1.
+        "web_fetch_hosts": MAX_HOSTS_CHARS,
+    }
+
     def get_str(self, key: str) -> str:
         """A known string key's value, stripped. The key must exist here."""
         if key not in self.STRING_SPEC:
@@ -187,7 +216,11 @@ class SettingsService:
     def set_str(self, key: str, value: str) -> str:
         if key not in self.STRING_SPEC:
             raise ApiError(400, "unknown_setting", f"unknown engine setting: {key}")
-        clean = str(value).strip()[:200]
+        clean = str(value).strip()
+        limit = self.STRING_LIMITS[key]
+        if len(clean) > limit:
+            # Refused, never shortened: a cut address or site list is a different value from the one that was shown.
+            raise ApiError(422, "invalid_value", f"{key} must be at most {limit} characters")
         self._db.execute(
             """INSERT INTO engine_settings (key, value, updated_at)
                VALUES (?, ?, ?)

@@ -24,6 +24,7 @@ from engine.stats_history import StatsSnapshotService
 from engine.stats_import import StatsImportService
 from engine.services import (
     AgentRegistryService,
+    ApiError,
     ConversationService,
     GoalService,
     SettingsService,
@@ -2894,6 +2895,30 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         """
         self.assertEqual(set(ENGINE_INT_SETTINGS), set(SettingsService.SPEC))
         self.assertEqual(set(ENGINE_STRING_SETTINGS), set(SettingsService.STRING_SPEC))
+        self.assertEqual(set(SettingsService.STRING_LIMITS), set(SettingsService.STRING_SPEC))
+
+    async def test_a_string_setting_is_stored_whole_up_to_the_limit_it_advertises(self) -> None:
+        """`set_str` cut every value at 200 characters while `GET /settings/engine` told the screen a speech
+        server's address could be 500, so a 322-character address was saved as a different address, without a
+        word. What is advertised, what is validated and what is stored are now one number per key."""
+        long_url = "http://127.0.0.1:8000/" + "a" * 300
+        r = await self.client.put("/settings/engine", headers=self.headers, json={"stt_base_url": long_url})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["saved"]["stt_base_url"], long_url, "the address saved is not the one sent")
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual(r.json()["stt_base_url"]["value"], long_url, "the address read back is not the one saved")
+
+        for key, limit in SettingsService.STRING_LIMITS.items():
+            with self.subTest(key=key):
+                self.assertEqual(r.json()[key]["max"], limit, "the screen is told a different limit than is kept")
+                with self.assertRaises(ApiError) as refused:
+                    app.state.settings.set_str(key, "x" * (limit + 1))
+                self.assertEqual(refused.exception.status, 422, "a value past the limit was stored, not refused")
+
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, json={"tts_base_url": "http://h/" + "b" * 600},
+        )
+        self.assertEqual(r.status_code, 422, r.text)
 
     async def test_provider_switch_does_not_carry_the_key_ref_over(self) -> None:
         """A credential stored for provider A must never be sent to provider B.
