@@ -14,11 +14,13 @@ from __future__ import annotations
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
 import asyncio
+import gc
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -201,6 +203,131 @@ class TestTheRouteCancelsTheWork(unittest.IsolatedAsyncioTestCase):
         for task in list(app_module._GOAL_TASKS.get(goal["id"], ())):
             task.cancel()
         await asyncio.sleep(0.05)
+
+
+class TestACancelBeforeTheWorkStartsGivesBackTheDriver(unittest.IsolatedAsyncioTestCase):
+    """Retry and Apply claim the goal's driver in the request, then spawn the work; the work's own `finally`
+    releases it. A Cancel handled before the spawned task's first step cancelled a coroutine that never ran, so
+    nothing released the claim: the goal was CANCELLED and still "driving" until the engine restarted, and
+    `DELETE /goals/{id}` answered 409 `goal_in_progress` for a goal nothing was working on.
+
+    The interleaving is the routes' own calls in their own order, with the Cancel's two calls (`update_status`,
+    `_stop_goal`) landing before the event loop gets to the new task: one loop iteration, which a second request
+    on another connection can occupy."""
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.conn = connect(self.root / "t.db")
+        keychain = Keychain(secrets_path=self.root / "secrets.json")
+        app.state.conn = self.conn
+        app.state.keychain = keychain
+        app.state.registry = AgentRegistryService(self.conn, ProviderFactory(keychain), keychain)
+        app.state.workspaces = WorkspaceService(self.conn)
+        app.state.goals = GoalService(self.conn)
+        app.state.sandbox = SandboxService()
+        app.state.settings = SettingsService(self.conn)
+        app.state.executor = ExecutorService(
+            app.state.goals, app.state.workspaces, app.state.registry, app.state.sandbox,
+        )
+        app.state.executor.settings = app.state.settings
+        app.state.token = BOOT_TOKEN
+        self.client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+        self.headers = {"Authorization": f"Bearer {BOOT_TOKEN}"}
+        ws = app.state.workspaces.create(WorkspaceCreate(name="ws", root_path=str(self.root)))
+        self.goal_id, self.step_id = "goal-1", "step-1"
+        now = time.time()
+        # A FAILED goal with a FAILED step, a dry run with a stored proposal: what Retry and Apply both accept.
+        self.conn.execute(
+            "INSERT INTO goals (id, workspace_id, title, description, status, dry_run, version, event_seq, "
+            "created_at, updated_at) VALUES (?, ?, 't', '', 'FAILED', 1, 3, 0, ?, ?)",
+            (self.goal_id, ws.id, now, now),
+        )
+        self.conn.execute(
+            "INSERT INTO plan_steps (id, goal_id, ordinal, title, description, suggested_paths, status) "
+            "VALUES (?, ?, 0, 's', 'd', '[]', 'FAILED')",
+            (self.step_id, self.goal_id),
+        )
+        self.conn.commit()
+
+    async def asyncTearDown(self) -> None:
+        await self.client.aclose()
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _cancel_now(self) -> None:
+        """`POST /goals/{id}/cancel`, as its handler does it: the record, then the stop."""
+        goal = app.state.goals.get(self.goal_id)
+        app.state.goals.update_status(self.goal_id, goal.version, "CANCELLED")
+        app_module._stop_goal(app, self.goal_id)
+
+    async def _settle(self) -> None:
+        for _ in range(20):
+            if self.goal_id not in app_module._GOAL_TASKS:
+                return
+            await asyncio.sleep(0.01)
+
+    async def _assert_released(self) -> None:
+        await self._settle()
+        self.assertEqual(app.state.goals.get(self.goal_id).status, "CANCELLED")
+        self.assertFalse(
+            app.state.executor.is_driving(self.goal_id),
+            "the goal was cancelled before its work started and still reads as driving",
+        )
+        r = await self.client.delete(f"/goals/{self.goal_id}", headers=self.headers)
+        self.assertEqual(r.status_code, 200, r.text)
+
+    async def test_a_retry_cancelled_before_it_starts_releases_its_claim(self) -> None:
+        executor = app.state.executor
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            executor.begin_retry(self.goal_id, self.step_id, 3, keep_notes=executor.conductor_can_drive(self.goal_id))
+            app_module._spawn(
+                app, app_module._retry_and_drive(app, self.goal_id, self.step_id), self.goal_id, owns_claim=True,
+            )
+            self._cancel_now()
+            await self._assert_released()
+            gc.collect()
+        never_awaited = [w for w in seen if "never awaited" in str(w.message)]
+        self.assertEqual(never_awaited, [], "the cancelled work was left as a coroutine nobody awaited or closed")
+
+    async def test_an_apply_cancelled_before_it_starts_releases_its_claim(self) -> None:
+        executor = app.state.executor
+        self.conn.execute("UPDATE goals SET status = 'COMPLETED' WHERE id = ?", (self.goal_id,))
+        self.conn.commit()
+        self.assertTrue(executor.claim_driver(self.goal_id))
+        app_module._spawn(
+            app, executor.apply_goal(self.goal_id, driver_claimed=True), self.goal_id, owns_claim=True,
+        )
+        # Apply moves the status in the background, so the goal is still COMPLETED here; a Cancel is refused
+        # from COMPLETED, and the stop that matters is the one that reaches a task which has not run.
+        app_module._stop_goal(app, self.goal_id)
+        await self._settle()
+        self.assertFalse(executor.is_driving(self.goal_id), "an apply stopped before it started kept the goal claimed")
+
+    async def test_work_that_started_still_releases_through_its_own_finally(self) -> None:
+        executor = app.state.executor
+        executor.begin_retry(self.goal_id, self.step_id, 3, keep_notes=False)
+        parked = asyncio.Event()
+
+        async def a_retry_that_is_running() -> None:
+            try:
+                parked.set()
+                await asyncio.Event().wait()
+            finally:
+                executor.release_driver(self.goal_id)
+
+        app_module._spawn(app, a_retry_that_is_running(), self.goal_id, owns_claim=True)
+        await asyncio.wait_for(parked.wait(), timeout=5)
+        self.assertTrue(executor.is_driving(self.goal_id), "a running retry must hold its claim")
+        self._cancel_now()
+        await self._assert_released()
+
+    async def test_a_cancel_with_nothing_running_keeps_no_signal(self) -> None:
+        executor = app.state.executor
+        executor.cancel_signal(self.goal_id)
+        app_module._stop_goal(app, self.goal_id)
+        self.assertNotIn(self.goal_id, executor._cancel_signals, "an idle goal's cancel signal was kept for ever")
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -2584,7 +2584,7 @@ async def retry_step(goal_id: str, step_id: str, body: VersionedAction, request:
         # drive keeps them. The recipe's fixer never reads them, and for it they would only sit on the timeline.
         keep_notes=executor.conductor_can_drive(goal_id),
     )
-    _spawn(request.app, _retry_and_drive(request.app, goal_id, step_id), goal_id)
+    _spawn(request.app, _retry_and_drive(request.app, goal_id, step_id), goal_id, owns_claim=True)
     return updated_step
 
 
@@ -2765,7 +2765,7 @@ async def apply_goal(goal_id: str, body: VersionedAction, request: Request) -> d
     # refused now, and the winner must own the goal before this handler returns.
     if not executor.claim_driver(goal_id):
         raise ApiError(409, "driver_busy", "another driver is already running this goal")
-    _spawn(request.app, executor.apply_goal(goal_id, driver_claimed=True), goal_id)
+    _spawn(request.app, executor.apply_goal(goal_id, driver_claimed=True), goal_id, owns_claim=True)
     return {"applied": True, "goal_id": goal_id}
 
 
@@ -2794,7 +2794,8 @@ async def enable_execution(goal_id: str, body: VersionedAction, request: Request
 
 
 def _spawn(
-    app: FastAPI, coro: Coroutine[Any, Any, Any], goal_id: str | None = None
+    app: FastAPI, coro: Coroutine[Any, Any, Any], goal_id: str | None = None,
+    *, owns_claim: bool = False,
 ) -> None:
     """Run a pipeline coroutine in the background, without losing its failure.
 
@@ -2802,9 +2803,17 @@ def _spawn(
     awaits it, so a crashed planning or execution run left the chat waiting
     forever with nothing explaining why. Failures here are surfaced as an error
     event and fail the goal instead of vanishing into the event loop.
+
+    `owns_claim` is for a route that claimed the goal's driver *before* spawning (retry, apply): the coroutine
+    releases it in its own `finally`, and that `finally` only exists once the coroutine has started. A Cancel that
+    reaches the task before its first step (`_stop_goal`) cancelled a coroutine that never ran, so the claim was
+    never released and the goal read as driving until the engine restarted: Delete refused it, and so did Start.
     """
+    started = False
 
     async def runner() -> None:
+        nonlocal started
+        started = True
         try:
             await coro
         except Exception as exc:  # last line of defence for background work
@@ -2819,7 +2828,19 @@ def _spawn(
             except Exception:
                 pass
 
+    def never_started(_done: asyncio.Task[None]) -> None:
+        # A task cancelled before its first step never ran `runner`, so `coro` was never awaited: closed here, or
+        # the interpreter reports it as never awaited, and its claim (if the route took one) given back.
+        if started:
+            return
+        coro.close()
+        if owns_claim and goal_id is not None:
+            executor = getattr(app.state, "executor", None)
+            if executor is not None:
+                executor.release_driver(goal_id)
+
     task = asyncio.create_task(runner())
+    task.add_done_callback(never_started)
     # The event loop keeps only a weak reference to a task, so one that nothing else holds can
     # be collected while it is still running (a documented CPython hazard) — a goal's driver
     # vanishing mid-step with no error at all. Held here until it is done.
@@ -2860,8 +2881,13 @@ def _stop_goal(app: FastAPI, goal_id: str) -> None:
     executor = getattr(app.state, "executor", None)
     if executor is not None:
         executor.stop_in_flight(goal_id)
-    for task in list(_GOAL_TASKS.get(goal_id, ())):
+    tasks = list(_GOAL_TASKS.get(goal_id, ()))
+    for task in tasks:
         task.cancel()
+    if not tasks and executor is not None:
+        # Nothing is running for the goal, so no task will finish and forget the signal (`_task_done`): it is
+        # forgotten here, or every goal cancelled while idle kept a set signal for the life of the engine.
+        executor.forget_in_flight(goal_id)
 
 
 async def _retry_and_drive(app: FastAPI, goal_id: str, step_id: str) -> None:

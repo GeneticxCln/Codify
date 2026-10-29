@@ -134,7 +134,11 @@ applies to any failure raised with no step.
 claim the goal's driver (`claim_driver`) for as long as they run, as `start` and `retry` already did. `apply` now claims
 in the request handler too, before it spawns the work: the guards used to run and *then* the coroutine claimed, so two
 requests could both pass and the loser's `driver_busy` was reported by `_spawn` as a goal failure while the winner was
-still writing. The claim is released in the coroutine's `finally`, so a failure after the claim cannot strand it.
+still writing. The claim is released in the coroutine's `finally`, so a failure after the claim cannot strand it —
+and a route that claimed before spawning (`retry`, `apply`) hands `_spawn` `owns_claim=True`, so a Cancel that reaches
+the task before its first step, when that `finally` does not exist yet, gives the claim back too; the goal used to
+read as driving until the engine restarted, and Delete refused it. A Cancel of a goal with nothing running also
+forgets the goal's cancel signal at once, since no finishing task will.
 The conductor's `plan` move leaves the goal `PENDING` while the turn goes on to write its answer, and `PENDING` is
 what Start accepts — so without the claim, Start then began a second driver on a goal whose turn was still going
 (two conductors writing the same steps, the turn's own `write` gate opening the moment the status read `RUNNING`),
