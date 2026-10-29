@@ -1198,12 +1198,14 @@ async def browse_workspace(request: Request) -> dict[str, Any]:
         raise ApiError(503, "picker_unavailable", message)
     path = outcome.detail
 
-    folder_name = Path(path).name or path
     ws_service: WorkspaceService = request.app.state.workspaces
-    for ws in ws_service.list_workspaces():
-        if ws.root_path == path:
-            return {"cancelled": False, "workspace": ws.model_dump()}
+    # Through the spelling `create` stores, so a folder reached by a symlink or written with a trailing slash reopens
+    # the workspace it already is instead of being refused as a duplicate of itself.
+    existing = ws_service.find_by_root(path)
+    if existing is not None:
+        return {"cancelled": False, "workspace": existing.model_dump()}
 
+    folder_name = Path(path).name or path
     new_ws = ws_service.create(WorkspaceCreate(name=folder_name, root_path=path))
     return {"cancelled": False, "workspace": new_ws.model_dump()}
 

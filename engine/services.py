@@ -577,7 +577,7 @@ class WorkspaceService:
         # exist (`RuntimeError`), a symlink loop (`RuntimeError` before 3.13) and a name or path past the filesystem's
         # limit (`OSError`, `ENAMETOOLONG`, which `Path.is_dir` does not swallow). All of them are "not a directory".
         try:
-            root = str(Path(body.root_path).expanduser().resolve())
+            root = self.canonical_root(body.root_path)
             is_dir = Path(root).is_dir()
         except (OSError, ValueError, RuntimeError) as exc:
             raise ApiError(400, "invalid_root", "root_path must be an existing directory") from exc
@@ -608,6 +608,29 @@ class WorkspaceService:
                 raise ApiError(409, "duplicate_workspace", f"workspace already exists for {root}") from exc
             raise ApiError(409, "duplicate_workspace", "workspace could not be created (duplicate id or path)") from exc
         return ws
+
+    @staticmethod
+    def canonical_root(root_path: str) -> str:
+        """The one spelling a workspace root is stored under: `~` expanded, links and `..` resolved, no trailing slash.
+
+        Raises what `Path.resolve` raises for a path the operating system will not answer (`create` turns that into
+        `invalid_root`).
+        """
+        return str(Path(root_path).expanduser().resolve())
+
+    def find_by_root(self, root_path: str) -> Workspace | None:
+        """The workspace already kept for this folder, however the path to it is spelled, or None.
+
+        The folder dialog compared the path it was handed with the stored one as text, so a folder reached through a
+        symlink, or written with a trailing slash, was not found and `create` then refused it as a duplicate (409):
+        choosing a workspace that already existed failed instead of reopening it.
+        """
+        try:
+            root = self.canonical_root(root_path)
+        except (OSError, ValueError, RuntimeError):
+            return None
+        row = self._db.execute("SELECT * FROM workspaces WHERE root_path = ?", (root,)).fetchone()
+        return Workspace.model_validate(row_to_dict(row)) if row is not None else None
 
     def list_workspaces(self) -> list[Workspace]:
         return [Workspace.model_validate(row_to_dict(r)) for r in self._db.execute("SELECT * FROM workspaces")]

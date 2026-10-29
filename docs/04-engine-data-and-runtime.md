@@ -676,7 +676,7 @@ open looked exactly like one the person closed, in the API and on screen):
 
 | outcome | answer |
 |---|---|
-| a folder chosen | `{cancelled:false, workspace}` — the existing workspace for that path, or a new one |
+| a folder chosen | `{cancelled:false, workspace}` — the existing workspace for that folder, or a new one. "Existing" is judged in the spelling a root is stored under (`WorkspaceService.canonical_root`: `~` expanded, links resolved, no trailing slash), so the same folder reached through a symlink reopens its workspace; it used to be compared as text and refused as a 409 duplicate of itself |
 | the dialog closed with nothing chosen | `{cancelled:true}` |
 | no dialog could open, it crashed, or it did not answer | **503 `picker_unavailable`**, the reason, and "type the folder's path instead" |
 | a folder chosen whose path is not valid UTF-8 text | **400 `invalid_root`**, the same code a typed path that is not a usable folder gets, with a sentence that names the folder (each undecodable byte written `\xNN`) and says to rename it or choose another; no workspace is made, and the search ends (a dialog that answered is not asked again) |
