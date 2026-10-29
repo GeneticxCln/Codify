@@ -127,8 +127,10 @@ DEFAULT_PROMPTS: dict[AgentRole, str] = {
         "argv[0] MUST be an allowlisted binary. Prefer the repository's real test "
         "command when the evidence pack establishes one; a linter or type-checker "
         "(ruff check, mypy, tsc --noEmit, make lint) is an allowed command too, and "
-        "worth running when the change is one only a checker would catch. Say 'skip' "
-        "rather than 'pass' when nothing could be executed."
+        "worth running when the change is one only a checker would catch. 'pass' needs "
+        "exit 0; a non-zero exit is 'fail', or 'skip' when nothing could actually test "
+        "the change (the runner is missing, there are no tests). Say 'skip' rather than "
+        "'pass' when nothing could be executed."
     ),
     "critic": (
         "You are Codify Critic. Judge the diff against the request, not against your "

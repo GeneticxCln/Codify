@@ -15,6 +15,7 @@ from typing import Any
 from engine.db import connect
 from engine.git import GitService
 from engine.executor import MAX_LIBRARY_ROUNDS, MAX_REFUSED_TEST_COMMANDS, ExecutorService
+from engine.executor_support import TestsFailed
 from engine.laya import GateCall, LayaDecision, LayaService
 from engine.library import LibraryService
 from engine.models import (
@@ -587,6 +588,9 @@ class TestSandboxRefusalRecovery(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name).resolve()
+        # A repository, so the allowed runner these tests fall back to (`git status`) succeeds. Outside one it exits
+        # 128, and a pass over that is exactly what the verifier is no longer allowed to record.
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True, capture_output=True)
         self.conn = connect(self.root / "t.db")
         self.provider = _ScriptedProvider(
             {
@@ -728,6 +732,105 @@ class TestSandboxRefusalRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.goals.get(self.goal.id).status, "FAILED")
         error = next(e for e in self.goals.events_after(self.goal.id, 0) if e.type == "error")
         self.assertIn("argv null", error.payload["message"])
+
+
+class _ExitSandbox(SandboxService):
+    """Runs nothing, and reports the exit code it was built with."""
+
+    def __init__(self, exit_code: int) -> None:
+        self.exit_code = exit_code
+
+    def run_command(
+        self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test",
+        cancel: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        return {"argv": argv, "exit_code": self.exit_code, "stdout": "", "stderr": "ModuleNotFoundError: pytest"}
+
+
+class TestAPassNeedsExitZero(unittest.IsolatedAsyncioTestCase):
+    """A verdict of pass is a claim about a command that ran, and its exit code is the engine's own record of it.
+
+    Seen live: `python -m pytest -q` exited 1 (`No module named pytest`), the verifier answered "no tests found;
+    trivially passing", and the step was reviewed and committed on that pass. The recipe's `run_step` and the
+    conductor's `verify` move both reach a verdict through `_verifier`, so this is held there.
+    """
+
+    RUN = {"argv": ["pytest", "-q"], "verdict": None, "explanation": "run the suite"}
+    PASS = {"argv": None, "verdict": "pass", "explanation": "no tests found; trivially passing"}
+
+    async def asyncSetUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name).resolve()
+        self.conn = connect(self.root / "t.db")
+        self.provider = _ScriptedProvider({
+            "planner": {"steps": [{"title": "Step 1", "description": "create x.txt", "suggested_paths": ["x.txt"]}]},
+        })
+        self.registry = AgentRegistryService(self.conn, _ScriptedFactory(self.provider, Keychain()), Keychain())
+        configure_every_role(self.registry)
+        self.goals = GoalService(self.conn)
+        self.workspaces = WorkspaceService(self.conn)
+        self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.root)))
+        self.goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="T", description=""))
+
+    async def asyncTearDown(self) -> None:
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    async def _verify(self, exit_code: int, replies: list[dict[str, Any]]) -> dict[str, Any]:
+        """Plan the goal, then ask for one verdict over a command that exits `exit_code`; the published record."""
+        executor = ExecutorService(
+            self.goals, self.workspaces, self.registry, _ExitSandbox(exit_code), laya=_SkippedGate(),
+        )
+        await executor.run_planning(self.goal.id)
+        step = self.goals.steps(self.goal.id)[0]
+        self.provider.verifier_replies = list(replies)
+        try:
+            await executor._verifier(self.goal.id, step, self.ws)
+        except TestsFailed:
+            pass
+        results = [e.payload for e in self.goals.events_after(self.goal.id, 0) if e.type == "test_result"]
+        self.assertEqual(len(results), 1, "one verdict is published per verification")
+        return results[0]
+
+    async def test_a_pass_over_a_failed_command_is_put_back_and_then_recorded_as_a_fail(self) -> None:
+        for exit_code in (1, 124, 128):
+            with self.subTest(exit_code=exit_code):
+                await self.asyncTearDown()
+                await self.asyncSetUp()
+                result = await self._verify(exit_code, [self.RUN, self.PASS, self.PASS])
+                self.assertEqual(result["verdict"], "fail", "a pass was recorded for a command that failed")
+                self.assertEqual(result["exit_code"], exit_code)
+                self.assertIn(f"exited {exit_code}", result["explanation"])
+                prompts = self.provider.verifier_prompt_seq
+                self.assertEqual(len(prompts), 3, "the verifier is asked once more, and only once")
+                self.assertIn("a verdict of pass needs exit 0", prompts[2])
+                warns = [
+                    e.payload["message"] for e in self.goals.events_after(self.goal.id, 0)
+                    if e.type == "log" and e.payload.get("level") == "warn"
+                ]
+                self.assertTrue(any("recorded as fail" in w for w in warns), "the override is said out loud")
+
+    async def test_told_the_exit_code_the_verifier_may_say_nothing_tested_it(self) -> None:
+        skip = {"argv": None, "verdict": "skip", "explanation": "pytest is not installed, so nothing ran"}
+        result = await self._verify(1, [self.RUN, self.PASS, skip])
+        self.assertEqual(result["verdict"], "skip")
+        self.assertEqual(result["explanation"], skip["explanation"], "the verifier's own reason is kept")
+
+    async def test_a_pass_over_exit_zero_is_taken_at_its_word_in_one_call(self) -> None:
+        result = await self._verify(0, [self.RUN, self.PASS])
+        self.assertEqual(result["verdict"], "pass")
+        self.assertEqual(len(self.provider.verifier_prompt_seq), 2, "a pass that agrees with the exit code costs nothing")
+
+    async def test_a_fail_over_a_failed_command_is_not_asked_again(self) -> None:
+        fail = {"argv": None, "verdict": "fail", "explanation": "the suite failed"}
+        result = await self._verify(1, [self.RUN, fail])
+        self.assertEqual(result["verdict"], "fail")
+        self.assertEqual(len(self.provider.verifier_prompt_seq), 2)
+
+    async def test_a_pass_with_nothing_run_is_unchanged(self) -> None:
+        result = await self._verify(1, [self.PASS])
+        self.assertEqual(result["verdict"], "pass", "no command ran, so there is no exit code to contradict")
+        self.assertFalse(result["ran"])
 
 
 class TestEvidencePackPathHandling(unittest.TestCase):

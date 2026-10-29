@@ -1425,9 +1425,18 @@ command instead or answer `verdict: "skip"` saying no permitted runner exists. F
 both unfair and destructive: a real run died with `command_not_allowed` over `touch …` *after* the fixer
 had already written the change.
 
+**A pass needs exit 0.** The exit code is the one fact about a run the engine holds itself, so a `pass` for a
+command that exited non-zero (a failing suite, a timeout's 124, `No module named pytest`'s 1) is not taken at its
+word: the verifier is told the exit code once (`verdict_contradicts_exit`) and may answer `fail`, or `skip` when
+nothing could actually test the change. A second `pass` is recorded as `fail`, with an explanation the engine
+writes and a `warn` log saying so. A live run had recorded "no tests found; trivially passing" over exit 1 and
+committed the step. `fail` and `skip` are taken as given, and so is a `pass` when no command ran (there is no exit
+code to contradict, and `ran: false` already says so). The recipe's `run_step` and the conductor's `verify` move
+share this, because both reach a verdict through `_verifier`.
+
 Bounds: a refusal executes nothing, so it does not consume the single-execution budget; refusals are
-capped at `MAX_REFUSED_TEST_COMMANDS` (2), after which the verifier must answer with a verdict, so a step
-costs at most 4 verifier calls.
+capped at `MAX_REFUSED_TEST_COMMANDS` (2), after which the verifier must answer with a verdict, and a pass that
+contradicts the exit code is put back once, so a step costs at most 5 verifier calls.
 
 The `test_result` payload records what really happened:
 

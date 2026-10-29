@@ -46,6 +46,20 @@ VERIFIER_1 = json.dumps(
 VERIFIER_2 = json.dumps(
     {"argv": None, "verdict": "pass", "explanation": "no tests found; trivially passing"}
 )
+# The same answer for a command that did not exit 0. The engine refuses a pass there (a pass needs exit 0), so the fake
+# says what an honest verifier would: nothing tested the change. Without this every smoke run in a checkout with no
+# pytest on PATH was asked twice and then recorded as a failure.
+VERIFIER_2_NONZERO = json.dumps(
+    {"argv": None, "verdict": "skip", "explanation": "the command did not exit 0; nothing tested this change"}
+)
+
+
+def verifier_verdict(prompt: str) -> str:
+    """The verifier's second answer, read off the exit code the engine reported in `prompt`."""
+    import re
+
+    found = re.search(r"exit_code=(-?\d+)", prompt)
+    return VERIFIER_2 if found is None or found.group(1) == "0" else VERIFIER_2_NONZERO
 # A design deliverable has no code to falsify: the artifact is prose on disk, so
 # the engine asks for a verdict directly (argv null). Answering with a command
 # here would make a live design run exercise the run path instead of the review.
@@ -504,7 +518,7 @@ class Handler(BaseHTTPRequestHandler):
         elif LIBRARIAN_MARKER in prompt:
             out = librarian_request(prompt)
         elif "Command ran." in prompt:
-            out = VERIFIER_2
+            out = verifier_verdict(prompt)
         elif "was NOT run" in prompt:
             # The sandbox refused the previous command. FAKE_REFUSE_FIRST=1 makes
             # the verifier pick something the allowlist permits; without it this
