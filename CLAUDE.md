@@ -37,7 +37,7 @@ mean the change is shippable.
 | `make test-ui` | `ui/tests/` through `node --test` (needs Node 22.22.2+, 24.15+ or 26+; checked before it runs) |
 | `make typecheck-ui-tests` | `tsc --noEmit` over `ui/src` **and** `ui/tests` — config `ui/tsconfig.test.json` |
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |
-| `make check-tauri` | `cargo check` + `cargo test` (under Xvfb when there is no display; includes the machine tab's real-jail tests, which need `bwrap`, `unshare` and an unprivileged overlay mount, not only user namespaces; `make doctor` fails on each) + `cargo fmt --check` |
+| `make check-tauri` | `cargo check` + `cargo test` (under Xvfb when there is no display; includes the machine tab's real-jail tests, which need `bwrap`, `unshare` and an unprivileged overlay mount, not only user namespaces; `make doctor` fails on each) + `cargo clippy --all-targets -D warnings` + the declared Rust version against the locked graph (`scripts/check_msrv.py`) + `cargo fmt --check` |
 | `make ci-python-floor` | Only the 3.10 leg; never skips — it fails with install instructions |
 | `make ci-report` | `make ci`, then publishes its verdict on the commit as a GitHub status (context local/make-ci) via `gh`. Not a second gate: it runs the one gate and reports it, and refuses a dirty tree — the mark a PR still carries when Actions cannot give one (it was billing-locked once) |
 | `make check-ghidra` | `analyze_binary` against a **real** Ghidra (`GHIDRA_INSTALL_DIR`; `GHIDRA_CHECK_ARGS="--cancel"` also kills a real run). Not part of `check` or `ci`, and it fails rather than skips without Ghidra: the gate drives a stand-in for `analyzeHeadless`, so this is the one check that the export script runs inside the real thing |

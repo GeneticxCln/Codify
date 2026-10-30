@@ -230,11 +230,19 @@ other (`allow-codify-update-check`, `allow-codify-update-download` in
 
 ## 5. Checking what you downloaded
 
-The Download button hands you a package and the command to install it. What it cannot tell you is
-whether the bytes that landed are the bytes that were published: a connection that drops part-way
-leaves a file `apt` will happily try to unpack, and an asset can be re-uploaded after the page you
-read was rendered. The release workflow writes `sha256sum` output into a `SHA256SUMS` asset beside
-the two packages (§3), so there is something to check against:
+A connection that drops part-way leaves a file `apt` will happily try to unpack, and an asset can be
+re-uploaded after the page you read was rendered. The release workflow writes `sha256sum` output into
+a `SHA256SUMS` asset beside the two packages (§3), so there is something to check against, and **the
+Download button checks it before it writes anything** (audit of 2026-10-29: it used to write whatever
+arrived). It reads the release's `SHA256SUMS` first, from the same hosts and under the same redirect
+rule as the package (`update::fetch_sums`), so a release that publishes none is refused before tens of
+megabytes are spent; then it hashes what arrived and compares it with the release's own line for that
+name (`update::check_against_sums`, which reads the file exactly as `scripts/verify_package.py`'s
+`parse_sums` does). A mismatch, a package the file does not list, and a file that is not `sha256sum`
+output are each a sentence, and in each case nothing is written. A match is said in the answer
+(`next_step`, and `sha256` beside it), with the same caveat as below.
+
+For a package you downloaded some other way, or to check again:
 
 ```
 make verify-package                                # whatever Codify packages are in ~/Downloads

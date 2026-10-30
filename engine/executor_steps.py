@@ -37,6 +37,21 @@ from engine.executor_design import _Design
 # model call.
 MAX_REFUSED_TEST_COMMANDS = 2
 
+
+def verdict_contradicts_exit(exit_code: int) -> str:
+    """What the verifier is told, once, when it answers `pass` for a command that exited `exit_code` (not 0).
+
+    The engine's words, not a model's: the exit code is the one fact about the run the engine holds itself. The
+    verifier may still be right that nothing is broken (a test runner that is not installed, a suite with no tests),
+    and that is a `skip`; what it may not do is call a run that failed a pass.
+    """
+    return (
+        f"The command you ran exited {exit_code}, and a verdict of pass needs exit 0. Answer again with argv null: "
+        "'fail' if the output shows the change is broken, or 'skip' if nothing could actually test it (the runner "
+        "is missing, or there are no tests), saying which in the explanation. A second pass for this run will be "
+        "recorded as a fail."
+    )
+
 # How many times a failing test run may be fed back to the fixer before the step
 # is declared failed. This is the loop that turns "a tool that proposes" into
 # "an agent that finishes": the verifier's output is exactly the evidence the
@@ -826,6 +841,8 @@ class _Steps(_Design):
         refusals: list[str] = []
         proposals_left = 1 + MAX_REFUSED_TEST_COMMANDS
         timeout_s = 120
+        # Whether the verifier has already been told that its `pass` contradicts the exit code (below).
+        contradiction_put = False
 
         while True:
             out = await self.orchestrator.run_agent("verifier", goal_id, step.id, prompt)
@@ -839,11 +856,32 @@ class _Steps(_Design):
             # Verdict-only answer: either it never needed a command, or it has
             # just been told what happened to the one it asked for.
             if proposed is None:
+                verdict = out.get("verdict")
+                explanation = out.get("explanation")
+                exit_code = result["exit_code"] if result else None
+                if result is not None and verdict == "pass" and exit_code != 0:
+                    # A pass is the claim that the command that ran succeeded, and its exit code is the engine's
+                    # own record of whether it did. A verifier that read `No module named pytest` (exit 1) as
+                    # "no tests found; trivially passing" had its pass recorded, reviewed and committed. It is
+                    # told once, and may answer `fail` or `skip`; a second pass is recorded as the fail it is.
+                    if not contradiction_put:
+                        contradiction_put = True
+                        prompt = f"{prompt}\n\n{verdict_contradicts_exit(result['exit_code'])}"
+                        continue
+                    self._log(
+                        goal_id, step.id, "warn",
+                        f"the verifier answered pass for a command that exited {exit_code}; recorded as fail",
+                    )
+                    verdict = "fail"
+                    explanation = (
+                        f"The command exited {exit_code}, and a pass needs exit 0, so the engine recorded this as "
+                        f"a failure. The verifier had answered pass twice: {explanation or '(no explanation)'}"
+                    )
                 outcome = {
                     "argv": argv,
-                    "verdict": out.get("verdict"),
-                    "explanation": out.get("explanation"),
-                    "exit_code": result["exit_code"] if result else None,
+                    "verdict": verdict,
+                    "explanation": explanation,
+                    "exit_code": exit_code,
                     "refused": refusals or [],
                     "ran": argv is not None,
                     "brand_drifts": brand_drifts,

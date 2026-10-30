@@ -189,6 +189,63 @@ class TestTheLegs(unittest.TestCase):
             self.assertTrue(all(part for part in leg.argv), f"{leg.name} has an empty argv entry")
 
 
+class TestEachWorktreeGetsTheCommitsOwnDependencies(unittest.TestCase):
+    """A range that moves the lockfile is installed per worktree; one that does not shares the checkout's tree.
+
+    The install used to happen only when the main checkout had no `ui/node_modules`. In a checkout that had one, a
+    range that moved the lockfile gave each worktree nothing: every UI leg of every commit failed on
+    `Cannot find module 'react'`, and the report said twelve commits did not build when the code was fine.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "checkout" / "ui" / "node_modules").mkdir(parents=True)
+        self.worktree = self.root / "worktree"
+        (self.worktree / "ui").mkdir(parents=True)
+        self.ran: list[tuple[list[str], Path]] = []
+
+        def recording_run(argv: list[str], cwd: Path) -> tuple[int, str]:
+            self.ran.append((list(argv), cwd))
+            return 0, ""
+
+        for patcher in (
+            patch.object(check_history, "ROOT", self.root / "checkout"),
+            patch.object(check_history, "_run", recording_run),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_moved_lockfile_is_installed_even_where_the_checkout_has_a_tree(self) -> None:
+        result = CommitResult("abc1234", "subject")
+        check_history._prepare_ui_deps(self.worktree, True, result)
+        self.assertEqual(self.ran, [(["npm", "ci"], self.worktree / "ui")], "the worktree was given no install")
+        self.assertFalse((self.worktree / "ui" / "node_modules").is_symlink(), "old dependencies were linked in")
+        self.assertEqual(result.blocked, "", "an install that worked blocked the commit")
+
+    def test_an_unmoved_lockfile_shares_the_checkouts_tree(self) -> None:
+        result = CommitResult("abc1234", "subject")
+        check_history._prepare_ui_deps(self.worktree, False, result)
+        self.assertEqual(self.ran, [], "an install ran where the checkout's tree is the same dependencies")
+        self.assertTrue((self.worktree / "ui" / "node_modules").is_symlink())
+
+    def test_nothing_to_share_and_no_install_is_blocked_not_passed(self) -> None:
+        (self.root / "checkout" / "ui" / "node_modules").rmdir()
+        result = CommitResult("abc1234", "subject")
+        check_history._prepare_ui_deps(self.worktree, False, result)
+        self.assertTrue(result.blocked, "a commit with no dependencies to test against was not blocked")
+
+    def test_the_typescript_legs_run_the_commits_own_tsc(self) -> None:
+        legs = build_legs(check_history.ROOT / ".venv", check_history.COMMITS_NODE_MODULES)
+        for name in ("tsc", "tsc-tests"):
+            leg = next(leg for leg in legs if leg.name == name)
+            tsc = Path(leg.argv[0])
+            self.assertFalse(tsc.is_absolute(), f"{name} runs a tsc outside the commit being checked: {tsc}")
+            self.assertEqual(tsc, Path("node_modules") / ".bin" / "tsc")
+            self.assertEqual("ui", leg.cwd, "relative to the worktree's ui/, where that commit's tree is")
+
+
 class TestTheTargetIsWired(unittest.TestCase):
     def test_the_makefile_target_passes_a_range(self) -> None:
         """A target that ran the script with no range would check HEAD against

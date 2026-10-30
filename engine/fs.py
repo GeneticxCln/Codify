@@ -111,6 +111,19 @@ SYSTEM_ROOTS = frozenset({
 })
 # Directories under the home that hold credentials and nothing anybody would call a project.
 CREDENTIAL_DIRS = (".ssh", ".gnupg", ".aws", ".kube")
+# Directories under the home whose contents run when the person next logs in, or decide what runs: desktop startup
+# entries, user services and their environment, application launchers, and the commands first on PATH. Refused both
+# ways, which `CREDENTIAL_DIRS` does not need: a root that is one, is inside one, or *holds* one. `~/.config` holds
+# `autostart` and `systemd`, so an approved goal there could plant something that runs at login; `~/.config/nvim`
+# reaches none of them and is the project it looks like.
+AUTORUN_DIRS = (
+    ".config/autostart",
+    ".config/systemd",
+    ".config/environment.d",
+    ".local/bin",
+    ".local/share/applications",
+    ".local/share/systemd",
+)
 
 
 def protected_root_reason(root: Path) -> str | None:
@@ -139,6 +152,14 @@ def protected_root_reason(root: Path) -> str | None:
         guarded = real_home / name
         if resolved == guarded or guarded in resolved.parents:
             return f"{guarded} holds credentials, not a project"
+    for name in AUTORUN_DIRS:
+        guarded = real_home / name
+        if resolved == guarded or guarded in resolved.parents or resolved in guarded.parents:
+            return (
+                f"it is or contains {guarded}, which holds what runs when you log in (startup entries, user "
+                "services, commands on your PATH), so a goal could plant something there; choose a folder that "
+                "does not contain it"
+            )
     # The state directory by the same reach rule as `$HOME`: a goal rooted *in* it, or in something
     # that contains it, can rewrite the database, the token and the stored keys; one rooted in a
     # subfolder cannot get out of that subfolder.

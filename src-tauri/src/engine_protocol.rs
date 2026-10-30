@@ -261,6 +261,81 @@ pub(crate) fn engine_exited_problem(root: &Path) -> String {
     )
 }
 
+/// What the shell does when an engine that had started has exited: start another, or stop and say why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AfterExit {
+    /// Start a fresh engine. `counted` is false for a restart a person asked for, which the budget does not charge.
+    Restart { counted: bool },
+    /// The app is closing: the exit was this shell's own doing, and nothing is started.
+    ShuttingDown,
+    /// The engine has exited too often, too fast; the sentence the window shows instead of starting it again.
+    GaveUp(String),
+}
+
+/// How many unasked-for restarts a supervisor allows inside its window before it stops and says so.
+///
+/// An engine that crashes once (a provider library that segfaulted, an out-of-memory kill) is worth starting again
+/// without asking anybody: the window shows Offline for a few seconds and then a healthy engine on a new port. One that
+/// crashes on every boot is not, and restarting it for ever would hide the problem behind a pill that flickers.
+#[derive(Debug, Clone)]
+pub(crate) struct RestartBudget {
+    max: usize,
+    window: std::time::Duration,
+    recent: std::collections::VecDeque<std::time::Instant>,
+}
+
+impl RestartBudget {
+    pub(crate) fn new(max: usize, window: std::time::Duration) -> Self {
+        Self {
+            max,
+            window,
+            recent: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Spend one restart at `now`, or refuse when `max` have already been spent inside the window.
+    fn spend(&mut self, now: std::time::Instant) -> bool {
+        while self
+            .recent
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= self.window)
+        {
+            self.recent.pop_front();
+        }
+        if self.recent.len() >= self.max {
+            return false;
+        }
+        self.recent.push_back(now);
+        true
+    }
+
+    /// Decide what follows an exit. `requested` is a person's Restart; `shutting_down` is the app closing.
+    pub(crate) fn after_exit(
+        &mut self,
+        shutting_down: bool,
+        requested: bool,
+        now: std::time::Instant,
+    ) -> AfterExit {
+        if shutting_down {
+            return AfterExit::ShuttingDown;
+        }
+        if requested {
+            // A person asked, so whatever was failing has had someone look at it: the budget starts over.
+            self.recent.clear();
+            return AfterExit::Restart { counted: false };
+        }
+        if self.spend(now) {
+            return AfterExit::Restart { counted: true };
+        }
+        AfterExit::GaveUp(format!(
+            "The engine stopped {} times within {} minutes, so it was not started again. What it printed last is \
+             below; press Restart engine once the cause is fixed.",
+            self.max + 1,
+            self.window.as_secs() / 60
+        ))
+    }
+}
+
 /// The role name goes into a URL path; a frontend bug (or a compromise) must not be
 /// able to traverse into other engine endpoints via `..%2f`-style sequences. Roles
 /// are lowercase slugs — anything else is refused here, at the boundary, rather than
@@ -634,5 +709,87 @@ mod tests {
         ] {
             assert!(valid_role(role).is_err(), "{role:?} must be refused");
         }
+    }
+
+    fn minutes(n: u64) -> std::time::Duration {
+        std::time::Duration::from_secs(60 * n)
+    }
+
+    #[test]
+    fn an_engine_that_crashes_is_started_again_up_to_the_budget_and_then_named() {
+        let start = std::time::Instant::now();
+        let mut budget = RestartBudget::new(3, minutes(5));
+        for n in 0..3 {
+            assert_eq!(
+                budget.after_exit(false, false, start + std::time::Duration::from_secs(n)),
+                AfterExit::Restart { counted: true },
+                "crash {n} inside the budget is restarted without asking anybody"
+            );
+        }
+        match budget.after_exit(false, false, start + std::time::Duration::from_secs(4)) {
+            AfterExit::GaveUp(why) => {
+                assert!(
+                    why.contains("4 times"),
+                    "the sentence counts the exits: {why}"
+                );
+                assert!(
+                    why.contains("Restart engine"),
+                    "and names the way out: {why}"
+                );
+            }
+            other => panic!("a fourth crash in five minutes was restarted again: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn crashes_spread_out_past_the_window_never_run_the_budget_out() {
+        let start = std::time::Instant::now();
+        let mut budget = RestartBudget::new(3, minutes(5));
+        for n in 0..10u64 {
+            assert_eq!(
+                budget.after_exit(false, false, start + minutes(6 * n)),
+                AfterExit::Restart { counted: true },
+                "one crash every six minutes is ten separate accidents, not a loop"
+            );
+        }
+    }
+
+    #[test]
+    fn a_person_asking_is_never_refused_and_starts_the_budget_over() {
+        let start = std::time::Instant::now();
+        let mut budget = RestartBudget::new(1, minutes(5));
+        assert_eq!(
+            budget.after_exit(false, false, start),
+            AfterExit::Restart { counted: true }
+        );
+        assert!(matches!(
+            budget.after_exit(false, false, start),
+            AfterExit::GaveUp(_)
+        ));
+        assert_eq!(
+            budget.after_exit(false, true, start),
+            AfterExit::Restart { counted: false },
+            "the Restart button works when the budget is spent"
+        );
+        assert_eq!(
+            budget.after_exit(false, false, start),
+            AfterExit::Restart { counted: true },
+            "and a crash after it has the budget back"
+        );
+    }
+
+    #[test]
+    fn nothing_is_started_while_the_app_is_closing() {
+        let start = std::time::Instant::now();
+        let mut budget = RestartBudget::new(3, minutes(5));
+        assert_eq!(
+            budget.after_exit(true, false, start),
+            AfterExit::ShuttingDown
+        );
+        assert_eq!(
+            budget.after_exit(true, true, start),
+            AfterExit::ShuttingDown,
+            "not even when a Restart was pressed on the way out"
+        );
     }
 }

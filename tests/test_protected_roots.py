@@ -27,7 +27,7 @@ from unittest.mock import patch
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
 from engine.db import connect
-from engine.fs import FileSystemService, PathEscapeError, ProtectedRootError, protected_root_reason
+from engine.fs import AUTORUN_DIRS, FileSystemService, PathEscapeError, ProtectedRootError, protected_root_reason
 from engine.models import WorkspaceCreate
 from engine.services import ApiError, WorkspaceService
 
@@ -71,6 +71,28 @@ class TestWhichRootsAreProtected(HomeCase):
                 with self.subTest(root=str(root.relative_to(self.home))):
                     self.assertIsNotNone(protected_root_reason(root))
 
+    def test_a_root_that_reaches_what_runs_at_login_is_refused(self) -> None:
+        """`~/.config` and `~/.local` were accepted, and they hold `autostart`, the user's systemd units and
+        `~/.local/bin`: an approved goal there could plant something that runs at the next login. A root that is
+        one of those, is inside one, or contains one is refused; an application's own config folder is not."""
+        for name in AUTORUN_DIRS:
+            (self.home / name / "sub").mkdir(parents=True, exist_ok=True)
+        refused = (
+            ".config", ".local", ".local/share", ".config/autostart", ".config/systemd/user",
+            ".config/environment.d", ".local/bin", ".local/bin/sub", ".local/share/applications",
+            ".local/share/systemd/sub",
+        )
+        for rel in refused:
+            (self.home / rel).mkdir(parents=True, exist_ok=True)
+            with self.subTest(root=rel):
+                reason = protected_root_reason(self.home / rel)
+                self.assertIsNotNone(reason, f"~/{rel} reaches what runs at login and was accepted")
+                self.assertIn("log in", str(reason))
+        for rel in (".config/nvim", ".local/share/fonts", ".config/fish/functions"):
+            (self.home / rel).mkdir(parents=True, exist_ok=True)
+            with self.subTest(root=rel):
+                self.assertIsNone(protected_root_reason(self.home / rel), f"~/{rel} is a project and was refused")
+
     def test_codifys_own_state_directory_is_refused(self) -> None:
         state = self.base / "state-dir"
         state.mkdir()
@@ -108,6 +130,20 @@ class TestTheRootIsRefusedWhenAWorkspaceIsCreated(HomeCase):
         self.assertIn("home", caught.exception.message)
         self.assertEqual([], self.workspaces.list_workspaces())
 
+    def test_creating_a_workspace_at_dot_config_is_a_400_naming_why(self) -> None:
+        (self.home / ".config" / "autostart").mkdir(parents=True)
+        with self.assertRaises(ApiError) as caught:
+            self.workspaces.create(WorkspaceCreate(name="config", root_path=str(self.home / ".config")))
+        self.assertEqual("invalid_root", caught.exception.code)
+        self.assertIn("log in", caught.exception.message)
+        made = self.workspaces.create(WorkspaceCreate(name="nvim", root_path=str(self._mkdir(".config/nvim"))))
+        self.assertTrue(made.root_path.endswith("/.config/nvim"))
+
+    def _mkdir(self, rel: str) -> Path:
+        path = self.home / rel
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def test_a_subdirectory_of_home_is_accepted(self) -> None:
         made = self.workspaces.create(WorkspaceCreate(name="app", root_path=str(self.home / "projects" / "app")))
         self.assertEqual(str(self.home / "projects" / "app"), made.root_path)
@@ -132,6 +168,23 @@ class TestAWorkspaceThatAlreadyExistsCannotWriteThere(HomeCase):
                 self.assertIsInstance(caught.exception, PathEscapeError)
         self.assertFalse((self.home / ".bashrc").exists(), "a file was written into the home directory")
         self.assertFalse((self.home / ".ssh" / "authorized_keys").exists())
+
+    def test_a_config_workspace_cannot_plant_a_startup_entry_or_save_into_it(self) -> None:
+        config = self.home / ".config"
+        (config / "autostart").mkdir(parents=True)
+        (config / "app.conf").write_text("a\n", encoding="utf-8")
+        fs = FileSystemService(str(config))
+        with self.assertRaises(ProtectedRootError):
+            fs.apply(
+                [{"path": "autostart/updater.desktop", "action": "create", "content": "[Desktop Entry]\nExec=sh\n"}],
+                dry_run=False,
+            )
+        self.assertFalse((config / "autostart" / "updater.desktop").exists(), "a startup entry was planted")
+        # A person's own Save is held to the same rule as the fixer's write.
+        opened = fs.read_editable("app.conf")
+        with self.assertRaises(ProtectedRootError):
+            fs.save_text("app.conf", "b\n", opened.version)
+        self.assertEqual("a\n", (config / "app.conf").read_text(encoding="utf-8"))
 
     def test_reading_is_unaffected(self) -> None:
         # The rule is about writing; a recon of a big directory is not made impossible by it.

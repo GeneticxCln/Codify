@@ -211,6 +211,25 @@ class TestTheRouteStillCreatesTheWorkspace(BrowseCase):
         listed: Any = (await self.client.get("/workspaces", headers=self.headers)).json()
         self.assertEqual(1, len(listed))
 
+    async def test_the_same_folder_spelled_another_way_reopens_its_workspace(self) -> None:
+        """The dialog's path was compared with the stored one as text, so the folder reached through a symlink, or
+        written with a trailing slash, was not found, and `create` refused it as a duplicate: a 409 for choosing a
+        workspace that already existed."""
+        link = self.base / "link-to-project"
+        link.symlink_to(self.chosen)
+        self.stub("python3", f'echo "{self.chosen}"')
+        first = (await self.browse()).json()["workspace"]
+
+        for spelled in (str(link), f"{self.chosen}/", f"{link}/"):
+            with self.subTest(spelled=spelled):
+                self.stub("python3", f'echo "{spelled}"')
+                r = await self.browse()
+                self.assertEqual(r.status_code, 200, r.text)
+                self.assertFalse(r.json()["cancelled"])
+                self.assertEqual(r.json()["workspace"]["id"], first["id"], "the folder opened as another workspace")
+        listed: Any = (await self.client.get("/workspaces", headers=self.headers)).json()
+        self.assertEqual(1, len(listed))
+
 
 class TestAFolderWhoseNameIsNotText(BrowseCase):
     """A dialog that worked, and a person who chose, must never end in a plain-text 500.

@@ -51,6 +51,10 @@ tokio = { version = "1", features = ["process", "io-util", "sync", "time", "sign
 reqwest = { version = "0.12", features = ["json"] }
 portable-pty = "0.9.0"
 url = "2"
+# The SHA-256 the About pane's download is checked against the release's own SHA256SUMS with, before the package is
+# written (update.rs). Already in the graph, through Tauri, at the version the lockfile pins; named here because the
+# check is this crate's own.
+sha2 = "0.10"
 # One syscall: SIGTERM to the engine child. tokio's `Child` exposes only SIGKILL
 # (`start_kill`, `kill`), and the exit path has to *ask* first so an interrupted
 # turn is recorded rather than cut off — see `stop_engine` in lib.rs. The pid is

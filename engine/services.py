@@ -25,6 +25,7 @@ from engine.fs import (
     protected_root_reason,
 )
 from engine.library import LibraryService
+from engine.web_fetch import MAX_HOSTS_CHARS
 from engine.models import (
     BUILTIN_PROVIDERS,
     PAUSE_CODES,
@@ -173,6 +174,34 @@ class SettingsService:
         "web_fetch_hosts": "",
     }
 
+    # The longest value each string key holds, and the one place that says so: `PUT /settings/engine` validates
+    # against it and `GET` advertises it (`engine/app.py` `ENGINE_STRING_SETTINGS` is this table), and `set_str`
+    # stores up to it. `set_str` used to cut every value at 200, so a 300-character speech server address that the
+    # screen was told it could save (500) was stored as a different address, with no error.
+    STRING_LIMITS: dict[str, int] = {
+        "conductor_provider": 64,
+        "conductor_model": 128,
+        "conductor_fallback_provider": 64,
+        "conductor_fallback_model": 128,
+        # Voice (Settings → Audio, engine/speech.py): which provider and model turn
+        # speech into text and back, the voice that reads, and the microphone. Engine
+        # settings rather than a role for the conductor's reason: neither is a stage.
+        "stt_provider": 64,
+        "stt_model": 128,
+        "stt_language": 16,
+        "tts_provider": 64,
+        "tts_model": 128,
+        "tts_voice": 64,
+        # A PipeWire node name; empty is the session's default source.
+        "audio_input": 200,
+        # A custom speech provider's own address (a local speech server, say), so it
+        # needs no agent role to define it. Built-in providers ignore it.
+        "stt_base_url": 500,
+        "tts_base_url": 500,
+        # The sites `fetch_page` may read when `web_fetch` is 1.
+        "web_fetch_hosts": MAX_HOSTS_CHARS,
+    }
+
     def get_str(self, key: str) -> str:
         """A known string key's value, stripped. The key must exist here."""
         if key not in self.STRING_SPEC:
@@ -187,7 +216,11 @@ class SettingsService:
     def set_str(self, key: str, value: str) -> str:
         if key not in self.STRING_SPEC:
             raise ApiError(400, "unknown_setting", f"unknown engine setting: {key}")
-        clean = str(value).strip()[:200]
+        clean = str(value).strip()
+        limit = self.STRING_LIMITS[key]
+        if len(clean) > limit:
+            # Refused, never shortened: a cut address or site list is a different value from the one that was shown.
+            raise ApiError(422, "invalid_value", f"{key} must be at most {limit} characters")
         self._db.execute(
             """INSERT INTO engine_settings (key, value, updated_at)
                VALUES (?, ?, ?)
@@ -544,7 +577,7 @@ class WorkspaceService:
         # exist (`RuntimeError`), a symlink loop (`RuntimeError` before 3.13) and a name or path past the filesystem's
         # limit (`OSError`, `ENAMETOOLONG`, which `Path.is_dir` does not swallow). All of them are "not a directory".
         try:
-            root = str(Path(body.root_path).expanduser().resolve())
+            root = self.canonical_root(body.root_path)
             is_dir = Path(root).is_dir()
         except (OSError, ValueError, RuntimeError) as exc:
             raise ApiError(400, "invalid_root", "root_path must be an existing directory") from exc
@@ -575,6 +608,29 @@ class WorkspaceService:
                 raise ApiError(409, "duplicate_workspace", f"workspace already exists for {root}") from exc
             raise ApiError(409, "duplicate_workspace", "workspace could not be created (duplicate id or path)") from exc
         return ws
+
+    @staticmethod
+    def canonical_root(root_path: str) -> str:
+        """The one spelling a workspace root is stored under: `~` expanded, links and `..` resolved, no trailing slash.
+
+        Raises what `Path.resolve` raises for a path the operating system will not answer (`create` turns that into
+        `invalid_root`).
+        """
+        return str(Path(root_path).expanduser().resolve())
+
+    def find_by_root(self, root_path: str) -> Workspace | None:
+        """The workspace already kept for this folder, however the path to it is spelled, or None.
+
+        The folder dialog compared the path it was handed with the stored one as text, so a folder reached through a
+        symlink, or written with a trailing slash, was not found and `create` then refused it as a duplicate (409):
+        choosing a workspace that already existed failed instead of reopening it.
+        """
+        try:
+            root = self.canonical_root(root_path)
+        except (OSError, ValueError, RuntimeError):
+            return None
+        row = self._db.execute("SELECT * FROM workspaces WHERE root_path = ?", (root,)).fetchone()
+        return Workspace.model_validate(row_to_dict(row)) if row is not None else None
 
     def list_workspaces(self) -> list[Workspace]:
         return [Workspace.model_validate(row_to_dict(r)) for r in self._db.execute("SELECT * FROM workspaces")]
@@ -1320,8 +1376,11 @@ class GoalService:
              goal.status, goal.mode, int(goal.trace), goal.created_at, goal.updated_at,
              goal.provider, goal.model),
         )
+        # A turn into an archived thread restores it, in the same write. Someone writing in a thread is working on it,
+        # and the panel lists only live threads: the turn used to run, spend, and answer inside a thread nobody could
+        # see. The ordinary way here is a second window that still had the thread open when another archived it.
         self._db.execute(
-            "UPDATE conversations SET updated_at = ? WHERE id = ?",
+            "UPDATE conversations SET updated_at = ?, archived = 0 WHERE id = ?",
             (now, conversation_id),
         )
         self._db.commit()

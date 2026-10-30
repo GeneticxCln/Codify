@@ -35,7 +35,7 @@ from engine.spawn_guard import guarded_argv, guarded_env
 from engine.stats import build_overview, normalize_window
 from engine.trace import TraceService
 from engine.surfaces import SurfaceAnswer, SurfaceBridge
-from engine.web_fetch import MAX_HOSTS_CHARS, parse_hosts
+from engine.web_fetch import parse_hosts
 from engine.webview_bridge import BridgeAnswer, WebviewBridge
 from engine.metrics import (
     STAGE_SUCCESS_OUTCOMES,
@@ -315,6 +315,13 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
             )
         except Exception:
             pass
+
+    # Recordings past the person's retention policy are forgotten at boot too, so the policy holds on an install
+    # that never opens the statistics screen (the other place it runs, beside every goal's end).
+    try:
+        app.state.traces.enforce_retention(app.state.settings)
+    except Exception:
+        pass
 
     # No workspace is created here on purpose.
     #
@@ -1198,12 +1205,14 @@ async def browse_workspace(request: Request) -> dict[str, Any]:
         raise ApiError(503, "picker_unavailable", message)
     path = outcome.detail
 
-    folder_name = Path(path).name or path
     ws_service: WorkspaceService = request.app.state.workspaces
-    for ws in ws_service.list_workspaces():
-        if ws.root_path == path:
-            return {"cancelled": False, "workspace": ws.model_dump()}
+    # Through the spelling `create` stores, so a folder reached by a symlink or written with a trailing slash reopens
+    # the workspace it already is instead of being refused as a duplicate of itself.
+    existing = ws_service.find_by_root(path)
+    if existing is not None:
+        return {"cancelled": False, "workspace": existing.model_dump()}
 
+    folder_name = Path(path).name or path
     new_ws = ws_service.create(WorkspaceCreate(name=folder_name, root_path=path))
     return {"cancelled": False, "workspace": new_ws.model_dump()}
 
@@ -1276,33 +1285,12 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
 # rather than the truthiness trap it would be for a number someone chooses.
 ENGINE_SWITCH_SETTINGS = frozenset({"conductor_drives_execution", "tts_auto_read", "browser_actions"})
 
-# The conductor's own provider and model, keyed to the longest value each
-# accepts. They are settings rather than an `AgentConfig` row because
-# docs/00 §6.1 fixes `AgentRole` at eight and a row in `agent_configs` *is* a
-# role (see `SettingsService.STRING_SPEC` for the same argument on that side).
-ENGINE_STRING_SETTINGS: dict[str, int] = {
-    "conductor_provider": 64,
-    "conductor_model": 128,
-    "conductor_fallback_provider": 64,
-    "conductor_fallback_model": 128,
-    # Voice (Settings → Audio, engine/speech.py): which provider and model turn
-    # speech into text and back, the voice that reads, and the microphone. Engine
-    # settings rather than a role for the conductor's reason: neither is a stage.
-    "stt_provider": 64,
-    "stt_model": 128,
-    "stt_language": 16,
-    "tts_provider": 64,
-    "tts_model": 128,
-    "tts_voice": 64,
-    # A PipeWire node name; empty is the session's default source.
-    "audio_input": 200,
-    # A custom speech provider's own address (a local speech server, say), so it
-    # needs no agent role to define it. Built-in providers ignore it.
-    "stt_base_url": 500,
-    "tts_base_url": 500,
-    # The sites `fetch_page` may read when `web_fetch` is 1. 200 is what `SettingsService.set_str` stores.
-    "web_fetch_hosts": MAX_HOSTS_CHARS,
-}
+# The string settings (the conductor's own provider and model, voice, web pages), keyed to the longest
+# value each accepts. They are settings rather than an `AgentConfig` row because docs/00 §6.1 fixes
+# `AgentRole` at eight and a row in `agent_configs` *is* a role (see `SettingsService.STRING_SPEC` for the
+# same argument on that side). The table is the service's own, so what is advertised, what is validated
+# here and what `set_str` stores are one number per key.
+ENGINE_STRING_SETTINGS: dict[str, int] = SettingsService.STRING_LIMITS
 
 # The slug shape `AgentConfigUpdate` enforces, so a conductor pointed at a
 # provider that cannot exist is refused here for the same reason it would be
@@ -1402,9 +1390,8 @@ def _clean_engine_string(key: str, value: Any) -> str:
             )
         written = ", ".join(hosts)
         # Bounded after normalising, not only before: the stored form is longer than what was typed (one space per
-        # separator, and an IDN name is longer as punycode), and `set_str` would cut it at 200 characters, which
-        # would chop the last site to a name that matches nothing. Refused instead, so the list that was saved is
-        # the list that was shown.
+        # separator, and an IDN name is longer as punycode), and `set_str` refuses anything past the limit. Refused
+        # here, with the sentence that says why, so the list that was saved is the list that was shown.
         if len(written) > limit:
             raise ApiError(
                 422, "invalid_value",
@@ -2398,15 +2385,14 @@ async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, 
         pass
 
     # Recordings are the other thing that grows without a policy (docs/04
-    # §8). Pruned at the same moment and on the same terms as the snapshot
-    # above: on read, so lowering it takes effect now rather than at some next
-    # run of a job that may not happen, and swallowed, because forgetting a
-    # recording must never be able to fail the read that asked for one.
+    # §8). Pruned here as well as at boot and at every goal's end
+    # (`TraceService.enforce_retention`): on read, so lowering it takes effect
+    # now rather than at some next run of a job that may not happen, and
+    # swallowed, because forgetting a recording must never be able to fail the
+    # read that asked for one.
     try:
         traces_pruned: TraceService = request.app.state.traces
-        traces_pruned.delete_older_than(
-            request.app.state.settings.get_int("trace_retention_days")
-        )
+        traces_pruned.enforce_retention(request.app.state.settings)
     except Exception:
         pass
 
@@ -2584,7 +2570,7 @@ async def retry_step(goal_id: str, step_id: str, body: VersionedAction, request:
         # drive keeps them. The recipe's fixer never reads them, and for it they would only sit on the timeline.
         keep_notes=executor.conductor_can_drive(goal_id),
     )
-    _spawn(request.app, _retry_and_drive(request.app, goal_id, step_id), goal_id)
+    _spawn(request.app, _retry_and_drive(request.app, goal_id, step_id), goal_id, owns_claim=True)
     return updated_step
 
 
@@ -2765,7 +2751,7 @@ async def apply_goal(goal_id: str, body: VersionedAction, request: Request) -> d
     # refused now, and the winner must own the goal before this handler returns.
     if not executor.claim_driver(goal_id):
         raise ApiError(409, "driver_busy", "another driver is already running this goal")
-    _spawn(request.app, executor.apply_goal(goal_id, driver_claimed=True), goal_id)
+    _spawn(request.app, executor.apply_goal(goal_id, driver_claimed=True), goal_id, owns_claim=True)
     return {"applied": True, "goal_id": goal_id}
 
 
@@ -2794,7 +2780,8 @@ async def enable_execution(goal_id: str, body: VersionedAction, request: Request
 
 
 def _spawn(
-    app: FastAPI, coro: Coroutine[Any, Any, Any], goal_id: str | None = None
+    app: FastAPI, coro: Coroutine[Any, Any, Any], goal_id: str | None = None,
+    *, owns_claim: bool = False,
 ) -> None:
     """Run a pipeline coroutine in the background, without losing its failure.
 
@@ -2802,9 +2789,17 @@ def _spawn(
     awaits it, so a crashed planning or execution run left the chat waiting
     forever with nothing explaining why. Failures here are surfaced as an error
     event and fail the goal instead of vanishing into the event loop.
+
+    `owns_claim` is for a route that claimed the goal's driver *before* spawning (retry, apply): the coroutine
+    releases it in its own `finally`, and that `finally` only exists once the coroutine has started. A Cancel that
+    reaches the task before its first step (`_stop_goal`) cancelled a coroutine that never ran, so the claim was
+    never released and the goal read as driving until the engine restarted: Delete refused it, and so did Start.
     """
+    started = False
 
     async def runner() -> None:
+        nonlocal started
+        started = True
         try:
             await coro
         except Exception as exc:  # last line of defence for background work
@@ -2819,7 +2814,19 @@ def _spawn(
             except Exception:
                 pass
 
+    def never_started(_done: asyncio.Task[None]) -> None:
+        # A task cancelled before its first step never ran `runner`, so `coro` was never awaited: closed here, or
+        # the interpreter reports it as never awaited, and its claim (if the route took one) given back.
+        if started:
+            return
+        coro.close()
+        if owns_claim and goal_id is not None:
+            executor = getattr(app.state, "executor", None)
+            if executor is not None:
+                executor.release_driver(goal_id)
+
     task = asyncio.create_task(runner())
+    task.add_done_callback(never_started)
     # The event loop keeps only a weak reference to a task, so one that nothing else holds can
     # be collected while it is still running (a documented CPython hazard) — a goal's driver
     # vanishing mid-step with no error at all. Held here until it is done.
@@ -2860,8 +2867,13 @@ def _stop_goal(app: FastAPI, goal_id: str) -> None:
     executor = getattr(app.state, "executor", None)
     if executor is not None:
         executor.stop_in_flight(goal_id)
-    for task in list(_GOAL_TASKS.get(goal_id, ())):
+    tasks = list(_GOAL_TASKS.get(goal_id, ()))
+    for task in tasks:
         task.cancel()
+    if not tasks and executor is not None:
+        # Nothing is running for the goal, so no task will finish and forget the signal (`_task_done`): it is
+        # forgotten here, or every goal cancelled while idle kept a set signal for the life of the engine.
+        executor.forget_in_flight(goal_id)
 
 
 async def _retry_and_drive(app: FastAPI, goal_id: str, step_id: str) -> None:

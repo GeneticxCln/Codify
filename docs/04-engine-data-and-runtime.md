@@ -134,7 +134,11 @@ applies to any failure raised with no step.
 claim the goal's driver (`claim_driver`) for as long as they run, as `start` and `retry` already did. `apply` now claims
 in the request handler too, before it spawns the work: the guards used to run and *then* the coroutine claimed, so two
 requests could both pass and the loser's `driver_busy` was reported by `_spawn` as a goal failure while the winner was
-still writing. The claim is released in the coroutine's `finally`, so a failure after the claim cannot strand it.
+still writing. The claim is released in the coroutine's `finally`, so a failure after the claim cannot strand it —
+and a route that claimed before spawning (`retry`, `apply`) hands `_spawn` `owns_claim=True`, so a Cancel that reaches
+the task before its first step, when that `finally` does not exist yet, gives the claim back too; the goal used to
+read as driving until the engine restarted, and Delete refused it. A Cancel of a goal with nothing running also
+forgets the goal's cancel signal at once, since no finishing task will.
 The conductor's `plan` move leaves the goal `PENDING` while the turn goes on to write its answer, and `PENDING` is
 what Start accepts — so without the claim, Start then began a second driver on a goal whose turn was still going
 (two conductors writing the same steps, the turn's own `write` gate opening the moment the status read `RUNNING`),
@@ -567,8 +571,8 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `PUT` | `/settings/agents/{role}` | `AgentConfigUpdate` | `AgentConfig` |
 | `POST` | `/settings/agents/{role}/test-connection` | — | `{ok, message}` — a 15s liveness probe (`01` §3) |
 | `GET` | `/settings/roles` | — | each role's `job` + `timing` (`01` §1) |
-| `GET` | `/settings/engine` | — | every key in `SettingsService.SPEC` / `STRING_SPEC`, each with its clamp band (or its max length, for a string) |
-| `PUT` | `/settings/engine` | `{parallel_width, …}` | `{saved: {…}}` — echoes what was actually stored, clamped for numbers |
+| `GET` | `/settings/engine` | — | every key in `SettingsService.SPEC` / `STRING_SPEC`, each with its clamp band (or its max length, for a string: `SettingsService.STRING_LIMITS`) |
+| `PUT` | `/settings/engine` | `{parallel_width, …}` | `{saved: {…}}` — echoes what was actually stored, clamped for numbers; a string is stored whole up to the max length `GET` advertises and refused past it (422 `invalid_value`), never shortened. `set_str` used to cut every string at 200, so a speech server address the screen allowed 500 for was saved as a different address |
 | `GET` | `/models?refresh=` | — | live-discovered catalog, per-provider status, each model's `context_tokens` (or `null`), and a `conductor` block `{provider, model, source, num_ctx}` — the model a conversation runs on when nothing is picked, computed per request and not cached (`06` §2.1) |
 | `GET` | `/models/recent?limit={1..25}` | — | `[{provider, model, role, ran_at}]`, newest first (`06` §3.1) |
 | `GET` | `/audio/status` | — | `{dictation, read_aloud, recorder, auto_read}`: whether each can run now and, if not, the reason (§3.0.2) |
@@ -672,7 +676,7 @@ open looked exactly like one the person closed, in the API and on screen):
 
 | outcome | answer |
 |---|---|
-| a folder chosen | `{cancelled:false, workspace}` — the existing workspace for that path, or a new one |
+| a folder chosen | `{cancelled:false, workspace}` — the existing workspace for that folder, or a new one. "Existing" is judged in the spelling a root is stored under (`WorkspaceService.canonical_root`: `~` expanded, links resolved, no trailing slash), so the same folder reached through a symlink reopens its workspace; it used to be compared as text and refused as a 409 duplicate of itself |
 | the dialog closed with nothing chosen | `{cancelled:true}` |
 | no dialog could open, it crashed, or it did not answer | **503 `picker_unavailable`**, the reason, and "type the folder's path instead" |
 | a folder chosen whose path is not valid UTF-8 text | **400 `invalid_root`**, the same code a typed path that is not a usable folder gets, with a sentence that names the folder (each undecodable byte written `\xNN`) and says to rename it or choose another; no workspace is made, and the search ends (a dialog that answered is not asked again) |
@@ -1421,9 +1425,18 @@ command instead or answer `verdict: "skip"` saying no permitted runner exists. F
 both unfair and destructive: a real run died with `command_not_allowed` over `touch …` *after* the fixer
 had already written the change.
 
+**A pass needs exit 0.** The exit code is the one fact about a run the engine holds itself, so a `pass` for a
+command that exited non-zero (a failing suite, a timeout's 124, `No module named pytest`'s 1) is not taken at its
+word: the verifier is told the exit code once (`verdict_contradicts_exit`) and may answer `fail`, or `skip` when
+nothing could actually test the change. A second `pass` is recorded as `fail`, with an explanation the engine
+writes and a `warn` log saying so. A live run had recorded "no tests found; trivially passing" over exit 1 and
+committed the step. `fail` and `skip` are taken as given, and so is a `pass` when no command ran (there is no exit
+code to contradict, and `ran: false` already says so). The recipe's `run_step` and the conductor's `verify` move
+share this, because both reach a verdict through `_verifier`.
+
 Bounds: a refusal executes nothing, so it does not consume the single-execution budget; refusals are
-capped at `MAX_REFUSED_TEST_COMMANDS` (2), after which the verifier must answer with a verdict, so a step
-costs at most 4 verifier calls.
+capped at `MAX_REFUSED_TEST_COMMANDS` (2), after which the verifier must answer with a verdict, and a pass that
+contradicts the exit code is put back once, so a step costs at most 5 verifier calls.
 
 The `test_result` payload records what really happened:
 
@@ -2160,10 +2173,13 @@ mid-planning can switch it off and the very next call is not stored.
 
 `trace_retention_days` (Settings → Engine, default **30**, band 0–730; `0` keeps everything) bounds
 how long a recording lives, so the table's growth is a decision rather than an accident. It is
-enforced on the `/stats/overview` read — the same moment and on the same terms as
-`stats_retention_days` — so a lowered policy takes effect on the next read instead of at the next
-run of a job that may never be scheduled. `trace_calls(created_at)` is indexed for it: the sweep
-walks a table with one row per model call of every recorded run.
+enforced (`TraceService.enforce_retention`) at three moments the engine is already at, never by a job
+that has to be scheduled: at **boot**, when **any goal reaches a terminal status** (beside the observation
+consolidation, best-effort), and on the `/stats/overview` read, the same moment and on the same terms as
+`stats_retention_days`, so a lowered policy takes effect on the next read. It used to be the read alone,
+so an install whose Stats screen was never opened kept every recording for ever under a 30-day policy
+(audit of 2026-10-29). `trace_calls(created_at)` is indexed for it: the sweep walks a table with one row
+per model call of every recorded run.
 
 Deleting a goal deletes its recording through `ON DELETE CASCADE`, so a recording never outlives the
 run it describes.

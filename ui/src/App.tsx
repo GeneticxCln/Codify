@@ -52,6 +52,7 @@ import {
   refreshEngineInfoFromIpc,
   engineFailureReason,
   fetchEngineStderr,
+  restartEngine,
   enableExecution,
   applyGoal,
   fetchConversations,
@@ -649,6 +650,8 @@ export const App: React.FC = () => {
    * soon as the engine answers, so a resolved outage leaves nothing behind.
    */
   const [engineStderr, setEngineStderr] = useState<string[]>([]);
+  // A Restart engine press that the shell has not answered yet, so the button cannot be pressed twice over one restart.
+  const [restartingEngine, setRestartingEngine] = useState(false);
   const [authOk, setAuthOk] = useState<boolean | null>(null);
   /** The connection, as one word: the pill's label, hint and colours all key off it. */
   const engineConnection = engineState(engineUp, authOk);
@@ -833,6 +836,22 @@ export const App: React.FC = () => {
       cancelled = true;
     };
   }, [engineUp]);
+
+  /** Restart engine: the shell stops the one that is there and starts a fresh one; the health probe adopts it. */
+  const handleRestartEngine = useCallback(async () => {
+    setRestartingEngine(true);
+    try {
+      if (await restartEngine()) {
+        // The launcher's old reason described the engine that is being replaced.
+        setError(null);
+        forceHealthProbeRef.current?.();
+      }
+    } catch (err: any) {
+      setError(readRejection(err, "Failed to restart the engine"));
+    } finally {
+      setRestartingEngine(false);
+    }
+  }, []);
 
   // Load workspaces; never fabricate a hardcoded one — if the engine has no
   // workspaces yet, the user picks a folder via the command bar first.
@@ -4316,10 +4335,20 @@ export const App: React.FC = () => {
                 <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-codify-warning">
                   {engineStderr.join("\n")}
                 </pre>
-                <p className="mt-1.5 text-xs text-codify-warning">
-                  The shell stops the engine rather than restarting it, so a new
-                  engine means relaunching the app.
-                </p>
+                <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs text-codify-warning">
+                    An engine that exits on its own is started again, up to three
+                    times in five minutes. Restart engine starts a fresh one now.
+                  </p>
+                  <button
+                    type="button"
+                    className="rounded-md border border-codify-border bg-codify-raised px-2 py-0.5 hover:bg-codify-border disabled:opacity-60"
+                    disabled={restartingEngine}
+                    onClick={() => void handleRestartEngine()}
+                  >
+                    {restartingEngine ? "Restarting…" : "Restart engine"}
+                  </button>
+                </div>
               </div>
             </div>
           )}

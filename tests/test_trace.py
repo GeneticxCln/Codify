@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from engine.app import app
+from unittest.mock import patch
+
+from engine.app import app, lifespan
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.models import (
@@ -679,6 +681,43 @@ class TraceApiCase(TraceHarness):
             self.traces.count(goal.id), 0, "older than the policy, so forgotten"
         )
         self.assertGreater(res.json()["goals"]["goals"], 0, "the read still worked")
+
+    async def _an_old_recording(self) -> str:
+        """A goal whose recording is past the 30-day default, and nothing else touched."""
+        goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="old", description="", trace=True))
+        await self._run(self._engine(ScriptedProvider(dict(RESPONSES))), goal.id)
+        self.assertGreater(self.traces.count(goal.id), 0)
+        self.conn.execute(
+            "UPDATE trace_calls SET created_at = ? WHERE goal_id = ?", (time.time() - 40 * 86400, goal.id),
+        )
+        self.conn.commit()
+        return goal.id
+
+    async def test_a_recording_older_than_the_policy_is_pruned_when_any_goal_ends(self) -> None:
+        """The statistics read was the only place the policy ran, so an install that never opened Stats kept every
+        recording for ever. A goal reaching its end is a moment the engine is already writing."""
+        old = await self._an_old_recording()
+        engine = self._engine(ScriptedProvider(dict(RESPONSES)))
+        engine.settings = app.state.settings
+        new = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="new", description="", trace=True))
+        await self._run(engine, new.id)
+        held = self.traces.count(new.id)
+        self.assertGreater(self.traces.count(old), 0, "nothing has ended yet, so nothing was pruned")
+
+        engine._set_status(new.id, "COMPLETED", None)
+
+        self.assertEqual(self.traces.count(old), 0, "a finished goal left an expired recording standing")
+        self.assertEqual(self.traces.count(new.id), held, "the goal that just ended keeps its fresh recording")
+
+    async def test_a_recording_older_than_the_policy_is_pruned_at_boot(self) -> None:
+        old = await self._an_old_recording()
+        # Finished, so the boot's rescue of goals left running does not end it: only the boot's own sweep can.
+        self.conn.execute("UPDATE goals SET status = 'COMPLETED'")
+        self.conn.commit()
+        with patch.dict(os.environ, {"CODIFY_DB": str(self.home / "t.db")}):
+            async with lifespan(app):
+                pass
+        self.assertEqual(self.traces.count(old), 0, "a restart left an expired recording standing")
 
     async def test_a_recording_inside_the_policy_survives_the_same_read(self) -> None:
         goal = self.goals.create(

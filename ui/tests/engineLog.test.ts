@@ -139,6 +139,37 @@ test("a window whose engine is gone shows the engine's last words, and only the 
   );
 });
 
+test("a window whose engine is gone offers to restart it, and the press reaches the shell once", async () => {
+  // The panel used to say a new engine meant relaunching the app, and there was nothing to press. The shell now
+  // restarts a crashed engine by itself a few times; the button is for when it has stopped trying.
+  const { withApp } = await import("./appHarness.ts");
+  let release: () => void = () => {};
+  const answered = new Promise<null>((resolve) => {
+    release = () => resolve(null);
+  });
+  await withApp(
+    { health: "down", shellAnswers: { codify_engine_log: [BACKSTOP], codify_engine_restart: () => answered } },
+    async ({ dom, shell, settle }) => {
+      await settle();
+      const button = [...dom.container.querySelectorAll("button")].find((b) => b.textContent === "Restart engine");
+      assert.ok(button, "the engine-down panel has no Restart engine button");
+      assert.doesNotMatch(dom.container.textContent ?? "", /relaunching the app/, "the panel still says to relaunch");
+      await dom.click(button);
+      const restarting = [...dom.container.querySelectorAll("button")].find((b) => b.textContent === "Restarting…");
+      assert.ok(restarting, "the button does not say a restart is under way");
+      assert.ok(restarting.hasAttribute("disabled"), "a press the shell has not answered can be pressed again");
+      await dom.click(restarting);
+      release();
+      await settle();
+      assert.equal(
+        shell.calls.filter((call) => call === "codify_engine_restart").length,
+        1,
+        "the press did not reach the shell exactly once",
+      );
+    },
+  );
+});
+
 test("a window whose engine is up shows no engine log at all", async () => {
   const { withApp } = await import("./appHarness.ts");
   await withApp({ shellAnswers: { codify_engine_log: [BACKSTOP] } }, async ({ dom, shell, settle }) => {

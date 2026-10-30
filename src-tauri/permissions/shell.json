@@ -17,6 +17,11 @@
       "commands": { "allow": ["codify_engine_log"] }
     },
     {
+      "identifier": "allow-codify-engine-restart",
+      "description": "Starts the engine again when a person presses Restart engine: stops the running one the way the app's own exit does (SIGTERM, its own bound, then SIGKILL) and launches a fresh one. Takes no argument, so a page chooses when and never what is run; the command and its environment are the shell's own launch, the same as at boot.",
+      "commands": { "allow": ["codify_engine_restart"] }
+    },
+    {
       "identifier": "allow-codify-list-agent-configs",
       "description": "Lists the eight role slots and their per-role configuration, with API keys redacted (docs/00 §6.4).",
       "commands": { "allow": ["codify_list_agent_configs"] }
@@ -133,7 +138,7 @@
     },
     {
       "identifier": "allow-codify-update-download",
-      "description": "Downloads the release package for this install into the person's downloads folder, and answers with the path and the sentence telling them what to run. Takes no argument, which is the guarantee: a page cannot choose the file or the address, since the asset is re-derived from the same release the check read, only for this install's package and architecture, and only from GitHub's own hosts. While it runs it announces how far it has come on `update-progress` — a byte count and the size the server announced, nothing about the machine — which is what the pane's bar is drawn from. It writes one file — it installs nothing, runs nothing and replaces nothing (docs/18 §4).",
+      "description": "Downloads the release package for this install into the person's downloads folder, and answers with the path and the sentence telling them what to run. Takes no argument, which is the guarantee: a page cannot choose the file or the address, since the asset is re-derived from the same release the check read, only for this install's package and architecture, and only from GitHub's own hosts. While it runs it announces how far it has come on `update-progress` — a byte count and the size the server announced, nothing about the machine — which is what the pane's bar is drawn from. Before it writes, it reads the release's SHA256SUMS from the same hosts and refuses a package whose digest is not the one listed (a check that the file is whole, not a signature). It writes one file — it installs nothing, runs nothing and replaces nothing (docs/18 §4, §5).",
       "commands": { "allow": ["codify_update_download"] }
     }
   ],
@@ -145,6 +150,7 @@
         "allow-codify-get-engine-info",
         "allow-codify-engine-status",
         "allow-codify-engine-log",
+        "allow-codify-engine-restart",
         "allow-codify-list-agent-configs",
         "allow-codify-update-agent-config",
         "allow-codify-repair-agent-configs",

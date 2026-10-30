@@ -100,6 +100,8 @@ test: test-engine
 # and half the engine suite went unrun while the gate stayed green. See the
 # module's docstring. It also fails a run that passed but leaked a database
 # connection: Python 3.13+ reports one as a ResourceWarning that scrolls past an OK.
+# And one where an exception escaped where no test could fail on it (an asyncio
+# callback, a task nobody awaited, a fake server's handler): printed, then OK.
 test-engine:
 	python3 scripts/run_tests.py discover -s tests -p "test_*.py" -v
 
