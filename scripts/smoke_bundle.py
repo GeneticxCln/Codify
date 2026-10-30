@@ -106,15 +106,22 @@ def _wait_for_handshake(engine: subprocess.Popen[bytes], timeout_s: float) -> tu
     raise SmokeError(f"no handshake within {timeout_s:.0f}s")
 
 
+# No proxy for the loopback engine, whatever the environment says: `urlopen` honours HTTP_PROXY,
+# and a proxy cannot reach this machine's 127.0.0.1.
+_LOOPBACK = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _health(port: int, token: str) -> int:
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/health", headers={"Authorization": f"Bearer {token}"}
     )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 — loopback http to the port the engine under test just announced
+        with _LOOPBACK.open(request, timeout=10) as response:
             return int(response.status)
     except urllib.error.HTTPError as exc:
         return int(exc.code)
+    except (urllib.error.URLError, OSError) as exc:
+        raise SmokeError(f"GET /health on port {port} could not connect: {exc}") from exc
 
 
 def _stop(engine: subprocess.Popen[bytes]) -> None:

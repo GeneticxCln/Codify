@@ -13,11 +13,13 @@ from __future__ import annotations
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
 import json
+import os
 import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts import smoke_bundle
 from scripts.smoke_bundle import SmokeError
@@ -77,6 +79,14 @@ class TestTheSmokesVerdicts(unittest.TestCase):
             with self.assertRaises(SmokeError) as caught:
                 smoke_bundle.smoke(bundle, boot_timeout_s=1.5)
             self.assertIn("no handshake within", str(caught.exception))
+
+    def test_a_proxy_in_the_environment_is_not_asked_for_the_loopback_engine(self) -> None:
+        # A runner or a desk with HTTP_PROXY set and no NO_PROXY for 127.0.0.1 would send the
+        # health check to the proxy, which cannot reach this machine's loopback.
+        dead_proxy = {"HTTP_PROXY": "http://127.0.0.1:9", "http_proxy": "http://127.0.0.1:9", "NO_PROXY": "", "no_proxy": ""}
+        with tempfile.TemporaryDirectory() as scratch, mock.patch.dict(os.environ, dead_proxy):
+            bundle = _bundle(Path(scratch), SERVER.format(status=200, before=""))
+            self.assertIn("/health 200", smoke_bundle.smoke(bundle, boot_timeout_s=20))
 
     def test_a_health_check_that_is_not_200_fails(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
