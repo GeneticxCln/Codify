@@ -1185,7 +1185,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
 
       {/* Manual Workspace Path Modal */}
       {isManualWsModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
           <div
             role="dialog"
             aria-modal="true"
@@ -1247,7 +1247,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
           answer — it means "only the conventional DESIGN.md, if the repo has one"
           — so it is offered as its own action rather than a cleared text field. */}
       {contractWs && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
           <div
             role="dialog"
             aria-modal="true"
