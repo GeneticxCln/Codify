@@ -228,7 +228,7 @@ tests, not a flag on this one.
 | `GET /conversations?workspace_id=&include_archived=` | The side panel, most recently touched first. Archived hidden unless asked. |
 | `GET /conversations/{id}` | One thread. |
 | `GET /conversations/{id}/turns` | The thread's turns, oldest first. Derived, not stored. |
-| `POST /conversations/{id}/turns` | Make a turn: `{prompt, provider?, model?, trace?}`, `extra=forbid`. `provider` and `model` come as a pair or not at all (§10.20). |
+| `POST /conversations/{id}/turns` | Make a turn: `{prompt, provider?, model?, trace?}`, `extra=forbid`. `provider` and `model` come as a pair or not at all (§10.20). A turn into an archived thread restores it in the same write, so the thread is back in the panel it is being worked in (a second window that still had it open is the ordinary way to get there). |
 | `PATCH /conversations/{id}` | Rename. The only mutable thing about a thread. |
 | `POST /conversations/{id}/archive?archived=` | Hide from the panel, or restore. |
 | `DELETE /conversations/{id}` | Drop the thread, keep the runs. |

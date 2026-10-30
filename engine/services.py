@@ -1376,8 +1376,11 @@ class GoalService:
              goal.status, goal.mode, int(goal.trace), goal.created_at, goal.updated_at,
              goal.provider, goal.model),
         )
+        # A turn into an archived thread restores it, in the same write. Someone writing in a thread is working on it,
+        # and the panel lists only live threads: the turn used to run, spend, and answer inside a thread nobody could
+        # see. The ordinary way here is a second window that still had the thread open when another archived it.
         self._db.execute(
-            "UPDATE conversations SET updated_at = ? WHERE id = ?",
+            "UPDATE conversations SET updated_at = ?, archived = 0 WHERE id = ?",
             (now, conversation_id),
         )
         self._db.commit()

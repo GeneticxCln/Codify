@@ -38,7 +38,7 @@ from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/herm
 from engine.app import BOOT_TOKEN, app
 from engine.db import connect
 from engine.executor import ExecutorService
-from engine.models import ConversationCreate, GoalCreate, WorkspaceCreate
+from engine.models import ConversationCreate, GoalCreate, TurnCreate, WorkspaceCreate
 from engine.providers import Keychain, ProviderFactory
 from engine.sandbox import SandboxService
 from engine.services import (
@@ -787,6 +787,20 @@ class ServiceLevelTestCase(unittest.IsolatedAsyncioTestCase):
             ConversationCreate(workspace_id=self.ws.id, title="   ")
         )
         self.assertEqual(thread.title, "")
+
+    async def test_a_turn_posted_into_an_archived_thread_brings_it_back(self) -> None:
+        """A turn into an archived thread ran, spent and answered inside a thread the panel no longer listed. The
+        ordinary way to get there is a second window that still had the thread open when another archived it."""
+        thread = self.conversations.create(ConversationCreate(workspace_id=self.ws.id))
+        self.conversations.set_archived(thread.id, True)
+        self.assertNotIn(thread.id, [c.id for c in self.conversations.list_conversations(workspace_id=self.ws.id)])
+
+        turn = self.goals.create_turn(thread.id, TurnCreate(prompt="are you still there?"))
+
+        self.assertFalse(self.conversations.get(thread.id).archived, "the thread stayed archived under a new turn")
+        listed = [c.id for c in self.conversations.list_conversations(workspace_id=self.ws.id)]
+        self.assertIn(thread.id, listed, "the thread a turn was just posted into is missing from the panel")
+        self.assertEqual(turn.conversation_id, thread.id)
 
 
 # `nobody`, by number: it need not exist by name for the kernel to honour the id.
