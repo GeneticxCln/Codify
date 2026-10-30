@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../build/engine-bundle": "engine-bundle"
+    }
+  }
+}

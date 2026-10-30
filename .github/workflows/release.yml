@@ -1,7 +1,9 @@
 name: release
 
 # Push a tag like `v1.0.0` and the packages people download come out of this workflow:
-# a deb and an AppImage, their checksums, and a GitHub release that carries all three.
+# a deb and an AppImage, their checksums, and a GitHub release that carries all three. Both
+# packages carry the engine and the Python it runs on (`scripts/bundle_engine.py`), so neither
+# needs a checkout beside it, and both are booted here before anything is published.
 #
 # **What this is not.** It is not a second gate. `make ci` is the gate and it runs before a
 # commit reaches master (`make hooks` installs the pre-push hook, `check.yml` runs the same
@@ -36,15 +38,22 @@ name: release
 on:
   push:
     tags: ["v*"]
-  # For a release that has to be built again — a bad upload, a runner that died — against a
-  # tag that already exists. Without the tag it publishes the ref this was started from, which
-  # is only right for the push above.
+  # Two jobs by hand. With `publish` and an existing tag: a release that has to be built again —
+  # a bad upload, a runner that died. Without `publish` (the default): a dry run that builds both
+  # packages from the ref it was started on, smoke-tests them exactly as a release would, and
+  # leaves them as a workflow artifact — no tag, no release, nothing any copy of the app can see.
+  # That is how a change to the packaging is tried before the release that would ship it.
   workflow_dispatch:
     inputs:
       tag:
-        description: "The existing tag to publish (e.g. v1.0.0)"
-        required: true
+        description: "With publish: the existing tag to publish (e.g. v1.0.0). Empty for a dry run."
+        required: false
         type: string
+      publish:
+        description: "Publish a GitHub release. Off: build and smoke-test only, and upload the packages as an artifact."
+        required: false
+        type: boolean
+        default: false
 
 # `contents: write` is the whole point: creating a release and uploading its assets to it.
 # Nothing here needs any other scope.
@@ -65,6 +74,9 @@ jobs:
     # the AppImage bundler downloads its own tools. Well under this, and a build that somehow
     # hangs ends here instead of holding the run for six hours.
     timeout-minutes: 60
+    env:
+      # A pushed tag always publishes; a run by hand only when it is asked to.
+      PUBLISH: ${{ github.event_name == 'push' || inputs.publish == true }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,15 +90,24 @@ jobs:
       # release: the About tab compares the running version against the latest tag, so every
       # copy of that build would offer an update to the thing it already is, forever. Three
       # files carry the version by hand, so they are compared here, in one step, with the tag.
+      #
+      # A dry run has no tag, so it holds the three files to each other instead, under the
+      # version they carry: the same script, the same refusal when one of them disagrees.
       - name: The tag, the shell, the crate and the UI must agree on a version
         run: |
-          TAG="${{ github.event.inputs.tag }}"
-          [ -n "$TAG" ] || TAG="${GITHUB_REF_NAME}"
+          if [ "$PUBLISH" = "true" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+            [ -n "$TAG" ] || TAG="${GITHUB_REF_NAME}"
+            git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null || {
+              echo "There is no tag $TAG in this repository, so there is nothing to publish." >&2
+              exit 1
+            }
+          else
+            TAG="v$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
+            echo "A dry run: building $TAG from ${GITHUB_REF_NAME}, publishing nothing."
+          fi
           echo "TAG=$TAG" >> "$GITHUB_ENV"
-          git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null || {
-            echo "There is no tag $TAG in this repository, so there is nothing to publish." >&2
-            exit 1
-          }
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
           python3 scripts/release_notes.py "$TAG" > release-notes.md
           cat release-notes.md
 
@@ -102,6 +123,17 @@ jobs:
       - name: Install UI dependencies
         run: npm ci
         working-directory: ui
+
+      # The engine both packages carry (`docs/18` §2): the CPython pinned in packaging/python.json,
+      # checked against its SHA-256, the wheels packaging/engine.lock names installed with
+      # --require-hashes, and engine/. The script runs on any Python 3.10+; the interpreter it
+      # builds with is the pinned one, so this is only the runner's way of starting it.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Build the engine the packages carry
+        run: python3 scripts/bundle_engine.py
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -139,7 +171,8 @@ jobs:
       # One command, because the targets live in `src-tauri/tauri.conf.json` (`bundle.targets`
       # is `deb` + `appimage`) and a list repeated here would be a second place to forget.
       # `beforeBuildCommand` builds the UI with Vite first, so the shell's window carries the
-      # real frontend.
+      # real frontend. `tauri.bundle.conf.json` adds the engine bundle as a resource; it is kept
+      # out of tauri.conf.json so that `cargo check` never needs a bundle to exist.
       #
       # `APPIMAGE_EXTRACT_AND_RUN` because appimagetool is itself an AppImage: without this it
       # needs a mounted FUSE filesystem, which a runner does not have, and the bundle step
@@ -147,7 +180,7 @@ jobs:
       - name: Build the packages
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: cargo tauri build
+        run: cargo tauri build --config tauri.bundle.conf.json
         working-directory: src-tauri
 
       # Both files, their checksums, and a hard failure when the bundler produced neither:
@@ -168,6 +201,25 @@ jobs:
           sha256sum "${packages[@]}" > SHA256SUMS
           cat SHA256SUMS
 
+      # Each package is unpacked (never installed) and the engine inside it is booted the way the
+      # shell boots it: its own Python, a throwaway CODIFY_HOME, a GET /health that must answer
+      # 200, and not one file in the bundle written while it ran. A package whose engine cannot
+      # start is a window that says so on every machine it reaches, and this is the only place
+      # that can be known before it does (scripts/smoke_bundle.py).
+      - name: Boot the engine each package carries
+        run: |
+          python3 scripts/smoke_bundle.py --deb dist/Codify_*.deb --version "$VERSION"
+          python3 scripts/smoke_bundle.py --appimage dist/Codify_*.AppImage --version "$VERSION"
+
+      # A dry run ends here, with the packages it built kept for a person to try.
+      - name: Keep the dry run's packages
+        if: env.PUBLISH != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codify-${{ env.VERSION }}-dry-run
+          path: dist/
+          retention-days: 7
+
       # Published, not drafted: the update button reads `releases/latest`, and GitHub's answer
       # to that is the newest release that is neither a draft nor a pre-release — so a draft
       # would be a release nobody's app can see. It also means this is the moment the button
@@ -176,6 +228,7 @@ jobs:
       # A re-run uploads over the same tag instead of failing on "release already exists",
       # which is the only way to fix an asset that was uploaded wrong.
       - name: Publish the release
+        if: env.PUBLISH == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPIMAGE_EXTRACT_AND_RUN: "1"

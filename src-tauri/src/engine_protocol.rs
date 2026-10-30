@@ -155,6 +155,110 @@ pub(crate) fn resolve_project_root(
     from_cwd
 }
 
+/// The directory under the app's resources that a packaged build carries its engine in:
+/// `python/` (a CPython of its own), `engine/` and `BUNDLE.json`, as
+/// `scripts/bundle_engine.py` builds it. `/usr/lib/Codify/engine-bundle` in the deb, and the
+/// same path inside an AppImage's mount.
+pub(crate) const BUNDLE_DIR: &str = "engine-bundle";
+
+/// Which kind of engine a launch runs, and so how it is started and how it is described.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineSource {
+    /// `CODIFY_ROOT` named it, and it is used as given.
+    Explicit,
+    /// The engine this package was built with.
+    Bundled,
+    /// A checkout found from the working directory or the executable.
+    Checkout,
+}
+
+/// Where the engine runs, under which interpreter, and why that one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EngineLaunch {
+    pub root: PathBuf,
+    pub interpreter: PathBuf,
+    pub source: EngineSource,
+}
+
+fn bundled_interpreter(bundle: &Path) -> PathBuf {
+    bundle.join("python").join("bin").join("python3")
+}
+
+/// Whether `dir` is a whole bundle: its own interpreter as well as the engine. A bundle with
+/// one and not the other is a broken install, and running the engine half under the PATH's
+/// `python3` would hide that behind whatever that interpreter happens to have installed.
+fn holds_bundle(dir: &Path) -> bool {
+    bundled_interpreter(dir).is_file() && holds_engine(dir)
+}
+
+/// The engine to run, in the order a person would expect.
+///
+/// 1. **`CODIFY_ROOT`**, when set, as given even when it is wrong (see `resolve_project_root`):
+///    it is how a packaged app is pointed at a checkout, and the only way to override 2.
+/// 2. **The bundled engine**, when this build carries a whole one. A package always runs the
+///    engine it was built with, so the shell and the engine it talks to come from one commit;
+///    a checkout that happens to be the working directory does not replace it. A dev build has
+///    no bundle, so for it nothing changes.
+/// 3. **A checkout**, found as `resolve_project_root` finds one.
+pub(crate) fn resolve_engine(
+    explicit: Option<&str>,
+    bundle: Option<&Path>,
+    exe: Option<&Path>,
+    cwd: &Path,
+) -> EngineLaunch {
+    if let Some(root) = explicit.map(str::trim).filter(|root| !root.is_empty()) {
+        let root = PathBuf::from(root);
+        return EngineLaunch {
+            interpreter: engine_interpreter(&root),
+            root,
+            source: EngineSource::Explicit,
+        };
+    }
+    if let Some(bundle) = bundle.filter(|dir| holds_bundle(dir)) {
+        return EngineLaunch {
+            root: bundle.to_path_buf(),
+            interpreter: bundled_interpreter(bundle),
+            source: EngineSource::Bundled,
+        };
+    }
+    let root = resolve_project_root(None, exe, cwd);
+    EngineLaunch {
+        interpreter: engine_interpreter(&root),
+        root,
+        source: EngineSource::Checkout,
+    }
+}
+
+/// The environment a launch sets and removes, beyond the PATH the launcher merges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EngineEnv {
+    pub set: Vec<(&'static str, std::ffi::OsString)>,
+    pub remove: Vec<&'static str>,
+}
+
+/// `PYTHONPATH` is the engine's root for every launch, as it always was. A bundled engine
+/// also gets the isolation its read-only, self-contained interpreter needs:
+///
+/// * `PYTHONDONTWRITEBYTECODE` — the bundle is precompiled (`unchecked-hash`) and cannot be
+///   written to, so an attempt to cache bytecode beside it is a failed write on every import;
+/// * `PYTHONNOUSERSITE` — a package in `~/.local/lib/python3.x` must not shadow a wheel the
+///   lock pinned, or the engine a person runs is not the one that was tested;
+/// * `PYTHONHOME` removed — inherited from a shell that set it for another Python, it would
+///   send this interpreter looking for its standard library in someone else's install.
+///
+/// A checkout's engine keeps the user's environment exactly as before: its interpreter is the
+/// developer's own, and user site-packages are a developer's tool.
+pub(crate) fn engine_env(launch: &EngineLaunch) -> EngineEnv {
+    let mut set = vec![("PYTHONPATH", launch.root.clone().into_os_string())];
+    let mut remove = Vec::new();
+    if launch.source == EngineSource::Bundled {
+        set.push(("PYTHONDONTWRITEBYTECODE", "1".into()));
+        set.push(("PYTHONNOUSERSITE", "1".into()));
+        remove.push("PYTHONHOME");
+    }
+    EngineEnv { set, remove }
+}
+
 /// The interpreter `python3 -m engine` should actually run under: the checkout's own
 /// `.venv` when it has one, and the bare name `python3` otherwise.
 ///
@@ -236,10 +340,10 @@ pub(crate) fn launch_problem(root: &Path) -> Option<String> {
         return None;
     }
     Some(format!(
-        "No engine to run at {} — this shell starts `python3 -m engine` from the project \
-         checkout, so the app has to be launched from the Codify repository, from a binary \
-         built inside it, or with CODIFY_ROOT pointing at it (and with the engine's \
-         dependencies installed).",
+        "No engine to run at {} — a packaged Codify carries its own engine, and this build has \
+         none, so it starts `python3 -m engine` from a project checkout: launch the app from \
+         the Codify repository, from a binary built inside it, or with CODIFY_ROOT pointing at \
+         it (and with the engine's dependencies installed).",
         root.display()
     ))
 }
@@ -253,11 +357,17 @@ pub(crate) fn launch_problem(root: &Path) -> Option<String> {
 /// already in front of the user; this says what that tail cannot — the command to run
 /// for the whole of it, in the directory the shell actually ran from, not in the
 /// abstract.
-pub(crate) fn engine_exited_problem(root: &Path) -> String {
+pub(crate) fn engine_exited_problem(launch: &EngineLaunch) -> String {
+    let which = if launch.source == EngineSource::Bundled {
+        "The engine this package carries"
+    } else {
+        "The engine"
+    };
     format!(
-        "The engine started but exited before it reported a port. What it printed is \
-         below; run `python3 -m engine` in {} to see the whole of it.",
-        root.display()
+        "{which} started but exited before it reported a port. What it printed is \
+         below; run `{} -m engine` in {} to see the whole of it.",
+        launch.interpreter.display(),
+        launch.root.display()
     )
 }
 
@@ -591,14 +701,153 @@ mod tests {
 
     #[test]
     fn an_engine_that_exited_names_the_directory_to_reproduce_it_in() {
-        let root = Path::new("/home/me/Codify");
-        let problem = engine_exited_problem(root);
+        let launch = EngineLaunch {
+            root: PathBuf::from("/home/me/Codify"),
+            interpreter: PathBuf::from("python3"),
+            source: EngineSource::Checkout,
+        };
+        let problem = engine_exited_problem(&launch);
         // The user has to be able to copy the directory and the command out of the
         // message; a generic "the engine exited" would leave them with no next step.
         assert!(
             problem.contains("/home/me/Codify") && problem.contains("python3 -m engine"),
             "the message has to name both the directory and the command: {problem}"
         );
+    }
+
+    #[test]
+    fn a_bundled_engine_that_exited_names_its_own_interpreter() {
+        // `python3 -m engine` in /usr/lib/Codify/engine-bundle would run the PATH's Python, which
+        // has none of the bundle's packages: the command to reproduce it has to be the bundle's.
+        let bundle = PathBuf::from("/usr/lib/Codify/engine-bundle");
+        let launch = EngineLaunch {
+            interpreter: bundled_interpreter(&bundle),
+            root: bundle,
+            source: EngineSource::Bundled,
+        };
+        let problem = engine_exited_problem(&launch);
+        assert!(
+            problem.starts_with("The engine this package carries"),
+            "{problem}"
+        );
+        assert!(
+            problem.contains(
+                "/usr/lib/Codify/engine-bundle/python/bin/python3 -m engine` in /usr/lib/Codify/engine-bundle"
+            ),
+            "{problem}"
+        );
+    }
+
+    fn bundle(name: &str) -> PathBuf {
+        let dir = checkout(name);
+        let bin = dir.join("python").join("bin");
+        std::fs::create_dir_all(&bin).expect("bundle interpreter directory");
+        std::fs::write(bin.join("python3"), "").expect("bundle interpreter");
+        dir
+    }
+
+    #[test]
+    fn a_package_runs_the_engine_it_carries_with_its_own_interpreter() {
+        let carried = bundle("bundled-carried");
+        let home = scratch_dir("bundled-home");
+        let launch = resolve_engine(
+            None,
+            Some(&carried),
+            Some(Path::new("/usr/bin/codify-desktop")),
+            &home,
+        );
+        assert_eq!(launch.source, EngineSource::Bundled);
+        assert_eq!(launch.root, carried);
+        assert_eq!(launch.interpreter, carried.join("python/bin/python3"));
+    }
+
+    #[test]
+    fn a_checkout_in_the_working_directory_does_not_replace_the_carried_engine() {
+        // Started from a terminal that happens to sit in a checkout, an installed app still talks
+        // to the engine it was built with — not to whatever commit that checkout is on.
+        let carried = bundle("bundled-over-cwd");
+        let here = checkout("bundled-cwd-checkout");
+        let launch = resolve_engine(None, Some(&carried), None, &here);
+        assert_eq!(launch.source, EngineSource::Bundled);
+        assert_eq!(launch.root, carried);
+    }
+
+    #[test]
+    fn codify_root_still_points_a_package_at_a_checkout() {
+        let carried = bundle("bundled-under-root");
+        let theirs = checkout("bundled-codify-root");
+        let launch = resolve_engine(theirs.to_str(), Some(&carried), None, &carried);
+        assert_eq!(launch.source, EngineSource::Explicit);
+        assert_eq!(launch.root, theirs);
+        assert_eq!(launch.interpreter, PathBuf::from("python3"));
+    }
+
+    #[test]
+    fn half_a_bundle_is_not_a_bundle() {
+        // The engine without its interpreter: falls through to the checkout rules, which name the
+        // working directory, instead of running the bundle's code under the PATH's Python.
+        let broken = checkout("bundled-half");
+        let home = scratch_dir("bundled-half-home");
+        let launch = resolve_engine(None, Some(&broken), None, &home);
+        assert_eq!(launch.source, EngineSource::Checkout);
+        assert_eq!(launch.root, home);
+        assert!(launch_problem(&launch.root).is_some());
+    }
+
+    #[test]
+    fn with_no_bundle_the_checkout_order_is_unchanged() {
+        let root = checkout("no-bundle-exe");
+        let exe = root.join("src-tauri/target/release/codify");
+        let home = scratch_dir("no-bundle-home");
+        let missing = scratch_dir("no-bundle-resources").join(BUNDLE_DIR);
+        for bundle in [None, Some(missing.as_path())] {
+            let launch = resolve_engine(None, bundle, Some(&exe), &home);
+            assert_eq!(launch.source, EngineSource::Checkout);
+            assert_eq!(launch.root, resolve_project_root(None, Some(&exe), &home));
+        }
+    }
+
+    #[test]
+    fn the_bundle_is_looked_for_where_the_packaging_config_puts_it() {
+        // `tauri.bundle.conf.json` maps build/engine-bundle to a directory under the resources; the
+        // shell looks under the same name. Two spellings of one path, so one test holds them together.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.bundle.conf.json");
+        let text = std::fs::read_to_string(&path).expect("tauri.bundle.conf.json");
+        let config: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        let targets: Vec<&str> = config["bundle"]["resources"]
+            .as_object()
+            .expect("resources is a map")
+            .values()
+            .filter_map(|target| target.as_str())
+            .collect();
+        assert_eq!(targets, vec![BUNDLE_DIR]);
+    }
+
+    #[test]
+    fn a_bundled_engine_is_isolated_and_a_checkout_keeps_its_environment() {
+        let carried = PathBuf::from("/usr/lib/Codify/engine-bundle");
+        let bundled = engine_env(&EngineLaunch {
+            interpreter: bundled_interpreter(&carried),
+            root: carried.clone(),
+            source: EngineSource::Bundled,
+        });
+        assert!(bundled
+            .set
+            .contains(&("PYTHONPATH", carried.clone().into_os_string())));
+        assert!(bundled
+            .set
+            .contains(&("PYTHONDONTWRITEBYTECODE", "1".into())));
+        assert!(bundled.set.contains(&("PYTHONNOUSERSITE", "1".into())));
+        assert_eq!(bundled.remove, vec!["PYTHONHOME"]);
+
+        let root = PathBuf::from("/home/me/Codify");
+        let checkout = engine_env(&EngineLaunch {
+            interpreter: PathBuf::from("python3"),
+            root: root.clone(),
+            source: EngineSource::Checkout,
+        });
+        assert_eq!(checkout.set, vec![("PYTHONPATH", root.into_os_string())]);
+        assert!(checkout.remove.is_empty());
     }
 
     #[test]
