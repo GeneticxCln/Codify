@@ -1,3 +1,4 @@
+mod appimage_env;
 mod browser;
 mod engine_log;
 mod engine_protocol;
@@ -1181,6 +1182,13 @@ async fn login_shell_path() -> Option<(String, String)> {
     // the first form is asked the plain interactive way instead of being written off.
     for flags in [["-ilc", probe.as_str()], ["-ic", probe.as_str()]] {
         let mut command = tokio::process::Command::new(&shell);
+        // The image's libraries must not reach the user's shell or its rc files (`appimage_env`).
+        for (key, value) in appimage_env::restored_here() {
+            match value {
+                Some(value) => command.env(key, value),
+                None => command.env_remove(key),
+            };
+        }
         command
             .args(flags)
             // An interactive shell must not be able to read from a terminal it does
@@ -1392,6 +1400,16 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
     let env = engine_protocol::engine_env(&launch);
     let mut engine = tokio::process::Command::new(&interpreter);
     engine.args(["-m", "engine"]).current_dir(&project_root);
+    // Run from an AppImage, this process carries the image's library path, Python home and GTK
+    // paths, and the engine would hand them to every program it starts: the system `python3`
+    // behind the folder dialog, `git`, a project's tests (`appimage_env`). Taken back out first,
+    // so the engine's own settings below still win.
+    for (key, value) in appimage_env::restored_here() {
+        match value {
+            Some(value) => engine.env(key, value),
+            None => engine.env_remove(key),
+        };
+    }
     for (key, value) in &env.set {
         engine.env(key, value);
     }
@@ -1414,6 +1432,14 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
         // Belt: if this handle is ever dropped unexpectedly, the engine dies
         // with it instead of surviving as a stray holding the port and DB.
         .kill_on_drop(true);
+    // The merged PATH starts from this process's, which an AppImage prefixes with its own `bin`.
+    let engine_path = match (engine_path, appimage_env::appdir()) {
+        (Some(path), Some(appdir)) => {
+            appimage_env::without_appdir(std::ffi::OsStr::new(&path), &appdir)
+                .map(|path| path.to_string_lossy().into_owned())
+        }
+        (path, _) => path,
+    };
     if let Some(path) = &engine_path {
         engine.env("PATH", path);
     }

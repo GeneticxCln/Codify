@@ -94,6 +94,21 @@ the deb depends on it, so `apt` installs it, and an AppImage uses the system's. 
 the system `python3` with GTK, as it always has (`engine/app.py`); without one, the engine says the
 dialog is unavailable and a folder can still be typed.
 
+**What the AppImage's launcher changes, and the shell takes back.** linuxdeploy's `AppRun` sets, for
+the whole process tree, `LD_LIBRARY_PATH` to the libraries the image carries (Ubuntu 22.04's GLib,
+OpenSSL, PCRE2 and the rest), `PYTHONHOME` and `PYTHONPATH` to directories inside the image, and,
+through the GTK plugin's hook, `GI_TYPELIB_PATH`, `GIO_MODULE_DIR`, `GTK_PATH`,
+`GDK_PIXBUF_MODULE_FILE` and their siblings. The shell's own WebKit needs them; nothing it starts does.
+In 1.3.0 they reached the engine and, through it, the system `python3` behind the folder dialog, which
+loaded the image's GLib 2.72 under the system's newer GObject introspection and died with
+`undefined symbol: g_once_init_leave_pointer`; `git` and a project's own test commands ran under the
+same library path. `src-tauri/src/appimage_env.rs` now removes every entry that points inside the
+image (`$APPDIR`) from the engine's environment, the login-shell probe's and the terminal pane's
+shells', and removes a variable left with nothing. That leaves each list as it was before the
+launcher prepended to it. Two values it sets cannot be told from a person's own and are left:
+`PYTHONDONTWRITEBYTECODE=1` and the hook's `GTK_THEME`. The machine tab clears its environment
+entirely and never saw any of it.
+
 `scripts/install-local.sh` remains for working out of a checkout: a `codify` command and a menu entry
 under the user's own `~/.local`, no root, nothing copied out of the checkout. It is not a second way
 to package the app and does not try to be.
