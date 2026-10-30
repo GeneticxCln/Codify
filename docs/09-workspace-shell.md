@@ -759,7 +759,9 @@ diagnosis when there is one, so the two read as cause and effect, and it is ambe
 because it is a quote rather than a second error.
 
 Two things follow that are worth stating. The `engine_exited_problem` message
-still names `python3 -m engine` and the directory: the tail is bounded, the whole
+still names the command and the directory — `<interpreter> -m engine`, with the
+interpreter that actually ran, which for a package is its own bundled Python
+(`04` §6.2): the tail is bounded, the whole
 of it is not, and the tail is not there in the browser build at all — outside
 Tauri there is no shell holding a pipe, so `fetchEngineStderr` answers `[]`. And
 the grant is a named permission like every other command
