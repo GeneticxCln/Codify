@@ -28,7 +28,7 @@ import os
 import sqlite3
 import time
 import uuid
-from typing import Any
+from typing import Any, Protocol
 
 from engine.providers import BaseProvider, ProviderError
 
@@ -41,6 +41,16 @@ _TRACE_PROMPTS_ENV = "CODIFY_TRACE_PROMPTS"
 
 def keep_prompts() -> bool:
     return (os.environ.get(_TRACE_PROMPTS_ENV) or "").strip() not in ("", "0", "false")
+
+
+# The engine setting that bounds how long a recording lives (`SettingsService.SPEC`), in days; 0 keeps everything.
+RETENTION_SETTING = "trace_retention_days"
+
+
+class _IntSettings(Protocol):
+    """The one thing `enforce_retention` asks of the settings store: a clamped integer by key."""
+
+    def get_int(self, key: str) -> int: ...
 
 
 def prompt_digest(system_prompt: str, user_prompt: str) -> str:
@@ -176,6 +186,16 @@ class TraceService:
         )
         self._db.commit()
         return int(row.rowcount or 0)
+
+    def enforce_retention(self, settings: _IntSettings) -> int:
+        """Forget every recording older than the person's `trace_retention_days`, and say how many went.
+
+        Called where the engine already is rather than by a job that has to be scheduled: at boot, when a goal ends,
+        and on the statistics read. It used to be the statistics read alone, so an install whose Stats screen was
+        never opened kept every recording for ever under a 30-day policy. Callers treat a failure as nothing to
+        report: forgetting a recording must never be able to fail the thing that happened to trigger it.
+        """
+        return self.delete_older_than(settings.get_int(RETENTION_SETTING))
 
     def summary(self, goal_id: str) -> dict[str, Any]:
         """What a goal recorded, for the UI: per role, in order, without bodies."""

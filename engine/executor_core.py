@@ -723,6 +723,14 @@ class _ExecutorCore:
                     goal_id, None, "warn",
                     f"observation consolidation failed: {exc}",
                 )
+            # And recordings past the retention policy are forgotten, so the policy holds on an engine that runs for
+            # weeks without a restart or a statistics read (docs/04 §8.3). Silent and best-effort for the same reason.
+            tracer = self.orchestrator.tracer
+            if tracer is not None and self.settings is not None:
+                try:
+                    tracer.enforce_retention(self.settings)
+                except Exception:
+                    pass
 
     def _pause(self, goal_id: str, step_id: str | None, code: str, detail: str = "") -> None:
         """Pause a goal for an engine reason, and say why in the engine's own words.

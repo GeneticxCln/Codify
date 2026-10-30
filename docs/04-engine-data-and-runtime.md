@@ -2173,10 +2173,13 @@ mid-planning can switch it off and the very next call is not stored.
 
 `trace_retention_days` (Settings → Engine, default **30**, band 0–730; `0` keeps everything) bounds
 how long a recording lives, so the table's growth is a decision rather than an accident. It is
-enforced on the `/stats/overview` read — the same moment and on the same terms as
-`stats_retention_days` — so a lowered policy takes effect on the next read instead of at the next
-run of a job that may never be scheduled. `trace_calls(created_at)` is indexed for it: the sweep
-walks a table with one row per model call of every recorded run.
+enforced (`TraceService.enforce_retention`) at three moments the engine is already at, never by a job
+that has to be scheduled: at **boot**, when **any goal reaches a terminal status** (beside the observation
+consolidation, best-effort), and on the `/stats/overview` read, the same moment and on the same terms as
+`stats_retention_days`, so a lowered policy takes effect on the next read. It used to be the read alone,
+so an install whose Stats screen was never opened kept every recording for ever under a 30-day policy
+(audit of 2026-10-29). `trace_calls(created_at)` is indexed for it: the sweep walks a table with one row
+per model call of every recorded run.
 
 Deleting a goal deletes its recording through `ON DELETE CASCADE`, so a recording never outlives the
 run it describes.

@@ -316,6 +316,13 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
         except Exception:
             pass
 
+    # Recordings past the person's retention policy are forgotten at boot too, so the policy holds on an install
+    # that never opens the statistics screen (the other place it runs, beside every goal's end).
+    try:
+        app.state.traces.enforce_retention(app.state.settings)
+    except Exception:
+        pass
+
     # No workspace is created here on purpose.
     #
     # The engine used to auto-seed one from its own working directory whenever the
@@ -2378,15 +2385,14 @@ async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, 
         pass
 
     # Recordings are the other thing that grows without a policy (docs/04
-    # §8). Pruned at the same moment and on the same terms as the snapshot
-    # above: on read, so lowering it takes effect now rather than at some next
-    # run of a job that may not happen, and swallowed, because forgetting a
-    # recording must never be able to fail the read that asked for one.
+    # §8). Pruned here as well as at boot and at every goal's end
+    # (`TraceService.enforce_retention`): on read, so lowering it takes effect
+    # now rather than at some next run of a job that may not happen, and
+    # swallowed, because forgetting a recording must never be able to fail the
+    # read that asked for one.
     try:
         traces_pruned: TraceService = request.app.state.traces
-        traces_pruned.delete_older_than(
-            request.app.state.settings.get_int("trace_retention_days")
-        )
+        traces_pruned.enforce_retention(request.app.state.settings)
     except Exception:
         pass
 
