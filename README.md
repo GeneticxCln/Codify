@@ -133,8 +133,9 @@ Codify targets Linux desktops and comes two ways. A **package** — a deb or an 
 entry under your own `~/.local`, no root involved. **Moving or deleting the checkout breaks the entry**, because the
 launcher finds the project root from where it lives.
 
-Either way the shell needs this checkout: it starts `python3 -m engine` from it, so a package with no checkout beside
-it opens a window that says so rather than opening empty — see [`docs/18`](docs/18-release-and-updates.md). The app
+A package carries its own engine and the Python it runs on, so it needs no checkout and no Python of yours, only `git`
+(which the deb installs). The checkout runs its own engine, and `CODIFY_ROOT=/path/to/Codify` points a package at a
+checkout's instead — see [`docs/18`](docs/18-release-and-updates.md) §2 for what a package holds and leaves out. The app
 also has a **Check for updates** button on Settings → About, which asks GitHub for the newest release when you press
 it and can download the package for the copy you are running. It never installs anything, and its request is the only
 one this app makes that is not one of your model providers'.
@@ -149,9 +150,10 @@ what it does and does not claim.
 > and shows a connection error unless a Vite dev server is already running, which looks exactly like an app whose
 > panes are not wired.
 
-> **The app needs the checkout and a Python 3.10+ with the engine's dependencies.** The shell spawns
-> `python3 -m engine` in the project root and reads the `CODIFY_ENGINE token=… port=…` handshake from its stdout.
-> If no engine is found the window says so rather than opening empty.
+> **Run from the checkout, the app needs a Python 3.10+ with the engine's dependencies** (`make setup`). The shell
+> spawns `python3 -m engine` in the project root — or a package's own bundled engine, when it is one — and reads the
+> `CODIFY_ENGINE token=… port=…` handshake from its stdout. If no engine is found the window says so rather than
+> opening empty.
 
 **If the window opens blank or black** (WebKitGTK 4.1 quirks, none of which apply on a normal GNOME or KDE
 session): try `WEBKIT_DISABLE_DMABUF_RENDERER=1 codify` on some NVIDIA/Wayland combinations, or

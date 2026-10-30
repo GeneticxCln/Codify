@@ -128,9 +128,10 @@ class TestTheNotes(unittest.TestCase):
 
     def test_the_notes_say_what_they_do_not_do(self) -> None:
         text = notes("v1.0.0", "1.0.0")
-        # The two things a person would otherwise assume: that the package carries the engine,
-        # and that it updates itself.
-        self.assertIn("The engine is Python 3.10+ and lives in a checkout", text)
+        # What a person would otherwise have to guess: that the package carries the engine (and
+        # what it leaves out), and that it does not update itself.
+        self.assertIn("Each package carries the engine", text)
+        self.assertIn("CODIFY_ROOT", text)
         self.assertIn("installs nothing", text)
         self.assertIn("sudo apt install", text)
 
@@ -169,6 +170,38 @@ class TestTheRealCheckout(unittest.TestCase):
         self.assertIn("Codify_*.deb", workflow)
         self.assertIn("Codify_*.AppImage", workflow)
         self.assertIn("cargo tauri build", workflow)
+
+    def test_the_workflow_ships_the_engine_and_boots_it_in_both_packages(self) -> None:
+        """A package without its engine, or with one that cannot start, must not be published.
+
+        The bundle is built, added through the overlay config (not tauri.conf.json, so that
+        `cargo check` never needs it), and each package's engine is booted before the publish
+        step — in that order, because a smoke after the upload would check a release that is
+        already out.
+        """
+        workflow = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        steps = [
+            "python3 scripts/bundle_engine.py",
+            "cargo tauri build --config tauri.bundle.conf.json",
+            'python3 scripts/smoke_bundle.py --deb dist/Codify_*.deb --version "$VERSION"',
+            'python3 scripts/smoke_bundle.py --appimage dist/Codify_*.AppImage --version "$VERSION"',
+            "- name: Publish the release",
+        ]
+        positions = [workflow.find(step) for step in steps]
+        self.assertNotIn(-1, positions, dict(zip(steps, positions, strict=True)))
+        self.assertEqual(positions, sorted(positions), "the steps are out of order")
+        overlay = json.loads(
+            (PROJECT_ROOT / "src-tauri" / "tauri.bundle.conf.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            overlay["bundle"]["resources"], {"../build/engine-bundle": "engine-bundle"}
+        )
+        conf = json.loads(
+            (PROJECT_ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("resources", conf["bundle"])
 
 
 if __name__ == "__main__":  # pragma: no cover

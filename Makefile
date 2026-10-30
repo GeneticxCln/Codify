@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history check-ghidra bundle-engine lock-engine verify-package hooks clean bench bench-smoke smoke-tabs
+.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history check-ghidra bundle-engine lock-engine check-bundle verify-package hooks clean bench bench-smoke smoke-tabs
 
 # A checkout's own virtualenv (`make setup` makes one) wins over whatever `python3` is on
 # PATH, so `make setup && make check` works with nothing activated. The floor leg sets
@@ -254,15 +254,17 @@ build-app: build-ui
 
 # The Linux packages, by the same command the release workflow runs (docs/18 §3): the
 # targets live in tauri.conf.json (`bundle.targets` is `deb` + `appimage`), so the list is
-# in one place and `cargo tauri build` picks both up with no flags. The UI is built first
-# by Tauri's own `beforeBuildCommand`, so this needs no `build-ui` prerequisite.
+# in one place and `cargo tauri build` picks both up. The UI is built first by Tauri's own
+# `beforeBuildCommand`, so this needs no `build-ui` prerequisite. The engine both packages
+# carry is `bundle-engine`'s, added by tauri.bundle.conf.json alone: in tauri.conf.json its
+# resources would have to exist for every `cargo check`, and the gate would need the download.
 #
 # Deliberately not part of `check` or `ci`: it needs the Tauri CLI
 # (`cargo install tauri-cli --version "^2" --locked`), the tools a deb and an AppImage are
 # assembled with, and the network for linuxdeploy. What it writes lands in
 # src-tauri/target/release/bundle/{deb,appimage}/.
-package-app:
-	cd src-tauri && $(BUILD_GUARD) cargo tauri build
+package-app: bundle-engine
+	cd src-tauri && $(BUILD_GUARD) cargo tauri build --config tauri.bundle.conf.json
 
 # The engine the packages carry (docs/18 §2): the CPython pinned in packaging/python.json, the
 # wheels packaging/engine.lock names (installed with --require-hashes) and engine/, built into
@@ -274,6 +276,12 @@ bundle-engine:
 
 lock-engine:
 	python3 scripts/lock_engine.py
+
+# Boot what `bundle-engine` built the way the shell would, ask it for /health, and check it wrote
+# nothing beside itself (scripts/smoke_bundle.py). Fails rather than skips when there is no bundle,
+# like check-ghidra: the release runs the same smoke on both packages before it publishes them.
+check-bundle:
+	python3 scripts/smoke_bundle.py build/engine-bundle
 
 # The checkout's own way in — a `codify` command and a menu entry, both under the user's own
 # ~/.local, both pointing back at this checkout, neither needing root. Not a package and not

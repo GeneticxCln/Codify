@@ -316,6 +316,23 @@ class TestTheBundlesContents(unittest.TestCase):
             left = sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
             self.assertEqual(left, ["bin/python3", "lib/python3.14/site-packages/fastapi/__init__.py"])
 
+    def test_the_interpreter_is_one_file_and_the_tree_has_no_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch) / "python"
+            (root / "bin").mkdir(parents=True)
+            (root / "bin" / "python3.14").write_bytes(b"interpreter")
+            (root / "bin" / "python3").symlink_to("python3.14")
+            (root / "bin" / "python").symlink_to("python3.14")
+            bundle_engine.single_interpreter(root)
+            self.assertEqual(sorted(p.name for p in (root / "bin").iterdir()), ["python3"])
+            self.assertFalse((root / "bin" / "python3").is_symlink())
+            self.assertEqual((root / "bin" / "python3").read_bytes(), b"interpreter")
+            # Any other link would be copied whole by the packager, so the build stops on it.
+            (root / "lib").mkdir()
+            (root / "lib" / "alias").symlink_to("../bin/python3")
+            with self.assertRaises(BundleError):
+                bundle_engine.single_interpreter(root)
+
     def test_the_manifest_names_the_app_version_and_the_lock(self) -> None:
         text = "# header\nfastapi==1.0 --hash=sha256:" + "a" * 64 + "  # MIT\n"
         info = bundle_engine.manifest(_pin(), text, bundle_engine.app_version(), 12)

@@ -808,6 +808,22 @@ mod tests {
     }
 
     #[test]
+    fn the_bundle_is_looked_for_where_the_packaging_config_puts_it() {
+        // `tauri.bundle.conf.json` maps build/engine-bundle to a directory under the resources; the
+        // shell looks under the same name. Two spellings of one path, so one test holds them together.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.bundle.conf.json");
+        let text = std::fs::read_to_string(&path).expect("tauri.bundle.conf.json");
+        let config: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        let targets: Vec<&str> = config["bundle"]["resources"]
+            .as_object()
+            .expect("resources is a map")
+            .values()
+            .filter_map(|target| target.as_str())
+            .collect();
+        assert_eq!(targets, vec![BUNDLE_DIR]);
+    }
+
+    #[test]
     fn a_bundled_engine_is_isolated_and_a_checkout_keeps_its_environment() {
         let carried = PathBuf::from("/usr/lib/Codify/engine-bundle");
         let bundled = engine_env(&EngineLaunch {

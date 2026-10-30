@@ -303,6 +303,25 @@ def prune(python_root: Path, pin: Pin) -> list[str]:
     return removed
 
 
+def single_interpreter(python_root: Path) -> None:
+    """Leave `bin/python3` as the interpreter's one file, and no symlink anywhere in the tree.
+
+    The build ships `python3` and `python` as symlinks to `python3.14`. The Tauri bundler copies
+    a resource symlink as the file it points at, so each would become another 31 MB copy of the
+    interpreter in both packages. The shell starts `bin/python3` and nothing else, and CPython
+    finds its library from where the executable is, not what it is called.
+    """
+    bin_dir = python_root / "bin"
+    real = (bin_dir / "python3").resolve()
+    for link in [path for path in bin_dir.iterdir() if path.is_symlink()]:
+        link.unlink()
+    if real != bin_dir / "python3":
+        real.rename(bin_dir / "python3")
+    left = sorted(str(path.relative_to(python_root)) for path in python_root.rglob("*") if path.is_symlink())
+    if left:
+        raise BundleError(f"the bundle still holds symlinks the packager would copy whole: {', '.join(left[:5])}")
+
+
 def _skipped(name: str) -> bool:
     return name in SKIPPED_NAMES or name.endswith(SKIPPED_SUFFIXES)
 
@@ -375,6 +394,7 @@ def build(out: Path, cache: Path, *, tarball: Path | None = None) -> dict[str, A
         python = python_root / "bin" / "python3"
         _run(install_argv(python, python_root, pin, LOCK_PATH), "installing packaging/engine.lock", PIP_TIMEOUT_S)
         prune(python_root, pin)
+        single_interpreter(python_root)
         engine_files = copy_engine(ROOT / "engine", staging / "engine")
         _run(
             compile_argv(python, [python_root / "lib" / f"python{pin.minor}", staging / "engine"]),
