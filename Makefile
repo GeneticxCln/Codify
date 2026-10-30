@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history check-ghidra verify-package hooks clean bench bench-smoke smoke-tabs
+.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history check-ghidra bundle-engine lock-engine verify-package hooks clean bench bench-smoke smoke-tabs
 
 # A checkout's own virtualenv (`make setup` makes one) wins over whatever `python3` is on
 # PATH, so `make setup && make check` works with nothing activated. The floor leg sets
@@ -263,6 +263,17 @@ build-app: build-ui
 # src-tauri/target/release/bundle/{deb,appimage}/.
 package-app:
 	cd src-tauri && $(BUILD_GUARD) cargo tauri build
+
+# The engine the packages carry (docs/18 §2): the CPython pinned in packaging/python.json, the
+# wheels packaging/engine.lock names (installed with --require-hashes) and engine/, built into
+# build/engine-bundle. Needs the network for the interpreter and the wheels, so it is not part of
+# `check` or `ci`; tests/test_bundle_engine.py holds what decides its contents without one.
+# `lock-engine` regenerates the lock when a dependency moves — by a person, never by the gate.
+bundle-engine:
+	python3 scripts/bundle_engine.py
+
+lock-engine:
+	python3 scripts/lock_engine.py
 
 # The checkout's own way in — a `codify` command and a menu entry, both under the user's own
 # ~/.local, both pointing back at this checkout, neither needing root. Not a package and not
