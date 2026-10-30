@@ -17,6 +17,11 @@
       "commands": { "allow": ["codify_engine_log"] }
     },
     {
+      "identifier": "allow-codify-engine-restart",
+      "description": "Starts the engine again when a person presses Restart engine: stops the running one the way the app's own exit does (SIGTERM, its own bound, then SIGKILL) and launches a fresh one. Takes no argument, so a page chooses when and never what is run; the command and its environment are the shell's own launch, the same as at boot.",
+      "commands": { "allow": ["codify_engine_restart"] }
+    },
+    {
       "identifier": "allow-codify-list-agent-configs",
       "description": "Lists the eight role slots and their per-role configuration, with API keys redacted (docs/00 §6.4).",
       "commands": { "allow": ["codify_list_agent_configs"] }
@@ -145,6 +150,7 @@
         "allow-codify-get-engine-info",
         "allow-codify-engine-status",
         "allow-codify-engine-log",
+        "allow-codify-engine-restart",
         "allow-codify-list-agent-configs",
         "allow-codify-update-agent-config",
         "allow-codify-repair-agent-configs",

@@ -177,6 +177,23 @@ export async function fetchEngineStderr(limit = 60): Promise<string[]> {
 }
 
 /**
+ * Ask the desktop shell for a fresh engine: a person pressed Restart engine.
+ *
+ * The shell restarts an engine that exited on its own, a few times, by itself; this is for when it has stopped
+ * trying (the same crash over and over), for a boot that never completed, and for an engine that is up but not
+ * answering. The shell stops the running one politely and starts another; the window's health probe adopts the new
+ * port and token when they arrive, as it does for any engine that moved.
+ *
+ * `false` outside Tauri, where there is no shell that started the engine, so there is nothing to restart from here.
+ * A refusal (the app is closing) is thrown, with the shell's sentence.
+ */
+export async function restartEngine(): Promise<boolean> {
+  if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return false;
+  await tauriInvoke<null>("codify_engine_restart");
+  return true;
+}
+
+/**
  * Call a shell command.
  *
  * ## Argument names are camelCase, and that is not a style choice

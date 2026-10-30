@@ -39,6 +39,11 @@ use std::pin::Pin;
 /// `hard_exit_s` is the engine's own bound on a stop request, announced on the
 /// handshake. It is cleared with the token and port, because it describes that
 /// process: an engine that has exited cannot be waited for.
+///
+/// `supervised` is true while a [`launch_engine`] loop owns the engine, so a second
+/// one (the Restart button pressed while an engine is starting) never runs beside it;
+/// `restart_requested` is that button's press, which the loop reads once the running
+/// engine has gone, so a restart a person asked for is not charged to the crash budget.
 #[derive(Default)]
 pub struct EngineState {
     pub token: Option<String>,
@@ -47,6 +52,8 @@ pub struct EngineState {
     pub problem: Option<String>,
     pub log: Arc<engine_log::EngineLog>,
     pub hard_exit_s: Option<f64>,
+    pub supervised: bool,
+    pub restart_requested: bool,
 }
 
 type SharedEngineState = Arc<Mutex<EngineState>>;
@@ -988,6 +995,34 @@ async fn codify_engine_status(state: State<'_, SharedEngineState>) -> Result<Eng
     })
 }
 
+/// Start the engine again, because a person pressed Restart engine.
+///
+/// The window offers it while the engine is not answering: after a crash the supervisor gave up on (too many exits
+/// too fast, `engine_protocol::RestartBudget`), after a boot that never completed, or for an engine that is up but
+/// hung. If a supervisor still owns the engine, the engine is asked to stop the way the app's own exit asks it
+/// (`stop_engine`: SIGTERM, its own bound, then SIGKILL) and the supervisor starts a fresh one without charging it to
+/// the budget; otherwise a supervisor is started. Takes no argument: the window chooses when, never what is run.
+#[tauri::command]
+async fn codify_engine_restart(state: State<'_, SharedEngineState>) -> Result<(), String> {
+    if SHUTDOWN_CLAIMED.load(Ordering::SeqCst) {
+        return Err("Codify is closing, so the engine is not being started again".to_string());
+    }
+    let shared = state.inner().clone();
+    let supervised = {
+        let mut s = shared.lock().await;
+        s.restart_requested = true;
+        s.problem = None;
+        s.supervised
+    };
+    if supervised {
+        let stopped = stop_engine(&shared).await;
+        println!("[Codify] Restart asked for: {stopped:?}");
+    } else {
+        tauri::async_runtime::spawn(launch_engine(shared));
+    }
+    Ok(())
+}
+
 /// The engine's own last words: the tail of its stderr, oldest first.
 ///
 /// The launcher can say *that* an engine failed — no checkout, no handshake, a
@@ -1201,7 +1236,64 @@ enum LaunchOutcome {
     Unlaunchable,
 }
 
-/// Keep trying until the engine is up, or the attempts run out.
+/// How many times an engine that had started may exit on its own, and inside what window, before the shell stops
+/// starting it again and says so; and how long it waits before each restart. A crash once in a while is restarted
+/// without asking anybody; one on every boot is named in the window, where the Restart engine button is.
+const ENGINE_RESTARTS: usize = 3;
+const ENGINE_RESTART_WINDOW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const ENGINE_RESTART_DELAY_MS: u64 = 1_000;
+
+/// Own the engine for the life of the app: start it, and start it again when it exits.
+///
+/// An engine that crashed after its handshake used to stay down until the app was quit and opened again, with the
+/// window showing Offline and nothing to press: the attempts below retry only a boot that never handed over a port.
+/// The reason given was that restarting is the user's decision and must not happen "in a loop", and both halves are
+/// kept: an exit the app did not ask for is restarted at most `ENGINE_RESTARTS` times in `ENGINE_RESTART_WINDOW`
+/// (`engine_protocol::RestartBudget`), then the window is told why and offers Restart engine, which is the person's
+/// decision and is never refused. Nothing is restarted once the app is closing (`SHUTDOWN_CLAIMED`).
+///
+/// One supervisor at a time: a second call while one runs returns at once (`EngineState::supervised`).
+async fn launch_engine(shared: SharedEngineState) {
+    {
+        let mut s = shared.lock().await;
+        if s.supervised {
+            return;
+        }
+        s.supervised = true;
+        s.restart_requested = false;
+    }
+    let mut budget = engine_protocol::RestartBudget::new(ENGINE_RESTARTS, ENGINE_RESTART_WINDOW);
+    let mut keep_log = false;
+    while launch_with_retries(&shared, keep_log).await {
+        // The engine had started, and has exited.
+        let requested = std::mem::take(&mut shared.lock().await.restart_requested);
+        let shutting_down = SHUTDOWN_CLAIMED.load(Ordering::SeqCst);
+        match budget.after_exit(shutting_down, requested, std::time::Instant::now()) {
+            engine_protocol::AfterExit::Restart { counted } => {
+                eprintln!(
+                    "[Codify] Engine exited — starting it again in {ENGINE_RESTART_DELAY_MS}ms ({})",
+                    if counted { "it was not asked to stop" } else { "a restart was asked for" }
+                );
+                // A crash's last words are the diagnosis, so they stay in the tail the window reads; a restart a
+                // person asked for starts the tail afresh, as a first launch does.
+                keep_log = counted;
+                tokio::time::sleep(std::time::Duration::from_millis(ENGINE_RESTART_DELAY_MS)).await;
+                if SHUTDOWN_CLAIMED.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            engine_protocol::AfterExit::ShuttingDown => break,
+            engine_protocol::AfterExit::GaveUp(why) => {
+                eprintln!("[Codify] {why}");
+                shared.lock().await.problem = Some(why);
+                break;
+            }
+        }
+    }
+    shared.lock().await.supervised = false;
+}
+
+/// Keep trying until the engine is up, or the attempts run out. True when an engine started (and has since exited).
 ///
 /// This used to be a single attempt in `setup`, which made one transient failure
 /// permanent: `codify_get_engine_info` answers `Err("Engine not yet started")`
@@ -1210,13 +1302,13 @@ enum LaunchOutcome {
 /// seconds later. A launcher that cannot retry is a launcher that turns a blip
 /// into a restart of the app.
 ///
-/// Not retried: an engine that ran and then exited. That is a crash, and
-/// restarting the app is a decision the user should make, not one this makes for
-/// them in a loop.
-async fn launch_engine(shared: SharedEngineState) {
+/// An engine that ran and then exited is not retried *here*: that is a crash, and
+/// [`launch_engine`] decides whether to start another.
+async fn launch_with_retries(shared: &SharedEngineState, keep_log: bool) -> bool {
     for attempt in 1..=ENGINE_LAUNCH_ATTEMPTS {
-        match launch_engine_once(shared.clone()).await {
-            LaunchOutcome::Started | LaunchOutcome::Unlaunchable => return,
+        match launch_engine_once(shared.clone(), keep_log && attempt == 1).await {
+            LaunchOutcome::Started => return true,
+            LaunchOutcome::Unlaunchable => return false,
             LaunchOutcome::NoHandshake => {
                 if attempt < ENGINE_LAUNCH_ATTEMPTS {
                     eprintln!(
@@ -1231,12 +1323,13 @@ async fn launch_engine(shared: SharedEngineState) {
         }
     }
     eprintln!("[Codify] Engine did not come up after {ENGINE_LAUNCH_ATTEMPTS} attempts");
+    false
 }
 
 /// Spawn the Python engine and parse its boot handshake:
 /// `CODIFY_ENGINE token=<hex> port=<int>`. One attempt; `launch_engine` decides
 /// whether to make another.
-async fn launch_engine_once(shared: SharedEngineState) -> LaunchOutcome {
+async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> LaunchOutcome {
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
@@ -1338,10 +1431,18 @@ async fn launch_engine_once(shared: SharedEngineState) -> LaunchOutcome {
     // — so the lines a crash leaves behind are still there when the window asks.
     let stderr_log = {
         let s = shared.lock().await;
-        // This attempt's stderr replaces the previous run's: a banner quoting
-        // the last words of an engine that is no longer this one would be
-        // confidently wrong.
-        s.log.clear();
+        if keep_log {
+            // Started again after a crash: the crash's last words are the reason this is a second engine, so they
+            // stay, with a line saying where they end.
+            s.log.feed(
+                b"[Codify] The engine exited without being asked to; it is being started again.\n",
+            );
+        } else {
+            // This attempt's stderr replaces the previous run's: a banner quoting
+            // the last words of an engine that is no longer this one would be
+            // confidently wrong.
+            s.log.clear();
+        }
         s.log.clone()
     };
     if let Some(stderr) = child.stderr.take() {
@@ -2131,6 +2232,7 @@ pub fn run() {
             codify_get_engine_info,
             codify_engine_status,
             codify_engine_log,
+            codify_engine_restart,
             codify_list_agent_configs,
             codify_update_agent_config,
             codify_repair_agent_configs,

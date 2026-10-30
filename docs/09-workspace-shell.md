@@ -766,6 +766,30 @@ the grant is a named permission like every other command
 (`allow-codify-engine-log`), so the command is unreachable until it is listed;
 the browser module's ACL test fails the build's test leg when the two lists drift.
 
+### 5.6 An engine that exits on its own is started again, a few times
+
+The launcher used to retry only a boot that never handed over a port. An engine that crashed *after* its handshake
+(a native library that segfaulted, an out-of-memory kill) stayed down until the app was quit and opened again: the
+pill said `Offline`, the panel above quoted its last words and said "a new engine means relaunching the app", and
+there was nothing to press. The stated reason was that restarting is the person's decision and must not happen in a
+loop, and both halves are kept (audit of 2026-10-29):
+
+- **`launch_engine` owns the engine for the life of the app.** When an engine that had started exits and the app
+  is not closing (`SHUTDOWN_CLAIMED`), it starts another after a second, at most `ENGINE_RESTARTS` (3) times inside
+  `ENGINE_RESTART_WINDOW` (5 minutes): the pure `engine_protocol::RestartBudget` decides, and its tests hold the
+  budget, the window, and that nothing starts while the app closes. Past the budget it stops and records why as
+  the launcher's `problem` ("stopped 4 times within 5 minutes"), which the banner shows. A crash's stderr is kept
+  across the restart with a line saying where it ends, so the panel can still quote the crash; one supervisor runs
+  at a time (`EngineState::supervised`).
+- **Restart engine is the person's decision, and never refused.** The panel offers it whenever the engine is not
+  answering. `codify_engine_restart` (granted as `allow-codify-engine-restart`) takes no argument: if a supervisor
+  owns the engine it stops the running one the way the app's own exit does (§5.4.1) and the supervisor starts a
+  fresh one without charging the budget, which starts over; otherwise it starts a supervisor. The health probe
+  adopts the new port and token as it does for any engine that moved (§5.3.1). Outside Tauri there is nothing to
+  restart from the page, and the wrapper answers `false`.
+- **A restarted engine is a new process.** Its boot rescue (`docs/04` §6.1) marks the goals the crash left running
+  as failed, so their Retry is where the work resumes; nothing is replayed on its own.
+
 ## 6. The restore gap, closed
 
 Attaching an **existing** goal to a thread used to be client-side only. When
