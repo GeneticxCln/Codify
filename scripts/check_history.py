@@ -68,6 +68,12 @@ ROOT = Path(__file__).resolve().parent.parent
 # range is installed properly instead.
 UI_DEPS = ("ui/package.json", "ui/package-lock.json")
 
+# Where a UI leg finds its tools: the `node_modules` of the commit being checked, relative to the leg's own directory
+# (`ui/` in the worktree), so `tsc` is the commit's TypeScript whether that tree is a fresh install or the symlink to
+# the main checkout's. It was the main checkout's absolute path, which typechecked every commit with whatever
+# TypeScript the checkout happened to have installed, the one thing an install for a moved lockfile must not do.
+COMMITS_NODE_MODULES = Path("node_modules")
+
 # Per-commit output that says nothing, stripped before hunting for the reason.
 _NOISE = (
     "npm notice",
@@ -371,19 +377,20 @@ def _prepare_ui_deps(worktree: Path, install: bool, result: CommitResult) -> Non
     with `_deps_moved`. When they moved, `npm ci` runs for real, because
     checking new code against old dependencies is a false pass.
     """
+    if install:
+        # Whether or not the main checkout has a tree of its own: it is the old dependencies, and they are exactly what
+        # an install is for not testing against. This used to run `npm ci` only when the main checkout had none, so a
+        # range that moved the lockfile in a checkout that had installed gave every worktree no `node_modules` at all,
+        # and every UI leg of every commit failed on `Cannot find module 'react'` whatever the commit held.
+        code, _ = _run(["npm", "ci"], worktree / "ui")
+        if code != 0:
+            result.blocked = "`npm ci` failed — no network, or a broken lockfile"
+        return
     source = ROOT / "ui" / "node_modules"
     if not source.is_dir():
-        if install:
-            code, _ = _run(["npm", "ci"], worktree / "ui")
-            if code != 0:
-                result.blocked = "`npm ci` failed — no network, or a broken lockfile"
-        else:
-            result.blocked = (
-                f"no {source.relative_to(ROOT)} to reuse, and --install-deps was not given"
-            )
+        result.blocked = f"no {source.relative_to(ROOT)} to reuse, and --install-deps was not given"
         return
-    if not install:
-        os.symlink(source, worktree / "ui" / "node_modules", target_is_directory=True)
+    os.symlink(source, worktree / "ui" / "node_modules", target_is_directory=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -421,7 +428,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"check-history: nothing to check — {reason}")
         return 0
 
-    legs = build_legs(venv, ROOT / "ui" / "node_modules")
+    legs = build_legs(venv, COMMITS_NODE_MODULES)
     if args.legs:
         wanted = {name.strip() for name in args.legs.split(",") if name.strip()}
         unknown = wanted - {leg.name for leg in legs}
