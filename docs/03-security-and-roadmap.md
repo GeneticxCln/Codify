@@ -288,9 +288,11 @@ configured for it, so the whole of it is written here:
 
 **What this does not claim.** Asking GitHub discloses to GitHub that this machine asked (an IP
 address in their logs, as any request would) — it is unauthenticated, not anonymous through a proxy,
-and no attempt is made to hide it. And the download is not verified: a `.deb` or `.AppImage` is
-fetched over TLS from GitHub's own hosts and its checksum is not compared with anything, because
-signing releases is the not-built half of `18` §5, not something this covers.
+and no attempt is made to hide it. And the download is checked, not verified: a `.deb` or `.AppImage`
+is fetched over TLS from GitHub's own hosts and compared with the release's own `SHA256SUMS`
+before anything is written (a mismatch or an unlisted package writes nothing), which catches a
+truncated or re-uploaded file. The sums come from the same release as the package, so it is not a
+signature: signing releases is the not-built half of `18` §5, not something this covers.
 
 ## 2. Persistence layer
 
