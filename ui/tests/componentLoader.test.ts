@@ -57,6 +57,7 @@ const { ToxicLab } = await import("../src/components/ui/ToxicLab.tsx");
 const { AnonFluid } = await import("../src/components/ui/AnonFluid.tsx");
 const { Panel } = await import("../src/components/ui/Panel.tsx");
 const { Toggle } = await import("../src/components/ui/Toggle.tsx");
+const { Checkbox } = await import("../src/components/ui/Checkbox.tsx");
 const { ChatTimeline } = await import("../src/components/ChatTimeline.tsx");
 const { MatrixRain } = await import("../src/components/ui/MatrixRain.tsx");
 const { RainBackdrop } = await import("../src/components/ui/RainBackdrop.tsx");
@@ -271,6 +272,20 @@ const PRIMITIVES: Record<
       ),
     expect: /Knowledge/,
     markup: /aria-pressed="true"[^>]*class="[^"]*bg-codify-knowledge\/20/,
+  },
+  "Checkbox.tsx": {
+    render: () =>
+      renderToStaticMarkup(
+        React.createElement(Checkbox, {
+          checked: true,
+          onChange: () => {},
+          children: "Drives the plan",
+        })
+      ),
+    expect: /Drives the plan/,
+    // The drawn box, not a native input: the checked fill is the accent and the
+    // tick is the theme's background, the two classes that make it visible.
+    markup: /role="checkbox"[^>]*aria-checked="true"[^>]*>[\s\S]*bg-codify-accent[\s\S]*text-codify-bg/,
   },
   "Logo.tsx": {
     render: () =>

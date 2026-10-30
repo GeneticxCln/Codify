@@ -56,12 +56,15 @@ async function withCard(
   });
 }
 
+/** Open the picker and click the mode's row, as a person would. */
 const choose = async (dom: Dom, mode: number): Promise<void> => {
-  const select = dom.byField("The assistant may fetch") as HTMLSelectElement;
-  await React.act(async () => {
-    select.value = String(mode);
-    select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-  });
+  const labels = ["Off", "Only the sites I list", "Any public site"];
+  await dom.click(dom.byLabel("The assistant may fetch"));
+  const row = [...dom.container.querySelectorAll("[role='option']")].find(
+    (option) => option.textContent === labels[mode],
+  );
+  assert.ok(row, `the list has no "${labels[mode]}" row`);
+  await dom.click(row);
 };
 
 const puts = (calls: Call[]): Call[] => calls.filter((c) => c.method === "PUT" && c.path === "/settings/engine");
@@ -75,7 +78,7 @@ test("an engine without the setting shows no card, rather than a card whose save
 test("a fresh install shows it off, says so, and offers nothing to save", async () => {
   await withCard({ "GET /settings/engine": () => json(held(0, "")) }, async (dom) => {
     assert.match(dom.text(), /Web pages/);
-    assert.equal((dom.byField("The assistant may fetch") as HTMLSelectElement).value, "0");
+    assert.match(dom.byLabel("The assistant may fetch").textContent ?? "", /Off/);
     assert.match(dom.text(), /cannot fetch web pages/);
     assert.ok((dom.byButton("Save web access") as HTMLButtonElement).disabled, "Save was offered for no change");
     assert.throws(() => dom.byField("Sites"), "the site list is shown while the setting is off");

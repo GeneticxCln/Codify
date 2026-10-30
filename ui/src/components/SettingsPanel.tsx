@@ -18,6 +18,7 @@ import { ConductorSettingsCard } from "./ConductorSettingsCard";
 import { WebAccessCard } from "./WebAccessCard";
 import { BrowserActionsCard } from "./BrowserActionsCard";
 import { EngineRuntimeCard } from "./EngineRuntimeCard";
+import { SelectMenu } from "./SelectMenu";
 import { Sliders, ShieldCheck, Zap, AlertTriangle, Cpu, Wand2, Wrench, Workflow } from "lucide-react";
 import { readRejection } from "../rejection.ts";
 
@@ -815,20 +816,25 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           )}
         </p>
         <div className="flex flex-wrap items-center gap-2">
-          <select
+          <SelectMenu
+            label="Model for every role"
             value={bulkChoice}
-            onChange={(e) => setBulkChoice(e.target.value)}
-            className="flex-1 min-w-[16rem] bg-codify-surface border border-codify-border rounded-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent font-mono"
-          >
-            <option value="">
-              {models.length > 0 ? "Choose a discovered model..." : "No models discovered yet"}
-            </option>
-            {models.map((m) => (
-              <option key={`${m.provider}:${m.id}`} value={`${m.provider}:${m.id}`}>
-                {m.provider} · {m.id}
-              </option>
-            ))}
-          </select>
+            onChange={setBulkChoice}
+            mono
+            searchable={models.length > 0}
+            searchPlaceholder="Search discovered models…"
+            className="flex items-center justify-between gap-2 flex-1 min-w-[16rem] bg-codify-surface border border-codify-border rounded-lg px-3 py-1.5 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent"
+            options={[
+              {
+                value: "",
+                label: models.length > 0 ? "Choose a discovered model..." : "No models discovered yet",
+              },
+              ...models.map((m) => ({
+                value: `${m.provider}:${m.id}`,
+                label: `${m.provider} · ${m.id}`,
+              })),
+            ]}
+          />
           <button
             type="button"
             onClick={applyToEveryRole}

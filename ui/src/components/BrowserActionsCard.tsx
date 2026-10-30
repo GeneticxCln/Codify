@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { getEngineSettings, saveEngineSettings } from "../api";
 import { readRejection } from "../rejection.ts";
+import { Checkbox } from "./ui/Checkbox";
 
 /** Explicit consent for conductor actions in the user's embedded browser, independent from page reading/fetching. */
 export const BrowserActionsCard: React.FC = () => {
@@ -46,16 +47,9 @@ export const BrowserActionsCard: React.FC = () => {
   return (
     <div className="flex flex-col gap-2.5 bg-codify-bg border border-codify-border rounded-xl p-3.5">
       <div className="text-xs font-semibold text-codify-secondary">Browser actions</div>
-      <label className="flex items-center gap-2 text-xs text-codify-secondary font-medium">
-        <input
-          type="checkbox"
-          checked={enabled}
-          disabled={saving}
-          onChange={(event) => void save(event.target.checked)}
-          className="accent-codify-accent"
-        />
+      <Checkbox checked={enabled} disabled={saving} onChange={(next) => void save(next)}>
         Allow the assistant to navigate, click and type in browser pages
-      </label>
+      </Checkbox>
       <p className="text-xs text-codify-warning leading-relaxed">
         Off by default. When enabled, a page can send text as you type, and clicking can submit it or act in a
         logged-in account. This is separate from reading the open page and from Web pages access.

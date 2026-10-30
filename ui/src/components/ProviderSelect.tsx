@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { providerLabel } from "../providerLabels";
+import { FIELD_CLASS, SEARCHABLE_FROM, SelectMenu } from "./SelectMenu";
 
 interface ProviderSelectProps {
   value: string;
@@ -38,25 +39,27 @@ export const ProviderSelect: React.FC<ProviderSelectProps> = ({
         Provider
       </label>
       <div className="flex gap-2">
-        <select
+        <SelectMenu
+          label="Provider"
           value={isCustom ? "custom" : value}
-          onChange={(e) => {
-            if (e.target.value === "custom") {
+          options={[
+            ...builtins.map((b) => ({ value: b, label: providerLabel(b) })),
+            { value: "custom", label: "Custom Provider..." },
+          ]}
+          // The custom row is an option too, so it counts towards the length at
+          // which the list stops being quicker to scan than to filter.
+          searchable={builtins.length + 1 >= SEARCHABLE_FROM}
+          searchPlaceholder="Search providers…"
+          onChange={(next) => {
+            if (next === "custom") {
               setIsCustom(true);
             } else {
               setIsCustom(false);
-              onChange(e.target.value);
+              onChange(next);
             }
           }}
-          className="flex-1 bg-codify-bg border border-codify-border rounded-sm px-3 py-2 text-sm text-codify-secondary focus:outline-hidden focus:border-codify-accent"
-        >
-          {builtins.map((b) => (
-            <option key={b} value={b}>
-              {providerLabel(b)}
-            </option>
-          ))}
-          <option value="custom">Custom Provider...</option>
-        </select>
+          className={FIELD_CLASS + " flex-1"}
+        />
         {isCustom && (
           <input
             type="text"

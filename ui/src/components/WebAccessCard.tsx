@@ -4,6 +4,7 @@ import { Globe, Save } from "lucide-react";
 import { getEngineSettings, saveEngineSettings } from "../api";
 import { readRejection } from "../rejection.ts";
 import { WEB_MODES, refusalSentence, webAccessDirty, webAccessStatus, webMode } from "../webAccess";
+import { SelectMenu } from "./SelectMenu";
 
 /**
  * Whether the assistant may fetch web pages, and from which sites.
@@ -85,22 +86,18 @@ export const WebAccessCard: React.FC = () => {
         <label htmlFor="web-fetch-mode" className="text-xs text-codify-secondary font-medium">
           The assistant may fetch
         </label>
-        <select
+        <SelectMenu
           id="web-fetch-mode"
-          value={draft.mode}
+          label="The assistant may fetch"
+          value={String(draft.mode)}
           disabled={saving}
-          onChange={(e) => {
-            setDraft({ ...draft, mode: Number(e.target.value) });
+          onChange={(next) => {
+            setDraft({ ...draft, mode: Number(next) });
             setMsg(null);
           }}
-          className="bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-none focus:border-codify-accent disabled:opacity-40"
-        >
-          {WEB_MODES.map((m) => (
-            <option key={m.value} value={m.value}>
-              {m.label}
-            </option>
-          ))}
-        </select>
+          options={WEB_MODES.map((m) => ({ value: String(m.value), label: m.label }))}
+          className="flex items-center justify-between gap-2 bg-codify-surface border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent disabled:opacity-40 disabled:cursor-not-allowed"
+        />
       </div>
       {draft.mode === 1 && (
         <div className="flex flex-col gap-1">

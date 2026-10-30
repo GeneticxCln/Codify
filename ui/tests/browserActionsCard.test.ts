@@ -53,13 +53,15 @@ async function withCard(
   });
 }
 
-const switchControl = (dom: Dom): HTMLInputElement =>
-  dom.byField("Allow the assistant to navigate, click and type in browser pages") as HTMLInputElement;
+const switchControl = (dom: Dom): HTMLElement =>
+  dom.byButton("Allow the assistant to navigate, click and type in browser pages");
+
+/** The control's own answer to "am I on", which is what a screen reader reads. */
+const isOn = (dom: Dom): boolean => switchControl(dom).getAttribute("aria-checked") === "true";
 
 const toggle = async (dom: Dom, enabled: boolean): Promise<void> => {
-  const input = switchControl(dom);
-  await dom.click(input);
-  assert.equal(input.checked, enabled, "the click did not toggle the checkbox");
+  await dom.click(switchControl(dom));
+  assert.equal(isOn(dom), enabled, "the click did not toggle the checkbox");
 };
 
 test("an engine without browser-action consent has no toggle to save", async () => {
@@ -78,7 +80,7 @@ test("the fresh-install permission is off and the person can explicitly enable i
     "GET /settings/engine": () => json(settings),
     "PUT /settings/engine": (body) => json({ saved: body }),
   }, async (dom, calls) => {
-    assert.equal(switchControl(dom).checked, false);
+    assert.equal(isOn(dom), false);
     assert.match(dom.text(), /Off by default/);
     assert.match(dom.text(), /logged-in account/);
 
@@ -89,7 +91,7 @@ test("the fresh-install permission is off and the person can explicitly enable i
       calls.filter((call) => call.method === "PUT").map((call) => call.body),
       [{ browser_actions: true }],
     );
-    assert.equal(switchControl(dom).checked, true);
+    assert.equal(isOn(dom), true);
     assert.match(dom.text(), /Saved — this applies to the next turn/);
   });
 });
@@ -103,7 +105,7 @@ test("a failed save does not display consent that the engine did not store", asy
     await dom.settle();
 
     assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
-    assert.equal(switchControl(dom).checked, false, "a refused save left consent enabled");
+    assert.equal(isOn(dom), false, "a refused save left consent enabled");
     assert.match(dom.text(), /settings unavailable/);
   });
 });

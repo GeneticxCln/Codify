@@ -23,6 +23,7 @@ import type {
 } from "../types";
 import { ModelSelect } from "./ModelSelect";
 import { ProviderSelect } from "./ProviderSelect";
+import { SEARCHABLE_FROM, SelectMenu } from "./SelectMenu";
 import { Button } from "./ui/Button";
 import { Toggle } from "./ui/Toggle";
 
@@ -275,24 +276,28 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
           <p className="text-2xs text-codify-warning" role="status">{inputs.reason}</p>
         ) : (
           <div className="flex flex-col gap-1.5">
-            {/* A label of its own, not a wrapping one: wrapped, the select's options would be read as its name. */}
+            {/* A label of its own, not a wrapping one: wrapped, the picker's options would be read as its name. */}
             <label htmlFor={micField} className="text-xs text-codify-secondary font-medium">
               Input
             </label>
-            <select
+            <SelectMenu
               id={micField}
-              className={inputClass}
+              label="Input"
+              className={"flex items-center justify-between gap-2 " + inputClass}
               value={draft.audio_input}
-              onChange={(e) => edit({ audio_input: e.target.value })}
-            >
-              <option value="">Default microphone</option>
-              {(inputs?.inputs ?? []).map((mic) => (
-                <option key={mic.name} value={mic.name}>
-                  {mic.description}
-                  {mic.default ? " (default)" : ""}
-                </option>
-              ))}
-            </select>
+              options={[
+                { value: "", label: "Default microphone" },
+                ...(inputs?.inputs ?? []).map((mic) => ({
+                  value: mic.name,
+                  label: mic.description + (mic.default ? " (default)" : ""),
+                })),
+              ]}
+              // The default entry is one of the options, and a machine with only
+              // a built-in mic should not be asked to search a three-row list.
+              searchable={(inputs?.inputs.length ?? 0) + 1 >= SEARCHABLE_FROM}
+              searchPlaceholder="Search microphones…"
+              onChange={(next) => edit({ audio_input: next })}
+            />
           </div>
         )}
       </section>

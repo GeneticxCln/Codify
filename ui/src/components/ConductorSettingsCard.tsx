@@ -8,6 +8,7 @@ import { staleTarget } from "../staleModel";
 import type { ModelOption, ProviderModelStatus } from "../types.ts";
 import { ModelSelect } from "./ModelSelect";
 import { ProviderSelect } from "./ProviderSelect";
+import { Checkbox } from "./ui/Checkbox";
 
 interface ConductorSettingsCardProps {
   /** Discovered models, so the field autocompletes real ids like a role's does. */
@@ -535,16 +536,13 @@ export const ConductorSettingsCard: React.FC<ConductorSettingsCardProps> = ({
             }}
           />
           <div className="flex flex-col gap-1.5">
-            <label className="flex items-center gap-2 text-xs text-codify-secondary font-medium">
-              <input
-                type="checkbox"
-                checked={drives === 1}
-                disabled={drives === null || drivesSaving}
-                onChange={(e) => saveDrives(e.target.checked)}
-                className="accent-codify-accent"
-              />
+            <Checkbox
+              checked={drives === 1}
+              disabled={drives === null || drivesSaving}
+              onChange={(next) => void saveDrives(next)}
+            >
               The conductor drives an approved plan
-            </label>
+            </Checkbox>
             <p className="text-xs text-codify-muted leading-relaxed">
               Off, the engine walks the steps in its own fixed order and the conductor only plans.
               The escape hatch for a model not yet trusted with the order, and it needs no rebuild.

@@ -1,6 +1,7 @@
 import React from "react";
 import type { ProviderProtocol } from "../types.ts";
 import { PROTOCOL_LABELS } from "../providerLabels.ts";
+import { SelectMenu } from "./SelectMenu";
 
 interface ProtocolSelectProps {
   value: ProviderProtocol;
@@ -13,17 +14,15 @@ export const ProtocolSelect: React.FC<ProtocolSelectProps> = ({ value, onChange 
       <label className="text-xs font-semibold text-codify-muted uppercase tracking-wider">
         Protocol
       </label>
-      <select
+      <SelectMenu
+        label="Protocol"
         value={value}
-        onChange={(e) => onChange(e.target.value as ProviderProtocol)}
-        className="bg-codify-bg border border-codify-border rounded-sm px-3 py-2 text-sm text-codify-secondary focus:outline-hidden focus:border-codify-accent"
-      >
-        {(Object.keys(PROTOCOL_LABELS) as ProviderProtocol[]).map((p) => (
-          <option key={p} value={p}>
-            {PROTOCOL_LABELS[p].long}
-          </option>
-        ))}
-      </select>
+        options={(Object.keys(PROTOCOL_LABELS) as ProviderProtocol[]).map((p) => ({
+          value: p,
+          label: PROTOCOL_LABELS[p].long,
+        }))}
+        onChange={(next) => onChange(next as ProviderProtocol)}
+      />
     </div>
   );
 };

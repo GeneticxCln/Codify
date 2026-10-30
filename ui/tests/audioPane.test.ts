@@ -59,6 +59,12 @@ function engine(): Record<string, Route> {
         inputs: [
           { name: "usb.mic", description: "USB Microphone", default: true },
           { name: "builtin.mic", description: "Built-in", default: false },
+          { name: "headset.mic", description: "Headset", default: false },
+          { name: "webcam.mic", description: "Webcam", default: false },
+          { name: "dock.mic", description: "Dock", default: false },
+          { name: "monitor.mic", description: "Monitor", default: false },
+          { name: "desk.mic", description: "Desk", default: false },
+          { name: "conference.mic", description: "Conference", default: false },
         ],
       }),
     "GET /audio/status": () =>
@@ -119,9 +125,37 @@ test("the pane shows what the engine has, and the engine's reason for what canno
       assert.match(dom.text(), /dictation has no provider and model yet/);
       assert.match(dom.text(), /Read-aloud is ready: openai · tts-1/);
       assert.equal((dom.byField("Voice") as HTMLInputElement).value, "alloy");
-      const mics = Array.from((dom.byField("Input") as HTMLSelectElement).options).map((o) => o.textContent);
-      assert.deepEqual(mics, ["Default microphone", "USB Microphone (default)", "Built-in"]);
+      await dom.click(dom.byLabel("Input"));
+      assert.ok(dom.byLabel("Search Input"), "the microphone list has no search field");
+      const mics = Array.from(dom.container.querySelectorAll('[role="option"]')).map((o) => o.textContent);
+      assert.deepEqual(mics.slice(0, 3), ["Default microphone", "USB Microphone (default)", "Built-in"]);
+      assert.equal(mics.length, 9, "the list is not the engine's inputs plus the default");
       assert.ok((dom.byButton("Try dictation") as HTMLButtonElement).disabled, "dictation that cannot run was offered");
+    },
+  );
+});
+
+test("a microphone list short enough to scan is not given a search field", async () => {
+  await withPane(
+    {
+      "GET /audio/inputs": () =>
+        json({
+          available: true,
+          reason: null,
+          inputs: [
+            { name: "usb.mic", description: "USB Microphone", default: true },
+            { name: "builtin.mic", description: "Built-in", default: false },
+          ],
+        }),
+    },
+    async (dom) => {
+      await dom.click(dom.byLabel("Input"));
+      const options = dom.container.querySelectorAll('[role="option"]');
+      assert.equal(options.length, 3, "the list is not the engine's inputs plus the default");
+      assert.ok(
+        dom.container.querySelector('input[aria-label="Search Input"]') === null,
+        "three microphones were given a search field they do not need",
+      );
     },
   );
 });
@@ -133,11 +167,14 @@ test("saving sends the voice keys as edited, then reads the status again", async
 
     await dom.fill(dom.byField("Voice") as HTMLInputElement, "nova");
     await dom.fill(dom.byField("Language (optional)") as HTMLInputElement, "en");
-    const mic = dom.byField("Input") as HTMLSelectElement;
-    await React.act(async () => {
-      mic.value = "usb.mic";
-      mic.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-    });
+    await dom.click(dom.byLabel("Input"));
+    await dom.fill(dom.byLabel("Search Input") as HTMLInputElement, "usb");
+    assert.deepEqual(
+      Array.from(dom.container.querySelectorAll('[role="option"]')).map((o) => o.textContent),
+      ["USB Microphone (default)"],
+      "the microphone search did not narrow the list",
+    );
+    await dom.click(dom.byText("USB Microphone (default)"));
     await dom.click(dom.byButton("Read each answer aloud as it arrives"));
     await dom.click(dom.byButton("Save audio settings"));
     await dom.settle();
@@ -202,7 +239,7 @@ test("without PipeWire the microphone section says what is missing instead of of
     },
     async (dom) => {
       assert.match(dom.text(), /voice input needs PipeWire's tools/);
-      assert.throws(() => dom.byField("Input"), /no field is labelled "Input"/, "a microphone list was offered without PipeWire");
+      assert.equal(dom.allByLabel("Input").length, 0, "a microphone list was offered without PipeWire");
     },
   );
 });

@@ -34,6 +34,10 @@ import {
   Route,
 } from "lucide-react";
 
+/** The temperature range's ends, named once for the slider and its fill. */
+const TEMPERATURE_MIN = 0;
+const TEMPERATURE_MAX = 2;
+
 interface AgentConfigCardProps {
   role: AgentRole;
   /**
@@ -260,6 +264,11 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
   const fallbackCustom = Boolean(fallbackProvider) && !builtinProviders.includes(fallbackProvider);
   const fallbackModels = models.filter((m) => m.provider === fallbackProvider);
   const fallbackDiscovery = providerStatus.find((s) => s.provider === fallbackProvider);
+
+  // Where the accent meets the empty track: the thumb's own fill comes from the
+  // browser, this is the line behind it.
+  const temperaturePct =
+    ((active.temperature - TEMPERATURE_MIN) / (TEMPERATURE_MAX - TEMPERATURE_MIN)) * 100;
 
   return (
     <div
@@ -625,12 +634,15 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
           <input
             id={`temperature-${role}`}
             type="range"
-            min={0}
-            max={2}
+            min={TEMPERATURE_MIN}
+            max={TEMPERATURE_MAX}
             step={0.05}
             value={active.temperature}
             onChange={(e) => updateDraft({ temperature: parseFloat(e.target.value) })}
-            className="w-full accent-codify-accent cursor-pointer"
+            style={{
+              background: `linear-gradient(to right, var(--codify-accent) ${temperaturePct}%, var(--codify-border-strong) ${temperaturePct}%)`,
+            }}
+            className="codify-range w-full cursor-pointer"
           />
         </div>
 

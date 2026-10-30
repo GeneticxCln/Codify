@@ -94,6 +94,86 @@
   }
 }
 
+/* The native controls the app still uses are dark, because every theme is.
+
+   A checkbox's box, a number field's spinners, a range's empty track, a
+   textarea's resize grip and the colour well's chrome are painted by the
+   desktop's widget toolkit, not by a class: `accent-color` reaches only the
+   *filled* state, and on a machine whose GTK theme is light the unchecked box
+   and every track came out white. `color-scheme` is the one declaration that
+   makes the toolkit paint them dark, and it is a fact about the product rather
+   than a choice of theme — `ui/src/appearance.ts` ships dark themes only.
+
+   The two controls that had no dark state worth keeping are drawn here instead
+   of being left to the toolkit: see `components/ui/Checkbox.tsx` and
+   `.codify-range` below. */
+@layer base {
+  /* A colour well whose frame is the theme's border and whose fill is the
+     colour itself. Left native, WebKitGTK draws a button around the swatch
+     (light grey, with its own inset border) and the theme's `border` class is
+     a second frame inside it. The pseudo-elements are WebKit's, which is the
+     engine the shell embeds as well as the one in Chrome; the border and
+     radius on the element still come from its classes. */
+  input[type="color"] {
+    appearance: none;
+  }
+  input[type="color"]::-webkit-color-swatch-wrapper {
+    padding: 0;
+  }
+  input[type="color"]::-webkit-color-swatch {
+    border: none;
+    border-radius: 1px;
+  }
+
+  /* The slider is the temperature control on every role card. `accent-color`
+     tints the filled part and the thumb but leaves the empty track to the
+     toolkit, which is a light grey line on every dark theme; drawing the track
+     here makes both halves the palette's. The fill comes from an inline
+     gradient on the element (the value is a number React knows), and spans the
+     element's width — the thumb insets by half its width at either end, so a
+     value at 0 or 100 lands a few pixels short of the colour change, which is
+     the same rounding `accent-color` itself has. */
+  .codify-range {
+    appearance: none;
+    height: 16px;
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: 100% 4px;
+    border-radius: 2px;
+  }
+  .codify-range::-webkit-slider-runnable-track {
+    height: 4px;
+    background: transparent;
+  }
+  .codify-range::-webkit-slider-thumb {
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    border-radius: 50%;
+    background: var(--codify-accent);
+    border: 2px solid var(--codify-bg);
+    box-shadow: 0 0 0 1px var(--codify-border-strong);
+  }
+  .codify-range:focus-visible {
+    outline: 2px solid var(--codify-accent);
+    outline-offset: 3px;
+  }
+  /* Firefox has no WebKit pseudo-elements; it gets the same track and thumb. */
+  .codify-range::-moz-range-track {
+    height: 4px;
+    background: transparent;
+  }
+  .codify-range::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--codify-accent);
+    border: 2px solid var(--codify-bg);
+    box-shadow: 0 0 0 1px var(--codify-border-strong);
+  }
+}
+
 /* The palette, once, for the handful of places CSS rather than a utility needs a
    colour: the body, the scrollbars, the audit-flash keyframes below. Tailwind reads
    the same values from `tailwind.config.js`, and `DESIGN.md` at the repository root
@@ -175,6 +255,13 @@
   --codify-design-ink-rgb: 237 176 208;
   --codify-knowledge-ink: #ace7eb;
   --codify-knowledge-ink-rgb: 172 231 235;
+}
+
+/* `html`, not a second custom-property block: the palette above is the one the
+   tests read, and a tokenless block ahead of it made them report that the
+   palette had vanished. */
+html {
+  color-scheme: dark;
 }
 
 body {
@@ -506,6 +593,7 @@ body {
 .focus-within\:border-codify-accent:focus-within { border-color: rgb(var(--codify-accent-rgb) / 1); }
 .focus\:border-codify-accent:focus { border-color: rgb(var(--codify-accent-rgb) / 1); }
 .group:hover .group-hover\:text-codify-accent { color: rgb(var(--codify-accent-rgb) / 1); }
+.group:hover .group-hover\:border-codify-accent { border-color: rgb(var(--codify-accent-rgb) / 1); }
 .hover\:bg-codify-border:hover { background-color: rgb(var(--codify-border-rgb) / 1); }
 .hover\:bg-codify-raised:hover { background-color: rgb(var(--codify-raised-rgb) / 1); }
 .hover\:bg-codify-raised\/60:hover { background-color: rgb(var(--codify-raised-rgb) / 0.60); }
