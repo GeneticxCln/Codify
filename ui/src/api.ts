@@ -1633,8 +1633,10 @@ export interface UpdateDownload {
   bytes: number;
   package: UpdatePackage;
   tag: string;
-  /** What to do with the file, as text. The shell runs none of it. */
+  /** What to do with the file, as text. The shell runs none of it. It also says the checksum matched. */
   next_step: string;
+  /** The package's SHA-256, checked against the release's own SHA256SUMS before the file was written. Not a signature. */
+  sha256?: string;
 }
 
 /**

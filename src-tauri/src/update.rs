@@ -422,6 +422,8 @@ pub(crate) struct UpdateDownload {
     pub tag: String,
     /// What to do with it, as text. The shell runs none of this.
     pub next_step: String,
+    /// The package's SHA-256, which matched the release's `SHA256SUMS` before it was written.
+    pub sha256: String,
 }
 
 /// An empty envelope, so every answer is built the same way.
@@ -647,6 +649,139 @@ pub(crate) async fn write_asset(into: &Path, name: &str, bytes: &[u8]) -> Result
     Ok(path)
 }
 
+// ── Checking the package against the release's own checksums ────────────────
+
+/// The name the release workflow publishes its checksums under, beside the packages (`docs/18`).
+const SUMS_ASSET: &str = "SHA256SUMS";
+
+/// A checksums file lists a handful of packages. Anything larger is not one, and is not read into memory.
+const MAX_SUMS_BYTES: u64 = 64 * 1024;
+
+/// `{file name: digest}` from the text of a `SHA256SUMS` file, digests lowercased.
+///
+/// The same reading as `scripts/verify_package.py`'s `parse_sums`, so the button and `make verify-package` agree
+/// about what a checksums file says: a line that is not `sha256sum` output (`<64 hex> <space or *><name>`) is
+/// refused with its number rather than skipped, since a mangled file would otherwise read as "this package is not
+/// listed"; and a file that lists nothing is refused, since comparing against nothing proves nothing.
+pub(crate) fn parse_sums(text: &str) -> Result<std::collections::HashMap<String, String>, String> {
+    let mut sums = std::collections::HashMap::new();
+    for (number, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let digest = line
+            .get(..64)
+            .filter(|d| d.bytes().all(|b| b.is_ascii_hexdigit()));
+        let separator = line.get(64..66).filter(|s| *s == "  " || *s == " *");
+        let name = line.get(66..).filter(|n| !n.is_empty());
+        match (digest, separator, name) {
+            (Some(digest), Some(_), Some(name)) => {
+                sums.insert(name.to_string(), digest.to_ascii_lowercase());
+            }
+            _ => {
+                return Err(format!(
+                    "line {} of the release's {SUMS_ASSET} is not `<sha256>  <name>`, so it is not \
+                     `sha256sum` output",
+                    number + 1
+                ))
+            }
+        }
+    }
+    if sums.is_empty() {
+        return Err(format!(
+            "the release's {SUMS_ASSET} lists no files, so there is nothing to check the package against"
+        ));
+    }
+    Ok(sums)
+}
+
+/// The SHA-256 of `bytes`, as the lowercase hex `sha256sum` prints.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Whether `bytes`, downloaded as `name`, are the file the release's checksums list under that name.
+///
+/// `Ok` carries the digest, for the sentence that says it matched. Every refusal says that nothing was written,
+/// because nothing is: this runs before [`write_asset`]. It is not a signature, and nothing here says it is: the
+/// checksums come from the same release as the package, so what a match proves is that the file is whole and is the
+/// one that release published.
+pub(crate) fn check_against_sums(
+    name: &str,
+    bytes: &[u8],
+    sums_text: &str,
+) -> Result<String, String> {
+    let sums = parse_sums(sums_text)?;
+    let Some(expected) = sums.get(name) else {
+        return Err(format!(
+            "the release's {SUMS_ASSET} does not list {name}, so it could not be checked and nothing was \
+             written. Take it from {RELEASES_PAGE}"
+        ));
+    };
+    let actual = sha256_hex(bytes);
+    if &actual != expected {
+        return Err(format!(
+            "{name} does not match the release's {SUMS_ASSET} (expected {expected}, got {actual}), so nothing \
+             was written. The download was damaged or changed on the way; try again, or take it from \
+             {RELEASES_PAGE}"
+        ));
+    }
+    Ok(actual)
+}
+
+/// The release's checksums, as text, from the same hosts and under the same redirect rule as everything else here.
+async fn fetch_sums(client: &reqwest::Client, payload: &ReleasePayload) -> Result<String, String> {
+    let asset = payload
+        .assets
+        .iter()
+        .find(|asset| asset.name == SUMS_ASSET)
+        .ok_or_else(|| {
+            format!(
+                "that release publishes no {SUMS_ASSET}, so a package from it could not be checked and none was \
+                 downloaded. Its page is {RELEASES_PAGE}"
+            )
+        })?;
+    if !allowed_url(&asset.browser_download_url) {
+        return Err(format!(
+            "that release's {SUMS_ASSET} is at an address this app will not fetch, so nothing was downloaded. \
+             Its page is {RELEASES_PAGE}"
+        ));
+    }
+    let response = client
+        .get(&asset.browser_download_url)
+        .send()
+        .await
+        .map_err(|err| format!("could not reach GitHub for the release's {SUMS_ASSET} ({err})"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "GitHub answered {} for the release's {SUMS_ASSET}, so nothing was downloaded",
+            response.status()
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_SUMS_BYTES)
+    {
+        return Err(format!(
+            "the release's {SUMS_ASSET} is larger than a checksums file is, so it was not read"
+        ));
+    }
+    let body = response
+        .bytes()
+        .await
+        .map_err(|err| format!("the release's {SUMS_ASSET} stopped part-way ({err})"))?;
+    if body.len() as u64 > MAX_SUMS_BYTES {
+        return Err(format!(
+            "the release's {SUMS_ASSET} is larger than a checksums file is, so it was not read"
+        ));
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
 /// What to do with the file, in a sentence.
 ///
 /// Text, not an action. A deb needs a package manager and a person's own decision about
@@ -729,6 +864,9 @@ pub(crate) async fn fetch_package(
              {RELEASES_PAGE}"
         ));
     }
+    // Read first: it is a few hundred bytes, and a release that cannot be checked is refused before tens of
+    // megabytes are spent on a package that would then not be written.
+    let sums = fetch_sums(&client, &payload).await?;
     let mut response = client
         .get(&url)
         .send()
@@ -782,13 +920,20 @@ pub(crate) async fn fetch_package(
             total,
         });
     }
+    // Before anything is written: a package that is not the one the release lists never reaches the downloads folder.
+    let sha256 = check_against_sums(&name, &bytes, &sums)?;
     let path = write_asset(&into, &name, &bytes).await?;
     Ok(UpdateDownload {
         path: path.display().to_string(),
         bytes: bytes.len() as u64,
         package,
         tag: update.tag.clone().unwrap_or_default(),
-        next_step: next_step(package, &path),
+        next_step: format!(
+            "{}\nIts SHA-256 matches the release's {SUMS_ASSET} ({sha256}): the file is whole, and is the one the \
+             release published. That is not a signature, since both came from the same release.",
+            next_step(package, &path)
+        ),
+        sha256,
     })
 }
 
@@ -1336,5 +1481,59 @@ mod tests {
             appimage.contains("chmod +x /home/me/Downloads/Codify.AppImage"),
             "{appimage}"
         );
+    }
+
+    /// `sha256sum` of the five bytes `hello`, as the release workflow's `sha256sum` would print it.
+    const HELLO_SHA256: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+    #[test]
+    fn the_checksums_are_read_the_way_sha256sum_writes_them() {
+        let text = format!(
+            "{HELLO_SHA256}  Codify_1.0.1_amd64.deb\r\n\n{}  Codify_1.0.1_amd64.AppImage\n",
+            HELLO_SHA256.to_uppercase()
+        );
+        let sums = parse_sums(&text).expect("sha256sum output");
+        assert_eq!(sums["Codify_1.0.1_amd64.deb"], HELLO_SHA256);
+        assert_eq!(
+            sums["Codify_1.0.1_amd64.AppImage"], HELLO_SHA256,
+            "digests are lowercased, as `make verify-package` reads them"
+        );
+        let binary_mode =
+            parse_sums(&format!("{HELLO_SHA256} *Codify.deb")).expect("binary-mode line");
+        assert_eq!(binary_mode["Codify.deb"], HELLO_SHA256);
+    }
+
+    #[test]
+    fn a_checksums_file_that_is_not_one_is_refused_by_line_rather_than_skipped() {
+        for (text, says) in [
+            (format!("# checksums\n{HELLO_SHA256}  a.deb"), "line 1"),
+            (
+                format!("{HELLO_SHA256}  a.deb\nnot a digest  b.deb"),
+                "line 2",
+            ),
+            (format!("{HELLO_SHA256} a.deb"), "line 1"),
+            (format!("{HELLO_SHA256}  "), "line 1"),
+            ("\n  \n".to_string(), "lists no files"),
+        ] {
+            let refused = parse_sums(&text).expect_err(&text);
+            assert!(refused.contains(says), "{refused:?} should say {says:?}");
+        }
+    }
+
+    #[test]
+    fn a_package_is_written_only_when_its_digest_is_the_one_the_release_lists() {
+        let sums = format!("{HELLO_SHA256}  Codify_1.0.1_amd64.deb\n");
+        assert_eq!(
+            check_against_sums("Codify_1.0.1_amd64.deb", b"hello", &sums),
+            Ok(HELLO_SHA256.to_string())
+        );
+        let damaged = check_against_sums("Codify_1.0.1_amd64.deb", b"hellO", &sums)
+            .expect_err("a changed byte");
+        assert!(damaged.contains("does not match"), "{damaged}");
+        assert!(damaged.contains("nothing was written"), "{damaged}");
+        let unlisted = check_against_sums("Codify_1.0.1_amd64.AppImage", b"hello", &sums)
+            .expect_err("not listed");
+        assert!(unlisted.contains("does not list"), "{unlisted}");
+        assert!(unlisted.contains("nothing was written"), "{unlisted}");
     }
 }

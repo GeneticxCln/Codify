@@ -138,7 +138,7 @@
     },
     {
       "identifier": "allow-codify-update-download",
-      "description": "Downloads the release package for this install into the person's downloads folder, and answers with the path and the sentence telling them what to run. Takes no argument, which is the guarantee: a page cannot choose the file or the address, since the asset is re-derived from the same release the check read, only for this install's package and architecture, and only from GitHub's own hosts. While it runs it announces how far it has come on `update-progress` — a byte count and the size the server announced, nothing about the machine — which is what the pane's bar is drawn from. It writes one file — it installs nothing, runs nothing and replaces nothing (docs/18 §4).",
+      "description": "Downloads the release package for this install into the person's downloads folder, and answers with the path and the sentence telling them what to run. Takes no argument, which is the guarantee: a page cannot choose the file or the address, since the asset is re-derived from the same release the check read, only for this install's package and architecture, and only from GitHub's own hosts. While it runs it announces how far it has come on `update-progress` — a byte count and the size the server announced, nothing about the machine — which is what the pane's bar is drawn from. Before it writes, it reads the release's SHA256SUMS from the same hosts and refuses a package whose digest is not the one listed (a check that the file is whole, not a signature). It writes one file — it installs nothing, runs nothing and replaces nothing (docs/18 §4, §5).",
       "commands": { "allow": ["codify_update_download"] }
     }
   ],
