@@ -197,7 +197,16 @@ fn shell_command(cwd: PathBuf) -> CommandBuilder {
     cmd.cwd(cwd);
     // A login-adjacent interactive shell is what a user expects from a terminal
     // pane; `portable-pty`'s default env is the parent's, which is right here —
-    // the pane is the user's environment and not a sanitised one.
+    // the pane is the user's environment and not a sanitised one. Except for what
+    // an AppImage's launcher added for the shell's own WebKit: with its library
+    // path, every program typed here would load the image's Ubuntu 22.04
+    // libraries instead of the machine's (`appimage_env`).
+    for (key, value) in crate::appimage_env::restored_here() {
+        match value {
+            Some(value) => cmd.env(key, value),
+            None => cmd.env_remove(key),
+        }
+    }
     cmd.env("TERM", "xterm-256color");
     cmd
 }
