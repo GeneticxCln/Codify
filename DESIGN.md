@@ -760,6 +760,23 @@ get the instant state change with no animation at all, never a slower animation.
 
 Nothing loops, nothing pulses to look alive, nothing moves that the user did not cause.
 
+**What the compositor pays.** Three rules, each measured on 2026-10-30 against the
+production build in software-composited Chromium, the path a GPU-less WebKitGTK takes and
+the one the shell's render watchdog exists for. `ui/tests/paintCost.test.ts` holds all three.
+
+- **Nothing blurs what is behind it.** No `backdrop-blur` or `backdrop-filter`. Settings, the
+  command palette and three more dialogs sat on a full-window blur, so every frame under
+  them re-blurred the whole window: Settings scrolled at 10–15 FPS in every theme, and at
+  60 without it. A dialog keeps the same black scrim, unblurred; under 70–75% black the blur was
+  barely visible.
+- **An animation that never ends moves in steps.** An endless `linear` loop changes every
+  frame forever; `steps()` changes a few times a period. The Cyberpunk veil rolls in
+  three steps and the logo's caret in one, and that is the whole list.
+- **The wordmark sweeps once, then rests.** Looped, its `background-position` sweep
+  repainted the wordmark every frame: with the app idle on the default theme the browser
+  spent 43% of a core, and 3% once it stopped. It runs again whenever the empty
+  transcript appears.
+
 That bans *decoration*, not feedback. Five animations survive this rule, and each has
 to survive it deliberately:
 

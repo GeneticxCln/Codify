@@ -56,6 +56,10 @@ const TEXT_READERS: Record<string, Reason> = {
     kind: "text",
     why: "By design it reads every class string and index.css to compute contrast for each pair the app paints, so a new badge cannot be left out of a hand-written table.",
   },
+  "paintCost.test.ts": {
+    kind: "text",
+    why: "What the compositor is made to do is decided by what the stylesheet and the class strings say (a backdrop filter, an endless animation's timing); jsdom has no compositor, so the measured rules are held where they are written.",
+  },
   "nonTextContrast.test.ts": {
     kind: "text",
     why: "The non-text half of contrast.test.ts: it measures the tokens as index.css writes them.",
