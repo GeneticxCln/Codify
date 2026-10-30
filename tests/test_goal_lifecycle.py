@@ -162,6 +162,11 @@ class TestSpawnedWorkIsNotLeftToTheGarbageCollector(unittest.IsolatedAsyncioTest
             def _fail(self, goal_id: str, step_id: Any, code: str, message: str) -> None:
                 failed.append((goal_id, code))
 
+            # `_task_done` asks this once the goal has nothing left running; without it the done-callback raised
+            # `AttributeError`, which asyncio printed into a passing run's output.
+            def forget_in_flight(self, goal_id: str) -> None:
+                pass
+
         async def boom() -> None:
             raise RuntimeError("the driver crashed")
 

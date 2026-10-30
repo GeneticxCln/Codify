@@ -21,7 +21,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from scripts.run_tests import completed, leaked_connections
+from scripts.run_tests import completed, escaped_exceptions, leaked_connections
 
 REPO = Path(__file__).resolve().parent.parent
 WRAPPER = REPO / "scripts" / "run_tests.py"
@@ -82,6 +82,82 @@ class LeakedConnectionsTest(unittest.TestCase):
     def test_a_clean_run_has_none(self) -> None:
         self.assertEqual(0, leaked_connections("...\nRan 3 tests in 0.1s\n\nOK\n"))
         self.assertEqual(0, leaked_connections(""))
+
+
+class EscapedExceptionsTest(unittest.TestCase):
+    """`escaped_exceptions()` reads the three ways a raised exception is printed and forgotten.
+
+    Two of them scrolled past in every green run until the audit of 2026-10-29: a done-callback in the engine that
+    called a method a test double lacked, and a fake server writing to a client that had already left.
+    """
+
+    CALLBACK = (
+        "test_x (m.T.test_x) ... " + "Exception in callback" + " _spawn.<locals>.<lambda>(<Task finished>)\n"
+        "AttributeError: 'Executor' object has no attribute 'forget_in_flight'\nok\n"
+    )
+    TASK = "Task exception" + " was never retrieved\nfuture: <Task finished name='Task-3'>\n"
+    SERVER = "Exception occurred during processing" + " of request from ('127.0.0.1', 46642)\nBrokenPipeError\n"
+
+    def test_each_kind_is_found_wherever_it_lands_on_the_line(self) -> None:
+        for kind in (self.CALLBACK, self.TASK, self.SERVER):
+            with self.subTest(kind=kind[:30]):
+                self.assertEqual(1, escaped_exceptions(kind))
+
+    def test_each_one_is_counted(self) -> None:
+        self.assertEqual(3, escaped_exceptions(self.CALLBACK + self.TASK + self.SERVER))
+
+    def test_an_ordinary_traceback_from_a_failing_test_is_not_this_guards_business(self) -> None:
+        # A failing test fails the run on its own; this guard is about the ones nothing failed on.
+        failing = "Traceback (most recent call last):\n  ...\nAssertionError: 1 != 2\n"
+        self.assertEqual(0, escaped_exceptions(failing))
+        self.assertEqual(0, escaped_exceptions("...\nRan 3 tests in 0.1s\n\nOK\n"))
+
+
+class RunnerRefusesAnEscapedExceptionTest(unittest.TestCase):
+    """The wrapper, end to end: a suite that passes while a callback raised behind it is not a clean pass."""
+
+    def _run(self, body: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "test_it.py").write_text(textwrap.dedent(body))
+            return subprocess.run(
+                [sys.executable, str(WRAPPER), "discover", "-s", tmp, "-p", "test_*.py", "-v"],
+                capture_output=True, text=True, cwd=str(REPO), timeout=120,
+            )
+
+    def test_a_passing_suite_whose_callback_raised_fails_and_says_so(self) -> None:
+        result = self._run(
+            """
+            import asyncio
+            import unittest
+
+
+            class Escapes(unittest.IsolatedAsyncioTestCase):
+                async def test_passes_but_a_callback_raises(self):
+                    def broken():
+                        raise AttributeError("a double without the method the code calls")
+                    asyncio.get_running_loop().call_soon(broken)
+                    await asyncio.sleep(0.01)
+            """
+        )
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn("FATAL", result.stderr)
+        self.assertIn("escaped", result.stderr)
+        self.assertIn("OK", result.stdout + result.stderr, "the suite itself passed; only the escape fails the run")
+
+    def test_a_passing_suite_with_nothing_escaped_still_passes(self) -> None:
+        result = self._run(
+            """
+            import asyncio
+            import unittest
+
+
+            class Clean(unittest.IsolatedAsyncioTestCase):
+                async def test_passes(self):
+                    await asyncio.sleep(0)
+            """
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertNotIn("FATAL", result.stderr)
 
 
 class RunnerRefusesADeadRunTest(unittest.TestCase):

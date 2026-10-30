@@ -178,7 +178,12 @@ class _FakeAIHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self) -> None:  # noqa: N802 — httpx talks to /chat/completions here
-        self._post()
+        try:
+            self._post()
+        except (BrokenPipeError, ConnectionResetError):
+            # The engine hung up mid-reply: a goal this test cancels stops its model call where it stands. That is
+            # the client leaving, not the fake failing, and socketserver printed it as a traceback into a passing run.
+            pass
 
     def do_GET(self) -> None:
         self.send_response(404)

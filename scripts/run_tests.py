@@ -35,6 +35,14 @@ _VERDICT = re.compile(r"^(OK|FAILED)\b", re.MULTILINE)
 # Python 3.13 warns when a sqlite3 connection is garbage-collected still open, and unittest prints it
 # into the scrollback of a run that goes on to say OK. Nothing older says it at all.
 _LEAKED_CONNECTION = re.compile(r"ResourceWarning: unclosed database in <sqlite3\.Connection", re.MULTILINE)
+# An exception that escaped somewhere nothing reports it as a failure: asyncio's default handler for a done-callback or
+# a task whose exception nobody retrieved, and `socketserver` for a request handler (the suite's fake servers). Each is
+# printed and the run goes on to say OK. Not anchored to a line start: under `-v` stderr lands mid-line, after a test's
+# own "... ". Two of these scrolled past in every green run (a test double missing a method the code now called, and a
+# fake server writing to a client that had left) until the audit of 2026-10-29.
+_ESCAPED_EXCEPTION = re.compile(
+    r"Exception in callback |Task exception was never retrieved|Exception occurred during processing of request from"
+)
 
 
 def completed(output: str) -> bool:
@@ -56,6 +64,16 @@ def leaked_connections(output: str) -> int:
     a green run unseen.
     """
     return len(_LEAKED_CONNECTION.findall(output))
+
+
+def escaped_exceptions(output: str) -> int:
+    """How many exceptions escaped into the output of a run without failing a test.
+
+    A callback, an unawaited task or a fake server's request handler that raised is printed and forgotten: the test
+    that caused it passes. That is how a broken done-callback in the engine would go unseen, so a passing run that
+    printed one is not a clean run.
+    """
+    return len(_ESCAPED_EXCEPTION.findall(output))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -96,6 +114,20 @@ def main(argv: list[str] | None = None) -> int:
             "  opened and nothing closed is a leak, and Python 3.13+ reports it as a\n"
             "  'ResourceWarning: unclosed database' line earlier in this output. Find the\n"
             "  test that opened it (its setUp or a helper) and close it in its teardown.\n"
+        )
+        return 1
+
+    escaped = escaped_exceptions(output)
+    if proc.returncode == 0 and escaped:
+        sys.stderr.write(
+            "\n"
+            f"FATAL: {escaped} exception(s) escaped where no test could fail on them.\n"
+            "  The tests passed, but something raised in an asyncio callback, in a task whose\n"
+            "  exception nobody retrieved, or in a fake server's request handler, and was only\n"
+            "  printed ('Exception in callback', 'Task exception was never retrieved',\n"
+            "  'Exception occurred during processing of request'). Find it earlier in this\n"
+            "  output: it is either a real bug the test did not assert on, or a test double\n"
+            "  that no longer matches the code it stands in for.\n"
         )
         return 1
     return proc.returncode
