@@ -31,6 +31,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The in-process System-1 gate (`engine/laya.py`, docs/05). Not in `dependencies` and not
+# installed by `make setup`: the SDK brings torch and its checkpoints are hundreds of
+# megabytes, and an install that never runs the gate should pay for neither. `make setup-laya`
+# installs it into the checkout's own `.venv` — the interpreter the desktop shell spawns — which
+# is the half that matters: a copy in some other Python leaves `sdk_available()` false with no
+# error (docs/05 §3). 0.x, so the minor is capped, like scrapling above.
+laya = [
+    "laya>=0.4.19,<0.5",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

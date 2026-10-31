@@ -115,6 +115,11 @@ A virtualenv rather than `pip install -r`: stock Ubuntu 24.04, Debian 12+ and Fe
 the system Python (PEP 668). The Makefile and the shell both use `./.venv` when it exists, so nothing has to be
 activated.
 
+The in-process **Laya gate** is optional and deliberately not part of `make setup`: the SDK brings torch and
+downloads its checkpoints on first use. `make setup-laya` adds it to the checkout's `.venv` (the interpreter the
+shell spawns), and `make doctor` says whether it is there. A package ships without it and gates through the
+role's fallback model — [`docs/05`](docs/05-laya-system-1-gate.md), [`docs/18`](docs/18-release-and-updates.md) §2.
+
 <details>
 <summary><b>Install a launcher, hot reload, or run the engine without the shell</b></summary>
 

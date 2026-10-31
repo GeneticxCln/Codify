@@ -24,6 +24,7 @@ from engine.fs import (
     looks_binary,
     protected_root_reason,
 )
+from engine.laya import CHECKPOINT_MAX
 from engine.library import LibraryService
 from engine.web_fetch import MAX_HOSTS_CHARS
 from engine.models import (
@@ -158,6 +159,10 @@ class SettingsService:
     # one, because a fallback with a provider and no model is the same inert
     # half-pair the primary would be.
     STRING_SPEC: dict[str, str] = {
+        # A fine-tuned Laya checkpoint, as a Hugging Face repo id (engine/laya.py). Empty means the
+        # built-in Router. It is here rather than in `agent_configs` because the gate's SDK is not
+        # a role, and docs/00 §6.1 fixes the role count at eight.
+        "laya_checkpoint": "",
         "conductor_provider": "",
         "conductor_model": "",
         "conductor_fallback_provider": "",
@@ -184,6 +189,7 @@ class SettingsService:
     # stores up to it. `set_str` used to cut every value at 200, so a 300-character speech server address that the
     # screen was told it could save (500) was stored as a different address, with no error.
     STRING_LIMITS: dict[str, int] = {
+        "laya_checkpoint": CHECKPOINT_MAX,
         "conductor_provider": 64,
         "conductor_model": 128,
         "conductor_fallback_provider": 64,

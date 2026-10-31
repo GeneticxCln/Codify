@@ -62,7 +62,7 @@ The gate reports which engine answered in `laya_decision.payload.engine`:
 
 | `engine` | When | Blocks? |
 |---|---|---|
-| `sdk` | `pip install laya` + local weights, run in-process on the CPU by default (`Router(device="cpu")`, the two routable checkpoints preloaded) | yes |
+| `sdk` | `make setup-laya` (or `pip install laya` into the engine's interpreter) + the checkpoints it downloads on first use, run in-process on the CPU by default (`Router(device="cpu")`, the two routable checkpoints preloaded) | yes |
 | `llm-fallback` | the `laya` role's configured provider answers the same typed contract | yes |
 | `skipped` | neither available (no SDK, no reachable provider) | **never** |
 
@@ -135,10 +135,40 @@ no goal id to stop), the health probe, or any other stream. Three rules keep it 
 
 **The SDK has to be in the interpreter that runs the engine.** The desktop shell spawns
 the checkout's own `.venv/bin/python3` when it has one and `python3` from the login
-shell's PATH otherwise, so `make test` and the app share one environment. Installing the
-SDK into a different interpreter than the one the app spawns is the failure mode worth
+shell's PATH otherwise, so `make test` and the app share one environment. Installing
+the SDK into a different interpreter than the one the app spawns is the failure mode worth
 naming: nothing errors, `sdk_available()` is simply false, and every goal quietly pays
 the LLM call anyway.
+
+**Installing it is one target, and `make setup` deliberately does not run it.**
+`make setup-laya` installs the extra into this checkout's `.venv`; `make doctor` says whether that
+interpreter can import it and names the target when it cannot. It is not a runtime dependency and
+not part of the default setup because it brings torch and the checkpoints are hundreds of
+megabytes — an install that never runs the gate should pay for neither. A packaged app is the same
+decision at the other end: it ships without the SDK and gates through the fallback model (`18`
+§2), which is why the Settings card names both paths.
+
+**There is no training step to run.** The checkpoints are pretrained and `Router` downloads the
+ones it needs on first use (~808 MB for English, ~647 MB for multilingual, upstream's own
+numbers) into the Hugging Face cache; `start_warming` pays that at engine start rather than on
+the first message. They answer Codify's four questions zero-shot. Fine-tuning is an accuracy
+improvement for a domain's own decisions, not a prerequisite: on upstream's typed-decisions
+benchmark the base English checkpoint scored 0.362 and the fine-tuned one 0.766. If the gate's
+verdicts on this schema ever need that, upstream's fine-tuning notebook is the path; this gate
+loads the upstream checkpoint names today and has no setting for a custom checkpoint, and a
+fine-tuned model's calibration would have to be checked against the thresholds in §4 first.
+
+**A fine-tuned checkpoint is a setting, not a code change.** Settings → the gate card takes a
+Hugging Face repo id in `laya_checkpoint` (`PUT /settings/engine`, the same person-only door as the
+conductor's model). A value replaces the built-in Router: `laya.load(repo)` loads the checkpoint at
+the repo root, every request is answered by that one model (so there is no language routing), and it
+runs on the CPU by default like the Router. Empty is the built-in `english` + `multilingual` pair.
+The repo must be in Laya's export format — `rl_agent_config.json`, `model.safetensors`, the
+tokenizer and encoder — which is what upstream's fine-tuning notebook produces. The value is read
+when the SDK loads, and saving it makes the engine reload the checkpoint in the background; a repo
+that cannot be loaded is reported in the gate card and the gate falls back exactly as it does for
+any other SDK failure. A fine-tune's calibration is its own, so re-check the thresholds in §4
+against it before trusting a block.
 
 **Context limits.** Laya's checkpoints have 512–1024 token contexts, so an arbitrary user prompt
 cannot fit whole. `build_state` clips over-long requests to 4000 characters **keeping both ends**

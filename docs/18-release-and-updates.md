@@ -84,8 +84,9 @@ licence its lock line names: MIT, BSD, Apache-2.0 and PSF, plus the MPL's file-l
 decision made in the open rather than a transitive dependency that arrived with an upgrade.
 
 **Deliberately left out: the Laya gate's SDK.** It brings torch, which would multiply the package
-several times over. A bundled engine's gate uses its LLM fallback (`docs/05`); to use the SDK, start
-the app against a checkout that has it: `CODIFY_ROOT=/path/to/Codify codify-desktop`. The same
+several times over. A bundled engine's gate uses its LLM fallback (`docs/05`); to use the SDK, run
+`make setup-laya` in a checkout and start the app against it:
+`CODIFY_ROOT=/path/to/Codify codify-desktop`. The same
 variable is how a packaged app runs a checkout's engine for any other reason, such as one's own
 changes.
 

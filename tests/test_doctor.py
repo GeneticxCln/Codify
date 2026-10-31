@@ -353,6 +353,34 @@ class TestTheCheckoutsVirtualEnvironment(DoctorCase):
         self.assertIn(".venv could not be checked", done.stdout)
 
 
+class TestTheLayaGateIsOptional(DoctorCase):
+    """The in-process SDK is an optional extra, not a gate requirement.
+
+    `make setup` deliberately does not install it — the SDK brings torch and its checkpoints are
+    hundreds of megabytes — so a checkout without it is healthy. What would be a trap is saying
+    nothing: the Settings card then shows a gate that skips or pays an LLM call, and the fix is one
+    target away.
+    """
+
+    def test_no_laya_is_a_note_that_names_the_install_target(self) -> None:
+        self.make_venv()
+
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertIn("note     the Laya SDK is not importable", done.stdout)
+        self.assertIn("make setup-laya", done.stdout)
+
+    def test_laya_importable_by_the_checkout_is_reported(self) -> None:
+        self.make_venv()
+        (self.root / "laya.py").write_text("", encoding="utf-8")
+
+        done = self.doctor(DISPLAY=":0", PYTHONPATH=str(self.root))
+
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertIn("ok       laya is importable by this checkout's .venv", done.stdout)
+
+
 class TestItIsWired(unittest.TestCase):
     def test_the_script_is_executable(self) -> None:
         self.assertTrue(os.access(SCRIPT, os.X_OK), f"{SCRIPT} is not executable")

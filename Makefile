@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup doctor check ci ci-report ci-python-floor check-history check-ghidra bundle-engine lock-engine check-bundle verify-package hooks clean bench bench-smoke smoke-tabs
+.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup setup-laya doctor check ci ci-report ci-python-floor check-history check-ghidra bundle-engine lock-engine check-bundle verify-package hooks clean bench bench-smoke smoke-tabs
 
 # A checkout's own virtualenv (`make setup` makes one) wins over whatever `python3` is on
 # PATH, so `make setup && make check` works with nothing activated. The floor leg sets
@@ -35,6 +35,7 @@ SCRATCH_HOME ?= /tmp/codify-scratch
 help:
 	@echo "Codify Development Commands:"
 	@echo "  make setup        - From a fresh clone: create .venv, install the engine and dev tools, npm ci"
+	@echo "  make setup-laya   - Install the optional Laya SDK into .venv (in-process gate; downloads torch and checkpoints)"
 	@echo "  make doctor       - Check this machine for everything make ci needs, and say how to install what is missing"
 	@echo "  make test         - Run full Python test suite (includes the concurrency/stream tests)"
 	@echo "  make test-streams - Run the concurrency/stream-isolation tests explicitly, by name"
@@ -85,6 +86,20 @@ setup:
 	cd ui && npm ci
 	@echo ""
 	@echo "Set up. Next: make doctor (what is still missing), then make check."
+	@echo "For the in-process Laya gate (optional): make setup-laya."
+
+# The optional in-process System-1 gate (docs/05). Deliberately not part of `setup`: the SDK
+# brings torch and its checkpoints are hundreds of megabytes, and an install that does not run
+# the gate should not pay for either. It must go into the checkout's own `.venv`: the desktop
+# shell spawns that interpreter when it exists, and `pip install laya` into any other Python
+# leaves `sdk_available()` false with no error (docs/05 §3).
+setup-laya:
+	@test -x .venv/bin/python3 || { echo "no .venv — run 'make setup' first"; exit 1; }
+	.venv/bin/python3 -m pip install -e ".[laya]"
+	.venv/bin/python3 -c "import sys, laya; print(f'laya {laya.__version__} is importable by {sys.executable}')"
+	@echo ""
+	@echo "The first gate decision downloads the checkpoints (~0.8 GB English, ~0.65 GB multilingual)."
+	@echo "The gate runs on the CPU unless CODIFY_LAYA_DEVICE=cuda is set (docs/05)."
 
 # Read-only: what this machine has and what `make ci` needs, with the fix for each gap.
 doctor:

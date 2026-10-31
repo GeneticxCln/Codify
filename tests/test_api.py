@@ -2577,6 +2577,45 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["code"], "unknown_setting")
 
+    async def test_a_laya_checkpoint_saves_and_refuses_what_is_not_a_hub_id(self) -> None:
+        """The gate's fine-tuned checkpoint is a Hub repo id, and the route says so.
+
+        A URL or a filesystem path in this field would point `laya.load` at something that is
+        not a checkpoint; the engine refuses it at the settings boundary (`engine/laya.py` owns
+        the shape) instead of storing a value that only fails on the next gate decision.
+        """
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, json={"laya_checkpoint": "me/laya-codify"}
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["saved"]["laya_checkpoint"], "me/laya-codify")
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual(r.json()["laya_checkpoint"]["value"], "me/laya-codify")
+        self.assertEqual(r.json()["laya_checkpoint"]["max"], 200)
+
+        for bad in (
+            "https://huggingface.co/me/laya-codify",
+            "../laya-codify",
+            "me/laya-codify/extra",
+            "me",
+            "me\\laya-codify",
+        ):
+            with self.subTest(value=bad):
+                r = await self.client.put(
+                    "/settings/engine", headers=self.headers, json={"laya_checkpoint": bad}
+                )
+                self.assertEqual(r.status_code, 422, r.text)
+                self.assertEqual(r.json()["code"], "invalid_value")
+                # A refused save changes nothing, including this key.
+                r = await self.client.get("/settings/engine", headers=self.headers)
+                self.assertEqual(r.json()["laya_checkpoint"]["value"], "me/laya-codify")
+
+        r = await self.client.put(
+            "/settings/engine", headers=self.headers, json={"laya_checkpoint": ""}
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["saved"]["laya_checkpoint"], "")
+
     async def test_a_refused_engine_settings_save_changes_nothing(self) -> None:
         """A 4xx from `PUT /settings/engine` means no key in that request was stored.
 
