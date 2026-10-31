@@ -166,6 +166,12 @@ BUILTIN_PROVIDERS: dict[str, dict[str, Any]] = {
         "base_url": "https://api.deepseek.com",
         "needs_key": True,
         "local_only": False,
+        # Thinking mode requires every earlier assistant turn's `reasoning_content` to be sent back
+        # when a request carries `tools`, and the conductor's neutral transcript has no slot for it:
+        # omitting it is a 400. Tool calls ask for thinking off instead (docs/01 §5.0). Roles keep it:
+        # only `complete_with_tools` reads this. A custom endpoint or an OpenRouter route to the same
+        # model is a different provider and is not covered.
+        "thinking_with_tools": "disabled",
     },
     "ollama": {
         "protocol": "ollama",

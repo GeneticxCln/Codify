@@ -864,9 +864,27 @@ def _response_format(capability: str | None, schema: dict[str, Any] | None) -> d
     return None
 
 
+def _tool_call_thinking(provider_name: str) -> dict[str, Any]:
+    """The thinking toggle this provider's tool calls need, or an empty payload.
+
+    DeepSeek's thinking mode requires the `reasoning_content` of every earlier assistant turn to be
+    passed back whenever a request carries `tools`; the conductor's neutral transcript has no slot
+    for it, and omitting it is a 400. Tool calls therefore ask for thinking off (docs/01 §5.0). This
+    reads the provider's catalog entry rather than its model name: a model reached through another
+    provider is not covered by that provider's guarantee. Roles' own `complete` calls never come
+    through here, so planning and review keep thinking on.
+    """
+    if (BUILTIN_PROVIDERS.get(provider_name) or {}).get("thinking_with_tools") == "disabled":
+        return {"thinking": {"type": "disabled"}}
+    return {}
+
+
 class OpenAICompatProvider(BaseProvider):
-    def __init__(self, api_key: str | None, base_url: str):
+    def __init__(self, api_key: str | None, base_url: str, provider_name: str | None = None):
         require_safe_key_destination(api_key, base_url)
+        # The catalog slug this provider was built for, used only for the few wire fields a vendor
+        # needs (currently DeepSeek's thinking toggle). A custom endpoint has no slug and gets none.
+        self._provider_name = provider_name or ""
         self._api_key = api_key or ""
         self._base_url = base_url.rstrip("/")
         # A role's temperature goes to a local server (LM Studio, vLLM, llama.cpp) and to no hosted one.
@@ -926,6 +944,7 @@ class OpenAICompatProvider(BaseProvider):
                     ],
                     "tools": [t.to_openai() for t in tools],
                     "tool_choice": "auto",
+                    **_tool_call_thinking(self._provider_name),
                 },
             )
         self._report_usage("openai_compat", data)
@@ -1720,7 +1739,9 @@ class ProviderFactory:
         if config.protocol == "anthropic":
             return AnthropicProvider(key, base)
         if config.protocol == "openai_compat":
-            return OpenAICompatProvider(key, base)
+            # The slug is passed through for the vendor-specific fields `complete_with_tools` needs;
+            # the wire protocol is still `config.protocol` and nothing here changes it.
+            return OpenAICompatProvider(key, base, config.provider)
         if config.protocol == "ollama":
             return OllamaProvider(base)
         if config.protocol == "google":
