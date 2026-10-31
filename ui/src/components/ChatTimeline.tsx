@@ -1283,15 +1283,21 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             {!msg.goal.plan_only &&
                               (msg.goal.status === "PENDING" ||
                                 msg.goal.status === "PAUSED") && (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    onStartGoal(msg.goal!.id, msg.goal!.version)
-                                  }
-                                  className="flex items-center gap-1 px-2.5 py-1 bg-codify-success text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg shadow-sm transition-colors"
-                                >
-                                  <Play className="w-3 h-3" /> Start
-                                </button>
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onStartGoal(msg.goal!.id, msg.goal!.version)
+                                    }
+                                    className="flex items-center gap-1 px-2.5 py-1 bg-codify-success text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg shadow-sm transition-colors"
+                                  >
+                                    <Play className="w-3 h-3" /> Start
+                                  </button>
+                                  <span className="max-w-[15rem] text-[10px] leading-tight text-codify-muted">
+                                    Codify will write files and run project code
+                                    with your permissions.
+                                  </span>
+                                </>
                               )}
 
                             {msg.goal.dry_run &&

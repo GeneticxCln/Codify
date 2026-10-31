@@ -293,6 +293,22 @@ test("Start asks for the goal and the version it was rendered from", async () =>
   );
 });
 
+test("Start says what approving lets Codify do", async () => {
+  // One line, beside the button: a popup every time is a popup people learn to dismiss. The
+  // sentence has to name both powers it confers — writing files and running the project's code —
+  // because "Start" alone reads like resuming a paused display.
+  await withTranscript(
+    { messages: [assistant({ goal: goal({ status: "PENDING" }) })] },
+    async (dom) => {
+      const start = dom.byButton("Start");
+      const beside = start.parentElement?.textContent ?? "";
+      assert.match(beside, /write files/);
+      assert.match(beside, /run project code/);
+      assert.match(beside, /your permissions/);
+    },
+  );
+});
+
 test("a plan-only goal offers Execute Plan instead, and it is a different call", async () => {
   // Two different engine routes. A card that offered the wrong one would lift
   // the plan-only guard by the wrong door, or start a run the user asked not to
