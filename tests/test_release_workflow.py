@@ -1,10 +1,11 @@
-"""The release workflow's two security rules, held where they can be read.
+"""The release workflow's security rules, held where they can be read.
 
-A workflow is code that runs with `contents: write`, so the two failures this file
-pins are the ones a review can miss: an action referenced by a moving tag (the tag
-owner can change what runs), and a dispatch input pasted into a shell script (the
-person who starts the run can change what runs). Neither is visible to `make ci`'s
-tests, which is why they are held here, against the file itself.
+A workflow is code that runs with `contents: write`, so the failures this file pins
+are the ones a review can miss: an action referenced by a moving tag (the tag owner
+can change what runs), a dispatch input pasted into a shell script (the person who
+starts the run can change what runs), and a published package with no signed
+provenance. None is visible to `make ci`'s tests, which is why they are held here,
+against the file itself.
 """
 
 from __future__ import annotations
@@ -39,6 +40,24 @@ class TestReleaseWorkflow(unittest.TestCase):
                 PINNED,
                 f"{name} is referenced by a moving tag rather than a commit: {use}",
             )
+
+    def test_the_published_packages_carry_signed_provenance(self) -> None:
+        # A checksum says the file is whole. It does not say who built it, and it came from
+        # the same host as the file. The attestation is the signed claim that ties these
+        # bytes to this workflow, and it must happen before anything is published.
+        self.assertRegex(
+            self.text,
+            r"actions/attest-build-provenance@[0-9a-f]{40}",
+            "the release publishes without an attestation step",
+        )
+        self.assertIn("id-token: write", self.text, "no OIDC token for the keyless certificate")
+        self.assertIn("attestations: write", self.text, "the attestation cannot be stored")
+        attest = self.text.index("name: Attest the packages and their checksums")
+        publish = self.text.index("name: Publish the release")
+        self.assertLess(attest, publish, "packages are published before they are attested")
+        block = self.text[attest:publish]
+        for subject in ("dist/Codify_*.deb", "dist/Codify_*.AppImage", "dist/SHA256SUMS"):
+            self.assertIn(subject, block, f"{subject} is not a subject of the attestation")
 
     def test_the_dispatch_tag_never_reaches_a_shell_script(self) -> None:
         # It may be an `env:` value (data) but never a `${{ }}` inside `run:`,

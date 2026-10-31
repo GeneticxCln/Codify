@@ -431,13 +431,20 @@ class LibraryService:
         # loading the rest.
         with resolved.open("rb") as fh:
             raw = fh.read(MAX_READ_CHARS * 4)
-        text = raw.decode("utf-8", errors="replace")[:MAX_READ_CHARS]
+        decoded = raw.decode("utf-8", errors="replace")
+        text = decoded[:MAX_READ_CHARS]
         return {
             "path": rel,
             "text": text,
-            "lines": text.count("\n") + 1,
+            # A trailing newline ends the last line; it does not start an empty
+            # one. `splitlines()` is not used because it also breaks on form
+            # feeds and U+2028, while this answer counts `\n` like wc does.
+            "lines": text.count("\n") + (0 if not text or text.endswith("\n") else 1),
             "bytes": total_size,
-            "truncated": total_size > MAX_READ_CHARS,
+            # Two different limits: bytes not read (the 4x read cap) and
+            # characters not shown (the text cap). Comparing total bytes to the
+            # character cap called a complete multibyte file truncated.
+            "truncated": total_size > len(raw) or len(decoded) > MAX_READ_CHARS,
         }
 
     def _read_line_window(

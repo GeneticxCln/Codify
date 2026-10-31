@@ -416,11 +416,20 @@ export function writeSetting(
   setting: MotionSetting,
   explicit?: Partial<MotionStores>,
 ): MotionState {
-  const { user } = stores(explicit);
+  const { user, session } = stores(explicit);
   try {
     user?.setItem(MOTION_KEY, setting === "allowed" ? "auto" : setting);
   } catch {
     // A store that refuses writes still yields the in-memory truth.
+  }
+  // A persistent choice is a newer answer than this window's override. Without
+  // this, "Reduce motion" in Settings could not undo the banner's "Animate
+  // anyway": `readSetting` reads the session first, so the click would write
+  // `reduced` and keep animating under the old `allowed`.
+  try {
+    session?.removeItem(MOTION_SESSION_KEY);
+  } catch {
+    // As above: the stored preference is still written.
   }
   announceChange();
   return readMotion(explicit);

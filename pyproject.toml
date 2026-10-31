@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codify-engine"
-version = "0.2.0"
+version = "1.3.4"
 description = "Codify Multi-Agent Engine"
 readme = "README.md"
 license = { text = "MIT" }

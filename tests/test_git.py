@@ -126,6 +126,23 @@ class TestGitService(GitTestBase):
         self.assertFalse((self.root / "hook-evidence.txt").exists(),
                          "pre-commit hook executed during commit")
 
+    def test_a_commit_hook_that_never_returns_is_stopped(self) -> None:
+        # `--no-verify` does not skip post-commit. Without a timeout, a hook that
+        # sleeps held the step, and Cancel waits for the step, so the only way out
+        # was to kill the engine.
+        hook = self.root / ".git" / "hooks" / "post-commit"
+        hook.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+        hook.chmod(0o755)
+        self.write("slow.py", "x = 1\n")
+        self.git.commit_timeout_s = 1.0
+
+        started = time.monotonic()
+        rev = self.git.commit(str(self.root), "feat: slow hook", ["slow.py"])
+        elapsed = time.monotonic() - started
+
+        self.assertIsNone(rev, "a commit that timed out must not report a revision")
+        self.assertLess(elapsed, 15.0, "the commit waited for its post-commit hook")
+
     def test_commit_env_does_not_carry_credentials(self) -> None:
         """The commit subprocess env must not include provider key variables —
         hooks would otherwise run with live credentials in scope."""

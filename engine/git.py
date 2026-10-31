@@ -44,6 +44,11 @@ class GitService:
     # repository is finite and still not worth a turn that never returns.
     read_only_timeout_s: float = 60.0
 
+    # How long a step's commit may run. `--no-verify` skips pre-commit and commit-msg,
+    # but not post-commit: a hook there runs after the commit exists, and without a
+    # limit it can hold the step (and Cancel, which waits for the step) forever.
+    commit_timeout_s: float = 120.0
+
     def __init__(self) -> None:
         self._git_bin = shutil.which("git") or "git"
 
@@ -396,9 +401,18 @@ class GitService:
         # Commit *with the pathspec*, so a file the user had staged for their own
         # commit stays staged instead of riding along in this one. Git takes the
         # worktree contents of the named paths, which is exactly what was written.
-        res = self._run_text(
-            ["commit", "--no-verify", "-m", message, "--", *stageable], cwd=cwd, env=env,
-        )
+        try:
+            res = self._run_text(
+                ["commit", "--no-verify", "-m", message, "--", *stageable],
+                cwd=cwd,
+                env=env,
+                timeout=self.commit_timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            # The hook outlived its welcome. `_run_bytes` has already killed git's
+            # process group, including the hook's children; the commit may or may
+            # not exist, so this reports no revision rather than a wrong one.
+            return None
         if res.returncode != 0:
             # Exit 1 means "nothing to commit" for these paths — the step's files
             # already match the last commit, or git refused for its own reasons.

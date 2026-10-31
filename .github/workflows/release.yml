@@ -56,9 +56,12 @@ on:
         default: false
 
 # `contents: write` is the whole point: creating a release and uploading its assets to it.
-# Nothing here needs any other scope.
+# The attestation is keyless: `id-token: write` mints the OIDC token, and `attestations: write`
+# stores the signed provenance beside the repository. No long-lived signing key exists here.
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -223,6 +226,19 @@ jobs:
         run: |
           python3 scripts/smoke_bundle.py --deb dist/Codify_*.deb --version "$VERSION"
           python3 scripts/smoke_bundle.py --appimage dist/Codify_*.AppImage --version "$VERSION"
+
+      # A signed claim that this workflow built these exact bytes. Sigstore issues a short-lived
+      # certificate to this run's OIDC identity, so there is no key to leak, rotate or forget in a
+      # secret. Each package and the checksums file are subjects; a person checks one with
+      # `gh attestation verify <file> --repo GeneticxCln/Codify` (docs/18 §5). The attestation is
+      # made before publishing, so a release whose provenance cannot be signed does not go out.
+      - name: Attest the packages and their checksums
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            dist/Codify_*.deb
+            dist/Codify_*.AppImage
+            dist/SHA256SUMS
 
       # A dry run ends here, with the packages it built kept for a person to try.
       - name: Keep the dry run's packages

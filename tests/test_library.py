@@ -123,6 +123,17 @@ class TestLibrarianReads(unittest.TestCase):
         self.assertTrue(big["truncated"], "a truncating read must say so")
         self.assertEqual(len(big["text"]), MAX_READ_CHARS)
 
+    def test_a_trailing_newline_does_not_add_a_line(self) -> None:
+        (self.root / "one.txt").write_text("only line\n", encoding="utf-8")
+        self.assertEqual(self.lib.read("one.txt")["lines"], 1)
+
+    def test_a_complete_multibyte_file_is_not_truncated_by_its_byte_count(self) -> None:
+        text = "é" * (MAX_READ_CHARS // 2 + 10)
+        (self.root / "accented.txt").write_text(text, encoding="utf-8")
+        res = self.lib.read("accented.txt")
+        self.assertFalse(res["truncated"], "bytes were compared to a character cap")
+        self.assertEqual(res["text"], text)
+
     def test_read_cannot_escape_the_workspace(self) -> None:
         with self.assertRaises(PathEscapeError):
             self.lib.read("../../etc/passwd")

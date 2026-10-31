@@ -89,8 +89,12 @@ pub(crate) enum Package {
     /// Running as an AppImage. The runtime exports the path of the file it is running in
     /// `$APPIMAGE`, and that one file is the whole install.
     AppImage,
-    /// Installed by a package manager: a `.deb` puts the binary under `/usr`.
+    /// Installed by Debian's package manager: a `.deb` puts the binary under `/usr`.
     Deb,
+    /// Installed under `/usr` by a distribution that is not Debian-family. The binary is
+    /// a package, but this app cannot name the manager that owns it, so offering a `.deb`
+    /// and printing `apt` would be instructions for the wrong system.
+    Distro,
     /// A build out of a checkout — `make run-app`, or the launcher
     /// `scripts/install-local.sh` writes. There is no package for this, and offering one
     /// would put a *second* Codify beside it, so the honest answer is how to update the
@@ -104,7 +108,7 @@ impl Package {
         match self {
             Package::AppImage => Some(".appimage"),
             Package::Deb => Some(".deb"),
-            Package::Source => None,
+            Package::Distro | Package::Source => None,
         }
     }
 
@@ -113,6 +117,7 @@ impl Package {
         match self {
             Package::AppImage => "AppImage",
             Package::Deb => "deb",
+            Package::Distro => "distribution package",
             Package::Source => "package",
         }
     }
@@ -131,20 +136,62 @@ pub(crate) fn install_package(exe: Option<&Path>, appimage: Option<&str>) -> Pac
         return Package::AppImage;
     }
     match exe {
-        // Where a Linux package puts a binary: a deb under `/usr`, a hand-built package
-        // under `/opt`. Anything else is a checkout, and says so rather than guessing a
-        // package it cannot justify.
-        Some(exe) if exe.starts_with("/usr/") || exe.starts_with("/opt/") => Package::Deb,
+        // A deb puts its binary under `/usr`. `/opt` is where a hand-built or
+        // distribution package goes, and this app cannot tell a `.deb` there from an
+        // Arch package; naming apt for one would be a guess. A checkout is the one
+        // answer that does not claim a package manager it did not see.
+        Some(exe) if exe.starts_with("/usr/") => Package::Deb,
         _ => Package::Source,
     }
 }
 
+/// Whether `/etc/os-release` names Debian, Ubuntu, or a derivative of either.
+///
+/// `ID_LIKE` is what Linux Mint (`ID=linuxmint`) and Pop!_OS (`ID=pop`) use to say they
+/// are Ubuntu-based; Debian itself says `ID=debian`. Anything else — Arch, Fedora,
+/// openSUSE — is not a system where `apt` is the answer.
+fn is_debian_family(os_release: &str) -> bool {
+    os_release.lines().any(|line| {
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        if key != "ID" && key != "ID_LIKE" {
+            return false;
+        }
+        value
+            .trim_matches('"')
+            .split_whitespace()
+            .any(|id| id.eq_ignore_ascii_case("debian") || id.eq_ignore_ascii_case("ubuntu"))
+    })
+}
+
+fn this_distro_is_debian_family() -> bool {
+    std::fs::read_to_string("/etc/os-release")
+        .map(|text| is_debian_family(&text))
+        .unwrap_or(false)
+}
+
 /// The package for the copy that is running now.
+///
+/// The path evidence says "a package under `/usr`", and the release file decides *which*
+/// package manager that path belongs to. Keeping the two apart is what lets the answer be
+/// tested without being any one distribution.
 pub(crate) fn package_for_this_install() -> Package {
     let exe = std::env::current_exe().ok();
     let appimage = std::env::var("APPIMAGE").ok();
     let resolved = exe.as_deref().and_then(|path| path.canonicalize().ok());
-    install_package(resolved.as_deref().or(exe.as_deref()), appimage.as_deref())
+    classify_install(
+        resolved.as_deref().or(exe.as_deref()),
+        appimage.as_deref(),
+        this_distro_is_debian_family(),
+    )
+}
+
+fn classify_install(exe: Option<&Path>, appimage: Option<&str>, debian_family: bool) -> Package {
+    match install_package(exe, appimage) {
+        Package::Deb if !debian_family => Package::Distro,
+        package => package,
+    }
 }
 
 /// This machine's architecture in the spelling a package name uses.
@@ -513,6 +560,14 @@ fn decide(payload: &ReleasePayload, current: &str, package: Package, arch: &str)
     // package — installing one would put a second Codify beside it — so the answer is how
     // to update the checkout itself.
     check.available = true;
+    if package == Package::Distro {
+        check.message = Some(format!(
+            "{tag} is newer, and this copy was installed by your distribution's package \
+             manager. Update it there, or take the AppImage from {}",
+            check.url
+        ));
+        return check;
+    }
     if package == Package::Source {
         check.message = Some(format!(
             "{tag} is newer, and this copy runs from a checkout: `git pull` in it, or take a \
@@ -662,9 +717,24 @@ pub(crate) async fn write_asset(into: &Path, name: &str, bytes: &[u8]) -> Result
         .await
         .map_err(|err| format!("could not use {} ({err})", into.display()))?;
     let path = into.join(name);
-    tokio::fs::write(&path, bytes)
-        .await
-        .map_err(|err| format!("could not write {} ({err})", path.display()))?;
+    // Written beside the destination and renamed over it, so a crash or a full disk
+    // leaves a `.part` file rather than a truncated package under the real name. The
+    // rename also replaces a symlink instead of following it: without this, a link at
+    // `~/Downloads/Codify.deb` made the download write through it to wherever it pointed.
+    static PART: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let part = into.join(format!(
+        ".{name}.{}.{}.part",
+        std::process::id(),
+        PART.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    tokio::fs::write(&part, bytes).await.map_err(|err| {
+        let _ = std::fs::remove_file(&part);
+        format!("could not write {} ({err})", path.display())
+    })?;
+    if let Err(err) = tokio::fs::rename(&part, &path).await {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(format!("could not write {} ({err})", path.display()));
+    }
     Ok(path)
 }
 
@@ -817,6 +887,10 @@ fn next_step(package: Package, path: &Path) -> String {
         Package::AppImage => format!(
             "Make it executable and run it:  chmod +x {shown} && {shown}\n\
              Or replace this AppImage with it once you are sure the new one starts."
+        ),
+        Package::Distro => format!(
+            "This copy was installed by your distribution's package manager. Update it there, \
+             or take the AppImage from {RELEASES_PAGE}."
         ),
         Package::Source => String::new(),
     }
@@ -1005,8 +1079,20 @@ mod tests {
             Package::Deb,
             install_package(Some(Path::new("/usr/bin/codify-desktop")), None)
         );
+        // The same path on a non-Debian distribution is a package, but not one apt owns.
         assert_eq!(
             Package::Deb,
+            classify_install(Some(Path::new("/usr/bin/codify-desktop")), None, true)
+        );
+        assert_eq!(
+            Package::Distro,
+            classify_install(Some(Path::new("/usr/bin/codify-desktop")), None, false)
+        );
+        // `/opt` is where a hand-built or distribution package goes, and it is not
+        // necessarily a deb: claiming one would print apt instructions for an Arch
+        // package. It is a checkout as far as this app can prove.
+        assert_eq!(
+            Package::Source,
             install_package(Some(Path::new("/opt/codify/codify-desktop")), None)
         );
         // `make run-app`, and the launcher `scripts/install-local.sh` writes.
@@ -1021,6 +1107,20 @@ mod tests {
         );
         // Nowhere to look at all: refuse to claim a package rather than guess one.
         assert_eq!(Package::Source, install_package(None, None));
+    }
+
+    #[test]
+    fn a_debian_family_is_recognised_from_its_own_release_file() {
+        assert!(is_debian_family("ID=debian\n"));
+        assert!(is_debian_family("ID=ubuntu\nID_LIKE=debian\n"));
+        // Derivatives name Ubuntu in `ID_LIKE`, sometimes beside Debian and in quotes.
+        assert!(is_debian_family(
+            "ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n"
+        ));
+        assert!(!is_debian_family("ID=arch\n"));
+        assert!(!is_debian_family("ID=fedora\nID_LIKE=\"fedora\"\n"));
+        // A missing or empty file is not a Debian system, so no deb is claimed for it.
+        assert!(!is_debian_family(""));
     }
 
     #[test]
@@ -1397,6 +1497,41 @@ mod tests {
         let again = block_on(write_asset(&into, DEB, b"a newer deb")).expect("written again");
         assert_eq!(written, again);
         assert_eq!(std::fs::read(&again).expect("readable"), b"a newer deb");
+        // The write is renamed into place, so a successful one leaves no temporary
+        // beside the package for a later crash to look like an install.
+        let leftovers: Vec<_> = std::fs::read_dir(&into)
+            .expect("readable")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".part"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temporary files left behind: {leftovers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn a_package_does_not_write_through_a_symlink_in_the_downloads_folder() {
+        let scratch =
+            std::env::temp_dir().join(format!("codify-update-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let into = scratch.join("Downloads");
+        std::fs::create_dir_all(&into).expect("the folder exists");
+        let outside = scratch.join("outside.deb");
+        std::fs::write(&outside, b"not ours").expect("the outside file exists");
+        let link = into.join(DEB);
+        std::os::unix::fs::symlink(&outside, &link).expect("the link exists");
+
+        let written = block_on(write_asset(&into, DEB, b"a deb")).expect("the package is written");
+
+        assert_eq!(std::fs::read(&outside).expect("readable"), b"not ours");
+        assert!(!std::fs::symlink_metadata(&written)
+            .expect("writable")
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&written).expect("readable"), b"a deb");
         let _ = std::fs::remove_dir_all(&scratch);
     }
 

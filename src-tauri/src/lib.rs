@@ -717,9 +717,20 @@ fn codify_render_cpu_ms() -> Option<u64> {
 /// launch, not a fact about a page. `target_os = "linux"` because the setting
 /// this mirrors is only applied there; on another platform the variable is not
 /// the shell's signal and the answer is false.
+/// Whether WebKit was launched with its dma-buf renderer disabled.
+///
+/// WebKit reads the variable as `1`; `0` means "leave it on", not "the variable is
+/// present". This used to be tested for presence here while the browser diagnostic
+/// accepted only `1`, so `=0` was both disabled and enabled depending on who asked.
+/// One function, so the three answers cannot drift apart again.
+fn dmabuf_renderer_disabled() -> bool {
+    cfg!(target_os = "linux")
+        && std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_ok_and(|value| value == "1")
+}
+
 #[tauri::command]
 fn codify_software_rendering() -> bool {
-    cfg!(target_os = "linux") && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some()
+    dmabuf_renderer_disabled()
 }
 
 /// This shell launch's id: different for every process, stable for every page
@@ -767,7 +778,7 @@ fn codify_boot_id() -> String {
 /// this early; waiting for a measured frame would be waiting for the bill.
 #[cfg(target_os = "linux")]
 fn apply_software_render_motion_default(_app: &tauri::AppHandle) {
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+    if !dmabuf_renderer_disabled() {
         return;
     }
     use gtk::prelude::*;
@@ -2562,7 +2573,7 @@ pub fn run() {
             if webview.label() != "main" || payload.event() != PageLoadEvent::Finished {
                 return;
             }
-            if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            if !dmabuf_renderer_disabled() {
                 return;
             }
             let _ = webview.eval(

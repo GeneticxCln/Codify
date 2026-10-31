@@ -77,6 +77,19 @@ def boot_token_path() -> Path:
     return codify_home() / "boot_token"
 
 
+def _stored_token(path: Path) -> str:
+    """The token in `path`, or "" when it is missing or not UTF-8 text.
+
+    The file is bytes on a disk a person can edit. A corrupt one must read as
+    absent and be repaired, not raise `UnicodeDecodeError` out of import-time
+    boot-token resolution and stop the engine from starting.
+    """
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
 def boot_token() -> str:
     """The loopback bearer token, stable across restarts of this state dir.
 
@@ -100,10 +113,7 @@ def boot_token() -> str:
     which is exactly what every run used to get.
     """
     path = boot_token_path()
-    try:
-        existing = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        existing = ""
+    existing = _stored_token(path)
     if existing:
         return existing
     fresh = secrets.token_hex(32)
@@ -114,7 +124,7 @@ def boot_token() -> str:
             # the loser adopts the winner's file rather than replacing it.
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
-            adopted = path.read_text(encoding="utf-8").strip()
+            adopted = _stored_token(path)
             if adopted:
                 return adopted
             # An empty file is a boot that died between creating and filling

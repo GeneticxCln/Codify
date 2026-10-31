@@ -121,17 +121,44 @@ export const Wordmark: React.FC<WordmarkProps> = ({ className = "" }) => {
   useLayoutEffect(() => {
     const el = maskRef.current;
     if (!el) return;
-    const paint = (): void => paintGlyphMask(el);
+    let frame: number | undefined;
+    let lastBox = "";
+    const paint = (): void => {
+      frame = undefined;
+      lastBox = `${el.clientWidth}x${el.clientHeight}`;
+      paintGlyphMask(el);
+    };
+    // A resize observer can fire more than once for one layout, and a font's
+    // `ready` can land in the same frame; one raster per frame is enough. The
+    // old callback rasterized and encoded a PNG every time it was called.
+    const paintSoon = (): void => {
+      if (frame !== undefined) return;
+      if (typeof requestAnimationFrame !== "function") {
+        paint();
+        return;
+      }
+      frame = requestAnimationFrame(paint);
+    };
+    const paintIfResized = (): void => {
+      const box = `${el.clientWidth}x${el.clientHeight}`;
+      if (box === lastBox) return;
+      paintSoon();
+    };
     paint();
     let observer: ResizeObserver | undefined;
     if (typeof ResizeObserver !== "undefined") {
-      observer = new ResizeObserver(paint);
+      observer = new ResizeObserver(paintIfResized);
       observer.observe(el);
     }
     // A webfont that arrives after the first layout reflows the word; the mask
-    // was rasterized in the fallback's metrics until this runs again.
-    void document.fonts?.ready.then(paint);
-    return () => observer?.disconnect();
+    // was rasterized in the fallback's metrics until this runs again. It is
+    // forced even when the box is unchanged: the metrics are the thing that
+    // changed, not the element's size.
+    void document.fonts?.ready.then(paintSoon);
+    return () => {
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      observer?.disconnect();
+    };
   }, [className]);
 
   return (

@@ -228,12 +228,17 @@ that is not the engine or a model provider, which is why the About tab's own sen
 | Evidence | Package | What is offered |
 |---|---|---|
 | `$APPIMAGE` is set (the AppImage runtime exports the path it is running from) | `appimage` | the `.AppImage` |
-| the binary runs from `/usr/` or `/opt/` | `deb` | the `.deb` |
+| the binary runs from `/usr/` and `/etc/os-release` names Debian, Ubuntu or a derivative | `deb` | the `.deb` |
+| the binary runs from `/usr/` on another distribution | `distro` | no package: update it with that distribution's package manager, with the release page named |
 | anything else — a build out of a checkout, or the launcher `scripts/install-local.sh` writes | `source` | no package at all: `git pull` in the checkout, with the release page named |
 
-That third row is the important one. Offering a deb to someone running from a checkout would install
+The last row is the important one. Offering a deb to someone running from a checkout would install
 a *second* Codify beside the one they have. The `$APPIMAGE` check comes first because an AppImage
 unpacks itself under `/tmp` and runs the binary from there, which would otherwise read as a checkout.
+`/opt` is deliberately not evidence of a deb: hand-built and distribution packages live there too, and
+naming `apt` for one would be a guess. The Debian check reads `/etc/os-release` (`ID`, or a derivative's
+`ID_LIKE`, naming `debian` or `ubuntu`); an Arch or Fedora install under `/usr` is `distro` and is told
+to update through the manager that owns it, never handed a `.deb`.
 
 **What the four answers are.** `available` says a newer stable release exists; `asset` says there is
 a file for this install; `message` is the sentence to show when there is not. So
@@ -341,8 +346,22 @@ matched, 1 when anything did not, and 2 when there was nothing to check.
 **It is not a signature, and it says so in its own output.** The checksums come from the same place
 the package did, over the same connection, so anyone who could serve a wrong package could serve
 matching checksums beside it. What a pass claims is the case that actually happens: the file is the
-one that release published, and it is whole. A real signature needs a key held in CI and a public key
-pinned in the app — the decision §6 defers along with self-updating.
+one that release published, and it is whole.
+
+**Authenticity is the attestation.** Every published package and `SHA256SUMS` is a subject of a
+GitHub build-provenance attestation, signed through Sigstore with a short-lived certificate for this
+repository's release workflow — no key is stored in CI, and none can be forgotten or leaked. Check a
+download with:
+
+```
+gh attestation verify ~/Downloads/Codify_1.3.4_amd64.deb --repo GeneticxCln/Codify
+gh attestation verify ~/Downloads/Codify_1.3.4_amd64.AppImage --repo GeneticxCln/Codify
+```
+
+The attestation lives with the repository, not beside the file, which is why `--repo` is required. It
+says these bytes were built by that workflow from that repository at that commit. It does not say a
+person reviewed the code, and it does not replace the checksum: the checksum still catches a truncated
+or re-uploaded download, while the attestation catches a file that was never built here.
 
 Local, and deliberately not part of `make check` or `make ci`: it reaches GitHub for the checksums
 unless you point it at a file you already have, and the gate may not depend on the network.
@@ -350,10 +369,19 @@ unless you point it at a file you already have, and the gate may not depend on t
 ## 6. What is not here, and what it would take
 
 * **No self-updating.** The Tauri updater plugin would let the app replace its own binary after
-  checking a signature. That is a different decision from this one, not a later step of it: it needs
-  a signing key held in CI, a public key pinned in `tauri.conf.json`, and a published policy for what
-  happens when an update is half-applied — and it makes a running process replace itself, which is
-  exactly the act invariant 9 keeps agents away from. It is left to the owner, deliberately.
+  checking a signature. That is a different decision from this one, not a later step of it: the
+  build-provenance attestation in §5 authenticates a download a person chose, but it is not the
+  updater plugin's signature format. Self-updating still needs a signing key held in CI, a public key
+  pinned in `tauri.conf.json`, and a published policy for what happens when an update is half-applied
+  — and it makes a running process replace itself, which is exactly the act invariant 9 keeps agents
+  away from. It is left to the owner, deliberately.
+
+**Dependency advisories are a CI job.** `make audit` runs `cargo audit --deny warnings` against the
+shell's locked graph; `src-tauri/audit.toml` names every transitive advisory accepted today and the
+Tauri/GTK constraint that keeps it there (the recipe passes the list as `--ignore` flags, because
+cargo-audit 0.22 reads no config file). It is not part of `make check` because it needs the network
+and a tool that is not a build dependency; `.github/workflows/check.yml` runs it on every push, and a
+new advisory fails until it is fixed or deliberately recorded.
 * **No check on launch, no timer, no background polling.** See §4: the request happens when someone
   presses the button.
 * **No channels, no beta ring, no rollback.** `releases/latest` is the whole notion of "newer" here,

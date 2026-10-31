@@ -349,6 +349,53 @@ pub(crate) fn find_bwrap(path_var: &str) -> Option<PathBuf> {
 /// Why this directory may not be shown to a machine, if it may not. The engine refuses the same list
 /// when a workspace is *created* (`fs.protected_root_reason`); this asks again because a record is data
 /// and can predate the rule, and because the reader here is an assistant that can run anything.
+///
+/// `SYSTEM_ROOTS` and `AUTORUN_DIRS` are kept in step with `engine/fs.py`. A workspace the
+/// engine refuses to create must not be one the machine opens, and the machine's record can
+/// predate either check.
+const SYSTEM_ROOTS: &[&str] = &[
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/home",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/media",
+    "/mnt",
+    "/opt",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/srv",
+    "/sys",
+    "/tmp",
+    "/usr",
+    "/var",
+    "/var/tmp",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/lib",
+    "/usr/lib32",
+    "/usr/lib64",
+    "/usr/local",
+    "/usr/share",
+    "/usr/include",
+];
+/// Directories under the home whose contents run when the person next logs in, or decide what
+/// runs: startup entries, user services, their environment, application launchers, and the
+/// commands first on PATH. Refused when the workspace is one, is inside one, or contains one.
+const AUTORUN_DIRS: &[&str] = &[
+    ".config/autostart",
+    ".config/systemd",
+    ".config/environment.d",
+    ".local/bin",
+    ".local/share/applications",
+    ".local/share/systemd",
+];
+
 pub(crate) fn protected_reason(
     path: &Path,
     home: Option<&Path>,
@@ -364,6 +411,24 @@ pub(crate) fn protected_reason(
         for secret in [".ssh", ".gnupg", ".aws", ".kube"] {
             if path.starts_with(home.join(secret)) {
                 return Some(format!("inside ~/{secret}"));
+            }
+        }
+    }
+    // Exact matches only: a project at `/usr/local/src/thing` or `/tmp/scratch` is ordinary;
+    // `/usr` and `/tmp` themselves are not.
+    if SYSTEM_ROOTS.iter().any(|root| path == Path::new(root)) {
+        return Some(format!(
+            "{} is a system directory, not a project",
+            path.display()
+        ));
+    }
+    if let Some(home) = home {
+        for name in AUTORUN_DIRS {
+            let guarded = home.join(name);
+            if path.starts_with(&guarded) || guarded.starts_with(path) {
+                return Some(format!(
+                    "it is or contains ~/{name}, which holds what runs when you log in"
+                ));
             }
         }
     }

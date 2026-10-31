@@ -141,7 +141,7 @@ _NEVER = tuple(ipaddress.ip_network(net) for net in (
     "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
     "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
     "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
-    "::/128", "::1/128", "64:ff9b::/96", "100::/64", "2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8",
+    "::/128", "::1/128", "64:ff9b::/96", "100::/64", "2001:db8::/32", "fc00::/7", "fe80::/10", "fec0::/10", "ff00::/8",
 ))
 
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f]")
@@ -264,6 +264,15 @@ def is_public(ip: IPAddress) -> bool:
         mapped = ip.ipv4_mapped
         if mapped is not None:
             return is_public(mapped)
+        # `::127.0.0.1` is IPv4-compatible, not IPv4-mapped: `ipv4_mapped` is
+        # None and `is_global` calls it global. It is the deprecated spelling
+        # (`::/96`) of the same address, so its last 32 bits are judged as the
+        # IPv4 address they are. `::` and `::1` are named below and are not
+        # IPv4 addresses at all.
+        if ip.packed[:12] == b"\x00" * 12 and ip not in (
+            ipaddress.IPv6Address("::"), ipaddress.IPv6Address("::1")
+        ):
+            return is_public(ipaddress.IPv4Address(ip.packed[-4:]))
         six = ip.sixtofour
         if six is not None:
             return is_public(six)
@@ -307,7 +316,7 @@ def check_url(raw: str, policy: FetchPolicy) -> Target:
             host = host.encode("idna").decode("ascii")
         except UnicodeError as exc:
             raise FetchRefused("that host name is not a valid name.") from exc
-    port = port or (443 if parts.scheme == "https" else 80)
+    port = port if port is not None else (443 if parts.scheme == "https" else 80)
     if port not in ALLOWED_PORTS:
         listed = ", ".join(str(p) for p in sorted(ALLOWED_PORTS))
         raise FetchRefused(f"port {port} is not one a fetch connects to; the ports are {listed}.")

@@ -220,6 +220,27 @@ test("writing a preference cannot smuggle in 'allowed'", () => {
   assert.equal(readMotion({ user, session }).setting, "auto");
 });
 
+test("a persistent choice undoes 'Animate anyway', which belongs to the session", () => {
+  // The Settings control has to be able to reverse the banner's answer. The
+  // session override is read first, so writing only `localStorage` would leave
+  // the window animating while the checkbox said it was reduced.
+  const user = mapStore();
+  const session = mapStore();
+  applyShellStarvation({ at: 1, measuredMs: 90 }, { user, session });
+  assert.equal(writeSessionSetting("allowed", { user, session }).setting, "allowed");
+
+  const chosen = writeSetting("reduced", { user, session });
+
+  assert.equal(chosen.setting, "reduced");
+  assert.equal(user.getItem(MOTION_KEY), "reduced");
+  assert.equal(session.getItem(MOTION_SESSION_KEY), null, "the session override survived");
+  assert.equal(
+    starvedThisBoot({ user, session }),
+    true,
+    "choosing reduced forgot that this boot was measured slow",
+  );
+});
+
 test("garbage in the verdict slot is no verdict", () => {
   const session = mapStore();
   session.setItem(MOTION_EVENT, "{not json");

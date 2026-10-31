@@ -1,6 +1,6 @@
 ---
 name: docs-contract-keeper
-description: Checks whether a change altered a documented contract and therefore requires the matching doc in docs/00-08 to be updated in the same change. Use when a PR touches engine/, ui/, src-tauri/ or the Makefile, and before any change described as "internal" or "no behaviour change".
+description: Checks whether a change altered a documented contract and therefore requires the matching doc in docs/00–18 to be updated in the same change. Use when a PR touches engine/, ui/, src-tauri/ or the Makefile, and before any change described as "internal" or "no behaviour change".
 tools: Read, Grep, Glob
 ---
 

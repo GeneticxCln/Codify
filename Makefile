@@ -384,6 +384,18 @@ GHIDRA_CHECK_ARGS ?=
 check-ghidra:
 	python3 scripts/check_ghidra.py $(GHIDRA_CHECK_ARGS)
 
+# Dependency advisories for the shell. Deliberately not part of `check` or `ci`: cargo-audit is
+# not a build dependency, and the advisory database comes from the network. CI runs this on every
+# push. `src-tauri/audit.toml` is the complete list of transitive warnings accepted today; a new
+# one fails the target rather than scrolling past in a log.
+#
+# cargo-audit 0.22 reads no config file, so the list is turned into the flags it does read. The
+# TOML stays the one place with the reasons; this recipe is how they reach the tool.
+AUDIT_IGNORE = $(shell sed -n 's/^[[:space:]]*"\(RUSTSEC-[0-9-]*\)",.*/--ignore \1/p' src-tauri/audit.toml)
+
+audit:
+	cd src-tauri && cargo audit --deny warnings $(AUDIT_IGNORE)
+
 # The one question the About tab's Download button cannot answer for you: is the file that landed
 # the file that was published? A truncated download looks like a whole file to `apt`, and the
 # release workflow writes a `SHA256SUMS` asset beside the packages for exactly this (`docs/18` §3,
@@ -396,8 +408,9 @@ check-ghidra:
 #   make verify-package TAG=v1.0.0                    # a named release instead of the newest
 #
 # It is not a signature, and it does not claim to be: the checksums come from the same place the
-# package did, so this catches a corrupted or re-uploaded file, not a hostile GitHub. The script
-# prints that sentence with its verdict rather than leaving it in this comment.
+# package did, so this catches a corrupted or re-uploaded file, not a hostile GitHub. Authenticity
+# is the release's build-provenance attestation (`gh attestation verify`, docs/18 §5); the script
+# prints the limits of its own verdict rather than leaving them in this comment.
 verify-package:
 	python3 scripts/verify_package.py $(FILES) $(if $(SUMS),--sums "$(SUMS)") $(if $(TAG),--tag "$(TAG)")
 

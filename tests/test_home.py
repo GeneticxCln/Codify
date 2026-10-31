@@ -283,6 +283,16 @@ class TestTheBootTokenOutlivesTheProcess(_EnvCase):
         self.assertEqual(path.read_text(), token)
         self.assertEqual(self.token(), token)
 
+    def test_a_non_utf8_token_file_is_repaired_instead_of_stopping_the_boot(self) -> None:
+        # The token is read at import time, so a decode error here is an engine
+        # that cannot start at all because of a corrupt file a person can edit.
+        path = self.scratch / "boot_token"
+        path.write_bytes(b"\xff\xfe\x00not-utf8")
+        token = self.token()
+        self.assertTrue(token)
+        self.assertEqual(path.read_text(encoding="utf-8"), token)
+        self.assertEqual(self.token(), token)
+
     def test_an_unwritable_state_directory_still_yields_a_token(self) -> None:
         # The engine has to boot even when it cannot keep state. A state
         # directory that is really a file fails the same way for every user,

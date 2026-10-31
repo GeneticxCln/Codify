@@ -629,8 +629,8 @@ export const App: React.FC = () => {
   // that pays for a software-rasterised backdrop is the process that announces
   // it, and a frozen window cannot reach a settings pane to ask for relief.
   // Read, not re-armed: the verdict is the shell's one announcement for this
-  // boot, and a reload of the same window must still see it. A new launch has a
-  // fresh `sessionStorage`, so it starts without one either way.
+  // boot, and a reload of the same window must still see it. A new launch reads
+  // a different boot id (`MOTION_BOOT_KEY`), so it starts without one either way.
   const [motion, setMotion] = useState<MotionState>(() => readMotion());
   useEffect(() => {
     let off: (() => void) | undefined;
@@ -4342,8 +4342,9 @@ export const App: React.FC = () => {
               and a reload instead of the silent 401 loop every other request
               was stuck in. Desktop never sees this — IPC self-heals first, and
               the probe re-checks before the pill settles. */}
-          {/* The shell watched its own main thread and concluded this window is
-              being rasterised in software: the animated backdrops cost more than
+          {/* The shell watched this window's renderers — its main thread and the
+              WebKit process — and concluded this window is being rasterised in
+              software: the animated backdrops cost more than
               the machine can pay, and the cost was landing on input. The verdict
               is one per boot and this banner is its receipt — naming the
               measurement and handing back the choice, because relief that a
@@ -4361,10 +4362,9 @@ export const App: React.FC = () => {
                       </>
                     ) : (
                       <>
-                        Animated backdrops were stopped: the desktop shell measured its main
-                        thread spending ~{Math.min(99, motion.shellStarved.measuredMs)}% of a
-                        core painting this window, which was starving input. This clears next
-                        launch.
+                        Animated backdrops were stopped: the desktop shell measured this
+                        window's renderers spending ~{Math.min(99, motion.shellStarved.measuredMs)}%
+                        of a core, which was starving input. This clears next launch.
                       </>
                     )}
                   </span>

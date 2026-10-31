@@ -71,13 +71,11 @@ export const RainBackdrop: React.FC<RainBackdropProps> = ({ active }) => {
           read as blocks. Still capped — the cost of a full-bleed canvas is
           quadratic and the cap is what keeps it off the CPU budget. The cap
           bounds cost, not speed: a faster effect is not a busier one. */}
-      {/* The same edge fade every other atmosphere gets — see
-          `WeatherBackdrop` and `.codify-atmosphere-fade` in `index.css`. The
-          rain predates that table and has always been mounted separately, so it
-          would otherwise have been the one canvas in the app that stopped dead
-          against the header. The fade is a sibling overlay rather than a mask
-          on the canvas: a full-window mask made the software compositor
-          rasterise every frame, which is measured in `index.css`. */}
+      {/* The edge fade every other atmosphere gets, drawn as a sibling overlay
+          rather than a mask on the canvas: a full-window mask made the software
+          compositor rasterise every frame. The rain predates the shared
+          treatment and is mounted separately, so it keeps its own radial
+          gradient here. */}
       <MatrixRain
         className="absolute inset-0 h-full w-full"
         maxDimension={1024}

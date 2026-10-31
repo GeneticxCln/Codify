@@ -1601,7 +1601,7 @@ export async function getAppFacts(): Promise<AppFacts | null> {
 }
 
 /** Which package a copy of the app takes. The shell decides it, never the page. */
-export type UpdatePackage = "deb" | "appimage" | "source";
+export type UpdatePackage = "deb" | "appimage" | "distro" | "source";
 
 /**
  * What the shell answered about a newer release.

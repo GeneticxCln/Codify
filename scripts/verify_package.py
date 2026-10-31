@@ -13,11 +13,10 @@ re-uploaded after the release page was read. The release workflow writes `sha256
 
 **What a pass claims, and what it does not.** It claims the bytes on disk are the bytes that
 release's `SHA256SUMS` lists — so a truncated, corrupted or re-uploaded file is caught here, before
-`sudo apt install`. It is not a signature, and it does not say the release is authentic: the
-checksums come from the same place the package did, over the same connection, so anyone who could
-serve a wrong package could serve matching checksums for it. That is what signing keys are for, and
-this app has none (`docs/18` §6) — the point of this check is the accidental case, which is the one
-that actually happens.
+`sudo apt install`. It is not a signature, and it does not say the release is authentic by itself:
+the checksums come from the same place the package did, over the same connection, so anyone who could
+serve a wrong package could serve matching checksums for it. Authenticity is the release's
+build-provenance attestation (`gh attestation verify`, `docs/18` §5).
 
 Exit status is 0 when every file matched, 1 when any file did not (or could not be read), and 2 when
 there was nothing to check — no package named and none found to look at.
@@ -265,7 +264,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         "verify_package: every file is the bytes that release published. This is not a signature — "
         "the checksums came from the same place the package did — so it catches a truncated, "
-        "corrupted or re-uploaded file, not a hostile one."
+        "corrupted or re-uploaded file. For authenticity, check the release's build-provenance "
+        "attestation with `gh attestation verify` (docs/18 §5)."
     )
     return 0
 

@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Check, ClipboardPaste, Copy, FileDown, FileUp, Palette, RotateCcw, Undo2 } from "lucide-react";
+import { Checkbox } from "./ui/Checkbox";
 import { Panel } from "./ui/Panel";
 import { UiScalePanel } from "./UiScalePanel";
 import { MatrixRain } from "./ui/MatrixRain";
 import { effectFor } from "./ui/WeatherBackdrop";
+import { MOTION_CHANGED, readMotion, writeSetting } from "../motionPreference";
 import {
   CODIFY_DARK,
   THEMES,
@@ -261,6 +263,7 @@ export const AppearancePane: React.FC = () => {
   return (
     <div className="space-y-4">
       <UiScalePanel />
+      <MotionPanel />
       <Panel title={<><Palette className="w-3.5 h-3.5" /> Theme</>}>
         <div className="grid grid-cols-1 lg:grid-cols-[17rem_minmax(0,1fr)] gap-4">
           <div
@@ -380,6 +383,43 @@ const ThemeChip: React.FC<{ theme: AppearanceTheme }> = ({ theme }) => {
         <span className="block h-0.5 w-1/2 rounded-full" style={{ backgroundColor: varOf("--codify-border-strong") }} />
       </span>
     </div>
+  );
+};
+
+/**
+ * The persistent motion preference.
+ *
+ * The shell's starvation verdict has its own "Animate anyway" banner, but that
+ * answer lives in `sessionStorage` and the banner goes away with the verdict.
+ * Without this control there was no way back to "reduced" inside the app, and
+ * no way to choose it at all on a machine whose system preference is "no
+ * preference". It writes the same `localStorage` key the rest of the app reads;
+ * the enabled state follows every writer through `MOTION_CHANGED`.
+ */
+const MotionPanel: React.FC = () => {
+  const [reduced, setReduced] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sync = (): void => setReduced(readMotion().setting === "reduced");
+    sync();
+    window.addEventListener(MOTION_CHANGED, sync);
+    return () => window.removeEventListener(MOTION_CHANGED, sync);
+  }, []);
+  return (
+    <Panel title="Motion">
+      <Checkbox
+        checked={reduced}
+        onChange={(next) => {
+          setReduced(writeSetting(next ? "reduced" : "auto").setting === "reduced");
+        }}
+      >
+        <span className="block font-medium text-codify-primary">Reduce motion</span>
+        <span className="block text-codify-muted">
+          Stops the animated backdrops and the wordmark&apos;s sweep. Off follows your
+          system setting; the shell can still stop them when this window is too slow.
+        </span>
+      </Checkbox>
+    </Panel>
   );
 };
 

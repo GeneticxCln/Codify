@@ -386,6 +386,18 @@ fn a_workspace_that_would_hand_over_the_persons_secrets_is_refused() {
         "/home/someone/.codify",
         "/home/someone/.codify/workspaces/a",
         "/var/lib/codify/db",
+        // The machine list mirrors the engine's: system roots exactly, and the
+        // directories that decide what runs at login either way.
+        "/etc",
+        "/usr",
+        "/tmp",
+        "/home/someone/.config/autostart",
+        "/home/someone/.config/systemd/user",
+        "/home/someone/.config/environment.d",
+        "/home/someone/.local/bin",
+        "/home/someone/.local/share/applications",
+        "/home/someone/.local/share/systemd",
+        "/home/someone/.config",
     ] {
         assert!(refused(p).is_some(), "{p} may be shown to a machine");
     }
@@ -395,6 +407,11 @@ fn a_workspace_that_would_hand_over_the_persons_secrets_is_refused() {
         "/home/someone/.sshfs-notes",
         "/srv/project",
         "/home/other",
+        // A project *below* a system directory or an autorun directory is ordinary;
+        // only the directory itself, or a root that would contain one, is refused.
+        "/usr/local/src/thing",
+        "/tmp/scratch",
+        "/home/someone/.config/nvim",
     ] {
         assert!(refused(p).is_none(), "{p} was refused: {:?}", refused(p));
     }

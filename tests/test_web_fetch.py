@@ -124,6 +124,8 @@ class TestAddressesThatAreNeverPublic(unittest.TestCase):
         "0.0.0.0",  # noqa: S104 — the address under test, never bound
         "::1", "::", "fe80::1", "fc00::1", "fd12:3456::1", "ff02::1",
         "::ffff:127.0.0.1", "::ffff:169.254.169.254", "::ffff:10.0.0.1",
+        "::127.0.0.1", "::169.254.169.254", "::10.0.0.1",  # IPv4-compatible, not mapped
+        "fec0::1",  # deprecated site-local, still routed on some networks
         "2002:7f00:1::",  # 6to4 wrapping 127.0.0.1
         "64:ff9b::7f00:1",  # NAT64 wrapping 127.0.0.1
         "2001:db8::1",
@@ -154,6 +156,13 @@ class TestAddressesThatAreNeverPublic(unittest.TestCase):
         for text in self.PUBLIC:
             with self.subTest(address=text):
                 self.assertTrue(is_public(ipaddress.ip_address(text)))
+
+    def test_port_zero_is_refused_rather_than_read_as_the_default(self) -> None:
+        with self.assertRaises(web_fetch.FetchRefused) as refused:
+            web_fetch.check_url(
+                "http://example.com:0/", web_fetch.FetchPolicy(mode=web_fetch.MODE_ANY)
+            )
+        self.assertIn("port 0", str(refused.exception))
 
 
 class TestTheSiteList(unittest.TestCase):

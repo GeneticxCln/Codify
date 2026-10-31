@@ -1,7 +1,7 @@
 # CLAUDE.md — working rules for this repository
 
 **This file is a distillation, not a second source of truth.** Everything below is
-sourced from `CONTRIBUTING.md` and `docs/00`–`16`; where this file and either of
+sourced from `CONTRIBUTING.md` and `docs/00`–`18`; where this file and either of
 those disagree, **they win and this file is the bug**. `tests/test_claude_md_contracts.py`
 fails if the invariants quoted here drift from `docs/00` §6, so that is enforced, not
 merely intended.
@@ -28,12 +28,13 @@ mean the change is shippable.
 | Target | What it runs |
 |---|---|
 | `make setup` / `make doctor` | From a fresh clone: create `.venv` + install everything / check the machine, and this checkout's `.venv` against `pyproject.toml`, and say how to fix what is missing (read-only). The Makefile prefers `./.venv/bin` automatically, except inside the 3.10 floor leg |
-| `make check` | Everything below, on the interpreter you have |
+| `make check` | Everything below, including the benchmark smoke (`make bench-smoke`), on the interpreter you have |
 | `make ci` | `make check`, then the same Python legs again on the declared 3.10 minimum |
-| `make lint` | `ruff check engine tests scripts` — rules and target Python pinned in `pyproject.toml` |
+| `make lint` | `ruff check engine tests scripts benchmarks` — rules and target Python pinned in `pyproject.toml` |
 | `make typecheck` | `mypy` over `engine`, `tests`, `scripts` — config pinned in `pyproject.toml` |
 | `make test` | Full Python suite via `unittest` |
 | `make test-streams` | Stream-isolation tests **by name**, not just by discovery |
+| `make bench-smoke` | The hermetic benchmark tier under both drivers — no network, no models, no spend; part of `make check` |
 | `make test-ui` | `ui/tests/` through `node --test` (needs Node 22.22.2+, 24.15+ or 26+; checked before it runs) |
 | `make typecheck-ui-tests` | `tsc --noEmit` over `ui/src` **and** `ui/tests` — config `ui/tsconfig.test.json` |
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |

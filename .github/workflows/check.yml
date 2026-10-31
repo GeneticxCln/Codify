@@ -1,11 +1,13 @@
 name: check
 
 # CONTRIBUTING.md states the bar in one line: "`make check` must pass." This runs
-# that same gate in CI — the union of the three jobs below is exactly the targets
+# that same gate in CI — the union of the python, ui and rust jobs below is exactly the targets
 # `make check` depends on (lint, typecheck, test-ui, typecheck-ui-tests, test,
 # test-streams, bench-smoke, build-ui, check-tauri), split by toolchain so a Python failure
 # cannot hide a Rust one and
-# each job installs only the toolchain it needs.
+# each job installs only the toolchain it needs. The audit job is extra: `cargo audit` needs the
+# advisory database over the network and a tool that is not a build dependency, so it is a CI
+# check rather than part of the local gate.
 #
 # Until this existed there was no CI at all, and the failures that reached the
 # repository were the ones a single local interpreter cannot see: a PEP 701
@@ -193,3 +195,22 @@ jobs:
       # Node toolchain — verified by running it with ui/dist removed.
       - name: Check, test, lint and format
         run: make check-tauri
+
+  audit:
+    name: rust — dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Prebuilt binaries are not used here: a release-gating tool is better installed from
+      # the locked source than fetched from a moving tag. The version is the one the accepted
+      # advisory list was reviewed against.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      # `--deny warnings` makes a new advisory fail the job, instead of appearing in a log
+      # nobody reads. `src-tauri/audit.toml` names the ones accepted today and why.
+      - name: Audit the locked dependency graph
+        run: make audit

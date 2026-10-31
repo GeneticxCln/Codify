@@ -1,0 +1,32 @@
+# Accepted advisories for the desktop shell's locked dependency graph.
+#
+# Every entry here is transitive. None is reachable by choosing a different direct dependency:
+# they all come through Tauri 2.11's GTK 3 stack, its urlpattern crate, or its single-instance
+# plugin. Updating past them would mean a Tauri/GTK major change, not a patch here.
+#
+# `make audit` and the CI audit job run `cargo audit --deny warnings`, so this list is the whole
+# of what is tolerated. A new advisory fails the job until it is either fixed or written down
+# here with a reason. cargo-audit 0.22 reads no config file; the `audit` target in the Makefile
+# turns each entry below into the `--ignore` flag the tool does read.
+
+[advisories]
+ignore = [
+    # glib's `VariantStrIter` iterators are unsound. There is no fixed 0.18 release; GTK 4
+    # uses glib 0.20, and Tauri 2's Linux runtime is GTK 3. This app does not iterate GVariant
+    # string values from untrusted input.
+    "RUSTSEC-2024-0429",
+    # glib-macros 0.18 pulls the unmaintained proc-macro-error 1.0.4. Same GTK 3 constraint.
+    "RUSTSEC-2024-0370",
+    # urlpattern 0.3 (through tauri-utils) uses the unmaintained unic-* crates. It parses
+    # patterns supplied by the app, not by a web page.
+    "RUSTSEC-2025-0081",
+    "RUSTSEC-2025-0075",
+    "RUSTSEC-2025-0080",
+    "RUSTSEC-2025-0100",
+    "RUSTSEC-2025-0098",
+    # tauri-plugin-single-instance 2.4.5 uses zbus 5.19; these three are its unmaintained
+    # D-Bus support crates. The plugin only owns the single-instance socket.
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0372",
+]

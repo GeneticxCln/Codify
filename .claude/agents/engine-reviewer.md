@@ -14,7 +14,7 @@ what the change actually was.
 
 ## What to check
 
-### 1. The seven invariants (`docs/00` §6)
+### 1. The nine invariants (`docs/00` §6)
 
 Read the invariants in `CLAUDE.md`, which quotes them. A change that *weakens* one
 to make its own diff fit is the finding this review exists to catch. Pay attention

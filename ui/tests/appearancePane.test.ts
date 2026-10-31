@@ -54,6 +54,15 @@ test("every theme is a row, so the last one is not two scrolls down a modal", ()
   }
 });
 
+test("the pane offers a persistent reduced-motion choice", () => {
+  // The banner's "Animate anyway" is a session answer, and the banner leaves
+  // with the verdict. Without this control "reduced" was only reachable by
+  // editing storage, and "Animate anyway" could not be undone in the app.
+  assert.match(markup(), /Reduce motion/, "the motion preference is not offered");
+  assert.match(source, /writeSetting\(/, "the control does not write the preference");
+  assert.match(source, /MOTION_CHANGED/, "the control does not follow other writers");
+});
+
 test("one canvas on screen, whichever theme you are looking at", () => {
   // The regression this whole layout exists to prevent. A rainy theme and a
   // grid theme both used to draw a canvas *per theme*; the list draws one for
