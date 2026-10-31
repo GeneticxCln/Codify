@@ -107,6 +107,11 @@ class SettingsService:
         # deliberately collecting replays. Same 730 ceiling as snapshots, for
         # the same fat-finger reason.
         "trace_retention_days": (30, lambda v: max(0, min(v, 730))),
+        # How many days a goal's event timeline is kept. Events hold the prompt, every diff and the
+        # command output — the most sensitive rows in the store — so they are bounded like a recording.
+        # The goal row and its terminal status stay; only the timeline ages out. 0 keeps everything,
+        # for someone deliberately collecting history.
+        "event_retention_days": (365, lambda v: max(0, min(v, 3650))),
         # How many tool-calling turns one conductor run may take before the
         # engine stops it and answers with what it has. Bounded because a model
         # that has lost the thread will call tools forever, and an unbounded
@@ -1927,8 +1932,14 @@ class GoalService:
         self.publish(event)
         return next(s for s in self.steps(goal_id) if s.id == step_id)
 
-    def fail_orphaned_active_goals(self, why: str = "the engine restarted") -> list[tuple[str, str, str]]:
+    def fail_orphaned_active_goals(
+        self, why: str = "the engine restarted", only: set[str] | None = None,
+    ) -> list[tuple[str, str, str]]:
         """Mark goals left PLANNING/RUNNING by a process that is gone as FAILED.
+
+        `only` limits the sweep to goals this process actually drove. A second engine on the same state
+        directory (docs/04 §6) must not fail the first one's live goals on its own shutdown, and the boot
+        rescue is skipped entirely when another engine owns the state directory (see `engine/app.py`).
 
         Called twice, with two different reasons, and the reason is the whole point of
         the parameter. At boot the cause is an engine that died without anyone seeing
@@ -1947,6 +1958,8 @@ class GoalService:
         rows = self._db.execute(
             "SELECT id, status, version FROM goals WHERE status IN ('PLANNING', 'RUNNING')"
         ).fetchall()
+        if only is not None:
+            rows = [r for r in rows if r["id"] in only]
         rescued: list[tuple[str, str, str]] = []
         now = time.time()
         for r in rows:
@@ -1964,6 +1977,26 @@ class GoalService:
             ))
         self._db.commit()
         return rescued
+
+    def prune_events(self, keep_days: int) -> int:
+        """Delete the timelines of goals that ended more than `keep_days` ago. 0 keeps everything.
+
+        Events are the store's copy of prompts, diffs and command output. They used to be deleted only
+        when a person deleted the goal or the workspace, so a retention setting covered recordings and
+        snapshots but left the most sensitive rows in place forever. A goal still in PLANNING or RUNNING
+        is never touched, however old its `updated_at` looks.
+        """
+        if keep_days <= 0:
+            return 0
+        cutoff = time.time() - keep_days * 86400
+        cur = self._db.execute(
+            "DELETE FROM events WHERE goal_id IN ("
+            "SELECT id FROM goals WHERE updated_at < ? AND status NOT IN ('PLANNING', 'RUNNING')"
+            ")",
+            (cutoff,),
+        )
+        self._db.commit()
+        return cur.rowcount
 
     def set_dry_run(self, goal_id: str, enabled: bool) -> None:
         row = self._db.execute(

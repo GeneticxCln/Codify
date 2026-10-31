@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
 import re
@@ -182,6 +183,31 @@ def _truncate_wal(conn: sqlite3.Connection) -> None:
         pass
 
 
+def _claim_state_lock() -> tuple[int | None, bool]:
+    """Try to own this state directory for the life of this process.
+
+    Two engines can be pointed at one state directory (docs/04 §6), and only the one that owns it may
+    treat a PLANNING/RUNNING goal as orphaned: it is the only process that could have been driving it.
+    The lock is advisory, held for the process's life, and a second engine that cannot take it still
+    boots — it just leaves the first one's goals alone.
+
+    Returns `(fd, owns)`. A state directory that cannot hold the lock file is not a reason to refuse to
+    boot; without a lock this process behaves as it did before the lock existed.
+    """
+    path = home.codify_home() / "engine.lock"
+    try:
+        home.ensure_private_dir(path.parent)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return None, True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None, False
+    return fd, True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The keychain is built first so a role-id migration (coder→fixer, ...) can
@@ -301,7 +327,12 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
         speech.sweep_recordings()
     except Exception:
         pass
-    rescued = app.state.goals.fail_orphaned_active_goals()
+    # ── Who owns this state directory ──────────────────────────────────────────
+    # A second engine on the same store must not rescue the first one's live goals: it was not driving
+    # them, and marking them failed stops work that is still happening (docs/04 §6).
+    state_lock, owns_state = _claim_state_lock()
+    app.state.state_lock = state_lock
+    rescued = app.state.goals.fail_orphaned_active_goals() if owns_state else []
     for goal_id, previous, message in rescued:
         try:
             app.state.executor._log(goal_id, None, "warn", message)
@@ -320,6 +351,7 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     # that never opens the statistics screen (the other place it runs, beside every goal's end).
     try:
         app.state.traces.enforce_retention(app.state.settings)
+        app.state.goals.prune_events(app.state.settings.get_int("event_retention_days"))
     except Exception:
         pass
 
@@ -373,8 +405,12 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
         pending = [t for gid in driven for t in _GOAL_TASKS.get(gid, ()) if not t.done()]
         if pending:
             await asyncio.wait(pending, timeout=5)
+        # Only the goals this process actually drove. A second engine sharing the state directory is still
+        # serving its own goals, and this shutdown is not evidence that they ended.
+        # The owner of the state directory may repair every goal still claiming to run — it is the only
+        # engine that could have been driving them. A second engine sharing the store knows only its own.
         for goal_id, previous, message in app.state.goals.fail_orphaned_active_goals(
-            "the engine is shutting down"
+            "the engine is shutting down", only=None if owns_state else set(driven)
         ):
             try:
                 app.state.executor._log(goal_id, None, "warn", message)
@@ -389,6 +425,12 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
                 )
             except Exception:
                 pass
+        if state_lock is not None:
+            try:
+                fcntl.flock(state_lock, fcntl.LOCK_UN)
+            finally:
+                os.close(state_lock)
+            app.state.state_lock = None
 
 
 # The engine's refusals, declared once and applied to every route by
@@ -769,6 +811,25 @@ async def save_key(body: ProviderKeyUpdate, request: Request) -> dict[str, Any]:
     if catalog:
         catalog.invalidate()
     return {"ok": True, "provider": body.provider, "storage": actual}
+
+
+@app.delete("/settings/keys/{provider}")
+async def delete_key(provider: str, request: Request) -> dict[str, Any]:
+    """Forget a provider's saved key.
+
+    Idempotent: removing a key that is not there is the state the caller asked for, not an error. A role
+    that pointed at its own key keeps it — this deletes the provider-scoped entry `save_key` wrote, and
+    the two are separate credentials by design.
+    """
+    if not PROVIDER_SLUG_RE.match(provider):
+        raise ApiError(422, "invalid_provider", f"{provider!r} is not a provider name")
+    keychain: Keychain = getattr(request.app.state, "keychain", None) or Keychain()
+    removed = keychain.delete_provider_key(provider)
+    # The provider's model list can change when its credential does; do not serve the cached one.
+    catalog: ModelCatalogService | None = getattr(request.app.state, "models", None)
+    if catalog:
+        catalog.invalidate()
+    return {"ok": True, "provider": provider, "removed": removed}
 
 
 @app.get("/settings/agents", response_model=list[AgentConfig])
@@ -1265,6 +1326,8 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     "parallel_width": (1, 16),
     "stats_retention_days": (0, 730),
     "trace_retention_days": (0, 730),
+    # Events hold prompts and diffs; the timeline ages out with this window (0 keeps everything).
+    "event_retention_days": (0, 3650),
     "conductor_max_turns": (1, 40),
     "conductor_max_moves": (0, 60),
     # A switch rather than a number a user has to know the meaning of, stored as
@@ -2131,6 +2194,10 @@ async def get_goal_audit(goal_id: str, request: Request) -> dict[str, Any]:
                     running.add(e.step_id)
                     entry["attempts"] = entry.get("attempts", 0) + 1
                     entry["started_at"] = when
+                # A retry re-opens a step that FAILED. Without this the report kept the
+                # old terminal status if the retry never finished, saying FAILED about a
+                # step that was running when the engine died.
+                entry["status"] = "IN_PROGRESS"
             elif status in ("COMPLETED", "FAILED", "CANCELLED"):
                 running.discard(e.step_id)
                 entry["status"] = status
@@ -2566,9 +2633,9 @@ async def retry_step(goal_id: str, step_id: str, body: VersionedAction, request:
     # await the whole step, holding the connection for minutes with no driver claimed.
     updated_step = executor.begin_retry(
         goal_id, step_id, body.expected_version,
-        # The critic's notes are what a conductor acts on when it takes the step again, so a retry it will
-        # drive keeps them. The recipe's fixer never reads them, and for it they would only sit on the timeline.
-        keep_notes=executor.conductor_can_drive(goal_id),
+        # Both drivers read them now: the conductor as guidance, and the recipe's fixer as the reason its
+        # last attempt was rejected. Clearing them before a retry made the second attempt blind.
+        keep_notes=True,
     )
     _spawn(request.app, _retry_and_drive(request.app, goal_id, step_id), goal_id, owns_claim=True)
     return updated_step
@@ -3103,7 +3170,7 @@ async def _close_quietly(websocket: WebSocket, code: int) -> None:
 
 
 @app.websocket("/ws/goals/{goal_id}")
-async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
+async def ws_goal(websocket: WebSocket, goal_id: str, after: int = 0) -> None:
     expected_token = getattr(websocket.app.state, "token", None) or BOOT_TOKEN
     auth_header = websocket.headers.get("authorization", "")
     authenticated = _same_secret(auth_header, f"Bearer {expected_token}")
@@ -3140,7 +3207,9 @@ async def ws_goal(websocket: WebSocket, goal_id: str) -> None:
     # goal for nobody (idle engine CPU 0.2 % -> 13.9 % of a core over 500 views, until restart).
     # `ws_engine` reads its socket for the same reason.
     receiver = asyncio.create_task(websocket.receive_text())
-    after = 0
+    # A reconnect may name the last sequence it saw (`?after=42`) instead of replaying the goal's whole
+    # log; without it every dropped socket redelivered every event the goal had ever produced.
+    after = max(0, after)
     try:
         while True:
             try:

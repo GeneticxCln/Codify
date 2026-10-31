@@ -120,7 +120,7 @@ MAX_LINK_URL_CHARS = 500
 #: A CSS selector is a handle on one part of a page, not a program.
 MAX_SELECTOR_CHARS = 200
 
-#: The most characters of a site list the setting holds (`SettingsService.set_str` stores 200).
+#: The most characters of a site list the setting holds (`SettingsService.STRING_SPEC["web_fetch_hosts"]`).
 MAX_HOSTS_CHARS = 200
 
 #: What a response may be. HTML is parsed; the rest is text that is read as it is.

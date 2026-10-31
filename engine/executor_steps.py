@@ -91,21 +91,54 @@ def _norm_path(p: str) -> str:
     return norm.casefold()
 
 
+def _merge_summaries(
+    earlier: list[dict[str, Any]], latest: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Every file this step has written, latest entry per path, in first-written order.
+
+    A step's change is all of its fixer passes and retries together. The last pass used to replace the
+    list, so a second pass (or a retry after a failed test) left the first pass's files out of the
+    critic's review and out of the commit, while the step still reported COMPLETED. This is the rule the
+    conductor already applies to its own writes (`_StepState.wrote`): a later entry wins, except that a
+    no-change proposal must not erase the diff of the write that did change the file.
+    """
+    merged = {s["path"]: s for s in earlier}
+    for entry in latest:
+        prior = merged.get(entry["path"])
+        if prior is not None and prior.get("changed", True) and not entry.get("changed", True):
+            continue
+        merged[entry["path"]] = entry
+    return list(merged.values())
+
+
 class _Steps(_Design):
     """Executing a plan: one step at a time, or a wave of independent ones.
 
     The fixer (the only writer), the verifier (the only role that runs a command), the critic and the
     scribe, the retry path and the apply path. Calls the design, evidence and core layers."""
 
-    async def run_step(self, goal_id: str, step_id: str, stored_files: list[dict[str, Any]] | None = None) -> None:
+    async def run_step(
+        self, goal_id: str, step_id: str, stored_files: list[dict[str, Any]] | None = None,
+        *, allowed_paths: set[str] | None = None,
+        base_versions: dict[str, str | None] | None = None,
+    ) -> None:
         """Run one step. stored_files=None asks the fixer for changes; a list
         (possibly empty) replays those exact file operations without a fixer
-        call — used by apply_goal to write reviewed dry-run changes."""
+        call — used by apply_goal to write reviewed dry-run changes.
+
+        `allowed_paths`, set for a step running in a parallel batch, is the plan's own footprint for it:
+        a fixer reply that writes anywhere else is refused, because the disjointness proof the batch runs
+        under only covers those paths. `base_versions` is the replay's Apply guard (see `fs.apply`).
+        """
         goal = self.goals.get(goal_id)
         step = self._step(goal_id, step_id)
         ws = self.workspaces.get(goal.workspace_id)
         fs = FileSystemService(ws.root_path)
         self._set_step(goal_id, step, "IN_PROGRESS")
+        if stored_files is None:
+            # A fresh fixer run supersedes a previous dry run's proposal. Passes within this run merge
+            # into it instead (`_store_proposed_files` replaces one path at a time).
+            self._clear_proposed_files(goal_id, step.id)
         # The same evidence the planner planned from, so a step is written against
         # what the repository actually says rather than against a fresh guess.
         evidence = self._evidence_for(goal_id)
@@ -132,12 +165,13 @@ class _Steps(_Design):
                         async with self._stage(
                             goal_id, "fixer", "fixer", step.id, ordinal=fixer_calls,
                         ) as fix_stage:
-                            summaries, wants_pass = await self._fixer(
+                            pass_summaries, wants_pass = await self._fixer(
                                 goal_id, step, fs, goal.dry_run, evidence,
-                                failure_feedback=prior_failure,
+                                failure_feedback=prior_failure, allowed_paths=allowed_paths,
                             )
+                            summaries = _merge_summaries(summaries or [], pass_summaries)
                             fix_stage.record(
-                                "wrote" if any(s.get("changed", True) for s in summaries)
+                                "wrote" if any(s.get("changed", True) for s in pass_summaries)
                                 else "no_change"
                             )
                         # The fixer declared the change multi-stage. Passes are
@@ -163,12 +197,13 @@ class _Steps(_Design):
                             async with self._stage(
                                 goal_id, "fixer", "fixer", step.id, ordinal=fixer_calls,
                             ) as pass_stage:
-                                summaries, wants_pass = await self._fixer(
+                                pass_summaries, wants_pass = await self._fixer(
                                     goal_id, step, fs, goal.dry_run, evidence,
-                                    failure_feedback=prior_failure,
+                                    failure_feedback=prior_failure, allowed_paths=allowed_paths,
                                 )
+                                summaries = _merge_summaries(summaries, pass_summaries)
                                 pass_stage.record(
-                                    "wrote" if any(s.get("changed", True) for s in summaries)
+                                    "wrote" if any(s.get("changed", True) for s in pass_summaries)
                                     else "no_change"
                                 )
                         # The verifier publishes its verdict and raises it as
@@ -212,7 +247,10 @@ class _Steps(_Design):
             else:
                 # A replay is a reviewed decision, not a fresh attempt: there is
                 # nothing for a retry loop to fix, so it never runs on this path.
-                summaries = self._replay_files(goal_id, step, fs, stored_files, dry_run=goal.dry_run)
+                summaries = self._replay_files(
+                    goal_id, step, fs, stored_files, dry_run=goal.dry_run,
+                    base_versions=base_versions,
+                )
                 # A replay wrote what a reviewed fixer pass already wrote, so the
                 # fixer stage is recorded as the replay it was — not as a second
                 # attempt to write, which would double the fixer's measured cost.
@@ -321,17 +359,23 @@ class _Steps(_Design):
 
     async def _apply_goal_locked(self, goal_id: str) -> Goal:
         rows = self.goals._db.execute(
-            "SELECT step_id, path, action, content FROM proposed_files WHERE goal_id = ? ORDER BY rowid",
+            "SELECT step_id, path, action, content, base_version FROM proposed_files "
+            "WHERE goal_id = ? ORDER BY rowid",
             (goal_id,),
         ).fetchall()
         if not rows:
             raise ApiError(409, "nothing_to_apply", "dry-run produced no proposed changes")
 
         by_step: dict[str, list[dict[str, Any]]] = {}
+        by_base: dict[str, dict[str, str | None]] = {}
         for r in rows:
             by_step.setdefault(r["step_id"], []).append(
                 {"path": r["path"], "action": r["action"], "content": r["content"]}
             )
+            if r["base_version"] is not None:
+                # NULL is an older build's row: there is no reviewed version to enforce, and
+                # refusing every legacy proposal would make a reviewed change unapplyable.
+                by_base.setdefault(r["step_id"], {})[r["path"]] = r["base_version"]
 
         # The apply run is a real execution: clear the dry_run flag and reset
         # every step so statuses/events tell the true story.
@@ -374,6 +418,7 @@ class _Steps(_Design):
                     try:
                         await self._run_parallel(
                             goal_id, batch, by_step, paths_for=effective_paths,
+                            base_versions=by_base,
                         )
                     except ApiError as exc:
                         # Dispatch re-check found the disjointness proof stale
@@ -383,16 +428,25 @@ class _Steps(_Design):
                         remaining = [s for s in self.goals.steps(goal_id) if s.status != "COMPLETED"]
                         continue
                 elif batch:
-                    await self.run_step(goal_id, batch[0].id, stored_files=by_step.get(batch[0].id, []))
+                    await self.run_step(
+                        goal_id, batch[0].id, stored_files=by_step.get(batch[0].id, []),
+                        base_versions=by_base.get(batch[0].id, {}),
+                    )
                 else:
                     # The head step's footprint is unprovable (no proposals, no
                     # suggested paths): it runs alone, same contract as the
                     # normal driver.
                     head = remaining.pop(0)
-                    await self.run_step(goal_id, head.id, stored_files=by_step.get(head.id, []))
+                    await self.run_step(
+                        goal_id, head.id, stored_files=by_step.get(head.id, []),
+                        base_versions=by_base.get(head.id, {}),
+                    )
             else:
                 step = remaining.pop(0)
-                await self.run_step(goal_id, step.id, stored_files=by_step.get(step.id, []))
+                await self.run_step(
+                    goal_id, step.id, stored_files=by_step.get(step.id, []),
+                    base_versions=by_base.get(step.id, {}),
+                )
             if self.goals.get(goal_id).status != "RUNNING":
                 return self.goals.get(goal_id)
 
@@ -450,6 +504,7 @@ class _Steps(_Design):
     async def _run_parallel(
         self, goal_id: str, steps: list[PlanStep], stored_files: dict[str, list[dict[str, Any]]] | None,
         paths_for: Any = None,
+        base_versions: dict[str, dict[str, str | None]] | None = None,
     ) -> None:
         """Run a path-disjoint batch concurrently; failures and cancels join.
 
@@ -506,7 +561,16 @@ class _Steps(_Design):
 
         async def run_one(step: PlanStep) -> None:
             stored = (stored_files or {}).get(step.id)
-            await self.run_step(goal_id, step.id, stored_files=stored)
+            # A fresh write may only touch the paths the batch proved disjoint. A replay writes
+            # exactly its stored proposal, which `paths_for` already proved, so it needs no scope.
+            allowed = None
+            if stored is None:
+                allowed = {_norm_path(p) for p in (step.suggested_paths or []) if _norm_path(p)}
+            await self.run_step(
+                goal_id, step.id, stored_files=stored,
+                allowed_paths=allowed,
+                base_versions=(base_versions or {}).get(step.id, {}),
+            )
 
         results = await asyncio.gather(*(run_one(s) for s in resolved), return_exceptions=True)
         errors = [r for r in results if isinstance(r, BaseException)]
@@ -519,9 +583,12 @@ class _Steps(_Design):
                 )
             raise errors[0]
 
-    def _replay_files(self, goal_id: str, step: PlanStep, fs: FileSystemService, files: list[dict[str, Any]], dry_run: bool) -> list[dict[str, Any]]:
+    def _replay_files(
+        self, goal_id: str, step: PlanStep, fs: FileSystemService, files: list[dict[str, Any]], dry_run: bool,
+        base_versions: dict[str, str | None] | None = None,
+    ) -> list[dict[str, Any]]:
         """Apply stored file operations and emit the same diff events as _fixer."""
-        summaries = fs.apply(files, dry_run=dry_run)
+        summaries = fs.apply(files, dry_run=dry_run, expected_versions=base_versions)
         self._publish_changes(goal_id, step.id, summaries, dry_run)
         self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="fixer")
         return summaries
@@ -598,6 +665,7 @@ class _Steps(_Design):
         evidence: dict[str, Any] | None = None,
         failure_feedback: dict[str, Any] | None = None,
         guidance: str = "",
+        allowed_paths: set[str] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Write one step's files.
 
@@ -635,6 +703,13 @@ class _Steps(_Design):
                 "edit your previous approach."
             )
             feedback_text = "\n".join(lines) + "\n\n"
+        if step.review_notes:
+            # A retry after a critic rejection is not a blind second attempt: the critic's reasons are
+            # exactly what the last pass got wrong, and they used to be cleared before the fixer ran.
+            feedback_text += (
+                "IMPORTANT — the critic rejected this step's previous attempt for these reasons:\n"
+                f"{step.review_notes}\n\n"
+            )
         # The locked direction, so this step's files match the other steps'
         # rather than each inventing its own palette. A design-deliverable
         # goal's write step is a special case: it is handed the draft itself,
@@ -675,6 +750,19 @@ class _Steps(_Design):
             files = self._parse_files(reply, notes)
             for note in notes:
                 self._log(goal_id, step.id, "info", note)
+            if allowed_paths is not None:
+                outside = sorted({f["path"] for f in files if _norm_path(f["path"]) not in allowed_paths})
+                if outside:
+                    # The batch runs under a disjointness proof that covers only the plan's paths. A write
+                    # anywhere else can race a sibling step — two steps writing one file, one change lost,
+                    # both reporting COMPLETED — so it is refused and put back to the model, which can keep
+                    # its change inside the step it was given.
+                    raise AgentOutputInvalid(
+                        f"this step runs in parallel with other steps and may write only its own paths: "
+                        f"{', '.join(sorted(allowed_paths))}. It tried to write {', '.join(outside)}, which "
+                        "the plan did not give this step. Keep this step's change inside the paths above.",
+                        role="fixer",
+                    )
             # The fixer may declare itself unfinished: multi-stage changes (a config
             # file in one pass, the code that reads it in the next) do not fit one
             # reply. It asks by returning needs_another_pass=true WITH a plan note;
@@ -1292,8 +1380,8 @@ class _Steps(_Design):
         # would otherwise interleave their staged paths.
         paths = list(dict.fromkeys(d["path"] for d in diffs))
         async with self._git_lock:
-            commit_hash = await asyncio.to_thread(
-                self.git.commit, root_path, commit_message, paths,
+            commit_hash, refused = await asyncio.to_thread(
+                self.git.commit_with_reason, root_path, commit_message, paths,
             )
         if commit_hash:
             self._set_step(goal_id, step, "IN_PROGRESS", commit_message=commit_message)
@@ -1302,11 +1390,11 @@ class _Steps(_Design):
         if paths:
             # Non-empty paths and no commit: either there was nothing left to
             # record (the files matched what is already committed) or git
-            # refused. Silence here reads as "committed" to anyone watching.
+            # refused. Silence here reads as "committed" to anyone watching —
+            # and git's own reason is the only thing that says which one it was.
+            cause = refused or "the step's files match the last commit"
             self._log(
-                goal_id, step.id, "warn",
-                "git commit produced nothing — the step's files match the last commit, "
-                "or git refused for another reason",
+                goal_id, step.id, "warn", f"git commit produced nothing — {cause}",
             )
             return "nothing_to_commit"
         return "nothing_to_commit"

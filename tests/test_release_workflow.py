@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "release.yml"
+CHECK_WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "check.yml"
 
 # A commit, not a tag: 40 lowercase hex characters.
 PINNED = re.compile(r"^[0-9a-f]{40}(\s|$)")
@@ -85,3 +86,26 @@ class TestReleaseWorkflow(unittest.TestCase):
                 body.append(line)
                 index += 1
             yield "\n".join(body)
+
+
+class TestCheckWorkflow(unittest.TestCase):
+    """check.yml runs on every push to master, so its actions are pinned to commits too.
+
+    A moving tag is code the tag's owner can change under the gate. `release.yml` was pinned first
+    because it holds `contents: write`; this workflow runs the tests a merge is judged by, which is
+    the same trust with a quieter failure.
+    """
+
+    def test_every_action_is_pinned_to_a_commit(self) -> None:
+        lines = CHECK_WORKFLOW.read_text(encoding="utf-8").splitlines()
+        uses = [
+            line.split("uses:", 1)[1].split("#", 1)[0].strip()
+            for line in lines
+            if re.match(r"^\s*(?:-\s*)?uses:", line)
+        ]
+        self.assertTrue(uses, "the workflow has no actions left to check")
+        for use in uses:
+            name, _, ref = use.partition("@")
+            self.assertRegex(
+                ref, PINNED, f"{name} is referenced by a moving tag rather than a commit: {use}"
+            )

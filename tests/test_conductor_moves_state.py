@@ -231,10 +231,13 @@ class TestTheStepRemembersEverythingWrittenForIt(MovesCase):
         entry = {"path": "a.py", "action": "update", "unified_diff": "+a = 2", "changed": True}
         staged: list[list[str]] = []
 
-        def commit(root: str, message: str, paths: list[str], *a: Any, **k: Any) -> None:
+        def commit_with_reason(
+            root: str, message: str, paths: list[str], *a: Any, **k: Any
+        ) -> tuple[str, None]:
             staged.append(list(paths))
+            return "deadbeef", None
 
-        with mock.patch.object(self.executor.git, "commit", commit):
+        with mock.patch.object(self.executor.git, "commit_with_reason", commit_with_reason):
             await self.executor._scribe(self.goal.id, step, [entry, dict(entry)], str(self.root), False, None)
 
         self.assertEqual([["a.py"]], staged)

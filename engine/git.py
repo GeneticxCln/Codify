@@ -63,7 +63,10 @@ class GitService:
         are workspace content: they run whatever the repo ships. The whitelist
         keeps git's own identity/locale knobs and drops everything else.
         """
-        keep = ("PATH", "LANG", "LC_ALL", "TZ", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
+        # HOME, so git reads the person's global config exactly as it would in their own terminal:
+        # without it a filter or attribute set there was silently not applied, and `git lfs install`
+        # (whose hooks live under HOME) stored raw blobs for LFS-tracked files.
+        keep = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
         return {k: os.environ[k] for k in keep if k in os.environ}
 
     def is_git_repo(self, root_path: str) -> bool:
@@ -255,7 +258,12 @@ class GitService:
 
     def _tracked_files(self, cwd: str, env: dict[str, str]) -> list[str]:
         """Workspace-relative paths git already knows about (used for deletions)."""
-        res = self._run_bytes(["ls-files", "-z"], cwd=cwd, env=env)
+        try:
+            res = self._run_bytes(
+                ["ls-files", "-z"], cwd=cwd, env=env, timeout=self.commit_timeout_s,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return []
         if res.returncode != 0:
             return []
         # Binary mode: -z output is NUL-separated raw bytes, and decoding with
@@ -335,6 +343,24 @@ class GitService:
         author_name: str = "Codify",
         author_email: str = "codify@local",
     ) -> str | None:
+        """The commit's hash, or None. Same contract as ever; see `commit_with_reason`."""
+        return self.commit_with_reason(root_path, message, paths, author_name, author_email)[0]
+
+    def commit_with_reason(
+        self,
+        root_path: str,
+        message: str,
+        paths: list[str],
+        author_name: str = "Codify",
+        author_email: str = "codify@local",
+    ) -> tuple[str | None, str | None]:
+        """Commit exactly `paths`, and say why when git refused.
+
+        `(hash, None)` on success, `(None, None)` when there was genuinely nothing to record, and
+        `(None, reason)` when git said no. The reason used to be discarded, so a held `index.lock` or a
+        failing hook became the same silent None as "the files already match", and the step's log guessed
+        at a cause.
+        """
         """Commit exactly `paths` (workspace-relative). Empty list → no commit.
 
         `paths` is required, and that is the point. This used to run a bare
@@ -345,10 +371,10 @@ class GitService:
         all — including whatever the user happened to have staged themselves.
         """
         if not self.is_git_repo(root_path):
-            return None
+            return None, None
         # Nothing changed in this run: not our commit to make.
         if not paths:
-            return None
+            return None, None
         cwd = str(Path(root_path).resolve())
         env = self._workspace_env()
         # The paths are file names, not patterns: a step can write a file called `*` or `[id]`, and
@@ -374,7 +400,7 @@ class GitService:
             if resolved.exists() or p in tracked:
                 stageable.append(p)
         if not stageable:
-            return None
+            return None, None
 
         # A gitignored path is fatal to `git add -A --`: git stages the paths
         # before it as it goes, so one ignored file used to leave the step's
@@ -382,21 +408,30 @@ class GitService:
         # ignored ones first. `--others` is exactly the set `git add` refuses —
         # a tracked file that happens to match a pattern is never one of them —
         # and `-z` keeps a file name with a newline in it intact.
-        listed = self._run_text(
-            ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", *stageable],
-            cwd=cwd, env=env,
-        )
+        try:
+            listed = self._run_text(
+                ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", *stageable],
+                cwd=cwd, env=env, timeout=self.commit_timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            return None, f"git ls-files did not finish in {self.commit_timeout_s:g}s"
         if listed.returncode == 0:
             ignored = {p for p in listed.stdout.split("\0") if p}
             stageable = [p for p in stageable if p not in ignored]
             if not stageable:
-                return None
+                return None, None
 
         # New paths must be known to git before a pathspec commit can name them;
         # `-A` also records deletions. Only these paths are touched in the index.
-        added = self._run_text(["add", "-A", "--", *stageable], cwd=cwd, env=env)
+        try:
+            added = self._run_text(
+                ["add", "-A", "--", *stageable], cwd=cwd, env=env, timeout=self.commit_timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            return None, f"git add did not finish in {self.commit_timeout_s:g}s"
         if added.returncode != 0:
-            return None
+            said = (added.stderr or added.stdout or "").strip().splitlines()
+            return None, f"git add failed: {said[0] if said else added.returncode}"
 
         # Commit *with the pathspec*, so a file the user had staged for their own
         # commit stays staged instead of riding along in this one. Git takes the
@@ -412,12 +447,21 @@ class GitService:
             # The hook outlived its welcome. `_run_bytes` has already killed git's
             # process group, including the hook's children; the commit may or may
             # not exist, so this reports no revision rather than a wrong one.
-            return None
+            return None, f"git commit did not finish in {self.commit_timeout_s:g}s"
         if res.returncode != 0:
             # Exit 1 means "nothing to commit" for these paths — the step's files
             # already match the last commit, or git refused for its own reasons.
-            return None
+            # Only the first is quiet; everything else is git's own reason.
+            said = (res.stderr or res.stdout or "").strip().splitlines()
+            reason = said[0] if said else f"git commit exited {res.returncode}"
+            if "nothing to commit" in reason or "no changes added" in reason:
+                return None, None
+            return None, reason
 
         # Return hash
-        rev = self._run_text(["rev-parse", "HEAD"], cwd=cwd, env=env)
-        return rev.stdout.strip() if rev.returncode == 0 else None
+        rev = self._run_text(
+            ["rev-parse", "HEAD"], cwd=cwd, env=env, timeout=self.commit_timeout_s,
+        )
+        if rev.returncode != 0:
+            return None, "the commit was made, but HEAD could not be read"
+        return rev.stdout.strip(), None

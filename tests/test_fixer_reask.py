@@ -301,15 +301,17 @@ class TestAFieldOfTheWrongType(ReAskCase):
         self.assertEqual("agent_output_invalid", self.events("error")[-1]["code"])
         self.assertEqual(SOURCE, self.file, "a reply that was refused wrote something")
 
-    async def test_a_null_content_still_means_an_empty_file(self) -> None:
-        # Not a type error: `create` with no content is how a model makes an empty file.
+    async def test_a_null_content_is_refused_and_never_blanks_a_file(self) -> None:
+        # `update` with null content parses like an edit and used to write an empty file, reported as
+        # changed. It is now a reply the fixer is asked about once, and then a refusal: nothing is written.
         provider = self.build({"files": [{"path": "empty.txt", "action": "create", "content": None}]})
 
         status = await self.run_the_step()
 
-        self.assertEqual(1, len(provider.fixer_prompts))
-        self.assertNotEqual("FAILED", status, self.events("error"))
-        self.assertEqual("", (self.root / "empty.txt").read_text(encoding="utf-8"))
+        self.assertEqual(2, len(provider.fixer_prompts), "the refusal must be put back to the model once")
+        self.assertEqual("FAILED", status)
+        self.assertFalse((self.root / "empty.txt").exists(), "a refused reply wrote something")
+        self.assertEqual("agent_output_invalid", self.events("error")[-1]["code"])
 
     async def asyncTearDown_and_up(self) -> None:
         """A fresh workspace and goal for the next case of a loop, because a step runs once per goal."""

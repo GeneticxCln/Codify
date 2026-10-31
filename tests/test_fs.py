@@ -73,6 +73,59 @@ class TestFileSystemService(unittest.TestCase):
         self.assertIn("+dry content", summaries[0]["unified_diff"])
 
 
+    def test_the_git_directory_is_refused_in_any_case(self) -> None:
+        """A case-insensitive mount answers `.GIT/config` for `.git/config`."""
+        with self.assertRaises(GitMetadataError):
+            self.fs.resolve(".GIT/config")
+        with self.assertRaises(GitMetadataError):
+            self.fs.resolve("sub/.Git/hooks/pre-commit")
+
+    def test_a_symlink_is_not_written_through(self) -> None:
+        """An in-workspace link is refused: its target is a file the path does not name."""
+        target = self.root / "target.txt"
+        target.write_text("original\n", encoding="utf-8")
+        os.symlink(target, self.root / "link.txt")
+
+        with self.assertRaises(ValueError) as caught:
+            self.fs.apply(
+                [{"path": "link.txt", "action": "update", "content": "changed\n"}], dry_run=False,
+            )
+
+        self.assertIn("symbolic link", str(caught.exception))
+        self.assertEqual(target.read_text(encoding="utf-8"), "original\n")
+        self.assertTrue((self.root / "link.txt").is_symlink())
+
+    def test_an_edit_with_no_ops_cannot_truncate_an_unshowable_file(self) -> None:
+        """`edits: []` used to resolve against an empty `before` and truncate a binary file."""
+        (self.root / "blob.bin").write_bytes(b"\x00binary")
+
+        with self.assertRaises(ValueError) as caught:
+            self.fs.apply([{"path": "blob.bin", "action": "edit", "edits": []}], dry_run=False)
+
+        self.assertIn("at least one", str(caught.exception))
+        self.assertEqual((self.root / "blob.bin").read_bytes(), b"\x00binary")
+
+    def test_apply_refuses_a_file_that_changed_after_the_dry_run(self) -> None:
+        """A reviewed proposal is not a licence to overwrite an edit made after the review."""
+        (self.root / "a.txt").write_text("one\n", encoding="utf-8")
+        proposals = [{"path": "a.txt", "action": "update", "content": "two\n"}]
+        summaries = self.fs.apply(proposals, dry_run=True)
+        version = summaries[0]["base_version"]
+        self.assertIsInstance(version, str)
+        (self.root / "a.txt").write_text("edited meanwhile\n", encoding="utf-8")
+
+        with self.assertRaises(ValueError) as caught:
+            self.fs.apply(proposals, dry_run=False, expected_versions={"a.txt": version})
+
+        self.assertIn("changed since the dry run", str(caught.exception))
+        self.assertEqual(on_disk(self.root, "a.txt"), "edited meanwhile\n")
+
+        # The same proposal applies when the file is still the version that was reviewed.
+        (self.root / "a.txt").write_text("one\n", encoding="utf-8")
+        self.fs.apply(proposals, dry_run=False, expected_versions={"a.txt": version})
+        self.assertEqual(on_disk(self.root, "a.txt"), "two\n")
+
+
 class TestWhatApplyActuallyChanged(unittest.TestCase):
     """`changed` and `diff_note`: the fixer's proposal is not evidence of a change."""
 

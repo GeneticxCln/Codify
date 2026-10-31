@@ -344,6 +344,12 @@ def _prepare(conn: sqlite3.Connection, db_path: Path, on_role_migrated: Any | No
     # output about the user's code, so an existing install gains the column
     # defaulted to "record nothing" rather than starting to keep copies.
     _add_column(conn, "goals", "trace", "INTEGER NOT NULL DEFAULT 0")
+    # A dry-run proposal names the version of the file it was resolved against, so Apply can
+    # refuse to overwrite an edit made after the person reviewed it. `""` means the path did
+    # not exist; NULL is a row an older build stored, with no version to compare — refusing
+    # every old proposal would make a reviewed change unapplyable for no reason the person
+    # could act on.
+    _add_column(conn, "proposed_files", "base_version", "TEXT")
     # A conversation is a thread of turns, and an install that predates it keeps
     # every goal with no thread: the column is nullable on purpose, so old
     # history renders as single-turn threads rather than disappearing.

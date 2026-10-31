@@ -354,8 +354,8 @@ repository's release workflow — no key is stored in CI, and none can be forgot
 download with:
 
 ```
-gh attestation verify ~/Downloads/Codify_1.3.4_amd64.deb --repo GeneticxCln/Codify
-gh attestation verify ~/Downloads/Codify_1.3.4_amd64.AppImage --repo GeneticxCln/Codify
+gh attestation verify ~/Downloads/Codify_1.3.5_amd64.deb --repo GeneticxCln/Codify
+gh attestation verify ~/Downloads/Codify_1.3.5_amd64.AppImage --repo GeneticxCln/Codify
 ```
 
 The attestation lives with the repository, not beside the file, which is why `--repo` is required. It

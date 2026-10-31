@@ -1,4 +1,5 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import os
 import subprocess
 import sys
 import tempfile
@@ -6,6 +7,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from engine.fs import FileSystemService
 from engine.git import GitService
@@ -254,6 +256,44 @@ class TestGitService(GitTestBase):
         rev = self.git.commit(str(self.root), "feat: add real", ["real.py", "phantom.py"])
         self.assertIsNotNone(rev)
         self.assertEqual(self.committed_paths(), {"real.py"})
+
+
+    def test_a_refused_commit_returns_gits_reason(self) -> None:
+        """A held index.lock is not silently the same as "nothing to commit"."""
+        self.write("real.py", "x = 1\n")
+        (self.root / ".git" / "index.lock").write_text("", encoding="utf-8")
+
+        commit_hash, reason = self.git.commit_with_reason(
+            str(self.root), "feat: x", ["real.py"],
+        )
+
+        self.assertIsNone(commit_hash)
+        self.assertIsNotNone(reason, "git's own refusal was thrown away")
+        self.assertIn("index.lock", reason or "")
+
+    def test_the_persons_global_git_config_is_read(self) -> None:
+        """HOME reaches git, so a filter or LFS setting configured there is applied.
+
+        The commit environment used to strip HOME. A person's global `filter.upper.clean`
+        was silently ignored, and `git lfs install` (which writes under HOME) would have
+        committed LFS-tracked files as raw blobs.
+        """
+        home_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(home_dir.cleanup)
+        home = Path(home_dir.name)
+        (home / ".gitconfig").write_text(
+            '[filter "upper"]\n\tclean = tr a-z A-Z\n', encoding="utf-8",
+        )
+        self.write(".gitattributes", "*.txt filter=upper\n")
+        self.write("note.txt", "hello\n")
+
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            commit_hash = self.git.commit(
+                str(self.root), "feat: note", [".gitattributes", "note.txt"],
+            )
+
+        self.assertIsNotNone(commit_hash, "the commit did not happen")
+        self.assertEqual(self.git_out("show", "HEAD:note.txt").strip(), "HELLO")
 
 
 class TestGuardedGitCommands(unittest.TestCase):

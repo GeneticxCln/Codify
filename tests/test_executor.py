@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from engine.db import connect
+from engine.fs import FileSystemService
 from engine.git import GitService
 from engine.executor import MAX_LIBRARY_ROUNDS, MAX_REFUSED_TEST_COMMANDS, ExecutorService
 from engine.executor_support import TestsFailed
@@ -1863,6 +1864,11 @@ class _RecordingGit(GitService):
         self.commits.append((message, paths))
         return "abcd1234"
 
+    def commit_with_reason(
+        self, root_path: str, message: str, paths: list[str], *args: Any, **kwargs: Any
+    ) -> tuple[str | None, str | None]:
+        return self.commit(root_path, message, paths, *args, **kwargs), None
+
 
 class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
     """The fixer may declare a change multi-stage (needs_another_pass).
@@ -1957,6 +1963,11 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.goals.steps(self.goal.id)[0].status, "COMPLETED")
         fixer_prompts = [p for r, p in self.provider.calls if r == "fixer"]
         self.assertEqual(len(fixer_prompts), 2, "pass 2 must actually call the fixer")
+        # The step is all of its passes together. Before the merge, the second pass replaced the
+        # first's summaries, so the critic reviewed — and the commit contained — only reader.py.
+        critic_prompts = [p for r, p in self.provider.calls if r == "critic"]
+        self.assertIn("settings.conf", critic_prompts[0], "the critic did not see the first pass's file")
+        self.assertIn("reader.py", critic_prompts[0], "the critic did not see the second pass's file")
 
     async def test_the_pass_bound_holds(self) -> None:
         self._script_fixer([
@@ -3278,6 +3289,86 @@ class TestEditActionEndToEnd(unittest.IsolatedAsyncioTestCase):
             self.goal.id, [{"title": "S1", "description": "d", "suggested_paths": ["a.py"]}]
         )
         return self.goals.steps(self.goal.id)[0]
+
+    def test_a_dry_runs_second_pass_keeps_the_first_pass_proposal(self) -> None:
+        """Apply must write every file the step proposed, not only the last pass's."""
+        self.executor._store_proposed_files(
+            self.goal.id, "s1", [{"path": "a.py", "action": "update", "content": "value = 2\n"}],
+        )
+        self.executor._store_proposed_files(
+            self.goal.id, "s1", [{"path": "b.txt", "action": "create", "content": "b\n"}],
+        )
+
+        rows = self.conn.execute(
+            "SELECT path FROM proposed_files WHERE goal_id = ? AND step_id = ? ORDER BY rowid",
+            (self.goal.id, "s1"),
+        ).fetchall()
+        self.assertEqual([r[0] for r in rows], ["a.py", "b.txt"])
+
+        # A later pass that revises one file replaces that row only.
+        self.executor._store_proposed_files(
+            self.goal.id, "s1", [{"path": "a.py", "action": "update", "content": "value = 3\n"}],
+        )
+        rows = self.conn.execute(
+            "SELECT path, content FROM proposed_files WHERE goal_id = ? AND step_id = ?",
+            (self.goal.id, "s1"),
+        ).fetchall()
+        self.assertEqual(dict(rows), {"a.py": "value = 3\n", "b.txt": "b\n"})
+
+    async def test_apply_refuses_a_file_edited_after_the_dry_run(self) -> None:
+        """The reviewed proposal names the version it was based on; a later edit is not overwritten."""
+        self.provider.others["fixer"] = {
+            "files": [{"path": "a.py", "action": "update", "content": "value = 2\n"}]
+        }
+        step = self._plan()
+        self.executor.goals.set_dry_run(self.goal.id, True)
+        await self.executor.run_step(self.goal.id, step.id)
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "COMPLETED")
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, g.version, "COMPLETED")
+
+        (self.root / "a.py").write_text("value = 99\n", encoding="utf-8")
+
+        result = await self.executor.apply_goal(self.goal.id)
+
+        self.assertEqual(result.status, "FAILED")
+        self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "value = 99\n")
+        errors = [e.payload for e in self.goals.events_after(self.goal.id, 0) if e.type == "error"]
+        self.assertTrue(
+            any("changed since the dry run" in str(e.get("message")) for e in errors), errors,
+        )
+
+    async def test_a_null_update_is_refused_instead_of_blanking_the_file(self) -> None:
+        """`content: null` on an update used to write an empty file and call it changed."""
+        self.provider.others["fixer"] = {
+            "files": [{"path": "a.py", "action": "update", "content": None,
+                       "edits": [{"old_text": "value = 1", "new_text": "value = 2"}]}]
+        }
+        step = self._plan()
+
+        await self.executor.run_step(self.goal.id, step.id)
+
+        self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "value = 1\n")
+        self.assertEqual(self.goals.steps(self.goal.id)[0].status, "FAILED")
+        errors = [e.payload for e in self.goals.events_after(self.goal.id, 0) if e.type == "error"]
+        self.assertTrue(any("requires content" in str(e.get("message")) for e in errors), errors)
+
+    async def test_a_parallel_step_cannot_write_outside_its_own_paths(self) -> None:
+        """The batch's disjointness proof covers only the plan's paths; anything else can race."""
+        from engine.executor import AgentOutputInvalid
+
+        step = self._plan()
+        fs = FileSystemService(str(self.root))
+        self.provider.others["fixer"] = {
+            "files": [{"path": "shared.txt", "action": "create", "content": "mine\n"}]
+        }
+
+        with self.assertRaises(AgentOutputInvalid):
+            await self.executor._fixer(
+                self.goal.id, step, fs, False, None, allowed_paths={"a.py"},
+            )
+
+        self.assertFalse((self.root / "shared.txt").exists())
 
     async def test_a_dry_run_edit_stores_the_resolved_content_not_the_description(self) -> None:
         step = self._plan()

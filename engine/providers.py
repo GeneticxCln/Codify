@@ -1664,8 +1664,9 @@ class Keychain:
         self.forget(old_ref)
         return True
 
-    def forget(self, ref: str) -> None:
-        """Best-effort delete of one entry, from whichever backend holds it."""
+    def forget(self, ref: str) -> bool:
+        """Best-effort delete of one entry, from whichever backend holds it. True when one was there."""
+        had = bool(self.get(ref))
         keyring_mod = self._keyring_module()
         if keyring_mod:
             try:
@@ -1678,13 +1679,23 @@ class Keychain:
                 if ref in data:
                     data.pop(ref)
                     self._write_file(data)
+                    had = True
         except OSError:
             # Nothing else to do: the entry is already unreachable.
             pass
+        return had
 
     def set_provider_key(self, provider: str, api_key: str) -> None:
         """Store an API key for a provider (OS keychain, or the local file)."""
         self._store(f"providers/{provider}", api_key)
+
+    def delete_provider_key(self, provider: str) -> bool:
+        """Remove a saved provider key from both backends. True when one was there.
+
+        There was no door for this: a key saved in Settings could be replaced or made unreachable by a
+        provider switch, but never removed, so the secret stayed in the store for good.
+        """
+        return self.forget(f"providers/{provider}")
 
     def has_provider_key(self, provider: str) -> bool:
         if provider == "ollama":

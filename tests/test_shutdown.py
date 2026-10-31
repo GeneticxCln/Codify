@@ -31,9 +31,11 @@ class TestShutdown(unittest.TestCase):
         seen: list[str] = []
         real = GoalService.fail_orphaned_active_goals
 
-        def recording(self: GoalService, why: str = "the engine restarted") -> Any:
+        def recording(
+            self: GoalService, why: str = "the engine restarted", only: set[str] | None = None,
+        ) -> Any:
             seen.append(why)
-            return real(self, why)
+            return real(self, why, only)
 
         with patch.object(CatalogWatch, "run", crash), patch.object(
             GoalService, "fail_orphaned_active_goals", recording
@@ -58,9 +60,11 @@ class TestShutdown(unittest.TestCase):
             finally:
                 stopped.set()
 
-        def recording(self: GoalService, why: str = "the engine restarted") -> Any:
+        def recording(
+            self: GoalService, why: str = "the engine restarted", only: set[str] | None = None,
+        ) -> Any:
             stopped_when_recorded.append(stopped.wait(2) if started.is_set() else False)
-            return real(self, why)
+            return real(self, why, only)
 
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)

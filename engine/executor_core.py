@@ -537,6 +537,16 @@ class _ExecutorCore:
                 raise AgentOutputInvalid(
                     f"fixer file path must be a string like src/app.py, not {_shape(path)}", role="fixer",
                 )
+            if action in ("create", "update") and content is None:
+                # `{"action": "update", "content": null, "edits": [...]}` parsed, and `apply` wrote the
+                # empty `content` — blanking a file while reporting it changed. A model that confuses
+                # update with edit sends exactly that, so it is a reply the engine asks about once rather
+                # than a file it empties. A create needs content for the same reason.
+                raise AgentOutputInvalid(
+                    f"fixer {action} for {_encodable(path)} requires content: the file's complete text, "
+                    'including its newlines. To remove a file use action "delete".',
+                    role="fixer",
+                )
             if action in ("create", "update") and content is not None and not isinstance(content, str):
                 raise AgentOutputInvalid(
                     f"fixer content for {_encodable(path)} must be one string holding the file's complete text "
@@ -615,6 +625,18 @@ class _ExecutorCore:
             db.rollback()
             raise
 
+    def _clear_proposed_files(self, goal_id: str, step_id: str) -> None:
+        """Forget a step's earlier dry-run proposal before a fresh fixer run.
+
+        A retry that now proposes nothing must not leave stale files applyable. Passes *within* one fixer
+        run are different: each pass adds to the proposal (`_store_proposed_files` replaces one path at a
+        time), because the step's change is all of the passes together — the second pass usually writes a
+        file the first did not, and the critic and the commit need both.
+        """
+        db = self.goals._db
+        db.execute("DELETE FROM proposed_files WHERE goal_id = ? AND step_id = ?", (goal_id, step_id))
+        db.commit()
+
     def _store_proposed_files(
         self, goal_id: str, step_id: str, files: list[dict[str, Any]], summaries: list[dict[str, Any]] | None = None,
     ) -> None:
@@ -625,6 +647,11 @@ class _ExecutorCore:
         may move between the dry run and Apply, and re-running a match against
         moved text would silently do something else. Resolved content makes the
         stored proposal exactly what the user reviewed in the diff.
+
+        One path is replaced at a time rather than the step's whole proposal: a fixer's second pass adds to
+        what the first wrote, and deleting the step's rows first made the earlier pass's files vanish from
+        the proposal and from Apply. `base_version` rides along from the same summaries, so Apply can refuse
+        a file that changed after the review.
         """
         db = self.goals._db
         by_path = {
@@ -632,7 +659,13 @@ class _ExecutorCore:
             for s in (summaries or [])
             if s.get("resolved_content") is not None and s.get("changed", True)
         }
-        db.execute("DELETE FROM proposed_files WHERE goal_id = ? AND step_id = ?", (goal_id, step_id))
+        # `""` names a path that did not exist when the proposal was resolved; NULL in the column
+        # means an older build stored the row and there is no version to compare.
+        bases = {
+            s["path"]: (s.get("base_version") or "")
+            for s in (summaries or [])
+            if "base_version" in s
+        }
         now = time.time()
         for f in files:
             path, action, content = f["path"], f["action"], f.get("content")
@@ -644,8 +677,13 @@ class _ExecutorCore:
                     continue
                 path, action, content = path, "update", resolved["resolved_content"]
             db.execute(
-                "INSERT INTO proposed_files (id, goal_id, step_id, path, action, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), goal_id, step_id, path, action, content, now),
+                "DELETE FROM proposed_files WHERE goal_id = ? AND step_id = ? AND path = ?",
+                (goal_id, step_id, path),
+            )
+            db.execute(
+                "INSERT INTO proposed_files (id, goal_id, step_id, path, action, content, base_version, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), goal_id, step_id, path, action, content, bases.get(path), now),
             )
         db.commit()
 

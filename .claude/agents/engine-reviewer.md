@@ -1,6 +1,6 @@
 ---
 name: engine-reviewer
-description: Reviews a change to engine/ against the seven non-negotiable invariants, the spawn-guard freeze, the pinned ruff/mypy configuration and the declared Python 3.10 floor. Use after editing anything under engine/, and before opening a PR that touches orchestration, the sandbox, git, providers or the database.
+description: Reviews a change to engine/ against the nine non-negotiable invariants, the spawn-guard freeze, the pinned ruff/mypy configuration and the declared Python 3.10 floor. Use after editing anything under engine/, and before opening a PR that touches orchestration, the sandbox, git, providers or the database.
 tools: Read, Grep, Glob, Bash
 ---
 

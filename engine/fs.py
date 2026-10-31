@@ -285,14 +285,17 @@ class FileSystemService:
             raise PathEscapeError(rel)
         # Anywhere in the path, not just at the root: a submodule or a linked
         # worktree keeps its own `.git` a level or two down.
-        if GIT_DIRNAME in Path(rel).parts:
+        # Case-insensitive on purpose: a case-insensitive mount answers `.GIT/config`
+        # for `.git/config`, and refusing only the exact spelling made the refusal a
+        # property of the filesystem rather than of the path.
+        if any(part.casefold() == GIT_DIRNAME for part in Path(rel).parts):
             raise GitMetadataError(rel)
         target = (self.root / rel).resolve()
         if target != self.root and self.root not in target.parents:
             raise PathEscapeError(rel)
         # A symlink inside the workspace points at git's metadata without ever
         # spelling `.git`, so ask where the path *lands*, not only how it reads.
-        if GIT_DIRNAME in target.relative_to(self.root).parts:
+        if any(part.casefold() == GIT_DIRNAME for part in target.relative_to(self.root).parts):
             raise GitMetadataError(rel)
         return target
 
@@ -405,8 +408,8 @@ class FileSystemService:
         except (PathEscapeError, OSError, UnicodeDecodeError):
             return None
 
-    def _read_for_diff(self, path: Path) -> tuple[str, str | None]:
-        """(text, reason there is no text). Never raises.
+    def _read_for_diff(self, path: Path) -> tuple[str, str | None, bytes | None]:
+        """(text, reason there is no text, bytes read). Never raises.
 
         `errors="replace"` would let a binary file be diffed into nonsense, so
         binary and oversized files are reported with the reason instead — and the
@@ -416,20 +419,20 @@ class FileSystemService:
         """
         try:
             if not path.is_file():
-                return "", None
+                return "", None, None
             size = path.stat().st_size
             if size > MAX_DIFF_BYTES:
                 path.open("rb").close()  # not read, but a file that cannot be opened is unreadable at any size
-                return "", f"file is {size} bytes — too large to diff"
+                return "", f"file is {size} bytes — too large to diff", None
             raw = path.read_bytes()
             if looks_binary(raw):
-                return "", "file is binary"
-            return raw.decode("utf-8"), None
+                return "", "file is binary", raw
+            return raw.decode("utf-8"), None, raw
         except OSError as exc:
             # The reason travels into a prompt: what the system said ("Permission denied"), not its errno or path.
-            return "", f"{UNREADABLE}{exc.strerror or type(exc).__name__}"
+            return "", f"{UNREADABLE}{exc.strerror or type(exc).__name__}", None
         except UnicodeDecodeError:
-            return "", "file is not UTF-8 text"
+            return "", "file is not UTF-8 text", raw
 
     def _write_atomic(self, target: Path, data: bytes) -> list[Path]:
         """Write via a temp file + rename, so a crash cannot truncate the target.
@@ -501,7 +504,10 @@ class FileSystemService:
                 pass
         return created
 
-    def apply(self, files: list[dict[str, Any]], *, dry_run: bool) -> list[dict[str, Any]]:
+    def apply(
+        self, files: list[dict[str, Any]], *, dry_run: bool,
+        expected_versions: dict[str, str | None] | None = None,
+    ) -> list[dict[str, Any]]:
         """Write the fixer's file operations, and say what actually changed.
 
         **All of it or none of it.** Two phases: every operation is resolved and validated
@@ -528,10 +534,16 @@ class FileSystemService:
 
         Phase one also refuses, with a ValueError the fixer is asked about once, in a dry run and a real run alike:
         an existing file that cannot be read (its bytes could not be put back after a failed write, and a rollback
-        must not delete it), and a final tree in which one path is both a file and a folder (`a.py` and
-        `a.py/b.py`, or `run.sh/inner.py` with `run.sh` an existing file the batch does not delete). A file replaced
-        by a folder of its name (`utils.py` -> `utils/__init__.py`) is fine in either order: phase two runs the
-        deletions first.
+        must not delete it), a path that is a symbolic link, and a final tree in which one path is both a file and a
+        folder (`a.py` and `a.py/b.py`, or `run.sh/inner.py` with `run.sh` an existing file the batch does not
+        delete). A file replaced by a folder of its name (`utils.py` -> `utils/__init__.py`) is fine in either order:
+        phase two runs the deletions first.
+
+        `expected_versions` is Apply's guard against a file that moved under a reviewed proposal: a mapping from a
+        path to the `version_of` its bytes had when the dry run resolved it (`""` for a path that did not exist).
+        A path whose current bytes no longer match is refused before anything is written, rather than replacing an
+        edit the person made after reviewing the proposal. A path the batch writes twice is checked once, at its
+        first operation, because the second op is part of the same reviewed proposal.
         """
         # Before anything is resolved or read. A workspace saved before `protected_root_reason`
         # existed is still in the database, and `WorkspaceService.create` cannot refuse it.
@@ -544,12 +556,24 @@ class FileSystemService:
         # Where each path stands after the operations planned so far: its text, or None once deleted.
         virtual: dict[Path, str | None] = {}
         spelled: dict[Path, str] = {}  # how the batch wrote each path, for a reason that names it
+        # The bytes each path held before this batch touched it, for a dry run's Apply guard.
+        bases: dict[Path, str | None] = {}
         for item in files:
             rel = item["path"]
             action = item["action"]
             content = item.get("content")
             _require_writable_text(rel, rel, "path")
             target = self.resolve(rel)
+            # `resolve` follows a link, so the check is on the spelling the batch used: writing through a
+            # workspace symlink changes a file the path does not name (and deleting through one removes that
+            # file and leaves the link dangling), which is not what the fixer asked for.
+            link = self.root / rel
+            if link.is_symlink():
+                raise ValueError(
+                    f"{rel} is a symbolic link. Codify does not write through a link: that would change the "
+                    f"file the link names, and a delete would remove it and leave the link dangling. Replace "
+                    f"{rel} with a regular file, or name the file it points at."
+                )
             if target.is_dir():
                 raise ValueError(f"{rel} is a directory, not a file")
             if target.exists() and not target.is_file():
@@ -560,7 +584,8 @@ class FileSystemService:
                 before, note = ("" if planned is None else planned), None
                 exists = planned is not None
             else:
-                before, note = self._read_for_diff(target)
+                before, note, raw_before = self._read_for_diff(target)
+                bases[target] = None if raw_before is None else version_of(raw_before)
                 exists = target.is_file()
                 if exists and note is not None and note.startswith(UNREADABLE):
                     # Its bytes are unknown, so a rollback could neither put them back nor leave the file be:
@@ -569,6 +594,23 @@ class FileSystemService:
                         f"{rel} exists but cannot be read ({note[len(UNREADABLE):]}), so it cannot be changed "
                         f"or deleted safely. Leave {rel} alone"
                     )
+            if expected_versions is not None and rel in expected_versions and target not in virtual:
+                # `""` and None both mean "the path did not exist" (a create proposal stores `""`;
+                # an absent file's version is None). Normalising them keeps a create checkable.
+                if (bases.get(target) or "") != (expected_versions[rel] or ""):
+                    raise ValueError(
+                        f"{rel} changed since the dry run reviewed it, so Apply refused rather than overwrite "
+                        f"that change. Run the dry run again to review the current files."
+                    )
+            if action == "edit" and not item.get("edits"):
+                # An edit with no ops used to resolve to "the file unchanged" — except for a binary, non-UTF-8
+                # or over-the-limit file, where the unresolved `before` is "" and the result truncated it while
+                # reporting no change. The parser refuses this today; refusing it at the one writer keeps the
+                # next caller from reintroducing it.
+                raise ValueError(
+                    f"an edit for {rel} needs at least one {{old_text, new_text}} op; to replace the whole "
+                    'file use action "update" with its complete content'
+                )
             if action == "edit":
                 # Resolve the ops against what the file holds right now, batch so far included.
                 # The result is the concrete `after` content, so dry-run storage and diff
@@ -620,6 +662,9 @@ class FileSystemService:
                     # an edit replays byte-identically without re-matching. Only
                     # set where it differs from what the fixer itself sent.
                     "resolved_content": after if action == "edit" else None,
+                    # The bytes this path held when the proposal was resolved, so Apply can refuse a file
+                    # that changed after the person reviewed the dry run.
+                    "base_version": bases[target],
                     # Why a diff is absent when something *did* change.
                     "diff_note": note if changed and not diff else None,
                 }

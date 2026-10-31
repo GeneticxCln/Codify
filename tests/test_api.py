@@ -384,6 +384,26 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(openai["storage_detail"])
 
+    async def test_a_saved_key_can_be_deleted(self) -> None:
+        """A secret saved in Settings has to be removable, not only replaceable."""
+        r = await self.client.post(
+            "/settings/keys", json={"provider": "openai", "api_key": "sk-gone"}, headers=self.headers
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(app.state.keychain.get_provider_key("openai"), "sk-gone")
+
+        deleted = await self.client.delete("/settings/keys/openai", headers=self.headers)
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertTrue(deleted.json()["removed"])
+        self.assertEqual(app.state.keychain.get_provider_key("openai"), "")
+        keys = (await self.client.get("/settings/keys", headers=self.headers)).json()
+        self.assertFalse(next(k for k in keys if k["provider"] == "openai")["has_key"])
+
+        # Idempotent: asking for the state that already holds is not an error.
+        again = await self.client.delete("/settings/keys/openai", headers=self.headers)
+        self.assertEqual(again.status_code, 200, again.text)
+        self.assertFalse(again.json()["removed"])
+
     async def test_a_pasted_key_loses_its_newline_and_a_spaced_one_is_refused(self) -> None:
         """A header cannot carry a newline, and the client's refusal names the whole header value."""
         r = await self.client.post(
@@ -2229,9 +2249,9 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         # through what the conductor passes it.
         self.assertEqual("a.py: explain the value", await self._retry_with_notes("ws-notes-kept", True))
 
-    async def test_a_retry_on_a_recipe_install_clears_the_notes_as_it_always_did(self) -> None:
-        # The recipe's fixer never reads them, so a stale note would only sit on the timeline.
-        self.assertIsNone(await self._retry_with_notes("ws-notes-cleared", False))
+    async def test_a_retry_on_a_recipe_install_keeps_the_notes_for_the_fixer(self) -> None:
+        # The fixer reads them now: a retry after a critic rejection is not a blind second attempt.
+        self.assertEqual("a.py: explain the value", await self._retry_with_notes("ws-notes-kept", False))
 
     async def test_a_cancel_during_the_retried_step_starts_no_conductor_on_a_recipe_install(self) -> None:
         """M2 through the route: the driver spawned after the step used to run regardless.
@@ -3015,6 +3035,40 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(r.status_code, 422, r.text)
         self.assertEqual(r.json()["code"], "invalid_value")
+
+    def test_ws_resumes_after_the_named_sequence(self) -> None:
+        """A reconnect names the last event it saw instead of replaying the whole log."""
+        from starlette.testclient import TestClient
+
+        with TestClient(app) as client:
+            with tempfile.TemporaryDirectory() as ws_dir:
+                ws = app.state.workspaces.create(WorkspaceCreate(name="WS", root_path=ws_dir))
+                goal = app.state.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
+                app.state.executor._log(goal.id, None, "info", "first")
+                app.state.executor._log(goal.id, None, "info", "second")
+                resume_at = app.state.goals.events_after(goal.id, 0)[0].sequence
+
+                with client.websocket_connect(
+                    f"/ws/goals/{goal.id}?after={resume_at}",
+                    headers={"Authorization": f"Bearer {app.state.token}"},
+                ) as sock:
+                    seen = json.loads(sock.receive_text())
+
+        self.assertGreater(seen["sequence"], resume_at)
+
+    def test_a_second_engine_cannot_claim_the_state_directory(self) -> None:
+        """Only the lock's owner may treat a live goal as orphaned (docs/04 §6)."""
+        import os
+
+        from engine.app import _claim_state_lock
+
+        first, owns = _claim_state_lock()
+        try:
+            self.assertTrue(owns)
+            self.assertEqual((None, False), _claim_state_lock())
+        finally:
+            if first is not None:
+                os.close(first)
 
     def test_ws_refuses_an_unknown_goal_after_auth(self) -> None:
         """Authenticated socket to a goal that does not exist → close 4404.

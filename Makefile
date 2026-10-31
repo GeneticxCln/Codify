@@ -396,6 +396,13 @@ AUDIT_IGNORE = $(shell sed -n 's/^[[:space:]]*"\(RUSTSEC-[0-9-]*\)",.*/--ignore 
 audit:
 	cd src-tauri && cargo audit --deny warnings $(AUDIT_IGNORE)
 
+# The Python half of the same question, for the same reason it is not in `check` or `ci`: pip-audit is
+# not a build dependency and the advisory database is fetched over the network. The packages ship the
+# engine's dependencies, so a vulnerable one is a vulnerability in the product, not only in a dev tool.
+# `--skip-editable` leaves this checkout out of the audit; everything it depends on is still read.
+audit-python:
+	python3 -m pip_audit --skip-editable --progress-spinner off
+
 # The one question the About tab's Download button cannot answer for you: is the file that landed
 # the file that was published? A truncated download looks like a whole file to `apt`, and the
 # release workflow writes a `SHA256SUMS` asset beside the packages for exactly this (`docs/18` §3,

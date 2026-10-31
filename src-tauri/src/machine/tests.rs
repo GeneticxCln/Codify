@@ -386,6 +386,8 @@ fn a_workspace_that_would_hand_over_the_persons_secrets_is_refused() {
         "/home/someone/.codify",
         "/home/someone/.codify/workspaces/a",
         "/var/lib/codify/db",
+        // A workspace that *contains* the state directory can rewrite it just as surely as one inside it.
+        "/var/lib",
         // The machine list mirrors the engine's: system roots exactly, and the
         // directories that decide what runs at login either way.
         "/etc",

@@ -256,6 +256,49 @@ class TestDbAndServices(unittest.TestCase):
                          "a goal already failed is not rescued twice")
         self.assertIn("the engine restarted", rebooted[0][2])
 
+    def test_the_rescue_can_be_limited_to_goals_this_engine_drove(self) -> None:
+        """A second engine sharing the store must not fail the first one's live goals."""
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=self.temp_dir.name))
+        mine = self.goals.create(GoalCreate(workspace_id=ws.id, title="M", description=""))
+        theirs = self.goals.create(GoalCreate(workspace_id=ws.id, title="T", description=""))
+        self.goals.update_status(mine.id, mine.version, "RUNNING")
+        self.goals.update_status(theirs.id, theirs.version, "RUNNING")
+
+        rescued = self.goals.fail_orphaned_active_goals(only={mine.id})
+
+        self.assertEqual([mine.id], [gid for gid, _, _ in rescued])
+        self.assertEqual(self.goals.get(mine.id).status, "FAILED")
+        self.assertEqual(self.goals.get(theirs.id).status, "RUNNING")
+
+    def test_events_age_out_with_the_retention_window(self) -> None:
+        """Events hold prompts and diffs; they used to be kept until the goal was deleted."""
+        import time
+
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=self.temp_dir.name))
+        old = self.goals.create(GoalCreate(workspace_id=ws.id, title="Old", description=""))
+        young = self.goals.create(GoalCreate(workspace_id=ws.id, title="Young", description=""))
+        # A goal is PLANNING until it runs; only terminal goals age out.
+        self.goals.update_status(old.id, old.version, "COMPLETED")
+        self.goals.update_status(young.id, young.version, "COMPLETED")
+        db = self.goals._db
+        for event_id, goal_id, moment in (("e-old", old.id, time.time()), ("e-young", young.id, time.time())):
+            db.execute(
+                "INSERT INTO events (id, goal_id, step_id, type, payload, timestamp, sequence) "
+                "VALUES (?, ?, NULL, 'log', '{}', ?, ?)",
+                (event_id, goal_id, moment, self.goals.next_sequence(goal_id)),
+            )
+        db.execute(
+            "UPDATE goals SET updated_at = ? WHERE id = ?", (time.time() - 90 * 86400, old.id),
+        )
+        db.execute("UPDATE goals SET updated_at = ? WHERE id = ?", (time.time(), young.id))
+        db.commit()
+
+        # Both of the old goal's events go: the creation event and the one inserted here.
+        self.assertEqual(self.goals.prune_events(30), 2)
+        remaining = {r["goal_id"] for r in db.execute("SELECT goal_id FROM events").fetchall()}
+        self.assertEqual(remaining, {young.id}, "the young goal's timeline was pruned too")
+        self.assertEqual(self.goals.prune_events(0), 0, "0 means keep everything")
+
     def test_seeded_roles_name_no_model(self) -> None:
         """A fresh install must not ship hardcoded model ids.
 

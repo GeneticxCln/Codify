@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codify-engine"
-version = "1.3.4"
+version = "1.3.5"
 description = "Codify Multi-Agent Engine"
 readme = "README.md"
 license = { text = "MIT" }
@@ -43,6 +43,9 @@ dev = [
     # Regenerates the checked-in logo/desktop icons on demand
     # (scripts/make_logo.py); nothing in the gate invokes it.
     "pillow>=10.0",
+    # `make audit-python` / the python-audit CI job: the engine's dependencies ship in the packages,
+    # so their advisories are the product's, not only the dev environment's.
+    "pip-audit>=2.7",
 ]
 
 [tool.mypy]

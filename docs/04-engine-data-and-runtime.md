@@ -438,6 +438,11 @@ CREATE TABLE proposed_files (
   path TEXT NOT NULL,
   action TEXT NOT NULL,
   content TEXT,
+  -- The `version_of` the file was resolved against (empty when the path did not
+  -- exist; NULL on a row an older build stored, which Apply cannot check). Apply
+  -- refuses a file whose bytes no longer match, so an edit made after the review
+  -- is never silently overwritten.
+  base_version TEXT,
   created_at REAL NOT NULL
 );
 
@@ -1310,7 +1315,9 @@ still the only writer, and the critic is still the only role that can stop a ste
 draft is authored and planned as usual, but there is no file on disk to read. Neither judge is told to
 skip, though — `_store_proposed_files` already persisted this step's proposal, so it is read back
 (`GoalService.proposed_content`) and reviewed under a heading that says what it is: `DESIGN.md as
-proposed by this step (nothing was written to disk)`. **Both judges read it that way**, through the one
+proposed by this step (nothing was written to disk)`. A proposal is the step's whole change: a second
+fixer pass adds to it (one row per path, replaced when that pass revises the same file) rather than
+replacing what the first pass wrote. **Both judges read it that way**, through the one
 helper `_deliverable_artifact(goal_id, step, ws_root)`: it returns the content and where it came from
 (`"written"` or `"proposed"`), or `None` when there is genuinely nothing. The critic gets the full
 content beside the diff, because the diff is the only place a dry run's content otherwise appears and
@@ -1881,7 +1888,9 @@ The line is printed **only once the engine can serve**: `serve()` opens the SQLi
 
 `token` = 32 bytes CSPRNG hex (64 chars), created once and kept at `<state dir>/boot_token` (`0600`). Desktop reads this line, then attaches `Authorization: Bearer <token>` to HTTP and `?token=` is **forbidden** (query leakage). WS: first text frame from client `{"type":"auth","token":"<hex>"}` or HTTP header on the Upgrade.
 
-WS URL: `ws://127.0.0.1:<port>/ws/goals/{id}`. After auth, server sends events with `sequence > 0` live; client SHOULD `GET /goals/{id}/events?after=` for gap fill.
+WS URL: `ws://127.0.0.1:<port>/ws/goals/{id}`, optionally `?after=<sequence>` to resume where a dropped
+socket stopped instead of replaying the goal's whole log. After auth, server sends events with
+`sequence > 0` live; client SHOULD `GET /goals/{id}/events?after=` for gap fill.
 
 Payload text is stored and served with lone surrogates replaced by U+FFFD, so one bad character cannot make a
 goal's log unreadable. A model's JSON reply can carry an escaped lone surrogate (for example `\ud800`);
@@ -2043,6 +2052,8 @@ first sweep after a client connects is a silent baseline; announcing it would te
 app after an hour away that every model everywhere is new.
 
 Token lifetime is the state directory, not the process. It is written once, with `O_EXCL`, so two engines booting against the same state dir converge on one value rather than each minting its own. This replaced a per-spawn rotation: a client that cached the token was rejected with 401 after every restart, and only the desktop shell could recover, by re-reading the live handshake over IPC — a browser tab pointed at a dev engine has no shell to ask and stayed broken until a human reloaded it. The cost is a longer-lived credential, affordable only because the socket is `127.0.0.1`: anything able to present this token could read the file, and the database beside it, without it. `CODIFY_BOOT_TOKEN` overrides the value for a caller that wants a token scoped to one process, and a state directory that cannot be written falls back to a per-boot token rather than refusing to boot.
+
+The same state directory carries `<state dir>/engine.lock`, an advisory `flock` held for the process's life. It decides who may rescue goals: an engine that cannot take it boots and serves normally, but leaves another live engine's PLANNING/RUNNING goals alone — and on shutdown it fails only the goals it actually drove. Without it, booting a second engine moved the first one's live goal to FAILED.
 
 ### 6.1 Death is bounded
 

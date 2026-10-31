@@ -433,7 +433,9 @@ pub(crate) fn protected_reason(
         }
     }
     for dir in state {
-        if path.starts_with(dir) {
+        // Both directions, exactly as the engine's own `protected_root_reason`: a workspace *inside* the
+        // state directory can rewrite the database, and one that *contains* it can too.
+        if path.starts_with(dir) || dir.starts_with(path) {
             return Some("Codify's own state directory".to_string());
         }
     }
