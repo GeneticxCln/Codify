@@ -504,21 +504,13 @@ class _Conduct(_Plan):
         }
 
     def _picked_pair(self, goal: Goal | None) -> tuple[str, str] | None:
-        """The provider and model the person picked in the command bar for this turn, or None.
+        """The pair the person picked in the command bar for this turn, or None.
 
-        Read from the goal row, which is where `POST /conversations/{id}/turns` recorded it, so it holds for
-        everything the turn goes on to do: the conductor's loop, its plain reply, and the run that resumes
-        after a plan is approved. A *turn* only (`mode == "chat"`): a goal made by `POST /goals` records the
-        same two columns as "what was asked for" and keeps running on the settings, as it always did.
-
-        Both halves or None, for the reason `conductor_provider`/`conductor_model` need both. Nothing here
-        writes: the pick is an input to one run, not configuration (docs/00 §6.2).
+        The rule lives on `AgentOrchestrator.turn_pick`, because the roles borrow the pick too when they have
+        no model of their own (docs/09 §10.20). This is the executor's name for it, kept so the conductor's
+        paths read as what they are doing rather than reaching into the orchestrator.
         """
-        if goal is None or goal.mode != "chat":
-            return None
-        provider = (goal.provider or "").strip()
-        model = (goal.model or "").strip()
-        return (provider, model) if provider and model else None
+        return self.orchestrator.turn_pick(goal)
 
     def _picked_config(self, base: AgentConfig, goal: Goal | None) -> AgentConfig | None:
         """The borrowed row moved onto the person's pick, or None when they picked nothing."""
@@ -1265,22 +1257,11 @@ class _Conduct(_Plan):
         """`base` moved onto `provider`/`model`: the one way a conductor's configuration is built.
 
         Shared by the two things that name a pair, the engine settings (`_conductor_config`) and the
-        person's pick for a turn (`_picked_config`), so the rules below cannot be true of one and not the
-        other. Only the provider, the protocol that follows it, the model and the credential change; the
-        row's temperature, token cap and `num_ctx` stay the borrowed row's. Naming a *different* provider
-        drops the row's `base_url` and `api_key_ref`, which belong to the provider the row points at (the
-        argument in `_conductor_config`'s docstring). Nothing is stored: the result is a value for one run.
+        person's pick for a turn (`_picked_config`), and now by a role borrowing the pick
+        (`AgentOrchestrator._targets`). The rule lives on `AgentRegistryService.config_for_pair` so those
+        three cannot disagree; this name is kept because the conductor's paths read better for it.
         """
-        moved = provider != base.provider
-        return base.model_copy(update={
-            "provider": provider,
-            "protocol": BUILTIN_PROVIDERS.get(
-                provider, BUILTIN_PROVIDERS.get(base.provider, {})
-            ).get("protocol", base.protocol),
-            "model_name": model,
-            "base_url": None if moved else base.base_url,
-            "api_key_ref": None if moved else base.api_key_ref,
-        })
+        return self.orchestrator.registry.config_for_pair(base, provider, model)
 
     def _conductor_fallback_config(self, base: AgentConfig) -> AgentConfig | None:
         """The conductor's fallback target, or None when none is configured.

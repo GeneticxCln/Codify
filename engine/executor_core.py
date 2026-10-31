@@ -384,6 +384,27 @@ class _ExecutorCore:
             return
         if not broken:
             return
+        # A turn carries a model the person picked, and a role with no model of its own borrows it for the
+        # run (`AgentOrchestrator._targets`). That is not a broken role, and naming it would warn about the
+        # one case the pick was recorded to fix. A role that *has* a model but cannot call it — no credential,
+        # say — still runs on its own row, so it is still reported.
+        try:
+            goal = self.goals.get(goal_id)
+        except ApiError:
+            goal = None
+        if goal is not None and self.orchestrator.turn_pick(goal) is not None:
+            kept: list[tuple[str, str]] = []
+            for role, reason in broken:
+                try:
+                    cfg = registry.get_config(role)
+                except ApiError:
+                    # No row at all is the same empty slot: the pick covers the call.
+                    continue
+                if (cfg.model_name or "").strip():
+                    kept.append((role, reason))
+            broken = kept
+        if not broken:
+            return
         detail = "; ".join(f"{role}: {reason}" for role, reason in broken)
         self._log(
             goal_id, None, "warn",

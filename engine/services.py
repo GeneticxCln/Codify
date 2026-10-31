@@ -512,6 +512,39 @@ class AgentRegistryService:
         self._db.commit()
         return merged
 
+    def config_for_pair(
+        self, base: AgentConfig, provider: str, model: str
+    ) -> AgentConfig:
+        """`base` moved onto `provider`/`model` for one run, and nothing else.
+
+        The one rule for a pair that is not the row's own: the conductor's settings, the person's pick for a
+        turn, and a role borrowing that pick all build the same value here, so they cannot disagree about
+        which fields move. Provider, protocol, model and (when the provider moved) the address and credential
+        reference change; temperature, token cap and `num_ctx` stay the borrowed row's, because they describe
+        the job rather than the model answering it. Nothing is written: the result is a value for one run.
+
+        A custom provider slug has no catalog entry to explain it, so its endpoint, protocol and credential
+        are taken from the role row that introduced it, exactly as the conductor's `_with_address` does.
+        """
+        moved = provider != base.provider
+        cfg = base.model_copy(update={
+            "provider": provider,
+            "protocol": BUILTIN_PROVIDERS.get(
+                provider, BUILTIN_PROVIDERS.get(base.provider, {})
+            ).get("protocol", base.protocol),
+            "model_name": model,
+            "base_url": None if moved else base.base_url,
+            "api_key_ref": None if moved else base.api_key_ref,
+        })
+        if not cfg.base_url and provider not in BUILTIN_PROVIDERS:
+            found = custom_provider_address(provider, self.list_configs())
+            if found is not None:
+                protocol, base_url, api_key_ref = found
+                cfg = cfg.model_copy(update={
+                    "protocol": protocol, "base_url": base_url, "api_key_ref": api_key_ref,
+                })
+        return cfg
+
     def get_provider_for(self, role: AgentRole) -> tuple[BaseProvider, AgentConfig]:
         cfg = self.get_config(role)
         return self._factory.build(cfg), cfg

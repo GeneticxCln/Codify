@@ -12,7 +12,8 @@ What must stay true, and is held here:
 - **It writes nothing** (docs/00 section 6.2 is about *writing* configuration). No `agent_configs` row, no
   `engine_settings` row changes, and the scribe's row still says what it said.
 - **It reaches only the turn's own calls.** The eight roles a move calls run on their own configuration; a
-  turn that goes on to the pipeline plans on the planner's model, not the pick.
+  turn that goes on to the pipeline plans on the planner's model, not the pick. The exception is a role with
+  no model chosen: it borrows the pick for the run, and the borrow writes nothing.
 - **Only turns.** A goal made by `POST /goals` records the same two columns and keeps running on the settings.
 - **The settings still decide the fallback**, and a pick that cannot be reached is *said*, not ignored.
 - **The door is bounded**: both halves or neither, and no longer than the settings would accept.
@@ -233,6 +234,80 @@ class TestThePickOnThePlainReply(TurnTestCase):
         self.assertTrue(self.goals.steps(goal.id), "the turn did not reach the pipeline, so this proves nothing")
         self.assertTrue(self._models(), "no role called a model")
         self.assertEqual(set(self._models()), {"stub-model"}, "the pick leaked into a role's call")
+
+
+class TestARoleWithNoModelBorrowsThePick(TurnTestCase):
+    """An empty slot is not a choice: it runs on the turn's pick, and no row changes.
+
+    A fresh install has eight empty model fields. Refusing every role call on a turn that already
+    carries a model would make the person configure a model they just told the engine to use. A role
+    that *has* a model keeps it — `test_the_roles_a_pipeline_turn_calls_keep_their_own_models` above is
+    the control.
+    """
+
+    def _picked_turn(self) -> Any:
+        return self.goals.create_turn(
+            self.thread.id, TurnCreate(prompt="add a test", provider=PICK[0], model=PICK[1])
+        )
+
+    async def test_an_empty_role_runs_on_the_pick_and_the_row_stays_empty(self) -> None:
+        self.registry.set_config("fixer", AgentConfigUpdate(provider="ollama", model_name=""))
+        goal = self._picked_turn()
+
+        cfg, targets = self.executor.orchestrator._targets("fixer", None, goal)
+
+        self.assertEqual((cfg.provider, cfg.model_name), PICK)
+        self.assertEqual([("primary", cfg.model_name)], [(label, c.model_name) for label, c in targets])
+        self.assertEqual(self.registry.get_config("fixer").model_name, "", "the borrow wrote a model onto the row")
+
+    async def test_the_borrowed_call_reaches_the_provider_on_the_pick(self) -> None:
+        self.registry.set_config("fixer", AgentConfigUpdate(provider="ollama", model_name=""))
+        goal = self._picked_turn()
+
+        await self.executor.orchestrator.run_agent("fixer", goal.id, None, "make the change")
+
+        self.assertEqual([c["model"] for c in self.provider.calls], ["picked-model"])
+        self.assertEqual(self.registry.get_config("fixer").model_name, "")
+
+    async def test_the_preflight_does_not_call_an_empty_role_broken_when_a_pick_exists(self) -> None:
+        self.registry.set_config("fixer", AgentConfigUpdate(provider="ollama", model_name=""))
+        goal = self._picked_turn()
+
+        await self.executor.run_planning(goal.id)
+
+        warnings = [
+            e.payload["message"] for e in self.goals.events_after(goal.id, 0)
+            if e.type == "log" and e.payload.get("level") == "warn" and "cannot be called" in e.payload.get("message", "")
+        ]
+        self.assertEqual(warnings, [], "the preflight warned about a role the pick covers")
+
+    async def test_the_control_a_pipeline_goal_still_names_the_empty_role(self) -> None:
+        # No pick on a goal made by POST /goals, so the same empty slot is a real fault.
+        self.registry.set_config("fixer", AgentConfigUpdate(provider="ollama", model_name=""))
+        goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="t", description="change it"))
+
+        await self.executor.run_planning(goal.id)
+
+        warnings = [
+            e.payload["message"] for e in self.goals.events_after(goal.id, 0)
+            if e.type == "log" and e.payload.get("level") == "warn" and "cannot be called" in e.payload.get("message", "")
+        ]
+        self.assertTrue(any("fixer: no model is chosen" in w for w in warnings), warnings)
+
+    async def test_a_role_with_a_model_but_no_credential_is_still_named(self) -> None:
+        # The pick covers an empty model, not a broken address: this role keeps its own row.
+        self.registry.set_config("fixer", AgentConfigUpdate(
+            provider="anthropic", protocol="anthropic", model_name="claude-sonnet-4-6",
+        ))
+        goal = self._picked_turn()
+
+        await self.executor.run_planning(goal.id)
+
+        warnings = [
+            e.payload["message"] for e in self.goals.events_after(goal.id, 0)
+            if e.type == "log" and e.payload.get("level") == "warn" and "cannot be called" in e.payload.get("message", "")
+        ]
+        self.assertTrue(any("fixer: anthropic needs a credential" in w for w in warnings), warnings)
 
 
 class TestThePickAtTheDoor(TurnTestCase):

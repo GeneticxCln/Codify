@@ -17,7 +17,7 @@ from engine.conductor import CallBooks, ToolCallRequest
 from engine.default_prompts import DEFAULT_PROMPTS
 from engine.executor_support import AgentNotConfigured, AgentOutputInvalid
 from engine.laya import GateCall
-from engine.models import AgentConfig, AgentRole, Event, EventType, scrub_surrogates
+from engine.models import AgentConfig, AgentRole, Event, EventType, Goal, scrub_surrogates
 from engine.providers import BaseProvider, FALLBACK_TRIGGER_CODES, ProviderError
 from engine.replies import (
     REPLY_KEYS,
@@ -341,8 +341,25 @@ class AgentOrchestrator:
         failure.role = role
         return failure
 
+    def turn_pick(self, goal: Goal | None) -> tuple[str, str] | None:
+        """The provider and model the person picked in the command bar for this turn, or None.
+
+        Read from the goal row, which is where `POST /conversations/{id}/turns` recorded it, so it holds for
+        everything the turn goes on to do: the conductor's loop, its plain reply, a role with no model, and
+        the run that resumes after a plan is approved. A *turn* only (`mode == "chat"`): a goal made by
+        `POST /goals` records the same two columns as "what was asked for" and keeps running on the settings.
+
+        Both halves or None. Nothing here writes: the pick is an input to one run, not configuration
+        (docs/00 §6.2). `ExecutorService._picked_pair` delegates here so there is one definition.
+        """
+        if goal is None or goal.mode != "chat":
+            return None
+        provider = (goal.provider or "").strip()
+        model = (goal.model or "").strip()
+        return (provider, model) if provider and model else None
+
     def _targets(
-        self, role: AgentRole, primary: AgentConfig | None = None
+        self, role: AgentRole, primary: AgentConfig | None = None, goal: Goal | None = None
     ) -> tuple[AgentConfig, list[tuple[str, AgentConfig]]]:
         """The targets this role may be called on, primary first.
 
@@ -352,11 +369,19 @@ class AgentOrchestrator:
 
         `primary` replaces the role's own row as the *first* target for one call, and nothing else: the
         fallback is still the role row's (a pick does not carry its own), and nothing is written. It exists
-        for a turn's plain reply on the model the person picked in the command bar; no role's `run_agent`
-        passes one.
+        for a turn's plain reply on the model the person picked in the command bar.
+
+        A role with **no model chosen** borrows the turn's pick for that run (docs/09 §10.20). The slot is
+        empty because nobody configured it, not because the person chose it, and a fresh install should be
+        able to answer a turn without writing a model onto eight rows. A role *with* a model keeps it: the
+        pick routes the turn's own calls, not configuration, and a role someone configured is not unset.
         """
         base = self.registry.get_config(role)
         cfg = primary if primary is not None else base
+        if primary is None and goal is not None and not (cfg.model_name or "").strip():
+            picked = self.turn_pick(goal)
+            if picked is not None:
+                cfg = self.registry.config_for_pair(base, *picked)
         targets: list[tuple[str, Any]] = [("primary", cfg)]
         fallback = self.registry.fallback_config_for(base)
         if fallback is not None:
@@ -517,8 +542,7 @@ class AgentOrchestrator:
         does on success it must be able to do again after a failure: a refused reply writes nothing.
         """
         goal = self.goals.get(goal_id)
-        _ = goal  # kept for interface symmetry; config comes from the registry
-        cfg, targets = self._targets(role, primary)
+        cfg, targets = self._targets(role, primary, goal)
         system = system or cfg.system_prompt_override or DEFAULT_PROMPTS[role]
         failures: list[tuple[str, str, ProviderError | AgentOutputInvalid]] = []
 

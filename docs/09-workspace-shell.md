@@ -3235,18 +3235,23 @@ the turn on whatever Settings named (the conductor model, else the scribe row it
 another model changed the label and nothing else. It is now what it says: **a pick routes the turn.**
 
 * **What the pick routes.** The turn's own calls: the conversation and its tool loop (the conductor), the plain
-  reply when no loop is available, and the resume after an approval. It does **not** route the roles. The
+  reply when no loop is available, and the resume after an approval. The
   planner, fixer, verifier and the rest of a pipeline a turn starts still run on the models in Settings → Agents,
   because "a role runs on its own configuration" (docs/01 §2.2) is what lets someone give the fixer a strong
-  model and the scribe a cheap one. The menu says so, in the sentence under its search box and in the button's
-  tooltip, so the label cannot be read as more than it is.
+  model and the scribe a cheap one. **The one exception is an empty slot:** a role with no model chosen borrows
+  the pick for that run (`AgentOrchestrator._targets`), so a fresh install can answer and plan without writing a
+  model onto eight rows. A role that has a model keeps it even when the pick names a different one. The menu says
+  so, in the sentence under its search box and in the button's tooltip, so the label cannot be read as more than
+  it is.
 * **Read, never written.** `ExecutorService._picked_pair` reads the pair from the goal row, for a turn only
   (`mode == "chat"`; a pipeline goal's `provider`/`model` keep meaning what they always meant), and builds the
   call's configuration from the row the call would have used, with the provider and model replaced. It
   inherits that row's temperature and `num_ctx`, and drops its `base_url` and key reference when the
-  provider moved (an endpoint is a provider's, not a model's). **No setting is written**, so invariant 2 (agent
-  configuration is written only by the settings routes) holds; `tests/test_turn_model_routing.py::TestThePickOnThePlainReply::test_a_pick_writes_no_configuration`
-  asserts it and is in the invariant ledger.
+  provider moved (an endpoint is a provider's, not a model's). The same builder (`AgentRegistryService.config_for_pair`)
+  moves a role with no model onto the pick, and it too writes nothing. **No setting is written**, so invariant 2
+  (agent configuration is written only by the settings routes) holds;
+  `tests/test_turn_model_routing.py::TestThePickOnThePlainReply::test_a_pick_writes_no_configuration` asserts it
+  and is in the invariant ledger.
 * **The fallback is kept.** A pick replaces the *primary* only. The configured fallback still catches a failed
   call and is announced as `provider_fallback`, as before. A pick no one can reach (no key, a server that is
   down) is said in the goal's log in those words ("the model you picked ...") rather than in the settings'

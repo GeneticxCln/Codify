@@ -824,9 +824,11 @@ class TurnCreate(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=20000)
     # The command bar's model choice. It is recorded on the goal, and it **routes this turn's own model
     # calls**: the conductor's loop and the plain reply, instead of the conductor model the settings name
-    # (`ExecutorService._picked_pair`). It is read from the goal row and written nowhere else: no role row,
+    # (`AgentOrchestrator.turn_pick`). It is read from the goal row and written nowhere else: no role row,
     # no engine setting (docs/00 §6.2 is about *writing* configuration, and this writes none). The eight roles
-    # a move calls keep running on their own configuration, which only the settings routes change.
+    # a move calls keep running on their own configuration, which only the settings routes change — with one
+    # exception: a role with no model chosen borrows this pair for the run, because an empty slot is not a
+    # choice. That borrow writes nothing either (docs/09 §10.20).
     #
     # Both or neither: half a pair names nothing to call. The caps are the settings' own
     # (`conductor_provider` 64, `conductor_model` 128), because this is the same two strings by another door
