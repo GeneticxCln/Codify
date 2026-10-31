@@ -125,7 +125,7 @@ class _Gate(LayaService):
         self.seen: list[dict[str, Any]] = []
 
     async def decide(
-        self, state: dict[str, Any], on_call: Any = None
+        self, state: dict[str, Any], on_call: Any = None, primary: Any = None
     ) -> LayaDecision:
         self.seen.append(state)
         if self._engine == "skipped":
@@ -143,7 +143,7 @@ class _Gate(LayaService):
 
 
 class _BlockingGate(LayaService):
-    async def decide(self, state: dict[str, Any], on_call: Any = None) -> LayaDecision:
+    async def decide(self, state: dict[str, Any], on_call: Any = None, primary: Any = None) -> LayaDecision:
         return LayaDecision(
             engine="sdk",
             answers={"prompt_injection": {"noul": 0.99}},
@@ -165,7 +165,7 @@ class _WarnGate(LayaService):
     for.
     """
 
-    async def decide(self, state: dict[str, Any], on_call: Any = None) -> LayaDecision:
+    async def decide(self, state: dict[str, Any], on_call: Any = None, primary: Any = None) -> LayaDecision:
         return LayaDecision(
             engine="llm-fallback",
             # A question, so the turn is answered and the card being counted is
@@ -181,7 +181,7 @@ class _WarnGate(LayaService):
 class _UnavailableGate(LayaService):
     """A gate whose own call failed: skipped in kind, broken in fact."""
 
-    async def decide(self, state: dict[str, Any], on_call: Any = None) -> LayaDecision:
+    async def decide(self, state: dict[str, Any], on_call: Any = None, primary: Any = None) -> LayaDecision:
         return LayaDecision(
             engine="skipped",
             unavailable=True,
@@ -374,6 +374,24 @@ class TestAQuestionIsAnswered(TurnTestCase):
             any("risk score" in str(p.get("message")) for p in self._logs(goal.id)),
             "the warning must reach the transcript too, not just the card",
         )
+
+    async def test_a_gate_that_could_not_answer_warns_in_the_chat(self) -> None:
+        # A skipped gate used to be silent unless it blocked or carried a policy warning. "We did not
+        # check this turn" is exactly the kind of thing a person needs to see, and it is a warning
+        # because the gate has never been allowed to fail a turn it could not judge.
+        goal = self._turn("hi")
+        executor = self._executor(_UnavailableGate())
+        await executor.run_chat(goal.id)
+
+        warnings = [
+            payload["message"] for payload in self._logs(goal.id)
+            if payload.get("level") == "warn"
+        ]
+        self.assertTrue(any("gate could not answer" in w for w in warnings), warnings)
+        decisions = [
+            e.payload for e in self.goals.events_after(goal.id, 0) if e.type == "laya_decision"
+        ]
+        self.assertEqual(len(decisions), 1, "the warning was not on the gate's card")
 
     async def test_a_gate_that_broke_is_not_scored_as_one_never_set_up(self) -> None:
         # `skipped` is a deliberate no — `STAGE_SUCCESS_OUTCOMES` counts it as

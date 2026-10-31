@@ -98,7 +98,11 @@ engine's readiness and the desktop shell's handshake never wait on it). Measured
 warm-up finishes ~7 s later, and the first decision after that takes ~1.4 s instead of paying the
 load itself. A decision that arrives *during* the load waits for it (up to the same timeout)
 rather than being skipped, so the first message is neither unguarded nor charged a second,
-fallback model call. It is a daemon thread on purpose: `asyncio.to_thread` workers are joined at
+fallback model call. A turn's gate with no model of its own borrows the model the person picked for
+that turn (`docs/09` §10.20); a call that fails is still skipped rather than fatal, but a chat turn
+now says so in the gate's card instead of staying silent.
+
+It is a daemon thread on purpose: `asyncio.to_thread` workers are joined at
 interpreter exit, so an engine asked to stop mid-load would wait for the load. The price is ~4 GB
 of RAM held from launch instead of from the first message; `CODIFY_LAYA_WARM=0` opts out. A load
 that fails records why in `sdk_error` and the first decision falls back exactly as before.

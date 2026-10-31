@@ -226,7 +226,7 @@ class _Factory(ProviderFactory):
 
 
 class _QuestionGate(LayaService):
-    async def decide(self, state: dict[str, Any], on_call: Any = None) -> LayaDecision:
+    async def decide(self, state: dict[str, Any], on_call: Any = None, primary: Any = None) -> LayaDecision:
         return LayaDecision(
             engine="sdk",
             answers={"intent": {"choice": "question", "confidence": 0.99}},

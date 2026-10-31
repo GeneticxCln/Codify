@@ -34,7 +34,7 @@ from engine.toolcall import ToolReply as _ToolReply
 class _ChangeGate(LayaService):
     """A gate that reads every request as a change, so the fall-through (the standard sequence) is the road taken."""
 
-    async def decide(self, state: dict[str, Any], on_call: Any = None) -> LayaDecision:
+    async def decide(self, state: dict[str, Any], on_call: Any = None, primary: Any = None) -> LayaDecision:
         return LayaDecision(
             engine="sdk", answers={"intent": {"choice": "code_change", "confidence": 0.99}},
         )

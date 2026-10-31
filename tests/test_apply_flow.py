@@ -74,7 +74,7 @@ class _NoGate(LayaService):
     """Skip the pre-flight gate so the pipeline under test is the only variable."""
 
     async def decide(
-        self, state: dict[str, Any], on_call: GateCall | None = None,
+        self, state: dict[str, Any], on_call: GateCall | None = None, primary: Any = None,
     ) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 

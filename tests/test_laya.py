@@ -287,6 +287,44 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         # scored differently for each.
         self.assertTrue(decision.unavailable, "a gate that could not answer says so")
 
+    async def test_a_gate_with_no_model_borrows_the_turns_pick(self) -> None:
+        """An unset `laya` row uses the turn's model, and the decision names it.
+
+        The same rule every role follows when its slot is empty (1.2): the pick is not configuration and
+        is not written; it is what the one run has, and a gate left silently off is worse than one run on
+        a model the person just chose.
+        """
+        provider = _StubProvider(
+            "{\"answers\": {\"intent\": {\"choice\": \"question\"}}}"
+        )
+        conn, registry = _registry_with(provider, self.root, model="")
+        primary = registry.get_config("laya").model_copy(update={"model_name": "picked-model"})
+        try:
+            decision = await LayaService(registry=registry, disabled=True).decide(
+                {"request": "why?"}, primary=primary,
+            )
+            stored = registry.get_config("laya").model_name
+        finally:
+            conn.close()
+        self.assertEqual(decision.engine, "llm-fallback")
+        self.assertEqual(decision.model, "picked-model")
+        self.assertEqual(provider.calls[0]["model"], "picked-model")
+        self.assertEqual(stored, "", "the borrow wrote a model onto the row")
+
+    async def test_a_configured_gate_ignores_the_turns_pick(self) -> None:
+        # The control: the pick is a fallback for an empty slot, not an override of a configured one.
+        provider = _StubProvider("{\"answers\": {\"intent\": {\"choice\": \"question\"}}}")
+        conn, registry = _registry_with(provider, self.root, model="own-model")
+        primary = registry.get_config("laya").model_copy(update={"model_name": "picked-model"})
+        try:
+            decision = await LayaService(registry=registry, disabled=True).decide(
+                {"request": "why?"}, primary=primary,
+            )
+        finally:
+            conn.close()
+        self.assertEqual(decision.model, "own-model")
+        self.assertEqual(provider.calls[0]["model"], "own-model")
+
     async def test_a_gate_with_no_model_configured_is_a_skip_not_a_failure(self) -> None:
         """The other half of `unavailable`. No model chosen for the laya role
         is a fresh install, and reporting it as a broken gate would paint every
@@ -607,7 +645,7 @@ class _BlockingLaya(LayaService):
     """Stands in for a high-confidence injection verdict from the real SDK."""
 
     async def decide(
-        self, state: dict[str, Any], on_call: GateCall | None = None,
+        self, state: dict[str, Any], on_call: GateCall | None = None, primary: Any = None,
     ) -> LayaDecision:
         return LayaDecision(
             engine="sdk",
@@ -620,7 +658,7 @@ class _BlockingLaya(LayaService):
 
 class _SilentLaya(LayaService):
     async def decide(
-        self, state: dict[str, Any], on_call: GateCall | None = None,
+        self, state: dict[str, Any], on_call: GateCall | None = None, primary: Any = None,
     ) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 
@@ -685,7 +723,7 @@ class TestExecutorGate(unittest.IsolatedAsyncioTestCase):
     async def test_warnings_surface_as_events_without_blocking(self) -> None:
         class _WarnLaya(LayaService):
             async def decide(
-        self, state: dict[str, Any], on_call: GateCall | None = None,
+        self, state: dict[str, Any], on_call: GateCall | None = None, primary: Any = None,
     ) -> LayaDecision:
                 return LayaDecision(
                     engine="llm-fallback",
@@ -711,7 +749,7 @@ class TestExecutorGate(unittest.IsolatedAsyncioTestCase):
     async def test_gate_exception_is_skipped_not_fatal(self) -> None:
         class _Exploding(LayaService):
             async def decide(
-        self, state: dict[str, Any], on_call: GateCall | None = None,
+        self, state: dict[str, Any], on_call: GateCall | None = None, primary: Any = None,
     ) -> LayaDecision:
                 raise RuntimeError("boom")
 
@@ -776,11 +814,11 @@ class GateOverrideContract(unittest.TestCase):
         offenders = [
             f"{where}:{node.lineno}"
             for where, node in self._overrides()
-            if "on_call" not in {a.arg for a in node.args.args + node.args.kwonlyargs}
+            if not {"on_call", "primary"} <= {a.arg for a in node.args.args + node.args.kwonlyargs}
         ]
         self.assertEqual(
             offenders, [],
-            "these `decide` overrides cannot accept the `on_call` the executor "
+            "these `decide` overrides cannot accept the `on_call` and `primary` the executor "
             "passes, so each one raises and its gate is silently skipped",
         )
 
@@ -987,7 +1025,7 @@ class TestGateCallIsBooked(unittest.IsolatedAsyncioTestCase):
         """
         class _SdkGate(LayaService):
             async def decide(
-                self, state: dict[str, Any], on_call: GateCall | None = None,
+                self, state: dict[str, Any], on_call: GateCall | None = None, primary: Any = None,
             ) -> LayaDecision:
                 return LayaDecision(
                     engine="sdk", answers={"intent": {"choice": "code_change"}},

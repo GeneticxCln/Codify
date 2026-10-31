@@ -84,6 +84,7 @@ class _ReplayedGate(LayaService):
 
     async def decide(  # noqa: D102
         self, state: dict[str, Any], on_call: GateCall | None = None,
+        primary: Any = None,
     ) -> LayaDecision:
         return self._verdict
 

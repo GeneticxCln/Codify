@@ -34,6 +34,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from engine.models import AgentConfig
 from engine.providers import BaseProvider
 from engine.replies import REPLY_SCHEMAS
 
@@ -491,11 +492,24 @@ class LayaService:
 
     async def _decide_with_llm(
         self, state: dict[str, Any], on_call: GateCall | None = None,
+        primary: AgentConfig | None = None,
     ) -> tuple[dict[str, Any], str, str]:
         if self._registry is None:
             raise RuntimeError("no registry configured")
-        provider, cfg = self._registry.get_provider_for("laya")
         from engine.default_prompts import DEFAULT_PROMPTS
+
+        cfg = self._registry.get_config("laya")
+        # A turn carries a model the person picked, and an unset `laya` row borrows it for that run, for
+        # the same reason every other role does (`AgentOrchestrator._targets`): an empty slot is not a
+        # choice, and a gate that is silently off is worse than one that runs on the turn's model. A row
+        # someone configured keeps its own model; the pick is not an override.
+        if (
+            primary is not None
+            and not (cfg.model_name or "").strip()
+            and (primary.model_name or "").strip()
+        ):
+            cfg = primary
+        provider = self._registry.build_provider(cfg)
 
         # No model chosen yet is a normal fresh-install state, not a gate
         # failure: say so, and let the pipeline continue without a gate.
@@ -532,8 +546,13 @@ class LayaService:
 
     async def decide(
         self, state: dict[str, Any], on_call: GateCall | None = None,
+        primary: AgentConfig | None = None,
     ) -> LayaDecision:
-        """Gate one request. Never raises: an unusable gate is a skipped gate."""
+        """Gate one request. Never raises: an unusable gate is a skipped gate.
+
+        `primary` is the turn's picked model, offered only when this install has no model for the `laya`
+        row: the same borrow every other role makes (docs/09 §10.20). The SDK path does not need it.
+        """
         # Why the SDK gave no verdict *this time*, when the reason is about this
         # request and not about the SDK (a timeout, a busy model). Kept out of
         # `_sdk_error` on purpose: that one is the SDK's standing condition, shown
@@ -575,7 +594,7 @@ class LayaService:
 
         if self._registry is not None:
             try:
-                answers, provider, model = await self._decide_with_llm(state, on_call)
+                answers, provider, model = await self._decide_with_llm(state, on_call, primary)
             except LayaNotConfigured as exc:
                 # This install has not set the gate's model. Deliberate, and
                 # scored as a skip rather than as a gate that broke.

@@ -30,7 +30,7 @@ from tests.test_conductor import ConductorTestCase, _call, _PlainProvider, _Tool
 class _ChangeGate(LayaService):
     """A gate that classifies the request as a change rather than a question."""
 
-    async def decide(self, state: dict[str, Any], on_call: Any = None) -> LayaDecision:
+    async def decide(self, state: dict[str, Any], on_call: Any = None, primary: Any = None) -> LayaDecision:
         return LayaDecision(
             engine="sdk",
             answers={"intent": {"choice": "code_change", "confidence": 0.99}},
@@ -40,7 +40,7 @@ class _ChangeGate(LayaService):
 class _OtherGate(LayaService):
     """A gate that cannot tell what the request is: greetings, thanks, anything unlabelled."""
 
-    async def decide(self, state: dict[str, Any], on_call: Any = None) -> LayaDecision:
+    async def decide(self, state: dict[str, Any], on_call: Any = None, primary: Any = None) -> LayaDecision:
         return LayaDecision(
             engine="sdk",
             answers={"intent": {"choice": "other", "confidence": 0.9}},

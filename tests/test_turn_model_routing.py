@@ -30,6 +30,7 @@ import httpx
 from httpx import ASGITransport
 
 from engine.app import BOOT_TOKEN, app
+from engine.laya import LayaService
 from engine.models import AgentConfigUpdate, GoalCreate, TurnCreate
 from engine.providers import BaseProvider
 from engine.toolcall import ToolReply, ToolSpec
@@ -268,6 +269,24 @@ class TestARoleWithNoModelBorrowsThePick(TurnTestCase):
 
         self.assertEqual([c["model"] for c in self.provider.calls], ["picked-model"])
         self.assertEqual(self.registry.get_config("fixer").model_name, "")
+
+    async def test_the_gates_empty_model_also_borrows_the_pick(self) -> None:
+        # 1.3: the gate follows the same rule, through the executor's own call. A gate that is silently
+        # skipped on a turn that already names a model is the failure this pins.
+        self.registry.set_config("laya", AgentConfigUpdate(provider="ollama", model_name=""))
+        goal = self._picked_turn()
+        executor = self._executor(LayaService(registry=self.registry, disabled=True))
+
+        await executor.run_chat(goal.id)
+
+        # The turn stub routes on the prompt rather than recording a role, so the gate's own system
+        # prompt is what identifies its call (the same phrase the stub's canned reply is keyed by).
+        laya_calls = [
+            c for c in self.provider.calls if "system-1 typed-decision" in c["system_prompt"].lower()
+        ]
+        self.assertTrue(laya_calls, "the gate never called a model")
+        self.assertEqual(laya_calls[-1]["model"], "picked-model")
+        self.assertEqual(self.registry.get_config("laya").model_name, "", "the borrow wrote a model onto the row")
 
     async def test_the_preflight_does_not_call_an_empty_role_broken_when_a_pick_exists(self) -> None:
         self.registry.set_config("fixer", AgentConfigUpdate(provider="ollama", model_name=""))

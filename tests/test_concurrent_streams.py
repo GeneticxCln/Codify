@@ -140,7 +140,7 @@ class _SkippedGate(LayaService):
     """The gate is a separate concern; this test is about stream isolation."""
 
     async def decide(
-        self, state: dict[str, Any], on_call: GateCall | None = None,
+        self, state: dict[str, Any], on_call: GateCall | None = None, primary: Any = None,
     ) -> LayaDecision:
         return LayaDecision(engine="skipped", skipped_reason="test double")
 

@@ -205,6 +205,7 @@ class _Conduct(_Plan):
                 decision = await self.laya.decide(
                     build_state(goal, ws.root_path),
                     on_call=self.orchestrator.gate_call(goal_id),
+                    primary=self._picked_config(self.orchestrator.registry.get_config("laya"), goal),
                 )
                 if decision.blocked:
                     gate_stage.record("block", decision.block_reason or None)
@@ -227,6 +228,15 @@ class _Conduct(_Plan):
                     engine="skipped", skipped_reason=f"gate error: {exc}", unavailable=True
                 )
                 gate_stage.record("unavailable", decision.skipped_reason)
+        # A gate that could not answer is something a person has to act on: the turn was not checked,
+        # and staying silent about that is the same trust-me with less evidence. It is a warning, not a
+        # block — the gate has never been allowed to fail a turn it could not judge (docs/05) — and it
+        # rides the same conditional publish as a policy warning, so a benign verdict still says nothing.
+        if decision.engine == "skipped" and decision.unavailable:
+            decision.warnings.append(
+                "The pre-flight gate could not answer, so this turn was not checked. "
+                "The run continued without it."
+            )
         # Announced only when the gate has something a person has to act on.
         #
         # The gate still ran, and it still gated: the stage above recorded the

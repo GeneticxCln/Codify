@@ -3019,7 +3019,11 @@ The announcement is now conditional, and the parts are separated:
   error, and the card *is* published, so a refusal has its reason on screen
   (§10.4).
 * **A warned turn shows the warning.** Silence is for a verdict that decided
-  nothing a person can act on; a warning is the opposite of that.
+  nothing a person can act on; a warning is the opposite of that. **A gate that
+  could not answer is one of those warnings**: the turn was not checked, and the
+  transcript says so in the same card rather than leaving the failure in a log
+  nobody opens. A gate with no model of its own runs on the turn's pick
+  (§10.20), so this is a call that failed, not one nobody configured.
 * **Only that.** A benign turn publishes its reply and its `goal_status` and
   nothing else about the gate: no `agent_assigned`, no `laya_decision`.
 
