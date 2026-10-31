@@ -20,9 +20,11 @@ import unittest
 from typing import Any
 
 from engine.conductor import BASE_TOOLS, BROWSER_ACTION_TOOLS, STEP_TOOLS, TOOLS, Conductor
+from engine.executor_support import AgentNotConfigured
 from engine.laya import LayaDecision, LayaService
 from engine.models import TurnCreate
 from engine.providers import ProviderError
+from engine.skills import load_skills
 from engine.toolcall import ToolReply
 from tests.test_conductor import ConductorTestCase, _call, _PlainProvider, _ToolProvider
 
@@ -310,6 +312,43 @@ class TestTheConductorCanDirectWhatItSummons(ConductorTestCase):
         prompt = self._prompt_for(provider, "librarian")
         self.assertNotIn("The conductor asked", prompt)
         self.assertIn("Widen the config parser", prompt)
+
+
+class TestReconFailure(ConductorTestCase):
+    """A failed recon is a stop, not an invitation to plan blind.
+
+    `plan` refuses without evidence, and the old result told the conductor it *may* plan without
+    it — advice the next call could only reject. A librarian with no model now says which role
+    needs configuring and tells the conductor to stop; every other failure says stop too, and
+    neither claims the workspace is optional.
+    """
+
+    async def _recon_after(self, failure: Exception) -> str:
+        async def fail(*args: Any, **kwargs: Any) -> Any:
+            raise failure
+
+        executor = self._executor(_ToolProvider())
+        executor._librarian = fail  # type: ignore[method-assign]
+        table = executor._conductor_dispatch(
+            self.goal.id, self.goals.get(self.goal.id), str(self.repo),
+            load_skills(str(self.repo)),
+        )
+        return str(await table["recon"]({"task": "look at the parser"}))
+
+    async def test_a_librarian_with_no_model_is_named_and_told_to_stop(self) -> None:
+        out = await self._recon_after(
+            AgentNotConfigured("librarian", "no model is configured for the librarian role")
+        )
+        self.assertIn("librarian", out.lower())
+        self.assertIn("Stop here", out)
+        self.assertIn("Settings", out)
+        self.assertNotIn("You may plan without evidence", out)
+
+    async def test_any_other_failure_also_says_stop_without_evidence(self) -> None:
+        out = await self._recon_after(ProviderError("provider_http", "the endpoint returned 503"))
+        self.assertIn("Stop here", out)
+        self.assertIn("do not plan", out)
+        self.assertNotIn("You may plan without evidence", out)
 
 
 class TestDecliningIsObeyedAndFailingIsCaught(ConductorTestCase):

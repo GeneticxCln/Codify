@@ -16,6 +16,7 @@ from engine import binary_analysis, usage_audit
 from engine.ask import AskRefused, parse_question
 from engine.conductor import DEFAULT_MAX_TURNS, EndTurn
 from engine.executor_support import (
+    AgentNotConfigured,
     AgentOutputInvalid,
     CriticRejection,
     TestsFailed,
@@ -953,11 +954,20 @@ class ConductorTools:
             async with self.service._stage(self.goal_id, "librarian", "librarian") as lib_stage:
                 evidence = await self.service._librarian(self.goal_id, self.goal, self.ws, task=task)
                 lib_stage.record("incomplete" if evidence.get("capped") else "pack")
+        except AgentNotConfigured as exc:
+            # `plan` refuses without evidence, so "you may plan without evidence" was advice the
+            # next call could only reject. A role with no model is a setting the person can fix,
+            # and the conductor has to stop for them to see it.
+            return (
+                f"The librarian could not run because it has no model configured ({exc}). "
+                "Stop here: do not plan and do not write. Tell the person to choose a model for "
+                "the librarian in Settings → Agent Roles, then ask again."
+            )
         except (AgentOutputInvalid, ProviderError, ValueError) as exc:
             return (
-                f"The librarian could not run ({getattr(exc, 'code', 'error')}: "
-                f"{exc}). You may plan without evidence, but say in your answer "
-                "that the workspace was not looked at."
+                f"The librarian could not run ({getattr(exc, 'code', 'error')}: {exc}). "
+                "Stop here: do not plan and do not write without evidence. Tell the person what "
+                "failed and that the workspace was not looked at."
             )
         return self.service._evidence_text(evidence)
 

@@ -596,6 +596,11 @@ piece is invalidated the moment it stops being true:
   and the conductor may plan again. The recipe's planner still fails the goal,
   because nothing after it can run without a plan. A plan's result carries each
   step's description and suggested paths.
+- **`recon` failure is a stop.** The move used to say "You may plan without
+  evidence", which the next `plan` call can only refuse. It now says stop: a
+  librarian with no model is named with the setting to fix, and any other
+  failure says what failed and that the workspace was not looked at. Neither
+  claims the evidence is optional.
 - **`_write_allowed` says why.** `PAUSED` is not "unapproved" (the plan was
   approved and something stopped the run), and a `FAILED`, `CANCELLED` or
   `COMPLETED` goal says so. Every message still begins "Nothing was written".
