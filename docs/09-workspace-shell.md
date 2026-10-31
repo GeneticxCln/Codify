@@ -2862,7 +2862,11 @@ fixer writes, and the move refuses while the goal is unapproved. The seam is
 `RUNNING`, reachable only through `POST /goals/{id}/start` — a person saying yes.
 So a turn that produces a plan ends with the plan in front of the user and
 **nothing written**; the approval starts it, and `run_conductor_resume` hands the
-approved plan back to the conductor to execute.
+approved plan back to the conductor to execute. The Start button carries one line
+beside it — Codify will write files and run project code with the person's
+permissions — because "Start" alone reads like resuming a paused display, and this
+is the moment those powers are actually granted (`ui/src/components/ChatTimeline.tsx`,
+`ui/tests/transcriptInteraction.test.ts`).
 
 **After Start the conductor owns every step it is given.** It is one conductor
 *run* per open step, each with its own budget and a prompt that names the plan in
