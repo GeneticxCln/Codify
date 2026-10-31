@@ -862,7 +862,18 @@ to survive it deliberately:
   calling itself "thin by design" while the stylesheet said 800, so the two disagreed
   for as long as both existed and the stylesheet was the one rendering.
   The `prefers-reduced-motion` answer is the logo's: the band is parked off the glyphs
-  rather than slowed, so the gradient wordmark is what remains. It matches every
+  rather than slowed, so the gradient wordmark is what remains. The app's own answer is
+  the same one, through `data-motion` on the root: until it existed only the OS
+  preference reached the stylesheet, so choosing "reduced" in the app stopped every
+  canvas and left this band sweeping. The band itself moves by `transform` under a glyph
+  mask rasterized once, not by animating `background-position`: the latter is a paint
+  property, so it re-rasterized the text-clipped word at the display's rate and held
+  ~45% of a core in the shell on a software-composited window. The transform removes the
+  glyph work, but on that window this WebKitGTK still charged a full-window blend for any
+  animated layer — the band alone pinned the shell at 100% — so the verdict still stops
+  it, and the first sweep waits for one, with ten seconds as the ceiling; the software
+  path's pre-paint answer or the boot probe usually has it in under a second. On a GPU-composited window the band runs, with no glyph
+  repainted. It matches every
   theme by *reading* one — every colour is `rgb(var(--codify-*-rgb) / …)` and there is
   no `switch` on the theme id — so the same rules give phosphor green, magenta, or flat
   white depending on what is active, and no new rule is needed for the seventeenth theme.
@@ -995,15 +1006,64 @@ to survive it deliberately:
   rather than a slow one, because every user who ever switched away would otherwise keep a
   still backdrop for the rest of the session.
 
+  **The measurement starts before the theme does.** The watchdog's window is ten one-second
+  samples, and until it closes the window is paying full rate for the thing it will later
+  stop — the first seconds of the boot are the most expensive ones. On the path where the
+  shell already knows the answer it does not measure at all: with
+  `WEBKIT_DISABLE_DMABUF_RENDERER` set, `apply_software_render_motion_default` turns off
+  `gtk-enable-animations` before the webview's first paint, which WebKit exposes as
+  `prefers-reduced-motion`, so every canvas draws its one still frame and every CSS
+  animation is parked from the first frame. The page asks the same fact at mount
+  (`codify_software_rendering`, with the page-load global and event as the earlier paths),
+  records the verdict and puts up the banner; a person can then choose to animate anyway,
+  which is when the lower rate below applies. The first paint is still.
+
+  On every other window both backdrop loops draw their static frame, then ask the shell
+  for the window's cumulative rendering CPU time — its own main thread plus the WebKit web
+  process it spawned (`codify_render_cpu_ms`), draw five frames twice, and judge the cheaper
+  pass's per-frame cost against 35% of a core at the requested interval — the same line the
+  watchdog uses. A frame over budget records the same starvation verdict the watchdog would
+  have reached, and the loop never arms; a frame under budget starts it at the requested
+  rate. The probe draws ten frames in about 0.4 s, so there are no seconds of full-cost
+  animation before the measurement, and the watchdog stays as the sustained backstop for a
+  machine that gets slower later. On the machine this was measured on, the two passes read
+  56 ms and 26 ms per frame at a 30 FPS interval (the budget is ~11.6 ms); the probe recorded
+  the verdict and the theme started at the starved rate, instead of the ~100% a full-rate
+  backdrop had held there. The cheaper of two passes is the one judged because the probe runs
+  during boot: the first pass can include layout, fonts and the engine handshake, and a
+  machine that is fast at rest should not lose its weather to a mount storm. A machine that
+  is still too slow after it is still caught by the watchdog.
+
+  Profiled at the starved rate, the shell held ~36% of a core at 15 FPS (web process ~6%),
+  ~26% at 10 FPS (web ~2%) and ~15% at 5 FPS (web ~2.5%) — a ~24–30 ms shell cost per
+  composited frame, so the cost tracks the number of frames and the web process's own
+  painting is a rounding error. That is the UI-process shape. On the dma-buf-disabled path
+  the shares invert: measured on the same app, the **web process** held ~98% of a core while
+  the shell sat at ~6%, and a watchdog that watched only the shell called the window
+  affordable and let the animation run. The reading is therefore the sum, not the shell's
+  own thread, and both shapes cross the same 35% line.
+
+  **The kept rate scales with the window.** "Animate anyway" keeps the backdrop but not the
+  rate it was measured at: one composited frame is a full-window blend, so its cost tracks
+  physical pixels. On the ~2 MP window the rates above were measured on, ten FPS is legible
+  and held ~26%; the window that actually froze was 1280×800 at 3× (~8.3 MP), where one
+  frame measured ~125 ms and even 5 FPS held ~55% of a core. The starved rate is therefore
+  `max(2, 10 × 2 MP / physical area)`: ~2.4 FPS on that window, ten on the reference one, and
+  two as the floor below which the effect is a slideshow rather than weather. Painters that
+  read `tick.seconds` keep their speed and show it in bigger steps; the rain is the
+  documented outlier and advances once per released frame, so it slows with the rate.
+
   **The half this does not cover, and how it showed up.** On the checkout where this was
   measured, the frame budget never fires: `rAF` is delivered quickly while the UI process
   rasterises, so the page cannot tell that its own decoration is what is starving the
   window. Measured there, the app burned ~97% of a core at idle, and **~33% with the
   effects stopped** (`gtk-enable-animations=false`, which the page reads as
-  `prefers-reduced-motion`) — so the relief valve works and the automatic verdict does not
-  reach that machine. A compositor-aware verdict has to come from the side that pays the
-  cost, which is the shell; until then, the budget above covers the machines whose frames
-  are throttled and the motion preference covers the rest.
+  `prefers-reduced-motion`) — so the relief valve works and the page-side budget does not
+  reach that machine. That is why the compositor-aware verdict comes from the one process
+  that can read the whole window's cost: the shell's watchdog and the boot probe above,
+  summing the shell's main thread and the WebKit web process rather than trusting either
+  alone. The frame budget still covers the machines whose frames are throttled; the shell
+  measurement covers the ones whose frames are not.
 - **Nothing else.** In particular the engine-health dot is steady: its colour already
   reports the connection, so a loop over it carried no information a reduced-motion user
   could receive. If you add a sixth, the burden is on you to say which of the two

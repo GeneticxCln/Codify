@@ -127,9 +127,11 @@ fn holds_engine(dir: &Path) -> bool {
 /// 1. **`CODIFY_ROOT`**, when set. It is taken *as given even when it is wrong*: a
 ///    mistyped variable must come out as `launch_problem` naming that path, never be
 ///    quietly replaced by a guess that happens to work on this machine and not the next.
-/// 2. **The working directory** (with `src-tauri` stripped), when it holds the engine.
-///    This is the dev flow, and it wins over the binary's location so that running a
-///    second checkout from inside it runs that checkout.
+/// 2. **The working directory** (with `src-tauri` stripped), only when `trust_cwd` is
+///    set. This is the dev flow and running a second checkout from inside it: opting in
+///    is what lets it win over the binary's location, and without it a folder's
+///    `engine/__main__.py` is not run merely because the app was launched from that
+///    folder (see `trust_working_directory`).
 /// 3. **An ancestor of the executable** that holds the engine. A binary built in place
 ///    lives at `<checkout>/src-tauri/target/{debug,release}/codify`, so the checkout is
 ///    a few parents up, and this is what makes a launcher work from any directory.
@@ -139,12 +141,13 @@ pub(crate) fn resolve_project_root(
     explicit: Option<&str>,
     exe: Option<&Path>,
     cwd: &Path,
+    trust_cwd: bool,
 ) -> PathBuf {
     if let Some(root) = explicit.map(str::trim).filter(|root| !root.is_empty()) {
         return PathBuf::from(root);
     }
     let from_cwd = project_root_from(cwd);
-    if holds_engine(&from_cwd) {
+    if trust_cwd && holds_engine(&from_cwd) {
         return from_cwd;
     }
     if let Some(exe) = exe {
@@ -153,6 +156,20 @@ pub(crate) fn resolve_project_root(
         }
     }
     from_cwd
+}
+
+/// Whether the working directory may choose the checkout: `CODIFY_DEV_CWD=1`.
+///
+/// Off by default. A command run inside a cloned repository must not execute that
+/// repository's `engine/` — and its own `.venv/bin/python3` — merely because the folder
+/// was the working directory: a folder is content, and content does not choose what the
+/// app runs. A developer who wants the working directory opts in, and `CODIFY_ROOT`
+/// remains the explicit way to point a packaged app at a checkout.
+pub(crate) fn trust_working_directory() -> bool {
+    matches!(
+        std::env::var("CODIFY_DEV_CWD").as_deref(),
+        Ok("1") | Ok("true")
+    )
 }
 
 /// The directory under the app's resources that a packaged build carries its engine in:
@@ -199,12 +216,14 @@ fn holds_bundle(dir: &Path) -> bool {
 ///    engine it was built with, so the shell and the engine it talks to come from one commit;
 ///    a checkout that happens to be the working directory does not replace it. A dev build has
 ///    no bundle, so for it nothing changes.
-/// 3. **A checkout**, found as `resolve_project_root` finds one.
+/// 3. **A checkout**, found as `resolve_project_root` finds one — the executable's own
+///    checkout, or the working directory when `trust_cwd` opted in.
 pub(crate) fn resolve_engine(
     explicit: Option<&str>,
     bundle: Option<&Path>,
     exe: Option<&Path>,
     cwd: &Path,
+    trust_cwd: bool,
 ) -> EngineLaunch {
     if let Some(root) = explicit.map(str::trim).filter(|root| !root.is_empty()) {
         let root = PathBuf::from(root);
@@ -221,7 +240,7 @@ pub(crate) fn resolve_engine(
             source: EngineSource::Bundled,
         };
     }
-    let root = resolve_project_root(None, exe, cwd);
+    let root = resolve_project_root(None, exe, cwd, trust_cwd);
     EngineLaunch {
         interpreter: engine_interpreter(&root),
         root,
@@ -246,10 +265,26 @@ pub(crate) struct EngineEnv {
 /// * `PYTHONHOME` removed — inherited from a shell that set it for another Python, it would
 ///   send this interpreter looking for its standard library in someone else's install.
 ///
+/// The person's own `PYTHONPATH` travels beside the engine's as
+/// `CODIFY_USER_PYTHONPATH` (empty when they had none). The sandbox gives that value back
+/// to a workspace command, which must not inherit the checkout on its path: a project
+/// with its own `engine/` package would import Codify's instead.
+///
 /// A checkout's engine keeps the user's environment exactly as before: its interpreter is the
 /// developer's own, and user site-packages are a developer's tool.
-pub(crate) fn engine_env(launch: &EngineLaunch) -> EngineEnv {
-    let mut set = vec![("PYTHONPATH", launch.root.clone().into_os_string())];
+pub(crate) fn engine_env(
+    launch: &EngineLaunch,
+    user_pythonpath: Option<&std::ffi::OsStr>,
+) -> EngineEnv {
+    let mut set = vec![
+        ("PYTHONPATH", launch.root.clone().into_os_string()),
+        (
+            "CODIFY_USER_PYTHONPATH",
+            user_pythonpath
+                .unwrap_or_else(|| std::ffi::OsStr::new(""))
+                .to_os_string(),
+        ),
+    ];
     let mut remove = Vec::new();
     if launch.source == EngineSource::Bundled {
         set.push(("PYTHONDONTWRITEBYTECODE", "1".into()));
@@ -599,21 +634,23 @@ mod tests {
         let exe = root.join("src-tauri/target/release/codify");
         let home = scratch_dir("exe-ancestor-home");
 
-        assert_eq!(root, resolve_project_root(None, Some(&exe), &home));
+        assert_eq!(root, resolve_project_root(None, Some(&exe), &home, false));
     }
 
     #[test]
-    fn the_working_directory_wins_when_it_holds_the_engine() {
+    fn the_working_directory_wins_only_when_a_developer_opts_in() {
         // Running a second checkout from inside it must run that checkout, not the one the
-        // binary happens to sit in.
+        // binary happens to sit in — but only when the developer asked for that. A folder
+        // that happens to contain an `engine/` is not a reason to run the code in it.
         let here = checkout("cwd-wins-here");
         let other = checkout("cwd-wins-other");
         let exe = other.join("src-tauri/target/debug/codify");
 
-        assert_eq!(here, resolve_project_root(None, Some(&exe), &here));
+        assert_eq!(other, resolve_project_root(None, Some(&exe), &here, false));
+        assert_eq!(here, resolve_project_root(None, Some(&exe), &here, true));
         assert_eq!(
             here,
-            resolve_project_root(None, Some(&exe), &here.join("src-tauri"))
+            resolve_project_root(None, Some(&exe), &here.join("src-tauri"), true)
         );
     }
 
@@ -623,7 +660,7 @@ mod tests {
         let exe = real.join("src-tauri/target/debug/codify");
         let mistyped = "/definitely/not/a/checkout";
 
-        let chosen = resolve_project_root(Some(mistyped), Some(&exe), &real);
+        let chosen = resolve_project_root(Some(mistyped), Some(&exe), &real, false);
 
         assert_eq!(
             PathBuf::from(mistyped),
@@ -636,7 +673,7 @@ mod tests {
     #[test]
     fn an_empty_codify_root_is_not_a_choice() {
         let root = checkout("explicit-empty");
-        assert_eq!(root, resolve_project_root(Some("  "), None, &root));
+        assert_eq!(root, resolve_project_root(Some("  "), None, &root, false));
     }
 
     #[test]
@@ -644,7 +681,7 @@ mod tests {
         let nowhere = scratch_dir("nowhere");
         let exe = nowhere.join("bin/codify");
 
-        let chosen = resolve_project_root(None, Some(&exe), &nowhere);
+        let chosen = resolve_project_root(None, Some(&exe), &nowhere, false);
 
         assert_eq!(nowhere, chosen);
         assert!(launch_problem(&chosen)
@@ -755,6 +792,7 @@ mod tests {
             Some(&carried),
             Some(Path::new("/usr/bin/codify-desktop")),
             &home,
+            false,
         );
         assert_eq!(launch.source, EngineSource::Bundled);
         assert_eq!(launch.root, carried);
@@ -767,7 +805,7 @@ mod tests {
         // to the engine it was built with — not to whatever commit that checkout is on.
         let carried = bundle("bundled-over-cwd");
         let here = checkout("bundled-cwd-checkout");
-        let launch = resolve_engine(None, Some(&carried), None, &here);
+        let launch = resolve_engine(None, Some(&carried), None, &here, false);
         assert_eq!(launch.source, EngineSource::Bundled);
         assert_eq!(launch.root, carried);
     }
@@ -776,7 +814,7 @@ mod tests {
     fn codify_root_still_points_a_package_at_a_checkout() {
         let carried = bundle("bundled-under-root");
         let theirs = checkout("bundled-codify-root");
-        let launch = resolve_engine(theirs.to_str(), Some(&carried), None, &carried);
+        let launch = resolve_engine(theirs.to_str(), Some(&carried), None, &carried, false);
         assert_eq!(launch.source, EngineSource::Explicit);
         assert_eq!(launch.root, theirs);
         assert_eq!(launch.interpreter, PathBuf::from("python3"));
@@ -788,7 +826,7 @@ mod tests {
         // working directory, instead of running the bundle's code under the PATH's Python.
         let broken = checkout("bundled-half");
         let home = scratch_dir("bundled-half-home");
-        let launch = resolve_engine(None, Some(&broken), None, &home);
+        let launch = resolve_engine(None, Some(&broken), None, &home, false);
         assert_eq!(launch.source, EngineSource::Checkout);
         assert_eq!(launch.root, home);
         assert!(launch_problem(&launch.root).is_some());
@@ -801,9 +839,12 @@ mod tests {
         let home = scratch_dir("no-bundle-home");
         let missing = scratch_dir("no-bundle-resources").join(BUNDLE_DIR);
         for bundle in [None, Some(missing.as_path())] {
-            let launch = resolve_engine(None, bundle, Some(&exe), &home);
+            let launch = resolve_engine(None, bundle, Some(&exe), &home, false);
             assert_eq!(launch.source, EngineSource::Checkout);
-            assert_eq!(launch.root, resolve_project_root(None, Some(&exe), &home));
+            assert_eq!(
+                launch.root,
+                resolve_project_root(None, Some(&exe), &home, false)
+            );
         }
     }
 
@@ -826,14 +867,21 @@ mod tests {
     #[test]
     fn a_bundled_engine_is_isolated_and_a_checkout_keeps_its_environment() {
         let carried = PathBuf::from("/usr/lib/Codify/engine-bundle");
-        let bundled = engine_env(&EngineLaunch {
-            interpreter: bundled_interpreter(&carried),
-            root: carried.clone(),
-            source: EngineSource::Bundled,
-        });
+        let bundled = engine_env(
+            &EngineLaunch {
+                interpreter: bundled_interpreter(&carried),
+                root: carried.clone(),
+                source: EngineSource::Bundled,
+            },
+            Some(std::ffi::OsStr::new("/home/me/.local/lib")),
+        );
         assert!(bundled
             .set
             .contains(&("PYTHONPATH", carried.clone().into_os_string())));
+        assert!(bundled.set.contains(&(
+            "CODIFY_USER_PYTHONPATH",
+            std::ffi::OsString::from("/home/me/.local/lib")
+        )));
         assert!(bundled
             .set
             .contains(&("PYTHONDONTWRITEBYTECODE", "1".into())));
@@ -841,12 +889,21 @@ mod tests {
         assert_eq!(bundled.remove, vec!["PYTHONHOME"]);
 
         let root = PathBuf::from("/home/me/Codify");
-        let checkout = engine_env(&EngineLaunch {
-            interpreter: PathBuf::from("python3"),
-            root: root.clone(),
-            source: EngineSource::Checkout,
-        });
-        assert_eq!(checkout.set, vec![("PYTHONPATH", root.into_os_string())]);
+        let checkout = engine_env(
+            &EngineLaunch {
+                interpreter: PathBuf::from("python3"),
+                root: root.clone(),
+                source: EngineSource::Checkout,
+            },
+            None,
+        );
+        assert_eq!(
+            checkout.set,
+            vec![
+                ("PYTHONPATH", root.into_os_string()),
+                ("CODIFY_USER_PYTHONPATH", std::ffi::OsString::new()),
+            ]
+        );
         assert!(checkout.remove.is_empty());
     }
 

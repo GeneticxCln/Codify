@@ -9,7 +9,7 @@ mod webview_bridge;
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Listener, Manager, State};
 use tokio::sync::Mutex;
 // The one wait in the exit path is a future it awaits, not a thread it blocks:
@@ -395,28 +395,43 @@ impl EngineProcess {
 //
 // On a machine whose WebKitGTK composites in software (an Nvidia/Wayland
 // session without a working dma-buf path), a full-window 30 FPS backdrop costs
-// about a whole core *in this process* — and the cost lands on the GTK main
-// loop, so the window stops answering input. The page cannot see the problem:
-// its frames keep being delivered, its painter is cheap, and the burn is here.
-// So the shell, the one party that pays, is the party that says so: it watches
-// its own main-thread CPU, and when the app has been idle-and-burning long
-// enough, it announces `codify:engine-render-starved` and the page stops the
-// effects. See `ui/src/motionPreference.ts` for the other end.
+// about a whole core — and the window stops answering input. The page cannot
+// see the problem: its frames keep being delivered and its painter looks cheap.
+// Where that core lands depends on how WebKit was told to render: on the GTK
+// main loop when it composites in the UI process, and in the **WebKit web
+// process** when the dma-buf path is disabled (`WEBKIT_DISABLE_DMABUF_RENDERER=1`,
+// the documented Nvidia workaround). A watchdog that watched only this process
+// read the second shape as a few percent and let the animation run at a core.
+// So the shell reads the rendering work of the whole window — its own main
+// thread plus the WebKit web processes it spawned — and when the app has been
+// idle-and-burning long enough, it announces `codify:engine-render-starved` and
+// the page stops the effects. See `ui/src/motionPreference.ts` for the other end.
+//
+// The page also gets to ask for that clock before a theme starts
+// (`codify_render_cpu_ms`, below), because the watchdog's ten-second window is
+// ten seconds of full-rate animation on the machine that cannot afford it. The
+// probe is the first measurement; the watchdog is the sustained backstop.
 
 /// The shell event the watchdog announces, and the payload it carries.
 pub const RENDER_STARVED_EVENT: &str = "codify:engine-render-starved";
 
 /** The thresholds, named once so a reader (and the freeze test) can judge them. */
 pub mod render_watchdog {
-    /// A sample is a fraction of one core spent by one thread in 1 s: the
-    /// kernel counts 100 ticks per core-second (`CLK_TCK` on Linux).
+    /// A sample is CPU ticks between two readings; the kernel counts 100 ticks
+    /// per core-second (`CLK_TCK` on Linux). The reading can cover more than one
+    /// thread, so a fraction over one core is possible and is not clamped here.
     pub const SAMPLE_TICKS: u64 = 100;
-    /// How much of a core, held across the window, is starvation: ~0.55. Below
-    /// this a busy repaint is uncomfortable; above it the main loop is losing
-    /// most of its time to the rasterizer and input is what dies first.
-    pub const STARVE_NUMERATOR: u64 = 55;
+    /// How much of a core, held across the window, is starvation: ~0.35. It
+    /// used to be 0.55, and that missed the measured shape of this app: the
+    /// wordmark's text-clipped gradient holds ~45% of a core on a
+    /// software-composited window, which is already losing input, and the
+    /// watchdog never fired — so the sweep the page could have stopped kept
+    /// running and the banner never appeared. A third of a core is the point at
+    /// which a decoration is no longer free; below it a busy repaint is
+    /// uncomfortable but the main loop still has most of its time.
+    pub const STARVE_NUMERATOR: u64 = 35;
     /// The burn must be sustained, but software rasterisation arrives in
-    /// *bursts* — measured on the machine that froze, the main thread alternated
+    /// *bursts* — measured on the machine that froze, the render work alternated
     /// ~3 s at ~90% of a core with ~3 s at ~34%, so a consecutive-streak rule
     /// missed the verdict by one second, twice. The rule is therefore windowed:
     /// this many hot samples out of the last [`HOT_WINDOW`] announce, which a
@@ -442,6 +457,17 @@ pub mod render_watchdog {
             hot: fraction_x100 >= STARVE_NUMERATOR,
             fraction_x100,
         }
+    }
+
+    /// Kernel ticks as milliseconds, for the page's frame probe.
+    ///
+    /// [`SAMPLE_TICKS`] is 100 per second, so one tick is 10 ms. Saturating
+    /// because the number crosses an IPC boundary as `u64` and a wrapped
+    /// reading would read as "the shell spent negative time" — a probe that
+    /// compared a huge number against its budget would call every machine
+    /// starved.
+    pub fn cpu_millis(ticks: u64) -> u64 {
+        ticks.saturating_mul(1000 / SAMPLE_TICKS)
     }
 
     /// The starvation verdict, from hot samples counted over a sliding window.
@@ -476,7 +502,7 @@ pub mod render_watchdog {
     }
 }
 
-/// Watch this process's main thread and announce starvation, once, when found.
+/// Watch this window's rendering work and announce starvation, once, when found.
 ///
 /// The verdict is deliberately *once per boot*, because false positives here
 /// cost the user their backdrop for the whole session (the page keeps it), and
@@ -498,7 +524,7 @@ fn watch_render_starvation(app: tauri::AppHandle) {
         let started = std::time::Instant::now();
         for _ in 0..WINDOW_SAMPLES {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let Some(ticks) = main_thread_cpu_ticks() else {
+            let Some(ticks) = render_cpu_ticks() else {
                 continue;
             };
             let Some(prev) = previous.replace(ticks) else {
@@ -520,7 +546,7 @@ fn watch_render_starvation(app: tauri::AppHandle) {
             if verdict.observe(hot) {
                 println!(
                     "[Codify] render watchdog: this window is being rasterised in software \
-                     (main thread hot on {} of the last {} sampled seconds) — asking \
+                     (render work hot on {} of the last {} sampled seconds) — asking \
                      the page to stop the animated backdrops",
                     render_watchdog::HOT_NEEDED,
                     render_watchdog::HOT_WINDOW,
@@ -533,18 +559,230 @@ fn watch_render_starvation(app: tauri::AppHandle) {
     });
 }
 
-/// The main thread's accumulated CPU ticks, from `/proc/self/stat` fields 14+15.
-fn main_thread_cpu_ticks() -> Option<u64> {
-    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
-    // The comm field can contain spaces, so the parse starts after the final ')'.
-    let after = stat.rsplit_once(")")?.1;
+/// The CPU ticks in a `/proc/<pid>/stat` line, fields 14+15.
+///
+/// The comm field can contain spaces and parentheses, so the parse starts after
+/// the final `)`. Fields after it run from field 3 (state is the first token), so
+/// utime — field 14 — is the 12th token and stime follows it.
+fn stat_cpu_ticks(stat: &str) -> Option<u64> {
+    let after = stat.rsplit_once(')')?.1;
     let mut fields = after.split_whitespace();
-    // Fields after the ')' run from field 3 (state is field 3, the first token
-    // here), so utime — field 14 — is the 12th token, and stime follows it.
     let utime: u64 = fields.nth(11)?.parse().ok()?;
     let stime: u64 = fields.next()?.parse().ok()?;
     Some(utime + stime)
 }
+
+/// The process's start time in clock ticks since boot: field 22 of `/proc/<pid>/stat`.
+fn stat_start_time(stat: &str) -> Option<u64> {
+    let after = stat.rsplit_once(')')?.1;
+    // Fields after the ')' start at field 3 (state); starttime is field 22.
+    after.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// The comm and parent pid in a `/proc/<pid>/stat` line.
+fn stat_identity(stat: &str) -> Option<(&str, u32)> {
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    let comm = &stat[open + 1..close];
+    let mut fields = stat[close + 1..].split_whitespace();
+    // Fields after the ')' start at field 3 (state); the parent is field 4.
+    let _state = fields.next()?;
+    let ppid: u32 = fields.next()?.parse().ok()?;
+    Some((comm, ppid))
+}
+
+/// The main thread's accumulated CPU ticks, from its own task file's fields 14+15.
+///
+/// `/proc/self/stat` is the whole thread group, so reading it here counted every
+/// worker and every WebKit helper the process owned and called the sum "the main
+/// thread". The main thread's own file is `/proc/self/task/<pid>/stat` (its TID is
+/// the process id).
+fn main_thread_cpu_ticks() -> Option<u64> {
+    let stat =
+        std::fs::read_to_string(format!("/proc/self/task/{}/stat", std::process::id())).ok()?;
+    stat_cpu_ticks(&stat)
+}
+
+/// Every thread's CPU ticks in one process.
+///
+/// Each task under `/proc/<pid>/task` has its own utime/stime, and summing them
+/// covers WebKit's raster and compositor threads, which are not the main thread.
+/// `/proc/<pid>/stat` reports the whole thread group, not the leader's share.
+fn process_cpu_ticks(pid: u32) -> u64 {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return 0;
+    };
+    let mut total: u64 = 0;
+    for task in tasks.flatten() {
+        let Ok(stat) = std::fs::read_to_string(task.path().join("stat")) else {
+            continue;
+        };
+        if let Some(ticks) = stat_cpu_ticks(&stat) {
+            total = total.saturating_add(ticks);
+        }
+    }
+    total
+}
+
+/// The pid of the earliest-started WebKit web process among `children`.
+fn oldest_web_process(children: &[(u32, u64)]) -> Option<u32> {
+    children
+        .iter()
+        .min_by_key(|(_, started)| *started)
+        .map(|(pid, _)| *pid)
+}
+
+/// The CPU ticks of the main window's WebKit web process.
+///
+/// The shell's own main thread is not the only party that pays for a
+/// software-composited animation. With `WEBKIT_DISABLE_DMABUF_RENDERER=1` — the
+/// documented workaround on Nvidia/Wayland, and a setting the app does not
+/// choose itself — the **web process** is the one that burns a core painting a
+/// backdrop, while the shell sits at a few percent. A render measurement that
+/// watched only the shell called that window affordable and let the animation
+/// run. Reading the web process's threads costs one `/proc` scan and catches the
+/// path the user is actually on.
+///
+/// Only the earliest-started WebKit child is counted. Browser tabs each get their
+/// own web process, created when the tab is opened; summing every child made a
+/// busy tab — or a restored terminal — a verdict about the main window's theme.
+fn web_process_cpu_ticks(parent: u32) -> u64 {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    let mut children: Vec<(u32, u64)> = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some((comm, ppid)) = stat_identity(&stat) else {
+            continue;
+        };
+        // `comm` is capped at 15 bytes, so "WebKitWebProcess" arrives as
+        // "WebKitWebProces". Match the prefix rather than the full name.
+        if ppid == parent && comm.starts_with("WebKitWebProces") {
+            if let Some(started) = stat_start_time(&stat) {
+                children.push((pid, started));
+            }
+        }
+    }
+    oldest_web_process(&children).map_or(0, process_cpu_ticks)
+}
+
+/// What this window's rendering costs, in CPU ticks: the shell's main thread
+/// plus the main window's WebKit web process.
+///
+/// The watchdog and the boot probe both read this, so they cannot disagree
+/// about which process pays. It is deliberately not the whole process tree: the
+/// engine is a child too, and an engine waiting on a provider or hashing a file
+/// is not a decoration starving the window. Browser tabs are children too, and
+/// are not this window's decoration either.
+fn render_cpu_ticks() -> Option<u64> {
+    let shell = main_thread_cpu_ticks()?;
+    let web = web_process_cpu_ticks(std::process::id());
+    Some(shell.saturating_add(web))
+}
+
+/// The window's cumulative rendering CPU time, in milliseconds.
+///
+/// The page's boot frame probe asks for this twice around a handful of drawn
+/// theme frames: the delta is what one composited frame costs the processes that
+/// pay for it. That is the measurement the watchdog makes over ten seconds,
+/// taken *before* a backdrop starts instead of after it has already been paid
+/// for. `None` when `/proc` cannot be read, and the page then starts the loop as
+/// it always did rather than guessing.
+#[tauri::command]
+fn codify_render_cpu_ms() -> Option<u64> {
+    render_cpu_ticks().map(render_watchdog::cpu_millis)
+}
+
+/// Whether this shell was launched on WebKit's software rasteriser.
+///
+/// The page used to learn this only from the injected global in `on_page_load`,
+/// and that injection raced the app's first effect: when it lost, a window born
+/// on the software path started its backdrops at full rate and the watchdog's
+/// ten seconds were the first thing that said otherwise. The page now asks the
+/// shell at mount, exactly as it asks for the render clock, and gets the same
+/// answer `apply_software_render_motion_default` acted on before the first
+/// paint.
+///
+/// Pure environment, read-only, and no argument: the value is the shell's own
+/// launch, not a fact about a page. `target_os = "linux"` because the setting
+/// this mirrors is only applied there; on another platform the variable is not
+/// the shell's signal and the answer is false.
+#[tauri::command]
+fn codify_software_rendering() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some()
+}
+
+/// This shell launch's id: different for every process, stable for every page
+/// load in it.
+///
+/// The page's motion facts (a starvation verdict, "Animate anyway") live in
+/// `sessionStorage`, which in this webview outlived the process — a fresh
+/// launch read the previous launch's `allowed` and animated on the machine the
+/// verdict was about. The page writes this id beside those facts and ignores
+/// them when it changes; a reload keeps it and so keeps the person's answer.
+/// It is pid plus start time, which is not a secret and describes no file, no
+/// machine and no other app.
+fn shell_boot_id() -> &'static str {
+    static BOOT: OnceLock<String> = OnceLock::new();
+    BOOT.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{}-{nanos}", std::process::id())
+    })
+}
+
+#[tauri::command]
+fn codify_boot_id() -> String {
+    shell_boot_id().to_string()
+}
+
+/// Start with motion off when WebKit was told to give up its dma-buf path.
+///
+/// With `WEBKIT_DISABLE_DMABUF_RENDERER=1` — the documented Nvidia/Wayland
+/// workaround, which the app never sets itself — WebKit rasterises every
+/// animated layer in the web process. Measured on that path, an empty window's
+/// backdrop held the web process at ~98% of a core while the shell sat at ~6%,
+/// so the window does not need the probe's first seconds to be expensive; it
+/// needs them never to happen. `gtk-enable-animations` is the setting WebKit
+/// maps to `prefers-reduced-motion`, and the page already starts every canvas
+/// still and every CSS animation parked under it for that media query. Setting
+/// it here, before the first paint, makes the static frame the first frame.
+///
+/// This is a **default**, not a verdict: the banner's "Animate anyway" still
+/// keeps the theme canvas, at the lower rate its measurement allows, and the
+/// boot probe and watchdog remain the measurement for a window that was not
+/// born on this path. The shell's own environment is the only signal available
+/// this early; waiting for a measured frame would be waiting for the bill.
+#[cfg(target_os = "linux")]
+fn apply_software_render_motion_default(_app: &tauri::AppHandle) {
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        return;
+    }
+    use gtk::prelude::*;
+    let Some(settings) = gtk::Settings::default() else {
+        return;
+    };
+    settings.set_property("gtk-enable-animations", false);
+    eprintln!(
+        "[Codify] software rendering: starting at reduced motion \
+         (the page asks at mount and can still choose to animate)"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_software_render_motion_default(_app: &tauri::AppHandle) {}
 
 /// Turn a termination signal into the same deliberate exit a closed window takes.
 ///
@@ -676,6 +914,22 @@ async fn engine_url(state: &SharedEngineState) -> Result<(String, String), Strin
     }
 }
 
+/// The HTTP client for every call this shell makes to its engine.
+///
+/// All of them go to `127.0.0.1`, and the boot token — or an API key on its way
+/// to the engine — is in the request. `reqwest` honours `HTTP_PROXY` for a
+/// loopback address too, so without this a proxy configured in the environment
+/// would receive `Authorization: Bearer …` and the Settings screen's key writes
+/// in clear text. The engine binds loopback only, so a proxy has nothing to add
+/// here. The update checker keeps its own client: it talks to GitHub, where the
+/// person's proxy may be exactly what is needed.
+pub(crate) fn engine_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("the engine's HTTP client has no configuration to fail")
+}
+
 // ── Tauri commands ──────────────────────────────────────────────────────────
 
 /// Surface engine errors as engine errors. Without this, a 401/404/409/5xx body
@@ -705,7 +959,7 @@ async fn workspace_root_for(
     workspace_id: &str,
 ) -> Result<String, String> {
     let (base, token) = engine_url(engine).await?;
-    let resp = reqwest::Client::new()
+    let resp = engine_http_client()
         .get(format!("{base}/workspaces/{workspace_id}"))
         .header("Authorization", format!("Bearer {token}"))
         .send()
@@ -1351,6 +1605,7 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
         bundle_dir.as_deref(),
         std::env::current_exe().ok().as_deref(),
         &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        engine_protocol::trust_working_directory(),
     );
     let project_root = launch.root.clone();
 
@@ -1397,14 +1652,24 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
         interpreter.display(),
         launch.source
     );
-    let env = engine_protocol::engine_env(&launch);
+    // What the AppImage launcher put in this process's environment, and the value it
+    // replaced. The engine's own settings are applied after this; the person's
+    // `PYTHONPATH` is read from the restored value rather than the image's.
+    let restored = appimage_env::restored_here();
+    let mut user_pythonpath = std::env::var_os("PYTHONPATH");
+    for (key, value) in &restored {
+        if key.as_os_str() == std::ffi::OsStr::new("PYTHONPATH") {
+            user_pythonpath = value.clone();
+        }
+    }
+    let env = engine_protocol::engine_env(&launch, user_pythonpath.as_deref());
     let mut engine = tokio::process::Command::new(&interpreter);
     engine.args(["-m", "engine"]).current_dir(&project_root);
     // Run from an AppImage, this process carries the image's library path, Python home and GTK
     // paths, and the engine would hand them to every program it starts: the system `python3`
     // behind the folder dialog, `git`, a project's tests (`appimage_env`). Taken back out first,
     // so the engine's own settings below still win.
-    for (key, value) in appimage_env::restored_here() {
+    for (key, value) in restored {
         match value {
             Some(value) => engine.env(key, value),
             None => engine.env_remove(key),
@@ -1795,7 +2060,7 @@ fn tabs_smoke_mode(app: tauri::AppHandle, state: SharedEngineState) -> Result<()
 
         // 2. Seed, through the route a window writes. One attempt: a refusal
         //    is a finding — the smoke sends exactly what a real window sends.
-        let client = reqwest::Client::new();
+        let client = engine_http_client();
         let url = format!("http://127.0.0.1:{port}/shell/tabs");
         let sent = client
             .put(&url)
@@ -2128,7 +2393,7 @@ pub fn run() {
         // One shared HTTP client for every engine-bridge command: `Client` is
         // cheaply cloneable over an internal connection pool, while
         // `Client::new()` per call re-resolves and re-handshakes every time.
-        .manage(reqwest::Client::new())
+        .manage(engine_http_client())
         .manage(SharedTerminals::new(std::sync::Mutex::new(
             terminal::Terminals::default(),
         )))
@@ -2143,6 +2408,13 @@ pub fn run() {
             webview_bridge::scheme_handler(context, request)
         })
         .setup(move |app| {
+            // The page is not painting yet, and on the software path the first
+            // frame is the one this window cannot afford. Set the GTK preference
+            // WebKit maps to `prefers-reduced-motion` before the webview's first
+            // paint; see `apply_software_render_motion_default`. Tauri has already
+            // initialised GTK by the time setup runs, so this cannot be the call
+            // that does it.
+            apply_software_render_motion_default(app.handle());
             // The embed smoke test, when asked: seat the page, watch for the
             // paint, report, exit. Runs INSTEAD of the engine launch so the
             // test is about the embed path and nothing else — see
@@ -2278,6 +2550,26 @@ pub fn run() {
             webview_bridge::start(app.handle().clone(), state_clone.clone());
             Ok(())
         })
+        // Tell the page when this shell was born on WebKit's software
+        // rasteriser, on every load of the main webview. An injected script and
+        // a DOM event, not an invoke: the same fact the reduced-motion default
+        // above is set from, and one the page needs before its first animation
+        // loop rather than ten seconds into a watchdog. Browser webviews are
+        // left alone — they are untrusted pages and the main window's own
+        // capability is the only one that talks to this shell.
+        .on_page_load(|webview, payload| {
+            use tauri::webview::PageLoadEvent;
+            if webview.label() != "main" || payload.event() != PageLoadEvent::Finished {
+                return;
+            }
+            if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+                return;
+            }
+            let _ = webview.eval(
+                "window.__CODIFY_SOFTWARE_RENDERING__ = true;\
+                 window.dispatchEvent(new Event('codify:software-rendering'));",
+            );
+        })
         .invoke_handler(tauri::generate_handler![
             codify_get_engine_info,
             codify_engine_status,
@@ -2287,6 +2579,9 @@ pub fn run() {
             codify_update_agent_config,
             codify_repair_agent_configs,
             codify_test_agent_connection,
+            codify_render_cpu_ms,
+            codify_software_rendering,
+            codify_boot_id,
             codify_terminal_open,
             codify_terminal_write,
             codify_terminal_resize,
@@ -2332,7 +2627,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        await_exit, claim_shutdown, display_backend, engine_has_gone, stop_engine, stop_grace,
+        await_exit, claim_shutdown, display_backend, engine_has_gone, oldest_web_process,
+        shell_boot_id, stat_cpu_ticks, stat_identity, stat_start_time, stop_engine, stop_grace,
         tabs_smoke_requested, tabs_smoke_seed_body, tabs_smoke_seed_url, EngineProcess,
         EngineState, EngineStop, SharedEngineState, DEFAULT_STOP_GRACE, ENGINE_STOP_POLL,
         STOP_GRACE_SLACK, TABS_SMOKE_ENV, TABS_SMOKE_LINE, TABS_SMOKE_SEED_KEY,
@@ -2419,18 +2715,42 @@ mod tests {
     }
 
     #[test]
-    fn the_hot_threshold_is_just_over_half_a_core() {
+    fn the_boot_id_is_stable_for_this_launch_and_carries_no_secret() {
+        // Stable is the whole point: a reload must resolve the same value, or a
+        // person's "Animate anyway" would die on every refresh. The page scopes
+        // its session facts to it, so it must also change between launches — a
+        // pid and a start time do both.
+        let first = shell_boot_id();
+        assert_eq!(first, shell_boot_id(), "a reload must see the same boot");
+        assert!(first.starts_with(&std::process::id().to_string()));
+        assert!(first.len() > std::process::id().to_string().len());
+    }
+
+    #[test]
+    fn the_hot_threshold_is_just_over_a_third_of_a_core() {
         // Named numbers, so the calibration is visible in a test rather than
-        // buried in a loop: 54 ticks in a second is busy-but-below, 55 is the
+        // buried in a loop: 34 ticks in a second is busy-but-below, 35 is the
         // verdict, and a clock (100 ticks) is exactly the edge.
-        assert!(!render_watchdog::sample(0, 54).hot);
-        assert!(render_watchdog::sample(0, 55).hot);
+        assert!(!render_watchdog::sample(0, 34).hot);
+        assert!(render_watchdog::sample(0, 35).hot);
         assert!(render_watchdog::sample(0, 100).hot);
         assert_eq!(render_watchdog::sample(0, 100).fraction_x100, 100);
         // And a quiet second is nowhere near it, including after wrap-free
         // subtraction of a larger previous reading (saturating, never negative).
-        assert!(!render_watchdog::sample(900, 950).hot);
+        assert!(!render_watchdog::sample(900, 910).hot);
         assert_eq!(render_watchdog::sample(950, 900).fraction_x100, 0);
+    }
+
+    #[test]
+    fn a_tick_is_ten_milliseconds() {
+        // The page compares a frame's cost against its own frame interval, so
+        // the unit crossing the IPC boundary is the one thing both sides must
+        // agree on. 100 ticks is a core-second; 1 tick is 10 ms.
+        assert_eq!(render_watchdog::cpu_millis(0), 0);
+        assert_eq!(render_watchdog::cpu_millis(1), 10);
+        assert_eq!(render_watchdog::cpu_millis(6), 60);
+        assert_eq!(render_watchdog::cpu_millis(100), 1_000);
+        assert_eq!(render_watchdog::cpu_millis(u64::MAX), u64::MAX);
     }
 
     #[test]
@@ -2441,18 +2761,38 @@ mod tests {
         // every field) and skips 11 tokens: state is index 0, utime index 11,
         // stime index 12.
         let stat = "600786 (codify-desktop) R 4113 0 0 0 0 0 0 0 0 0 1234 567 0 0";
-        let after = stat.rsplit_once(")").unwrap().1;
-        let mut fields = after.split_whitespace();
-        let utime: u64 = fields.nth(11).unwrap().parse().unwrap();
-        let stime: u64 = fields.next().unwrap().parse().unwrap();
-        assert_eq!(utime + stime, 1234 + 567);
+        assert_eq!(stat_cpu_ticks(stat), Some(1234 + 567));
+        let (comm, ppid) = stat_identity(stat).unwrap();
+        assert_eq!(comm, "codify-desktop");
+        assert_eq!(ppid, 4113);
         // A comm field containing a `)` must not shift the parse.
         let tricky = "42 (codify (tty)) R 7 0 0 0 0 0 0 0 0 0 5 6 0 0";
-        let after = tricky.rsplit_once(")").unwrap().1;
-        let mut fields = after.split_whitespace();
-        let utime: u64 = fields.nth(11).unwrap().parse().unwrap();
-        let stime: u64 = fields.next().unwrap().parse().unwrap();
-        assert_eq!(utime + stime, 5 + 6);
+        assert_eq!(stat_cpu_ticks(tricky), Some(5 + 6));
+        assert_eq!(stat_identity(tricky).unwrap(), ("codify (tty)", 7));
+        // The web process's comm is cut at 15 bytes, which is why the scan
+        // matches a prefix rather than the whole name.
+        let web = "600787 (WebKitWebProces) S 600786 0 0 0 0 0 0 0 0 0 40 2 0 0";
+        assert_eq!(stat_identity(web).unwrap(), ("WebKitWebProces", 600786));
+        assert_eq!(stat_cpu_ticks(web), Some(42));
+    }
+
+    #[test]
+    fn a_stat_lines_start_time_is_field_22() {
+        // The comm field can contain spaces and parentheses, so the parse starts
+        // after the last `)`. This line has fields 3..21 in order and 4242 as
+        // field 22 (starttime).
+        let stat = "1234 (WebKitWebProces) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242";
+        assert_eq!(stat_start_time(stat), Some(4242));
+    }
+
+    #[test]
+    fn the_oldest_web_process_is_the_window_not_a_tab() {
+        // The main window's web process starts first; browser tabs are younger.
+        assert_eq!(
+            Some(20),
+            oldest_web_process(&[(30, 900), (20, 100), (40, 500)])
+        );
+        assert_eq!(None, oldest_web_process(&[]));
     }
 
     #[test]
@@ -2474,6 +2814,18 @@ mod tests {
         assert!(
             ui.contains("codify:engine-render-starved"),
             "the UI store no longer listens for the shell's verdict"
+        );
+        // The page's boot probe reads the shell's own CPU clock through this
+        // command. A rename on either side is a probe that silently never
+        // measures, because it skips when the command refuses.
+        assert!(
+            source.contains("codify_render_cpu_ms"),
+            "the render probe's command disappeared from the shell"
+        );
+        let probe = include_str!("../../ui/src/frameProbe.ts");
+        assert!(
+            probe.contains("codify_render_cpu_ms"),
+            "the frame probe no longer asks the shell what a frame costs"
         );
     }
 
@@ -2832,6 +3184,80 @@ mod tests {
             DEFAULT_STOP_GRACE,
             stop_grace(None),
             "an engine that announced nothing gets the engine's own default, plus slack"
+        );
+    }
+
+    #[test]
+    fn the_engine_client_ignores_a_proxy_in_the_environment() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+
+        // A listener a proxied request would reach. It is non-blocking so the
+        // assertion after the request never waits for one.
+        let proxy = TcpListener::bind("127.0.0.1:0").expect("proxy listener");
+        proxy
+            .set_nonblocking(true)
+            .expect("non-blocking proxy listener");
+        let proxy_url = format!("http://{}", proxy.local_addr().expect("proxy address"));
+
+        // The engine's side: one request, one response. The response is
+        // best-effort so a regression fails on the assertion below rather than
+        // on a write into a socket the test released.
+        let engine = TcpListener::bind("127.0.0.1:0").expect("engine listener");
+        let engine_addr = engine.local_addr().expect("engine address");
+        let engine_url = format!("http://{engine_addr}");
+        let server = std::thread::spawn(move || {
+            let Ok((mut socket, _)) = engine.accept() else {
+                return;
+            };
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request);
+            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok");
+        });
+
+        // Scoped to this test: no other test in this binary makes an HTTP
+        // request, and the values are put back even when the request fails. An
+        // empty NO_PROXY is the point — a machine whose environment exempts
+        // loopback would otherwise pass this test without the code doing it.
+        let saved: Vec<(&str, Option<String>)> =
+            ["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"]
+                .into_iter()
+                .map(|key| (key, std::env::var(key).ok()))
+                .collect();
+        std::env::set_var("HTTP_PROXY", &proxy_url);
+        std::env::set_var("http_proxy", &proxy_url);
+        std::env::set_var("NO_PROXY", "");
+        std::env::set_var("no_proxy", "");
+        let response = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime")
+            .block_on(async {
+                super::engine_http_client()
+                    .get(&engine_url)
+                    .timeout(Duration::from_secs(3))
+                    .send()
+                    .await
+            });
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        // If the request went to the proxy, release the engine thread so the
+        // failure is the assertion, not a suite that never returns.
+        if response.is_err() {
+            let _ = TcpStream::connect(engine_addr);
+        }
+        server.join().expect("engine thread");
+
+        let response = response.expect("the request must reach the engine, not the proxy");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(
+            proxy.accept().is_err(),
+            "the engine's client sent the request — and the boot token with it — to the proxy"
         );
     }
 }

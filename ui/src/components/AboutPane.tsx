@@ -301,8 +301,8 @@ export const AboutPane: React.FC = () => {
         <div className="space-y-1.5">
           <p className="text-xs text-codify-muted leading-relaxed">
             A local-first, multi-agent AI coding assistant. Your code, your keys and your history stay on
-            this machine; the only requests that leave it go to the model providers you configure, plus the one
-            GitHub asks for below when you press Check for updates.
+            this machine. It talks to the model providers you configure; when you allow web pages in Settings,
+            the assistant can fetch them; and GitHub is asked for a release only when you press Check for updates.
           </p>
           {app === undefined ? (
             <Row label="Version">checking…</Row>

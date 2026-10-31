@@ -1276,8 +1276,8 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     # Whether model-proposed browser navigation, clicks and typing are allowed. Off by default.
     "browser_actions": (0, 1),
     # Whether the conductor may fetch web pages: 0 never, 1 only the sites in `web_fetch_hosts`, 2 any
-    # public site (the default of a fresh install). Three states, so not a switch: a checkbox's `true` is
-    # refused here like any other number a person is choosing.
+    # public site. Off on a fresh install (engine/services.py says why). Three states, so not a switch: a
+    # checkbox's `true` is refused here like any other number a person is choosing.
     "web_fetch": (0, 2),
 }
 

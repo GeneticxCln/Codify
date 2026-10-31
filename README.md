@@ -135,10 +135,13 @@ launcher finds the project root from where it lives.
 
 A package carries its own engine and the Python it runs on, so it needs no checkout and no Python of yours, only `git`
 (which the deb installs). The checkout runs its own engine, and `CODIFY_ROOT=/path/to/Codify` points a package at a
-checkout's instead — see [`docs/18`](docs/18-release-and-updates.md) §2 for what a package holds and leaves out. The app
+checkout's instead — see [`docs/18`](docs/18-release-and-updates.md) §2 for what a package holds and leaves out. A
+checkout build finds the checkout it was built in; starting it from another folder does not run that folder's engine
+unless you opt in with `CODIFY_DEV_CWD=1`. The app
 also has a **Check for updates** button on Settings → About, which asks GitHub for the newest release when you press
-it and can download the package for the copy you are running. It never installs anything, and its request is the only
-one this app makes that is not one of your model providers'.
+it and can download the package for the copy you are running. It never installs anything, and it asks GitHub only
+when you press the button. The engine can also request a web page for the assistant, but only after you allow it in
+Settings; otherwise the requests that leave the machine go to the model providers you configure.
 
 A package you downloaded can be checked against its release's own `SHA256SUMS` before you install it:
 `make verify-package` (or `make verify-package FILES=~/Downloads/Codify_1.0.0_amd64.deb`). That says the file is whole
@@ -355,8 +358,8 @@ Four constraints hold every one of them:
   last theme added was five lines of tokens and no new code.
 - **One clock, one budget.** Every effect runs through `useAtmosphereCanvas`, which owns the canvas size cap, a
   30 FPS accumulator, and exactly one static frame under `prefers-reduced-motion`.
-- **Decoration is never under the words being read.** Content surfaces stay opaque and the canvas is masked to
-  fade before it reaches the chrome.
+- **Decoration is never under the words being read.** Content surfaces stay opaque, and the canvas fades itself
+  out at its edges — painted into its own pixels, not a CSS mask — before it reaches the chrome.
 - **A theme may restate the status tones; it may not renegotiate them.** All six or none, and `danger` and
   `warning` stay on the warm arc: a user who learned that orange means *needs attention* was owed that much.
 

@@ -887,7 +887,7 @@ pub fn scheme_handler(
 /// nothing is a fact about the engine, and it can be wrong, and it expires.
 pub fn start(app: AppHandle, engine: crate::SharedEngineState) {
     tauri::async_runtime::spawn(async move {
-        let client = reqwest::Client::new();
+        let client = crate::engine_http_client();
         loop {
             // Asked for per iteration rather than once: the engine can be
             // restarted underneath a running shell, and a base URL captured

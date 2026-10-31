@@ -1,13 +1,15 @@
 import React, { useEffect, useRef } from "react";
 
-import { nextRate } from "../../hooks/useAtmosphereCanvas";
+import { backdropFps, nextRate } from "../../hooks/useAtmosphereCanvas";
+import { applyEdgeFade } from "../../canvasEdgeFade.ts";
 import {
   bindContextRecovery,
   makeFrameBudget,
   makeFrameGuard,
   FRAMES_BEFORE_GIVING_UP,
 } from "../../canvasRecovery.ts";
-import { useMotionAllowed } from "../../motionPreference.ts";
+import { useMotionAllowed, useStarvedThisBoot } from "../../motionPreference.ts";
+import { probeAvailable, probeFrameBudget } from "../../frameProbe.ts";
 
 /**
  * The CMatrix rain: a lightweight 2D-canvas glyph shower for the OLED theme.
@@ -30,7 +32,9 @@ import { useMotionAllowed } from "../../motionPreference.ts";
  * Appearance exception, in the same family as `logo.gif`: it animates only
  * where the user asked for it (they picked the theme), and under
  * `prefers-reduced-motion` it draws exactly one frame — the trail, frozen —
- * so opting out removes the animation entirely rather than slowing it.
+ * so opting out removes the animation entirely rather than slowing it. Like the
+ * shared hook, it measures the window's render cost for a composited frame before the
+ * shower starts (`frameProbe.ts`), so the budget is judged before it is spent.
  */
 export interface MatrixRainProps {
   className?: string;
@@ -95,12 +99,18 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
   // system preference. As a dependency it re-arms the loop when it flips —
   // which is the point: a re-render alone would leave the loop running.
   const motionAllowed = useMotionAllowed();
+  // The shell measured this boot spending a core on decoration. Below the
+  // person's choice: "Animate anyway" keeps the rain, at the measured rate.
+  const starved = useStarvedThisBoot();
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    // See the shared hook: a probe is async, and a torn-down effect must not
+    // arm the loop it was probing for.
+    let cancelled = false;
 
     // As in the shared hook: an explicit `animated` wins (a preview must
     // animate to be a preview), otherwise the motion store, computed above.
@@ -190,6 +200,11 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
           if (ty >= 0) ctx.fillText(randomGlyph(glyphs), x, ty * cell);
         }
       }
+      // The same edge fade every other atmosphere gets. It is painted into the
+      // canvas rather than applied as a CSS mask because a mask on a
+      // full-window canvas made the software compositor rebuild the window on
+      // every frame; the shared hook owns the other loop's call.
+      applyEdgeFade(ctx, canvas.width, canvas.height);
     };
 
     const step = (rate: number): void => {
@@ -197,8 +212,8 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
         col.frac += rate;
         // A rate of 1.8 earns a cell and most of the next one per frame, so
         // this runs twice on a fast frame and not at all on a slow one. That is
-        // the intended arithmetic — the column moves at `rate` cells per
-        // second, not `rate` steps per frame.
+        // the intended arithmetic — the column moves `rate` cells per frame,
+        // and the fractional part is carried here so it can.
         while (col.frac >= 1) {
           col.frac -= 1;
           col.y += col.speed;
@@ -214,7 +229,18 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     // rAF only to align with the compositor; the pacing authority is the
     // accumulator, which releases at most one frame per 1000/fps ms. That is
     // the cap: a 144 Hz display still gets 30.
-    const frameMs = Math.max(1, 1000 / Math.max(1, fps));
+    // The same rate policy as the shared hook, including the starved rate: the
+    // rain is the one loop that predates it, not one exempt from it. The
+    // compositor pays per physical pixel of the canvas's on-screen box, so the
+    // starved rate is scaled by that area — see `starvedFps`. `dpr` is capped
+    // at 2 for the canvas's own pixels; the screen's ratio is uncapped, because
+    // that is the area the compositor blends.
+    const displayDpr = window.devicePixelRatio || 1;
+    const box = canvas.getBoundingClientRect();
+    const physicalPixels =
+      Math.max(1, Math.round(box.width * box.height)) * displayDpr * displayDpr;
+    const releaseFps = backdropFps(fps, starved, physicalPixels);
+    const frameMs = Math.max(1, 1000 / Math.max(1, releaseFps));
     let last = 0;
     let raf = 0;
     // As in the shared hook: the frame count is untouched, only how much
@@ -287,7 +313,33 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     let observer: ResizeObserver | undefined;
     layout();
     drawFrame(); // the static frame reduced motion gets
-    if (!reduced) raf = requestAnimationFrame(loop);
+    const start = (): void => {
+      if (!cancelled) raf = requestAnimationFrame(loop);
+    };
+    if (reduced) {
+      // The loop is never armed; the static frame is the whole animation.
+    } else if (animated !== undefined || starved || !probeAvailable()) {
+      // A preview must animate to be a preview, and a page outside the shell
+      // has no shell clock to ask. A window already measured starving starts at
+      // the rate the verdict allows — re-probing there would let the budget
+      // overrule "Animate anyway" a second time, which is not what the control
+      // promises. Only the first, full-rate start waits for the probe.
+      start();
+    } else {
+      // Measure the window's render cost for a composited frame before the shower
+      // starts, rather than discovering it after the watchdog's window. The
+      // probe advances the rain by a handful of cells and draws each one; if a
+      // frame does not fit the interval, it records the verdict and this effect
+      // re-runs instead of arming. See `frameProbe.ts`.
+      const probeDraw = (): void => {
+        if (cancelled) return;
+        step(1);
+        drawFrame();
+      };
+      void probeFrameBudget(probeDraw, frameMs).then((fits) => {
+        if (fits) start();
+      });
+    }
 
     // Suspended frames are not slow frames: a window nobody is looking at gets
     // about one a second by design, and that must not be the measurement that
@@ -309,12 +361,13 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     }
 
     return () => {
+      cancelled = true;
       if (raf) cancelAnimationFrame(raf);
       observer?.disconnect();
       recovery.detach();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [animated, motionAllowed, fps, maxDimension]);
+  }, [animated, motionAllowed, starved, fps, maxDimension]);
 
   // aria-hidden: the effect is decoration beside real content, and a screen
   // reader reading half-width katakana is not a service to anyone.

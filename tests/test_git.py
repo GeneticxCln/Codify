@@ -92,6 +92,23 @@ class TestGitService(GitTestBase):
         # Nothing left to record for that path.
         self.assertIsNone(self.git.commit(str(self.root), "feat: duplicate", ["hello.py"]))
 
+    def test_one_ignored_file_does_not_cancel_the_step_commit(self) -> None:
+        # `git add -A -- real.py ignored.log` is fatal, and git stages real.py
+        # before it reaches the ignored path: the step's commit vanished, its
+        # file stayed staged, and the log blamed user.name/user.email even
+        # though the engine sets both itself.
+        self.write(".gitignore", "*.log\n")
+        self.write("real.py", "print('real')\n")
+        self.write("debug.log", "not committed\n")
+
+        rev = self.git.commit(
+            str(self.root), "feat: add real.py", ["real.py", "debug.log"]
+        )
+
+        assert rev is not None, "the ignored path cancelled the commit"
+        self.assertEqual(self.committed_paths(), {"real.py"})
+        self.assertNotIn("A  real.py", self.porcelain(), "the step's file stayed staged")
+
     def test_commit_does_not_run_repo_hooks(self) -> None:
         """Hooks are workspace content: a checked-in pre-commit hook must not
         execute (with the engine's environment) as a side effect of committing.

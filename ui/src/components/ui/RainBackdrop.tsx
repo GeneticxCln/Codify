@@ -72,12 +72,14 @@ export const RainBackdrop: React.FC<RainBackdropProps> = ({ active }) => {
           quadratic and the cap is what keeps it off the CPU budget. The cap
           bounds cost, not speed: a faster effect is not a busier one. */}
       {/* The same edge fade every other atmosphere gets — see
-          `WeatherBackdrop` and `.codify-atmosphere-canvas` in `index.css`. The
+          `WeatherBackdrop` and `.codify-atmosphere-fade` in `index.css`. The
           rain predates that table and has always been mounted separately, so it
           would otherwise have been the one canvas in the app that stopped dead
-          against the header. */}
+          against the header. The fade is a sibling overlay rather than a mask
+          on the canvas: a full-window mask made the software compositor
+          rasterise every frame, which is measured in `index.css`. */}
       <MatrixRain
-        className="codify-atmosphere-canvas absolute inset-0 h-full w-full"
+        className="absolute inset-0 h-full w-full"
         maxDimension={1024}
         active={active}
       />

@@ -304,6 +304,9 @@ export async function withApp(
         return typeof answer === "function" ? (answer as (x: Record<string, unknown>) => unknown)(a) : answer;
       }
       if (cmd === "codify_get_engine_info") return { port: 51820, token: options.engineToken ?? "e2e-token" };
+      // One id for the whole test page, as the shell answers one per launch.
+      // A test about a different launch passes its own `MOTION_BOOT_KEY`.
+      if (cmd === "codify_boot_id") return "test-boot";
       if (cmd === "codify_engine_status") return { error: null };
       if (cmd === "codify_terminal_open") return "term-1";
       if (cmd.startsWith("codify_list_") || cmd.includes("configs")) return [];
@@ -715,6 +718,23 @@ export async function withApp(
       }
       for (const [key, value] of Object.entries(options.sessionStorage ?? {})) {
         dom.window.sessionStorage.setItem(key, value);
+      }
+      // The real app resolves this before its first render (`main.tsx`). The
+      // harness mounts `App` directly, so it does the same step here.
+      const motion = await import("../src/motionPreference.ts");
+      const boot = await motion.prepareMotionSession();
+      // Facts without a boot key are a page in the same boot — what a reload
+      // leaves. A test about a *new* launch passes `MOTION_BOOT_KEY` explicitly.
+      const motionKeys = [
+        motion.MOTION_SESSION_KEY,
+        motion.MOTION_EVENT,
+        motion.STARVED_BOOT_KEY,
+      ];
+      if (
+        !(motion.MOTION_BOOT_KEY in (options.sessionStorage ?? {})) &&
+        motionKeys.some((key) => key in (options.sessionStorage ?? {}))
+      ) {
+        dom.window.sessionStorage.setItem(motion.MOTION_BOOT_KEY, boot);
       }
       globalThis.fetch = fakeFetch;
       if (!(globalThis as Record<string, unknown>).self) {

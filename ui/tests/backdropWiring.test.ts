@@ -22,7 +22,9 @@ import type { AppContext } from "./appHarness.ts";
 const { withApp } = await import("./appHarness.ts");
 const { CODIFY_DARK, CMATRIX_OLED, ASCII_RAIN, CYBERPUNK_NEON } = await import("../src/appearance.ts");
 const { themesWithWeather } = await import("../src/components/ui/WeatherBackdrop.tsx");
-const { MOTION_KEY, MOTION_EVENT } = await import("../src/motionPreference.ts");
+const { MOTION_KEY, MOTION_EVENT, MOTION_SESSION_KEY, STARVED_BOOT_KEY } = await import(
+  "../src/motionPreference.ts",
+);
 
 const VIEWPORT = { width: 900, height: 600 };
 const THEME_KEY = "codify.theme";
@@ -159,9 +161,13 @@ test("the loops run when motion is allowed and are never armed when it is reduce
   }
 });
 
-test("the user's 'allowed' outranks the system preference; 'reduced' outranks a system that allows motion", async () => {
+test("this window's 'allowed' outranks the system preference; 'reduced' outranks a system that allows motion", async () => {
   await withApp(
-    { viewport: VIEWPORT, localStorage: { [THEME_KEY]: CMATRIX_OLED.id, [MOTION_KEY]: "allowed" } },
+    {
+      viewport: VIEWPORT,
+      localStorage: { [THEME_KEY]: CMATRIX_OLED.id },
+      sessionStorage: { [MOTION_SESSION_KEY]: "allowed" },
+    },
     async ({ dom, settle }) => {
       dom.window.matchMedia = ((q: string) => ({ matches: /reduce/.test(q), media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} })) as never;
       await settle();
@@ -219,24 +225,76 @@ test("'Animate anyway' hands the choice back: it is remembered, and the animatio
     await ctx.settle();
     await ctx.dom.click(banner(ctx.dom.container)!);
     await ctx.settle();
-    assert.equal(ctx.dom.window.localStorage.getItem(MOTION_KEY), "allowed", "the choice was not written down");
+    assert.equal(
+      ctx.dom.window.sessionStorage.getItem(MOTION_SESSION_KEY),
+      "allowed",
+      "the session choice was not written down",
+    );
+    assert.equal(
+      ctx.dom.window.localStorage.getItem(MOTION_KEY),
+      null,
+      "the session choice became a preference for a later launch",
+    );
     assert.equal(bannerUp(ctx.dom.container), false, "the banner stayed after it was answered");
     assert.ok((await framesRequested(ctx.dom, 300)) > 0, "the animation did not resume");
   });
 });
 
-test("a verdict left by an earlier boot does not survive into this one, but the user's choice does", async () => {
-  // The verdict is a diagnosis of one boot: persisting it would turn "your machine
-  // cannot afford this today" into "your machine can never have this".
-  const verdict = JSON.stringify({ at: 1, measuredMs: 95 });
+test("a reload keeps this window's answer, and does not revive the verdict it answered", async () => {
+  // The verdict is a diagnosis of one boot and lives in the session store; the
+  // choice that answered it is a second session fact and outlives the reload.
+  // A realistic reload after "Animate anyway" has the choice and the measured
+  // boot flag, but no verdict: the click withdrew it, and the shell announces
+  // at most once per boot, so there is nothing that could put it back.
   await withApp(
-    { viewport: VIEWPORT, localStorage: { [THEME_KEY]: CMATRIX_OLED.id, [MOTION_KEY]: "allowed" }, sessionStorage: { [MOTION_EVENT]: verdict } },
+    {
+      viewport: VIEWPORT,
+      localStorage: { [THEME_KEY]: CMATRIX_OLED.id },
+      sessionStorage: { [MOTION_SESSION_KEY]: "allowed", [STARVED_BOOT_KEY]: "1" },
+    },
     async ({ dom, settle }) => {
       await settle();
-      assert.equal(bannerUp(dom.container), false, "a stale verdict put the banner up at boot");
-      assert.equal(dom.window.sessionStorage.getItem(MOTION_EVENT), null, "the verdict was kept for the next reload");
-      assert.equal(dom.window.localStorage.getItem(MOTION_KEY), "allowed", "a boot forgot the user's choice");
-      assert.ok((await framesRequested(dom, 300)) > 0);
+      assert.equal(bannerUp(dom.container), false, "a reload revived the answered verdict");
+      assert.equal(
+        dom.window.sessionStorage.getItem(MOTION_SESSION_KEY),
+        "allowed",
+        "a reload forgot this window's choice",
+      );
+      assert.equal(
+        dom.window.document.documentElement.dataset.starved,
+        "true",
+        "a reload forgot that this window was measured starving",
+      );
+      assert.ok((await framesRequested(dom, 300)) > 0, "the kept backdrop did not resume after a reload");
+    },
+  );
+});
+
+test("a stored 'allowed' from an earlier launch cannot outrank this boot's verdict", async () => {
+  // The bug this replaced: "Animate anyway" used to be a preference, so one
+  // click made every later launch on that machine animate — the stored word
+  // outranked the verdict the shell had just measured. The word is this
+  // window's now, so a preference left by an earlier launch stops at the
+  // verdict; only a click in this window resumes the animation.
+  await withApp(
+    { viewport: VIEWPORT, localStorage: { [THEME_KEY]: CMATRIX_OLED.id, [MOTION_KEY]: "allowed" } },
+    async (ctx) => {
+      await ctx.settle();
+      await emitStarved(ctx, 92);
+      await ctx.settle();
+      assert.equal(
+        await framesRequested(ctx.dom, 300),
+        0,
+        "a stored 'allowed' overrode the verdict this boot measured",
+      );
+      await ctx.dom.click(banner(ctx.dom.container)!);
+      await ctx.settle();
+      assert.equal(
+        ctx.dom.window.sessionStorage.getItem(MOTION_SESSION_KEY),
+        "allowed",
+        "this window's answer was not written to the session",
+      );
+      assert.ok((await framesRequested(ctx.dom, 300)) > 0, "the explicit answer did not resume");
     },
   );
 });

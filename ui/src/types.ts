@@ -622,7 +622,7 @@ export interface EngineSettings {
   /** 1 = permit model-driven navigation, clicking and typing in browser tabs. Off by default. */
   browser_actions?: EngineSettingValue;
   /** Whether the conductor's `fetch_page` may read the web: 0 never, 1 only the sites in `web_fetch_hosts`, 2 any
-   * public site (docs/12). 2 on a fresh install, and optional like the others: an engine that predates it answers
+   * public site (docs/12). 0 on a fresh install, and optional like the others: an engine that predates it answers
    * without it and the card is simply absent. */
   web_fetch?: EngineSettingValue;
   /** The sites `fetch_page` may read when `web_fetch` is 1: site names, each covering its subdomains. */

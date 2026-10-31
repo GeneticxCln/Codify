@@ -23,7 +23,8 @@ import { registerTsx } from "./tsxLoader.ts";
 registerTsx();
 
 const { withDom } = await import("./dom.ts");
-const { MOTION_EVENT, MOTION_KEY } = await import("../src/motionPreference.ts");
+const { MOTION_BOOT_KEY, MOTION_EVENT, MOTION_KEY, MOTION_SESSION_KEY, motionBootId } =
+  await import("../src/motionPreference.ts");
 
 /** A 2d context that accepts everything a painter does and records nothing. */
 function quietContext(): CanvasRenderingContext2D {
@@ -48,7 +49,7 @@ type Loop = "Nanofluid" | "MatrixRain";
 interface Conditions {
   /** Which render loop to mount. */
   component?: Loop;
-  /** The user's stored choice, if any. */
+  /** The choice in force, if any: a preference, or the session's "Animate anyway". */
   setting?: "auto" | "allowed" | "reduced";
   /** The shell's verdict for this boot: the window is being rasterised in software. */
   starved?: boolean;
@@ -79,7 +80,19 @@ async function loopsArmed(conditions: Conditions): Promise<number> {
     }
     (dom.window.HTMLCanvasElement.prototype as unknown as Record<string, unknown>).getContext =
       () => quietContext();
-    if (setting) dom.window.localStorage.setItem(MOTION_KEY, setting);
+    if (setting === "allowed" || starved) {
+      // Session facts are scoped to the shell launch that wrote them. This page
+      // is that launch (`motionBootId` is the page id when there is no shell),
+      // so a verdict or an answer here is a fact of this boot.
+      dom.window.sessionStorage.setItem(MOTION_BOOT_KEY, motionBootId());
+    }
+    if (setting === "allowed") {
+      // "Animate anyway" is this window's answer to this boot's verdict, not a
+      // preference: it lives in the session store and dies with the launch.
+      dom.window.sessionStorage.setItem(MOTION_SESSION_KEY, setting);
+    } else if (setting) {
+      dom.window.localStorage.setItem(MOTION_KEY, setting);
+    }
     if (starved) {
       dom.window.sessionStorage.setItem(MOTION_EVENT, JSON.stringify({ at: 1, measuredMs: 90 }));
     }
@@ -93,6 +106,41 @@ async function loopsArmed(conditions: Conditions): Promise<number> {
     return armed;
   });
 }
+
+const { backdropFps, STARVED_FPS, STARVED_FPS_FLOOR, starvedFps } = await import(
+  "../src/hooks/useAtmosphereCanvas.ts",
+);
+
+test("a starved window lowers the release rate, and never raises a painter's own cap", () => {
+  assert.equal(backdropFps(30, false), 30, "a healthy window's rate was changed");
+  assert.equal(backdropFps(30, true), STARVED_FPS, "the shell's verdict did not lower the rate");
+  assert.ok(STARVED_FPS > 0 && STARVED_FPS < 30, "the starved rate is not a lower animation rate");
+  assert.equal(
+    backdropFps(10, true),
+    10,
+    "a painter that already asked for fewer than the starved rate was sped up",
+  );
+});
+
+test("the starved rate scales with the window's physical pixels, never below the floor", () => {
+  // The compositor pays per physical pixel. The ten-FPS figure was profiled on
+  // a ~2 MP window; a 4K-class window is four times the area and gets about a
+  // quarter of the rate for the same core share.
+  assert.equal(starvedFps(2_000_000), STARVED_FPS);
+  assert.equal(starvedFps(8_000_000), 2.5);
+  assert.equal(starvedFps(20_000_000), STARVED_FPS_FLOOR, "a huge window went below the floor");
+  assert.equal(starvedFps(0), STARVED_FPS, "an unmeasured box was treated as starving");
+  assert.equal(
+    backdropFps(30, true, 8_000_000),
+    2.5,
+    "a 4K-class window animated at the 2 MP rate",
+  );
+  assert.equal(
+    backdropFps(2, true, 8_000_000),
+    2,
+    "a painter that asked for two frames a second was sped up to the starved rate",
+  );
+});
 
 const LOOPS: Loop[] = ["Nanofluid", "MatrixRain"];
 

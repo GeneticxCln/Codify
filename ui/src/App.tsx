@@ -229,10 +229,15 @@ import {
 import {
   applyShellStarvation,
   clearShellStarvation,
+  motionAllowed,
   readMotion,
-  rearmVerdictForBoot,
-  writeSetting,
+  softwareRendering,
+  softwareRenderingFromShell,
+  useStarvedThisBoot,
+  writeSessionSetting,
+  MOTION_CHANGED,
   MOTION_EVENT,
+  SOFTWARE_RENDERING_EVENT,
   type MotionState,
 } from "./motionPreference";
 import {
@@ -623,10 +628,10 @@ export const App: React.FC = () => {
   // clock). The shell's starvation verdict arrives through this: the one party
   // that pays for a software-rasterised backdrop is the process that announces
   // it, and a frozen window cannot reach a settings pane to ask for relief.
-  const [motion, setMotion] = useState<MotionState>(() => {
-    rearmVerdictForBoot();
-    return readMotion();
-  });
+  // Read, not re-armed: the verdict is the shell's one announcement for this
+  // boot, and a reload of the same window must still see it. A new launch has a
+  // fresh `sessionStorage`, so it starts without one either way.
+  const [motion, setMotion] = useState<MotionState>(() => readMotion());
   useEffect(() => {
     let off: (() => void) | undefined;
     let cancelled = false;
@@ -641,6 +646,73 @@ export const App: React.FC = () => {
       cancelled = true;
       off?.();
     };
+  }, []);
+  // The shell sets its reduced-motion default before the first paint, and says
+  // so to the page, but the page owns the canvases. This is that message, read
+  // at mount (the global) or when it lands just after (the event) — before the
+  // watchdog's ten seconds, which on the software path is ten seconds of a
+  // core spent on decoration.
+  //
+  // An explicit choice for this window wins: "reduced" is already still, and
+  // "allowed" is the banner's "Animate anyway", which lives in this session
+  // only (see `MOTION_SESSION_KEY` and `MOTION_BOOT_KEY`) — a reload keeps it,
+  // a new launch cannot inherit it because the stored boot id differs. Only an
+  // unset "auto" takes the software-rendering verdict.
+  useEffect(() => {
+    let cancelled = false;
+    const applyIfSoftware = (): void => {
+      if (cancelled) return;
+      const current = readMotion();
+      if (current.setting !== "auto") return;
+      // A measured verdict from the watchdog may already be in force (it can
+      // win the race on a slow boot); keep its number for the banner.
+      setMotion(
+        current.shellStarved ? current : applyShellStarvation({ at: Date.now(), measuredMs: 0 }),
+      );
+    };
+    if (softwareRendering()) {
+      applyIfSoftware();
+      return () => {
+        cancelled = true;
+      };
+    }
+    window.addEventListener(SOFTWARE_RENDERING_EVENT, applyIfSoftware);
+    // The injected global and the event above both come from `on_page_load`,
+    // which can arrive *after* this effect has run and attached its listener.
+    // The shell is the party that knows; ask it once, and keep the event as the
+    // path for a shell that answers late.
+    void softwareRenderingFromShell().then((software) => {
+      if (software === true) applyIfSoftware();
+    });
+    return () => {
+      cancelled = true;
+      window.removeEventListener(SOFTWARE_RENDERING_EVENT, applyIfSoftware);
+    };
+  }, []);
+  // The same decision, on the document, for the animations CSS owns. The
+  // canvases read the store through `useMotionAllowed`, but the wordmark's
+  // gradient and the cyberpunk veil are stylesheet animations, and until this
+  // ran they answered only to the OS preference — so the app's own "reduced"
+  // stopped the backdrops and left the most expensive decoration in the app
+  // painting. `data-starved` is the shell's measurement, not the person's
+  // choice; see `STARVED_BOOT_KEY` for why it outlives "Animate anyway".
+  // The verdict is itself proof this boot was measured starving, and `motion`
+  // carries it synchronously when the software path applies it in an effect —
+  // before this hook's listener exists. The store flag is what survives after
+  // "Animate anyway" withdraws the verdict, so either one means starved.
+  const starvedBoot = useStarvedThisBoot() || motion.shellStarved !== null;
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.motion = motionAllowed(motion) ? "allowed" : "reduced";
+    root.dataset.starved = starvedBoot ? "true" : "false";
+  }, [motion, starvedBoot]);
+  useEffect(() => {
+    // The banner writes this window's answer through the store, not through this
+    // component; without this the attributes above would keep describing the
+    // value the app started with.
+    const onChange = (): void => setMotion(readMotion());
+    window.addEventListener(MOTION_CHANGED, onChange);
+    return () => window.removeEventListener(MOTION_CHANGED, onChange);
   }, []);
   /**
    * What the engine said on its way out, read from the shell that tailed its
@@ -4281,9 +4353,20 @@ export const App: React.FC = () => {
               <div className="rounded-xl border border-codify-info bg-codify-info/10 p-2.5 text-xs">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-codify-info">
-                    Animated backdrops were stopped: the desktop shell measured its main thread
-                    spending ~{Math.min(99, motion.shellStarved.measuredMs)}% of a core painting
-                    this window, which was starving input. This clears next launch.
+                    {motion.shellStarved.measuredMs === 0 ? (
+                      <>
+                        Animated backdrops were stopped: this window is being rendered in
+                        software, where they cost more than the machine can pay. This clears
+                        next launch.
+                      </>
+                    ) : (
+                      <>
+                        Animated backdrops were stopped: the desktop shell measured its main
+                        thread spending ~{Math.min(99, motion.shellStarved.measuredMs)}% of a
+                        core painting this window, which was starving input. This clears next
+                        launch.
+                      </>
+                    )}
                   </span>
                   <button
                     type="button"
@@ -4291,7 +4374,9 @@ export const App: React.FC = () => {
                     onClick={() => {
                       // The choice outranks the verdict, and the verdict is
                       // withdrawn so the banner that announced it goes too.
-                      writeSetting("allowed");
+                      // `sessionStorage` scoped to this launch's boot id: the
+                      // answer survives a reload and cannot reach a later launch.
+                      writeSessionSetting("allowed");
                       setMotion(clearShellStarvation());
                     }}
                   >

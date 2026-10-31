@@ -130,13 +130,13 @@ class SettingsService:
         # explicitly enables it: these actions can send data to sites and act on logged-in pages.
         "browser_actions": (0, lambda v: 1 if v == 1 else 0),
         # Whether the conductor's `fetch_page` may read the web: 0 not at all, 1 only the sites in
-        # `web_fetch_hosts`, 2 any public site. 2 on a fresh install: Codify runs on local models, and an
-        # assistant that cannot look something up is the one that is held back. What that costs is that the
-        # address it asks for leaves the machine from the engine itself and can carry what a turn has read
-        # (engine/web_fetch.py, docs/12, docs/03 §1.6); every request is announced in the transcript before it
-        # is made, and a person narrows it to a list or switches it off in Settings. Only a person writes
-        # this, never a goal or a turn (docs/00 §6.2). An install that already stored a choice keeps it.
-        "web_fetch": (2, lambda v: max(0, min(v, 2))),
+        # `web_fetch_hosts`, 2 any public site. Off on a fresh install: the address a fetch asks for leaves
+        # the machine from the engine itself and can carry what a turn has read (engine/web_fetch.py,
+        # docs/12, docs/03 §1.6), so reaching the web is something a person turns on in Settings rather than
+        # something an install does on their behalf. Every request is announced in the transcript before it
+        # is made. Only a person writes this, never a goal or a turn (docs/00 §6.2). An install that already
+        # stored a choice keeps it.
+        "web_fetch": (0, lambda v: max(0, min(v, 2))),
     }
 
     # The conductor's model, and why it is here rather than in `agent_configs`:

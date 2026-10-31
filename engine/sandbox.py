@@ -68,6 +68,47 @@ WC_FLAGS = {"-l", "-w", "-c", "-m", "-L"}
 MAX_READ_ONLY_ARGS = 8
 # Stored command output is capped so a verbose suite cannot bloat memory/DB.
 MAX_COMMAND_OUTPUT_CHARS = 200_000
+
+#: The shell's copy of the person's own `PYTHONPATH`, taken before it points `PYTHONPATH`
+#: at Codify's checkout so `python3 -m engine` can import it (`src-tauri/src/lib.rs`). It is
+#: the value a workspace command gets back; empty means the person had none. Absent when the
+#: engine was started by hand, and then the engine's own root is removed from the inherited
+#: value instead.
+ENV_USER_PYTHONPATH = "CODIFY_USER_PYTHONPATH"
+_ENGINE_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _workspace_env() -> dict[str, str]:
+    """The environment a workspace command runs with, without Codify's checkout on its path.
+
+    The shell starts this engine with `PYTHONPATH` set to the checkout (`engine_env` in
+    `src-tauri/src/engine_protocol.rs`). Inherited by a test command, that makes a workspace
+    with its own `engine/` package import Codify's instead — a test can pass against the wrong
+    code — and it replaces the person's own value. The shell hands the original over in
+    `CODIFY_USER_PYTHONPATH` (empty when they had none), and that is what the command gets.
+
+    Started by hand (`make run-engine`), the variable is absent: the engine's own root is
+    removed and every other entry the person set is kept. `CODIFY_USER_PYTHONPATH` itself is
+    not passed on; it belongs to the hand-over, not to the workspace.
+    """
+    env = {
+        key: os.environ[key]
+        for key in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONHOME")
+        if key in os.environ
+    }
+    if ENV_USER_PYTHONPATH in os.environ:
+        user = os.environ[ENV_USER_PYTHONPATH]
+        if user:
+            env["PYTHONPATH"] = user
+        return env
+    kept = [
+        entry
+        for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+        if entry and Path(entry).resolve() != _ENGINE_ROOT
+    ]
+    if kept:
+        env["PYTHONPATH"] = os.pathsep.join(kept)
+    return env
 # A NUL cannot be passed to a process at all (`subprocess` raises ValueError, which is a
 # crash where a refusal belongs) and any other control character is a newline or escape
 # no allowlisted command has a reason to receive.
@@ -363,7 +404,7 @@ class SandboxService:
             env = guarded_env(git_readonly.runner_env(os.environ, root_path), COMMAND_LIMITS)
         else:
             child_argv = [resolved, *hardened_args(argv)]
-            env = guarded_env({k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME") if k in os.environ}, COMMAND_LIMITS)
+            env = guarded_env(_workspace_env(), COMMAND_LIMITS)
         try:
             proc = subprocess.Popen(  # noqa: S603 — the argv passed `validate_argv` above; guarded, own session, no shell
                 # One process deeper than the command itself: the guard leads the new

@@ -243,14 +243,13 @@ export const WeatherBackdrop: React.FC<WeatherBackdropProps> = ({ active }) => {
           this box is the window, not a column. A perspective grid is cheaper
           than a glyph shower, but the cap is not about this frame's cost — it
           is about what happens on a 4K panel the user has maximised. */}
-      {/* `codify-atmosphere-canvas` is the edge fade, and it is passed here
-          rather than added inside each of the ~20 painters: every one of them
-          renders the same `<canvas className={`pointer-events-none ${className}`}>`
-          and threading a class through that one call site is what keeps a new
-          effect from shipping without the fade. The class itself is in
-          `index.css` — one mask definition, not twenty inline styles. */}
+      {/* The edge fade is painted into the canvas by the shared hook
+          (`canvasEdgeFade.ts`), not applied as a mask or an overlay: a
+          full-window mask made the software compositor rebuild the window on
+          every frame, even a still one. Every effect in the table goes through
+          that hook, so all ~20 get the fade without a per-painter call site. */}
       <Canvas
-        className="codify-atmosphere-canvas absolute inset-0 h-full w-full"
+        className="absolute inset-0 h-full w-full"
         maxDimension={1024}
         active={active}
       />

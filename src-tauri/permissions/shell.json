@@ -42,6 +42,21 @@
       "commands": { "allow": ["codify_test_agent_connection"] }
     },
     {
+      "identifier": "allow-codify-render-cpu-ms",
+      "description": "Reports this window's cumulative rendering CPU time in milliseconds: the shell's main thread plus the WebKit web process it spawned. Read-only, takes no argument and changes nothing: it is the clock the page's boot probe reads around a handful of theme frames, to price one composited frame before starting the animation. The number describes this app's own work — no other machine, no other app.",
+      "commands": { "allow": ["codify_render_cpu_ms"] }
+    },
+    {
+      "identifier": "allow-codify-software-rendering",
+      "description": "Reports whether this shell was launched with WebKit's dma-buf path disabled, which is the one signal the page can act on before the first animation frame. Read-only, takes no argument and describes the shell's own environment — no file, no process and no other app.",
+      "commands": { "allow": ["codify_software_rendering"] }
+    },
+    {
+      "identifier": "allow-codify-boot-id",
+      "description": "Reports this shell launch's identifier: the page scopes its session-storage motion facts to it, so an answer from one launch cannot leak into the next. Read-only, takes no argument, changes on every launch, and contains only the process id and start time — no machine, no person, no project.",
+      "commands": { "allow": ["codify_boot_id"] }
+    },
+    {
       "identifier": "allow-codify-terminal-open",
       "description": "Starts a PTY the user asked for. A terminal is arbitrary code execution by another name, so the grant names it rather than inheriting it.",
       "commands": { "allow": ["codify_terminal_open"] }
@@ -155,6 +170,9 @@
         "allow-codify-update-agent-config",
         "allow-codify-repair-agent-configs",
         "allow-codify-test-agent-connection",
+        "allow-codify-render-cpu-ms",
+        "allow-codify-software-rendering",
+        "allow-codify-boot-id",
         "allow-codify-terminal-open",
         "allow-codify-terminal-write",
         "allow-codify-terminal-resize",

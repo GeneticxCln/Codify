@@ -1306,7 +1306,7 @@ class _Steps(_Design):
             self._log(
                 goal_id, step.id, "warn",
                 "git commit produced nothing — the step's files match the last commit, "
-                "or git refused (check its user.name/user.email config)",
+                "or git refused for another reason",
             )
             return "nothing_to_commit"
         return "nothing_to_commit"

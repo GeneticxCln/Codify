@@ -60,6 +60,48 @@ class TestSandboxService(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(survivors, "", f"stray grandchildren survived: {survivors}")
 
+    def test_a_workspace_command_does_not_inherit_the_engines_pythonpath(self) -> None:
+        # The shell sets PYTHONPATH to the checkout so `python3 -m engine` can import
+        # it. A workspace command must not inherit that: a project with its own
+        # `engine/` package would import Codify's instead, and the person's own value
+        # was replaced. The shell hands the original over separately; empty means none.
+        (self.root / "pythonpath_probe.py").write_text(
+            "import os\n"
+            "print(os.environ.get('PYTHONPATH', '<unset>'))\n"
+            "print(os.environ.get('CODIFY_USER_PYTHONPATH', '<unset>'))\n",
+            encoding="utf-8",
+        )
+        for user, expected in (
+            ("/home/me/.local/lib", "/home/me/.local/lib"),
+            ("", "<unset>"),
+        ):
+            with patch.dict(
+                os.environ,
+                {"PYTHONPATH": str(PROJECT_ROOT), "CODIFY_USER_PYTHONPATH": user},
+                clear=False,
+            ):
+                result = self.sandbox.run_command(
+                    str(self.root), ["python3", "pythonpath_probe.py"], timeout_s=10
+                )
+            self.assertEqual(result["exit_code"], 0, result["stderr"])
+            lines = result["stdout"].splitlines()
+            self.assertEqual(lines[0], expected, "the checkout leaked onto the workspace's path")
+            self.assertEqual(
+                lines[1], "<unset>", "the shell's hand-over leaked into the workspace"
+            )
+
+        # Started by hand the variable is absent: the engine's own root is dropped and
+        # the person's other entries are kept.
+        with patch.dict(
+            os.environ, {"PYTHONPATH": f"{PROJECT_ROOT}:/opt/shared"}, clear=False
+        ):
+            os.environ.pop("CODIFY_USER_PYTHONPATH", None)
+            result = self.sandbox.run_command(
+                str(self.root), ["python3", "pythonpath_probe.py"], timeout_s=10
+            )
+        self.assertEqual(result["exit_code"], 0, result["stderr"])
+        self.assertEqual(result["stdout"].splitlines()[0], "/opt/shared")
+
     def test_empty_and_basename(self) -> None:
         with self.assertRaises(CommandNotAllowed):
             validate_argv([], self.fs)

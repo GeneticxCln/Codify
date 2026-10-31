@@ -6,7 +6,59 @@ import {
   makeFrameGuard,
   FRAMES_BEFORE_GIVING_UP,
 } from "../canvasRecovery.ts";
-import { useMotionAllowed } from "../motionPreference.ts";
+import { useMotionAllowed, useStarvedThisBoot } from "../motionPreference.ts";
+import { probeAvailable, probeFrameBudget } from "../frameProbe.ts";
+import { applyEdgeFade } from "../canvasEdgeFade.ts";
+
+/**
+ * The release rate a measured-starved window gets when its person kept the
+ * backdrop ("Animate anyway"), on the reference window it was profiled on.
+ *
+ * The window is the layer the software compositor has to recompose, so the
+ * render cost is proportional to the number of *new frames*, not to the
+ * painter's own work: halving the rate roughly halves it. Ten is still an
+ * animation — the person asked to keep one — and the atmosphere painters read
+ * `tick.seconds`, so they keep their speed; it is only revealed in bigger
+ * steps. The rain is the documented outlier and advances once per released
+ * frame, so it does slow with the rate.
+ *
+ * **Ten is the reference, not a constant for every display.** Profiled on the
+ * software-composited window that set this: at 15 FPS the shell held ~36% of a
+ * core (web process ~6%), at 10 FPS ~26% (web ~2%), and at 5 FPS ~15% (web
+ * ~2.5%). The per-frame shell cost is ~24–30 ms across those rates: the
+ * compositor's full-window blend, with the web process's own painting a
+ * rounding error. That is the **UI-process** shape; with the dma-buf path
+ * disabled the web process is the one that pays, which is why the measurement
+ * sums both. The blend cost is per *physical* pixel, and the referece window was
+ * ~2 MP. On the machine that actually froze — 1280×800 logical at 3×, so ~8.3 MP
+ * — one composited frame measured ~125 ms, and 5 FPS still held ~55% of a
+ * core. Ten FPS there would be a core for decoration. So the starved rate
+ * scales with the canvas's physical area: a 4K-class window gets ~2.4 FPS for
+ * the same share a 2 MP window gets at ten. Two is the floor — below it the
+ * effect is a slideshow with a noticeable pause — and a person who asks to
+ * keep it still sees motion rather than a frozen frame.
+ */
+export const STARVED_FPS = 10;
+/** The physical pixel budget the ten-FPS figure was measured at (~2 MP). */
+export const STARVED_REFERENCE_PIXELS = 2_000_000;
+/** The slowest rate that is still an animation rather than a slideshow. */
+export const STARVED_FPS_FLOOR = 2;
+
+/** The starved rate for a canvas of `pixels` physical pixels. */
+export function starvedFps(pixels: number): number {
+  if (!(pixels > 0) || !Number.isFinite(pixels)) return STARVED_FPS;
+  const scaled = STARVED_FPS * (STARVED_REFERENCE_PIXELS / pixels);
+  return Math.max(STARVED_FPS_FLOOR, Math.min(STARVED_FPS, scaled));
+}
+
+/** The rate to release at, given the painter's own cap and the shell's verdict. */
+export function backdropFps(
+  fps: number,
+  starved: boolean,
+  pixels: number = STARVED_REFERENCE_PIXELS,
+): number {
+  return starved ? Math.min(fps, starvedFps(pixels)) : fps;
+}
 
 /**
  * The clock every atmosphere shares.
@@ -36,6 +88,11 @@ import { useMotionAllowed } from "../motionPreference.ts";
  * - **Live variable reads.** `read` resolves against a *live*
  *   `getComputedStyle`, so a theme applied while a canvas is running restyles it
  *   on the next frame with no remount and no second source of colour.
+ * - **The boot probe.** Before the loop is armed, the hook measures what one
+ *   composited frame costs the window's renderers — the shell's main thread
+ *   and its WebKit web process — and starts only if it fits the budget. See
+ *   `frameProbe.ts`: without it the first seconds of the boot are paid at full
+ *   rate before the watchdog can be sure they should not be.
  *
  * Dependencies are deliberately just the three numbers. A painter is a closure
  * and a caller cannot memoise one honestly, so including `create` in the deps
@@ -187,6 +244,10 @@ export function useAtmosphereCanvas(
   // user choice, shell verdict, or system preference, as a dependency the
   // effect below re-runs on — a re-render alone would leave the loop running.
   const motionAllowed = useMotionAllowed();
+  // The shell measured this window spending a core on decoration. `motionAllowed`
+  // still answers the person's choice; this is the measurement, and it is what
+  // lowers the rate rather than stopping the backdrop they chose to keep.
+  const starved = useStarvedThisBoot();
   // Kept in a ref so the effect can read the latest values without listing
   // them as dependencies — see the note above on why that is not laziness.
   const latest = useRef({ vars, create, active });
@@ -197,6 +258,9 @@ export function useAtmosphereCanvas(
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    // A probe is async; a cleanup while it is in flight must stop it from
+    // arming a loop that belongs to an effect React has already torn down.
+    let cancelled = false;
 
     // Whether to move at all: an explicit `animated` prop wins (a preview must
     // animate to be a preview), otherwise the motion store, computed above.
@@ -229,15 +293,34 @@ export function useAtmosphereCanvas(
     };
 
     const tick: AtmosphereTick = { frame: 0, seconds: 0, size };
-    const frameMs = Math.max(1, 1000 / Math.max(1, fps));
+    // One draw, and the edge fade that belongs to every atmosphere. The fade is
+    // painted into the canvas's own pixels rather than applied as a CSS mask:
+    // a mask on a full-window canvas made the software compositor rebuild the
+    // window every frame (see `canvasEdgeFade.ts`). Every `painter.draw` call in
+    // this effect goes through here, so a new call site cannot ship without it.
+    const paint = (): void => {
+      painter.draw(ctx, size, tick);
+      applyEdgeFade(ctx, size.width, size.height);
+    };
+    // The compositor pays per physical pixel on screen, which is the canvas's
+    // own CSS area at this display's scale — not the capped painting size and
+    // not the window, so a tile in the Appearance pane is priced as a tile.
+    // `dpr` above is capped at 2 for the canvas's pixels; the screen's own
+    // ratio is what the compositor blends, so the budget uses the uncapped one.
+    const displayDpr = window.devicePixelRatio || 1;
+    const box = canvas.getBoundingClientRect();
+    const physicalPixels =
+      Math.max(1, Math.round(box.width * box.height)) * displayDpr * displayDpr;
+    const releaseFps = backdropFps(fps, starved, physicalPixels);
+    const frameMs = Math.max(1, 1000 / Math.max(1, releaseFps));
 
-    // The 30 FPS clock. rAF aligns with the compositor; the accumulator is the
+    // The frame clock. rAF aligns with the compositor; the accumulator is the
     // authority on how many frames are released.
     let last = 0;
     let raf = 0;
     // The rate the effect is *currently* running at, and the one it is easing
     // toward. Frame count is untouched by either: the loop still releases at
-    // `fps` and costs what it cost. What changes is how much simulated time a
+    // `releaseFps` and costs what it cost. What changes is how much simulated time a
     // frame is worth, which is what every painter reads (`tick.seconds`) and
     // what `step` is handed, so drift and phase stay consistent with each other
     // and a capped canvas still moves at the same speed per second.
@@ -304,7 +387,7 @@ export function useAtmosphereCanvas(
       tick.frame += 1;
       guard.run(() => {
         painter.step?.(scaled, tick);
-        painter.draw(ctx, size, tick);
+        paint();
       });
     };
 
@@ -319,7 +402,7 @@ export function useAtmosphereCanvas(
         // leap that skips the painter forward.
         layout();
         last = 0;
-        painter.draw(ctx, size, tick);
+        paint();
       },
     });
 
@@ -327,8 +410,37 @@ export function useAtmosphereCanvas(
     layout();
     // The static frame. Drawn before the loop is armed so that a reduced-motion
     // user and a screenshot taken in the first millisecond see the same thing.
-    painter.draw(ctx, size, tick);
-    if (!reduced) raf = requestAnimationFrame(loop);
+    paint();
+    const start = (): void => {
+      if (!cancelled) raf = requestAnimationFrame(loop);
+    };
+    if (reduced) {
+      // The loop is never armed; the static frame is the whole animation.
+    } else if (animated !== undefined || starved || !probeAvailable()) {
+      // A preview must animate to be a preview, and a page outside the shell
+      // has no shell clock to ask. A window already measured starving starts at
+      // the rate the verdict allows — re-probing there would let the budget
+      // overrule "Animate anyway" a second time, which is not what the control
+      // promises. Only the first, full-rate start waits for the probe.
+      start();
+    } else {
+      // Measure what a composited frame costs the shell *before* moving: the
+      // watchdog's ten-second window is ten seconds of full-rate animation, and
+      // on the machine that cannot afford it those are the seconds that hurt.
+      // The probe draws a handful of frames at the requested interval; if one
+      // does not fit, it records the verdict and this effect re-runs into the
+      // reduced path instead of arming. See `frameProbe.ts`.
+      const probeDraw = (): void => {
+        if (cancelled) return;
+        tick.frame += 1;
+        tick.seconds += frameMs / 1000;
+        painter.step?.(frameMs / 1000, tick);
+        paint();
+      };
+      void probeFrameBudget(probeDraw, frameMs).then((fits) => {
+        if (fits) start();
+      });
+    }
 
     // A window that has just come back was suspended, not slow: its frames
     // arrived at roughly 1 Hz because nobody was looking, and that measurement
@@ -344,18 +456,19 @@ export function useAtmosphereCanvas(
         // Same reason the loop checks: a lost context makes the draw a no-op, and
         // the restore handler is what will repaint when it comes back.
         if (recovery.isLost()) return;
-        painter.draw(ctx, size, tick);
+        paint();
       });
       observer.observe(canvas);
     }
 
     return () => {
+      cancelled = true;
       if (raf) cancelAnimationFrame(raf);
       observer?.disconnect();
       recovery.detach();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [animated, motionAllowed, fps, maxDimension]);
+  }, [animated, motionAllowed, starved, fps, maxDimension]);
 
   return canvasRef;
 }

@@ -371,6 +371,22 @@ class GitService:
         if not stageable:
             return None
 
+        # A gitignored path is fatal to `git add -A --`: git stages the paths
+        # before it as it goes, so one ignored file used to leave the step's
+        # real files staged, no commit made, and no reason in the log. Drop the
+        # ignored ones first. `--others` is exactly the set `git add` refuses —
+        # a tracked file that happens to match a pattern is never one of them —
+        # and `-z` keeps a file name with a newline in it intact.
+        listed = self._run_text(
+            ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", *stageable],
+            cwd=cwd, env=env,
+        )
+        if listed.returncode == 0:
+            ignored = {p for p in listed.stdout.split("\0") if p}
+            stageable = [p for p in stageable if p not in ignored]
+            if not stageable:
+                return None
+
         # New paths must be known to git before a pathspec commit can name them;
         # `-A` also records deletions. Only these paths are touched in the index.
         added = self._run_text(["add", "-A", "--", *stageable], cwd=cwd, env=env)

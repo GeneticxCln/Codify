@@ -45,7 +45,7 @@ measured, what each idea became, and what was not looked at, so the table cannot
 One conductor tool, **`fetch_page(url, selector?, max_chars?)`**, in `engine/web_fetch.py`, offered through
 `engine/conductor.py` and run by `engine/conductor_tools.py`; and two engine settings that a person alone writes.
 
-* **`web_fetch`** (0 / 1 / 2, default 2): off, only the sites in `web_fetch_hosts`, any public site.
+* **`web_fetch`** (0 / 1 / 2, default 0): off, only the sites in `web_fetch_hosts`, any public site.
   **`web_fetch_hosts`**: site names, each covering its subdomains. `PUT /settings/engine` is the only writer
   (`docs/00` §6.2); `tests/test_invariants_at_their_boundary.py` sweeps every writing route with both keys in a
   hostile body and fails if any other route moves them. A list entry that is not a site name (an address, a URL, a
@@ -82,8 +82,8 @@ One conductor tool, **`fetch_page(url, selector?, max_chars?)`**, in `engine/web
 * **The address is the payload.** A model that has read `.env` can put it in the query string of a URL on an
   allowed site, and the site receives it. No rule here can tell a destination from a destination used to carry
   data; `docs/03` §1.6 says the same of `navigate_page`, and this tool is the same limit made *invisible* (no tab
-  moves) and *engine-originated* (no shell guard in the way). What was done is what can be done: it is on for any
-  public site until a person narrows it to a list or switches it off (the card says in plain words what each
+  moves) and *engine-originated* (no shell guard in the way). What was done is what can be done: it is off until
+  a person allows a list of sites or any public site (the card says in plain words what each
   choice allows), every attempt is in the transcript before it happens, a run is bounded, and the tool's description and the conductor's prompt both say
   not to put the workspace in an address. A model that ignores that, with the setting on, is a way out of the
   machine for what the turn has read.

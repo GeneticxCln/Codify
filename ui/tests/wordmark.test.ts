@@ -50,6 +50,106 @@ function rule(cls: string): string {
   return found.join("\n");
 }
 
+/**
+ * A rule with one selector satisfying `selector`, and a body matching `body`.
+ *
+ * The selector list is split on commas first. A grouped rule can name
+ * `[data-starved="true"] .cyber-veil` and `.codify-wordmark-sweep` in the same
+ * list, and matching the whole list would report that the starved rule applies
+ * to the wordmark when only its sibling selector does.
+ */
+function hasRule(selector: (s: string) => boolean, body: RegExp): boolean {
+  for (const chunk of CSS.split("}")) {
+    const brace = chunk.lastIndexOf("{");
+    if (brace < 0) continue;
+    const selectors = chunk.slice(0, brace).split(",").map((s) => s.trim());
+    if (selectors.some(selector) && body.test(chunk.slice(brace + 1))) return true;
+  }
+  return false;
+}
+
+const sweepStopped = (attribute: string): boolean =>
+  hasRule(
+    (s) => s.includes(attribute) && s.includes(".codify-wordmark-sweep"),
+    /animation:\s*none/,
+  );
+
+test("a starved window stops the sweep even when its person kept the backdrop", () => {
+  // Measured on a software-composited window: the band is a transform under a
+  // glyph mask now (no glyph repaint), but this compositor still charges a
+  // full-window blend for any animated layer — the band alone pinned the shell
+  // at 100%, against the old paint version's ~45%. The verdict is the only
+  // party that can tell; it stops the band and the theme canvas keeps the
+  // lower rate the person chose.
+  assert.ok(
+    sweepStopped('[data-starved="true"]'),
+    "a measured-starved boot still sweeps the wordmark",
+  );
+  assert.ok(
+    hasRule(
+      (s) => s.includes('[data-starved="true"]') && s.includes(".codify-wordmark-sweep"),
+      /transform:\s*translate3d\(100%, 0, 0\)/,
+    ),
+    "the sweep was stopped without the off-glyph frame the reduced-motion block uses",
+  );
+});
+
+test("the first sweep waits for the shell's verdict", () => {
+  // The watchdog arms after 5s and needs ten one-second samples. A sweep that
+  // starts before that is a sweep the verdict can only discover after paying
+  // for it; ten seconds of stillness is the empty-state hero loading, and a
+  // window that is healthy gets its shimmer after it.
+  const sweep = rule("codify-wordmark-sweep");
+  assert.match(
+    sweep,
+    /animation:\s*codify-wordmark-sweep\s+9s\s+linear\s+1\b/,
+    "the sweep does not rest after one pass",
+  );
+  assert.match(
+    sweep,
+    /animation-delay:\s*10s/,
+    "the sweep can start before the shell has had its ten samples",
+  );
+});
+
+test("the band moves by transform, not by a background-position repaint", () => {
+  // The failure this holds: `background-position` is a paint property, so
+  // animating it on text-clipped glyphs made the browser rasterize the word at
+  // the display's rate — ~45% of a core in the shell on a software-composited
+  // window, for a highlight. A transform is composited, and the glyphs are
+  // painted once into the mask wrapper by `Wordmark.tsx`.
+  // Comments are stripped first: the rule's own comment says why
+  // `background-position` is wrong, and a declaration check must not read the
+  // explanation as the declaration.
+  const withoutComments = (css: string): string => css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const sweep = withoutComments(rule("codify-wordmark-sweep"));
+  assert.doesNotMatch(sweep, /background-position/, "the sweep repaints its glyphs again");
+  assert.match(sweep, /will-change:\s*transform/, "the band is not marked as a composited layer");
+
+  const at = CSS.indexOf("@keyframes codify-wordmark-sweep");
+  assert.ok(at >= 0, "the sweep's keyframes moved or were renamed");
+  const open = CSS.indexOf("{", at);
+  let depth = 0;
+  let end = open;
+  for (; end < CSS.length; end += 1) {
+    if (CSS[end] === "{") depth += 1;
+    else if (CSS[end] === "}") {
+      depth -= 1;
+      if (depth === 0) break;
+    }
+  }
+  const frames = withoutComments(CSS.slice(open + 1, end));
+  assert.match(frames, /transform:\s*translate3d/, "the keyframes do not move a transform");
+  assert.doesNotMatch(frames, /background-position/, "the keyframes repaint instead of compositing");
+});
+
+test("the app's own reduced setting reaches the sweep", () => {
+  assert.ok(
+    sweepStopped('[data-motion="reduced"]'),
+    "choosing reduced motion in the app left the wordmark sweeping",
+  );
+});
+
 test("the wordmark is thin, as its own docstring claims", () => {
   const match = /font-weight:\s*(\d+)/.exec(rule("codify-wordmark"));
   assert.ok(match, ".codify-wordmark declares no font-weight at all");

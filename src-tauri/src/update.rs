@@ -258,12 +258,33 @@ struct AssetPayload {
     browser_download_url: String,
 }
 
+/// The architecture an asset's name carries, in the Debian spelling this app runs as.
+///
+/// `amd64` is the tag Tauri writes; `x86_64` and `x64` are the same machine under other
+/// names. `None` means the name says nothing about an architecture, which is the only
+/// case a single candidate may be accepted without one.
+fn named_arch(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    const NAMES: [(&str, &[&str]); 3] = [
+        ("amd64", &["amd64", "x86_64", "x64"]),
+        ("arm64", &["arm64", "aarch64"]),
+        ("i386", &["i386", "i686"]),
+    ];
+    NAMES
+        .iter()
+        .find(|(_, aliases)| aliases.iter().any(|alias| lower.contains(alias)))
+        .map(|(arch, _)| *arch)
+}
+
 /// The asset that belongs to this install, or `None` when the release has none.
 ///
 /// The extension decides the kind, and the architecture in the name decides between two
 /// builds of that kind: a release carrying an `arm64` deb must not be handed to an `amd64`
 /// person. An asset whose name has no architecture is accepted only when it is the *only*
-/// candidate — a single unnamed `.deb` is unambiguous, two of them would be a guess.
+/// candidate — a single unnamed `.deb` is unambiguous, two of them would be a guess. A
+/// single candidate that names another architecture is not a fallback: an `amd64` package
+/// cannot run on `arm64`, and offering it would turn "no build for you" into a broken
+/// download.
 ///
 /// A name is only ever a name: the address that gets fetched comes from the payload's own
 /// `browser_download_url`, and is subject to the same host check as everything else here.
@@ -276,19 +297,17 @@ fn pick_asset<'a>(
     let matches = |asset: &AssetPayload| {
         is_plain_file_name(&asset.name) && asset.name.to_lowercase().ends_with(extension)
     };
-    assets
+    let candidates: Vec<&AssetPayload> = assets.iter().filter(|asset| matches(asset)).collect();
+    if let Some(found) = candidates
         .iter()
-        .find(|asset| matches(asset) && asset.name.to_lowercase().contains(arch))
-        .or_else(|| {
-            match assets
-                .iter()
-                .filter(|asset| matches(asset))
-                .collect::<Vec<_>>()
-            {
-                candidates if candidates.len() == 1 => candidates.first().copied(),
-                _ => None,
-            }
-        })
+        .find(|asset| named_arch(&asset.name) == Some(arch))
+    {
+        return Some(*found);
+    }
+    match candidates.as_slice() {
+        [only] if named_arch(&only.name).is_none() => Some(*only),
+        _ => None,
+    }
 }
 
 /// May this module speak to this URL?
@@ -1142,6 +1161,16 @@ mod tests {
         );
         // A checkout is offered nothing at all.
         assert!(pick_asset(&assets, Package::Source, "amd64").is_none());
+
+        // This repository's releases carry amd64 only. An arm64 install must be
+        // told there is no package, not handed the amd64 one.
+        let amd64_only = vec![AssetPayload {
+            name: DEB.to_string(),
+            size: 18_000_000,
+            browser_download_url: "https://github.com/x".to_string(),
+        }];
+        assert!(pick_asset(&amd64_only, Package::Deb, "arm64").is_none());
+        assert!(pick_asset(&amd64_only, Package::AppImage, "arm64").is_none());
     }
 
     #[test]

@@ -473,46 +473,6 @@ body {
 .text-codify-muted { color: rgb(var(--codify-muted-rgb) / 1); }
 .bg-codify-raised\/60 { background-color: rgb(var(--codify-raised-rgb) / 0.6); }
 
-/* The atmosphere canvas fades out at its edges instead of stopping at them.
- *
- * The canvas is `absolute inset-0` and the chrome is painted over it, so the
- * effect is only ever seen through the gaps the panels leave — and at those
- * boundaries it used to end on a hard line: a bright arc or a grid that ran
- * under the header and stopped dead against it, with no alpha falloff at all.
- * Each painter draws its own internal fades because that is what makes an
- * effect look like an effect, but none of them can fade the *element*, and an
- * element that ends abruptly ends abruptly no matter how soft its last frame
- * was.
- *
- * One radial image rather than two linear ones with `mask-composite: intersect`,
- * which is the other way to do this and the worse one here: the default
- * composite is `add`, so an engine that did not understand the intersect would
- * take the *union* of the two masks and hide the canvas almost entirely. A
- * single image has no such failure mode, and the degradation when `mask-image`
- * is unsupported at all is "no mask" — the old look, not an invisible backdrop.
- *
- * `-webkit-mask-image` is not redundancy. Tauri renders through the platform
- * webview, which on Linux is WebKitGTK, and a WebKit older than the one in
- * Safari 15.4 only took the prefixed property; the desktop app supports
- * distributions older than that.
- *
- * `farthest-corner` rather than a fixed pixel radius, so the fade covers the
- * short axis of a tall window and the long axis of a wide one without the value
- * having to know the window. The centre stays fully opaque, so the visible
- * middle — where the transcript actually is — is untouched. */
-.codify-atmosphere-canvas {
-  -webkit-mask-image: radial-gradient(
-    ellipse farthest-corner at 50% 50%,
-    #000 55%,
-    transparent 100%
-  );
-  mask-image: radial-gradient(
-    ellipse farthest-corner at 50% 50%,
-    #000 55%,
-    transparent 100%
-  );
-}
-
 /* The five status tones and the interactive hue, in the three shapes the badge
    primitive asks for: the resting pill (`bg-…/40` on `text-…` and
    `border-…`), and a bare `text-…` for a status icon shown without a pill. One
@@ -749,49 +709,108 @@ body {
   background-clip: text;
   color: transparent;
 }
-.codify-wordmark-fill,
-.codify-wordmark-sweep {
+.codify-wordmark-fill {
   display: block;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
 }
-.codify-wordmark-sweep {
+
+/* The glyphs are rasterized **once** into this wrapper's mask by
+   `Wordmark.tsx`, and everything inside is clipped by it. The wrapper is
+   static; only the band inside moves. */
+.codify-wordmark-sweep-clip {
   position: absolute;
   inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  /* Revealed by `Wordmark.tsx` once the glyph mask is applied; an unmasked
+     band is a diagonal rectangle over the word. */
+  visibility: hidden;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: 0 0;
+  mask-position: 0 0;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+}
+.codify-wordmark-sweep-clip[data-masked="true"] {
+  visibility: visible;
+}
+.codify-wordmark-sweep {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  /* Twice the word's width, so the band has empty gradient on both sides and
+     the loop never starts or ends with a half-applied band. */
+  width: 200%;
   background-image: linear-gradient(
     100deg,
     transparent 0%,
-    transparent 42%,
+    transparent 30%,
     rgb(var(--codify-primary-rgb) / 0.95) 50%,
-    transparent 58%,
+    transparent 70%,
     transparent 100%
   );
-  /* 220% so the band has empty gradient to sit in on both sides of the glyphs:
-     at 100% it is off the right edge, and at -40% off the left, so the loop
-     never shows a band half-applied. */
-  background-size: 220% 100%;
-  background-position: 100% 0;
-  /* Once, when the empty transcript appears, and then still. The sweep animates
-     `background-position` on text clipped to its background, which is a repaint of
-     the whole wordmark every frame, and a loop made that permanent: measured with
-     the app idle in software-composited Chromium, the whole browser spent 43% of
-     a core on the default theme with the loop and 4% without it, and it is cost
-     the shell's render watchdog counts. DESIGN.md §7 already said nothing loops;
-     this is that rule, kept. */
+  /* A transform, not `background-position`: the latter is a paint property, so
+     animating it on text-clipped glyphs re-rasterized the word every display
+     frame — ~45% of a core in the shell on a software-composited window. A
+     transform is composited; the glyphs are painted once into the mask above. */
+  transform: translate3d(-100%, 0, 0);
+  /* Ten seconds before the first sweep: the boot probe usually has a verdict in
+     under a second (see `frameProbe.ts`), but the shell's watchdog needs ten
+     one-second samples to be sure, and a band that starts before either answer
+     is a band one of them has already paid for. On a window measured starved,
+     the rule below removes the animation before it ever starts. Counted once,
+     not looped: DESIGN.md §7 says nothing loops, and `paintCost.test.ts` holds
+     every endless animation to a stepped timeline. */
   animation: codify-wordmark-sweep 9s linear 1;
+  animation-delay: 10s;
+  will-change: transform;
   pointer-events: none;
 }
 @keyframes codify-wordmark-sweep {
-  0% { background-position: 100% 0; }
-  55% { background-position: -40% 0; }
-  100% { background-position: 100% 0; }
+  0% { transform: translate3d(-100%, 0, 0); }
+  55% { transform: translate3d(100%, 0, 0); }
+  100% { transform: translate3d(-100%, 0, 0); }
 }
 @media (prefers-reduced-motion: reduce) {
   .codify-wordmark-sweep {
     animation: none;
-    background-position: 100% 0;
+    transform: translate3d(100%, 0, 0);
   }
+}
+
+/* The app's own decision, not only the OS's.
+
+   `prefers-reduced-motion` is the system's answer; the app keeps a second one
+   (`data-motion`, from the motion store and the shell's measured verdict) and
+   the CSS above could not see it. So "reduced" stopped every canvas and left the wordmark's
+   gradient sweeping — a `background-position` animation over text-clipped
+   glyphs, which repainted the hero at the display's rate and held ~45% of a
+   core. The band is composited now (see `.codify-wordmark-sweep`), which removes
+   the glyph work but not the compositor's per-frame blend: measured on such a
+   window, the transform alone still pinned the shell at 100%. So `data-starved`
+   stops this band and the cyberpunk veil, and outlives "Animate anyway" (see
+   `STARVED_BOOT_KEY`); the canvas the person kept runs at the lower rate in
+   `useAtmosphereCanvas`. */
+html[data-starved="true"] .codify-wordmark-sweep,
+html[data-starved="true"] .cyber-veil,
+html[data-motion="reduced"] .codify-wordmark-sweep,
+html[data-motion="reduced"] .cyber-veil,
+html[data-motion="reduced"] .codify-logo-caret-live {
+  animation: none;
+}
+html[data-starved="true"] .codify-wordmark-sweep,
+html[data-motion="reduced"] .codify-wordmark-sweep {
+  transform: translate3d(100%, 0, 0);
+  /* The stop rules remove the animation, so the compositing hint has nothing
+     left to keep on the compositor. */
+  will-change: auto;
+}
+html[data-motion="reduced"] .codify-logo-caret-live {
+  opacity: 1;
 }
 
 /* ── the chat surfaces and the remaining panels ─────────────────────────────
