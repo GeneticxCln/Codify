@@ -69,8 +69,8 @@ shown by name and pulls when it wants. A workspace can replace it.
 
 ## The menu narrows
 
-A model choosing from twelve tools chooses worse than one choosing from six, and
-the four step moves are meaningless before a step exists. So the menu is built
+A model choosing from a menu this long chooses worse than one choosing from six,
+and the four step moves are meaningless before a step exists. So the menu is built
 per iteration: `write`, `verify`, `review` and `summarize` are only offered once
 `plan` has produced something for them to act on. That is the cheapest
 reliability win available and it needs no prompt work to get.

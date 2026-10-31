@@ -87,7 +87,7 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
   speech.py       voice: dictation and read-aloud through an OpenAI-compatible speech provider; the engine records the mic (pw-record)
   surfaces.py     the bridge for what the app window owns: the engine asks, the window answers, ops are fixed strings in a table;
                   surface_editor.py is the editor's table (`read_editor`, `open_in_editor`, `edit_editor`; none touches the disk),
-                  surface_machine.py the machine tab's (`read_machine`, `run_in_machine`, `key_in_machine`; no op opens a machine)
+                  surface_machine.py the machine tab's (`read_machine`, `run_in_machine`, `key_in_machine`, `reset_machine`; no op opens a machine)
 ui/             React 19 + TS + Vite; ui/tests/ run through node --test
 src-tauri/      Tauri v2 Rust shell
 tests/          Python suite; stream_isolation.py is the shared isolation helper

@@ -661,9 +661,8 @@ class _Conduct(_Plan):
         """The moves offered for a goal, as a callable the loop asks each turn.
 
         Narrowed by state, and the one rule that matters: the four step moves do
-        nothing before a step exists, so they are not offered until one does. A
-        model choosing from eight tools chooses better than the same model
-        choosing from twelve, and this is the cheapest reliability win available
+        nothing before a step exists, so they are not offered until one does.        A model choosing from a shorter menu chooses better than the same model
+        choosing from the whole menu, and this is the cheapest reliability win available
         — no prompt work, no extra call.
 
         A method rather than a closure inside `_conduct` so the narrowing is

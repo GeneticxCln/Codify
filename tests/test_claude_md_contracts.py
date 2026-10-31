@@ -757,5 +757,24 @@ class ClaudeMdContractsTest(unittest.TestCase):
         )
 
 
+class TestTheMachineToolsAreNamed(unittest.TestCase):
+    """The layout line is the agent's map of the surface bridge; it has to list the doors.
+
+    `reset_machine` was added to the bridge and the README but not to `CLAUDE.md`, so an agent
+    reading the layout believed the machine had three verbs. The tool count in the conductor's
+    docstring went stale the same way: it said twelve while the menu had more than twice that.
+    """
+
+    def test_the_machine_surface_line_names_every_tool(self) -> None:
+        text = CLAUDE_MD.read_text(encoding="utf-8")
+        line = next(line for line in text.splitlines() if "surface_machine.py" in line)
+        for tool in ("read_machine", "run_in_machine", "key_in_machine", "reset_machine"):
+            self.assertIn(tool, line)
+
+    def test_the_conductor_menu_comment_does_not_name_a_stale_count(self) -> None:
+        text = (PROJECT_ROOT / "engine" / "conductor.py").read_text(encoding="utf-8")
+        self.assertNotIn("twelve tools", text)
+
+
 if __name__ == "__main__":
     unittest.main()
