@@ -286,14 +286,16 @@ MAX_SKILL_BYTES = MAX_SKILL_CHARS * 4
 
 
 def _read_file(
-    path: Path, source: str, known_moves: Collection[str] | None = None
+    path: Path, source: str, known_moves: Collection[str] | None = None,
+    name: str | None = None,
 ) -> tuple[Skill | None, str | None]:
+    label = name or path.stem.lower()
     try:
         with path.open("rb") as handle:
             raw = handle.read(MAX_SKILL_BYTES + 1)
         if len(raw) > MAX_SKILL_BYTES:
             return None, (
-                f"{path.stem.lower()}: over {MAX_SKILL_BYTES:,} bytes, past the "
+                f"{label}: over {MAX_SKILL_BYTES:,} bytes, past the "
                 f"{MAX_SKILL_CHARS}-character limit; the rest was not read"
             )
         text = raw.decode("utf-8")
@@ -301,11 +303,16 @@ def _read_file(
         return None, f"{path.name}: {type(exc).__name__}: {exc}"
     except UnicodeDecodeError:
         return None, f"{path.name}: not valid UTF-8 text"
-    return parse_skill(text, path.stem.lower(), source, known_moves)
+    return parse_skill(text, label, source, known_moves)
 
 
-def _skill_files(directory: Path, within: Path | None = None) -> tuple[list[Path], list[str]]:
-    """The skill files in `directory`, and a sentence for every entry refused.
+def _skill_files(directory: Path, within: Path | None = None) -> tuple[list[tuple[Path, str]], list[str]]:
+    """The skill files in `directory`, and a sentence for every entry ignored or refused.
+
+    A skill is either a `.md` file or a `<name>/SKILL.md` folder. A folder's name is
+    the skill's name; every other entry in that folder is reported and never read or
+    run, because a skill is its text and its scripts are not part of the engine's
+    authority.
 
     **A symlink is refused, and that is the whole point of this function.**
     `Path.is_file()` follows links, so a cloned repository could ship
@@ -336,19 +343,49 @@ def _skill_files(directory: Path, within: Path | None = None) -> tuple[list[Path
             f"{SKILLS_DIRNAME}; a link to a directory elsewhere would load someone else's files "
             "as instructions"
         ]
-    files: list[Path] = []
+    files: list[tuple[Path, str]] = []
     problems: list[str] = []
     for path in sorted(directory.iterdir(), key=lambda p: p.name):
-        if path.suffix != ".md":
+        if path.is_symlink():
+            problems.append(
+                f"{path.name}: refused — a skill file or folder must be real, inside "
+                f"{SKILLS_DIRNAME}, not a link to one somewhere else"
+            )
             continue
-        if path.is_symlink() or path.resolve().parent != root:
+        if path.is_dir():
+            skill_file = path / "SKILL.md"
+            if skill_file.is_symlink() or not skill_file.is_file():
+                problems.append(
+                    f"{path.name}/: ignored — a skill folder must contain a real SKILL.md file"
+                )
+                continue
+            if skill_file.resolve().parent != path.resolve() or path.resolve().parent != root:
+                problems.append(
+                    f"{path.name}/SKILL.md: refused — a skill folder and its SKILL.md must be "
+                    f"inside {SKILLS_DIRNAME}, not links to somewhere else"
+                )
+                continue
+            files.append((skill_file, path.name.lower()))
+            for extra in sorted(path.iterdir(), key=lambda p: p.name):
+                if extra.name != "SKILL.md":
+                    problems.append(
+                        f"{path.name}/{extra.name}: ignored — a skill is its SKILL.md; "
+                        "bundled files are never read or run"
+                    )
+            continue
+        if path.suffix != ".md":
+            problems.append(
+                f"{path.name}: ignored — a skill is a .md file or a folder with a SKILL.md"
+            )
+            continue
+        if path.resolve().parent != root:
             problems.append(
                 f"{path.name}: refused — a skill file must be a real file inside "
                 f"{SKILLS_DIRNAME}, not a link to one somewhere else"
             )
             continue
         if path.is_file():
-            files.append(path)
+            files.append((path, path.stem.lower()))
     return files, problems
 
 
@@ -362,8 +399,8 @@ def builtin_skills(known_moves: Collection[str] | None = None) -> tuple[list[Ski
     problems: list[str] = []
     files, refused = _skill_files(BUILTIN_DIR)
     problems.extend(f"built-in skill ignored — {problem}" for problem in refused)
-    for path in files:
-        skill, problem = _read_file(path, "built-in", known_moves)
+    for path, name in files:
+        skill, problem = _read_file(path, "built-in", known_moves, name)
         if skill is not None:
             skills.append(skill)
             problems.extend(_noted(skill))
@@ -389,8 +426,8 @@ def workspace_skills(
             f"{MAX_WORKSPACE_SKILLS} were read"
         )
         files = files[:MAX_WORKSPACE_SKILLS]
-    for path in files:
-        skill, problem = _read_file(path, "workspace", known_moves)
+    for path, name in files:
+        skill, problem = _read_file(path, "workspace", known_moves, name)
         if skill is not None:
             skills.append(skill)
             problems.extend(_noted(skill))

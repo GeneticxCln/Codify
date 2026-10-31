@@ -361,17 +361,61 @@ class TestDiscovery(SkillCase):
         self.assertIn("fine", found.names())
         self.assertEqual(len(found.problems), 1)
 
-    def test_non_markdown_files_are_ignored(self) -> None:
+    def test_ignored_entries_are_reported_not_silently_skipped(self) -> None:
         directory = self.root / SKILLS_DIRNAME
         directory.mkdir(parents=True)
         (directory / "notes.txt").write_text("not a skill")
         (directory / "subdir.md").mkdir()
+
         found = load_skills(str(self.root))
-        self.assertEqual(found.problems, ())
+
         self.assertEqual(
             found.names(),
             ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "unstick", "usage-audit"],
         )
+        self.assertEqual(2, len(found.problems), found.problems)
+        self.assertTrue(any("notes.txt" in p and "ignored" in p for p in found.problems), found.problems)
+        self.assertTrue(any("subdir.md" in p and "SKILL.md" in p for p in found.problems), found.problems)
+
+    def test_a_folder_with_skill_md_is_a_skill_named_for_its_folder(self) -> None:
+        folder = self.root / SKILLS_DIRNAME / "deploy"
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text("---\ndescription: deploy\n---\nShip it.\n", encoding="utf-8")
+
+        found = load_skills(str(self.root))
+
+        self.assertIn("deploy", found.names())
+        skill = found.get("deploy")
+        assert skill is not None
+        self.assertEqual("Ship it.", skill.body)
+        self.assertEqual((), found.problems)
+
+    def test_a_folder_skills_bundled_files_are_reported_and_never_run(self) -> None:
+        folder = self.root / SKILLS_DIRNAME / "deploy"
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text("---\ndescription: deploy\n---\nShip it.\n", encoding="utf-8")
+        (folder / "run.sh").write_text("echo hi\n", encoding="utf-8")
+
+        found = load_skills(str(self.root))
+
+        self.assertIn("deploy", found.names())
+        self.assertEqual(1, len(found.problems), found.problems)
+        self.assertIn("deploy/run.sh", found.problems[0])
+        self.assertIn("never read or run", found.problems[0])
+
+    def test_a_folder_skill_replaces_a_builtin_of_the_same_name(self) -> None:
+        folder = self.root / SKILLS_DIRNAME / "ship-a-change"
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text("---\ndescription: ours\n---\nOur own order.\n", encoding="utf-8")
+
+        found = load_skills(str(self.root))
+
+        self.assertIn("ship-a-change", found.names())
+        self.assertEqual(("ship-a-change",), found.shadows)
+        replaced = found.get("ship-a-change")
+        assert replaced is not None
+        self.assertEqual("workspace", replaced.source)
+        self.assertEqual("Our own order.", replaced.body)
 
     def test_a_huge_directory_is_capped_and_says_so(self) -> None:
         directory = self.root / SKILLS_DIRNAME
@@ -413,6 +457,19 @@ class TestDiscovery(SkillCase):
             self.assertIn("ship-a-change", found.names())
         finally:
             secret.unlink(missing_ok=True)
+
+    def test_a_symlinked_skill_folder_is_refused(self) -> None:
+        outside = self._outside("folder")
+        (outside / "SKILL.md").write_text("---\ndescription: outside\n---\nBody.\n", encoding="utf-8")
+        directory = self.root / SKILLS_DIRNAME
+        directory.mkdir(parents=True)
+        (directory / "planted").symlink_to(outside, target_is_directory=True)
+
+        found = load_skills(str(self.root))
+
+        self.assertNotIn("planted", found.names())
+        self.assertEqual(1, len(found.problems), found.problems)
+        self.assertIn("planted", found.problems[0])
 
     def test_a_skill_symlinked_to_another_skill_in_the_same_directory_is_refused_too(self) -> None:
         # The rule is "the file named is the file opened", not "the target is

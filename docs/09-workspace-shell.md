@@ -2817,6 +2817,11 @@ worse than an obvious one. `context-transfer.md`, `security-review.md` (docs/13)
 assumption two failed fixes shared and probes it before a third variation is attempted, are the
 directory's other built-ins and the proof that the set is not a pipeline with one entry.
 
+A skill is a `.md` file or a `<name>/SKILL.md` folder; a folder's name is the
+skill's name. Every other entry in the directory is reported with why it was
+ignored, and a folder's other files are never read or run — a skill is its text,
+never its scripts.
+
 **A skill is data, not a capability.** `.codify/skills/` arrives with a cloned
 repository, which makes it untrusted input. A skill can sequence moves that
 already exist; it cannot define a move, cannot widen `validate_argv`, and cannot
