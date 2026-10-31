@@ -52,9 +52,13 @@ tell a considered shortcut from a step you forgot.
    `run_command` too: that works now the plan is approved. The project's
    commands are on an allowlist; if one is refused, say so rather than reaching
    for a different command to get around it.
-7. **If verification failed**, take the failure back to `write` with the
-   command output, once or twice. You are not required to loop forever, and a
-   step you cannot make pass is worth reporting as such rather than hiding.
+7. **If verification failed**, take the failure back to `write` with the first
+   error, not the last line, and the sentence you think names the cause. Once or
+   twice is the budget. If the same error comes back after two different fixes,
+   stop varying the edit and load **`unstick`**: name the assumption both fixes
+   shared, probe it, and either fix what the probe shows or change the
+   mechanism. A step you cannot make pass is worth reporting as such rather
+   than hiding.
 8. **`review`** — ask the critic whether the change is acceptable. If the critic
    asks for changes, tell the user what it asked for and stop: the run is paused
    for them, and `write` will refuse until they press Start. Do not argue with

@@ -123,7 +123,7 @@ class TestWhatShipsWithCodify(unittest.TestCase):
         self.assertEqual(found.problems, ())
         self.assertEqual(
             found.names(),
-            ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "usage-audit"],
+            ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "unstick", "usage-audit"],
             "built-ins always load",
         )
 
@@ -214,6 +214,36 @@ class TestWhatShipsWithCodify(unittest.TestCase):
             "the five sections are out of order — the order is the shape of the "
             "block, and a handoff that reorders it is a different recipe",
         )
+
+
+    def test_the_unstick_recipe_loads_and_pins_its_stop_conditions(self) -> None:
+        """Its value is the rule it imposes on a model that is already failing, so that is pinned.
+
+        Two failed fixes of the same kind are one wrong belief, and the recipe exists to make the
+        conductor test that belief instead of producing a third variation of the same edit. Without
+        those sentences the skill is a platitude, so the load-bearing phrases are asserted.
+        """
+        skills, problems = builtin_skills(ConductorTools.NAMES)
+        self.assertEqual(problems, [])
+        by_name = {s.name: s for s in skills}
+        self.assertIn("unstick", by_name)
+        recipe = by_name["unstick"]
+        self.assertTrue(recipe.description)
+        self.assertLessEqual(len(recipe.description), MAX_DESCRIPTION_CHARS)
+        self.assertEqual(recipe.source, "built-in")
+        self.assertEqual(
+            set(recipe.moves),
+            {"recon", "write", "verify"},
+            "every declared move has to exist — a name that does not is a note, and this one is written around these",
+        )
+        for kept in (
+            "third variation",      # stop editing; a variation is the same assumption in a new diff
+            "shared assumption",    # name the belief the attempts have in common
+            "probe",                # test it with a call the engine already offers
+            "not the last line",    # the first error is the cause; the rest is fallout
+            "change the mechanism", # if the belief holds, move the fix, not the edit
+        ):
+            self.assertIn(kept, recipe.body, f"the skill dropped {kept!r}")
 
 
 class TestParsing(unittest.TestCase):
@@ -339,7 +369,7 @@ class TestDiscovery(SkillCase):
         self.assertEqual(found.problems, ())
         self.assertEqual(
             found.names(),
-            ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "usage-audit"],
+            ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "unstick", "usage-audit"],
         )
 
     def test_a_huge_directory_is_capped_and_says_so(self) -> None:
@@ -581,7 +611,7 @@ class TestTheMenuTheConductorIsOffered(SkillCase):
             self.assertIn(kept, narrowed)
         self.assertEqual(
             skills.names(),
-            ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "usage-audit"],
+            ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "unstick", "usage-audit"],
         )
 
     def test_the_body_handed_back_is_the_loaded_text(self) -> None:

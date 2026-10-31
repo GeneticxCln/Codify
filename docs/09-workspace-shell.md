@@ -2806,8 +2806,9 @@ fetched with `use_skill` only when it is wanted, and a
 `<workspace>/.codify/skills/*.md` file of the same name replaces it — with the
 replacement announced in the transcript, because a silently shadowed recipe is
 worse than an obvious one. `context-transfer.md`, `security-review.md` (docs/13),
-`usage-audit.md` (docs/15) and `inspect-an-artifact.md` (docs/17) are the directory's other built-ins and
-the proof that the set is not a pipeline with one entry.
+`usage-audit.md` (docs/15), `inspect-an-artifact.md` (docs/17) and `unstick.md`, which names the
+assumption two failed fixes shared and probes it before a third variation is attempted, are the
+directory's other built-ins and the proof that the set is not a pipeline with one entry.
 
 **A skill is data, not a capability.** `.codify/skills/` arrives with a cloned
 repository, which makes it untrusted input. A skill can sequence moves that
