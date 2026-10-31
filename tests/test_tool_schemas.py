@@ -54,6 +54,21 @@ class TestEveryRealToolIsWellFormed(unittest.TestCase):
             self.assertEqual(declared.get("items"), {"type": "string"}, f"{spec.name}.{key}")
 
 
+class TestToolTextTellsTheTruth(unittest.TestCase):
+    """A tool's description is a capability claim, and the model reads it as one.
+
+    `run_command` used to say it could not reach the network. It runs the project's own tests and
+    build, which are code, and code can open a socket. The engine does not sandbox the network; the
+    allowlist decides what may run, not what it may connect to.
+    """
+
+    def test_run_command_does_not_promise_a_network_that_is_not_there(self) -> None:
+        text = RUN_COMMAND.description
+        self.assertNotIn("cannot reach the network", text)
+        self.assertIn("may reach the network", text)
+        self.assertIn("allowlist", text)
+
+
 class TestTheCheckerCanFail(unittest.TestCase):
     """Negative controls: each rule must be able to say no."""
 
