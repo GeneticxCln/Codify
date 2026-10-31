@@ -109,6 +109,24 @@ DEFAULT_SDK_TIMEOUT_S = 30.0
 # are as likely to be appended at the end of a request as stated up front.
 MAX_REQUEST_CHARS = 4000
 
+# A fine-tuned checkpoint is a Hugging Face repo id, loaded from the repo root by `laya.load`.
+# The gate accepts no URL, local path or subfolder here: the setting names a published model,
+# and the loader's own source is a string it hands to the Hub. Empty means the built-in Router.
+CHECKPOINT_MAX = 200
+CHECKPOINT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def checkpoint_problem(value: str) -> str | None:
+    """Why `value` is not a Hub repo id, or None when it is (empty means the built-ins)."""
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > CHECKPOINT_MAX:
+        return f"must be at most {CHECKPOINT_MAX} characters"
+    if not CHECKPOINT_RE.match(text):
+        return "must be a Hugging Face repo id such as owner/laya-codify (no URL, local path or subfolder)"
+    return None
+
 
 class LayaSdkBusy(RuntimeError):
     """The SDK is still working on an earlier request (one it was stopped waiting for)."""
@@ -360,13 +378,24 @@ class LayaService:
         disabled: bool | None = None,
         registry: Any = None,
         sdk_timeout: float | None = None,
+        settings: Any = None,
+        checkpoint: str | None = None,
     ):
         # Annotated, not inferred: mypy reads the None initializer as "always
         # None" and then calls the probe branch below unreachable — the SDK
         # loader assigns a real Router to it at runtime.
         self._router: Any = None
+        # The fine-tuned checkpoint's Agent, and the repo it was loaded from. A reload replaces
+        # both; keeping the repo lets a decision that follows a setting change notice the cache
+        # belongs to the old value even before the reload thread reaches the lock.
+        self._custom_agent: Any = None
+        self._custom_repo: str | None = None
         self._sdk_error: str | None = None
         self._registry = registry
+        # A caller that already knows the checkpoint (a test) can pass it; otherwise the
+        # `laya_checkpoint` engine setting is read when the SDK is about to load.
+        self._settings = settings
+        self._checkpoint = checkpoint
         env = os.environ.get(SDK_DISABLE_ENV, "").strip().lower()
         self._disabled = disabled if disabled is not None else env in ("0", "false", "no", "off")
         # One SDK call at a time, and never a queue of them: the model is not
@@ -393,6 +422,21 @@ class LayaService:
     def sdk_error(self) -> str | None:
         return self._sdk_error
 
+    def checkpoint(self) -> str:
+        """The fine-tuned Hub repo this gate loads, or "" for the built-in Router."""
+        if self._checkpoint is not None:
+            return self._checkpoint.strip()
+        if self._settings is None:
+            return ""
+        try:
+            return str(self._settings.get_str("laya_checkpoint")).strip()
+        except Exception:
+            return ""
+
+    def _device(self) -> str:
+        """`CODIFY_LAYA_DEVICE`, or the CPU — see the note in `_sdk_router`."""
+        return os.environ.get(SDK_DEVICE_ENV, "").strip() or DEFAULT_SDK_DEVICE
+
     def _sdk_router(self) -> Any:
         """Load the Laya Router once (preloaded, so no per-request reload).
 
@@ -417,14 +461,40 @@ class LayaService:
             # display server for the last VRAM: one such run logged 3,389
             # nvidia-drm "Failed to allocate NVKMS memory" errors in a minute,
             # which is the desktop freezing. `CODIFY_LAYA_DEVICE=cuda` opts in.
-            device = os.environ.get(SDK_DEVICE_ENV, "").strip() or DEFAULT_SDK_DEVICE
-            router = Router(device=device)
+            router = Router(device=self._device())
             router.preload(list(ROUTED_CHECKPOINTS))
             self._router = router
         except Exception as exc:  # missing weights, no network, unsupported host
             self._sdk_error = f"{type(exc).__name__}: {exc}"
             return None
         return self._router
+
+    def _sdk_agent(self, repo: str | None = None) -> Any:
+        """Load a fine-tuned checkpoint once, or return None with `sdk_error` set.
+
+        A custom checkpoint is one model, not a language router: `laya.load(repo)` returns the
+        Agent the training recipe exported, and every request is answered by it. The built-in
+        Router is not built at all while this is configured. The repo id's shape is checked here
+        too, not only in the settings route: a value that reached the database by another door
+        must not become an arbitrary path or URL handed to the loader.
+        """
+        repo = (repo if repo is not None else self.checkpoint()).strip()
+        if self._custom_agent is not None and self._custom_repo == repo:
+            return self._custom_agent
+        if self._sdk_error is not None or self._disabled or not repo:
+            return None
+        try:
+            problem = checkpoint_problem(repo)
+            if problem is not None:
+                raise ValueError(f"laya_checkpoint {problem}")
+            import laya
+
+            self._custom_agent = laya.load(repo, device=self._device())
+            self._custom_repo = repo
+        except Exception as exc:  # not a repo, no network, a checkpoint in another format
+            self._sdk_error = f"{type(exc).__name__}: {exc}"
+            return None
+        return self._custom_agent
 
     # --- decision engines --------------------------------------------------
 
@@ -455,11 +525,49 @@ class LayaService:
     def _warm(self) -> None:
         try:
             with self._sdk_lock:
-                self._sdk_router()
-        except Exception as exc:  # `_sdk_router` catches its own; this is the last line
+                self._load_sdk()
+        except Exception as exc:  # `_load_sdk` catches its own; this is the last line
             self._sdk_error = f"{type(exc).__name__}: {exc}"
         finally:
             self._warming.clear()
+
+    def _load_sdk(self) -> Any:
+        """The built-in Router, or the configured fine-tuned Agent — never both."""
+        repo = self.checkpoint()
+        return self._sdk_agent(repo) if repo else self._sdk_router()
+
+    def reload(self) -> threading.Thread | None:
+        """Apply a newly saved `laya_checkpoint` without restarting the engine.
+
+        A daemon thread for the same reason `start_warming` is one: a load is seconds and a
+        download can be minutes, and the settings route must not wait for either. The SDK lock
+        makes an in-flight decision finish first; the caches are cleared only then, so a request
+        can never see half a swap. A decision that arrives during the reload waits on `_warming`
+        instead of being judged by the checkpoint that is being replaced.
+        """
+        if not self.sdk_available():
+            self._router = None
+            self._custom_agent = None
+            self._custom_repo = None
+            self._sdk_error = None
+            return None
+        worker = threading.Thread(target=self._reload, name="laya-reload", daemon=True)
+        worker.start()
+        return worker
+
+    def _reload(self) -> None:
+        with self._sdk_lock:
+            self._router = None
+            self._custom_agent = None
+            self._custom_repo = None
+            self._sdk_error = None
+            self._warming.set()
+            try:
+                self._load_sdk()
+            except Exception as exc:  # `_load_sdk` catches its own; this is the last line
+                self._sdk_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                self._warming.clear()
 
     def _decide_with_sdk(self, state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         """Blocking: load the router if need be, then one forward pass. Runs on a worker thread.
@@ -479,15 +587,21 @@ class LayaService:
             # request itself would have waited for the SDK.
             if not self._sdk_lock.acquire(timeout=self._sdk_timeout):
                 raise LayaSdkBusy("the laya SDK is still loading")
+        repo = self.checkpoint()
         try:
-            router = self._sdk_router()
-            if router is None:
+            backend = self._sdk_agent(repo) if repo else self._sdk_router()
+            if backend is None:
                 raise RuntimeError(self._sdk_error or "laya SDK unavailable")
-            result = router.predict(state, dict(LAYA_QUESTIONS))
+            result = backend.predict(state, dict(LAYA_QUESTIONS))
         finally:
             self._sdk_lock.release()
         answers = result.get("answers", {}) if isinstance(result, dict) else {}
-        routing = result.get("routing", {}) if isinstance(result, dict) else {}
+        if repo:
+            # One checkpoint answered, so there is no language decision to report; naming the
+            # repo is the provenance the UI needs, and `model` keeps its usual meaning.
+            routing = {"model": repo, "repo": repo, "checkpoint": "custom"}
+        else:
+            routing = result.get("routing", {}) if isinstance(result, dict) else {}
         return answers or {}, routing or {}
 
     async def _decide_with_llm(
@@ -637,6 +751,7 @@ class LayaService:
             "sdk_installed": available,
             "sdk_disabled": self._disabled,
             "sdk_error": self._sdk_error,
+            "checkpoint": self.checkpoint(),
             "questions": LAYA_QUESTIONS,
             "policy": {
                 "injection_block_threshold": INJECTION_BLOCK_THRESHOLD,

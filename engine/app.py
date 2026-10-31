@@ -30,7 +30,7 @@ from engine import capabilities, home, speech, watchdog
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.git import GitService
-from engine.laya import LayaService
+from engine.laya import LayaService, checkpoint_problem
 from engine.role_repair import plan_role_repair
 from engine.spawn_guard import guarded_argv, guarded_env
 from engine.stats import build_overview, normalize_window
@@ -256,7 +256,7 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     app.state.stats_imports = StatsImportService(conn)
     # The gate needs the registry for its LLM fallback when the real Laya SDK is
     # not installed; without it every goal's gate would silently skip.
-    app.state.laya = LayaService(registry=app.state.registry)
+    app.state.laya = LayaService(registry=app.state.registry, settings=app.state.settings)
     # Load the gate's checkpoints in the background, so the first message does not
     # pay for it. Off the event loop and never awaited: the engine's readiness
     # (the handshake the desktop shell waits for) does not depend on it.
@@ -1373,6 +1373,11 @@ SLUG_SETTINGS = frozenset({
 # because the key and the address can be saved in either order.
 URL_SETTINGS = frozenset({"stt_base_url", "tts_base_url"})
 
+# A fine-tuned Laya checkpoint is a Hugging Face repo id, not a provider slug or a URL. The
+# shape is the SDK's own (`engine/laya.py` `checkpoint_problem`), so the route and the loader
+# cannot disagree about what it will accept.
+CHECKPOINT_SETTINGS = frozenset({"laya_checkpoint"})
+
 
 @app.get("/settings/engine")
 async def get_engine_settings(request: Request) -> dict[str, Any]:
@@ -1461,6 +1466,10 @@ def _clean_engine_string(key: str, value: Any) -> str:
                 f"{key} is {len(written)} characters once written out ({limit} allowed); list fewer sites",
             )
         return written
+    if key in CHECKPOINT_SETTINGS and text:
+        problem = checkpoint_problem(text)
+        if problem is not None:
+            raise ApiError(422, "invalid_value", f"{key} {problem}")
     return text
 
 
@@ -1502,6 +1511,12 @@ async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[st
     out: dict[str, Any] = {}
     for key in body:
         out[key] = settings.set_int(key, int_values[key]) if key in int_values else settings.set_str(key, string_values[key])
+    if "laya_checkpoint" in body:
+        # Read when the SDK next loads. Reload now so the save takes effect without a restart; the
+        # thread may download a checkpoint, so the route must not await it. Never raises.
+        laya: LayaService | None = getattr(request.app.state, "laya", None)
+        if laya is not None:
+            laya.reload()
     return {"saved": out}
 
 

@@ -158,6 +158,18 @@ verdicts on this schema ever need that, upstream's fine-tuning notebook is the p
 loads the upstream checkpoint names today and has no setting for a custom checkpoint, and a
 fine-tuned model's calibration would have to be checked against the thresholds in §4 first.
 
+**A fine-tuned checkpoint is a setting, not a code change.** Settings → the gate card takes a
+Hugging Face repo id in `laya_checkpoint` (`PUT /settings/engine`, the same person-only door as the
+conductor's model). A value replaces the built-in Router: `laya.load(repo)` loads the checkpoint at
+the repo root, every request is answered by that one model (so there is no language routing), and it
+runs on the CPU by default like the Router. Empty is the built-in `english` + `multilingual` pair.
+The repo must be in Laya's export format — `rl_agent_config.json`, `model.safetensors`, the
+tokenizer and encoder — which is what upstream's fine-tuning notebook produces. The value is read
+when the SDK loads, and saving it makes the engine reload the checkpoint in the background; a repo
+that cannot be loaded is reported in the gate card and the gate falls back exactly as it does for
+any other SDK failure. A fine-tune's calibration is its own, so re-check the thresholds in §4
+against it before trusting a block.
+
 **Context limits.** Laya's checkpoints have 512–1024 token contexts, so an arbitrary user prompt
 cannot fit whole. `build_state` clips over-long requests to 4000 characters **keeping both ends**
 (`…[N chars elided]…`), because an injected instruction is as likely to be appended at the end of a

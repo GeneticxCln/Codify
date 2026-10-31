@@ -182,6 +182,18 @@ class _StubFactory(ProviderFactory):
         return self.provider
 
 
+class _SettingsStub:
+    """One mutable engine setting, for the checkpoint path without a database."""
+
+    def __init__(self, checkpoint: str = "") -> None:
+        self.value = checkpoint
+
+    def get_str(self, key: str) -> str:
+        if key != "laya_checkpoint":
+            raise KeyError(key)
+        return self.value
+
+
 def _registry_with(
     provider: BaseProvider, tmp: Path, model: str = "stub-model"
 ) -> tuple[sqlite3.Connection, AgentRegistryService]:
@@ -194,16 +206,19 @@ def _registry_with(
     return conn, registry
 
 
-def _install_fake_sdk(router: object) -> None:
+def _install_fake_sdk(router: object, loader: object | None = None) -> None:
     """Stub the Laya SDK on `sys.modules`.
 
     The real SDK is optional by design (docs/05) and is not installed here, so the
     SDK code path is exercised against a module built in the test. `setattr` rather
     than `module.Router = ...` because a `ModuleType` declares no attributes for the
-    checker to see.
+    checker to see. `loader` is the SDK's `laya.load`, used by the fine-tuned
+    checkpoint path; tests that do not set it never reach that path.
     """
     module = types.ModuleType("laya")
     setattr(module, "Router", router)  # noqa: B010 — the name is the SDK's, kept dynamic on purpose
+    if loader is not None:
+        setattr(module, "load", loader)  # noqa: B010 — the name is the SDK's, kept dynamic on purpose
     sys.modules["laya"] = module
 
 
@@ -383,6 +398,99 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         # ~27 s and ~1.7 GB of load for a model this gate never asks for.
         self.assertEqual(calls, [{"device": "cpu"}])
         self.assertEqual(preloaded, [["english", "multilingual"]])
+
+    async def test_a_fine_tuned_checkpoint_is_loaded_instead_of_the_router(self) -> None:
+        loads: list[tuple[str, dict[str, Any]]] = []
+        predicted: list[dict[str, Any]] = []
+
+        class Agent:
+            def predict(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+                predicted.append(state)
+                return {"answers": {"prompt_injection": {"noul": 0.02}}}
+
+        def load(repo: str, **kwargs: Any) -> Agent:
+            loads.append((repo, kwargs))
+            return Agent()
+
+        class Router:
+            def __init__(self, **kwargs: Any) -> None:
+                raise AssertionError("the built-in Router must not be built for a custom checkpoint")
+
+        _install_fake_sdk(Router, load)
+        service = LayaService(disabled=False, checkpoint="me/laya-codify")
+        decision = await service.decide({"request": "add a test"})
+
+        self.assertEqual(decision.engine, "sdk")
+        self.assertEqual(decision.model, "me/laya-codify")
+        self.assertEqual(loads, [("me/laya-codify", {"device": "cpu"})])
+        self.assertEqual(len(predicted), 1, "the custom Agent did not answer the gate")
+        self.assertEqual(decision.routing["checkpoint"], "custom")
+
+    async def test_a_broken_custom_checkpoint_falls_back_instead_of_failing(self) -> None:
+        def load(repo: str, **kwargs: Any) -> Any:
+            raise OSError("checkpoint is not on the Hub")
+
+        _install_fake_sdk(object, load)
+        provider = _StubProvider({"intent": {"choice": "question"}})
+        conn, registry = _registry_with(provider, self.root)
+        try:
+            service = LayaService(registry=registry, disabled=False, checkpoint="me/missing")
+            decision = await service.decide({"request": "x"})
+        finally:
+            conn.close()
+        self.assertEqual(decision.engine, "llm-fallback")
+        self.assertIn("checkpoint is not on the Hub", service.sdk_error() or "")
+
+    async def test_a_checkpoint_that_is_not_a_hub_id_is_not_loaded(self) -> None:
+        loads: list[str] = []
+
+        def load(repo: str, **kwargs: Any) -> Any:
+            loads.append(repo)
+            return object()
+
+        _install_fake_sdk(object, load)
+        provider = _StubProvider({"intent": {"choice": "question"}})
+        conn, registry = _registry_with(provider, self.root)
+        try:
+            # A value that reached the database by another door must not become a URL or a path
+            # handed to the SDK. The route refuses it first; this is the loader's own guard.
+            service = LayaService(
+                registry=registry, disabled=False, checkpoint="https://example.com/model",
+            )
+            decision = await service.decide({"request": "x"})
+        finally:
+            conn.close()
+        self.assertEqual(loads, [])
+        self.assertEqual(decision.engine, "llm-fallback")
+        self.assertIn("Hugging Face repo id", service.sdk_error() or "")
+
+    async def test_reload_swaps_the_checkpoint_from_the_setting(self) -> None:
+        settings = _SettingsStub("one/repo")
+        loads: list[str] = []
+
+        class Agent:
+            def predict(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+                return {"answers": {"intent": {"choice": "other"}}}
+
+        def load(repo: str, **kwargs: Any) -> Agent:
+            loads.append(repo)
+            return Agent()
+
+        _install_fake_sdk(object, load)
+        service = LayaService(disabled=False, settings=settings)
+        first = await service.decide({"request": "hi"})
+        self.assertEqual(first.engine, "sdk")
+
+        settings.value = "two/repo"
+        worker = service.reload()
+        assert worker is not None, "reload did not start"
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+
+        second = await service.decide({"request": "hi"})
+        self.assertEqual(second.engine, "sdk")
+        self.assertEqual(second.model, "two/repo")
+        self.assertEqual(loads, ["one/repo", "two/repo"])
 
     async def test_sdk_crash_falls_back_instead_of_failing(self) -> None:
         class Router:
@@ -639,6 +747,13 @@ class TestLayaService(unittest.IsolatedAsyncioTestCase):
         status = LayaService().status()
         self.assertEqual(status["questions"], LAYA_QUESTIONS)
         self.assertEqual(status["policy"]["injection_block_threshold"], 0.85)
+        self.assertEqual(status["checkpoint"], "")
+
+    def test_status_reports_the_configured_checkpoint(self) -> None:
+        self.assertEqual(
+            LayaService(checkpoint="me/laya-codify").status()["checkpoint"],
+            "me/laya-codify",
+        )
 
 
 class _BlockingLaya(LayaService):

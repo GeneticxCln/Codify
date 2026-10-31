@@ -558,6 +558,9 @@ export interface LayaStatus {
   sdk_installed: boolean;
   sdk_disabled: boolean;
   sdk_error?: string | null;
+  /** The fine-tuned Hub repo the gate loads, or empty for the built-in Router. Optional: an
+   * engine that predates the setting answers without it, and the card shows the built-in. */
+  checkpoint?: string;
   questions: Record<string, any>;
   policy: {
     injection_block_threshold: number;
@@ -627,6 +630,8 @@ export interface EngineSettings {
   web_fetch?: EngineSettingValue;
   /** The sites `fetch_page` may read when `web_fetch` is 1: site names, each covering its subdomains. */
   web_fetch_hosts?: EngineStringSettingValue;
+  /** A fine-tuned Laya checkpoint's Hub repo id; empty uses the built-in Router (docs/05). */
+  laya_checkpoint?: EngineStringSettingValue;
 }
 
 /** The Settings screen's tabs, in the order they are shown. One definition, so a new tab is one edit. */

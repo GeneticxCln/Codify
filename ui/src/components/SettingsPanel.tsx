@@ -19,8 +19,9 @@ import { WebAccessCard } from "./WebAccessCard";
 import { BrowserActionsCard } from "./BrowserActionsCard";
 import { EngineRuntimeCard } from "./EngineRuntimeCard";
 import { SelectMenu } from "./SelectMenu";
-import { Sliders, ShieldCheck, Zap, AlertTriangle, Cpu, Wand2, Wrench, Workflow } from "lucide-react";
+import { Sliders, ShieldCheck, Zap, AlertTriangle, Cpu, Wand2, Wrench, Workflow, Save, RotateCcw } from "lucide-react";
 import { readRejection } from "../rejection.ts";
+import { checkpointProblem } from "../layaCheckpoint.ts";
 
 interface SettingsPanelProps {
   /** Render compactly inside the settings modal instead of as a full page. */
@@ -51,12 +52,18 @@ interface SettingsPanelProps {
 const LayaGateStatus: React.FC = () => {
   const [status, setStatus] = useState<LayaStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     getLayaStatus()
       .then((s) => {
-        if (!cancelled) setStatus(s ?? null);
+        if (!cancelled) {
+          setStatus(s ?? null);
+          setDraft(s?.checkpoint ?? "");
+        }
       })
       .catch(() => {
         if (!cancelled) setStatus(null);
@@ -86,6 +93,30 @@ const LayaGateStatus: React.FC = () => {
     : status.sdk_disabled
     ? "text-codify-warning"
     : "text-codify-secondary";
+  const stored = status.checkpoint ?? "";
+  const problem = checkpointProblem(draft);
+  const dirty = draft.trim() !== stored;
+
+  const save = async (value: string) => {
+    setSaving(true);
+    setMsg(null);
+    try {
+      const res = await saveEngineSettings({ laya_checkpoint: value });
+      const next = String(res.saved.laya_checkpoint ?? "");
+      setDraft(next);
+      setStatus((s) => (s ? { ...s, checkpoint: next } : s));
+      setMsg({
+        ok: true,
+        text: status.sdk_installed
+          ? "Saved — the gate reloads it in the background."
+          : "Saved — it applies once the Laya SDK is installed.",
+      });
+    } catch (err: any) {
+      setMsg({ ok: false, text: readRejection(err, "Could not save the checkpoint.") });
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-1.5 bg-codify-surface border border-codify-border rounded-lg p-3">
@@ -116,6 +147,66 @@ const LayaGateStatus: React.FC = () => {
           {status.sdk_error ? `Last error: ${status.sdk_error}` : ""}
         </p>
       )}
+      {status.sdk_installed && status.sdk_error && (
+        <p className="text-xs text-codify-warning">
+          The gate's last load failed: {status.sdk_error} — it is using the fallback model.
+        </p>
+      )}
+      <form
+        className="flex flex-col gap-1.5 border-t border-codify-border pt-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!problem && dirty && !saving) void save(draft.trim());
+        }}
+      >
+        <label className="text-xs font-semibold text-codify-secondary" htmlFor="laya-checkpoint">
+          Fine-tuned checkpoint (optional)
+        </label>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            id="laya-checkpoint"
+            type="text"
+            value={draft}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setMsg(null);
+            }}
+            placeholder="owner/laya-codify"
+            spellCheck={false}
+            autoComplete="off"
+            className="flex-1 min-w-[14rem] bg-codify-bg border border-codify-border rounded-lg px-2.5 py-1.5 text-xs text-codify-text outline-none focus:border-codify-accent"
+          />
+          <button
+            type="submit"
+            disabled={saving || !dirty || problem !== null}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-accent text-codify-bg hover:brightness-110 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+          >
+            <Save className="w-3.5 h-3.5" />
+            {saving ? "Saving..." : "Save"}
+          </button>
+          {stored !== "" && (
+            <button
+              type="button"
+              onClick={() => void save("")}
+              disabled={saving}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-codify-surface hover:bg-codify-border border border-codify-border text-codify-secondary text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Use built-in
+            </button>
+          )}
+        </div>
+        <p className="text-xs text-codify-muted leading-relaxed">
+          A Hugging Face repo id for a Laya checkpoint fine-tuned on this schema. It replaces the
+          built-in Router (so there is no language routing), is downloaded on first use, and runs on
+          the CPU unless <code>CODIFY_LAYA_DEVICE=cuda</code> is set. Empty uses the built-in
+          english/multilingual checkpoints.
+        </p>
+        {problem && <p className="text-xs text-codify-danger">{problem}</p>}
+        {msg && (
+          <p className={`text-xs ${msg.ok ? "text-codify-success" : "text-codify-danger"}`}>{msg.text}</p>
+        )}
+      </form>
     </div>
   );
 };
