@@ -15,6 +15,7 @@ file fails the test instead of comparing two empty lists.
 """
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -87,6 +88,30 @@ class TestDevToolsHaveOneList(unittest.TestCase):
         self.assertTrue(tools, "the floor script's tools parsed to nothing — extractor is stale")
         extra = _dev_extra()
         self.assertEqual([t for t in tools if t not in extra], [], "the floor script pins a tool the dev extra does not")
+
+
+class TestTheLayaExtraIsInstallable(unittest.TestCase):
+    """`make setup-laya` is only a fix if the extra it installs exists and goes into `.venv`.
+
+    The SDK is the one dependency deliberately outside `dependencies` and `dev` (docs/05,
+    docs/18), so nothing else would notice the target naming an extra pyproject.toml does not
+    declare: pip would fail with "does not provide the extra" after resolving torch.
+    """
+
+    def test_pyproject_declares_the_laya_extra(self) -> None:
+        text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        match = re.search(r"^laya\s*=\s*\[(.*?)^\]", text, re.S | re.M)
+        self.assertIsNotNone(match, "pyproject.toml no longer declares a `laya` extra")
+        assert match is not None
+        deps = re.findall(r'"([^"]+)"', _COMMENT.sub("", match.group(1)))
+        self.assertTrue(deps and deps[0].startswith("laya>="), deps)
+
+    def test_the_target_installs_it_into_the_checkouts_own_interpreter(self) -> None:
+        done = subprocess.run(
+            ["make", "-n", "setup-laya"], cwd=ROOT, capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertIn('.venv/bin/python3 -m pip install -e ".[laya]"', done.stdout)
 
 
 class TestDependencyParity(unittest.TestCase):

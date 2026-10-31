@@ -110,8 +110,10 @@ const LayaGateStatus: React.FC = () => {
       )}
       {!status.sdk_installed && !status.sdk_disabled && (
         <p className="text-xs text-codify-muted">
-          Install the SDK (`pip install laya` + weights) to run the gate in-process;{" "}
-          {status.sdk_error ? `last error: ${status.sdk_error}` : "no local weights installed yet."}
+          No Laya SDK in this install. From a checkout, <code>make setup-laya</code> adds it to the
+          engine's own interpreter; a packaged app ships without it and gates through the fallback
+          model below.{" "}
+          {status.sdk_error ? `Last error: ${status.sdk_error}` : ""}
         </p>
       )}
     </div>

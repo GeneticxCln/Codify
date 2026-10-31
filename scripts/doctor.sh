@@ -98,6 +98,15 @@ else
 fi
 echo
 
+echo "Laya gate (optional: the in-process System-1 SDK; 'make ci' does not need it)"
+if [ -x "$venv_py" ] && "$venv_py" -c 'import laya' >/dev/null 2>&1; then
+  ok "laya is importable by this checkout's .venv — the gate answers in-process"
+else
+  note "the Laya SDK is not importable by this checkout's interpreter: the gate uses the 'laya' role's model, or skips" \
+    "make setup-laya   (installs the SDK into .venv; torch and the checkpoints are hundreds of MB)"
+fi
+echo
+
 echo "Node (the UI)"
 if have node && have npm; then
   if run node "$root/ui/scripts/check-node.mjs" >/dev/null 2>&1; then
