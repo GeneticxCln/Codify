@@ -416,8 +416,7 @@ class _Conduct(_Plan):
             self._fail(
                 goal_id, None, "conductor_failed",
                 f"The conductor's model could not be reached ({code}), so nothing was changed. Ask again "
-                "when it is back, or switch the conductor off in Settings and Codify will use its fixed "
-                "sequence instead.",
+                "when it is back, or choose a different conductor model in Settings.",
             )
         elif not words:
             self._fail(

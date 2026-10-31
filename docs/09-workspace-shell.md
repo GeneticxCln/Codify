@@ -2911,7 +2911,9 @@ the turn's reply, with a warning that nothing was changed and that the budget is
 a setting; if its model failed, or said nothing, the turn **fails** with
 `conductor_failed` and a sentence naming the provider's *code* (never its
 message, which is third-party text) that says nothing was changed and what to do
-about it. A plan made before the conductor stopped still stands. Where there is
+about it: ask again when it is back, or choose a different conductor model in
+Settings. There is no switch that turns the conductor off and no fixed sequence
+waiting behind it, so the sentence never offers one. A plan made before the conductor stopped still stands. Where there is
 no conductor at all (no tool-capable model), nothing changed: the recipe is the
 driver there, as it always was (`tests/test_conductor_turn_end.py`).
 

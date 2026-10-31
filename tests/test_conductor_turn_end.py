@@ -103,6 +103,10 @@ class TestAChangeRequestTheConductorCouldNotFinish(TurnEndCase):
         self.assertIn("upstream_error", error["message"], "the provider's code says what happened")
         self.assertNotIn("refused the tool call", error["message"], "the provider's own words are not ours")
         self.assertIn("nothing was changed", error["message"].lower())
+        # There is no switch that turns the conductor off and no fixed sequence waiting behind it
+        # (docs/09 §10.14). The advice has to name a setting that exists.
+        self.assertIn("choose a different conductor model", error["message"])
+        self.assertNotIn("switch the conductor off", error["message"])
         self.assertEqual([], self.goals.steps(self.goal.id), "a plan was made by something other than the conductor")
         self.assertFalse(self._recipe_ran(provider), "the recipe ran over a conductor that failed")
 
