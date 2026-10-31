@@ -82,6 +82,16 @@ GUARDED_SPAWN_SITES: dict[str, dict[str, str]] = {
     "scripts/check_history.py": {
         "run": "the per-commit build check: git worktree/rev-list/diff and the gate's own leg binaries, each an argv list with capture_output and no shell. Deliberately NOT routed through SandboxService: that allowlist is a security boundary for MODEL-proposed argv, and this script is run by a developer, never by an agent. Its argv is assembled here from a fixed table and a git range the developer typed — there is no request to validate, and validate_argv would reject `node --experimental-strip-types --test tests/*.test.ts` because of the glob, which is the check's whole point. The spawned process is the gate's own toolchain, it runs in a throwaway worktree outside the repository, and it is torn down on every path out including SIGINT (see the atexit/signal handling). Pinned by tests/test_check_history.py",
     },
+    "scripts/bundle_engine.py": {
+        "run": "the engine bundle's build (`make bundle-engine`): the pinned CPython's own pip installing packaging/engine.lock with --require-hashes into the bundle, then its compileall over the bundle — two fixed argv lists, no shell, each with a timeout, and the interpreter is the file this script just checked against packaging/python.json's SHA-256. Not routed through SandboxService or spawn_guard for the reason check_history.py gives: a developer or the release workflow runs it, never an agent, and there is no model-proposed request to validate. Pinned by tests/test_bundle_engine.py (the argv) and `make check-bundle` (the result)",
+    },
+    "scripts/lock_engine.py": {
+        "run": "the lock's resolution (`make lock-engine`): the pinned CPython's own pip with --dry-run --report over engine/requirements.txt — a fixed argv, no shell, a timeout, nothing installed. Run by a person when a dependency moves; same reasoning as bundle_engine.py above. Pinned by tests/test_bundle_engine.py",
+    },
+    "scripts/smoke_bundle.py": {
+        "Popen": "the bundle smoke (`make check-bundle`, and the release before it publishes): the bundle's own `python/bin/python3 -m engine`, started from the bundle the way the shell starts it, with a throwaway CODIFY_HOME and this script as the engine's watched parent (`CODIFY_PARENT_PID`), stopped with SIGTERM then SIGKILL on every path out. Not routed through SandboxService or spawn_guard: the argv is the engine's entry point in a directory a developer or the release named, there is no model-proposed request to validate, and like preview_engine.py this script has to be the engine's parent. Pinned by tests/test_smoke_bundle.py",
+        "run": "unpacking the package under test, never installing or running it: `dpkg-deb -x <deb> <tempdir>`, or the AppImage's own `--appimage-extract` in a temp directory. Fixed argv lists, no shell, a timeout. Pinned by tests/test_smoke_bundle.py (the verdicts) and the release workflow (the packages)",
+    },
     "scripts/run_tests.py": {
         "run": "the suite runner `make test-engine` goes through, which starts `sys.executable -m unittest` with the caller's arguments appended. A fixed argv prefix, no shell, and the arguments are a developer's or CI's rather than anything a model produced. Not routed through SandboxService for the reason check_history.py gives, and with an extra one: the thing being spawned IS the thing that spawns everything else, so a guard around it would be a guard around the guard. Its whole job is to notice that the suite died part-way and say so, which it cannot do from inside the process it is watching. Pinned by tests/test_run_tests_guard.py",
     },
@@ -187,7 +197,10 @@ DIRECT_OS_SPAWN_CALLS = {
 
 # How many times an allowlisted (file, call) may appear. Absent means once: a second `Popen` in a file that
 # already has a justified one is a new decision, and it is made by raising a number here.
-SPAWN_SITE_COUNTS: dict[tuple[str, str], int] = {}
+SPAWN_SITE_COUNTS: dict[tuple[str, str], int] = {
+    # Two unpackers, one per package format: `dpkg-deb -x` and the AppImage's own `--appimage-extract`.
+    ("scripts/smoke_bundle.py", "run"): 2,
+}
 
 
 # Every package whose Python is reviewed alongside the engine. `benchmarks` and

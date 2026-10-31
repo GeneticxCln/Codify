@@ -2091,6 +2091,31 @@ line is the entire explanation of an engine that vanished holding a hung websock
 shell tails the engine's stderr and shows the tail in the app rather than inheriting it into a console
 (`09` §5.5) — a bounded shutdown nobody can read is indistinguishable from a crash.
 
+### 6.2 Which engine the shell starts, and under which Python
+
+`engine_protocol::resolve_engine` decides, in this order, and `cargo test` holds each step:
+
+1. **`CODIFY_ROOT`**, when set, is the checkout, taken as given even when it is wrong, so that a mistyped
+   path comes out as "No engine to run at <that path>" rather than as a guess that works on one machine.
+   It is also how a packaged app is pointed at a checkout.
+2. **The engine the package carries**, `<resources>/engine-bundle` (`/usr/lib/Codify/engine-bundle` in the
+   deb, the same path inside an AppImage's mount), when it holds both its own interpreter
+   (`python/bin/python3`) and `engine/__main__.py`. A package always runs the engine it was built with,
+   so the shell and the engine it talks to come from one commit, even when the app is started from a
+   terminal sitting in some other checkout. Half a bundle is not a bundle and falls through to 3.
+   `scripts/bundle_engine.py` builds it (`18` §2).
+3. **A checkout**: the working directory when it holds the engine (the dev flow), then an ancestor of the
+   executable that does (a binary built in place), then the working directory anyway, so the failure
+   message names where the shell looked first.
+
+The interpreter follows from the choice: a bundle's own CPython for 2; for 1 and 3, the checkout's
+`.venv/bin/python3` when it exists and `python3` on the PATH otherwise. Every launch sets `PYTHONPATH` to
+the root. A bundled engine is also started with `PYTHONDONTWRITEBYTECODE=1` (the bundle is read-only and
+precompiled with `unchecked-hash` bytecode), `PYTHONNOUSERSITE=1` (nothing in `~/.local` may shadow a
+wheel the lock pinned) and without `PYTHONHOME`. A checkout's engine keeps the user's environment as it
+always did. An engine that exits before its handshake is reported with the command that reproduces it,
+using the interpreter that actually ran (`engine_exited_problem`).
+
 ## 7. Key storage
 
 Two backends, one namespace. Names: `codify` service + username `providers/{slug}` for a provider key,

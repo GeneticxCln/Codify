@@ -144,7 +144,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-start justify-center pt-[12vh] p-4"
+      className="fixed inset-0 z-50 bg-black/75 flex items-start justify-center pt-[12vh] p-4"
       onMouseDown={onClose}
       role="presentation"
     >

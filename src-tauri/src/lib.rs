@@ -1,3 +1,4 @@
+mod appimage_env;
 mod browser;
 mod engine_log;
 mod engine_protocol;
@@ -54,6 +55,10 @@ pub struct EngineState {
     pub hard_exit_s: Option<f64>,
     pub supervised: bool,
     pub restart_requested: bool,
+    /// Where a packaged build carries its engine (`<resources>/engine-bundle`), set once at
+    /// setup; a dev build's resource directory has none, and `resolve_engine` then looks for a
+    /// checkout as it always did.
+    pub bundle_dir: Option<std::path::PathBuf>,
 }
 
 type SharedEngineState = Arc<Mutex<EngineState>>;
@@ -1177,6 +1182,13 @@ async fn login_shell_path() -> Option<(String, String)> {
     // the first form is asked the plain interactive way instead of being written off.
     for flags in [["-ilc", probe.as_str()], ["-ic", probe.as_str()]] {
         let mut command = tokio::process::Command::new(&shell);
+        // The image's libraries must not reach the user's shell or its rc files (`appimage_env`).
+        for (key, value) in appimage_env::restored_here() {
+            match value {
+                Some(value) => command.env(key, value),
+                None => command.env_remove(key),
+            };
+        }
         command
             .args(flags)
             // An interactive shell must not be able to read from a terminal it does
@@ -1333,11 +1345,14 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-    let project_root = engine_protocol::resolve_project_root(
+    let bundle_dir = shared.lock().await.bundle_dir.clone();
+    let launch = engine_protocol::resolve_engine(
         std::env::var("CODIFY_ROOT").ok().as_deref(),
+        bundle_dir.as_deref(),
         std::env::current_exe().ok().as_deref(),
         &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
     );
+    let project_root = launch.root.clone();
 
     // Started outside the checkout, `python3 -m engine` cannot import anything: it
     // would come up only to print a traceback on a stderr no window user sees and
@@ -1369,20 +1384,39 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
         None => None,
     };
 
-    // Which `python3` actually runs: the checkout's own `.venv` when it has one,
-    // and the PATH otherwise. `make test` already uses the venv, and the two can
-    // hold different installs — the Laya gate's SDK lives in the venv, and an
-    // engine on `/usr/bin/python3` cannot see it, so it would keep paying an LLM
-    // call per goal for an SDK that is installed in the same checkout. One
-    // interpreter for the whole project; `engine_interpreter` is where the
-    // fallback is decided and tested.
-    let interpreter = engine_protocol::engine_interpreter(&project_root);
-    eprintln!("[Codify] Engine interpreter: {}", interpreter.display());
+    // Which `python3` actually runs: a package's own CPython for the engine it
+    // carries; for a checkout, its own `.venv` when it has one and the PATH
+    // otherwise. `make test` already uses the venv, and the two can hold different
+    // installs — the Laya gate's SDK lives in the venv, and an engine on
+    // `/usr/bin/python3` cannot see it, so it would keep paying an LLM call per
+    // goal for an SDK that is installed in the same checkout. `resolve_engine`
+    // and `engine_interpreter` are where that is decided and tested.
+    let interpreter = launch.interpreter.clone();
+    eprintln!(
+        "[Codify] Engine interpreter: {} ({:?})",
+        interpreter.display(),
+        launch.source
+    );
+    let env = engine_protocol::engine_env(&launch);
     let mut engine = tokio::process::Command::new(&interpreter);
+    engine.args(["-m", "engine"]).current_dir(&project_root);
+    // Run from an AppImage, this process carries the image's library path, Python home and GTK
+    // paths, and the engine would hand them to every program it starts: the system `python3`
+    // behind the folder dialog, `git`, a project's tests (`appimage_env`). Taken back out first,
+    // so the engine's own settings below still win.
+    for (key, value) in appimage_env::restored_here() {
+        match value {
+            Some(value) => engine.env(key, value),
+            None => engine.env_remove(key),
+        };
+    }
+    for (key, value) in &env.set {
+        engine.env(key, value);
+    }
+    for key in &env.remove {
+        engine.env_remove(key);
+    }
     engine
-        .args(["-m", "engine"])
-        .current_dir(&project_root)
-        .env("PYTHONPATH", &project_root)
         // The parent-death contract: the engine watches this pid and exits with it.
         // The exit handler below cannot cover every way this process ends — a signal
         // never runs it, and `kill_on_drop` needs Rust to drop the handle — so the
@@ -1398,6 +1432,14 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
         // Belt: if this handle is ever dropped unexpectedly, the engine dies
         // with it instead of surviving as a stray holding the port and DB.
         .kill_on_drop(true);
+    // The merged PATH starts from this process's, which an AppImage prefixes with its own `bin`.
+    let engine_path = match (engine_path, appimage_env::appdir()) {
+        (Some(path), Some(appdir)) => {
+            appimage_env::without_appdir(std::ffi::OsStr::new(&path), &appdir)
+                .map(|path| path.to_string_lossy().into_owned())
+        }
+        (path, _) => path,
+    };
     if let Some(path) = &engine_path {
         engine.env("PATH", path);
     }
@@ -1517,7 +1559,7 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
             // that used to be indistinguishable from "still starting": record it, so
             // the window can name the command that reproduces the engine's output
             // instead of leaving a red pill standing as the whole explanation.
-            let problem = engine_protocol::engine_exited_problem(&project_root);
+            let problem = engine_protocol::engine_exited_problem(&launch);
             eprintln!("[Codify] {problem}");
             s.problem = Some(problem);
         }
@@ -2215,9 +2257,17 @@ pub fn run() {
             // backdrop is this process, so this is the party that notices and says
             // so. See the block comment above `watch_render_starvation`.
             watch_render_starvation(app.handle().clone());
-            // Launch engine asynchronously so the window appears immediately.
+            // Launch engine asynchronously so the window appears immediately. A
+            // packaged build carries its engine among its resources; the launcher
+            // has no app handle, so where that is goes into its state first.
             let shared = state_clone.clone();
+            let bundle_dir = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|dir| dir.join(engine_protocol::BUNDLE_DIR));
             tauri::async_runtime::spawn(async move {
+                shared.lock().await.bundle_dir = bundle_dir;
                 launch_engine(shared).await;
             });
             // The bridge's other end: poll the engine for page questions and

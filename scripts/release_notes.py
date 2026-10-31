@@ -116,11 +116,10 @@ chmod +x ./{appimage} && ./{appimage}
 sha256sum -c SHA256SUMS
 ```
 
-These are the desktop shell. **The engine is Python 3.10+ and lives in a checkout**: the shell
-starts `python3 -m engine` from the project root, so a package with no checkout beside it says
-exactly that instead of opening empty. Keep a checkout and start the app from it, or point the
-packaged shell at one with `CODIFY_ROOT=/path/to/Codify`. `{REPO}` has the three commands that
-set a checkout up.
+**Each package carries the engine** and the Python it runs on, so neither needs a checkout or a
+Python of yours. Both need `git`, which the deb installs for you. To run a checkout's engine
+instead — your own changes, or the Laya gate's SDK, which the packages leave out — start the app
+with `CODIFY_ROOT=/path/to/Codify`; `{REPO}` has the three commands that set a checkout up.
 
 **Nothing here updates itself.** The app's About tab asks GitHub for the newest release when a
 person presses Check for updates, and can download the package for the copy they are running —

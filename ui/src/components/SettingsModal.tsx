@@ -374,7 +374,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const needsKeyCount = keys.filter((k) => k.needs_key && !k.has_key).length;
 
   return (
-    <div className="fixed inset-0 bg-black/75 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4">
       <div className="bg-codify-surface border border-codify-border rounded-2xl shadow-2xl w-full max-w-6xl h-[90vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="flex items-start justify-between border-b border-codify-border px-6 py-4 shrink-0">

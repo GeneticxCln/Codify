@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Codify",
-  "version": "1.2.0",
+  "version": "1.3.2",
   "identifier": "com.codify.app",
   "build": {
     "beforeDevCommand": { "script": "npm run dev", "cwd": "../ui" },
@@ -36,7 +36,12 @@
     "publisher": "Codify",
     "homepage": "https://github.com/GeneticxCln/Codify",
     "shortDescription": "A local-first, multi-agent AI coding assistant",
-    "longDescription": "Codify is a local-first, multi-agent AI coding assistant: a goal is planned by a fixed set of roles, written by the fixer, run by the verifier and reviewed by the critic, all against a workspace on this machine. Your code, your keys and your history stay here; the only requests that leave it go to the model providers you configure. The engine it needs is Python 3.10+ with this checkout's dependencies, so a package without a checkout installed is a window that says so rather than an empty one.",
+    "longDescription": "Codify is a local-first, multi-agent AI coding assistant: a goal is planned by a fixed set of roles, written by the fixer, run by the verifier and reviewed by the critic, all against a workspace on this machine. Your code, your keys and your history stay here; the only requests that leave it go to the model providers you configure. The package carries its own engine and the Python it runs on, so no checkout and no Python of yours are needed; CODIFY_ROOT points it at a checkout's engine instead.",
+    "linux": {
+      "deb": {
+        "depends": ["git"]
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

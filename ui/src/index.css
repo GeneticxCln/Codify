@@ -397,7 +397,15 @@ body {
    exactly one gradient period and the box is one period taller than the window
    (`bottom: -3px` below), so the loop has no seam to travel across. The
    scanline colour is the theme's own `--cyber-scan`, composed from the `-rgb`
-   triplet `applyTheme` derives, which is why this rule needs no per-theme copy. */
+   triplet `applyTheme` derives, which is why this rule needs no per-theme copy.
+
+   And it rolls in three steps, not continuously. A composited transform is cheap
+   on a GPU, but where the window is composited in software (the case the shell's
+   render watchdog exists for) every frame the veil moves is a full-window
+   composite, and a `linear` roll moves it every frame for 3px of travel: measured
+   in software-composited Chromium, it held the theme's main screen at 30 FPS.
+   `steps(3, end)` moves it one scanline every three seconds, which is the same
+   drift to the eye and three composites per period: 60 FPS again. */
 @keyframes cyber-roll {
   0% { transform: translateY(0); }
   100% { transform: translateY(3px); }
@@ -409,7 +417,7 @@ body {
     rgb(var(--cyber-scan-rgb) / 0.55) 0 1px,
     transparent 1px 3px
   );
-  animation: cyber-roll 9s linear infinite;
+  animation: cyber-roll 9s steps(3, end) infinite;
 }
 @media (prefers-reduced-motion: reduce) {
   .cyber-veil {
@@ -764,7 +772,14 @@ body {
      never shows a band half-applied. */
   background-size: 220% 100%;
   background-position: 100% 0;
-  animation: codify-wordmark-sweep 9s linear infinite;
+  /* Once, when the empty transcript appears, and then still. The sweep animates
+     `background-position` on text clipped to its background, which is a repaint of
+     the whole wordmark every frame, and a loop made that permanent: measured with
+     the app idle in software-composited Chromium, the whole browser spent 43% of
+     a core on the default theme with the loop and 4% without it, and it is cost
+     the shell's render watchdog counts. DESIGN.md §7 already said nothing loops;
+     this is that rule, kept. */
+  animation: codify-wordmark-sweep 9s linear 1;
   pointer-events: none;
 }
 @keyframes codify-wordmark-sweep {

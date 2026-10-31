@@ -92,7 +92,8 @@ src-tauri/      Tauri v2 Rust shell
 tests/          Python suite; stream_isolation.py is the shared isolation helper
 scripts/        fake_ollama.py (drive a goal with no API keys; FAKE_CONDUCTOR=1 plays a tool-calling conductor), replay_trace.py
                  drive_a_turn.py (drive a turn against a real local model; --approve presses Start),
-                 make_logo.py, check_history.py (does every commit in a range build)
+                 make_logo.py, check_history.py (does every commit in a range build),
+                 bundle_engine.py / lock_engine.py / smoke_bundle.py (the engine a package carries; packaging/ holds its pin and lock)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
 docs/           00–18, below
 .githooks/      versioned pre-commit / pre-push
@@ -137,8 +138,9 @@ docs/           00–18, below
   notice beside it recording upstream, SHA, licence and reason. A benchmark that
   needs a repo it does not have fails and says so; it never scores the absence as
   a pass. See `docs/08`.
-- **3.10 is a real deployment target.** The shell boots the engine as `python3 -m engine`,
-  so syntax the newest interpreter accepts can still be a `SyntaxError` there.
+- **3.10 is a real deployment target.** The shell boots a checkout's engine as `python3 -m engine`,
+  so syntax the newest interpreter accepts can still be a `SyntaxError` there. A package carries its
+  own CPython instead (the newest `check.yml` leg; `docs/18` §2), so both ends are shipped.
 
 ## Depth, on demand
 
@@ -161,7 +163,7 @@ docs/           00–18, below
 | `docs/14` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, the design a Ghidra tool needs here (now built: `analyze_binary`), and the gaps it found (child resource limits and a cancellable worker, both closed) |
 | `docs/15` | The Xerg audit: `audit_usage`, the native audit of wasted model calls in tokens (coverage first; retry waste and the fix loop measured; cache reads and writes measured as a signal, never a saving; tool-loop waste reported as not measurable), and what of Xerg's skill was taken |
 | `docs/16` | The DeepInfer and cmux audit: what is portable from a serving framework and an agent terminal (terminal OSC notifications into the inbox, bounded transcript replay, JSON-schema replies, prompt-prefix reuse), what is refused and by which invariant, and the plan |
-| `docs/18` | Release and updates: a release is a tag (three files and the tag must agree, `scripts/release_notes.py`), the deb and AppImage hold the shell and not the engine, the workflow's decisions, and what the About tab's update button does and refuses — one GET to GitHub when a person clicks, a package written to their downloads folder, nothing installed |
+| `docs/18` | Release and updates: a release is a tag (three files and the tag must agree, `scripts/release_notes.py`), the deb and AppImage hold the shell and the engine with its own CPython (the bundle, its pinned interpreter and hashed lock, the smoke that boots it before publishing), the workflow's decisions, and what the About tab's update button does and refuses — one GET to GitHub when a person clicks, a package written to their downloads folder, nothing installed |
 | `docs/17` | The leanrea audit: the 8 KB routing-table skill that argues against REA's 207 tools — what is already this engine's design, the gap its trap list found (`search_code` now names the directories its walk pruned), the measured cost of one conductor call, and the two small rows built |
 
 If your change alters a documented contract, update the matching doc in the same

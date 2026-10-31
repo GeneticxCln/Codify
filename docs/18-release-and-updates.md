@@ -17,8 +17,9 @@ git tag v1.0.0 && git push origin v1.0.0
 ```
 
 That is the whole of it. `.github/workflows/release.yml` runs on `push: tags: ["v*"]`, builds the
-packages, and publishes them as a GitHub release on that tag. `workflow_dispatch` takes an existing
-tag as well, for a release that has to be built again.
+packages, and publishes them as a GitHub release on that tag. By hand (`workflow_dispatch`) it either
+rebuilds an existing tag's release (`publish` on, with that `tag`) or, by default, makes a dry run
+that builds and smoke-tests both packages from any ref and publishes nothing (§3).
 
 Four things carry the version, three of them by hand:
 
@@ -51,20 +52,66 @@ Debian spelling of the architecture:
 | `Codify_<version>_amd64.deb` | `sudo apt install ./Codify_<version>_amd64.deb` | wants it owned by the package manager, removed by `apt remove` |
 | `Codify_<version>_amd64.AppImage` | `chmod +x Codify_<version>_amd64.AppImage && ./Codify_<version>_amd64.AppImage` | wants one file, no root, nothing installed |
 
-Both hold the **desktop shell**: the React UI, the Tauri window, the PTYs, the webview bridge, the
-machine tab. Neither holds the engine, and neither can: the shell starts `python3 -m engine` from a
-project checkout (`docs/04` §6's token handshake), so the app is one half of a pair that is expected
-to sit beside a checkout. A package installed with no checkout anywhere opens a window that says so
-in its own words — "No engine to run at … this shell starts `python3 -m engine` from the project
-checkout …" — rather than opening empty, and there are two ways out, both honest:
+Both hold the **desktop shell** — the React UI, the Tauri window, the PTYs, the webview bridge, the
+machine tab — **and the engine**, with the Python it runs on, at `/usr/lib/Codify/engine-bundle` in
+the deb and the same path inside the AppImage. Neither needs a checkout or a Python of the user's, and
+the shell runs the engine its own package carries (`docs/04` §6.2), so the window and the engine it
+talks to always come from one commit. Up to 1.2.0 the packages held the shell alone, and a package
+installed with no checkout anywhere opened a window that said "No engine to run".
 
-* keep a checkout and launch the app from it (`make run-app`), or point the packaged shell at one
-  with `CODIFY_ROOT=/path/to/Codify codify-desktop`;
-* install the engine's Python dependencies into that checkout (`make setup` in the repository).
+`make bundle-engine` (`scripts/bundle_engine.py`) builds that half into `build/engine-bundle`, and
+`make package-app` (the release's own command) adds it through `src-tauri/tauri.bundle.conf.json`:
 
-`scripts/install-local.sh` remains for the first of those: a `codify` command and a menu entry under
-the user's own `~/.local`, no root, nothing copied out of the checkout. It is not a second way to
-package the app and does not try to be.
+| In the bundle | Where it comes from | Why that way |
+|---|---|---|
+| `python/` | python-build-standalone's CPython, the build `packaging/python.json` names, checked against its SHA-256 | relocatable and needs only glibc 2.17, so it runs from wherever a package puts it; the minor version is the newest `check.yml` tests, so the interpreter people run is one CI ran the suite on |
+| its `site-packages` | the wheels `packaging/engine.lock` names, installed with `--require-hashes --no-deps --only-binary=:all:` for the glibc 2.35 floor (§3) | a wheel that changed on PyPI under the same version stops the build instead of shipping; `make lock-engine` regenerates the lock with that same interpreter's pip |
+| `engine/` | this checkout's `engine/`, without bytecode or `requirements.txt` | the engine the shell beside it was built with |
+| `BUNDLE.json` | written by the build | the app version, the interpreter and the lock's hash, so an installed package can say what its engine is |
+
+The tree is compiled with `unchecked-hash` bytecode, because neither package keeps a file's
+modification time and the bundle is read-only where it lands: timestamp-checked bytecode would be
+stale on every start and could not be rewritten. Pruned, because the engine never runs them: Tcl/Tk
+and `tkinter`, IDLE, `ensurepip` and `pip` itself, the headers and manual pages, and the shared
+`libpython` (`bin/python3` is linked statically). The interpreter is one file, not three names for
+it: the bundler copies a symlink as the file it points at. What is left is about 116 MB unpacked,
+which makes the deb about 40 MB larger and the AppImage about the same.
+
+**What the packages redistribute.** CPython (PSF licence) and the 34 locked wheels, each under the
+licence its lock line names: MIT, BSD, Apache-2.0 and PSF, plus the MPL's file-level copyleft for
+`certifi`, `orjson` and `tld`. Each wheel's own licence files are kept in its `.dist-info`, and
+`scripts/lock_engine.py` refuses a dependency whose licence is outside that list, so a new one is a
+decision made in the open rather than a transitive dependency that arrived with an upgrade.
+
+**Deliberately left out: the Laya gate's SDK.** It brings torch, which would multiply the package
+several times over. A bundled engine's gate uses its LLM fallback (`docs/05`); to use the SDK, start
+the app against a checkout that has it: `CODIFY_ROOT=/path/to/Codify codify-desktop`. The same
+variable is how a packaged app runs a checkout's engine for any other reason, such as one's own
+changes.
+
+**What a package still needs from the machine:** `git`, which the engine runs for every workspace —
+the deb depends on it, so `apt` installs it, and an AppImage uses the system's. The folder picker uses
+the system `python3` with GTK, as it always has (`engine/app.py`); without one, the engine says the
+dialog is unavailable and a folder can still be typed.
+
+**What the AppImage's launcher changes, and the shell takes back.** linuxdeploy's `AppRun` sets, for
+the whole process tree, `LD_LIBRARY_PATH` to the libraries the image carries (Ubuntu 22.04's GLib,
+OpenSSL, PCRE2 and the rest), `PYTHONHOME` and `PYTHONPATH` to directories inside the image, and,
+through the GTK plugin's hook, `GI_TYPELIB_PATH`, `GIO_MODULE_DIR`, `GTK_PATH`,
+`GDK_PIXBUF_MODULE_FILE` and their siblings. The shell's own WebKit needs them; nothing it starts does.
+In 1.3.0 they reached the engine and, through it, the system `python3` behind the folder dialog, which
+loaded the image's GLib 2.72 under the system's newer GObject introspection and died with
+`undefined symbol: g_once_init_leave_pointer`; `git` and a project's own test commands ran under the
+same library path. `src-tauri/src/appimage_env.rs` now removes every entry that points inside the
+image (`$APPDIR`) from the engine's environment, the login-shell probe's and the terminal pane's
+shells', and removes a variable left with nothing. That leaves each list as it was before the
+launcher prepended to it. Two values it sets cannot be told from a person's own and are left:
+`PYTHONDONTWRITEBYTECODE=1` and the hook's `GTK_THEME`. The machine tab clears its environment
+entirely and never saw any of it.
+
+`scripts/install-local.sh` remains for working out of a checkout: a `codify` command and a menu entry
+under the user's own `~/.local`, no root, nothing copied out of the checkout. It is not a second way
+to package the app and does not try to be.
 
 **Deliberately not bundled: GStreamer.** `bundleMediaFramework` is `false`, so audio playback in an
 AppImage uses the machine's own GStreamer plugins. Voice read-aloud is the feature this touches, and
@@ -104,9 +151,20 @@ otherwise have to be rediscovered:
   filesystem to run, which a runner does not have. Without this the bundling step fails with
   "failed to run linuxdeploy" and says nothing about FUSE.
 
-The build step is one command, `cargo tauri build`, because the target list lives in
-`tauri.conf.json`; a list repeated in the workflow would be a second place to forget. Tauri's own
-`beforeBuildCommand` builds the UI first, so the window carries the real frontend.
+Before the build, `python3 scripts/bundle_engine.py` builds the engine both packages carry (§2). The
+runner's Python only starts the script; the interpreter that installs the lock and compiles the
+bundle is the pinned one, and **the wheels are chosen for the glibc of the runner this job is pinned
+to** (`GLIBC_FLOOR = (2, 35)`, newest tag first, as pip would choose on Ubuntu 22.04), so a wheel that
+needs a newer glibc cannot reach a package that promises to run there.
+
+The build step is one command, `cargo tauri build --config tauri.bundle.conf.json`, because the
+target list lives in `tauri.conf.json`; a list repeated in the workflow would be a second place to
+forget. Tauri's own `beforeBuildCommand` builds the UI first, so the window carries the real
+frontend. **The engine is added by that second config file alone**, which maps
+`../build/engine-bundle` to `engine-bundle` under the resources. In `tauri.conf.json` it would be read
+by `tauri-build` on every compile, and every `cargo check` — the gate's Rust leg included — would
+need a 116 MB bundle that only a download can make. A Rust test holds the shell's `BUNDLE_DIR` to the
+name this file maps it to.
 
 **Both hooks say where to run, and that is not decoration.** A Tauri hook runs with its working
 directory set to the *frontend* directory — the resolved `frontendDist`, here `ui/dist` — not to
@@ -122,6 +180,25 @@ After it, one step collects `*.deb` and `*.AppImage` into `dist/`, writes `SHA25
 if the bundler produced fewer than two files**. A release with no assets looks published and cannot
 be installed, which is worse than a failed run: the update button would offer a version with nothing
 behind it.
+
+**Then each package's engine is booted, before anything is published.** `scripts/smoke_bundle.py`
+unpacks the deb (`dpkg-deb -x`) and the AppImage (`--appimage-extract`) without installing or
+running either, and starts the engine inside each the way the shell does: its own Python, the
+isolation environment of `docs/04` §6.2, a throwaway `CODIFY_HOME`. It passes only when the engine
+prints its handshake, answers `GET /health` with 200, and leaves every file in its bundle exactly as
+it found it — a deb's files belong to root and an AppImage is read-only, so a write that works on the
+runner fails on every installed copy, and the comparison is made on the tree rather than on file
+modes because CI runs as root. `--version` also requires the bundle's `BUNDLE.json` to name this
+release. This is the second check the workflow makes that nothing else can, after the version
+agreement: the gate never builds a package. `make check-bundle` runs the same smoke on a local
+`build/engine-bundle`.
+
+**A dry run builds and smoke-tests a release without publishing one.** Started by hand with
+`publish` off (the default), the workflow builds from the ref it was started on, holds the three
+version files to each other under the version they carry, runs every step above, and uploads `dist/`
+as a workflow artifact kept for a week. There is no tag and no release, so no copy of the app can
+see it. It is how a change to the packaging is tried before the release that would ship it. With
+`publish` on and an existing `tag`, a run by hand rebuilds and re-uploads that release, as before.
 
 The release is published rather than drafted. The update check reads GitHub's `releases/latest`,
 whose answer is the newest release that is neither a draft nor a pre-release — so a draft is a
