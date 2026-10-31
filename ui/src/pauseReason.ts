@@ -4,7 +4,8 @@ import type { Event } from "./types.ts";
  * Why a goal is paused, from the engine's own words.
  *
  * `PAUSED` has several causes and the status alone names none of them: the person pressed Pause, the critic
- * asked for changes, or the conductor could not finish a step (it ran out of calls, lost its model, or stopped).
+ * asked for changes, the conductor could not finish a step (it ran out of calls, lost its model, or stopped),
+ * or the same verification failed twice the same way.
  * An engine pause carries a `reason_code` from a closed set and a `reason` sentence the engine wrote on the
  * `goal_status` event (`docs/04` §1.4; `engine/models.py` `PAUSE_CODES`). The person's own Pause carries
  * neither, and shows nothing here: they know.
@@ -16,7 +17,7 @@ import type { Event } from "./types.ts";
  *
  * Pure and DOM-free, so the rules have tests that need no renderer.
  */
-export const PAUSE_CODES = ["conductor_budget", "conductor_provider", "conductor_stopped", "critic_rejected"] as const;
+export const PAUSE_CODES = ["conductor_budget", "conductor_provider", "conductor_stopped", "critic_rejected", "verify_repeated"] as const;
 export type PauseCode = (typeof PAUSE_CODES)[number];
 
 /** The one-line name of each cause. The engine's sentence says what to do about it. */
@@ -25,6 +26,7 @@ export const PAUSE_HEADINGS: Record<PauseCode, string> = {
   conductor_provider: "The conductor's model could not be reached",
   conductor_stopped: "The conductor stopped before finishing",
   critic_rejected: "The critic asked for changes",
+  verify_repeated: "The same check failed twice",
 };
 
 export interface PauseReason {

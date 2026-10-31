@@ -158,6 +158,23 @@ class _Conducted:
 _DIFF_EXCERPT_CHARS = 1500
 
 
+def _failure_signature(outcome: dict[str, Any]) -> str:
+    """What makes two verification failures the same one, as a value.
+
+    The verifier's `explanation` is prose from a model and can describe one failing check differently on
+    two runs, so it is not part of the signature when there is a command or output to compare. It is the
+    fallback when there is neither: a verifier that failed without running anything has only its own words
+    to tell one failure from another.
+    """
+    mechanical = {
+        key: outcome.get(key)
+        for key in ("argv", "verdict", "exit_code", "refused", "output_tail", "brand_drifts")
+    }
+    if not mechanical["output_tail"] and not mechanical["argv"]:
+        mechanical["explanation"] = outcome.get("explanation")
+    return json.dumps(mechanical, sort_keys=True, default=str)
+
+
 @dataclass
 class _StepState:
     """What one conductor run knows about one step, between the moves that act on it.
@@ -176,6 +193,9 @@ class _StepState:
     test: dict[str, Any] | None = None
     #: The last verification failed. A step in this state is not reviewable.
     test_failed: bool = False
+    #: The signature of the most recent failed verification, or None. Two failures with the same signature
+    #: are the same failure, not two: a third attempt would be a third sample of one wrong belief.
+    last_failure: str | None = None
     #: The critic approved the files as they are now.
     reviewed: bool = False
 
@@ -1151,9 +1171,22 @@ class ConductorTools:
             # value, because the conductor is the thing that decides what to
             # do about a failure — retry, re-plan, or report it.
             outcome = self.service._last_test_result(self.goal_id, step.id)
+            signature = _failure_signature(outcome)
+            repeated = state.last_failure == signature
+            # A write does not clear this: the same failure after a different fix is still the same
+            # failure, and clearing it on every write is how a write/verify loop becomes unbounded.
+            state.last_failure = signature
             state.test = outcome
             state.test_failed = True
             state.reviewed = False
+            if repeated:
+                self.service._pause(self.goal_id, step.id, "verify_repeated")
+                return (
+                    "Verification FAILED the same way twice. The same check produced the same result, so "
+                    "this is one wrong belief rather than two different bugs: a third attempt would be a "
+                    "third variation of the same mistake. The goal is paused, and only the user's Start "
+                    "resumes it. Tell them what the failure shows and stop."
+                )
             return "Verification FAILED. " + json.dumps({
                 "reason": str(exc), "outcome": outcome,
             }, default=str)
@@ -1164,6 +1197,7 @@ class ConductorTools:
             )
         state.test = outcome
         state.test_failed = False
+        state.last_failure = None
         return json.dumps({"passed": True, "outcome": outcome}, default=str)
 
     async def review(self, args: dict[str, Any]) -> str:

@@ -1,8 +1,9 @@
 /**
  * A paused goal says why: the rules.
  *
- * `PAUSED` has three causes (the person's Pause, the critic asking for changes, and a conductor that could not
- * finish a step) and the status alone names none of them. The engine now puts a code from a closed set and a
+ * `PAUSED` has several causes (the person's Pause, the critic asking for changes, a conductor that could not
+ * finish a step, and a verification that failed the same way twice) and the status alone names none of them.
+ * The engine now puts a code from a closed set and a
  * sentence of its own on the `goal_status` event of an engine pause (`docs/04` §1.4). These are the rules for
  * what the window makes of that, with no renderer: the newest status event decides, so a Start clears it with
  * no bookkeeping; the person's own Pause has no reason and shows none; a code this build does not know is not
@@ -26,15 +27,22 @@ const ev = (sequence: number, payload: Record<string, unknown>, type = "goal_sta
 const paused = (sequence: number, code: string, version = sequence, stepId: string | null = "s1"): Event =>
   ev(sequence, { status: "PAUSED", version, reason_code: code, reason: `engine words for ${code}` }, "goal_status", stepId);
 
-test("the codes are the engine's four, each with a heading", () => {
-  assert.deepEqual([...PAUSE_CODES], ["conductor_budget", "conductor_provider", "conductor_stopped", "critic_rejected"]);
+test("the codes are the engine's five, each with a heading", () => {
+  assert.deepEqual([...PAUSE_CODES], ["conductor_budget", "conductor_provider", "conductor_stopped", "critic_rejected", "verify_repeated"]);
   for (const code of PAUSE_CODES) assert.ok(PAUSE_HEADINGS[code].length > 0, code);
   assert.equal(isPauseCode("conductor_budget"), true);
   assert.equal(isPauseCode("because"), false);
   assert.equal(isPauseCode(undefined), false);
 });
 
-test("a paused goal's newest status event gives the reason", () => {
+test("a repeated verification failure is its own pause, with its own words", () => {
+  const found = pauseReasonOf("PAUSED", [paused(2, "verify_repeated")]);
+  assert.equal(found?.code, "verify_repeated");
+  assert.equal(found?.heading, "The same check failed twice");
+  assert.equal(found?.reason, "engine words for verify_repeated");
+});
+
+test("a paused goal's newest status event gives its reason", () => {
   const found = pauseReasonOf("PAUSED", [ev(1, { status: "RUNNING", version: 2 }), paused(2, "conductor_budget")]);
   assert.ok(found);
   assert.equal(found.code, "conductor_budget");

@@ -2884,8 +2884,9 @@ The step's stored status is the judge, never the conductor's last sentence. A
 step that is `COMPLETED` after the run was completed, however the run ended. One
 that is not leaves the goal `PAUSED` with a reason from `models.PAUSE_CODES`
 (`conductor_budget`: it used its calls; `conductor_provider`: its model could not
-be reached; `conductor_stopped`: it stopped without finishing; and the critic's
-`critic_rejected`), and **nothing else touches the step**. There is no engine
+be reached; `conductor_stopped`: it stopped without finishing; `critic_rejected`:
+the critic asked for changes; and `verify_repeated`: the same verification failed
+the same way twice), and **nothing else touches the step**. There is no engine
 sweep behind the conductor: that sweep re-ran any step left open through the
 fixed recipe from scratch, so a conductor that wrote a step and ran out of calls
 before `summarize` had the fixer run on it a second time, and "the conductor
@@ -2896,6 +2897,16 @@ them (the recipe's fixer never reads them, so a recipe retry still clears them).
 A critic that asks for changes pauses the goal and the conductor is told so, with
 every reason, and told to stop; the next `write` is allowed again only after
 Start (`tests/test_conductor_drives.py`).
+
+A tool call repeated identically, with no tool in between, is not run again: the
+model is told the result is already the tool message above it, and to use it or
+change the call. Nothing it could be asking about has changed — every tool that
+could change something would itself be the call in between — so the repeat is a
+loop, and running a stage move twice is how a step is written twice. A `verify`
+that fails with the same command, exit status and output twice is the same
+failure twice: the step pauses as `verify_repeated` rather than spending a third
+attempt on one wrong belief, and after Start the conductor can load the
+`unstick` skill to test the assumption both attempts shared.
 
 **Where the recipe still drives an approved plan.** An install with no
 tool-capable model, a goal with `parallel` set (the engine's batcher proves which

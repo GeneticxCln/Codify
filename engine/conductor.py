@@ -397,6 +397,10 @@ class Conductor:
         self.exhausted = False
         self.nudged = False
         self.tools_used: list[str] = []
+        # The previous call that actually reached a handler, as (name, canonical arguments). A model that
+        # repeats it immediately is looping: no tool ran in between, so nothing it is asking about changed.
+        # The repeat is not run, and it is told where the result already is.
+        self._last_call: tuple[str, str] | None = None
         # Set when a tool ended the run (`EndTurn`): the loop stops there and its answer is the tool's reply.
         self.ended: EndTurn | None = None
 
@@ -643,6 +647,15 @@ class Conductor:
                 "browser navigation/click/type only when allowed in Settings). "
                 f"The tools available now are: {now}. Call one of those, or answer without a tool."
             )
+        # The exact call, again, with no tool in between: nothing it could be asking about has changed.
+        # Running it again would repeat a move (a second `write` for one step), and telling the model to try
+        # again is how a loop becomes a budget. The result is the tool message above; this says so.
+        signature = (call.name, json.dumps(call.arguments, sort_keys=True, default=str))
+        if self._last_call == signature:
+            return (
+                f"`{call.name}` was not run again: it is the same call, with the same arguments, as the one "
+                "immediately before it. Its result is the tool message above; use that, or change the call."
+            )
         if call.name in STAGE_MOVES:
             if self.moves_made >= self.max_moves:
                 return self._budget_refusal(call.name)
@@ -665,6 +678,7 @@ class Conductor:
                     return refusal
             else:
                 arguments = scrub_surrogates(arguments)
+            self._last_call = signature
             return _result(await handler(arguments))
         except EndTurn as end:
             self.ended = end

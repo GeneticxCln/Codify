@@ -66,6 +66,10 @@ PAUSE_REASONS: dict[str, str] = {
         "The critic asked for changes and stopped the run. Its reasons are on the step. "
         "Press Start to carry on, or edit the plan first."
     ),
+    "verify_repeated": (
+        "The same check failed twice with the same result, so the run stopped before trying a third time. "
+        "Look at the failure on the step, change something, then press Start."
+    ),
 }
 PAUSE_CODES: tuple[str, ...] = tuple(PAUSE_REASONS)
 

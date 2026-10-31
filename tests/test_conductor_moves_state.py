@@ -308,6 +308,43 @@ class TestAFailedVerificationIsNotReviewable(MovesCase):
         self.assertEqual(1, provider.asked["critic"])
 
 
+class TestARepeatedVerificationPausesTheStep(MovesCase):
+    async def test_the_same_failure_twice_pauses_with_its_own_reason(self) -> None:
+        provider = self.build(A_V2, A_V3)
+        provider.roles["verifier"] = FAIL
+        step_id = self.approve()
+        table = self.table()
+        await table["write"]({"step_id": step_id, "instructions": "first"})
+        first = await table["verify"]({"step_id": step_id})
+        await table["write"]({"step_id": step_id, "instructions": "second"})
+        second = await table["verify"]({"step_id": step_id})
+
+        self.assertIn("FAILED", first)
+        self.assertIn("same way twice", second)
+        self.assertEqual("PAUSED", self.goals.get(self.goal.id).status)
+        paused = [e for e in self.goals.events_after(self.goal.id, 0)
+                  if e.type == "goal_status" and e.payload["status"] == "PAUSED"]
+        self.assertEqual(1, len(paused), "the run-end pause must not replace the verification's reason")
+        self.assertEqual("verify_repeated", paused[0].payload["reason_code"])
+        self.assertEqual(step_id, paused[0].step_id)
+        self.assertEqual(2, provider.asked["verifier"], "a third verification ran after the pause")
+
+    async def test_a_different_failure_is_not_the_same_failure(self) -> None:
+        provider = self.build(A_V2, A_V3)
+        provider.roles["verifier"] = dict(FAIL, explanation="one")
+        step_id = self.approve()
+        table = self.table()
+        await table["write"]({"step_id": step_id, "instructions": "first"})
+        await table["verify"]({"step_id": step_id})
+        provider.roles["verifier"] = dict(FAIL, explanation="another")
+        await table["write"]({"step_id": step_id, "instructions": "second"})
+        second = await table["verify"]({"step_id": step_id})
+
+        self.assertIn("FAILED", second)
+        self.assertNotIn("same way twice", second)
+        self.assertEqual("RUNNING", self.goals.get(self.goal.id).status)
+
+
 class TestACompletedStepStaysCompleted(MovesCase):
     async def test_a_write_to_a_completed_step_is_refused_and_changes_nothing(self) -> None:
         self.build(A_V2, A_V3)

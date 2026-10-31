@@ -260,7 +260,7 @@ reason: `RUNNING` after a Start has none. `update_status` refuses an unknown cod
 without a reason, or either on a status other than `PAUSED`. A pause never widens the write
 gate: `PAUSED` refuses `write`, and only the person's Start moves it (`docs/00` §6.9).
 
-**Pause codes**: `conductor_budget`, `conductor_provider`, `conductor_stopped`, `critic_rejected`.
+**Pause codes**: `conductor_budget`, `conductor_provider`, `conductor_stopped`, `critic_rejected`, `verify_repeated`.
 
 `GoalService.next_sequence(goal_id)` is atomic (`UPDATE goals SET event_seq = event_seq + 1 ... RETURNING`).
 

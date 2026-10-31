@@ -323,6 +323,30 @@ class TestTheLoop(ConductorTestCase):
         refusal = [m for m in provider.seen_messages[-1] if m.get("role") == "tool"][0]
         self.assertIn("the disk fell over", refusal["content"])
 
+    async def test_an_identical_call_repeated_immediately_is_not_run_again(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        async def read_file(args: dict[str, Any]) -> str:
+            calls.append(args)
+            return "the same text"
+
+        provider = _ToolProvider([
+            ToolReply(tool_calls=[_call("read_file", path="app.py")]),
+            ToolReply(tool_calls=[_call("read_file", path="app.py")]),
+            ToolReply(text="done"),
+        ])
+        conductor = Conductor(
+            provider, "m", str(self.repo), list(TOOLS),
+            {"read_file": read_file}, system_prompt="s",
+        )
+
+        await conductor.run("read it")
+
+        self.assertEqual([{"path": "app.py"}], calls, "the repeated call reached its handler")
+        repeat = [m for m in provider.seen_messages[2] if m.get("role") == "tool"][-1]["content"]
+        self.assertIn("not run again", repeat)
+        self.assertIn("same call", repeat)
+
 
 class TestBrowserActionPermission(ConductorTestCase):
     async def test_menu_and_dispatch_both_refuse_actions_when_permission_is_disabled(self) -> None:
@@ -404,8 +428,10 @@ class TestTheCap(ConductorTestCase):
             calls["n"] += 1
             return "still going"
 
+        # A different path each round: an identical repeat is caught by its own guard, and this test is
+        # about the cap on model calls, not that one.
         provider = _ToolProvider([
-            ToolReply(tool_calls=[_call("read_file", path="app.py")]) for _ in range(50)
+            ToolReply(tool_calls=[_call("read_file", path=f"app{i}.py")]) for i in range(50)
         ] + [ToolReply(text="Here is everything I found.")])
 
         conductor = Conductor(
