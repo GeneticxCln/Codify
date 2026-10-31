@@ -259,7 +259,7 @@ class TestTimingOut(BridgeCase):
 class TestState(BridgeCase):
     async def test_state_says_who_is_attached_what_is_in_flight_and_what_can_be_asked(self) -> None:
         self.assertEqual(
-            {"attached": False, "inflight": 0, "timeout_s": surfaces.ASK_TIMEOUT_S, "surfaces": {"toy": ["ping"]}},
+            {"attached": False, "inflight": 0, "timeout_s": surfaces.ASK_TIMEOUT_S, "machines": [], "surfaces": {"toy": ["ping"]}},
             self.bridge.state(),
         )
         self.bridge.note_ui()
@@ -271,6 +271,18 @@ class TestState(BridgeCase):
         await asking
 
         self.assertEqual((True, 1), (state["attached"], state["inflight"]))
+
+    def test_the_window_reports_which_workspaces_have_a_machine_open(self) -> None:
+        self.assertFalse(self.bridge.has_machine("ws-1"))
+        self.bridge.note_window(["ws-1", "ws-2", ""])
+
+        self.assertTrue(self.bridge.has_machine("ws-1"))
+        self.assertTrue(self.bridge.has_machine("ws-2"))
+        self.assertFalse(self.bridge.has_machine("ws-3"))
+        self.assertEqual(["ws-1", "ws-2"], self.bridge.state()["machines"])
+
+        self.bridge.note_window([])
+        self.assertFalse(self.bridge.has_machine("ws-1"))
 
 
 class TestTheDefaultTable(unittest.TestCase):

@@ -18,8 +18,19 @@ from __future__ import annotations
 
 import unittest
 from typing import Any
+from unittest import mock
 
-from engine.conductor import BASE_TOOLS, BROWSER_ACTION_TOOLS, STEP_TOOLS, TOOLS, Conductor
+from engine.conductor import (
+    ANALYZE_BINARY,
+    BASE_TOOLS,
+    BROWSER_ACTION_TOOLS,
+    EDITOR_TOOLS,
+    MACHINE_TOOLS,
+    PAGE_TOOLS,
+    STEP_TOOLS,
+    TOOLS,
+    Conductor,
+)
 from engine.executor_support import AgentNotConfigured
 from engine.laya import LayaDecision, LayaService
 from engine.models import TurnCreate
@@ -103,6 +114,7 @@ class TestTheMenuFollowsTheState(ConductorTestCase):
     def test_browser_actions_are_off_by_default_but_page_reading_remains_available(self) -> None:
         executor = self._executor(_ToolProvider())
         executor.settings = self.settings
+        executor.bridge = mock.Mock(attached=True)
         menu = executor.conductor_menu(self.goal.id)
         names = {tool.name for tool in menu()}
         self.assertTrue(BROWSER_ACTION_TOOLS.isdisjoint(names))
@@ -119,6 +131,7 @@ class TestTheMenuFollowsTheState(ConductorTestCase):
     def test_browser_actions_are_offered_only_after_the_setting_is_enabled(self) -> None:
         executor = self._executor(_ToolProvider())
         executor.settings = self.settings
+        executor.bridge = mock.Mock(attached=True)
         menu = executor.conductor_menu(self.goal.id)
         self.assertTrue(BROWSER_ACTION_TOOLS.isdisjoint({tool.name for tool in menu()}))
 
@@ -168,7 +181,8 @@ class TestATurnCanPlanThroughTheConductor(ConductorTestCase):
             ToolReply(text="I have planned it. Approve the plan and I will make it."),
         ])
         executor = self._executor(provider, laya=_ChangeGate())
-        await executor.run_chat(self.goal.id)
+        with mock.patch("engine.executor_conduct.ghidra_available", return_value=False):
+            await executor.run_chat(self.goal.id)
 
         steps = self.goals.steps(self.goal.id)
         self.assertEqual([s.title for s in steps], ["S1"])
@@ -177,16 +191,21 @@ class TestATurnCanPlanThroughTheConductor(ConductorTestCase):
         # approval gate reads.
         self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
         # `navigate_page`, `click_page` and `type_page` need the separate, off-by-default browser-actions
-        # permission; `read_page` remains independent. Without `fetch_page`: it is offered only once a person
-        # allows it in Settings (docs/12), and a fresh install has not, so a tool that could only say "turned off"
-        # is not a slot the model is shown. `ask_user` is last: it is offered whenever somebody is there to answer,
-        # which is on a turn and never during an approved run.
+        # permission. Without an app window there are no page, editor or machine verbs at all, and without a usable
+        # Ghidra install `analyze_binary` is not offered either: the menu is narrowed by what can act. Without
+        # `fetch_page`: it is offered only once a person allows it in Settings (docs/12), and a fresh install has
+        # not, so a tool that could only say "turned off" is not a slot the model is shown. `ask_user` is last: it
+        # is offered whenever somebody is there to answer, which is on a turn and never during an approved run.
         self.assertEqual(
             provider.seen_tools[0],
             [
                 *(
                     t.name for t in BASE_TOOLS
-                    if t.name != "fetch_page" and t.name not in BROWSER_ACTION_TOOLS
+                    if t.name != "fetch_page"
+                    and t.name != ANALYZE_BINARY.name
+                    and t.name not in EDITOR_TOOLS
+                    and t.name not in MACHINE_TOOLS
+                    and t.name not in PAGE_TOOLS
                 ),
                 "ask_user",
             ],

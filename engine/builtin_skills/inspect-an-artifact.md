@@ -46,9 +46,9 @@ compiled file is the file's own words — names, strings, library names — whic
 - **Do not present a decompiler's labels as the program's own.** A stripped symbol, a `FUN_00123456` stub or a
   rebuilt type name is Ghidra's naming of what it found; the *strings* it returns are the binary's own text. Keep
   those two apart in the answer, because a caller will quote you.
-- **Do not substitute a tool and present it as the same answer.** If Ghidra is not installed, `analyze_binary` answers
-  in one sentence saying so and how to set it up; the file being too large or an unsupported Ghidra version is the
-  same kind of answer. Report it and stop. Reading a binary as text is not a smaller version of the same analysis.
+- **Do not substitute a tool and present it as the same answer.** If Ghidra is not configured, `analyze_binary` is
+  not on the menu; say that Ghidra is needed and name `GHIDRA_INSTALL_DIR`. A file that is too large for the export is
+  the same kind of answer: report it and stop. Reading a binary as text is not a smaller version of the same analysis.
 - **Do not check the workspace's own past runs twice.** If a symbol or a path is unexplained, `recall` first: this
   workspace may already have traced it, and the answer you need may be in an earlier goal rather than in the file.
 - **Do not widen anything.** This skill is an order over calls the conductor already had: no new tool, no argv, no

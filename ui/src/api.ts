@@ -880,6 +880,27 @@ export async function nextSurfaceRequest(wait: number, signal?: AbortSignal): Pr
   return body && typeof body.id === "string" ? (body as SurfaceRequest) : null;
 }
 
+/**
+ * What this window holds open, reported when a machine tab opens or closes.
+ *
+ * The poll says the window is there; this says which workspaces have a machine it can reach, so the conductor menu
+ * can leave out the four machine tools until one is open. It grants nothing: a machine question still names its
+ * workspace and the window still refuses one it does not hold. A failure is not fatal — the next change reports
+ * again — so the caller may ignore it.
+ */
+export async function reportSurfaceWindow(machines: readonly string[]): Promise<void> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/surfaces/window`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${currentEngine.token}`,
+    },
+    body: JSON.stringify({ machines }),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to report the window's machines");
+}
+
 /** Answer one question. `false` when the engine no longer wanted it: it ran out of patience, or the id was never its own. */
 export async function answerSurface(body: {
   id: string;

@@ -317,7 +317,7 @@ class TestACommandMayUseItsWholeWait(unittest.IsolatedAsyncioTestCase):
 
 
 class TestTheyAreOfferedLikeTheOtherSurfaceTools(unittest.TestCase):
-    def test_each_is_a_tool_with_a_handler_always_on_the_menu_and_costing_no_move(self) -> None:
+    def test_each_is_a_tool_with_a_handler_in_the_base_vocabulary_and_costing_no_move(self) -> None:
         for name in TOOLS_UNDER_TEST:
             with self.subTest(name=name):
                 self.assertIn(name, ConductorTools.NAMES)

@@ -25,12 +25,22 @@ import sqlite3
 import tempfile
 import unittest
 from collections.abc import Callable
+from unittest import mock
 from pathlib import Path
 from typing import Any
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
-from engine.conductor import BROWSER_ACTION_TOOLS, TOOLS, Conductor, tool_names
+from engine.conductor import (
+    ANALYZE_BINARY,
+    BROWSER_ACTION_TOOLS,
+    EDITOR_TOOLS,
+    MACHINE_TOOLS,
+    PAGE_TOOLS,
+    TOOLS,
+    Conductor,
+    tool_names,
+)
 from engine.db import connect
 from engine.fs import PathEscapeError
 from engine.git import GitService
@@ -51,6 +61,7 @@ from engine.services import (
     SettingsService,
     WorkspaceService,
 )
+from engine.surfaces import SurfaceBridge
 from engine.toolcall import (
     ToolCall,
     ToolReply,
@@ -346,6 +357,45 @@ class TestTheLoop(ConductorTestCase):
         repeat = [m for m in provider.seen_messages[2] if m.get("role") == "tool"][-1]["content"]
         self.assertIn("not run again", repeat)
         self.assertIn("same call", repeat)
+
+
+class TestTheMenuOnlyOffersWhatCanAct(ConductorTestCase):
+    def _names(self, executor: Any) -> set[str]:
+        return {tool.name for tool in executor.conductor_menu(self.goal.id)()}
+
+    def test_with_no_window_and_no_ghidra_the_desktop_and_binary_tools_are_absent(self) -> None:
+        executor = self._executor(_ToolProvider())
+        executor.settings = self.settings
+
+        with mock.patch("engine.executor_conduct.ghidra_available", return_value=False):
+            names = self._names(executor)
+
+        for gone in (*EDITOR_TOOLS, *MACHINE_TOOLS, *PAGE_TOOLS, ANALYZE_BINARY.name):
+            self.assertNotIn(gone, names, f"{gone} can only refuse without a window or Ghidra")
+        for kept in ("read_file", "search_code", "run_command", "recon", "plan"):
+            self.assertIn(kept, names)
+
+    def test_a_window_brings_the_editor_back_but_machines_need_one_open_in_this_workspace(self) -> None:
+        executor = self._executor(_ToolProvider())
+        executor.settings = self.settings
+        executor.bridge = mock.Mock(attached=True)
+        executor.surfaces = SurfaceBridge()
+        executor.surfaces.note_ui()
+
+        with mock.patch("engine.executor_conduct.ghidra_available", return_value=True):
+            without_machine = self._names(executor)
+            self.assertIn("read_page", without_machine)
+            self.assertIn("read_editor", without_machine)
+            self.assertIn("analyze_binary", without_machine)
+            self.assertNotIn("read_machine", without_machine)
+
+            executor.surfaces.note_window([self.ws.id])
+            with_machine = self._names(executor)
+
+        self.assertIn("read_machine", with_machine)
+        self.assertIn("run_in_machine", with_machine)
+        self.assertIn("reset_machine", with_machine)
+        self.assertNotIn("navigate_page", with_machine, "browser actions still need their own permission")
 
 
 class TestBrowserActionPermission(ConductorTestCase):

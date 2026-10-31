@@ -83,6 +83,7 @@ import {
   listWorkspaceFiles,
   getWorkspaceGit,
   nextSurfaceRequest,
+  reportSurfaceWindow,
   answerSurface,
 } from "./api";
 import {
@@ -2494,6 +2495,20 @@ export const App: React.FC = () => {
     }),
     [resetMachineTab],
   );
+
+  // What the window holds open, for the one menu decision the poll cannot make: the machine tools are offered only
+  // while a machine is open in the run's workspace. This changes when a machine tab opens or closes, not on every
+  // screen update, and it grants nothing: the machine surface still names and checks its own workspace.
+  const machineWorkspaces = tabState.tabs
+    .filter((tab) => tab.kind === "machine" && tab.workspaceId)
+    .map((tab) => tab.workspaceId as string)
+    .sort()
+    .join("\n");
+  useEffect(() => {
+    if (engineUp !== true) return;
+    const machines = machineWorkspaces ? machineWorkspaces.split("\n") : [];
+    void reportSurfaceWindow(machines).catch(() => {});
+  }, [engineUp, machineWorkspaces]);
 
   // The window's half of the surface bridge (`engine/surfaces.py`): poll the engine for questions about what is on screen
   // and answer them from the buffers, for as long as the window and the engine are up. It is on from the start and not

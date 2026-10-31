@@ -45,7 +45,12 @@ import {
 test("the window polls the engine for questions, and the polls are not counted among what the app asked for", async () => {
   await withEditorApp({}, async (ctx) => {
     assert.ok(ctx.surface.polls() >= 1, "the window never asked the engine whether it had a question");
-    assert.equal(ctx.engine.some((c) => c.path.startsWith("/surfaces/")), false);
+    // The window report (`/surfaces/window`) is an ordinary request and is allowed here; the poll and its answer
+    // are the bridge's, and must not be counted among what the app asked the engine for.
+    assert.equal(
+      ctx.engine.some((c) => c.path === "/surfaces/next" || c.path === "/surfaces/answer"),
+      false,
+    );
   });
 });
 

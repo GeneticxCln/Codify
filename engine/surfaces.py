@@ -62,6 +62,17 @@ class SurfaceRefused(RuntimeError):
     """The question was not asked, or was not done, and the message says why."""
 
 
+class SurfaceWindow(BaseModel):
+    """What the app window holds open, reported when it changes.
+
+    Only the workspaces with at least one machine tab open, because that is the whole question the conductor's menu
+    asks. A count would be a fact the engine does not use, and an id that is not a workspace is dropped by the bridge.
+    """
+
+    model_config = {"extra": "forbid"}
+    machines: list[str] = Field(default_factory=list)
+
+
 class SurfaceAnswer(BaseModel):
     """What the window posts back: one id, one verdict, one payload.
 
@@ -126,6 +137,9 @@ class SurfaceBridge:
         # may ask while a person is typing; they come out in the order they went in.
         self._handed: set[str] = set()
         self._last_seen: float | None = None
+        # Workspaces in which the window last said a machine tab is open. Only a menu input: the machine surface
+        # still checks every question's workspace, and this grants nothing.
+        self._machine_workspaces: set[str] = set()
         self._wake = asyncio.Event()
 
     # ── the engine's side ──────────────────────────────────────────────────
@@ -180,6 +194,7 @@ class SurfaceBridge:
             "attached": self.attached,
             "inflight": len(self._pending),
             "timeout_s": ASK_TIMEOUT_S,
+            "machines": sorted(self._machine_workspaces),
             "surfaces": {name: sorted(ops) for name, ops in self._surfaces.items()},
         }
 
@@ -188,6 +203,22 @@ class SurfaceBridge:
     def note_ui(self) -> None:
         """A window polled. That is the whole liveness signal there is, stamped rather than latched."""
         self._last_seen = time.monotonic()
+
+    def note_window(self, machines: list[str]) -> None:
+        """Which workspaces have a machine open, as the window last reported them.
+
+        Not a liveness signal: `note_ui` owns that, and a window that reports a machine but stops polling is still
+        gone (`attached`). Ids are only compared to the goal's own workspace id; nothing here becomes a path, an
+        argv or a capability. A count is not kept because the menu only asks whether there is one.
+        """
+        self._machine_workspaces = {
+            workspace_id for workspace_id in machines
+            if isinstance(workspace_id, str) and workspace_id
+        }
+
+    def has_machine(self, workspace_id: str) -> bool:
+        """Whether the window holds a machine open in that workspace, as of its last report."""
+        return bool(workspace_id) and workspace_id in self._machine_workspaces
 
     async def next_request(self, wait_s: float = POLL_WAIT_S) -> dict[str, Any] | None:
         """The oldest question not yet handed out, or None if none arrives in time."""

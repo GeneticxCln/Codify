@@ -11,14 +11,19 @@ import json
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
+from engine.binary_analysis import ghidra_available
 from engine.chat_prompts import CHAT_SYSTEM_PROMPT, CONDUCTOR_SYSTEM_PROMPT
 from engine.conductor import (
+    ANALYZE_BINARY,
     ASK_USER,
     BASE_TOOLS,
     Conductor,
     DEFAULT_MAX_MOVES,
     DEFAULT_MAX_TURNS,
+    EDITOR_TOOLS,
     FETCH_PAGE,
+    MACHINE_TOOLS,
+    PAGE_TOOLS,
     STEP_TOOLS,
     without_browser_actions,
 )
@@ -671,8 +676,25 @@ class _Conduct(_Plan):
         """
 
         def menu() -> list[ToolSpec]:
+            goal = self.goals.get(goal_id)
             planned = bool(self.goals.steps(goal_id))
             offered = [*BASE_TOOLS, *(STEP_TOOLS if planned else ())]
+            # A tool whose surface is not there cannot act. Offering it costs tokens on every call and, when a
+            # model tries it, a call to discover the refusal; the handler still refuses if one is named anyway.
+            bridge = self.bridge
+            if bridge is None or not bridge.attached:
+                offered = [t for t in offered if t.name not in PAGE_TOOLS]
+            surfaces = self.surfaces
+            if surfaces is None or not surfaces.attached:
+                offered = [
+                    t for t in offered
+                    if t.name not in EDITOR_TOOLS and t.name not in MACHINE_TOOLS
+                ]
+            elif not surfaces.has_machine(goal.workspace_id):
+                offered = [t for t in offered if t.name not in MACHINE_TOOLS]
+            # Ghidra is located by its own files, not PATH; without it `analyze_binary` can only say so.
+            if not ghidra_available():
+                offered = [t for t in offered if t.name != ANALYZE_BINARY.name]
             # Browser actions are a distinct permission from reading pages and are off by default.
             if not self._browser_actions_enabled():
                 offered = without_browser_actions(offered)
@@ -684,7 +706,7 @@ class _Conduct(_Plan):
             # on a question), and once a plan exists the plan is what the person is looking at: they
             # approve it, edit it, or say what to change in their next message. A question asked after it
             # would not even be drawn, because a turn that planned is shown as its plan.
-            if not planned and self.goals.get(goal_id).status != "RUNNING":
+            if not planned and goal.status != "RUNNING":
                 offered.append(ASK_USER)
             return offered
 

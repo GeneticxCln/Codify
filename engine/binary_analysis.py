@@ -188,6 +188,20 @@ def locate_ghidra(env: Mapping[str, str] | None = None) -> GhidraInstall:
     return GhidraInstall(root=root, headless=headless, version=version)
 
 
+def ghidra_available(env: Mapping[str, str] | None = None) -> bool:
+    """Whether `analyze_binary` can run here: a supported Ghidra is configured and executable.
+
+    The same check the tool makes, asked before the tool is offered. A menu entry that can only answer "Ghidra is
+    not configured" costs tokens on every call and, when a model tries it, a call to discover that. Nothing is
+    cached: the environment is read each time, so a menu built after a restart sees the install a person just set.
+    """
+    try:
+        locate_ghidra(env)
+    except BinaryAnalysisError:
+        return False
+    return True
+
+
 def _maxmem(env: dict[str, str]) -> str:
     asked = (env.get(ENV_MAXMEM) or "").strip()
     return asked if _MAXMEM.fullmatch(asked) else DEFAULT_MAXMEM

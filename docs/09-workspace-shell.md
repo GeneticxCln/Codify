@@ -2688,6 +2688,13 @@ branch names the *menu the model was given* rather than the dispatch table, so a
 tool that is offered but unwired is named as unavailable rather than silently
 missing from the list.
 
+The menu is narrowed by what can act, not only by what exists. With no app
+window attached there are no page verbs and no editor or machine tools; with a
+window but no machine open in this run's workspace, the four machine tools stay
+off; and with no usable Ghidra install, `analyze_binary` stays off. A tool that
+can only answer "there is no window" or "Ghidra is not configured" is a slot on
+every call and a call to discover the refusal (`conductor_menu`; docs/14 §4).
+
 `ApiError` and `CommandNotAllowed` are the two exceptions: those are the engine
 refusing, and the sentence says retrying will not help — a recoverable-looking
 refusal teaches the model to keep asking.

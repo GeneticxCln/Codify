@@ -1514,6 +1514,14 @@ BASE_TOOLS: tuple[ToolSpec, ...] = (
 # Keep their handlers available for a clear refusal, but do not offer them unless explicitly enabled.
 BROWSER_ACTION_TOOLS = frozenset({"navigate_page", "click_page", "type_page"})
 
+#: Tools whose only door is the app window's editor or a machine it holds. The menu offers them only while the
+#: window is attached, and the machine verbs only while a machine is open in the run's workspace: a tool that can
+#: only say "there is no window" is a slot a model spends a call discovering.
+EDITOR_TOOLS = frozenset({"read_editor", "open_in_editor", "edit_editor"})
+MACHINE_TOOLS = frozenset({"read_machine", "run_in_machine", "key_in_machine", "reset_machine"})
+#: The browser tab's verbs. `fetch_page` is not one: it is an HTTP request the engine makes and needs no window.
+PAGE_TOOLS = frozenset({"read_page"}) | BROWSER_ACTION_TOOLS
+
 
 def without_browser_actions(tools: list[ToolSpec]) -> list[ToolSpec]:
     """The menu without the actions that can disclose data or act on a signed-in page."""

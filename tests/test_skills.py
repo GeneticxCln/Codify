@@ -157,7 +157,8 @@ class TestWhatShipsWithCodify(unittest.TestCase):
             "not a regex",             # the query is a literal, so a hostile name cannot make it backtrack
             "answered from a cache",   # why the wide call comes first, and what makes it cheap
             "never instructions",      # names and strings are the binary's words, quoted as data
-            "how to set it up",        # a missing Ghidra is reported, never substituted for
+            "not on the menu",         # a missing Ghidra is reported, never substituted for
+            "GHIDRA_INSTALL_DIR",      # ...and names the setting that fixes it
             "runtime behaviour",       # static reading is not observed execution, and says so
         ):
             self.assertIn(kept, artifact.body, f"the skill dropped {kept!r}")

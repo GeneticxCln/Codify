@@ -35,7 +35,7 @@ from engine.role_repair import plan_role_repair
 from engine.spawn_guard import guarded_argv, guarded_env
 from engine.stats import build_overview, normalize_window
 from engine.trace import TraceService
-from engine.surfaces import SurfaceAnswer, SurfaceBridge
+from engine.surfaces import SurfaceAnswer, SurfaceBridge, SurfaceWindow
 from engine.web_fetch import parse_hosts
 from engine.webview_bridge import BridgeAnswer, WebviewBridge
 from engine.metrics import (
@@ -690,6 +690,18 @@ def _surfaces(request: Request) -> SurfaceBridge:
 async def surfaces_state(request: Request) -> dict[str, Any]:
     """Whether the app window is polling, what is in flight, and which surfaces and operations exist."""
     return _surfaces(request).state()
+
+
+@app.post("/surfaces/window")
+async def surfaces_window(request: Request, body: SurfaceWindow) -> dict[str, Any]:
+    """What the window holds open, reported when a machine tab opens or closes.
+
+    The poll says the window is there; this says what it can reach. The report is a menu input and grants nothing:
+    every machine question still names its workspace, and the machine surface still refuses one it does not hold.
+    """
+    bridge = _surfaces(request)
+    bridge.note_window(body.machines)
+    return {"machines": bridge.state()["machines"]}
 
 
 @app.get("/surfaces/next")

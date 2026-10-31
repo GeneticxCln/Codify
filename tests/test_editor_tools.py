@@ -10,8 +10,8 @@ what is asserted:
   * **A missing editor is a sentence, never an exception**, the way a missing browser is: most callers (a benchmark, a
     command-line turn) have no window, and a tool that raised there would fail every turn on all of them.
   * **A refusal from the editor reaches the model in words it can act on.**
-  * They are always offered (like the page verbs), cost model calls only (they are not stage moves), and are named in the
-    prompt (`test_conductor_prompt`).
+  * They are in the base vocabulary and cost model calls only (they are not stage moves); the menu offers them while
+    the app window is attached, and they are named in the prompt (`test_conductor_prompt`).
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ class ToolCase(unittest.IsolatedAsyncioTestCase):
 
 
 class TestTheyAreOfferedLikeThePageVerbs(unittest.TestCase):
-    def test_each_is_a_tool_with_a_handler_that_is_always_on_the_menu_and_costs_no_move(self) -> None:
+    def test_each_is_a_tool_with_a_handler_in_the_base_vocabulary_and_costs_no_move(self) -> None:
         for name in TOOLS_UNDER_TEST:
             with self.subTest(name=name):
                 self.assertIn(name, ConductorTools.NAMES)

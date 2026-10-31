@@ -3,6 +3,7 @@
     GET  /surfaces/state          who is attached, what is in flight, which surfaces and ops exist
     GET  /surfaces/next?wait=     the oldest unanswered question, or {"id": null} (a long poll: the window's heartbeat)
     POST /surfaces/answer         {id, ok, result?, error?} extra=forbid -> {"accepted": bool}
+    POST /surfaces/window         {machines: [workspace_id]} extra=forbid -> which workspaces have a machine open
 
 A long poll rather than a socket for the reason the browser bridge is one: every WebSocket in this engine carries one
 goal's events and nothing else, and a second long-lived socket is how two streams get interleaved
@@ -76,6 +77,22 @@ class TestPolling(RouteCase):
         for wait in (-1, 61):
             with self.subTest(wait=wait):
                 self.assertEqual(422, (await self.next(wait)).status_code)
+
+    async def test_the_window_reports_the_workspaces_with_a_machine_open(self) -> None:
+        r = await self.client.post("/surfaces/window", headers=self.headers, json={"machines": ["ws-1"]})
+
+        self.assertEqual(200, r.status_code)
+        self.assertEqual(["ws-1"], r.json()["machines"])
+        state = (await self.client.get("/surfaces/state", headers=self.headers)).json()
+        self.assertEqual(["ws-1"], state["machines"])
+        self.assertFalse(state["attached"], "a report is not a poll; only the poll is the heartbeat")
+
+    async def test_the_report_has_no_other_fields(self) -> None:
+        r = await self.client.post(
+            "/surfaces/window", headers=self.headers, json={"machines": [], "editors": 1}
+        )
+
+        self.assertEqual(422, r.status_code)
 
 
 class TestARoundTripOverHttp(RouteCase):
