@@ -23,7 +23,7 @@ split rather than asking the prompts to be well behaved:
 |---|---|---|---|
 | `laya` | typed decisions only | Typed pre-flight decisions (intent / risk / injection) — may fail the goal | `05` §5 |
 | `librarian` | **read** files, **search** the tree, read-only git, read-only inspect commands. Cannot write. | The evidence pack everything downstream plans from | `04` §4.0 |
-| `design` | reasons only, no tools; cannot write | The locked direction (artifact, design system, tokens, components, acceptance) that the planner plans against and the fixer obeys — or, in a deliverable goal, the workspace's own `DESIGN.md` (`design`) or `CODIFY.md` (`knowledge`) in draft | `04` §4.0a, §4.0a.2, §4.9 |
+| `design` | reasons only, no tools; cannot write; rendered surfaces only | The locked direction for a rendered surface (layout, states, design system, tokens, components, acceptance) that the planner plans against and the fixer obeys — or, in a deliverable goal, the workspace's own `DESIGN.md` (`design`) or `CODIFY.md` (`knowledge`) in draft | `04` §4.0a, §4.0a.2, §4.9 |
 | `planner` | reasons only, no tools | Ordered `PlanStep[]` from the goal + the evidence pack | `04` §4.1 |
 | `fixer` | **the only writer** | File edits | `04` §4.2 |
 | `verifier` | **the only role that executes a command** | Argv + verdict + what actually ran | `04` §4.3 |
@@ -506,7 +506,7 @@ a copy is sent. `tests/test_provider_requests_surrogates.py` covers all four pro
 | `recall` | `GoalService.recall_events` + `recall.search` | read-only over this workspace's own `events`; the `RECALLABLE` allow-list decides what can be returned and nothing stored can widen it (docs/03 §1.8) |
 | `recall_threads` | `GoalService.thread_recall` + `recall.search_threads` | read-only over this workspace's own conversation threads; scoped by workspace in the query, archived threads excluded (docs/03 §1.8) |
 | `recon` | `ExecutorService._librarian` | read-only, `MAX_LIBRARY_ROUNDS` |
-| `design` | `ExecutorService._design` | no tools at all |
+| `design` | `ExecutorService._design` | no tools at all; rendered surfaces only — layout, states, components, tokens, acceptance, never an API, a schema or a set of names |
 | `plan` | `_plan_steps` | refuses without evidence; writes steps, never files |
 | `write` | `ExecutorService._fixer` | docs/00 §6.9 — the only move that writes, gated on approval |
 | `verify` | `ExecutorService._verifier` | `validate_argv` in `test` mode — second door, same list |

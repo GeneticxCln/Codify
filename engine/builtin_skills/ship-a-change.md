@@ -18,9 +18,11 @@ tell a considered shortcut from a step you forgot.
    it honestly: `plan` refuses to run without evidence, and a plan written
    against a guessed file layout produces steps that edit the wrong things.
    Ask for what you actually need, not for the whole repository.
-2. **`design`** — lock the direction, when the request has a shape worth locking
-   (an API, a schema, a UI surface, a set of names). Skip it for a one-line fix.
-   It has no tools: it decides from the evidence, not from more reading.
+2. **`design`** — lock the direction, when the request changes a rendered
+   surface worth locking (layout, states, components, tokens, acceptance).
+   Skip it for a one-line fix, and for work with no surface — an API, a schema
+   or a set of names is the planner's job, not the designer's. It has no tools:
+   it decides from the evidence, not from more reading.
 3. **`plan`** — turn the request plus the evidence into steps. Call it once: this
    creates the steps that everything below operates on, so nothing can be
    written before it, and a second call spends a move for nothing. If you cannot

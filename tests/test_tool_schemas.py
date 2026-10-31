@@ -16,6 +16,7 @@ wrong with anything looks identical to one that works.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from typing import Any
 
 from engine.conductor import GIT_HISTORY, RUN_COMMAND, SEARCH_CODE, READ_FILE, TOOLS
@@ -52,6 +53,28 @@ class TestEveryRealToolIsWellFormed(unittest.TestCase):
         for spec, key in ((GIT_HISTORY, "args"), (RUN_COMMAND, "argv")):
             declared = spec.parameters["properties"][key]
             self.assertEqual(declared.get("items"), {"type": "string"}, f"{spec.name}.{key}")
+
+
+class TestTheDesignToolIsAboutRenderedSurfaces(unittest.TestCase):
+    """The tool text has to match what the role actually decides.
+
+    The design role locks a *rendered* direction. Its tool used to promise "the shape of an API, a
+    schema, a set of names, a UI surface", so a model could send it work it was never meant to do. The
+    skill is the other half of the same claim.
+    """
+
+    def test_the_tool_asks_for_a_rendered_surface(self) -> None:
+        design = next(t for t in TOOLS if t.name == "design")
+        self.assertIn("rendered surface", design.description)
+        self.assertIn("not an API, a schema", design.description)
+        self.assertNotIn("the shape of an API", design.description)
+        self.assertNotIn("a UI surface", design.description)
+
+    def test_the_bundled_skill_says_the_same(self) -> None:
+        skill = (Path(__file__).resolve().parent.parent / "engine" / "builtin_skills" / "ship-a-change.md")
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn("rendered", text)
+        self.assertNotIn("an API, a schema, a UI surface", text)
 
 
 class TestToolTextTellsTheTruth(unittest.TestCase):

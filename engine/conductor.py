@@ -1294,10 +1294,11 @@ DESIGN = ToolSpec(
     name="design",
     description=(
         "Ask the design agent to lock a direction before any code is planned: "
-        "the shape of an API, a schema, a set of names, a UI surface. It has no "
-        "tools and decides from the evidence that already exists, so call "
-        "`recon` first. Skip it for a change small enough that there is no "
-        "direction to lock."
+        "the rendered surface the change produces — its layout, states, "
+        "components, tokens and acceptance. It is about what a person sees, not "
+        "an API, a schema or a set of names; those are the planner's job. It has "
+        "no tools and decides from the evidence that already exists, so call "
+        "`recon` first. Skip it for a change with no rendered surface to lock."
     ),
     parameters={
         "type": "object",
