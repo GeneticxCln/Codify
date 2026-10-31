@@ -21,7 +21,7 @@ from urllib.parse import ParseResult, urlparse
 import httpx
 
 from engine import home
-from engine.models import AgentConfig, BUILTIN_PROVIDERS, scrub_surrogates
+from engine.models import AgentConfig, BUILTIN_PROVIDERS, TOOL_CALL_THINKING_OFF, scrub_surrogates
 from engine.toolcall import (
     ToolCall,
     ToolReply,
@@ -870,11 +870,11 @@ def _tool_call_thinking(provider_name: str) -> dict[str, Any]:
     DeepSeek's thinking mode requires the `reasoning_content` of every earlier assistant turn to be
     passed back whenever a request carries `tools`; the conductor's neutral transcript has no slot
     for it, and omitting it is a 400. Tool calls therefore ask for thinking off (docs/01 §5.0). This
-    reads the provider's catalog entry rather than its model name: a model reached through another
-    provider is not covered by that provider's guarantee. Roles' own `complete` calls never come
-    through here, so planning and review keep thinking on.
+    reads the provider slug rather than its model name: a model reached through another provider is
+    not covered by that provider's guarantee. Roles' own `complete` calls never come through here, so
+    planning and review keep thinking on.
     """
-    if (BUILTIN_PROVIDERS.get(provider_name) or {}).get("thinking_with_tools") == "disabled":
+    if provider_name in TOOL_CALL_THINKING_OFF:
         return {"thinking": {"type": "disabled"}}
     return {}
 

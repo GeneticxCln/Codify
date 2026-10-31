@@ -166,12 +166,6 @@ BUILTIN_PROVIDERS: dict[str, dict[str, Any]] = {
         "base_url": "https://api.deepseek.com",
         "needs_key": True,
         "local_only": False,
-        # Thinking mode requires every earlier assistant turn's `reasoning_content` to be sent back
-        # when a request carries `tools`, and the conductor's neutral transcript has no slot for it:
-        # omitting it is a 400. Tool calls ask for thinking off instead (docs/01 §5.0). Roles keep it:
-        # only `complete_with_tools` reads this. A custom endpoint or an OpenRouter route to the same
-        # model is a different provider and is not covered.
-        "thinking_with_tools": "disabled",
     },
     "ollama": {
         "protocol": "ollama",
@@ -216,6 +210,16 @@ BUILTIN_PROVIDERS: dict[str, dict[str, Any]] = {
     # were previously reaching for as a "custom" endpoint — which asks them for a
     # protocol and a base URL the engine already knows.
 }
+
+
+# Wire quirks that belong to a provider's tool-call path, kept out of `BUILTIN_PROVIDERS`: that table is
+# served verbatim to the Settings screen and its four-field shape is a contract
+# (`tests/test_builtin_providers.py`). DeepSeek's thinking mode requires every earlier assistant turn's
+# `reasoning_content` to be sent back when a request carries `tools`, and the conductor's neutral
+# transcript has no slot for it: omitting it is a 400. Tool calls ask for thinking off instead (docs/01
+# §5.0). Only `complete_with_tools` reads this; roles' own `complete` calls keep thinking on. A custom
+# endpoint or an OpenRouter route to the same model is a different provider and is not covered.
+TOOL_CALL_THINKING_OFF: frozenset[str] = frozenset({"deepseek"})
 
 
 class AgentConfig(BaseModel):

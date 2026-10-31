@@ -464,9 +464,9 @@ switch credits the turn's answer to a model that never produced it.
 **DeepSeek's tool calls disable thinking.** In thinking mode, a request that carries `tools` must
 send back every earlier assistant turn's `reasoning_content`, and a request that omits it is a 400.
 The conductor's neutral transcript has no slot for that field, so `OpenAICompatProvider.complete_with_tools`
-asks DeepSeek for `{"thinking": {"type": "disabled"}}`; the catalog entry carries the fact
-(`BUILTIN_PROVIDERS["deepseek"]["thinking_with_tools"]`), and the factory passes the slug through so
-the provider can read it. Only the tool-call path does this: a role's own `complete` call keeps
+asks DeepSeek for `{"thinking": {"type": "disabled"}}`; `TOOL_CALL_THINKING_OFF` in `engine/models.py` carries the
+fact (kept out of `BUILTIN_PROVIDERS`, whose four fields are what the Settings screen reads), and
+the factory passes the slug through so the provider can read it. Only the tool-call path does this: a role's own `complete` call keeps
 thinking on, because it is one turn with no reasoning to echo back. A custom endpoint or an
 OpenRouter route to a DeepSeek model is a different catalog entry and is not covered.
 
