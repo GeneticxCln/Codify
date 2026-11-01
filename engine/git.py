@@ -295,9 +295,13 @@ class GitService:
             }
         if res.returncode != 0:
             said = (res.stderr or res.stdout or "").strip().splitlines()
+            reason = said[-1] if said else "git push failed."
+            # Git can quote the remote in "Authentication failed for '…'". The
+            # sentence is returned too, so the same credential-free spelling is
+            # substituted there before it reaches the window.
             return {
                 "ok": False, "branch": branch, "remote": remote,
-                "reason": said[-1] if said else "git push failed.",
+                "reason": reason.replace(raw_remote, remote),
             }
         return {
             "ok": True, "branch": branch, "remote": remote,

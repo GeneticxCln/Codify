@@ -152,6 +152,21 @@ class TestPushService(unittest.TestCase):
         self.assertEqual("https://example.com/repo.git", answer["remote"])
         self.assertNotIn("secret", str(answer))
 
+    def test_a_refused_push_does_not_echo_the_credential_in_gits_sentence(self) -> None:
+        raw = "https://user:secret@example.com/repo.git"
+        refused = subprocess.CompletedProcess(
+            [], 1, "", f"fatal: Authentication failed for '{raw}/'"
+        )
+        with patch.object(GitService, "is_git_repo", return_value=True), \
+                patch.object(GitService, "status", return_value={"branch": "main"}), \
+                patch.object(GitService, "remote_url", return_value=raw), \
+                patch.object(GitService, "_run_text", return_value=refused):
+            answer = self.service.push(str(self.root))
+
+        self.assertIs(False, answer["ok"])
+        self.assertNotIn("secret", str(answer))
+        self.assertIn("https://example.com/repo.git", answer["reason"] or "")
+
     def test_no_origin_is_a_sentence_not_an_exception(self) -> None:
         local = _repo(self.root / "local")
 
