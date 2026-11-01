@@ -5,7 +5,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, get_args
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 import sqlite3
 
@@ -14,6 +14,7 @@ from engine.fs import (
     BINARY_SNIFF_BYTES,
     MAX_EDIT_BYTES,
     FileAccessError,
+    FileAlreadyExistsError,
     FileChangedError,
     FileNotTextError,
     FileSystemService,
@@ -26,6 +27,16 @@ from engine.fs import (
 )
 from engine.laya import CHECKPOINT_MAX
 from engine.library import LibraryService
+from engine.skills import (
+    MAX_DECLARED_MOVES,
+    MAX_DESCRIPTION_CHARS,
+    MAX_SKILL_CHARS,
+    NAME_RE,
+    SKILLS_DIRNAME,
+    load_skills,
+    parse_skill,
+    render_skill,
+)
 from engine.web_fetch import MAX_HOSTS_CHARS
 from engine.models import (
     BUILTIN_PROVIDERS,
@@ -47,6 +58,9 @@ from engine.models import (
     PlanStep,
     ShellTab,
     ShellTabWrite,
+    SkillCreate,
+    SkillCreated,
+    SkillImport,
     TurnCreate,
     Workspace,
     WorkspaceFile,
@@ -271,7 +285,6 @@ class SettingsService:
         self._db.commit()
         return clamped
 
-
 def custom_provider_address(
     provider: str, rows: list[AgentConfig]
 ) -> tuple[str, str, str | None] | None:
@@ -435,6 +448,8 @@ class AgentRegistryService:
             # Same for the residency window — "unset" is a real setting, and a
             # user who cleared the field wants Ollama's own five minutes back.
             "keep_alive",
+            # And for thinking effort: clearing it returns the role to the provider's own default.
+            "thinking_effort",
         )
         data.update({k: v for k, v in updates.items() if v is not None or k in CLEARABLE})
         if not (data.get("fallback_provider") or "").strip():
@@ -503,13 +518,13 @@ class AgentRegistryService:
         self._db.execute(
             """UPDATE agent_configs SET display_name=?, provider=?, protocol=?, model_name=?,
                api_key_ref=?, base_url=?, system_prompt_override=?, temperature=?, max_tokens=?,
-               fallback_provider=?, fallback_model_name=?, fallback_protocol=?, fallback_base_url=?,
-               num_ctx=?, keep_alive=?, updated_at=?
+               thinking_effort=?, fallback_provider=?, fallback_model_name=?,
+               fallback_protocol=?, fallback_base_url=?, num_ctx=?, keep_alive=?, updated_at=?
                WHERE role=?""",
             (
                 merged.display_name, merged.provider, merged.protocol, merged.model_name,
                 merged.api_key_ref, merged.base_url, merged.system_prompt_override,
-                merged.temperature, merged.max_tokens,
+                merged.temperature, merged.max_tokens, merged.thinking_effort,
                 merged.fallback_provider, merged.fallback_model_name,
                 merged.fallback_protocol, merged.fallback_base_url,
                 merged.num_ctx, merged.keep_alive, merged.updated_at, role,
@@ -684,6 +699,183 @@ class WorkspaceService:
         if row is None:
             raise ApiError(404, "unknown_workspace", "workspace not found")
         return Workspace.model_validate(row_to_dict(row))
+
+    def disabled_skills(self, workspace_id: str) -> set[str]:
+        """The skill names this workspace switched off.
+
+        Read on every conductor run. A hand-edited row is filtered to the shape a skill
+        name can have rather than failing a goal; an unknown workspace simply has no
+        switches. The table only ever narrows the menu (`engine/skills.py`).
+        """
+        rows = self._db.execute(
+            "SELECT name FROM workspace_disabled_skills WHERE workspace_id = ?",
+            (workspace_id,),
+        )
+        return {
+            str(row["name"]).strip().lower()
+            for row in rows
+            if NAME_RE.match(str(row["name"]).strip().lower())
+        }
+
+    def set_skill_enabled(self, workspace_id: str, name: str, enabled: bool) -> set[str]:
+        """Turn one skill on or off for one workspace, and return its disabled set.
+
+        Disabling is how a person says "do not offer this to the conductor here". It does
+        not run, delete or change the skill file, and it grants nothing: the write gate
+        and `validate_argv` are untouched (docs/00 §6.9). Only disabled names have rows,
+        so enabling is a delete and a fresh workspace starts with every skill on.
+        """
+        self.get(workspace_id)  # 404 if unknown, before any row points at it
+        clean = name.strip().lower()
+        if not NAME_RE.match(clean):
+            raise ApiError(422, "invalid_skill_name", "skill name is invalid")
+        if enabled:
+            self._db.execute(
+                "DELETE FROM workspace_disabled_skills WHERE workspace_id = ? AND name = ?",
+                (workspace_id, clean),
+            )
+        else:
+            self._db.execute(
+                """INSERT INTO workspace_disabled_skills (workspace_id, name, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(workspace_id, name) DO UPDATE SET updated_at = excluded.updated_at""",
+                (workspace_id, clean, time.time()),
+            )
+        self._db.commit()
+        return self.disabled_skills(workspace_id)
+
+    # ── the skill creator ───────────────────────────────────────────────────────
+    #
+    # A person's New skill action writes one new Markdown file under `.codify/skills/`. It is the
+    # second person-only write door (the editor's Save is the first) and is deliberately narrower:
+    # it creates, never replaces, never deletes, and the path is built from a validated skill name
+    # rather than from anything the client sent (docs/00 §6.9). `known_moves` is supplied by the
+    # route from `ConductorTools.NAMES`; this module does not import the conductor.
+
+    def create_skill(
+        self,
+        workspace: Workspace,
+        body: SkillCreate,
+        known_moves: Collection[str] | None = None,
+    ) -> SkillCreated:
+        clean = body.name.strip().lower()
+        if not NAME_RE.match(clean):
+            raise ApiError(
+                422, "invalid_skill_name",
+                "a skill name is lowercase letters, digits and dashes, starting with a letter or digit",
+            )
+        description = body.description.strip()
+        if not description or "\n" in description or "\r" in description:
+            raise ApiError(422, "invalid_skill_description", "a skill needs a one-line description")
+        if len(description) > MAX_DESCRIPTION_CHARS:
+            raise ApiError(
+                422, "invalid_skill_description",
+                f"a skill description is at most {MAX_DESCRIPTION_CHARS} characters",
+            )
+        instructions = body.instructions.strip()
+        if not instructions:
+            raise ApiError(422, "invalid_skill_body", "a skill needs instructions")
+        moves = self._clean_skill_moves(body.moves, known_moves)
+        text = render_skill(clean, description, moves, instructions)
+        if len(text) > MAX_SKILL_CHARS:
+            raise ApiError(
+                422, "invalid_skill_body",
+                f"a skill is at most {MAX_SKILL_CHARS:,} characters",
+            )
+        return self._write_skill(workspace, text, clean, known_moves)
+
+    def import_skill(
+        self,
+        workspace: Workspace,
+        body: SkillImport,
+        known_moves: Collection[str] | None = None,
+    ) -> SkillCreated:
+        filename = body.filename.strip()
+        if not filename or "\x00" in filename or "/" in filename or "\\" in filename:
+            raise ApiError(422, "invalid_skill_filename", "an uploaded skill needs a plain .md filename")
+        if not filename.lower().endswith(".md"):
+            raise ApiError(422, "invalid_skill_filename", "an uploaded skill must be a .md file")
+        fallback = Path(filename).stem.lower()
+        return self._write_skill(workspace, body.content, fallback, known_moves)
+
+    @staticmethod
+    def _clean_skill_moves(moves: list[str], known_moves: Collection[str] | None) -> list[str]:
+        cleaned: list[str] = []
+        for raw in moves:
+            move = str(raw).strip().lower()
+            if not move or move in cleaned:
+                continue
+            if known_moves is not None and move not in known_moves:
+                raise ApiError(
+                    422, "invalid_skill_moves",
+                    f"{move!r} is not a move the conductor offers",
+                )
+            cleaned.append(move)
+        if len(cleaned) > MAX_DECLARED_MOVES:
+            raise ApiError(
+                422, "invalid_skill_moves",
+                f"a skill declares at most {MAX_DECLARED_MOVES} moves",
+            )
+        return cleaned
+
+    def _write_skill(
+        self,
+        workspace: Workspace,
+        text: str,
+        fallback_name: str,
+        known_moves: Collection[str] | None,
+    ) -> SkillCreated:
+        skill, problem = parse_skill(text, fallback_name, "workspace", known_moves)
+        if skill is None:
+            raise ApiError(422, "invalid_skill", problem or "that is not a usable skill")
+        if skill.notes:
+            raise ApiError(422, "invalid_skill", " · ".join(skill.notes))
+
+        root = Path(workspace.root_path).resolve()
+        skills_dir = root / SKILLS_DIRNAME
+        try:
+            resolves_to = skills_dir.resolve()
+        except OSError as exc:
+            raise ApiError(422, "skill_directory_refused", f"the skills folder cannot be read: {exc}") from exc
+        if resolves_to != root / SKILLS_DIRNAME:
+            raise ApiError(
+                422, "skill_directory_refused",
+                f"{SKILLS_DIRNAME} resolves outside the workspace's own folder, so no skill was written",
+            )
+
+        relative = f"{SKILLS_DIRNAME}/{skill.name}.md"
+        target = root / relative
+        folder = root / SKILLS_DIRNAME / skill.name
+        try:
+            if target.exists() or target.is_symlink() or folder.exists() or folder.is_symlink():
+                raise ApiError(
+                    409, "skill_exists",
+                    f"a skill called {skill.name!r} is already in this workspace; edit its file instead",
+                )
+            FileSystemService(str(root)).create_text(relative, text)
+        except ApiError:
+            raise
+        except FileAlreadyExistsError as exc:
+            raise ApiError(
+                409, "skill_exists",
+                f"a skill called {skill.name!r} already exists in this workspace",
+            ) from exc
+        except (PathEscapeError, FileTooLargeError, FileNotTextError, FileAccessError) as exc:
+            raise self._file_refusal(exc, relative) from exc
+
+        # A person who just created a skill means it to be offered. Clearing a stale switch for the
+        # name is a settings change by that same person, not a grant: the write gate is untouched.
+        self.set_skill_enabled(workspace.id, skill.name, True)
+        shadows = skill.name in load_skills(str(root), known_moves).shadows
+        return SkillCreated(
+            workspace_id=workspace.id,
+            name=skill.name,
+            description=skill.description,
+            path=relative,
+            source="workspace",
+            moves=list(skill.moves),
+            shadows=shadows,
+        )
 
     def goal_count(self, workspace_id: str) -> int:
         """How many goals point at this workspace — the cost of deleting it."""

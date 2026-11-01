@@ -92,6 +92,18 @@ class FileChangedError(Exception):
         self.current_version = current_version
 
 
+class FileAlreadyExistsError(Exception):
+    """A create-only write found something already at the path.
+
+    A dedicated error rather than a bare `FileExistsError`, because the route turns this into
+    a 409 with the path in it, while an operating-system refusal is a different answer.
+    """
+
+    def __init__(self, path: str):
+        super().__init__(f"something already exists at {path}")
+        self.path = path
+
+
 class FileAccessError(Exception):
     """The operating system refused: a file the engine may not read, or a directory it may not write into."""
 
@@ -381,6 +393,51 @@ class FileSystemService:
             raise FileAccessError(exc.strerror or str(exc)) from exc
         return TextFile(rel, content, version_of(data), len(data))
 
+    def create_text(self, rel: str, content: str) -> TextFile:
+        """Create one new text file, and never replace one.
+
+        **This is the skill creator's writer, not an agent's.** The only caller is
+        `WorkspaceService.create_skill`, which fixes the path under `.codify/skills/`; no conductor
+        tool, skill body or model reply can name it (docs/00 §6.9). It is deliberately narrower than
+        `save_text`: an existing file, directory or symlink is a refusal, so this is never a general
+        file writer and never a way to edit a file the editor already owns.
+
+        Containment, `.git`, a protected root and the atomic write are the same checks `apply` and
+        `save_text` use. The final target is created with `O_EXCL` and no-clobber linking, so a file
+        that appears between the check and the write is a refusal rather than a silent overwrite.
+        """
+        reason = protected_root_reason(self.root)
+        if reason is not None:
+            raise ProtectedRootError(str(self.root), reason)
+        target = self.resolve(rel)
+        # `resolve` follows the final link, which would make a skill through a link write the file it
+        # points at. A create is not allowed to follow one: it would create somewhere that is not the
+        # path the person named, and the skill loader refuses links for the same reason.
+        if (self.root / rel).is_symlink():
+            raise FileAlreadyExistsError(rel)
+        try:
+            if target.exists():
+                raise FileAlreadyExistsError(rel)
+        except OSError as exc:
+            raise FileAccessError(exc.strerror or str(exc)) from exc
+        if "\x00" in content:
+            raise FileNotTextError("binary")
+        try:
+            data = content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise FileNotTextError("encoding") from exc
+        if len(data) > MAX_EDIT_BYTES:
+            raise FileTooLargeError(len(data))
+        try:
+            self._write_atomic(target, data, replace=False)
+        except PathEscapeError:
+            raise
+        except FileExistsError as exc:
+            raise FileAlreadyExistsError(rel) from exc
+        except OSError as exc:
+            raise FileAccessError(exc.strerror or str(exc)) from exc
+        return TextFile(rel, content, version_of(data), len(data))
+
     def read_text_or_none(self, rel: str) -> str | None:
         """The file's text, or None when it is not text at all.
 
@@ -434,10 +491,12 @@ class FileSystemService:
         except UnicodeDecodeError:
             return "", "file is not UTF-8 text", raw
 
-    def _write_atomic(self, target: Path, data: bytes) -> list[Path]:
+    def _write_atomic(self, target: Path, data: bytes, *, replace: bool = True) -> list[Path]:
         """Write via a temp file + rename, so a crash cannot truncate the target.
 
-        Returns the directories this call had to create, outermost first, so a caller that
+        `replace=False` is the create-only half: the temp file is hard-linked into place, which
+        fails with `FileExistsError` instead of replacing a file that appeared since the caller
+        checked. Returns the directories this call had to create, outermost first, so a caller that
         has to undo the write can remove them again.
         """
         # The target itself was resolved through containment, but its parents
@@ -481,7 +540,12 @@ class FileSystemService:
                 handle.write(data)
             if mode is not None:
                 os.chmod(tmp, mode)
-            os.replace(tmp, real_parent / target.name)
+            if replace:
+                os.replace(tmp, real_parent / target.name)
+            else:
+                # A link is the no-clobber form of the same atomic publication: unlike `os.replace`
+                # it cannot replace a file that appeared after the caller's check.
+                os.link(tmp, real_parent / target.name)
         except BaseException:
             # A directory made for a write that then failed is not left standing — and it is
             # empty only once this call's own temp file is gone, so that goes first.

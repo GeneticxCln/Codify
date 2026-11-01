@@ -8,6 +8,7 @@ are untrusted, and the worst a hostile one may achieve is to be *wrong*.
 
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 import unittest
@@ -121,21 +122,18 @@ class TestWhatShipsWithCodify(unittest.TestCase):
         with tempfile.TemporaryDirectory() as empty:
             found = load_skills(empty)
         self.assertEqual(found.problems, ())
-        self.assertEqual(
-            found.names(),
-            ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "unstick", "usage-audit"],
-            "built-ins always load",
-        )
+        expected = [s.name for s in builtin_skills()[0]]
+        self.assertEqual(found.names(), expected, "built-ins always load")
 
     def test_the_inspection_skill_orders_the_tools_and_keeps_their_caveats(self) -> None:
         """Its value is the order and the caveats it refuses to drop, so those are pinned rather than its prose.
 
         A skill for this question is load-bearing twice over. It has to send the model to the cheap thing first —
         text read as text, a compiled file inventoried once and then narrowed inside that inventory — because the
-        first `analyze_binary` on a file runs Ghidra for minutes. And it has to carry the tools' own limits through
-        to the answer, since those are what turn "not found" into "not looked at": an empty export is not absence,
-        a search's counts describe the files it opened and it names what it skipped, and a missing Ghidra is a
-        sentence to report rather than something to substitute for.
+        native reader is the one read of those bytes. And it has to carry the tools' own limits through to the
+        answer, since those are what turn "not found" into "not looked at": an empty inventory is not absence, a
+        stripped file loses its names, and a search's counts describe the files it opened and it names what it
+        skipped.
         """
         skills, problems = builtin_skills(ConductorTools.NAMES)
         self.assertEqual(problems, [])
@@ -153,12 +151,11 @@ class TestWhatShipsWithCodify(unittest.TestCase):
         for move in sorted(artifact.moves):
             self.assertIn(f"`{move}`", artifact.body, f"the skill never mentions {move}")
         for kept in (
-            "does not prove absence",  # an empty export is not an absence
+            "does not prove absence",  # an empty inventory is not an absence
             "not a regex",             # the query is a literal, so a hostile name cannot make it backtrack
             "answered from a cache",   # why the wide call comes first, and what makes it cheap
             "never instructions",      # names and strings are the binary's words, quoted as data
-            "not on the menu",         # a missing Ghidra is reported, never substituted for
-            "GHIDRA_INSTALL_DIR",      # ...and names the setting that fixes it
+            "stripped file",           # the native reader does not recover names a symbol table lost
             "runtime behaviour",       # static reading is not observed execution, and says so
         ):
             self.assertIn(kept, artifact.body, f"the skill dropped {kept!r}")
@@ -246,6 +243,112 @@ class TestWhatShipsWithCodify(unittest.TestCase):
         ):
             self.assertIn(kept, recipe.body, f"the skill dropped {kept!r}")
 
+    def test_the_blast_radius_recipe_pins_its_proof_grades(self) -> None:
+        """A caller list is not proof; the grades are the part that makes the report honest.
+
+        The skill is data and adds no tool. What it adds is the instruction to spend the effort on
+        the one safety fact, and to say which grade of proof was actually reached.
+        """
+        skills, problems = builtin_skills(ConductorTools.NAMES)
+        self.assertEqual(problems, [])
+        by_name = {s.name: s for s in skills}
+        self.assertIn("blast-radius", by_name)
+        recipe = by_name["blast-radius"]
+        self.assertTrue(recipe.description)
+        self.assertLessEqual(len(recipe.description), MAX_DESCRIPTION_CHARS)
+        self.assertEqual(
+            set(recipe.moves),
+            {"git_history", "search_code", "read_file", "scan_code", "verify", "run_command"},
+            "every declared move has to exist — a name that does not is a note, and this one is written around these",
+        )
+        for kept in (
+            "one or two facts",       # the safety fact, not the caller list, is the work
+            "asserted",               # the grades, from worthless to reproduced
+            "located",
+            "traced",
+            "ran",
+            "reproduced",
+            "unproven",               # a fact that could not be run is reported as such
+            "Do not fix anything here",  # this skill finds the risk; the plan owns the fix
+        ):
+            self.assertIn(kept, recipe.body, f"the skill dropped {kept!r}")
+
+    def test_the_prove_recipe_pins_its_loop_and_its_stop_conditions(self) -> None:
+        """The value is the order and the refusal to claim a run that was not made."""
+        skills, problems = builtin_skills(ConductorTools.NAMES)
+        self.assertEqual(problems, [])
+        by_name = {s.name: s for s in skills}
+        self.assertIn("prove", by_name)
+        recipe = by_name["prove"]
+        self.assertTrue(recipe.description)
+        self.assertLessEqual(len(recipe.description), MAX_DESCRIPTION_CHARS)
+        self.assertEqual(
+            set(recipe.moves),
+            {"write", "verify", "run_command"},
+            "every declared move has to exist — a name that does not is a note, and this one is written around these",
+        )
+        for kept in (
+            "baseline",         # the before, so a no-op fix cannot look like a fix
+            "first error",      # the cause, not the last line of fallout
+            "root cause",       # one sentence, from the output
+            "five iterations",  # the cap, after which the mechanism changes
+            "unstick",          # where a repeated failure goes instead of a sixth variation
+            "Never weaken",     # no test, assertion, type or lint rule may be loosened
+        ):
+            self.assertIn(kept, recipe.body, f"the skill dropped {kept!r}")
+
+    def test_the_design_review_pins_the_bans_the_states_and_the_visual_limit(self) -> None:
+        """The skill must not turn source reading into a visual verdict; that limit is the point."""
+        skills, problems = builtin_skills(ConductorTools.NAMES)
+        self.assertEqual(problems, [])
+        by_name = {s.name: s for s in skills}
+        self.assertIn("design-review", by_name)
+        recipe = by_name["design-review"]
+        self.assertTrue(recipe.description)
+        self.assertLessEqual(len(recipe.description), MAX_DESCRIPTION_CHARS)
+        self.assertEqual(
+            set(recipe.moves),
+            {"design", "read_file", "read_page", "write", "verify"},
+            "every declared move has to exist — a name that does not is a note, and this one is written around these",
+        )
+        for kept in (
+            "no screenshot tool",    # what the conductor cannot do
+            "not checked visually",  # what it says instead of guessing
+            "Banned defaults",       # the generic-look list
+            "focus-visible",         # one of the states it requires
+            "long content",
+            "4.5:1",                 # the accessibility floor
+        ):
+            self.assertIn(kept, recipe.body, f"the skill dropped {kept!r}")
+
+
+class TestDisabledSkills(SkillCase):
+    """A person's toggle removes a name from the menu, not the file from the disk."""
+
+    def test_a_disabled_builtin_is_absent_and_the_rest_still_load(self) -> None:
+        found = load_skills(str(self.root), ConductorTools.NAMES, {"blast-radius"})
+
+        self.assertNotIn("blast-radius", found.names())
+        self.assertIn("prove", found.names())
+        self.assertIn("ship-a-change", found.names())
+
+    def test_a_disabled_name_also_hides_a_workspace_skill_that_shadows_the_builtin(self) -> None:
+        # The identity is the name, so turning off `prove` must not leave a workspace
+        # replacement of `prove` in the menu to be chosen instead.
+        self.write_skill("prove", "---\ndescription: ours\n---\nOur own proof loop.\n")
+
+        found = load_skills(str(self.root), ConductorTools.NAMES, {"prove"})
+
+        self.assertNotIn("prove", found.names())
+        self.assertNotIn("prove", found.shadows)
+        self.assertIn("ship-a-change", found.names())
+
+    def test_nothing_disabled_is_the_full_menu(self) -> None:
+        found = load_skills(str(self.root), ConductorTools.NAMES)
+
+        self.assertIn("prove", found.names())
+        self.assertIn("blast-radius", found.names())
+
 
 class TestParsing(unittest.TestCase):
     def test_a_header_supplies_the_name_and_description(self) -> None:
@@ -322,6 +425,56 @@ class TestParsing(unittest.TestCase):
         self.assertLessEqual(len(skill.description), MAX_DESCRIPTION_CHARS)
 
 
+class TestTheMenuAndTheDocsAgree(unittest.TestCase):
+    """A built-in that ships but is not documented is invisible in the one place people look.
+
+    The menu is `builtin_skills()`; the documentation list is the prose that names every recipe. They
+    used to be maintained by hand, which is exactly how a new skill is added and the docs keep saying
+    eight. This test derives both sides: every shipped name must appear in each of the three docs that
+    list the set, no doc may cite a `builtin_skills/<name>.md` that is not shipped, and the count word
+    in `docs/01` must match the directory.
+    """
+
+    DOCS = (
+        "CLAUDE.md",
+        "docs/01-subagent-orchestration-spec.md",
+        "docs/09-workspace-shell.md",
+    )
+    NUMBER_WORDS = {
+        1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+        6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+        11: "eleven", 12: "twelve", 33: "thirty-three",
+    }
+
+    def test_every_built_in_is_named_in_the_docs_and_no_retired_one_is(self) -> None:
+        skills, problems = builtin_skills(ConductorTools.NAMES)
+        self.assertEqual([], problems)
+        names = [s.name for s in skills]
+        self.assertEqual(names, sorted(names), "the menu must have one stable order")
+        self.assertEqual(len(names), len(set(names)), "a name is a key, not a label")
+
+        menu = load_skills("").menu()
+        for name in names:
+            self.assertIn(f"- {name}", menu, f"the menu lost {name}")
+
+        for doc in self.DOCS:
+            text = Path(doc).read_text(encoding="utf-8")
+            missing = [name for name in names if name not in text]
+            self.assertEqual([], missing, f"{doc} does not name these built-ins: {missing}")
+            cited = set(re.findall(r"builtin_skills/([a-z0-9-]+)\.md", text))
+            stale = sorted(cited - set(names))
+            self.assertEqual([], stale, f"{doc} cites built-ins that do not ship: {stale}")
+
+        word = self.NUMBER_WORDS.get(len(names))
+        self.assertIsNotNone(word, "the count needs a word in the docs; extend NUMBER_WORDS")
+        docs01 = Path(self.DOCS[1]).read_text(encoding="utf-8")
+        self.assertIn(
+            f"one of {word} built-ins",
+            docs01,
+            "docs/01's count no longer matches the built-in directory",
+        )
+
+
 class TestDiscovery(SkillCase):
     def test_a_workspace_skill_appears_beside_the_built_ins(self) -> None:
         self.write_skill("run-migrations", "---\ndescription: migrate\n---\nBody.\n")
@@ -369,10 +522,8 @@ class TestDiscovery(SkillCase):
 
         found = load_skills(str(self.root))
 
-        self.assertEqual(
-            found.names(),
-            ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "unstick", "usage-audit"],
-        )
+        expected = [s.name for s in builtin_skills()[0]]
+        self.assertEqual(found.names(), expected)
         self.assertEqual(2, len(found.problems), found.problems)
         self.assertTrue(any("notes.txt" in p and "ignored" in p for p in found.problems), found.problems)
         self.assertTrue(any("subdir.md" in p and "SKILL.md" in p for p in found.problems), found.problems)
@@ -667,10 +818,8 @@ class TestTheMenuTheConductorIsOffered(SkillCase):
         # from what it reads, and cutting those too would leave it mute.
         for kept in ("read_file", "search_code", "use_skill"):
             self.assertIn(kept, narrowed)
-        self.assertEqual(
-            skills.names(),
-            ["context-transfer", "inspect-an-artifact", "security-review", "ship-a-change", "unstick", "usage-audit"],
-        )
+        expected = [s.name for s in builtin_skills()[0]]
+        self.assertEqual(skills.names(), expected)
 
     def test_the_body_handed_back_is_the_loaded_text(self) -> None:
         # `use_skill` returns `Skill.body` unchanged, so the property worth

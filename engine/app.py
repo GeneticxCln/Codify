@@ -27,7 +27,9 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from engine import capabilities, home, speech, watchdog
+from engine import github_remote
 from engine.db import connect
+from engine.conductor_tools import ConductorTools
 from engine.executor import ExecutorService
 from engine.git import GitService
 from engine.laya import LayaService, checkpoint_problem
@@ -71,6 +73,9 @@ from engine.models import (
     ShellTab,
     ShellTabWrite,
     ProviderKeyUpdate,
+    SkillCreate,
+    SkillCreated,
+    SkillImport,
     ROLES,
     SpeakRequest,
     TurnCreate,
@@ -83,11 +88,14 @@ from engine.models import (
     WorkspaceFileList,
     WorkspaceFileSave,
     WorkspaceFileSaved,
+    WorkspaceChecks,
     WorkspaceGit,
+    WorkspacePush,
     loads_payload,
 )
 from engine.providers import Keychain, ProviderError, ProviderFactory
 from engine.sandbox import SandboxService
+from engine.skills import NAME_RE, load_skills
 from engine.services import (
     AgentRegistryService,
     ApiError,
@@ -1391,6 +1399,159 @@ URL_SETTINGS = frozenset({"stt_base_url", "tts_base_url"})
 CHECKPOINT_SETTINGS = frozenset({"laya_checkpoint"})
 
 
+def _skills_workspace(request: Request, workspace_id: str | None) -> Workspace:
+    """The workspace a skills request is about, resolved through the one workspace service.
+
+    A skill switch is a property of a repository, not of the install: the same name is
+    available in one workspace and may be useless in another. A request without a workspace
+    therefore names nothing to switch, and an unknown id is the same 404 every other route
+    gives rather than an empty list that reads as "no skills".
+    """
+    if not workspace_id:
+        raise ApiError(
+            422, "workspace_required",
+            "choose a workspace — skill switches belong to one workspace",
+        )
+    workspaces: WorkspaceService | None = getattr(request.app.state, "workspaces", None)
+    if workspaces is None:
+        raise ApiError(503, "workspace_unavailable", "workspaces are not available")
+    return workspaces.get(workspace_id)
+
+
+@app.get("/settings/skills")
+async def get_skills(
+    request: Request, workspace_id: str | None = Query(None)
+) -> dict[str, Any]:
+    """Every skill in this workspace's menu, and whether this workspace offers it.
+
+    Disabled is a filter over the same names the conductor sees, not a second menu. `enabled`
+    is what Settings draws; the engine applies it before `use_skill` can find anything.
+    """
+    workspace = _skills_workspace(request, workspace_id)
+    workspaces = request.app.state.workspaces
+    loaded = load_skills(workspace.root_path, ConductorTools.NAMES)
+    disabled = workspaces.disabled_skills(workspace.id)
+    return {
+        "workspace_id": workspace.id,
+        "available_moves": list(ConductorTools.NAMES),
+        "skills": [
+            {
+                "name": skill.name,
+                "description": skill.description,
+                "source": skill.source,
+                "moves": list(skill.moves),
+                "enabled": skill.name not in disabled,
+            }
+            for skill in loaded.skills
+        ],
+        "disabled": sorted(disabled),
+        "problems": list(loaded.problems),
+        "shadows": list(loaded.shadows),
+    }
+
+
+@app.post("/settings/skills/import", status_code=201, response_model=SkillCreated)
+async def import_skill(
+    body: SkillImport,
+    request: Request,
+    workspace_id: str | None = Query(None),
+) -> SkillCreated:
+    """Create one workspace skill from an uploaded Markdown file.
+
+    The picked filename is a label and a fallback name, never a path: the file that is written is
+    `.codify/skills/<name>.md` from the parsed header (or the filename stem when there is no header).
+    The content is parsed by the same loader the conductor uses before anything is written.
+    """
+    workspace = _skills_workspace(request, workspace_id)
+    workspaces: WorkspaceService = request.app.state.workspaces
+    return await asyncio.to_thread(
+        workspaces.import_skill, workspace, body, ConductorTools.NAMES
+    )
+
+
+@app.post("/settings/skills", status_code=201, response_model=SkillCreated)
+async def create_skill(
+    body: SkillCreate,
+    request: Request,
+    workspace_id: str | None = Query(None),
+) -> SkillCreated:
+    """Create one workspace skill from the Settings form.
+
+    A person's New skill action, not an agent's: the boot token reaches this route and no skill,
+    conductor tool or workspace file can (`docs/00` §6.9). It creates `.codify/skills/<name>.md`
+    and never replaces, deletes or edits another file.
+    """
+    workspace = _skills_workspace(request, workspace_id)
+    workspaces: WorkspaceService = request.app.state.workspaces
+    return await asyncio.to_thread(
+        workspaces.create_skill, workspace, body, ConductorTools.NAMES
+    )
+
+
+@app.get("/settings/skills/{name}")
+async def get_skill(
+    name: str,
+    request: Request,
+    workspace_id: str | None = Query(None),
+) -> dict[str, Any]:
+    """One skill's full instructions, for the Settings preview.
+
+    Read on demand rather than included in the menu: a preview must not make every turn's
+    menu carry every body, and the conductor's own body path is still `use_skill`.
+    """
+    clean = name.strip().lower()
+    if not NAME_RE.match(clean):
+        raise ApiError(422, "invalid_skill_name", "skill name is invalid")
+    workspace = _skills_workspace(request, workspace_id)
+    workspaces = request.app.state.workspaces
+    loaded = load_skills(workspace.root_path, ConductorTools.NAMES)
+    skill = loaded.get(clean)
+    if skill is None:
+        raise ApiError(404, "unknown_skill", f"no skill called {clean!r} is available here")
+    disabled = workspaces.disabled_skills(workspace.id)
+    return {
+        "workspace_id": workspace.id,
+        "name": skill.name,
+        "description": skill.description,
+        "source": skill.source,
+        "moves": list(skill.moves),
+        "notes": list(skill.notes),
+        "enabled": skill.name not in disabled,
+        "body": skill.body,
+    }
+
+
+@app.put("/settings/skills/{name}")
+async def put_skill(
+    name: str,
+    body: dict[str, Any],
+    request: Request,
+    workspace_id: str | None = Query(None),
+) -> dict[str, Any]:
+    """Turn one skill on or off for one workspace. It hides a name; it grants nothing."""
+    clean = name.strip().lower()
+    if not NAME_RE.match(clean):
+        raise ApiError(422, "invalid_skill_name", "skill name is invalid")
+    if set(body) != {"enabled"} or not isinstance(body.get("enabled"), bool):
+        raise ApiError(422, "invalid_value", "body must be exactly {\"enabled\": true|false}")
+    enabled = bool(body["enabled"])
+    workspace = _skills_workspace(request, workspace_id)
+    workspaces = request.app.state.workspaces
+    # Both directions are checked. Enabling a typo would store a preference that can never be
+    # satisfied; disabling one would store a dead name forever. The workspace is the scope:
+    # the same skill may stay on in another repository.
+    available = {skill.name for skill in load_skills(workspace.root_path, ConductorTools.NAMES).skills}
+    if clean not in available:
+        raise ApiError(404, "unknown_skill", f"no skill called {clean!r} is available here")
+    disabled = workspaces.set_skill_enabled(workspace.id, clean, enabled)
+    return {
+        "workspace_id": workspace.id,
+        "name": clean,
+        "enabled": enabled,
+        "disabled": sorted(disabled),
+    }
+
+
 @app.get("/settings/engine")
 async def get_engine_settings(request: Request) -> dict[str, Any]:
     """The engine-wide settings screen values, each with its clamp bounds so the
@@ -1661,6 +1822,40 @@ async def get_workspace_git(workspace_id: str, request: Request) -> WorkspaceGit
     workspace = workspaces.get(workspace_id)
     state = await asyncio.to_thread(GitService().status, workspace.root_path)
     return WorkspaceGit(**state)
+
+
+@app.post("/workspaces/{workspace_id}/push", response_model=WorkspacePush)
+async def push_workspace(workspace_id: str, request: Request) -> WorkspacePush:
+    """Push the selected branch to `origin`, for the person who pressed the button.
+
+    Not a model's door and not a tool: like Save and Apply, this route needs the boot token and is
+    reached only by a request from the window. The branch and remote come from the repository, and a
+    GitHub `origin` adds the pull-request form the window can open in its own browser pane. The engine
+    stores no GitHub token and creates no pull request through GitHub's API (`docs/04` §6).
+    """
+    workspaces: WorkspaceService = request.app.state.workspaces
+    workspace = workspaces.get(workspace_id)
+    result = await asyncio.to_thread(GitService().push, workspace.root_path)
+    if result.get("ok"):
+        remote = github_remote.parse_remote(str(result.get("remote") or ""))
+        branch = result.get("branch")
+        if remote is not None and isinstance(branch, str) and branch:
+            result["pr_url"] = github_remote.compare_url(remote, branch)
+    return WorkspacePush(**result)
+
+
+@app.get("/workspaces/{workspace_id}/ci", response_model=WorkspaceChecks)
+async def get_workspace_ci(workspace_id: str, request: Request) -> WorkspaceChecks:
+    """GitHub's checks for the workspace's current commit, for the header's CI line.
+
+    The repository is the workspace's own `origin` and the commit is `HEAD`; the request body and query
+    string supply neither. Only `api.github.com` is ever contacted, only when a person's window asks,
+    and no credential is sent — so a private repository answers with `state: "unknown"` and a reason
+    rather than a check that would be a guess. Writes nothing and runs no command a model chose.
+    """
+    workspaces: WorkspaceService = request.app.state.workspaces
+    workspace = workspaces.get(workspace_id)
+    return WorkspaceChecks(**await github_remote.read_checks(workspace.root_path))
 
 
 @app.get("/workspaces/{workspace_id}/files", response_model=WorkspaceFileList, response_model_exclude_defaults=True)

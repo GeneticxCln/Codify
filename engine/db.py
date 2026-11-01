@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, overload
 
 from engine import home
 from engine.models import DEFAULT_AGENTS, LEGACY_ROLE_RENAMES, AgentConfig
@@ -116,6 +118,9 @@ CREATE TABLE IF NOT EXISTS agent_configs (
   system_prompt_override TEXT,
   temperature REAL NOT NULL,
   max_tokens INTEGER NOT NULL,
+  -- low / medium / high, or NULL for the provider's own default. A provider without a thinking control
+  -- accepts the keyword and ignores it; the value is the role's request, not a guarantee.
+  thinking_effort TEXT,
   -- Ollama's context window for the role; NULL = the server default. Added
   -- after the fallback columns, so existing installs gain it by the ALTER below.
   num_ctx INTEGER,
@@ -255,6 +260,20 @@ CREATE TABLE IF NOT EXISTS observations (
 
 CREATE INDEX IF NOT EXISTS idx_observations_workspace
   ON observations(workspace_id, refined_at DESC);
+
+-- The skills one workspace has switched off. Per workspace rather than an
+-- `engine_settings` row because the same name means different things in two
+-- repositories: a project may want `ship-a-change` off while another keeps it,
+-- and a workspace-only skill exists in one menu and not the other. Only the
+-- disabled names are stored; enabled is the absence of a row, which is what a
+-- fresh workspace and a re-enabled skill both are. The cascade is what makes
+-- deleting a workspace leave no switches behind.
+CREATE TABLE IF NOT EXISTS workspace_disabled_skills (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  updated_at REAL NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
 """
 
 
@@ -285,6 +304,129 @@ def _add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) ->
             raise
 
 
+_CursorT = TypeVar("_CursorT", bound=sqlite3.Cursor)
+
+
+class _ThreadSlot(threading.local):
+    """The connection one thread owns; `None` until its first statement."""
+
+    connection: sqlite3.Connection | None = None
+
+
+class _PerThreadConnection(sqlite3.Connection):
+    """The store's one handle, backed by one SQLite connection per thread.
+
+    `connect` hands services a single object, and they use it from the event loop, from `asyncio.to_thread`
+    workers, and from the daemon threads behind the gate and the conductor. SQLite serialises each C call,
+    but a transaction is several of them — the implicit BEGIN, the statement, the COMMIT — and two threads
+    interleaving on one connection mean one thread's `commit()` ends another's half-finished transaction,
+    its `rollback()` undoes the wrong work, or (with an explicit `BEGIN`) the second thread is refused
+    outright. A connection per thread makes each transaction its author's, and SQLite's own write lock plus
+    the busy timeout order the commits across connections.
+
+    A `sqlite3.Connection` subclass rather than a wrapper because every service and test types its store as
+    `sqlite3.Connection`, and because the handle they pass around has to stay one object. The thread that
+    created this one uses the connection it already is; any other thread gets a connection opened on first
+    use, with the per-connection PRAGMAs (`foreign_keys`, `busy_timeout`) that `_prepare` set on the
+    creator's. `cursor`, `in_transaction` and `close` are routed too, so no caller reaches the
+    creator's connection from another thread through an API this wrapper forgot; `close` closes every
+    connection this object opened, whichever thread asks.
+    """
+
+    def __init__(self, database: Any, *args: Any, **kwargs: Any) -> None:
+        super().__init__(database, *args, **kwargs)
+        self._database = database
+        self._creator = threading.get_ident()
+        self._local = _ThreadSlot()
+        self._opened: list[sqlite3.Connection] = []
+        self._opened_lock = threading.Lock()
+        self._closed = False
+
+    def _created_here(self) -> bool:
+        return threading.get_ident() == self._creator
+
+    def _other_thread_connection(self) -> sqlite3.Connection:
+        """This thread's connection, opened on first use and remembered for its next statement."""
+        with self._opened_lock:
+            if self._closed:
+                raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+            connection = self._local.connection
+            if connection is None:
+                connection = sqlite3.connect(self._database, check_same_thread=False, timeout=30.0)
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA busy_timeout = 5000")
+                connection.execute("PRAGMA foreign_keys = ON")
+                self._local.connection = connection
+                self._opened.append(connection)
+            return connection
+
+    def execute(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        if self._created_here():
+            return super().execute(*args, **kwargs)
+        return self._other_thread_connection().execute(*args, **kwargs)
+
+    def executemany(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        if self._created_here():
+            return super().executemany(*args, **kwargs)
+        return self._other_thread_connection().executemany(*args, **kwargs)
+
+    def executescript(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        if self._created_here():
+            return super().executescript(*args, **kwargs)
+        return self._other_thread_connection().executescript(*args, **kwargs)
+
+    @overload
+    def cursor(self, factory: None = ...) -> sqlite3.Cursor: ...
+
+    @overload
+    def cursor(self, factory: Callable[[sqlite3.Connection], _CursorT]) -> _CursorT: ...
+
+    def cursor(
+        self, factory: Callable[[sqlite3.Connection], sqlite3.Cursor] | None = None,
+    ) -> sqlite3.Cursor:
+        """A cursor on this thread's connection, not the creator's.
+
+        `execute` was routed, but code that keeps a cursor and calls it later (`cursor.execute`,
+        `cursor.executemany`) bypassed that and reached the creator's connection from a worker. A
+        cursor belongs to the connection that made it, and a transaction begun through one belongs
+        to the thread that owns that connection.
+        """
+        connection = self if self._created_here() else self._other_thread_connection()
+        return connection.cursor() if factory is None else connection.cursor(factory)
+
+    @property
+    def in_transaction(self) -> bool:
+        """Whether *this thread's* connection has an open transaction.
+
+        The inherited property reads the creator's connection. A worker that started `BEGIN` and
+        asked the shared handle was told `False`, which is exactly the kind of answer that makes a
+        caller commit or roll back at the wrong moment.
+        """
+        if self._created_here():
+            return super().in_transaction
+        return self._other_thread_connection().in_transaction
+
+    def commit(self) -> None:
+        if self._created_here():
+            super().commit()
+        else:
+            self._other_thread_connection().commit()
+
+    def rollback(self) -> None:
+        if self._created_here():
+            super().rollback()
+        else:
+            self._other_thread_connection().rollback()
+
+    def close(self) -> None:
+        with self._opened_lock:
+            self._closed = True
+            opened, self._opened = self._opened, []
+        for connection in opened:
+            connection.close()
+        super().close()
+
+
 def connect(
     path: Path | None = None,
     on_role_migrated: Any | None = None,
@@ -305,7 +447,9 @@ def connect(
     if db_path.is_dir():
         raise RuntimeError(f"database path is a directory: {db_path}")
     home.ensure_private_file(db_path)
-    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+    conn = sqlite3.connect(
+        db_path, check_same_thread=False, timeout=30.0, factory=_PerThreadConnection,
+    )
     try:
         _prepare(conn, db_path, on_role_migrated)
     except BaseException:
@@ -406,6 +550,8 @@ def _prepare(conn: sqlite3.Connection, db_path: Path, on_role_migrated: Any | No
         # How long Ollama keeps the model resident after a request; NULL = the
         # server's own window, which is what an install that never set this wants.
         ("keep_alive", "TEXT"),
+        # How much thinking the role asks for, where its provider has a control; NULL = provider default.
+        ("thinking_effort", "TEXT"),
     ):
         _add_column(conn, "agent_configs", col, decl)
     for old_role, new_role in migrate_agent_roles(conn):

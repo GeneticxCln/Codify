@@ -54,6 +54,60 @@ class TestDbAndServices(unittest.TestCase):
         goal = self.goals.update_status(goal.id, 1, status)
         return ws, goal
 
+    def test_workspace_skill_switches_are_isolated_and_cascade(self) -> None:
+        """One name is a different decision in each workspace, and deletion takes its switches."""
+        roots = []
+        for name in ("skills-one", "skills-two"):
+            root = Path(self.temp_dir.name) / name
+            root.mkdir()
+            roots.append(root)
+        one = self.workspaces.create(WorkspaceCreate(name="One", root_path=str(roots[0])))
+        two = self.workspaces.create(WorkspaceCreate(name="Two", root_path=str(roots[1])))
+
+        self.assertEqual(self.workspaces.disabled_skills(one.id), set())
+        self.assertEqual(self.workspaces.set_skill_enabled(one.id, "prove", False), {"prove"})
+        self.assertEqual(self.workspaces.disabled_skills(one.id), {"prove"})
+        self.assertEqual(
+            self.workspaces.disabled_skills(two.id), set(),
+            "a switch in one workspace must not reach another",
+        )
+
+        self.assertEqual(self.workspaces.set_skill_enabled(two.id, "prove", False), {"prove"})
+        self.assertEqual(self.workspaces.disabled_skills(one.id), {"prove"})
+        self.assertEqual(self.workspaces.disabled_skills(two.id), {"prove"})
+
+        # Enabling removes the row; the other workspace keeps its own.
+        self.assertEqual(self.workspaces.set_skill_enabled(one.id, "prove", True), set())
+        self.assertEqual(self.workspaces.disabled_skills(two.id), {"prove"})
+
+        with self.assertRaises(ApiError):
+            self.workspaces.set_skill_enabled(one.id, "Not A Skill", False)
+
+        self.workspaces.set_skill_enabled(one.id, "prove", False)
+        self.workspaces.delete(one.id)
+        left = self.conn.execute(
+            "SELECT count(*) FROM workspace_disabled_skills WHERE workspace_id = ?", (one.id,)
+        ).fetchone()[0]
+        self.assertEqual(left, 0, "deleting a workspace must leave no switch rows behind")
+
+    def test_an_existing_database_gains_the_workspace_skill_table(self) -> None:
+        """The table is created for an install that predates the per-workspace switch."""
+        path = Path(self.temp_dir.name) / "legacy-skills.db"
+        before = SCHEMA.split("CREATE TABLE IF NOT EXISTS workspace_disabled_skills")[0]
+        legacy = sqlite3.connect(path)
+        legacy.executescript(before)
+        legacy.commit()
+        legacy.close()
+
+        upgraded = connect(path)
+        try:
+            row = upgraded.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'workspace_disabled_skills'"
+            ).fetchone()
+            self.assertIsNotNone(row, "an existing database did not gain the switch table")
+        finally:
+            upgraded.close()
+
     def test_delete_goal_refuses_in_progress_states_directly(self) -> None:
         """The service guards itself, not just the HTTP route.
 
@@ -806,6 +860,105 @@ class TestRoleMigration(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM agent_configs").fetchone()[0], len(ROLES))
         finally:
             conn.close()
+
+
+class TestAnExistingAgentConfigGainsThinkingEffort(unittest.TestCase):
+    """An upgrade adds the column without inventing, resetting or dropping a setting.
+
+    The legacy table is the live schema with only the `thinking_effort` line removed, which is
+    exactly the shape an install from before the setting has. `connect` must add it nullable,
+    leave every configured field as it was, and remain safe to run again on the next start.
+    """
+
+    def test_the_column_is_added_null_and_every_old_setting_survives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.db"
+            start = SCHEMA.index("CREATE TABLE IF NOT EXISTS agent_configs (")
+            end = SCHEMA.index(");", start) + 2
+            legacy = "\n".join(
+                line for line in SCHEMA[start:end].splitlines()
+                if "thinking_effort" not in line
+            )
+            raw = sqlite3.connect(path)
+            try:
+                raw.executescript(legacy)
+                raw.execute(
+                    """INSERT INTO agent_configs (
+                         role, display_name, provider, protocol, model_name, api_key_ref,
+                         base_url, system_prompt_override, temperature, max_tokens,
+                         num_ctx, keep_alive, fallback_provider, fallback_model_name,
+                         fallback_protocol, fallback_base_url, updated_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        "fixer", "My Fixer", "deepseek", "openai_compat", "deepseek-chat",
+                        "codify/agents/fixer", "https://api.deepseek.com", "Be careful.",
+                        0.15, 1234, 32768, "45m", "ollama", "qwen2.5-coder",
+                        "ollama", "http://127.0.0.1:11434", 999.0,
+                    ),
+                )
+                raw.commit()
+                self.assertNotIn(
+                    "thinking_effort",
+                    {row[1] for row in raw.execute("PRAGMA table_info(agent_configs)")},
+                    "the fixture must be the old table, not the current one",
+                )
+            finally:
+                raw.close()
+
+            conn = connect(path)
+            try:
+                self.assertIn(
+                    "thinking_effort",
+                    {row[1] for row in conn.execute("PRAGMA table_info(agent_configs)")},
+                )
+                fixer = conn.execute(
+                    "SELECT * FROM agent_configs WHERE role = 'fixer'"
+                ).fetchone()
+                self.assertIsNone(
+                    fixer["thinking_effort"],
+                    "an existing role starts at its provider's default, not at a level nobody chose",
+                )
+                expected = {
+                    "display_name": "My Fixer",
+                    "provider": "deepseek",
+                    "protocol": "openai_compat",
+                    "model_name": "deepseek-chat",
+                    "api_key_ref": "codify/agents/fixer",
+                    "base_url": "https://api.deepseek.com",
+                    "system_prompt_override": "Be careful.",
+                    "temperature": 0.15,
+                    "max_tokens": 1234,
+                    "num_ctx": 32768,
+                    "keep_alive": "45m",
+                    "fallback_provider": "ollama",
+                    "fallback_model_name": "qwen2.5-coder",
+                    "fallback_protocol": "ollama",
+                    "fallback_base_url": "http://127.0.0.1:11434",
+                    "updated_at": 999.0,
+                }
+                for column, value in expected.items():
+                    self.assertEqual(fixer[column], value, f"the migration changed {column}")
+
+                # The column is not merely present: the normal settings path can write and read it.
+                keychain = Keychain(secrets_path=Path(directory) / "secrets.json")
+                registry = AgentRegistryService(conn, ProviderFactory(keychain), keychain)
+                registry.set_config("fixer", AgentConfigUpdate(thinking_effort="high"))
+                self.assertEqual("high", registry.get_config("fixer").thinking_effort)
+            finally:
+                conn.close()
+
+            # A second start is what every install does. It must not add the column twice or
+            # reset the value the person saved after the upgrade.
+            conn = connect(path)
+            try:
+                columns = [row[1] for row in conn.execute("PRAGMA table_info(agent_configs)")]
+                self.assertEqual(1, columns.count("thinking_effort"))
+                fixer = conn.execute(
+                    "SELECT thinking_effort FROM agent_configs WHERE role = 'fixer'"
+                ).fetchone()
+                self.assertEqual("high", fixer["thinking_effort"])
+            finally:
+                conn.close()
 
 
 class TestUpgradedGoalsKeepTheConversationForeignKey(unittest.TestCase):

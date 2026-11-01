@@ -11,10 +11,8 @@ import json
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
-from engine.binary_analysis import ghidra_available
 from engine.chat_prompts import CHAT_SYSTEM_PROMPT, CONDUCTOR_SYSTEM_PROMPT
 from engine.conductor import (
-    ANALYZE_BINARY,
     ASK_USER,
     BASE_TOOLS,
     Conductor,
@@ -496,6 +494,21 @@ class _Conduct(_Plan):
         except Exception:
             return default
 
+    def _disabled_skills(self, workspace_id: str) -> set[str]:
+        """The skills this workspace switched off, or none when the store cannot answer.
+
+        A workspace read must not fail a turn, and an executor built by hand in a test may
+        have no workspace service. The filter is applied at the one seam that builds the
+        menu, so `use_skill` cannot reach a name this set hides.
+        """
+        workspaces = getattr(self, "workspaces", None)
+        if workspaces is None:
+            return set()
+        try:
+            return set(workspaces.disabled_skills(workspace_id))
+        except Exception:
+            return set()
+
     def conductor_summary(self) -> dict[str, Any]:
         """Which model a turn runs on when the person picks nothing, and the window it would be given.
 
@@ -692,9 +705,6 @@ class _Conduct(_Plan):
                 ]
             elif not surfaces.has_machine(goal.workspace_id):
                 offered = [t for t in offered if t.name not in MACHINE_TOOLS]
-            # Ghidra is located by its own files, not PATH; without it `analyze_binary` can only say so.
-            if not ghidra_available():
-                offered = [t for t in offered if t.name != ANALYZE_BINARY.name]
             # Browser actions are a distinct permission from reading pages and are off by default.
             if not self._browser_actions_enabled():
                 offered = without_browser_actions(offered)
@@ -939,7 +949,7 @@ class _Conduct(_Plan):
     def _todo_brief(self, goal_id: str) -> str:
         return self._todos_for(goal_id).brief()
 
-    def _intent_brief(self, intent: str) -> str:
+    def _intent_brief(self, intent: str, skills: SkillSet | None = None) -> str:
         """What the gate decided, told to the conductor as advice, and what to do with it.
 
         This was missing at first, and a live run found it where the suite could
@@ -968,30 +978,48 @@ class _Conduct(_Plan):
                 "The user has approved the plan and started it, so there is nothing to plan and nothing to "
                 "ask: carry out the one step you were given with the moves, and stop when it is done."
             )
+        # The recipe is only named when it is actually on the menu: a person may have turned
+        # `ship-a-change` off in Settings, and telling the model to read a skill it cannot load
+        # would spend one of its calls on a refusal.
+        ship = skills is None or skills.get("ship-a-change") is not None
         if intent == "question":
+            if ship:
+                return (
+                    "The pre-flight gate read this request as a question, so answering "
+                    "directly is usually right. If it turns out to need the workspace "
+                    "changed, the `ship-a-change` skill is how that is done."
+                )
             return (
-                "The pre-flight gate read this request as a question, so answering "
-                "directly is usually right. If it turns out to need the workspace "
-                "changed, the `ship-a-change` skill is how that is done."
+                "The pre-flight gate read this request as a question, so answering directly is "
+                "usually right. If it turns out to need the workspace changed, read the skill "
+                "that fits from the menu with `use_skill` and follow it."
             )
         if intent in CHANGE_INTENTS:
+            recipe = (
+                "read the `ship-a-change` skill with `use_skill` and follow it: recon, then "
+                "plan, then stop so they can approve the plan. Prefer acting over asking: use "
+                "`ask_user` only when the request genuinely cannot be planned without something "
+                "only they know, and ask the one thing."
+                if ship
+                else "read the skill that fits from the menu with `use_skill` and follow it: "
+                "recon, then plan, then stop so they can approve the plan. Prefer acting over "
+                "asking: use `ask_user` only when the request genuinely cannot be planned "
+                "without something only they know, and ask the one thing."
+            )
             return (
                 f"The pre-flight gate read this request as {intent!r}. That label "
                 "is a small classifier's guess, not a fact — it has called a plain "
                 "greeting a code change — so go by the user's actual words: if "
                 "they are a greeting, thanks or a question, just reply in prose. "
-                "If they do ask for the workspace to be changed, read the "
-                "`ship-a-change` skill with `use_skill` and follow it: recon, then "
-                "plan, then stop so they can approve the plan. Prefer acting over "
-                "asking: use `ask_user` only when the request genuinely cannot be "
-                "planned without something only they know, and ask the one thing."
+                f"If they do ask for the workspace to be changed, {recipe}"
             )
         return (
             "The pre-flight gate could not tell what this request asks for "
             f"(it read it as {intent or 'unlabelled'!r}). Go by the user's actual "
             "words: a greeting, thanks or a question is answered directly, in "
             "prose, with no tools. If they ask for the workspace to be changed, "
-            "`ship-a-change` is the skill for that."
+            + ("`ship-a-change` is the skill for that." if ship else
+               "read the skill that fits from the menu with `use_skill`.")
         )
 
     def _intent_nudge(self, intent: str) -> str | None:
@@ -1040,7 +1068,7 @@ class _Conduct(_Plan):
         fallback = targets[1] if len(targets) > 1 else None
         role = self._conductor_role()
 
-        skills = load_skills(root, ConductorTools.NAMES)
+        skills = load_skills(root, ConductorTools.NAMES, self._disabled_skills(goal.workspace_id))
         for problem in skills.problems:
             self._log(goal_id, None, "warn", problem)
         for shadowed in skills.shadows:
@@ -1060,7 +1088,7 @@ class _Conduct(_Plan):
         prompt = (
             prompt_override if prompt_override is not None else self._turn_prompt(goal, with_history=False)
         )
-        prompt = f"{prompt}\n\n{self._memory_brief(goal)}\n\n{self._intent_brief(intent)}"
+        prompt = f"{prompt}\n\n{self._memory_brief(goal)}\n\n{self._intent_brief(intent, skills)}"
         notes = self._todo_brief(goal_id)
         if notes:
             # After the intent: the person's request and the plan have been stated by then, and these are

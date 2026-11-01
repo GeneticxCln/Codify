@@ -629,12 +629,14 @@ def _defines(module: str, function: str) -> bool:
     return any(isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef) and n.name == function for n in ast.walk(tree))
 
 
-class TestAPersonsSaveIsTheOneOtherDoor(unittest.TestCase):
-    """docs/00 section 6.9 names one writer besides the fixer: a person pressing Save in the editor.
+class TestAPersonsWriteDoors(unittest.TestCase):
+    """docs/00 section 6.9 names two person-only doors: Save in the editor and New skill in Settings.
 
-    `PUT /workspaces/{id}/file` calls `WorkspaceService.save_file`, which calls `FileSystemService.save_text`. The claim
-    that no agent, skill or conductor tool can reach it is a claim about who may *name* either of those, and it is held
-    here the way the claim about `apply` is: by looking at every engine module, so a new caller fails the build.
+    `PUT /workspaces/{id}/file` calls `WorkspaceService.save_file`, which calls
+    `FileSystemService.save_text`; the creator routes call `WorkspaceService.create_skill`, which calls
+    `FileSystemService.create_text`. The claim that no agent, skill or conductor tool can reach either
+    is a claim about who may *name* them, and it is held here the way the claim about `apply` is: by
+    looking at every engine module, so a new caller fails the build.
     """
 
     def test_save_text_is_called_from_exactly_one_place_and_that_place_is_the_workspace_service(self) -> None:
@@ -642,30 +644,40 @@ class TestAPersonsSaveIsTheOneOtherDoor(unittest.TestCase):
 
         self.assertEqual(["services.py"], _modules_naming("save_text"))
 
-    def test_the_service_method_is_reached_from_exactly_one_place_and_that_place_is_the_route_module(self) -> None:
+    def test_create_text_is_called_from_exactly_one_place_and_that_place_is_the_workspace_service(self) -> None:
+        self.assertTrue(_defines("fs.py", "create_text"))
+
+        self.assertEqual(["services.py"], _modules_naming("create_text"))
+
+    def test_save_file_is_reached_from_exactly_one_place_and_that_place_is_the_route_module(self) -> None:
         self.assertTrue(_defines("services.py", "save_file"))
 
         self.assertEqual(["app.py"], _modules_naming("save_file"))
 
-    def test_nothing_an_agent_runs_so_much_as_names_either_of_them(self) -> None:
+    def test_create_skill_is_reached_from_exactly_one_place_and_that_place_is_the_route_module(self) -> None:
+        self.assertTrue(_defines("services.py", "create_skill"))
+
+        self.assertEqual(["app.py"], _modules_naming("create_skill"))
+
+    def test_nothing_an_agent_runs_so_much_as_names_a_door(self) -> None:
         agent_side = [
             p.name
             for p in ENGINE_DIR.glob("*.py")
             if p.name.startswith(("conductor", "executor", "agent_", "skills", "surfaces", "toolcall", "library"))
         ]
+        doors = ["save_text", "save_file", "create_text", "create_skill"]
 
         self.assertGreater(len(agent_side), 8, "the scan found almost none of the agent-side modules")
-        self.assertEqual(
-            [],
-            sorted(set(agent_side) & set(_modules_naming("save_text") + _modules_naming("save_file"))),
-        )
+        self.assertEqual([], sorted(set(agent_side) & {name for door in doors for name in _modules_naming(door)}))
 
-    def test_the_invariant_says_the_door_exists_so_it_cannot_exist_unnamed(self) -> None:
+    def test_the_invariant_says_the_doors_exist_so_they_cannot_exist_unnamed(self) -> None:
         text = ARCHITECTURE.read_text(encoding="utf-8")
         start = text.index("9. Only the fixer writes")
         paragraph = " ".join(text[start : text.index("\n\n", start)].split())
 
         self.assertIn("`PUT /workspaces/{id}/file`", paragraph)
+        self.assertIn("`POST /settings/skills`", paragraph)
+        self.assertIn("`POST /settings/skills/import`", paragraph)
         self.assertIn("boot token", paragraph)
 
 
@@ -747,7 +759,7 @@ LEDGER: dict[int, tuple[str, ...]] = {
     8: (f"{_HERE}.TestATurnHasOneDoor", "tests.test_turns.TestOneDoor"),
     9: (
         f"{_HERE}.TestOnlyTheFixerWrites",
-        f"{_HERE}.TestAPersonsSaveIsTheOneOtherDoor",
+        f"{_HERE}.TestAPersonsWriteDoors",
         "tests.test_conductor.TestTheToolsAreThePipelinesDoors.test_write_refuses_and_writes_nothing_while_unapproved",
         "tests.test_write_gate_timing.TestTheConductorRoad",
     ),

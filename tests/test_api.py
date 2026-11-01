@@ -504,6 +504,36 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIsNone(r.json()["num_ctx"])
 
+    async def test_thinking_effort_round_trips_and_null_returns_the_default(self) -> None:
+        """The role setting reaches the DB through the only route allowed to write it.
+
+        The provider tests hold the wire translation; this one holds the other end. A PUT that
+        silently dropped the field would leave every adapter sending nothing while Settings showed
+        a level the engine never stored.
+        """
+        r = await self.client.put(
+            "/settings/agents/fixer",
+            headers=self.headers,
+            json={"thinking_effort": "high"},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["thinking_effort"], "high")
+        r = await self.client.get("/settings/agents", headers=self.headers)
+        fixer = next(c for c in r.json() if c["role"] == "fixer")
+        self.assertEqual(fixer["thinking_effort"], "high")
+
+        # Null is a clear, not "no change": the role returns to its provider's own default.
+        r = await self.client.put(
+            "/settings/agents/fixer",
+            headers=self.headers,
+            json={"thinking_effort": None},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIsNone(r.json()["thinking_effort"])
+        r = await self.client.get("/settings/agents", headers=self.headers)
+        fixer = next(c for c in r.json() if c["role"] == "fixer")
+        self.assertIsNone(fixer["thinking_effort"], "the clear has to survive the DB too")
+
     async def test_keep_alive_round_trips_and_null_returns_the_default(self) -> None:
         """The same round trip, for the residency window.
 
@@ -2576,6 +2606,217 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["code"], "unknown_setting")
+
+    async def test_agent_skills_are_listed_and_their_toggles_are_per_workspace(self) -> None:
+        """The skills tab reads one workspace's real menu and saves two independent sets.
+
+        The list is derived from `load_skills`, not a second copy of the built-in names, so
+        a skill that ships tomorrow appears here without a route change. Disabling is a row
+        in `workspace_disabled_skills`: the same built-in may be off in one repository and on
+        in another, and the preview route reads the body without adding it to the list.
+        """
+        roots = []
+        for name, skill in (("skills-one", "local-one"), ("skills-two", "local-two")):
+            root = self.root / name
+            (root / ".codify" / "skills").mkdir(parents=True)
+            (root / ".codify" / "skills" / f"{skill}.md").write_text(
+                f"---\ndescription: a workspace-only skill\n---\nDo the {skill} thing.\n"
+            )
+            roots.append(root)
+        one = app.state.workspaces.create(WorkspaceCreate(name="One", root_path=str(roots[0])))
+        two = app.state.workspaces.create(WorkspaceCreate(name="Two", root_path=str(roots[1])))
+
+        # A workspace is required: there is no install-wide menu to switch anymore.
+        r = await self.client.get("/settings/skills", headers=self.headers)
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["code"], "workspace_required")
+
+        r = await self.client.get(
+            f"/settings/skills?workspace_id={one.id}", headers=self.headers
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["workspace_id"], one.id)
+        names = [skill["name"] for skill in body["skills"]]
+        self.assertIn("ship-a-change", names)
+        self.assertIn("blast-radius", names)
+        self.assertIn("local-one", names)
+        self.assertNotIn("local-two", names, "another workspace's skill must not appear")
+        self.assertTrue(all(skill["enabled"] for skill in body["skills"]))
+        self.assertEqual(body["disabled"], [])
+
+        # The preview is one skill's full body, read on demand and scoped the same way.
+        r = await self.client.get(
+            f"/settings/skills/local-one?workspace_id={one.id}", headers=self.headers
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        detail = r.json()
+        self.assertEqual(detail["body"], "Do the local-one thing.")
+        self.assertEqual(detail["source"], "workspace")
+        self.assertTrue(detail["enabled"])
+        r = await self.client.get(
+            f"/settings/skills/local-one?workspace_id={two.id}", headers=self.headers
+        )
+        self.assertEqual(r.status_code, 404, "a workspace-only skill does not exist in another")
+
+        r = await self.client.put(
+            f"/settings/skills/blast-radius?workspace_id={one.id}",
+            headers=self.headers,
+            json={"enabled": False},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["disabled"], ["blast-radius"])
+
+        # The same built-in is still on in the other workspace.
+        r = await self.client.get(
+            f"/settings/skills?workspace_id={two.id}", headers=self.headers
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        blast = next(s for s in r.json()["skills"] if s["name"] == "blast-radius")
+        self.assertTrue(blast["enabled"], "a switch leaked between workspaces")
+        self.assertEqual(r.json()["disabled"], [])
+
+        # Each workspace stores its own workspace-only name too.
+        r = await self.client.put(
+            f"/settings/skills/local-two?workspace_id={two.id}",
+            headers=self.headers,
+            json={"enabled": False},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["disabled"], ["local-two"])
+        r = await self.client.get(
+            f"/settings/skills?workspace_id={one.id}", headers=self.headers
+        )
+        self.assertEqual(r.json()["disabled"], ["blast-radius"])
+
+        # Unknown names and malformed bodies are refused rather than stored.
+        r = await self.client.put(
+            f"/settings/skills/not-a-skill?workspace_id={one.id}",
+            headers=self.headers,
+            json={"enabled": False},
+        )
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.json()["code"], "unknown_skill")
+        r = await self.client.put(
+            f"/settings/skills/blast-radius?workspace_id={one.id}",
+            headers=self.headers,
+            json={"enabled": "no"},
+        )
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["code"], "invalid_value")
+
+        # An unknown workspace is a 404, not a silent fall back to another menu.
+        r = await self.client.get(
+            "/settings/skills?workspace_id=does-not-exist", headers=self.headers
+        )
+        self.assertEqual(r.status_code, 404)
+
+    async def test_a_person_can_create_and_import_a_workspace_skill(self) -> None:
+        """The creator writes one canonical file and uploads keep their own text.
+
+        The route is the person's door, not an agent's: it takes a boot token, creates only under
+        `.codify/skills/`, and refuses a name that already exists instead of replacing a file.
+        """
+        root = self.root / "skill-creator"
+        root.mkdir()
+        workspace = app.state.workspaces.create(
+            WorkspaceCreate(name="Skill creator", root_path=str(root))
+        )
+        query = f"?workspace_id={workspace.id}"
+
+        r = await self.client.post(
+            f"/settings/skills{query}",
+            headers=self.headers,
+            json={
+                "name": "release-check",
+                "description": "Checks a release before tagging.",
+                "moves": ["recon", "verify"],
+                "instructions": "1. Read the manifest.\n2. Run the narrowest check.",
+            },
+        )
+        self.assertEqual(r.status_code, 201, r.text)
+        created = r.json()
+        self.assertEqual(created["name"], "release-check")
+        self.assertEqual(created["path"], ".codify/skills/release-check.md")
+        self.assertEqual(created["moves"], ["recon", "verify"])
+        self.assertFalse(created["shadows"])
+        path = root / created["path"]
+        self.assertIn("moves: recon, verify", path.read_text(encoding="utf-8"))
+
+        r = await self.client.get(f"/settings/skills{query}", headers=self.headers)
+        self.assertEqual(r.status_code, 200, r.text)
+        listed = r.json()
+        self.assertIn("read_file", listed["available_moves"])
+        entry = next(skill for skill in listed["skills"] if skill["name"] == "release-check")
+        self.assertTrue(entry["enabled"])
+        self.assertEqual(entry["source"], "workspace")
+
+        # A second create is a conflict and leaves the first file alone.
+        before = path.read_bytes()
+        r = await self.client.post(
+            f"/settings/skills{query}",
+            headers=self.headers,
+            json={
+                "name": "release-check",
+                "description": "A replacement.",
+                "moves": [],
+                "instructions": "Different text.",
+            },
+        )
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()["code"], "skill_exists")
+        self.assertEqual(path.read_bytes(), before)
+
+        # The parser owns the accepted shape, and unknown body fields are not silently ignored.
+        r = await self.client.post(
+            f"/settings/skills{query}",
+            headers=self.headers,
+            json={
+                "name": "bad-move",
+                "description": "A typo.",
+                "moves": ["not_a_move"],
+                "instructions": "Do it.",
+            },
+        )
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertEqual(r.json()["code"], "invalid_skill_moves")
+        r = await self.client.post(
+            f"/settings/skills{query}",
+            headers=self.headers,
+            json={
+                "name": "extra",
+                "description": "Extra field.",
+                "moves": [],
+                "instructions": "Do it.",
+                "agent_config": {},
+            },
+        )
+        self.assertEqual(r.status_code, 422, r.text)
+
+        # Uploaded text is written unchanged, and its header decides the filename.
+        upload = (
+            "---\nname: imported-skill\ndescription: imported, not typed\n"
+            "moves: read_file, verify\n---\nRead the file, then verify it.\n"
+        )
+        r = await self.client.post(
+            f"/settings/skills/import{query}",
+            headers=self.headers,
+            json={"filename": "ignored-name.md", "content": upload},
+        )
+        self.assertEqual(r.status_code, 201, r.text)
+        imported = r.json()
+        self.assertEqual(imported["name"], "imported-skill")
+        self.assertEqual((root / imported["path"]).read_text(encoding="utf-8"), upload)
+
+        # The filename is never a path.
+        r = await self.client.post(
+            f"/settings/skills/import{query}",
+            headers=self.headers,
+            json={"filename": "../escape.md", "content": "Do it.\n"},
+        )
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertEqual(r.json()["code"], "invalid_skill_filename")
+        self.assertFalse((self.root / "escape.md").exists())
 
     async def test_a_laya_checkpoint_saves_and_refuses_what_is_not_a_hub_id(self) -> None:
         """The gate's fine-tuned checkpoint is a Hub repo id, and the route says so.

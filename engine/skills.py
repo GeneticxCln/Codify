@@ -279,6 +279,27 @@ def parse_skill(
     )
 
 
+def render_skill(
+    name: str, description: str, moves: Collection[str], body: str
+) -> str:
+    """The canonical text for a skill the Settings creator writes.
+
+    One renderer beside the one parser, so the form and the file cannot drift: the header holds
+    exactly the three keys `parse_skill` reads, and the body is what the person wrote. This does
+    not validate — `parse_skill` still refuses the result — and it is not a capability: the
+    rendered text is data, and creating the file is the person's own door (`docs/00` §6.9).
+    """
+    lines = [
+        "---",
+        f"name: {name}",
+        f"description: {description}",
+    ]
+    if moves:
+        lines.append(f"moves: {', '.join(moves)}")
+    lines.extend(["---", "", body.strip(), ""])
+    return "\n".join(lines)
+
+
 # The most bytes a skill file is read for. `MAX_SKILL_CHARS` is a limit on characters and a character takes at
 # most four bytes of UTF-8, so a file over four bytes per allowed character is over the limit whatever it holds.
 # The read stops one byte past that, so a hostile file is refused by what was read, not by reading all of it.
@@ -436,21 +457,33 @@ def workspace_skills(
     return skills, problems
 
 
-def load_skills(root: str | None, known_moves: Collection[str] | None = None) -> SkillSet:
-    """Every skill available for a workspace, with workspace files winning.
+def load_skills(
+    root: str | None,
+    known_moves: Collection[str] | None = None,
+    disabled: Collection[str] = (),
+) -> SkillSet:
+    """The skills offered for a workspace, with workspace files winning.
 
     `known_moves` is the set of moves that exist; the moves a skill declares are checked against it.
+    `disabled` is the person's own Settings choice: a name there is not offered at all, neither from
+    the built-ins nor from a workspace that shadows one. This removes a name from the menu; it does
+    not stop the file existing, and the conductor's `use_skill` cannot reach a name this set omits.
 
     Built-ins are loaded first and a workspace skill of the same name replaces
     it in place, so the menu order is stable regardless of which layer a skill
     came from and a shadowed built-in keeps its position.
     """
+    blocked = {name.strip().lower() for name in disabled}
     builtin, builtin_problems = builtin_skills(known_moves)
     workspace, workspace_problems = workspace_skills(root, known_moves)
 
-    ordered: dict[str, Skill] = {s.name: s for s in builtin}
+    ordered: dict[str, Skill] = {
+        s.name: s for s in builtin if s.name not in blocked
+    }
     shadows: list[str] = []
     for skill in workspace:
+        if skill.name in blocked:
+            continue
         if skill.name in ordered:
             shadows.append(skill.name)
         ordered[skill.name] = skill

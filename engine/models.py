@@ -24,6 +24,9 @@ AgentRole = Literal[
     "scribe",
 ]
 ProviderProtocol = Literal["anthropic", "openai_compat", "ollama", "google"]
+# How much deliberate reasoning a role asks its provider for. None is the provider's own default, which
+# is the only honest setting for a fresh install: a model that has no thinking control is not sent one.
+ThinkingEffort = Literal["low", "medium", "high"]
 # What a goal is for. "design" inverts the design role's usual relationship to
 # the brand file: instead of deriving a contract from an existing one (or from
 # nothing), its output becomes the workspace's DESIGN.md — reviewed by the
@@ -207,12 +210,6 @@ BUILTIN_PROVIDERS: dict[str, dict[str, Any]] = {
         "needs_key": True,
         "local_only": False,
     },
-    # NVIDIA NIM, which is an OpenAI-compatible endpoint rather than a bespoke
-    # dialect: it serves /v1/models and /v1/chat/completions, so the existing
-    # openai_compat provider reads it unchanged and the catalogue is discovered
-    # live like every other. Added because it is a provider people ask for and
-    # were previously reaching for as a "custom" endpoint — which asks them for a
-    # protocol and a base URL the engine already knows.
 }
 
 
@@ -240,6 +237,11 @@ class AgentConfig(BaseModel):
     system_prompt_override: str | None = Field(None, max_length=SYSTEM_PROMPT_OVERRIDE_MAX)
     temperature: float = Field(0.2, ge=0.0, le=2.0)
     max_tokens: int = Field(4096, gt=0, le=200000)
+    # How much thinking this role asks for, where the provider has a control for it. None leaves the
+    # provider's default in force — the one value that cannot be wrong for a model with no such field.
+    # The translation is per protocol (reasoning_effort, Anthropic/Gemini budgets, Ollama's `think`),
+    # and a provider without the control accepts the keyword and ignores it.
+    thinking_effort: ThinkingEffort | None = None
     # Ollama's context window for this role, in tokens. Ollama defaults to a
     # small window (4096) and *silently truncates* anything longer — the
     # librarian's evidence pack and the design role's contract simply do not
@@ -319,6 +321,8 @@ class AgentConfigUpdate(BaseModel):
     system_prompt_override: str | None = Field(None, max_length=SYSTEM_PROMPT_OVERRIDE_MAX)
     temperature: float | None = Field(None, ge=0.0, le=2.0)
     max_tokens: int | None = Field(None, gt=0, le=200000)
+    # Explicit null clears back to the provider's default; absent leaves it unchanged.
+    thinking_effort: ThinkingEffort | None = None
     num_ctx: int | None = Field(None, gt=0, le=1_000_000)
     # Explicit null clears back to Ollama's default window, like `num_ctx`.
     keep_alive: str | None = Field(None, max_length=32, pattern=KEEP_ALIVE_RE.pattern)
@@ -387,6 +391,36 @@ class WorkspaceFileSaved(BaseModel):
     size: int
 
 
+class SkillCreate(BaseModel):
+    """The Settings creator's fields. The route writes one file and is not a general body editor."""
+
+    model_config = {"extra": "forbid"}
+    name: str = Field(..., min_length=1, max_length=64)
+    description: str = Field(..., min_length=1, max_length=200)
+    moves: list[str] = Field(default_factory=list, max_length=24)
+    instructions: str = Field(..., min_length=1)
+
+
+class SkillImport(BaseModel):
+    """An uploaded Markdown file. `filename` is a label and a fallback name, never a path."""
+
+    model_config = {"extra": "forbid"}
+    filename: str = Field(..., min_length=1, max_length=255)
+    content: str = Field(..., min_length=1)
+
+
+class SkillCreated(BaseModel):
+    """A workspace skill the Settings creator just made."""
+
+    workspace_id: str
+    name: str
+    description: str
+    path: str
+    source: str
+    moves: list[str]
+    shadows: bool
+
+
 class WorkspaceGit(BaseModel):
     """A workspace's repository state, for the panel header (`GET /workspaces/{id}/git`, `docs/04` §6).
 
@@ -402,6 +436,49 @@ class WorkspaceGit(BaseModel):
     dirty: bool = False
     ahead: int = 0
     behind: int = 0
+    reason: str | None = None
+
+
+class WorkspacePush(BaseModel):
+    """The result of a person's push (`POST /workspaces/{id}/push`, `docs/04` §6).
+
+    A refused push is a 200 with `ok: false` and the sentence git or the repository gave, not an error:
+    "no origin remote" and "your key was refused" are outcomes the panel can show. `pr_url` is
+    GitHub's pull-request form for the branch that was pushed, present only when `origin` is GitHub.
+    The engine never creates a pull request through GitHub's API, and never stores a GitHub token.
+    `remote` is that origin URL with any embedded userinfo removed, so a token in it is not echoed
+    into a response the window renders (`engine/git.py` `sanitize_remote_url`).
+    """
+
+    ok: bool
+    branch: str | None = None
+    remote: str | None = None
+    sha: str | None = None
+    pr_url: str | None = None
+    reason: str | None = None
+
+
+class WorkspaceCheck(BaseModel):
+    """One check run GitHub reported for a commit. Its `url` is empty when GitHub did not send one."""
+
+    name: str
+    status: str
+    conclusion: str | None = None
+    url: str = ""
+
+
+class WorkspaceChecks(BaseModel):
+    """The commit's checks as `GET /workspaces/{id}/ci` answers them (`docs/04` §6).
+
+    `state` is `none`, `pending`, `success`, `failure` or `unknown`. The last one carries a `reason` —
+    no GitHub origin, no commit, a private repository, an exhausted anonymous rate limit — because
+    "could not read" must never be drawn as "passed".
+    """
+
+    state: str
+    sha: str | None = None
+    url: str | None = None
+    checks: list[WorkspaceCheck] = Field(default_factory=list)
     reason: str | None = None
 
 

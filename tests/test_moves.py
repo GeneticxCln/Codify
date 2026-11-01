@@ -21,7 +21,6 @@ from typing import Any
 from unittest import mock
 
 from engine.conductor import (
-    ANALYZE_BINARY,
     BASE_TOOLS,
     BROWSER_ACTION_TOOLS,
     EDITOR_TOOLS,
@@ -99,7 +98,7 @@ class TestTheMenuIsTheDispatchTable(ConductorTestCase):
         base = {t.name for t in BASE_TOOLS}
         self.assertLessEqual(
             {
-                "read_file", "search_code", "git_history", "run_command",
+                "read_file", "search_code", "git_history", "read_ci", "run_command",
                 "read_page", "navigate_page", "recall", "recall_threads",
                 "use_skill",
             },
@@ -181,8 +180,7 @@ class TestATurnCanPlanThroughTheConductor(ConductorTestCase):
             ToolReply(text="I have planned it. Approve the plan and I will make it."),
         ])
         executor = self._executor(provider, laya=_ChangeGate())
-        with mock.patch("engine.executor_conduct.ghidra_available", return_value=False):
-            await executor.run_chat(self.goal.id)
+        await executor.run_chat(self.goal.id)
 
         steps = self.goals.steps(self.goal.id)
         self.assertEqual([s.title for s in steps], ["S1"])
@@ -191,18 +189,18 @@ class TestATurnCanPlanThroughTheConductor(ConductorTestCase):
         # approval gate reads.
         self.assertEqual(self.goals.get(self.goal.id).status, "PENDING")
         # `navigate_page`, `click_page` and `type_page` need the separate, off-by-default browser-actions
-        # permission. Without an app window there are no page, editor or machine verbs at all, and without a usable
-        # Ghidra install `analyze_binary` is not offered either: the menu is narrowed by what can act. Without
-        # `fetch_page`: it is offered only once a person allows it in Settings (docs/12), and a fresh install has
-        # not, so a tool that could only say "turned off" is not a slot the model is shown. `ask_user` is last: it
-        # is offered whenever somebody is there to answer, which is on a turn and never during an approved run.
+        # permission. Without an app window there are no page, editor or machine verbs at all. `analyze_binary`
+        # stays: the native reader answers ELF, PE and Mach-O without Ghidra (docs/14 §9), so it can act on a
+        # fresh install. Without `fetch_page`: it is offered only once a person allows it in Settings (docs/12),
+        # and a fresh install has not, so a tool that could only say "turned off" is not a slot the model is shown.
+        # `ask_user` is last: it is offered whenever somebody is there to answer, which is on a turn and never
+        # during an approved run.
         self.assertEqual(
             provider.seen_tools[0],
             [
                 *(
                     t.name for t in BASE_TOOLS
                     if t.name != "fetch_page"
-                    and t.name != ANALYZE_BINARY.name
                     and t.name not in EDITOR_TOOLS
                     and t.name not in MACHINE_TOOLS
                     and t.name not in PAGE_TOOLS
