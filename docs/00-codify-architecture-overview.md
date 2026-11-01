@@ -120,6 +120,7 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
 | `18-release-and-updates.md` | Release and updates: a release is a tag, what a deb and an AppImage hold (the shell and the engine, with its own pinned CPython and hashed lock), the workflow's deliberate decisions (the bundle, its smoke before publishing, the dry run), and what the About tab's update button does and refuses |
 | `17-leanrea-audit.md` | The leanrea audit: the routing-table skill that argues against REA's tool surface — what of it is already this engine's design (a closed 31-call menu, skills as lazy data, coverage lines), the defect its trap list found and fixed here (`search_code` now names the directories its walk pruned instead of reporting an absence), the measured fixed cost of one conductor call, and the two small rows built instead of the mechanism |
 | `19-deepseek-stack-audit.md` | The deepseek-stack audit: 29 skills for a cheap, literal model, read at the initial release `d4f1ebe` — the 24 native recipes built from them, what each does, and which actions stay with a person (push, merge, comments, screenshots, parallel models); per-role thinking effort remains a setting rather than a skill |
+| `20-mcp-admission-design.md` | The MCP admission design: invariant 10 (a remote data source, never a capability), remote-only transport, per-tool Read/Act authority, and the tests that hold it. **Phase 3 is built: admission, probe, per-tool Read/Act authority, `list_mcp_tools` and `call_mcp`; act is gated on the goal's stored `RUNNING` status** |
 
 ## 6. Invariants (non-negotiable)
 
@@ -152,8 +153,20 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
    agent, skill or conductor tool can call either, and the creator may only create one new file
    under `.codify/skills/`, never replace or delete another file. A skill is instructions, never a
    capability. See `docs/09` §10.14.
+10. An MCP server is a remote data source, never a capability the engine did not define. A server is
+   reached only at an HTTPS endpoint a person added through `/settings/mcp`; there is no stdio
+   transport, no child process, no localhost, loopback, link-local or private-network address, and no
+   redirect off the admitted URL. Its tools never enter the model's tool namespace: every call goes
+   through the engine's `call_mcp`, whose arguments name an admitted server and an admitted tool, and
+   only the settings routes can install, enable or widen either. A person assigns each tool `read` or
+   `act`; `read` tools may be offered on any turn, `act` tools only while the goal's stored status is
+   `RUNNING`, and the engine refuses a call whose authority no longer matches, whatever the model was
+   told. A result is bounded third-party text, labelled as data and never as instructions; it is not
+   recallable and cannot create a plan step, write a file, run a command, change a setting or spend a
+   model call on its own. A server's credential is write-only in the API, lives in the engine's secret
+   store, and never appears in a response or an event; a URL is not a credential store.
 
-Each of the nine is held by a test at the boundary it names (a route, the sandbox, the running app, the
+Each of the ten is held by a test at the boundary it names (a route, the sandbox, the running app, the
 engine's own source) and not only by a test of a constructor or a table. `tests/test_invariants_at_their_boundary.py`
 keeps the ledger of which tests hold which invariant and fails if an invariant is added here without an
 entry or a test it names goes missing.

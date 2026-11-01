@@ -99,6 +99,13 @@ export type EventType =
   | "error"
   | "todo_updated"
   /**
+   * A thread's older turns were replaced by a summary. The transcript draws a
+   * compact boundary marker from this event; the summary text and what it
+   * covers are read from `GET /conversations/{id}/compaction` and drawn in the
+   * Session drawer.
+   */
+  | "session_compacted"
+  /**
    * The engine's own per-stage measurement (docs/04 §4.7). Listed here because
    * the engine publishes it into this goal's log, so `GET /goals/{id}/events`
    * can return one and the `Event` type has to be able to say so.
@@ -261,6 +268,27 @@ export interface ConversationTurn {
   prompt: string;
   status: GoalStatus;
   created_at: number;
+}
+
+/** One rolling summary of a thread's earlier turns. */
+export interface ConversationCompaction {
+  id: string;
+  conversation_id: string;
+  summary: string;
+  turns: number;
+  /** `created_at` of the last replaced turn; recent turns after it stay verbatim. */
+  covers_through: number;
+  created_at: number;
+}
+
+/** `GET /conversations/{id}/compaction`, and what the Session drawer renders. */
+export interface CompactionStatus {
+  conversation_id: string;
+  latest: ConversationCompaction | null;
+  turns: number;
+  compactable: number;
+  keep_turns: number;
+  auto: boolean;
 }
 
 /**
@@ -643,10 +671,14 @@ export interface EngineSettings {
   web_fetch_hosts?: EngineStringSettingValue;
   /** A fine-tuned Laya checkpoint's Hub repo id; empty uses the built-in Router (docs/05). */
   laya_checkpoint?: EngineStringSettingValue;
+  /** 1 = summarise older thread turns automatically before answering. */
+  session_compact_auto?: EngineSettingValue;
+  /** How many recent turns stay verbatim beside the summary. */
+  session_compact_keep_turns?: EngineSettingValue;
 }
 
 /** The Settings screen's tabs, in the order they are shown. One definition, so a new tab is one edit. */
-export type SettingsTab = "keys" | "agents" | "skills" | "audio" | "appearance" | "about";
+export type SettingsTab = "keys" | "agents" | "skills" | "sessions" | "mcp" | "audio" | "appearance" | "about";
 
 /** One entry in Settings → Agent skills, as the engine loaded it. */
 export interface AgentSkill {
@@ -697,6 +729,60 @@ export interface AgentSkillCreated {
 export interface AgentSkillDetail extends AgentSkill {
   notes: string[];
   body: string;
+}
+
+/** One remote MCP server, as Settings stores and probes it. No secret is ever included. */
+export interface McpTool {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+  authority: "read" | "act" | null;
+  enabled: boolean;
+  state: "current" | "new" | "changed" | "gone";
+}
+
+export interface McpServer {
+  id: string;
+  name: string;
+  url: string;
+  auth_kind: "none" | "bearer" | "header";
+  auth_header: string;
+  has_secret: boolean;
+  protocol_version: string;
+  server_name: string;
+  enabled: boolean;
+  last_probe_at: number | null;
+  last_probe_error: string | null;
+  tools: McpTool[];
+  created_at: number;
+  updated_at: number;
+}
+
+/** `PUT /settings/mcp/{id}`: every field optional; an omitted secret keeps the stored one. */
+export interface McpServerUpdate {
+  name?: string;
+  url?: string;
+  auth_kind?: "none" | "bearer" | "header";
+  auth_header?: string;
+  secret?: string;
+  clear_secret?: boolean;
+  enabled?: boolean;
+}
+
+/** `PUT /settings/mcp/{id}/tools/{tool}`: a person's authority for one tool. */
+export interface McpToolUpdate {
+  authority: "read" | "act" | null;
+  enabled: boolean;
+}
+
+/** `POST /settings/mcp`: the write-only fields a person supplies once. */
+export interface McpServerCreate {
+  name: string;
+  url: string;
+  auth_kind: "none" | "bearer" | "header";
+  auth_header?: string;
+  secret?: string;
+  enabled?: boolean;
 }
 
 /** Whether one voice feature can run now, and if not, the engine's reason (`GET /audio/status`). */

@@ -53,6 +53,22 @@ CREATE TABLE IF NOT EXISTS conversations (
   updated_at REAL NOT NULL
 );
 
+-- Rolling summaries of a thread's earlier turns (engine/compaction.py). One
+-- row per compaction, newest is live; the turns themselves are never rewritten.
+-- `covers_through` is the created_at of the last replaced turn, so the boundary
+-- survives a deleted turn and the prompt filter is a timestamp comparison.
+CREATE TABLE IF NOT EXISTS conversation_compactions (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  summary TEXT NOT NULL,
+  turns INTEGER NOT NULL,
+  covers_through REAL NOT NULL,
+  created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_compactions_thread
+  ON conversation_compactions(conversation_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS goals (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id),
@@ -274,6 +290,43 @@ CREATE TABLE IF NOT EXISTS workspace_disabled_skills (
   updated_at REAL NOT NULL,
   PRIMARY KEY (workspace_id, name)
 );
+
+-- Remote MCP servers a person added in Settings. This is the admission list,
+-- not a capability: no conductor tool reads these rows yet. `url` is always
+-- https and the secret itself lives in the keychain under `api_key_ref`.
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  url TEXT NOT NULL,
+  auth_kind TEXT NOT NULL DEFAULT 'none',
+  auth_header TEXT NOT NULL DEFAULT '',
+  api_key_ref TEXT NOT NULL DEFAULT '',
+  protocol_version TEXT NOT NULL DEFAULT '',
+  server_name TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_probe_at REAL,
+  last_probe_error TEXT,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+
+-- What the last successful `tools/list` found. A tool is listed here, never
+-- callable: authority is NULL and enabled is 0 until the call path exists.
+CREATE TABLE IF NOT EXISTS mcp_tools (
+  id TEXT PRIMARY KEY,
+  server_id TEXT NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  input_schema_json TEXT NOT NULL DEFAULT '{}',
+  schema_hash TEXT NOT NULL DEFAULT '',
+  authority TEXT,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'new',
+  last_seen_at REAL NOT NULL,
+  UNIQUE (server_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_tools_server ON mcp_tools(server_id, name);
 """
 
 
@@ -391,7 +444,12 @@ class _PerThreadConnection(sqlite3.Connection):
         cursor belongs to the connection that made it, and a transaction begun through one belongs
         to the thread that owns that connection.
         """
-        connection = self if self._created_here() else self._other_thread_connection()
+        # `super().cursor`, not `self.cursor`: CPython before 3.12 implements
+        # `Connection.execute` by calling the bound `cursor` method, so routing the
+        # creator's thread back through `self` made every `execute` recurse on 3.10.
+        if self._created_here():
+            return super().cursor() if factory is None else super().cursor(factory)
+        connection = self._other_thread_connection()
         return connection.cursor() if factory is None else connection.cursor(factory)
 
     @property

@@ -89,7 +89,10 @@ starts at `docs/00` §6, not at the feature. Two have a shorter road than the re
   model asserts.
 * **An MCP surface** would need a design for admitting a tool to the menu that is not `validate_argv` and not a
   move, and an answer for what an admitted tool's results are (third-party text, quoted as such, like a page).
-  Without both it widens the engine.
+  Without both it widens the engine. `docs/20` is that design: a remote-only server, a person's per-tool
+  Read/Act authority, and one engine-owned `call_mcp`. Its settings admission, probe and both call paths are
+  built, and invariant 10 now lives in `docs/00` §6 with a boundary test in the ledger. A read tool is callable
+  on any turn; an act tool only while the goal's stored status is `RUNNING`, announced first and never retried.
 
 Nothing here should be read as a verdict on Ruflo's quality. It is a different product with a different
 trust model, and this document is only about what this one may take from it.

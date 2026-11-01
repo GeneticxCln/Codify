@@ -27,7 +27,7 @@ test("what cannot be measured never hides anything", () => {
 
 test("the threshold is the panel, the drawer and the centre's floor, in rem", () => {
   assert.equal(SIDEBAR_REM, 15);
-  assert.deepEqual({ ...DRAWER_REM }, { stats: 28, notifications: 20, clipboard: 20, history: 20 });
+  assert.deepEqual({ ...DRAWER_REM }, { stats: 28, session: 22, notifications: 20, clipboard: 20, history: 20 });
   assert.equal(MIN_CENTRE_REM, 30);
   for (const drawer of ["stats", "clipboard", "history"] as const) {
     const need = SIDEBAR_REM + DRAWER_REM[drawer] + MIN_CENTRE_REM;

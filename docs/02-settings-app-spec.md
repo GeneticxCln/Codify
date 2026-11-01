@@ -13,7 +13,7 @@ Agent configuration is edited only at **Settings → Agents**. Enforced at three
 ```
 ui/src/
   components/
-    SettingsModal.tsx         # the tabs: providers, agent roles, agent skills, audio, appearance, about
+    SettingsModal.tsx         # the tabs: providers, agent roles, agent skills, sessions, MCP, audio, appearance, about
     SettingsPanel.tsx
     AgentConfigCard.tsx
     ProviderRow.tsx           # one provider: key field, model picker, apply button
@@ -27,6 +27,8 @@ ui/src/
     PromptOverrideEditor.tsx
     ConductorSettingsCard.tsx  # the conductor's own model + budgets, not a role
     AgentSkillsPane.tsx        # Agent skills: one on/off switch per skill in this workspace's menu
+    SessionSettingsPane.tsx    # Sessions: auto-compaction and how many recent turns stay verbatim
+    McpPane.tsx                # MCP: remote HTTPS servers admitted and probed; no call path
     AudioPane.tsx              # microphone, dictation, read-aloud — engine settings only
     UiScalePanel.tsx           # Appearance → UI scale: how big the whole window is
     AboutPane.tsx              # About: version, engine, data folder, shortcuts — read-only
@@ -212,6 +214,43 @@ of each turn, so this button is for the screen and does not restart anything.
 Enabled is the default for every skill in every workspace, including built-ins. Turning all of
 them off is allowed: the conductor is then shown no skill menu and answers from its own moves.
 When no workspace is selected, the pane asks for one instead of offering switches with no scope.
+
+### 3.2a The Sessions tab
+
+Settings → Sessions (`SessionSettingsPane.tsx`) holds the two engine-wide defaults for thread
+compaction (`engine/compaction.py`, docs/09 §10.21):
+
+* **Compact automatically** (`session_compact_auto`, on by default). A turn summarises the older
+  part of its thread before answering once four turns have accumulated past the kept ones. Off
+  still allows `Compact now` in the Session drawer; it only stops the automatic spend.
+* **Recent turns kept verbatim** (`session_compact_keep_turns`, default 6, clamped 2–40). These
+  stay beside the summary in the prompt, because a follow-up refers to the latest exchange and a
+  summary of what was just said is strictly worse than what was said.
+
+Both are `engine_settings` keys written through `PUT /settings/engine` and nothing else. They are
+not a role and not per thread: a thread's own summary and its manual Compact/Undo buttons live in
+the Session drawer beside the transcript, where the person can see what they act on.
+
+### 3.2b The MCP tab
+
+Settings → MCP (`McpPane.tsx`) admits **remote HTTPS servers only**. A person adds a name, an HTTPS URL, and
+optionally a bearer token or one custom header. The secret is write-only: the engine stores it in its secret
+store (the OS keychain, or the 0600 local file when none) and every response carries `has_secret`, never the value. `POST /settings/mcp` stores the server and runs
+`initialize` then `tools/list`; a failed probe leaves the row with the engine's reason, and **Probe now** tries
+again. Removing a server removes its tools and its secret-store entry.
+
+Each discovered tool starts **Not admitted**. Choosing **Read** or **Act** and switching **Enabled** on admits
+it; the conductor then has `list_mcp_tools` and `call_mcp`, and the engine re-reads the stored rows before
+every call. A Read tool is callable on any turn; an Act tool only while the goal's stored status is `RUNNING`,
+where it is announced in the transcript before it is sent and is never retried. Switching the server itself off
+removes all of its tools from the menu, and switching a tool off keeps its authority but makes it uncallable.
+Each tool's input schema is shown on disclosure, and a tool's result is labelled as the server's data, never as
+instructions.
+
+Validation happens before a request: HTTPS, a public address, port 443 or 8443, no userinfo, query or fragment,
+no redirect followed, no environment proxy, a timeout and a byte cap. `localhost`, private, link-local and
+metadata addresses are refused, and the connection is made to an address that was checked rather than to a name
+that may answer differently the second time (`docs/20` §3).
 
 ### 3.3 The Audio tab
 

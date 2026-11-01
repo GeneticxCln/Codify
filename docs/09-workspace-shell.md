@@ -3339,6 +3339,42 @@ stays, nothing is written, the door refuses half a pair, a turn with no pick is 
 the badges, and the toolbar's contents). Not proven: the picker in the desktop window (WebKitGTK), which no
 test here can open.
 
+### 10.21 Thread compaction and the Session drawer
+
+A long thread used to lose its beginning: `_turn_prompt` sends at most `TURN_HISTORY_TURNS` (12)
+recent turns, and the oldest fall out first. Compaction replaces an older span with one rolling
+summary, stored in `conversation_compactions`, which the prompt carries **instead of** those turns.
+The transcript is never rewritten — the raw turns stay in `goals` and their events — so undo is the
+deletion of the newest summary, not a reconstruction of anything.
+
+* **The boundary is a timestamp, not a count.** `covers_through` is the `created_at` of the last
+turn a summary replaces. Turns newer than it are still sent verbatim, including the `keep_turns`
+that were deliberately left out of the summary. The next compaction reads only turns past the same
+boundary, and builds on the previous summary, so summaries compose rather than stack.
+* **Auto is bounded.** On by default (`session_compact_auto`), it waits for four turns past the
+kept ones (`AUTO_MIN_OLD_TURNS`) before spending a call. A failed summary is a warning in the goal
+log and the turn continues with the history it already had; a summary is an upgrade, never a
+prerequisite. The same call is available explicitly from the Session drawer.
+* **One model call, no new capability.** `_summarise_turns` goes through `AgentOrchestrator.run_agent`
+with the same borrowed configuration a turn's own answer uses, `raw_output`, and a system prompt
+that forbids tools. The summary is capped at `MAX_SUMMARY_CHARS` and the transcript handed to it at
+`MAX_COMPACT_INPUT_CHARS`. No skill, workspace file or conductor reply can widen that.* **The drawer is per thread.** A **Session** button sits beside Stats in the header and opens a
+  `22rem` drawer (a flex sibling, like the others) showing the turn count, the kept count, whether
+  auto is on, how many turns are ready, the latest summary, and **Compact now** / **Undo**. A manual
+  compaction while a turn is still answering is a 409 `conversation_busy` rather than a summary built
+  from rows that are still moving. The transcript itself draws a **Conversation compacted** marker
+  at the event's own sequence — how many turns were replaced, whether it was automatic or a press,
+  and that the transcript is unchanged. The marker never repeats the summary text; the drawer is the
+  one place that reads it.
+* **Settings → Sessions holds the defaults**, not the drawer: `session_compact_auto` and
+`session_compact_keep_turns` (docs/02 §3.2a). Both are engine settings; neither is an `AgentConfig`
+row, so the eight-role rule (docs/00 §6.1) is untouched.
+
+Proven by `tests/test_compaction.py` (the plan boundary, kept turns after a summary, undo, the
+bounded stored summary, the auto batch floor, prompt injection, and the GET/POST/DELETE routes) and
+`ui/tests/turnTranscript.test.ts` (the marker's wording, automatic vs manual, and that it does not
+copy the summary). Not proven: the drawer against a real long thread from a live provider.
+
 ## 11. The clipboard history (built)
 
 An icon-only **Clipboard** button sits immediately after Notifications in the header and opens a fourth drawer, in

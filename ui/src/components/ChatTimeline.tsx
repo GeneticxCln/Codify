@@ -56,6 +56,7 @@ import {
   FileUp,
   Trash2,
   Radio,
+  Archive,
 } from "lucide-react";
 import { readRejection } from "../rejection.ts";
 import { answersToRead, type AutoReadMemory } from "../speech.ts";
@@ -338,6 +339,39 @@ const LayaGateCard: React.FC<{ payload: Record<string, any> }> = ({
  *
  * The rules live in `turnTranscript.ts` and are asserted there; this draws them.
  */
+/**
+ * The boundary a compaction made in what the model was shown.
+ *
+ * The transcript is the person's record and is never rewritten, so this is a
+ * marker, not a replacement: it says how many earlier turns a summary now
+ * stands for and whether a turn or a person did it. The summary text stays in
+ * the Session drawer, which reads the live status; repeating it here would be a
+ * second copy that can age differently.
+ */
+const CompactionMarker: React.FC<{ event: Event }> = ({ event }) => {
+  const turns = Number(event.payload?.turns ?? 0);
+  return (
+    <div
+      role="note"
+      aria-label="Conversation compacted"
+      data-compaction-marker="true"
+      className="flex items-start gap-2 p-2.5 rounded-lg bg-codify-bg border border-codify-border"
+    >
+      <Archive className="w-3.5 h-3.5 shrink-0 mt-0.5 text-codify-info" />
+      <div className="flex flex-col gap-0.5">
+        <span className="text-xs font-semibold text-codify-secondary">
+          Conversation compacted
+        </span>
+        <span className="text-2xs text-codify-muted leading-relaxed">
+          {turns} earlier turn{turns === 1 ? "" : "s"} replaced by a rolling
+          summary {event.payload?.automatic === false ? "when you pressed Compact" : "automatically"}
+          . The transcript itself is unchanged.
+        </span>
+      </div>
+    </div>
+  );
+};
+
 const TurnExchange: React.FC<{
   msg: ChatMessage;
   /** This message's recording panel is open. */
@@ -360,9 +394,13 @@ const TurnExchange: React.FC<{
   const live = reply === null ? turnLiveText(msg.events) : null;
   const alerts = turnAlerts(msg.events);
   const active = isGoalActive(msg.goal?.status);
+  const compactions = (msg.events ?? []).filter((ev) => ev.type === "session_compacted");
 
   return (
     <div className="space-y-2">
+      {compactions.map((ev) => (
+        <CompactionMarker key={ev.sequence} event={ev} />
+      ))}
       <div className="rounded-2xl rounded-tl-sm border border-codify-border bg-codify-surface px-4 py-2.5 text-sm leading-relaxed text-codify-primary break-words">
         {/* The answer is Markdown, drawn as elements and never as HTML (`markdown.ts` says why), so
             the streamed snapshot and the finished reply are the same component and an unterminated
@@ -1847,6 +1885,10 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 if (ev.type === "agent_assigned") return;
                                 rendered.push(
                                   <div key={ev.sequence} className="text-xs">
+                                    {ev.type === "session_compacted" && (
+                                      <CompactionMarker event={ev} />
+                                    )}
+
                                     {ev.type === "diff" && (
                                       <DiffViewer
                                         path={ev.payload.path}

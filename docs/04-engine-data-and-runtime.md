@@ -189,6 +189,7 @@ EventType = Literal[
     "library_evidence", "design_contract", "stage_result", "plan_updated",
     "laya_decision", "fix_retry", "fixer_pass", "plan_consult",
     "agent_call_failed", "usage", "model_delta", "error", "todo_updated",
+    "session_compacted",
 ]
 
 class Event(BaseModel):
@@ -232,6 +233,7 @@ the UI's copy a member behind both.
 | `model_delta` | any | `{role, provider, model, text, final}` — a streaming snapshot of the reply so far (self-contained, ~every 400 ms); `final: true` closes the card, and once it lands the stream's earlier snapshots have their `text` blanked and `compacted: true` set (each repeats all the text before it, so keeping them was quadratic: 88 events / 106 KB for a 561-token reply). The rows stay: a goal's sequence is dense from 1 and a client tells a lost event by a gap. Chat-render only |
 | `error` | any | `{code: str, message: str, role: str \| null}` |
 | `todo_updated` | — | `{items: [{id, text, status}]}` — the conductor's own todo list (`engine/todo.py`), published whole every time the conductor changes it, so the newest event *is* the list. `status` is `pending`\|`doing`\|`done`\|`dropped`; an item is one line of at most 160 characters, a list holds at most 20 items, and one run changes it at most 40 times. It is the model's note to its next run, put back in its prompt as *its own notes, not instructions*: nothing in the engine reads it to decide anything, it is never shown to a sub-agent, and `recall` cannot return it (not in `RECALLABLE`). Item text can echo what the model read, so it is third-party text and the UI draws it as plain text |
+| `session_compacted` | — | `{summary, turns, automatic, covers_through}` — one stored rolling summary of this thread's older turns (`engine/compaction.py`, docs/09 §10.21). `summary` is model prose, capped at 4,000 characters; `turns` is how many turns it replaced; `automatic` says whether a turn did it or a person pressed Compact; `covers_through` is the `created_at` of the last replaced turn, the boundary recent turns sit after. The raw transcript is never rewritten: the timeline draws a **Conversation compacted** marker at the boundary (turns replaced, automatic or manual, and that the transcript is unchanged), while the summary text and compaction status are read through `GET /conversations/{id}/compaction` and shown in the Session drawer |
 
 `step_id` column: `—` marks goal-level events that never carry a step; `step`
 marks step-scoped ones; `any` marks types published both ways (agent-level
@@ -492,6 +494,23 @@ CREATE TABLE engine_settings (
   updated_at REAL NOT NULL
 );
 
+-- Rolling summaries of a thread's earlier turns (engine/compaction.py, docs/09
+-- §10.21). One row per compaction; the newest is live, and undo deletes it. The
+-- turns themselves stay in goals/events and are never rewritten.
+-- `covers_through` is the created_at of the last replaced turn, so the prompt
+-- filter is a timestamp comparison that survives a deleted turn.
+CREATE TABLE conversation_compactions (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  summary TEXT NOT NULL,
+  turns INTEGER NOT NULL,
+  covers_through REAL NOT NULL,
+  created_at REAL NOT NULL
+);
+
+CREATE INDEX idx_conversation_compactions_thread
+  ON conversation_compactions(conversation_id, created_at DESC);
+
 -- Per-workspace skill switches (docs/02 §3.2): disabled names only, so a
 -- fresh workspace and a re-enabled skill are both "no row". The cascade takes
 -- the switches with the workspace.
@@ -603,6 +622,13 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `POST` | `/settings/skills/import` | `{filename, content}`, query: `workspace_id` (required) | `201` with the same shape. Uploads one Markdown file. `filename` is a label and a fallback name, never a path; a header `name:` wins. The text is written unchanged after `parse_skill` accepts it, so `.md` only and the same size/UTF-8 limits apply. A path, a non-`.md` name or a malformed skill is `422` |
 | `GET` | `/settings/skills/{name}` | query: `workspace_id` (required) | `{workspace_id, name, description, source, moves, notes, enabled, body}` — one skill's full instructions for the Settings preview. Read-only and on demand; it does not change the switch or reach the conductor. Unknown name/workspace is `404`; a missing id is `422` |
 | `PUT` | `/settings/skills/{name}` | `{enabled: true\|false}`, query: `workspace_id` (required) | `{workspace_id, name, enabled, disabled}`. Writes or deletes one row in `workspace_disabled_skills` for that workspace, a filter over the menu and never a grant. The same built-in may be on in another workspace; an unknown name is `404 unknown_skill`, a missing workspace id is `422 workspace_required`, and a body that is not exactly `{enabled: bool}` is `422` |
+| `GET` | `/settings/mcp` | — | admitted remote MCP servers with tools, `has_secret` and the last probe result; never a secret |
+| `POST` | `/settings/mcp` | `{name, url, auth_kind, auth_header, secret, enabled}` | `201` with the stored server. HTTPS, public address, port 443/8443, no userinfo/query/fragment; otherwise `400 mcp_invalid_*`. Stores first, then probes; a refused probe leaves the row with `last_probe_error` and answers `502` |
+| `PUT` | `/settings/mcp/{id}` | `{name, url, auth_kind, auth_header, secret, clear_secret, enabled}` | the updated server. Omitted `secret` keeps the stored one; `clear_secret` removes it. A changed URL is revalidated |
+| `DELETE` | `/settings/mcp/{id}` | — | `{ok, id}`; removes the server, its tools and its secret-store entry |
+| `POST` | `/settings/mcp/{id}/probe` | — | the server after `initialize` + `notifications/initialized` + bounded `tools/list`; never `tools/call`. A refusal is `502` and is written to `last_probe_error` |
+| `PUT` | `/settings/mcp/{id}/tools/{tool}` | `{authority: read\|act\|null, enabled}` | the updated tool. `authority: null` is not admitted; an enabled tool must name `read` or `act`. An `act` tool is callable only while the goal's stored status is `RUNNING`. This route never calls the tool |
+| `GET` | `/settings/mcp/{id}/tools` | — | that server's discovered tools with their full descriptions, input schemas, authority, enabled and state; bounded, and it never calls one |
 | `GET` | `/settings/engine` | — | every key in `SettingsService.SPEC` / `STRING_SPEC`, each with its clamp band (or its max length, for a string: `SettingsService.STRING_LIMITS`) |
 | `PUT` | `/settings/engine` | `{parallel_width, …}` | `{saved: {…}}` — echoes what was actually stored, clamped for numbers; a string is stored whole up to the max length `GET` advertises and refused past it (422 `invalid_value`), never shortened. `set_str` used to cut every string at 200, so a speech server address the screen allowed 500 for was saved as a different address |
 | `GET` | `/models?refresh=` | — | live-discovered catalog, per-provider status, each model's `context_tokens` (or `null`), and a `conductor` block `{provider, model, source, num_ctx}` — the model a conversation runs on when nothing is picked, computed per request and not cached (`06` §2.1) |
@@ -617,6 +643,8 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 Declaration order matters for the parameterised settings routes: `/settings/agents/stats` and `/settings/agents/repair` are registered **before** `/settings/agents/{role}`, or FastAPI's in-order matching would read `stats` and `repair` as role ids and 404/422 them. `/settings/skills` and `/settings/skills/import` are registered before `/settings/skills/{name}`, for the same reason.
 
 `workspace_disabled_skills` holds only the names a workspace switched off (`workspace_id`, `name`, `updated_at`, primary key `(workspace_id, name)`); enabled is the absence of a row. `WorkspaceService.disabled_skills` filters a hand-edited name to the shape a skill name can have, and `_conduct` reads the set on every run. Deleting a workspace cascades its rows, so no switch outlives the menu it belonged to. Creating a skill removes a stale row for its name, so a person who just made it is offered it; that is a settings change by the same person, not a grant.
+
+`mcp_servers` holds the admission list (`id`, `name`, `url`, `auth_kind`, `auth_header`, `api_key_ref`, `protocol_version`, `server_name`, `enabled`, `last_probe_at`, `last_probe_error`, timestamps); the secret itself is in the engine's secret store under `mcp/<id>` (the OS keychain, or the 0600 local file; `docs/03` §1.1). `mcp_tools` holds the last discovered tools (`server_id`, `name`, `description`, `input_schema_json`, `schema_hash`, `authority`, `enabled`, `state`, `last_seen_at`), cascading with the server. A new tool is `state = 'new'`, a changed schema is `'changed'`, and a vanished one is `'gone'`; a new or changed tool is stored with `authority = NULL` and `enabled = 0`, while an unchanged one keeps the authority and switch a person gave it. `list_mcp_tools` and `call_mcp` read these rows: the menu offers them only while one callable tool exists on an enabled server — a `read` tool on any turn, an `act` tool only while the goal's stored status is `RUNNING` — and `call_mcp` re-checks the stored server, tool, authority and argument bounds before every send. An `act` call is announced before it is sent and is never retried; a `read` call may be retried once on a transport failure (`docs/20` §5, §10).
 
 `retry`: only if step `FAILED` or (`IN_PROGRESS` and last review was `request-changes`). Resets step to `PENDING` then the Executor runs fixer → verifier → critic → scribe again. No agent overrides in body.
 

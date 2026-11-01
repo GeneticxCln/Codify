@@ -15,6 +15,8 @@ import { AppearancePane } from "./AppearancePane";
 import { AudioPane } from "./AudioPane";
 import { AboutPane } from "./AboutPane";
 import { AgentSkillsPane } from "./AgentSkillsPane";
+import { SessionSettingsPane } from "./SessionSettingsPane";
+import { McpPane } from "./McpPane";
 import { ProviderRow } from "./ProviderRow";
 import { useAgentConfigs } from "../hooks/useAgentConfigs";
 import { checkedLabel, discoveredFooter, needsOwnRefresh } from "../providerSetup";
@@ -25,7 +27,7 @@ import {
   saveSeen,
   type SeenIndex,
 } from "../modelFreshness";
-import { X, Key, Sliders, Sparkles, HardDrive, Lock, AlertCircle, RefreshCw, Palette, Mic, Info } from "lucide-react";
+import { X, Key, Sliders, Sparkles, HardDrive, Lock, AlertCircle, RefreshCw, Palette, Mic, Info, Archive, Plug } from "lucide-react";
 
 /**
  * How often the panel re-asks while it is open, and how long after a check a
@@ -399,6 +401,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       ? "What this app is, what it is running on, and the keyboard shortcuts."
                       : tab === "skills"
                       ? "Choose which skills the conductor may offer. Enabled skills are named; their instructions are loaded only when one is chosen."
+                      : tab === "sessions"
+                        ? "How a long thread is remembered: automatic rolling summaries, and how many recent turns stay verbatim."
+                      : tab === "mcp"
+                        ? "Remote HTTPS servers you admit and probe. No model can call their tools yet."
                       : tab === "audio"
                         ? "The microphone, dictation into the prompt, and answers read aloud — through the speech providers you choose."
                         : "Each role's model, endpoint, temperature, and prompt. Roles run in the order of the pipeline."}
@@ -416,7 +422,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Tab bar */}
-        {/* `flex-wrap`: six tabs are wider than a 900px window once the UI is scaled to 175%, and a
+        {/* `flex-wrap`: eight tabs are wider than a 900px window once the UI is scaled to 175%, and a
             fixed row clipped the last ones and let the browser scroll the whole modal sideways to
             reach them. Wrapped, every tab is always on screen. */}
         <div className="flex flex-wrap items-center gap-1 px-6 pt-3 shrink-0">
@@ -457,6 +463,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }`}
           >
             <Sparkles className="w-3.5 h-3.5" /> Agent skills
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("sessions")}
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+              tab === "sessions"
+                ? "bg-codify-raised text-codify-primary border border-codify-border"
+                : "text-codify-muted hover:text-codify-secondary"
+            }`}
+          >
+            <Archive className="w-3.5 h-3.5" /> Sessions
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("mcp")}
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+              tab === "mcp"
+                ? "bg-codify-raised text-codify-primary border border-codify-border"
+                : "text-codify-muted hover:text-codify-secondary"
+            }`}
+          >
+            <Plug className="w-3.5 h-3.5" /> MCP
           </button>
           <button
             type="button"
@@ -598,6 +626,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           )}
 
           {tab === "skills" && <AgentSkillsPane workspaceId={workspaceId} />}
+
+          {tab === "sessions" && <SessionSettingsPane />}
+
+          {tab === "mcp" && <McpPane />}
 
           {tab === "audio" && (
             <AudioPane

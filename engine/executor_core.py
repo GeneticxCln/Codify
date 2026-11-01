@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from engine.agent_orchestrator import AgentOrchestrator
+from engine.compaction import CompactionService
 from engine.executor_support import AgentOutputInvalid, CriticRejection, TestsFailed, WriteWithdrawn
 from engine.git import GitService
 from engine.laya import LayaService
@@ -30,6 +31,7 @@ from engine.surfaces import SurfaceBridge
 from engine.webview_bridge import WebviewBridge
 
 if TYPE_CHECKING:
+    from engine.mcp import McpService
     from engine.services import SettingsService
     from engine.trace import TraceService
 
@@ -180,6 +182,14 @@ class _ExecutorCore:
         # Annotated at the field so the None default is the *documented* empty
         # state, not a type the checker reads out of one constructor.
         self.settings: SettingsService | None = None
+        # Rolling summaries of a thread's earlier turns. Attached with the
+        # settings; a test that builds the executor by hand gets no compaction,
+        # which is the same empty state as an engine that never opens a thread.
+        self.compactions: CompactionService | None = None
+        # The admitted remote MCP servers (`engine/mcp.py`). Attached with the settings; a
+        # test that builds the executor by hand gets none, which is the same state as an
+        # engine where the person has admitted nothing: the menu offers no MCP tool.
+        self.mcp: McpService | None = None
         # One driver per goal: start, retry, and apply each spawn a driver
         # loop, and two loops on one goal re-run the same steps concurrently.
         self._drivers: set[str] = set()

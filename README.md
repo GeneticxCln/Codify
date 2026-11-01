@@ -586,6 +586,7 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/17`](docs/17-leanrea-audit.md) | The leanrea audit: the routing-table skill that argues against REA's 207 tools — what of it this engine already is, and the one gap its trap list found in `search_code` |
 | [`docs/18`](docs/18-release-and-updates.md) | Release and updates: a release is a tag, what the deb and AppImage hold, how the release workflow is built, and what the About tab's update button does and refuses |
 | [`docs/19`](docs/19-deepseek-stack-audit.md) | The deepseek-stack audit: 29 skills read in full, the 24 native recipes built from them, what each does, and which actions stay with a person (push, merge, comments, screenshots, parallel models) |
+| [`docs/20`](docs/20-mcp-admission-design.md) | The MCP admission design: invariant 10, remote-only transport, per-tool Read/Act authority, and the tests that hold it. Phase 3 is built (per-tool Read/Act authority, `list_mcp_tools`, `call_mcp`); act is gated on the goal's stored `RUNNING` status |
 
 ## 📂 Layout
 

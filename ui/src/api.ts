@@ -15,6 +15,7 @@ import type {
   AgentSkills,
   AudioInputs,
   AudioStatus,
+  CompactionStatus,
   Conversation,
   ConversationTurn,
   DeletedGoal,
@@ -30,6 +31,11 @@ import type {
   EngineRuntime,
   Goal,
   GoalMode,
+  McpServer,
+  McpServerCreate,
+  McpServerUpdate,
+  McpTool,
+  McpToolUpdate,
   ShellTabRow,
   GoalStatus,
   LayaStatus,
@@ -514,6 +520,100 @@ export async function setAgentSkillEnabled(
   return res.json();
 }
 
+/** The remote MCP servers Settings has admitted. Never includes a secret. */
+export async function getMcpServers(): Promise<McpServer[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/settings/mcp`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to fetch MCP servers");
+  return res.json();
+}
+
+/** Store one server and probe it. A failed probe is reported, not hidden. */
+export async function createMcpServer(body: McpServerCreate): Promise<McpServer> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/settings/mcp`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${currentEngine.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to save the MCP server");
+  return res.json();
+}
+
+/** Change one server's settings, including its Enabled switch. */
+export async function updateMcpServer(id: string, body: McpServerUpdate): Promise<McpServer> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/settings/mcp/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${currentEngine.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to update the MCP server");
+  return res.json();
+}
+
+/** One server's discovered tools, with their full descriptions and schemas. */
+export async function getMcpTools(id: string): Promise<McpTool[]> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/settings/mcp/${encodeURIComponent(id)}/tools`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to fetch the MCP tools");
+  return res.json();
+}
+
+/** Admit one tool with an authority, or switch it off. This never calls it. */
+export async function setMcpTool(
+  serverId: string,
+  toolName: string,
+  body: McpToolUpdate,
+): Promise<McpTool> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(
+    `${base}/settings/mcp/${encodeURIComponent(serverId)}/tools/${encodeURIComponent(toolName)}`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${currentEngine.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) throw await engineError(res, "Failed to change the MCP tool");
+  return res.json();
+}
+
+/** Re-run initialize + tools/list. This never calls a tool. */
+export async function probeMcpServer(id: string): Promise<McpServer> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/settings/mcp/${encodeURIComponent(id)}/probe`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to probe the MCP server");
+  return res.json();
+}
+
+/** Forget one server and its keychain entry. */
+export async function deleteMcpServer(id: string): Promise<{ ok: boolean; id: string }> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/settings/mcp/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to remove the MCP server");
+  return res.json();
+}
+
 export async function getEngineSettings(): Promise<EngineSettings> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/settings/engine`, {
@@ -557,6 +657,8 @@ export async function saveEngineSettings(
     web_fetch?: number;
     web_fetch_hosts?: string;
     laya_checkpoint?: string;
+    session_compact_auto?: boolean;
+    session_compact_keep_turns?: number;
   }
 ): Promise<{ saved: Record<string, number | string> }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
@@ -1137,6 +1239,44 @@ export async function renameConversation(
     body: JSON.stringify({ title }),
   });
   if (!res.ok) throw await engineError(res, "Failed to rename the conversation");
+  return res.json();
+}
+
+/** This thread's rolling summary and what a compaction would cover now. */
+export async function getCompactionStatus(
+  conversationId: string,
+): Promise<CompactionStatus> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/conversations/${conversationId}/compaction`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to read this session");
+  return res.json();
+}
+
+/** Summarise this thread's older turns. The raw transcript is not rewritten. */
+export async function compactConversation(
+  conversationId: string,
+): Promise<CompactionStatus> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/conversations/${conversationId}/compaction`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to compact this session");
+  return res.json();
+}
+
+/** Forget the newest summary; the turns it covered were never removed. */
+export async function undoCompaction(
+  conversationId: string,
+): Promise<CompactionStatus> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/conversations/${conversationId}/compaction`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to undo the compaction");
   return res.json();
 }
 

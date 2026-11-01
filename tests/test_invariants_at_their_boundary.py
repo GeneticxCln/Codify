@@ -14,6 +14,7 @@ configuration) in the key sweep, and the two routes that act on the outside worl
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import tempfile
@@ -34,6 +35,7 @@ from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/herm
 from engine.app import BOOT_TOKEN, app
 from engine.db import connect
 from engine.executor import ExecutorService
+from engine.mcp import McpService
 from engine.model_catalog import ModelCatalogService
 from engine.models import ROLES, AgentRole, TurnCreate
 from engine.providers import Keychain, ProviderFactory
@@ -724,6 +726,135 @@ class TestOneDatabaseFile(unittest.TestCase):
         self.assertEqual(["codify.db"], databases)
 
 
+# --- 10. an MCP server is a data source -----------------------------------------------------------------------
+
+
+def _mcp_handler(request: httpx.Request) -> httpx.Response:
+    """One remote server: initialize, tools/list, and a text tools/call."""
+    body = json.loads(request.content)
+    method = body.get("method")
+    if method == "initialize":
+        return httpx.Response(
+            200,
+            headers={"mcp-session-id": "session-1"},
+            json={
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "result": {
+                    "protocolVersion": "2025-06-18",
+                    "serverInfo": {"name": "test-mcp"},
+                    "capabilities": {"tools": {}},
+                },
+            },
+        )
+    if method == "notifications/initialized":
+        return httpx.Response(202)
+    if method == "tools/list":
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "result": {
+                    "tools": [
+                        {
+                            "name": "search_issues",
+                            "description": "Search issues.",
+                            "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}},
+                        }
+                    ]
+                },
+            },
+        )
+    if method == "tools/call":
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "result": {"content": [{"type": "text", "text": "issue 1 is open"}]},
+            },
+        )
+    raise AssertionError(f"unexpected MCP method: {method}")
+
+
+class TestAnMcpServerIsADataSource(BoundaryCase):
+    """docs/00 section 6.10: admission is Settings', and the model gets one engine-owned tool."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.mcp = McpService(
+            self.conn, self.keychain, transport=httpx.MockTransport(_mcp_handler)
+        )
+        app.state.mcp = self.mcp
+        app.state.executor.mcp = self.mcp
+
+    async def test_only_an_admitted_tool_reaches_the_menu_and_act_needs_a_running_goal(self) -> None:
+        ids = await self.workspace_goal_and_thread()
+
+        def menu() -> set[str]:
+            return {tool.name for tool in app.state.executor.conductor_menu(ids["goal_id"])()}
+
+        self.assertNotIn("call_mcp", menu())
+        self.assertNotIn("list_mcp_tools", menu())
+
+        created = await self.client.post(
+            "/settings/mcp",
+            headers=self.headers,
+            json={"name": "Issues", "url": "https://93.184.216.34/mcp"},
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        server_id = created.json()["id"]
+        # Discovery alone admits nothing: the tool is listed with no authority.
+        self.assertNotIn("call_mcp", menu())
+
+        admitted = await self.client.put(
+            f"/settings/mcp/{server_id}/tools/search_issues",
+            headers=self.headers,
+            json={"authority": "read", "enabled": True},
+        )
+        self.assertEqual(200, admitted.status_code, admitted.text)
+        self.assertIn("call_mcp", menu())
+        self.assertIn("list_mcp_tools", menu())
+
+        # Act is admitted, but a goal that is not RUNNING does not get it in the
+        # menu: the same stored status `write` and `run_command` read.
+        read_off = await self.client.put(
+            f"/settings/mcp/{server_id}/tools/search_issues",
+            headers=self.headers,
+            json={"authority": None, "enabled": False},
+        )
+        self.assertEqual(200, read_off.status_code, read_off.text)
+        act = await self.client.put(
+            f"/settings/mcp/{server_id}/tools/search_issues",
+            headers=self.headers,
+            json={"authority": "act", "enabled": True},
+        )
+        self.assertEqual(200, act.status_code, act.text)
+        self.assertEqual("act", act.json()["authority"])
+        self.assertNotIn("call_mcp", menu(), "an act tool is not offered before the goal runs")
+
+        self.conn.execute("UPDATE goals SET status = 'RUNNING' WHERE id = ?", (ids["goal_id"],))
+        self.conn.commit()
+        self.assertIn("call_mcp", menu())
+        self.assertIn("list_mcp_tools", menu())
+
+        off = await self.client.put(
+            f"/settings/mcp/{server_id}/tools/search_issues",
+            headers=self.headers,
+            json={"authority": None, "enabled": False},
+        )
+        self.assertEqual(200, off.status_code, off.text)
+        self.assertNotIn("call_mcp", menu())
+
+    def test_there_is_no_second_transport_in_the_mcp_module(self) -> None:
+        source = (Path(__file__).resolve().parent.parent / "engine" / "mcp.py").read_text(
+            encoding="utf-8"
+        )
+        for forbidden in ("subprocess", "Popen", "npx", "stdio"):
+            self.assertNotIn(forbidden, source)
+
+
 # --- the ledger ---------------------------------------------------------------------------------------------
 
 ARCHITECTURE = Path(__file__).resolve().parent.parent / "docs" / "00-codify-architecture-overview.md"
@@ -763,6 +894,7 @@ LEDGER: dict[int, tuple[str, ...]] = {
         "tests.test_conductor.TestTheToolsAreThePipelinesDoors.test_write_refuses_and_writes_nothing_while_unapproved",
         "tests.test_write_gate_timing.TestTheConductorRoad",
     ),
+    10: (f"{_HERE}.TestAnMcpServerIsADataSource",),
 }
 
 

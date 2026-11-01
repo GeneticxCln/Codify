@@ -144,6 +144,14 @@ class SettingsService:
         # point of having one; 0 is the escape hatch for a model that is not yet
         # good enough to be trusted with the order, and it needs no rebuild.
         "conductor_drives_execution": (1, lambda v: 1 if v else 0),
+        # Rolling thread summaries (engine/compaction.py). On by default: a long
+        # thread that loses its beginning is the defect the summary exists to
+        # fix, and it only spends a call once four turns have accumulated past
+        # the kept ones. The kept count is deliberately small — the engine sends
+        # at most twelve turns to a model, so keeping forty verbatim would keep
+        # none of the benefit.
+        "session_compact_auto": (1, lambda v: 1 if v else 0),
+        "session_compact_keep_turns": (6, lambda v: max(2, min(v, 40))),
         # Read each answer aloud as it arrives (Settings → Audio). Off unless asked for.
         "tts_auto_read": (0, lambda v: 1 if v else 0),
         # Whether the conductor may navigate, click or type in the user's browser tabs. Off unless a person
@@ -1624,7 +1632,7 @@ class GoalService:
 
     def turn_history(
         self, conversation_id: str, limit: int = 12, *, exclude_goal_id: str | None = None,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         """This thread's earlier turns as (prompt, reply) pairs, oldest first.
 
         Derived from rows that already exist rather than stored, so there is no
@@ -1643,12 +1651,12 @@ class GoalService:
         "(no answer)" under it.
         """
         rows = self._db.execute(
-            """SELECT id, title, description FROM goals
+            """SELECT id, title, description, created_at FROM goals
                WHERE conversation_id = ? AND mode = 'chat' AND id IS NOT ?
                ORDER BY created_at DESC, id DESC LIMIT ?""",
             (conversation_id, exclude_goal_id, max(0, int(limit))),
         ).fetchall()
-        out: list[dict[str, str]] = []
+        out: list[dict[str, Any]] = []
         for r in reversed(rows):
             reply = self._db.execute(
                 """SELECT payload FROM events
@@ -1664,8 +1672,12 @@ class GoalService:
                     break
             out.append(
                 {
+                    "goal_id": r["id"],
                     "prompt": (r["description"] or r["title"] or "").strip(),
                     "reply": text.strip(),
+                    # Compaction's boundary: the last turn a summary replaces. A
+                    # caller that only reads prompt/reply is unaffected.
+                    "created_at": float(r["created_at"]),
                 }
             )
         return out

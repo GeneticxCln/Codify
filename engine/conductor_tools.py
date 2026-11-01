@@ -25,6 +25,7 @@ from engine.executor_support import (
 )
 from engine.fs import FileSystemService, PathEscapeError
 from engine.library import LibraryService, format_command, format_read, format_search
+from engine.mcp import MAX_CALLS_PER_RUN, McpError
 from engine.models import Goal, PlanStep
 from engine.providers import ProviderError
 from engine.recall import (
@@ -35,6 +36,7 @@ from engine.recall import (
     search_threads,
 )
 from engine.sandbox import CommandNotAllowed, validate_argv
+from engine.services import ApiError
 from engine.scan import list_profiles, run_scan
 from engine.skills import SkillSet
 from engine.surface_editor import (
@@ -266,6 +268,8 @@ class ConductorTools:
         'reset_machine',
         'recall',
         'recall_threads',
+        'list_mcp_tools',
+        'call_mcp',
         'recon',
         'design',
         'plan',
@@ -305,6 +309,9 @@ class ConductorTools:
         # How many pages this run has asked the web for, refused or not. Per run for the reason `todo_edits` is: the
         # limit is on how much one run may send out, and a refused attempt has already put its address in the log.
         self.fetches = 0
+        # MCP calls this run attempted, refused ones included: the bound is on how much one run may ask a
+        # remote server, and a refused call still cost a model call to make.
+        self.mcp_calls = 0
 
     def _state_of(self, step_id: str) -> _StepState:
         state = self.state.get(step_id)
@@ -355,6 +362,85 @@ class ConductorTools:
             )
         listed = ", ".join(f"{s.id} ({s.title!r})" for s in steps)
         return f"There is no step called {step_id!r}. The steps are: {listed}"
+
+    async def list_mcp_tools(self, args: dict[str, Any]) -> str:
+        """The admitted tools and their schemas, or a refusal naming the server.
+
+        This reads the settings rows and returns text. It calls no server, so a
+        listing cannot become a request the person did not admit.
+        """
+        mcp = getattr(self.service, "mcp", None)
+        if mcp is None:
+            return "MCP is not configured in this engine, so there are no remote tools to list."
+        try:
+            text: str = mcp.list_for_model(
+                str(args.get("server") or "").strip(),
+                goal_running=self._goal_running(),
+            )
+            return text
+        except McpError as exc:
+            return f"Refused: {exc}"
+
+    def _goal_running(self) -> bool:
+        """The goal's *stored* status, which is what an act tool is gated on.
+
+        Read from the row at call time, not from the `Goal` a run was built with: a
+        plan can be approved after the run started, and a status can change under
+        it. A goal deleted mid-run has no stored status, and is not running.
+        """
+        try:
+            return self.service.goals.get(self.goal_id).status == "RUNNING"
+        except ApiError:
+            return False
+
+    async def call_mcp(self, args: dict[str, Any]) -> str:
+        """One call, and a result that says whose words these are.
+
+        The engine re-reads the stored authority on every call; this method does
+        not trust that the menu was offered, the prompt was told, or the skill
+        named the tool. A `read` tool is callable on any turn; an `act` tool only
+        while the goal's stored status is `RUNNING`, and it is announced before it
+        is sent (docs/20 §5).
+        """
+        if self.mcp_calls >= MAX_CALLS_PER_RUN:
+            return (
+                f"This run has already called MCP tools {MAX_CALLS_PER_RUN} times, which is the "
+                "limit. Use what you have and answer."
+            )
+        self.mcp_calls += 1
+        mcp = getattr(self.service, "mcp", None)
+        if mcp is None:
+            return "MCP is not configured in this engine, so nothing was called."
+        server = str(args.get("server") or "").strip()
+        tool = str(args.get("tool") or "").strip()
+        arguments = args.get("arguments")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            return "Refused: the arguments for an MCP tool must be a JSON object; nothing was sent."
+        def announce(sentence: str) -> None:
+            self.service._log(self.goal_id, None, "info", sentence)
+        try:
+            result = await mcp.call_tool(
+                server, tool, arguments,
+                goal_running=self._goal_running(),
+                announce=announce,
+            )
+        except McpError as exc:
+            # The code, not the server's own message: an error body can echo the
+            # credential, and the goal's log is a response the window renders.
+            self.service._log(
+                self.goal_id, None, "warn",
+                f'MCP call {server or "?"}.{tool or "?"} refused ({exc.code})',
+            )
+            return f"Refused, and retrying will not help: {exc}"
+        self.service._log(
+            self.goal_id, None, "info",
+            f'MCP call {result["server"]}.{result["tool"]} ({result["authority"]}): ok, '
+            f'{result["size"]} chars, {result["duration_ms"]} ms',
+        )
+        text: str = result["text"]
+        return text
 
     async def use_skill(self, args: dict[str, Any]) -> str:
         """One skill's instructions, or the menu if the name is wrong.

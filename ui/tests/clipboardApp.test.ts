@@ -89,8 +89,8 @@ test("the clipboard icon sits right after Notifications, with no word beside it"
     const names = toggleNames(ctx);
     const at = (re: RegExp): number => names.findIndex((n) => re.test(n));
     assert.deepEqual(
-      [at(/^Stats/), at(/^Notifications/), at(/^Clipboard history$/), at(/^History/)].map((n, i, all) => (i === 0 ? n >= 0 : n === all[i - 1] + 1)),
-      [true, true, true, true],
+      [at(/^Stats/), at(/^Session/), at(/^Notifications/), at(/^Clipboard history$/), at(/^History/)].map((n, i, all) => (i === 0 ? n >= 0 : n === all[i - 1] + 1)),
+      [true, true, true, true, true],
       `toggles, in order: ${names.join(" | ")}`,
     );
     const button = toggle(ctx);
@@ -104,19 +104,24 @@ test("the clipboard icon sits right after Notifications, with no word beside it"
   });
 });
 
-test("the four drawers are one at a time, and each button is armed only for its own", async () => {
+test("the five drawers are one at a time, and each button is armed only for its own", async () => {
   await withApp({ viewport: WIDE }, async (ctx) => {
     const armed = (name: RegExp): string | null =>
       [...header(ctx).querySelectorAll("button[aria-pressed]")].find((b) => name.test(b.getAttribute("aria-label") ?? b.textContent ?? ""))?.getAttribute("aria-pressed") ?? null;
     const which = (): string[] =>
       [
         ctx.dom.container.querySelector('[aria-label="Close statistics"]') ? "stats" : "",
+        ctx.dom.container.querySelector('[aria-label="Close session"]') ? "session" : "",
         ctx.dom.container.querySelector('aside[aria-label="Notifications"]') ? "notifications" : "",
         drawer(ctx) ? "clipboard" : "",
         ctx.dom.container.querySelector('[aria-label="Close goal history"]') ? "history" : "",
       ].filter(Boolean);
 
     await ctx.dom.click(ctx.dom.byButton("Stats"));
+    await ctx.dom.click(ctx.dom.byButton("Session"));
+    assert.deepEqual(which(), ["session"], "opening Session left Stats open");
+    assert.equal(armed(/^Session/), "true");
+    assert.equal(armed(/^Stats/), "false");
     await open(ctx);
     assert.deepEqual(which(), ["clipboard"], "opening Clipboard left Stats open");
     assert.equal(armed(/^Clipboard history/), "true");

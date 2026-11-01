@@ -68,6 +68,7 @@ Quoted from `docs/00` §6, which is the owner. Do not weaken one to make a chang
 7. Single SQLite file: `~/.codify/codify.db`. There is no `agents.db`. *(docs/00 §6.7)*
 8. A turn is created only by `POST /conversations/{id}/turns`. `POST /goals` refuses `mode: "chat"`, and `TurnCreate` carries no pipeline flags, so a client chooses neither that a turn exists nor what it becomes — the gate classifies and the conductor disposes. See `docs/09` §10. *(docs/00 §6.8)*
 9. Only the fixer writes for an agent. The `write` move is the single path from a conductor run to the filesystem, it refuses while the goal is unapproved, and no skill, workspace file or conductor reply can widen that. A person's own Save in the editor is one other door, `PUT /workspaces/{id}/file`, and a person's New skill action is the second, `POST /settings/skills` and `POST /settings/skills/import`: both need the boot token, so no agent, skill or conductor tool can call either, and the creator may only create one new file under `.codify/skills/`, never replace or delete another file. A skill is instructions, never a capability. See `docs/09` §10.14. *(docs/00 §6.9)*
+10. An MCP server is a remote data source, never a capability the engine did not define. A server is reached only at an HTTPS endpoint a person added through `/settings/mcp`; there is no stdio transport, no child process, no localhost, loopback, link-local or private-network address, and no redirect off the admitted URL. Its tools never enter the model's tool namespace: every call goes through the engine's `call_mcp`, whose arguments name an admitted server and an admitted tool, and only the settings routes can install, enable or widen either. A person assigns each tool `read` or `act`; `read` tools may be offered on any turn, `act` tools only while the goal's stored status is `RUNNING`, and the engine refuses a call whose authority no longer matches, whatever the model was told. A result is bounded third-party text, labelled as data and never as instructions; it is not recallable and cannot create a plan step, write a file, run a command, change a setting or spend a model call on its own. A server's credential is write-only in the API, lives in the engine's secret store, and never appears in a response or an event; a URL is not a credential store. *(docs/00 §6.10)*
 
 ## Layout
 
@@ -99,7 +100,7 @@ scripts/        fake_ollama.py (drive a goal with no API keys; FAKE_CONDUCTOR=1 
                  make_logo.py, check_history.py (does every commit in a range build),
                  bundle_engine.py / lock_engine.py / smoke_bundle.py (the engine a package carries; packaging/ holds its pin and lock)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–19, below
+docs/           00–20, below
 .githooks/      versioned pre-commit / pre-push
 ```
 
@@ -170,6 +171,7 @@ docs/           00–19, below
 | `docs/18` | Release and updates: a release is a tag (three files and the tag must agree, `scripts/release_notes.py`), the deb and AppImage hold the shell and the engine with its own CPython (the bundle, its pinned interpreter and hashed lock, the smoke that boots it before publishing), the workflow's decisions, and what the About tab's update button does and refuses — one GET to GitHub when a person clicks, a package written to their downloads folder, nothing installed |
 | `docs/17` | The leanrea audit: the 8 KB routing-table skill that argues against REA's 207 tools — what is already this engine's design, the gap its trap list found (`search_code` now names the directories its walk pruned), the measured cost of one conductor call, and the two small rows built |
 | `docs/19` | The deepseek-stack audit: 29 skills read in full, the 24 native recipes built from them, what each does, and which actions stay with a person (push, merge, comments, screenshots, parallel models) |
+| `docs/20` | The MCP admission design: invariant 10 (a remote data source, never a capability), remote-only transport, per-tool Read/Act authority, and the tests that hold it. **Phase 3 is built: per-tool Read/Act authority, `list_mcp_tools` and `call_mcp`; act is gated on the goal's stored `RUNNING` status** |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.

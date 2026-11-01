@@ -29,10 +29,12 @@ from fastapi.responses import JSONResponse
 from engine import capabilities, home, speech, watchdog
 from engine import github_remote
 from engine.db import connect
+from engine.compaction import CompactionService
 from engine.conductor_tools import ConductorTools
 from engine.executor import ExecutorService
 from engine.git import GitService
 from engine.laya import LayaService, checkpoint_problem
+from engine.mcp import McpService
 from engine.role_repair import plan_role_repair
 from engine.spawn_guard import guarded_argv, guarded_env
 from engine.stats import build_overview, normalize_window
@@ -59,6 +61,7 @@ from engine.models import (
     ROLE_TIMING,
     AgentConfig,
     AgentConfigUpdate,
+    CompactionStatus,
     Conversation,
     ConversationCreate,
     ConversationTurn,
@@ -68,6 +71,9 @@ from engine.models import (
     GoalConversationUpdate,
     GoalCreate,
     GoalDetail,
+    McpServerCreate,
+    McpServerUpdate,
+    McpToolUpdate,
     PlanStep,
     PlanStepUpdate,
     ShellTab,
@@ -252,8 +258,15 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     # strip. What each tab is *showing* stays in the window that shows it.
     app.state.shell_tabs = ShellTabService(conn)
     app.state.goals = GoalService(conn)
+    # Rolling summaries of a thread's earlier turns (engine/compaction.py). It
+    # reads the same goal rows the transcript does, so a summary can never
+    # disagree with the turns it replaces.
+    app.state.compactions = CompactionService(conn, app.state.goals)
     app.state.sandbox = SandboxService()
     app.state.settings = SettingsService(conn)
+    # The MCP admission list, its probe, and the read-only call path a person's
+    # per-tool authority unlocks (`engine/mcp.py`, docs/20).
+    app.state.mcp = McpService(conn, keychain)
     app.state.models = ModelCatalogService(app.state.registry, keychain)
     # One frozen statistics document per past day, written lazily on the first
     # stats read after a day ends (see engine/stats_history.py).
@@ -291,6 +304,8 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
         surfaces=app.state.surfaces,
     )
     app.state.executor.settings = app.state.settings
+    app.state.executor.compactions = app.state.compactions
+    app.state.executor.mcp = app.state.mcp
     app.state.token = BOOT_TOKEN
 
     # Engine-level WebSocket connections, each with a queue the watcher can hand a
@@ -1353,6 +1368,10 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     # A switch rather than a number a user has to know the meaning of, stored as
     # the 0/1 the engine already reads.
     "conductor_drives_execution": (0, 1),
+    # Thread compaction (engine/compaction.py): whether a turn may summarise the
+    # thread before answering, and how many recent turns stay verbatim.
+    "session_compact_auto": (0, 1),
+    "session_compact_keep_turns": (2, 40),
     # Read each answer aloud as it arrives (Settings → Audio). Off by default: a
     # voice that starts talking unasked is not something a fresh install does.
     "tts_auto_read": (0, 1),
@@ -1366,7 +1385,9 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
 
 # The integer settings that are really switches, so a checkbox's `true` is a 1
 # rather than the truthiness trap it would be for a number someone chooses.
-ENGINE_SWITCH_SETTINGS = frozenset({"conductor_drives_execution", "tts_auto_read", "browser_actions"})
+ENGINE_SWITCH_SETTINGS = frozenset({
+    "conductor_drives_execution", "tts_auto_read", "browser_actions", "session_compact_auto",
+})
 
 # The string settings (the conductor's own provider and model, voice, web pages), keyed to the longest
 # value each accepts. They are settings rather than an `AgentConfig` row because docs/00 §6.1 fixes
@@ -1416,6 +1437,62 @@ def _skills_workspace(request: Request, workspace_id: str | None) -> Workspace:
     if workspaces is None:
         raise ApiError(503, "workspace_unavailable", "workspaces are not available")
     return workspaces.get(workspace_id)
+
+
+def _mcp_service(request: Request) -> McpService:
+    service: McpService | None = getattr(request.app.state, "mcp", None)
+    if service is None:
+        raise ApiError(503, "mcp_unavailable", "MCP settings are not available")
+    return service
+
+
+@app.get("/settings/mcp")
+async def list_mcp_servers(request: Request) -> list[dict[str, Any]]:
+    """Admitted servers and the tools last discovered on them.
+
+    This is the list Settings draws. A tool is callable only after a person
+    admits it with Read authority through the tool route below; the listing
+    itself changes nothing.
+    """
+    return _mcp_service(request).servers()
+
+
+@app.post("/settings/mcp", status_code=201)
+async def create_mcp_server(body: McpServerCreate, request: Request) -> dict[str, Any]:
+    """Store one HTTPS server and probe it. A failed probe leaves the row failed."""
+    return await _mcp_service(request).create(body)
+
+
+@app.put("/settings/mcp/{server_id}")
+async def update_mcp_server(
+    server_id: str, body: McpServerUpdate, request: Request
+) -> dict[str, Any]:
+    return await _mcp_service(request).update(server_id, body)
+
+
+@app.delete("/settings/mcp/{server_id}")
+async def delete_mcp_server(server_id: str, request: Request) -> dict[str, Any]:
+    return _mcp_service(request).delete(server_id)
+
+
+@app.post("/settings/mcp/{server_id}/probe")
+async def probe_mcp_server(server_id: str, request: Request) -> dict[str, Any]:
+    """Run `initialize` and `tools/list`; never `tools/call`."""
+    return await _mcp_service(request).probe(server_id)
+
+
+@app.put("/settings/mcp/{server_id}/tools/{tool_name}")
+async def update_mcp_tool(
+    server_id: str, tool_name: str, body: McpToolUpdate, request: Request
+) -> dict[str, Any]:
+    """Admit one discovered tool, or switch it off. This route never calls it."""
+    return _mcp_service(request).set_tool_authority(server_id, tool_name, body)
+
+
+@app.get("/settings/mcp/{server_id}/tools")
+async def list_mcp_server_tools(server_id: str, request: Request) -> list[dict[str, Any]]:
+    """Every discovered tool for one server, with its full description and schema."""
+    return _mcp_service(request).tools(server_id)
 
 
 @app.get("/settings/skills")
@@ -1997,6 +2074,50 @@ async def list_conversation_turns(
     """
     conversations: ConversationService = request.app.state.conversations
     return conversations.turns(conversation_id)
+
+
+@app.get("/conversations/{conversation_id}/compaction", response_model=CompactionStatus)
+async def get_conversation_compaction(
+    conversation_id: str, request: Request
+) -> CompactionStatus:
+    """This thread's rolling summary, and what a compaction would cover now."""
+    request.app.state.conversations.get(conversation_id)
+    compactions: CompactionService = request.app.state.compactions
+    settings: SettingsService = request.app.state.settings
+    return compactions.status(conversation_id, settings)
+
+
+@app.post("/conversations/{conversation_id}/compaction", response_model=CompactionStatus)
+async def compact_conversation(
+    conversation_id: str, request: Request
+) -> CompactionStatus:
+    """Replace this thread's older turns with a summary, on request.
+
+    The raw turns are untouched; only what the next model call is shown changes.
+    A turn still being answered is a 409 rather than a summary built from rows
+    that are still moving.
+    """
+    request.app.state.conversations.get(conversation_id)
+    executor: ExecutorService = request.app.state.executor
+    return await executor.compact_thread(conversation_id)
+
+
+@app.delete("/conversations/{conversation_id}/compaction", response_model=CompactionStatus)
+async def undo_conversation_compaction(
+    conversation_id: str, request: Request
+) -> CompactionStatus:
+    """Forget the newest summary. The turns it replaced were always still there."""
+    request.app.state.conversations.get(conversation_id)
+    compactions: CompactionService = request.app.state.compactions
+    settings: SettingsService = request.app.state.settings
+    if compactions.is_busy(conversation_id):
+        raise ApiError(
+            409, "conversation_busy",
+            "a turn in this thread is still being answered; undo after it finishes",
+        )
+    if not compactions.undo(conversation_id):
+        raise ApiError(404, "nothing_to_undo", "this thread has no compaction to undo")
+    return compactions.status(conversation_id, settings)
 
 
 @app.post("/conversations/{conversation_id}/turns", response_model=Goal)

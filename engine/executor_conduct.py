@@ -12,6 +12,12 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from engine.chat_prompts import CHAT_SYSTEM_PROMPT, CONDUCTOR_SYSTEM_PROMPT
+from engine.compaction import (
+    COMPACTION_SYSTEM_PROMPT,
+    MAX_SUMMARY_CHARS,
+    CompactionPlan,
+    summary_is_usable,
+)
 from engine.conductor import (
     ASK_USER,
     BASE_TOOLS,
@@ -21,6 +27,7 @@ from engine.conductor import (
     EDITOR_TOOLS,
     FETCH_PAGE,
     MACHINE_TOOLS,
+    MCP_TOOLS,
     PAGE_TOOLS,
     STEP_TOOLS,
     without_browser_actions,
@@ -28,7 +35,7 @@ from engine.conductor import (
 from engine.conductor_tools import ConductorTools, _Conducted
 from engine.executor_support import AgentNotConfigured
 from engine.laya import LayaDecision, build_state
-from engine.models import AgentConfig, AgentRole, BUILTIN_PROVIDERS, Goal, PlanStep
+from engine.models import AgentConfig, AgentRole, BUILTIN_PROVIDERS, CompactionStatus, Goal, PlanStep
 from engine.providers import ProviderError
 from engine.recall import build_brief
 from engine.services import ApiError, custom_provider_address
@@ -274,6 +281,12 @@ class _Conduct(_Plan):
                 decision.block_reason or "blocked by Laya", role="laya",
             )
             return
+
+        # Before the answer, so the model is handed the summary this thread now
+        # has rather than the turns it replaces. Auto-compaction is an upgrade
+        # and never a prerequisite: a failed summary is a warning and the turn
+        # goes on with the history it would have had.
+        await self._auto_compact(goal)
 
         # The conductor decides everything, when there is one.
         #
@@ -711,6 +724,13 @@ class _Conduct(_Plan):
             # A tool that can only say "turned off" is a slot a small model spends a call finding that out.
             if not self._web_policy().offered:
                 offered = [t for t in offered if t.name != FETCH_PAGE.name]
+            # Remote MCP tools are offered only when Settings admits a tool this
+            # run may call: a read tool on any turn, an act tool only while the
+            # goal's stored status is RUNNING. A tool the stored rows do not admit
+            # is not a slot a model should spend a call discovering (docs/20 §5).
+            mcp = getattr(self, "mcp", None)
+            if mcp is not None and mcp.has_admitted_tools(goal.status == "RUNNING"):
+                offered.extend(MCP_TOOLS)
             # A question needs somebody to answer it, and a place to be seen. An approved plan that is
             # running has nobody sitting at it (a step ends finished, or paused with a reason, never parked
             # on a question), and once a plan exists the plan is what the person is looking at: they
@@ -1079,15 +1099,16 @@ class _Conduct(_Plan):
 
         menu = self.conductor_menu(goal_id)
 
-        history = (
-            self.goals.turn_history(goal.conversation_id, TURN_HISTORY_TURNS, exclude_goal_id=goal.id)
-            if goal.conversation_id else []
-        )
+        history = self._thread_history(goal)
         # The earlier turns go to the conductor as messages (`history`), so the prompt is not given them a
-        # second time.
+        # second time. The summary replaces the turns it covers and has to be in the prompt, because it is
+        # not one of those messages.
         prompt = (
             prompt_override if prompt_override is not None else self._turn_prompt(goal, with_history=False)
         )
+        summary = self._compaction_brief(goal)
+        if summary:
+            prompt = f"{prompt}\n\n{summary}"
         prompt = f"{prompt}\n\n{self._memory_brief(goal)}\n\n{self._intent_brief(intent, skills)}"
         notes = self._todo_brief(goal_id)
         if notes:
@@ -1245,20 +1266,25 @@ class _Conduct(_Plan):
         return _as_prose(str(raw)) or "(no answer)"
 
     def _turn_prompt(self, goal: Goal, *, with_history: bool = True) -> str:
-        """The user's words, plus this thread's earlier turns.
+        """The user's words, plus this thread's earlier turns and their summary.
 
         The history is capped by `GoalService.turn_history` and trimmed here, so
         a long thread cannot grow a prompt without bound — the oldest turns go
         first, because the most recent exchange is what a follow-up refers to.
+        A compaction summary takes the place of the turns it covers; it is one
+        bounded paragraph where those turns were many.
         """
         parts: list[str] = []
         if goal.conversation_id and with_history:
-            history = self.goals.turn_history(goal.conversation_id, TURN_HISTORY_TURNS, exclude_goal_id=goal.id)
+            summary = self._compaction_brief(goal)
+            if summary:
+                parts.append(summary)
+            history = self._thread_history(goal)
             if history:
                 lines = ["Earlier in this conversation:"]
                 for turn in history:
-                    said = _clip_text(turn["prompt"], 600)
-                    got = _clip_text(turn["reply"], 900) or "(no answer)"
+                    said = _clip_text(str(turn.get("prompt") or ""), 600)
+                    got = _clip_text(str(turn.get("reply") or ""), 900) or "(no answer)"
                     # Two different speakers. Labelling both lines "You:"
                     # leaves the model unable to tell what the user asked from
                     # what it said itself, which is the one distinction the
@@ -1269,6 +1295,149 @@ class _Conduct(_Plan):
                 parts.append("\n".join(lines))
         parts.append(f"The user says: {goal.description}")
         return "\n\n".join(parts)
+
+    def _thread_history(self, goal: Goal) -> list[dict[str, Any]]:
+        """The turns still sent verbatim: after the latest summary's boundary.
+
+        A compaction keeps its newest turns as they were, and those are older
+        than the summary row itself but newer than the turn it replaces. The
+        boundary is therefore `covers_through`, not the row's `created_at`.
+        """
+        if not goal.conversation_id:
+            return []
+        latest = self.compactions.latest(goal.conversation_id) if self.compactions else None
+        history = self.goals.turn_history(
+            goal.conversation_id,
+            TURN_HISTORY_TURNS * 4,
+            exclude_goal_id=goal.id,
+        )
+        if latest is not None:
+            history = [
+                turn for turn in history
+                if float(turn.get("created_at") or 0) > latest.covers_through
+            ]
+        return history[-TURN_HISTORY_TURNS:]
+
+    def _compaction_brief(self, goal: Goal) -> str:
+        """The live summary, or nothing when this thread has never been compacted."""
+        if not goal.conversation_id or self.compactions is None:
+            return ""
+        latest = self.compactions.latest(goal.conversation_id)
+        if latest is None or not latest.summary.strip():
+            return ""
+        return (
+            "Earlier in this conversation, summarised because it was longer than "
+            "the live turns below:\n" + latest.summary
+        )
+
+    async def _auto_compact(self, goal: Goal) -> None:
+        """Compact this thread before the turn is answered, when it is due.
+
+        Never fails the turn: a provider that cannot write a summary is a warning
+        in the log, and the answer goes on with the history the thread already
+        had. A manual compaction in the Session drawer is the explicit path and
+        reports its failure to the person.
+        """
+        if self.compactions is None or self.settings is None or not goal.conversation_id:
+            return
+        if self.settings.get_int("session_compact_auto") != 1:
+            return
+        keep = self.settings.get_int("session_compact_keep_turns")
+        try:
+            plan = self.compactions.plan(
+                goal.conversation_id, keep, exclude_goal_id=goal.id,
+            )
+            if not self.compactions.should_auto(plan):
+                return
+            await self._store_compaction(goal, plan, automatic=True)
+        except Exception as exc:  # noqa: BLE001 — a summary is an upgrade, never a prerequisite
+            self._log(goal.id, None, "warn", f"auto-compaction skipped: {exc}")
+
+    async def compact_thread(self, conversation_id: str, *, automatic: bool = False) -> CompactionStatus:
+        """Compact one thread on request, and return its new status.
+
+        The Session drawer and the turns route are the only callers. The model
+        call is the same one automatic compaction makes; the difference is that
+        this path refuses loudly when there is nothing to do or the thread is
+        still being answered, because a person pressed a button and is owed a
+        sentence.
+        """
+        if self.compactions is None or self.settings is None:
+            raise ApiError(503, "compaction_unavailable", "this engine has no compaction service")
+        if self.compactions.is_busy(conversation_id):
+            raise ApiError(
+                409, "conversation_busy",
+                "a turn in this thread is still being answered; compact after it finishes",
+            )
+        anchor = self.compactions.anchor_goal_id(conversation_id)
+        if anchor is None:
+            raise ApiError(409, "nothing_to_compact", "this thread has no turns to compact")
+        goal = self.goals.get(anchor)
+        keep = self.settings.get_int("session_compact_keep_turns")
+        plan = self.compactions.plan(conversation_id, keep)
+        if plan.compactable == 0:
+            raise ApiError(
+                409, "nothing_to_compact",
+                f"nothing older than the {keep} kept turns is waiting for a summary",
+            )
+        await self._store_compaction(goal, plan, automatic=automatic)
+        return self.compactions.status(conversation_id, self.settings)
+
+    async def _store_compaction(
+        self, goal: Goal, plan: CompactionPlan, *, automatic: bool,
+    ) -> None:
+        """Write one summary and announce it. The caller checked there is one to write."""
+        if self.compactions is None or not goal.conversation_id:
+            return
+        summary = await self._summarise_turns(goal, plan)
+        record = self.compactions.create(
+            goal.conversation_id,
+            summary,
+            plan.compactable,
+            plan.covers_through,
+        )
+        self.goals.publish(self._event(
+            goal.id, None, "session_compacted",
+            {
+                "summary": record.summary,
+                "turns": record.turns,
+                "automatic": automatic,
+                "covers_through": record.covers_through,
+            },
+        ))
+
+    async def _summarise_turns(self, goal: Goal, plan: CompactionPlan) -> str:
+        """One model call, on the same configuration a turn's own answer uses."""
+        if self.compactions is None:
+            raise ApiError(503, "compaction_unavailable", "this engine has no compaction service")
+        role = self._conductor_role()
+        primary = self._picked_config(self.orchestrator.registry.get_config(role), goal)
+        prompt = self.compactions.build_prompt(plan)
+
+        async def ask(extra: str = "") -> str:
+            raw = await self.orchestrator.run_agent(
+                role, goal.id, None, prompt + extra,
+                system=COMPACTION_SYSTEM_PROMPT, raw_output=True, primary=primary,
+            )
+            return _as_prose(str(raw)).strip()
+
+        summary = await ask()
+        if not summary_is_usable(summary):
+            # One same-model re-ask, for the same reason a reply that cannot be
+            # parsed gets one: a local model can answer `{}` or a JSON-shaped
+            # fragment to a prose request, and spending a second call is cheaper
+            # than losing the summary for the rest of the thread. Anything still
+            # unusable is refused below and never reaches the store.
+            summary = await ask(
+                "\n\nYour previous reply was not usable prose: it began with "
+                "JSON, a code fence or punctuation, or it repeated punctuation. "
+                "Write 2-5 plain sentences about the transcript. Do not use "
+                "JSON, braces, code fences, headings, bullets or markdown. "
+                "Begin with a word."
+            )
+        if not summary_is_usable(summary):
+            raise ApiError(502, "compaction_failed", "the model returned no usable summary; nothing was changed")
+        return summary[:MAX_SUMMARY_CHARS]
 
     def _conductor_config(self, base: AgentConfig) -> AgentConfig:
         """The conductor's own provider/model, if the settings name one.

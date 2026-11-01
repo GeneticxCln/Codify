@@ -98,6 +98,7 @@ EventType = Literal[
     "model_delta",
     "error",
     "todo_updated",
+    "session_compacted",
 ]
 
 SYSTEM_PROMPT_OVERRIDE_MAX = 32768
@@ -401,6 +402,47 @@ class SkillCreate(BaseModel):
     instructions: str = Field(..., min_length=1)
 
 
+# A remote MCP server is admitted from Settings and probed for its tool list;
+# nothing here makes a tool callable. `secret` is write-only: the response model
+# is a plain dict built by `engine/mcp.py` and carries `has_secret` instead.
+McpAuthKind = Literal["none", "bearer", "header"]
+
+
+class McpServerCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+    name: str = Field(..., min_length=1, max_length=80)
+    url: str = Field(..., min_length=1, max_length=2048)
+    auth_kind: McpAuthKind = "none"
+    auth_header: str = Field("", max_length=80)
+    secret: str = Field("", max_length=4096)
+    enabled: bool = True
+
+
+class McpServerUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+    name: str | None = Field(None, min_length=1, max_length=80)
+    url: str | None = Field(None, min_length=1, max_length=2048)
+    auth_kind: McpAuthKind | None = None
+    auth_header: str | None = Field(None, max_length=80)
+    # Absent keeps the stored secret; `clear_secret` is the explicit removal.
+    secret: str | None = Field(None, max_length=4096)
+    clear_secret: bool = False
+    enabled: bool | None = None
+
+
+class McpToolUpdate(BaseModel):
+    """A person's authority for one discovered tool (`PUT /settings/mcp/{id}/tools/{tool}`).
+
+    `authority: null` is "not admitted", and an enabled tool needs one. `act` is
+    accepted by the model so the route can refuse it in one voice until the ship
+    that enforces the goal's stored `RUNNING` status; this build admits `read` only.
+    """
+
+    model_config = {"extra": "forbid"}
+    authority: Literal["read", "act"] | None = None
+    enabled: bool = False
+
+
 class SkillImport(BaseModel):
     """An uploaded Markdown file. `filename` is a label and a fallback name, never a path."""
 
@@ -569,6 +611,35 @@ class ConversationTurn(BaseModel):
     prompt: str
     status: GoalStatus
     created_at: float
+
+
+class ConversationCompaction(BaseModel):
+    """One rolling summary of a thread's earlier turns.
+
+    The raw turns stay where they are; this is the second reading the model is
+    shown instead of them. `covers_through` is the `created_at` of the last turn
+    the summary replaces, so the turns after it are exactly the ones still sent
+    verbatim — a timestamp, not a row count, because a turn may be deleted and a
+    count would then point at the wrong boundary.
+    """
+
+    id: str
+    conversation_id: str
+    summary: str
+    turns: int
+    covers_through: float
+    created_at: float
+
+
+class CompactionStatus(BaseModel):
+    """What the Session drawer shows about one thread, from one consistent read."""
+
+    conversation_id: str
+    latest: ConversationCompaction | None = None
+    turns: int
+    compactable: int
+    keep_turns: int
+    auto: bool
 
 
 class ShellTab(BaseModel):

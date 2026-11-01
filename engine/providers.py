@@ -1745,6 +1745,19 @@ class Keychain:
             pass
         return had
 
+    def set_secret(self, ref: str, secret: str) -> None:
+        """Store one secret under an engine-owned reference.
+
+        The provider and agent helpers below are conveniences over this one call. A
+        caller that is neither a provider nor a role (a remote MCP server, for
+        example) gets a reference of its own rather than borrowing a provider's.
+        """
+        self._store(ref, secret)
+
+    def delete_secret(self, ref: str) -> bool:
+        """Forget one engine-owned reference. True when it was present."""
+        return self.forget(ref)
+
     def set_provider_key(self, provider: str, api_key: str) -> None:
         """Store an API key for a provider (OS keychain, or the local file)."""
         self._store(f"providers/{provider}", api_key)

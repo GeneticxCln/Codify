@@ -205,6 +205,7 @@ import {
   type AppNotification,
 } from "./notifications";
 import { NotificationsDrawer } from "./components/NotificationsDrawer";
+import { SessionDrawer } from "./components/SessionDrawer";
 import { ClipboardDrawer } from "./components/ClipboardDrawer";
 import { useClipboardHistory } from "./useClipboardHistory";
 import { ClipboardRecorderContext } from "./clipboardContext";
@@ -272,6 +273,7 @@ import {
   PanelLeftOpen,
   Bell,
   ClipboardList,
+  Archive,
 } from "lucide-react";
 import { notableStderrLines } from "./engineLog";
 import { RainBackdrop } from "./components/ui/RainBackdrop";
@@ -1219,6 +1221,7 @@ export const App: React.FC = () => {
   // and "which one" is what the layout rule below needs to know (`drawers.ts`).
   const [drawer, setDrawer] = useState<Drawer | null>(null);
   const statsOpen = drawer === "stats";
+  const sessionOpen = drawer === "session";
   const historyOpen = drawer === "history";
   const notificationsOpen = drawer === "notifications";
   const clipboardOpen = drawer === "clipboard";
@@ -4293,6 +4296,20 @@ export const App: React.FC = () => {
             <span>Stats</span>
           </Toggle>
 
+          {/* Session: what this thread's model call is actually shown. The same
+              slot as the other drawers, and next to Stats because both are
+              about the engine's own accounting — one across goals, one across
+              the turns of this conversation. */}
+          <Toggle
+            armed={sessionOpen}
+            tone="accent"
+            onClick={() => setDrawer((open) => nextDrawer(open, "session"))}
+            title="Session — this thread's rolling summary, manual compaction, and undo"
+          >
+            <Archive className="w-3.5 h-3.5" />
+            <span>Session</span>
+          </Toggle>
+
           {/* Notifications: goals that finished or failed, plans waiting for approval, engine connection
               changes and model list changes. Between Stats and History because it is the third of the same
               thing (a drawer on the right, armed while open); the unread count is the whole of the badge, and
@@ -4580,6 +4597,13 @@ export const App: React.FC = () => {
               `28rem`, not the `w-96` (24rem) it shipped with: StatsPanel's stage
               table measured 500px of content inside a 384px drawer, so it scrolled
               sideways and clipped its own last column. */}
+        {sessionOpen && (
+          <SessionDrawer
+            conversationId={activeConversationId}
+            onClose={() => setDrawer((open) => closeDrawer(open, "session"))}
+          />
+        )}
+
         {statsOpen && (
           <aside className="w-[28rem] max-w-[45%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
             <div className="flex items-center justify-between px-4 py-3 border-b border-codify-border">

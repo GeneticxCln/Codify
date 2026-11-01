@@ -301,6 +301,35 @@ test("a turn's reply and its live snapshot are both drawn as Markdown", () => {
   assert.ok(!text(streaming).includes("```"), "an open fence showed its backticks while it streamed");
 });
 
+test("a compacted thread shows a boundary marker, and says the transcript is untouched", () => {
+  const markup = timeline([
+    event(1, "session_compacted", {
+      summary: "We chose SQLite and finished the parser.",
+      turns: 8,
+      automatic: true,
+      covers_through: 1,
+    }),
+  ]);
+  const words = text(markup);
+  assert.match(markup, /data-compaction-marker="true"/);
+  assert.match(words, /Conversation compacted/);
+  assert.match(words, /8 earlier turns replaced by a rolling summary automatically/);
+  assert.match(words, /The transcript itself is unchanged/);
+  assert.doesNotMatch(words, /We chose SQLite/, "the marker is not a second copy of the summary");
+
+  const manual = text(
+    timeline([
+      event(1, "session_compacted", {
+        summary: "summary",
+        turns: 1,
+        automatic: false,
+        covers_through: 1,
+      }),
+    ]),
+  );
+  assert.match(manual, /1 earlier turn replaced by a rolling summary when you pressed Compact/);
+});
+
 test("a plan step's description keeps its marks, and the person's own message wraps", () => {
   const markup = timeline([event(1, "goal_status", { status: "PENDING" })], {
     status: "PENDING",
