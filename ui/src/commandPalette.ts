@@ -110,6 +110,7 @@ export const SETTINGS_ENTRIES: ReadonlyArray<{
 }> = [
   { id: "settings:keys", title: "Provider keys & endpoints", settingsTab: "keys" },
   { id: "settings:agents", title: "Agent roles & prompts", settingsTab: "agents" },
+  { id: "settings:skills", title: "Agent skills: choose what the conductor may use", settingsTab: "skills" },
   { id: "settings:audio", title: "Audio: microphone, dictation & read-aloud", settingsTab: "audio" },
   { id: "settings:appearance", title: "Appearance, themes & UI scale", settingsTab: "appearance" },
   { id: "settings:about", title: "About Codify", settingsTab: "about" },

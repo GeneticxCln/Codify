@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
-from engine import binary_analysis, usage_audit
+from engine import binary_analysis, github_remote, usage_audit
 from engine.ask import AskRefused, parse_question
 from engine.conductor import DEFAULT_MAX_TURNS, EndTurn
 from engine.executor_support import (
@@ -250,6 +250,7 @@ class ConductorTools:
         'analyze_binary',
         'audit_usage',
         'git_history',
+        'read_ci',
         'run_command',
         'read_page',
         'navigate_page',
@@ -433,12 +434,13 @@ class ConductorTools:
             return f"That scan did not run: {exc}."
 
     async def analyze_binary(self, args: dict[str, Any]) -> str:
-        """What Ghidra knows about one compiled workspace file, from a one-shot analysis of a private copy.
+        """What one compiled workspace file contains, read by the engine's own inspector (`engine/binary_inspect.py`).
 
-        The door is `engine/binary_analysis.py` (`docs/14` §4): its own guarded spawn site, an engine-owned export
-        script, the engine's limits, a stripped environment, and output framed as the binary's own words. The model
-        supplies a path, a view from a fixed list and a literal filter, never a flag, a script or a regex. A refusal
-        says what happened, whether trying again could help, and what to do, in one sentence the model can branch on.
+        The native reader parses ELF, PE and Mach-O headers, symbol and export tables, imports, sections, strings and
+        direct calls in Python; no process is started and nothing is written to the workspace. Ghidra is the fallback
+        in `engine/binary_analysis.py` for a format the reader refuses. The model supplies a path, a view from a fixed
+        list and a literal filter, never a flag, a script or a regex. A refusal says what happened, whether trying
+        again could help, and what to do, in one sentence the model can branch on.
         """
         try:
             limit = int(args["limit"]) if args.get("limit") is not None else binary_analysis.DEFAULT_LIMIT
@@ -485,6 +487,21 @@ class ConductorTools:
         # A thread, because git is a subprocess: a `log` over a long history
         # used to hold the event loop behind it.
         return await asyncio.to_thread(self.git.read_only, self.root, args.get("args") or [])
+
+    async def read_ci(self, args: dict[str, Any]) -> str:
+        """GitHub's checks for this workspace's current commit, read-only and tokenless.
+
+        The repository and commit come from the workspace's own `origin` and `HEAD`, never from an argument:
+        the model cannot name a different repository, a different commit or an address. No credential is sent,
+        and a private repository's 404 is reported as `unknown` rather than read as a pass. A check's name is
+        repository text; `format_checks` frames it as data.
+        """
+        answer = await github_remote.read_checks(self.root)
+        self.service._log(
+            self.goal_id, None, "info",
+            f"conductor read CI for {answer.get('sha') or 'no commit'}: {answer.get('state')}",
+        )
+        return github_remote.format_checks(answer)
 
     async def run_command(self, args: dict[str, Any]) -> str:
         argv = args.get("argv") or []

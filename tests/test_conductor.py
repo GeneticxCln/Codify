@@ -37,6 +37,7 @@ from engine.conductor import (
     EDITOR_TOOLS,
     MACHINE_TOOLS,
     PAGE_TOOLS,
+    READ_CI,
     TOOLS,
     Conductor,
     tool_names,
@@ -101,6 +102,10 @@ class _ToolProvider(BaseProvider):
         # scripted double that only returns canned JSON cannot show the
         # difference — see `TestTheConductorCanDirectWhatItSummons`.
         self.seen_prompts: list[tuple[str, str]] = []
+        # The conductor's system prompt, where the skill menu lives. Recorded because a turn that
+        # never sees a skill's name cannot decide to read it, and a test of the tool result alone
+        # would miss a menu that stopped being built.
+        self.seen_systems: list[str] = []
 
     @property
     def supports_tools(self) -> bool:
@@ -109,7 +114,7 @@ class _ToolProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None
     ) -> str:
         # Keyed on the role's own self-description rather than a loose
         # substring: the planner's prompt *mentions* a design contract, so a
@@ -131,6 +136,7 @@ class _ToolProvider(BaseProvider):
         *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
         self.seen_tools.append([t.name for t in tools])
+        self.seen_systems.append(system_prompt)
         self.seen_messages.append([dict(m) for m in messages])
         if not self.replies:
             return ToolReply(text="I have run out of things to say.")
@@ -143,7 +149,7 @@ class _PlainProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None
     ) -> str:
         return "a plain answer"
 
@@ -178,8 +184,8 @@ class _DyingProvider(_ToolProvider):
         )
 
 
-def _call(name: str, **arguments: Any) -> ToolCall:
-    return ToolCall(id=f"c_{name}", name=name, arguments=arguments)
+def _call(tool: str, **arguments: Any) -> ToolCall:
+    return ToolCall(id=f"c_{tool}", name=tool, arguments=arguments)
 
 
 class ConductorTestCase(unittest.IsolatedAsyncioTestCase):
@@ -363,16 +369,14 @@ class TestTheMenuOnlyOffersWhatCanAct(ConductorTestCase):
     def _names(self, executor: Any) -> set[str]:
         return {tool.name for tool in executor.conductor_menu(self.goal.id)()}
 
-    def test_with_no_window_and_no_ghidra_the_desktop_and_binary_tools_are_absent(self) -> None:
+    def test_with_no_window_the_desktop_tools_are_absent_and_binary_analysis_is_not(self) -> None:
         executor = self._executor(_ToolProvider())
         executor.settings = self.settings
+        names = self._names(executor)
 
-        with mock.patch("engine.executor_conduct.ghidra_available", return_value=False):
-            names = self._names(executor)
-
-        for gone in (*EDITOR_TOOLS, *MACHINE_TOOLS, *PAGE_TOOLS, ANALYZE_BINARY.name):
-            self.assertNotIn(gone, names, f"{gone} can only refuse without a window or Ghidra")
-        for kept in ("read_file", "search_code", "run_command", "recon", "plan"):
+        for gone in (*EDITOR_TOOLS, *MACHINE_TOOLS, *PAGE_TOOLS):
+            self.assertNotIn(gone, names, f"{gone} can only refuse without a window")
+        for kept in ("read_file", "search_code", "run_command", "recon", "plan", ANALYZE_BINARY.name, READ_CI.name):
             self.assertIn(kept, names)
 
     def test_a_window_brings_the_editor_back_but_machines_need_one_open_in_this_workspace(self) -> None:
@@ -382,15 +386,14 @@ class TestTheMenuOnlyOffersWhatCanAct(ConductorTestCase):
         executor.surfaces = SurfaceBridge()
         executor.surfaces.note_ui()
 
-        with mock.patch("engine.executor_conduct.ghidra_available", return_value=True):
-            without_machine = self._names(executor)
-            self.assertIn("read_page", without_machine)
-            self.assertIn("read_editor", without_machine)
-            self.assertIn("analyze_binary", without_machine)
-            self.assertNotIn("read_machine", without_machine)
+        without_machine = self._names(executor)
+        self.assertIn("read_page", without_machine)
+        self.assertIn("read_editor", without_machine)
+        self.assertIn("analyze_binary", without_machine)
+        self.assertNotIn("read_machine", without_machine)
 
-            executor.surfaces.note_window([self.ws.id])
-            with_machine = self._names(executor)
+        executor.surfaces.note_window([self.ws.id])
+        with_machine = self._names(executor)
 
         self.assertIn("read_machine", with_machine)
         self.assertIn("run_in_machine", with_machine)
@@ -546,7 +549,7 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
         self.assertEqual(
             names,
             {
-                "read_file", "search_code", "scan_code", "analyze_binary", "audit_usage", "git_history", "run_command",
+                "read_file", "search_code", "scan_code", "analyze_binary", "audit_usage", "git_history", "read_ci", "run_command",
                 "read_page", "navigate_page", "click_page", "type_page", "fetch_page",
                 "read_editor", "open_in_editor", "edit_editor",
                 "read_machine", "run_in_machine", "key_in_machine", "reset_machine",
@@ -962,6 +965,74 @@ class TestCancelStopsAConductorRun(ConductorTestCase):
             "a cancelled turn fell through to the engine's own sequence",
         )
         self.assertEqual([], [p for p in provider.seen_prompts if "planner" in p[0].lower()])
+
+
+class TestTheNewBuiltInsSurviveARealTurn(ConductorTestCase):
+    """The skills a real conductor loads, through the loop a person's question actually runs.
+
+    A body pinned in `tests/test_skills.py` is only prose until the loop offers it, the model asks for
+    it, and the body comes back as the next call's tool result. That is what this drives: the real
+    `run_chat`, the real skill loader, and the real `use_skill` handler. It also checks the engine's
+    note about moves that are not on the menu yet, because each of these three declares a write or a
+    verification and a turn is not approved to run one.
+    """
+
+    # Phrases the model must receive, not sentences this test invented: each is load-bearing in the
+    # skill and would be a different recipe if it disappeared.
+    CASES = {
+        "blast-radius": ("one or two facts", "asserted", "Before approval it is read-only"),
+        "prove": ("baseline", "first error", "five iterations", "Before a plan is approved it is read-only"),
+        "design-review": (
+            "no screenshot tool", "not checked visually", "Apply the top three to five",
+            "Before the plan is approved",
+        ),
+    }
+
+    async def _load_in_a_turn(self, name: str) -> _ToolProvider:
+        provider = _ToolProvider([
+            ToolReply(tool_calls=[_call("use_skill", name=name)]),
+            ToolReply(text=f"I read {name}."),
+        ])
+        executor = self._executor(provider)
+        goal = self.goals.create_turn(self.thread.id, TurnCreate(prompt="look at this"))
+        await executor.run_chat(goal.id)
+        self.assertEqual(2, len(provider.seen_messages), f"{name} did not take two model calls")
+        return provider
+
+    async def test_the_menu_offers_each_skill_and_the_body_reaches_the_next_call(self) -> None:
+        for name, phrases in self.CASES.items():
+            with self.subTest(skill=name):
+                provider = await self._load_in_a_turn(name)
+
+                self.assertIn(f"- {name}:", provider.seen_systems[0], f"{name} is missing from the menu")
+                result = [
+                    m for m in provider.seen_messages[1] if m.get("role") == "tool"
+                ]
+                self.assertEqual(1, len(result), f"{name} produced no tool result")
+                # The body is markdown and wraps; the contract is the sentence, not its line breaks.
+                body = " ".join(str(result[0].get("content") or "").split())
+                for phrase in phrases:
+                    self.assertIn(phrase, body, f"{name} lost {phrase!r} in the turn")
+
+                # The turn is unapproved, so the engine must warn before the model tries `write` or
+                # `verify`. Silently dropping the note would make the model's first attempt a refusal.
+                self.assertIn("not on your menu right now", body, name)
+                self.assertIn("this note does not add them", body, name)
+
+    async def test_a_disabled_skill_is_absent_from_the_conductor_menu(self) -> None:
+        # The settings toggle is only real if the loop stops offering the name. This runs
+        # the same turn path and reads the system prompt the provider was actually handed.
+        self.workspaces.set_skill_enabled(self.ws.id, "blast-radius", False)
+        provider = _ToolProvider([ToolReply(text="done")])
+        executor = self._executor(provider)
+        executor.settings = self.settings
+        goal = self.goals.create_turn(self.thread.id, TurnCreate(prompt="look at this"))
+
+        await executor.run_chat(goal.id)
+
+        menu = provider.seen_systems[0]
+        self.assertNotIn("- blast-radius:", menu)
+        self.assertIn("- prove:", menu, "turning one skill off must not empty the menu")
 
 
 class TestToolDialects(unittest.TestCase):

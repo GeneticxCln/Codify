@@ -269,8 +269,9 @@ const UpdatePanel: React.FC = () => {
  * It is the one place in Settings that *writes* something — the release package, into the
  * person's Downloads folder, when they press Download — and it still writes no
  * configuration: agent config comes from the settings routes alone (docs/02 §1). The update
- * check is also the one request this app makes that is not a model provider's, so it is
- * named in the sentence above it and made only on a click (docs/18 §4).
+ * check is the one request this pane makes that is not a model provider's, so it is named in
+ * the sentence above it and made only on a click (docs/18 §4). A workspace push is separate:
+ * its checks read (`docs/04` §6) happens only after the person pushes.
  *
  * A download is minutes long, so the button says how far it has come while it runs, from the
  * shell's own announcements (`update-progress` → `updateProgress.ts`). Nothing else in the pane

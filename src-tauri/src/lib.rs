@@ -7,7 +7,7 @@ mod terminal;
 mod update;
 mod webview_bridge;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Listener, Manager, State};
@@ -855,6 +855,10 @@ pub struct AgentConfig {
     pub system_prompt_override: Option<String>,
     pub temperature: f64,
     pub max_tokens: u32,
+    // Null is the provider's own default. It has to be on this struct as well as the patch, or
+    // serde drops it from every config the settings screen reads back.
+    #[serde(default)]
+    pub thinking_effort: Option<String>,
     // The role's second target. These have to be here, not just in the engine's
     // schema: this struct is what deserializes the frontend's patch, so a field
     // missing from it is dropped silently — the card would say "Saved" about a
@@ -864,6 +868,19 @@ pub struct AgentConfig {
     pub fallback_protocol: Option<String>,
     pub fallback_base_url: Option<String>,
     pub updated_at: f64,
+}
+
+/// Read a field that is absent, null, or a string as three different things.
+///
+/// `Option<Option<String>>` alone cannot do this: serde's `Option` visitor reads a JSON `null` as
+/// `None` before the inner option is reached, so an explicit clear would be indistinguishable from
+/// a field the person never touched. This is only called when the field is present; `#[serde(default)]`
+/// gives the absent case its own value.
+fn deserialize_clearable<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -886,6 +903,14 @@ pub struct AgentConfigPatch {
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    // Some(None) is an explicit null and returns the role to its provider's default; absent is
+    // "no change". The engine treats those differently, so the shell must not collapse them.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_clearable"
+    )]
+    pub thinking_effort: Option<Option<String>>,
     // Removing a fallback sends an empty provider rather than null: through this
     // struct a `null` and an absent field are the same thing, and "no fallback"
     // must be distinguishable from "leave it alone". The engine reads an empty
@@ -2640,14 +2665,39 @@ mod tests {
     use super::{
         await_exit, claim_shutdown, display_backend, engine_has_gone, oldest_web_process,
         shell_boot_id, stat_cpu_ticks, stat_identity, stat_start_time, stop_engine, stop_grace,
-        tabs_smoke_requested, tabs_smoke_seed_body, tabs_smoke_seed_url, EngineProcess,
-        EngineState, EngineStop, SharedEngineState, DEFAULT_STOP_GRACE, ENGINE_STOP_POLL,
-        STOP_GRACE_SLACK, TABS_SMOKE_ENV, TABS_SMOKE_LINE, TABS_SMOKE_SEED_KEY,
+        tabs_smoke_requested, tabs_smoke_seed_body, tabs_smoke_seed_url, AgentConfigPatch,
+        EngineProcess, EngineState, EngineStop, SharedEngineState, DEFAULT_STOP_GRACE,
+        ENGINE_STOP_POLL, STOP_GRACE_SLACK, TABS_SMOKE_ENV, TABS_SMOKE_LINE, TABS_SMOKE_SEED_KEY,
     };
     use super::{render_watchdog, RENDER_STARVED_EVENT};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn a_thinking_effort_patch_tells_absent_from_null() {
+        // The engine treats null as "back to the provider's default" and absent as "no change".
+        // Serde's plain `Option` collapses the two at this boundary, which would make the card's
+        // clear button save a level that comes straight back.
+        let absent: AgentConfigPatch = serde_json::from_str("{}").expect("an empty patch");
+        assert!(absent.thinking_effort.is_none());
+        assert!(serde_json::to_value(&absent)
+            .expect("a patch")
+            .get("thinking_effort")
+            .is_none());
+
+        let clear: AgentConfigPatch =
+            serde_json::from_str(r#"{"thinking_effort":null}"#).expect("a clear");
+        assert_eq!(Some(None), clear.thinking_effort);
+        assert_eq!(
+            serde_json::Value::Null,
+            serde_json::to_value(&clear).expect("a clear patch")["thinking_effort"]
+        );
+
+        let high: AgentConfigPatch =
+            serde_json::from_str(r#"{"thinking_effort":"high"}"#).expect("a level");
+        assert_eq!(Some(Some("high".to_string())), high.thinking_effort);
+    }
 
     #[test]
     fn the_render_watchdog_announces_once_after_four_hot_seconds() {

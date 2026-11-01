@@ -8,6 +8,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 # The read-only argv law lives in `engine/sandbox.py` and it is the *only*
 # copy: the librarian's `run_command(mode="read_only")` and this class's
@@ -29,6 +30,39 @@ from engine.sandbox import (
 from engine.spawn_guard import guarded_argv, guarded_env
 
 
+def sanitize_remote_url(url: str) -> str:
+    """The URL a person can see, with credentials embedded in it removed.
+
+    A workspace's `origin` is workspace content: it can hold a username and a token
+    (`https://user:token@host/...`) or a token in the username position
+    (`https://ghp_...@host/...`). The push route answers with the remote it used, and
+    that answer is rendered; echoing the userinfo would put a live credential in a
+    response and on screen. Host, path, query and fragment are kept exactly.
+    `git@`/`hg@` in the scp-like and SSH spellings is the conventional login, not a
+    secret, so it is kept; every other userinfo is dropped.
+    """
+    text = (url or "").strip()
+    if not text:
+        return text
+    if "://" not in text:
+        user, at, rest = text.partition("@")
+        if not at:
+            return text
+        return text if user in ("git", "hg") else rest
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return text
+    if parsed.username is None and parsed.password is None:
+        return text
+    if parsed.password is None and parsed.username in ("git", "hg"):
+        return text
+    # `netloc` keeps the host, port and IPv6 brackets exactly as written; only the
+    # `userinfo@` in front of it is removed.
+    host = parsed.netloc.rpartition("@")[2]
+    return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
+
+
 class GitService:
     """The engine's git, one process deeper than it looks.
 
@@ -48,6 +82,10 @@ class GitService:
     # but not post-commit: a hook there runs after the commit exists, and without a
     # limit it can hold the step (and Cancel, which waits for the step) forever.
     commit_timeout_s: float = 120.0
+
+    # How long a person's push may run. Unlike a commit this crosses the network, and a slow
+    # remote is still a finite wait; a button that leaves a process behind forever is not.
+    push_timeout_s: float = 180.0
 
     def __init__(self) -> None:
         self._git_bin = shutil.which("git") or "git"
@@ -151,6 +189,119 @@ class GitService:
         return {
             "branch": branch, "detached": False, "dirty": dirty,
             "ahead": ahead, "behind": behind, "reason": None,
+        }
+
+    # ── pushing, which is a person's action and never a model's ─────────
+
+    @staticmethod
+    def _push_env() -> dict[str, str]:
+        """`_workspace_env` plus the two knobs a non-interactive push needs.
+
+        Provider keys stay stripped, exactly as they are for a commit: a `pre-push` hook is workspace
+        content too. The ssh agent and askpass socket are added because they are how the person's own
+        terminal authenticates, and a push that cannot reach them is a button that only works for HTTPS
+        users with a plain credential store. `GIT_TERMINAL_PROMPT=0` is the one addition that is not an
+        inherited channel: the engine has no terminal to prompt on, so git must fail with a sentence
+        rather than wait on a question nobody can see.
+        """
+        env = GitService._workspace_env()
+        for name in ("SSH_AUTH_SOCK", "GIT_ASKPASS"):
+            if name in os.environ:
+                env[name] = os.environ[name]
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        return env
+
+    def remote_url(self, root_path: str, name: str = "origin") -> str | None:
+        """The URL of one remote, or None. The route derives GitHub facts from this, never from a request."""
+        try:
+            res = self._run_text(
+                ["remote", "get-url", name],
+                cwd=str(Path(root_path).resolve()),
+                env=self._workspace_env(),
+                timeout=self.read_only_timeout_s,
+                capped=True,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if res.returncode != 0:
+            return None
+        lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+        return lines[0] if lines else None
+
+    def head_sha(self, root_path: str) -> str | None:
+        """The commit HEAD names, or None for an unborn or unreadable repository."""
+        try:
+            res = self._run_text(
+                ["rev-parse", "HEAD"],
+                cwd=str(Path(root_path).resolve()),
+                env=self._workspace_env(),
+                timeout=self.read_only_timeout_s,
+                capped=True,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        sha = res.stdout.strip().splitlines()[0].strip() if res.stdout.strip() else ""
+        if res.returncode != 0 or not 7 <= len(sha) <= 64:
+            return None
+        return sha if all(ch in "0123456789abcdef" for ch in sha) else None
+
+    def push(self, root_path: str) -> dict[str, Any]:
+        """Push the current branch to `origin`, for the person who pressed the button.
+
+        The branch is read from the repository (the same status the header shows), not supplied by the
+        caller, and the refspec is fully qualified, so a branch name can never be parsed as an option.
+        A failed push is a result rather than an exception: "your ssh key was refused" is a sentence the
+        panel can show, and a 500 would lose it.
+
+        This is not the conductor's door. No tool reaches it, no skill can call it, and it requires the
+        boot token like every route; the model can write files only through the fixer's `write` move
+        (`docs/00` §6.9). Pushing is the person deciding those writes are ready to share.
+        """
+        root = str(Path(root_path).resolve())
+        if not self.is_git_repo(root):
+            return {"ok": False, "reason": "This workspace is not a git repository."}
+        state = self.status(root)
+        branch = state.get("branch")
+        if not branch:
+            return {"ok": False, "reason": state.get("reason") or "There is no branch to push."}
+        raw_remote = self.remote_url(root)
+        if not raw_remote:
+            return {
+                "ok": False, "branch": branch,
+                "reason": "This repository has no `origin` remote to push to.",
+            }
+        # The route echoes this to the window, which renders it. A token embedded in
+        # `origin` must not leave in that answer, but the push above still uses the
+        # remote's name, so the URL itself is only ever display data here.
+        remote = sanitize_remote_url(raw_remote)
+        refspec = f"refs/heads/{branch}:refs/heads/{branch}"
+        try:
+            res = self._run_text(
+                ["push", "--porcelain", "origin", refspec],
+                cwd=root,
+                env=self._push_env(),
+                timeout=self.push_timeout_s,
+                capped=True,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False, "branch": branch, "remote": remote,
+                "reason": f"git push did not finish in {self.push_timeout_s:g}s.",
+            }
+        except OSError as exc:
+            return {
+                "ok": False, "branch": branch, "remote": remote,
+                "reason": f"git push could not run: {exc}",
+            }
+        if res.returncode != 0:
+            said = (res.stderr or res.stdout or "").strip().splitlines()
+            return {
+                "ok": False, "branch": branch, "remote": remote,
+                "reason": said[-1] if said else "git push failed.",
+            }
+        return {
+            "ok": True, "branch": branch, "remote": remote,
+            "sha": self.head_sha(root), "reason": None,
         }
 
     # ── the one way this class starts a process ─────────────────────────

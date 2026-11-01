@@ -18,8 +18,8 @@ test("Settings has an About tab after Appearance, and it shows the shortcuts", a
     await ctx.settle();
     const tabs = [...ctx.dom.container.querySelectorAll("button")]
       .map((b) => (b.textContent ?? "").trim())
-      .filter((t) => ["Provider Keys", "Agent Roles", "Audio", "Appearance", "About"].includes(t));
-    assert.deepEqual(tabs, ["Provider Keys", "Agent Roles", "Audio", "Appearance", "About"]);
+      .filter((t) => ["Provider Keys", "Agent Roles", "Agent skills", "Audio", "Appearance", "About"].includes(t));
+    assert.deepEqual(tabs, ["Provider Keys", "Agent Roles", "Agent skills", "Audio", "Appearance", "About"]);
     assert.doesNotMatch(ctx.dom.text(), /Keyboard shortcuts/, "About content showed on another tab");
 
     await ctx.dom.click(ctx.dom.byButton("About"));
@@ -27,6 +27,47 @@ test("Settings has an About tab after Appearance, and it shows the shortcuts", a
     assert.match(ctx.dom.text(), /Keyboard shortcuts/);
     assert.match(ctx.dom.text(), /What this app is, what it is running on/, "the header subtitle did not follow the tab");
   });
+});
+
+test("Agent skills sits directly after Agent Roles and opens the skills pane", async () => {
+  await withApp(
+    {
+      answers: {
+        "GET /settings/skills": {
+          body: {
+            workspace_id: "ws-a",
+            skills: [
+              {
+                name: "prove",
+                description: "Prove a change with the narrowest real check.",
+                source: "built-in",
+                moves: [],
+                enabled: true,
+              },
+            ],
+            disabled: [],
+            problems: [],
+            shadows: [],
+          },
+        },
+      },
+    },
+    async (ctx) => {
+      await ctx.dom.click(ctx.dom.byButton("Settings"));
+      await ctx.settle();
+
+      const order = ["Provider Keys", "Agent Roles", "Agent skills", "Audio", "Appearance", "About"];
+      const shown = [...ctx.dom.container.querySelectorAll("button")]
+        .map((button) => (button.textContent ?? "").trim())
+        .filter((text) => order.includes(text));
+      assert.deepEqual(shown, order, "Agent skills must be the tab immediately after Agent Roles");
+
+      await ctx.dom.click(ctx.dom.byButton("Agent skills"));
+      await ctx.settle();
+      assert.match(ctx.dom.text(), /Skills the conductor may choose from/);
+      assert.match(ctx.dom.text(), /prove/);
+    },
+  );
 });
 
 test("searching the palette for About opens Settings on the About tab", async () => {
@@ -51,8 +92,8 @@ test("the tab bar wraps rather than clipping, so every tab stays reachable at a 
     const bar = ctx.dom.byButton("About").parentElement as HTMLElement;
     // jsdom has no layout to measure, so this pins the classes that make the real thing wrap; the
     // measured check is a render at 175% in a 900px window (docs/02 §3.3).
-    assert.ok(bar.classList.contains("flex-wrap"), "a row of five tabs does not wrap, and clips at 175%");
-    for (const label of ["Provider Keys", "Agent Roles", "Audio", "Appearance", "About"]) {
+    assert.ok(bar.classList.contains("flex-wrap"), "a row of six tabs does not wrap, and clips at 175%");
+    for (const label of ["Provider Keys", "Agent Roles", "Agent skills", "Audio", "Appearance", "About"]) {
       assert.ok(
         ctx.dom.byButton(label).classList.contains("whitespace-nowrap"),
         `${label} can wrap its own label onto two lines`,

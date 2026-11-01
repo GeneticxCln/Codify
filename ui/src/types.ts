@@ -109,6 +109,8 @@ export type EventType =
    */
   | "stage_result";
 
+export type ThinkingEffort = "low" | "medium" | "high";
+
 export interface AgentConfig {
   role: AgentRole;
   display_name: string;
@@ -120,6 +122,13 @@ export interface AgentConfig {
   system_prompt_override?: string | null;
   temperature: number;
   max_tokens: number;
+  /**
+   * How much thinking this role asks for, where its provider has a control:
+   * OpenAI-compatible `reasoning_effort`, Anthropic/Gemini budgets, Ollama's
+   * `think`. Null/absent leaves the provider's own default; a protocol with no
+   * such field accepts the setting and ignores it.
+   */
+  thinking_effort?: ThinkingEffort | null;
   /**
    * Ollama's context window for this role, in tokens; null/absent = the
    * server's default (4096, silently truncating longer prompts). Only the
@@ -156,6 +165,8 @@ export interface AgentConfigPatch {
   system_prompt_override?: string | null;
   temperature?: number;
   max_tokens?: number;
+  /** null clears the field and returns the role to the provider's own default. */
+  thinking_effort?: ThinkingEffort | null;
   /** null clears an explicit window and returns the role to Ollama's default. */
   num_ctx?: number | null;
   /** null returns the role to Ollama's own residency window. */
@@ -635,7 +646,58 @@ export interface EngineSettings {
 }
 
 /** The Settings screen's tabs, in the order they are shown. One definition, so a new tab is one edit. */
-export type SettingsTab = "keys" | "agents" | "audio" | "appearance" | "about";
+export type SettingsTab = "keys" | "agents" | "skills" | "audio" | "appearance" | "about";
+
+/** One entry in Settings → Agent skills, as the engine loaded it. */
+export interface AgentSkill {
+  name: string;
+  description: string;
+  source: "built-in" | "workspace";
+  moves: string[];
+  enabled: boolean;
+}
+
+/** `GET /settings/skills`: every available skill, plus why one was refused. */
+export interface AgentSkills {
+  workspace_id: string;
+  /** Every name the conductor's menu can answer to, for the creator's move picker. */
+  available_moves?: string[];
+  skills: AgentSkill[];
+  disabled: string[];
+  problems: string[];
+  shadows: string[];
+}
+
+/** `POST /settings/skills`: the Settings creator's fields. */
+export interface AgentSkillCreate {
+  name: string;
+  description: string;
+  moves: string[];
+  instructions: string;
+}
+
+/** `POST /settings/skills/import`: one uploaded Markdown file. */
+export interface AgentSkillImport {
+  filename: string;
+  content: string;
+}
+
+/** A workspace skill the Settings creator just made. */
+export interface AgentSkillCreated {
+  workspace_id: string;
+  name: string;
+  description: string;
+  path: string;
+  source: "workspace";
+  moves: string[];
+  shadows: boolean;
+}
+
+/** `GET /settings/skills/{name}`: one skill's full instructions, read on demand. */
+export interface AgentSkillDetail extends AgentSkill {
+  notes: string[];
+  body: string;
+}
 
 /** Whether one voice feature can run now, and if not, the engine's reason (`GET /audio/status`). */
 export interface SpeechReadiness {
@@ -736,6 +798,45 @@ export interface WorkspaceGit {
   dirty: boolean;
   ahead: number;
   behind: number;
+  reason: string | null;
+}
+
+/**
+ * `POST /workspaces/{id}/push`: the person's push, as the engine answers it.
+ *
+ * A refused push is a 200 with `ok: false` and git's own sentence: no `origin`, a detached HEAD, an ssh
+ * key the remote refused. `pr_url` is GitHub's pull-request form for the branch just pushed, present only
+ * when `origin` is a GitHub repository. The engine stores no GitHub token and creates no PR itself.
+ */
+export interface WorkspacePush {
+  ok: boolean;
+  branch: string | null;
+  remote: string | null;
+  sha: string | null;
+  pr_url: string | null;
+  reason: string | null;
+}
+
+/** One check run GitHub reported for a commit; `url` is empty when GitHub sent none. */
+export interface WorkspaceCheck {
+  name: string;
+  status: string;
+  conclusion: string | null;
+  url: string;
+}
+
+/**
+ * `GET /workspaces/{id}/ci`: the current commit's checks.
+ *
+ * `state` is `none`, `pending`, `success`, `failure` or `unknown`; `unknown` always carries a `reason`
+ * (no GitHub origin, no commit, a private repository, a spent anonymous rate limit), because a read that
+ * did not happen must never be drawn as a pass.
+ */
+export interface WorkspaceChecks {
+  state: "none" | "pending" | "success" | "failure" | "unknown";
+  sha: string | null;
+  url: string | null;
+  checks: WorkspaceCheck[];
   reason: string | null;
 }
 

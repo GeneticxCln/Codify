@@ -258,6 +258,7 @@ class AgentOrchestrator:
         async def call(
             provider: BaseProvider, provider_slug: str, system: str, user: str,
             model: str, temperature: float, max_tokens: int,
+            *, thinking_effort: str | None = None,
         ) -> str:
             books = self._accounting(goal_id, None, "laya", provider_slug, model)
             provider.usage_sink = books.sink
@@ -277,6 +278,7 @@ class AgentOrchestrator:
                     keep_alive=None,
                     # The gate's typed contract; the SDK path never reaches this closure.
                     json_schema=REPLY_SCHEMAS["laya"],
+                    **({"thinking_effort": thinking_effort} if thinking_effort else {}),
                 )
             finally:
                 # The provider is shared across roles and reused for a replay, so
@@ -588,6 +590,9 @@ class AgentOrchestrator:
                     # The role's reply shape, where the endpoint can take one (docs/16 item 5). The parser is
                     # unchanged: a schema narrows what a model writes, it never becomes what the engine trusts.
                     json_schema=REPLY_SCHEMAS.get(role),
+                    # Only when the role asked: an unset field sends no keyword, so a test double
+                    # written before this setting existed still serves the old calls unchanged.
+                    **({"thinking_effort": target.thinking_effort} if target.thinking_effort else {}),
                 )
             except ProviderError as exc:
                 flush_deltas()
@@ -674,6 +679,7 @@ class AgentOrchestrator:
                     num_ctx=target.ollama_num_ctx,
                     keep_alive=target.ollama_keep_alive,
                     json_schema=REPLY_SCHEMAS.get(role),
+                    **({"thinking_effort": target.thinking_effort} if target.thinking_effort else {}),
                 )
             except ProviderError as exc:
                 self.goals.publish(self._event(

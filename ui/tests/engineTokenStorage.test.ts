@@ -60,6 +60,22 @@ test("outside the shell the pasted token is still read and kept", () => {
   });
 });
 
+test("a stored port that is not one falls back to 7430 instead of NaN", () => {
+  // `parseInt` used to turn any of these into NaN, and every request then went to
+  // `http://127.0.0.1:NaN` — a preview that could not say why it was offline.
+  for (const junk of ["", "not-a-port", "7431oops", "0", "65536", "-1"]) {
+    withStorage({ CODIFY_PORT: junk }, () => {
+      assert.deepEqual(storedEngineInfo(false), { port: 7430, token: "" });
+    });
+  }
+});
+
+test("a stored port that is one is kept, whitespace and all", () => {
+  withStorage({ CODIFY_PORT: " 43210 " }, () => {
+    assert.deepEqual(storedEngineInfo(false), { port: 43210, token: "" });
+  });
+});
+
 test("paste, then retry: the standalone preview picks up what was pasted", () => {
   // The sequence the banner asks for. The client holds a module-level copy made
   // at page load, so a retry that did not re-read storage would re-probe with

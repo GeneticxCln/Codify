@@ -100,7 +100,7 @@ test("items come in strip order: tabs, then conversations, then settings", () =>
     items.map((i) => i.id),
     [
       "tab:tab-1", "tab:tab-2", "conversation:c9",
-      "settings:keys", "settings:agents", "settings:audio", "settings:appearance", "settings:about",
+      "settings:keys", "settings:agents", "settings:skills", "settings:audio", "settings:appearance", "settings:about",
       // Opening a machine is always on offer, and sits after settings and before anything about a split.
       "action:new-machine", "action:new-machine-network",
     ]
@@ -150,7 +150,7 @@ test("the active tab is marked, and settings land on the right dialog page", () 
   const settings = items.filter((i) => i.kind === "settings");
   assert.deepEqual(
     settings.map((i) => (i.kind === "settings" ? i.settingsTab : "?")),
-    ["keys", "agents", "audio", "appearance", "about"]
+    ["keys", "agents", "skills", "audio", "appearance", "about"]
   );
 });
 

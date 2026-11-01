@@ -8,7 +8,9 @@ import React, {
 } from "react";
 import {
   Workspace,
+  WorkspaceChecks,
   WorkspaceGit,
+  WorkspacePush,
   ChatMessage,
   Conversation,
   EngineInfo,
@@ -81,7 +83,9 @@ import {
   upsertShellTab,
   deleteShellTab,
   listWorkspaceFiles,
+  getWorkspaceChecks,
   getWorkspaceGit,
+  pushWorkspace,
   nextSurfaceRequest,
   reportSurfaceWindow,
   answerSurface,
@@ -292,6 +296,10 @@ export const App: React.FC = () => {
   const [selectedWs, setSelectedWs] = useState<Workspace | undefined>();
   /** The selected workspace's branch and working-tree state, for the panel header (`docs/16` item 3). */
   const [workspaceGit, setWorkspaceGit] = useState<WorkspaceGit | null>(null);
+  /** The person's last push, and the checks the window is watching afterwards (`docs/04` §6). */
+  const [workspacePush, setWorkspacePush] = useState<WorkspacePush | null>(null);
+  const [workspaceChecks, setWorkspaceChecks] = useState<WorkspaceChecks | null>(null);
+  const [pushingWorkspace, setPushingWorkspace] = useState(false);
   // Model catalog: discovered from every configured provider by the engine.
   // Nothing here is hardcoded — an empty list means nothing is configured yet.
   /**
@@ -564,6 +572,8 @@ export const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    setWorkspacePush(null);
+    setWorkspaceChecks(null);
     if (!selectedWs) {
       setWorkspaceGit(null);
       return;
@@ -579,6 +589,62 @@ export const App: React.FC = () => {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [selectedWs?.id, loadWorkspaceGit]);
+
+  /** Push and then open GitHub's pull-request form, all from the header the branch is shown in. */
+  const handlePushWorkspace = useCallback(async () => {
+    const id = selectedWs?.id;
+    if (!id || pushingWorkspace) return;
+    setPushingWorkspace(true);
+    setWorkspacePush(null);
+    setWorkspaceChecks(null);
+    try {
+      const result = await pushWorkspace(id);
+      setWorkspacePush(result);
+      if (result.ok) void loadWorkspaceGit(id, true);
+    } catch (err) {
+      setWorkspacePush({
+        ok: false, branch: null, remote: null, sha: null, pr_url: null,
+        reason: readRejection(err, "Could not push the branch"),
+      });
+    } finally {
+      setPushingWorkspace(false);
+    }
+  }, [selectedWs?.id, pushingWorkspace, loadWorkspaceGit]);
+
+  // The watcher: a push is the only thing that starts it, and it stops as soon as GitHub has a terminal
+  // answer. `none` is retried a few times because checks are created a moment after a push; `pending` is
+  // polled at 30 s, so a ten-minute run costs 20 requests and an idle header costs none. A read that fails
+  // is `unknown`, never "passed".
+  useEffect(() => {
+    const id = selectedWs?.id;
+    if (!id || !workspacePush?.ok) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    const tick = async () => {
+      attempts += 1;
+      try {
+        const value = await getWorkspaceChecks(id);
+        if (!alive) return;
+        setWorkspaceChecks(value);
+        if (value.state === "pending" || (value.state === "none" && attempts < 10)) {
+          timer = setTimeout(() => void tick(), 30_000);
+        }
+      } catch {
+        if (alive) {
+          setWorkspaceChecks({
+            state: "unknown", sha: workspacePush.sha, url: null, checks: [],
+            reason: "Could not read this commit's checks.",
+          });
+        }
+      }
+    };
+    void tick();
+    return () => {
+      alive = false;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [selectedWs?.id, workspacePush]);
   const updateWorkspaceConversations = useCallback(
     (
       workspaceId: string,
@@ -4313,6 +4379,11 @@ export const App: React.FC = () => {
             onOpenSettings={() => setIsSettingsOpen(true)}
             latestUnread={newestUnreadNotice?.title ?? null}
             git={workspaceGit}
+            onPush={() => void handlePushWorkspace()}
+            pushing={pushingWorkspace}
+            pushResult={workspacePush}
+            checks={workspaceChecks}
+            onOpenLink={handleOpenLink}
             loading={conversationsLoading}
           />
         )}
@@ -4633,6 +4704,7 @@ export const App: React.FC = () => {
         recentRuns={recentRuns}
         catalogTick={catalogTick}
         catalogLive={catalogLive}
+        workspaceId={selectedWs?.id}
         onClose={() => {
           setIsSettingsOpen(false);
           // Keys or endpoints may have changed — re-discover, don't re-read cache.

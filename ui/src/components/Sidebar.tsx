@@ -14,7 +14,7 @@ import { IconButton } from "./ui/IconButton";
 import { ThreadMenu } from "./ThreadMenu";
 import { newThreadParentId } from "../threadMenu";
 import { UNTITLED_THREAD_TITLE, threadLabel } from "../threadTitle";
-import type { Conversation, Workspace, WorkspaceGit } from "../types";  /**
+import type { Conversation, Workspace, WorkspaceChecks, WorkspaceGit, WorkspacePush } from "../types";  /**
    * The side panel: which project is selected, which threads belong to it, and
    * the action to add a project.
    *
@@ -83,9 +83,29 @@ export interface SidebarProps {
    * is a fact, not a warning banner.
    */
   git?: WorkspaceGit | null;
+  /**
+   * Push the branch to `origin`, from the header the branch is already shown in. The window owns the
+   * request and the polling; this panel only draws what it is handed, and a button with no handler stays
+   * absent rather than becoming a control that does nothing.
+   */
+  onPush?: () => void;
+  pushing?: boolean;
+  pushResult?: WorkspacePush | null;
+  /** The current commit's checks, while the window watches them. Null before a push. */
+  checks?: WorkspaceChecks | null;
+  /** Open an address in the app's own browser pane — never the system opener (`markdownLinks.ts`). */
+  onOpenLink?: (url: string) => void;
   /** Set by the shell when the engine is unreachable, so the list can say so. */
   loading?: boolean;
 }
+
+const CHECK_LABELS: Record<string, string> = {
+  none: "CI not started",
+  pending: "CI running",
+  success: "CI passed",
+  failure: "CI failed",
+  unknown: "CI unknown",
+};
 
 /**
  * A thread's name, or a placeholder when it has none.
@@ -255,6 +275,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenSettings,
   latestUnread = null,
   git = null,
+  onPush,
+  pushing = false,
+  pushResult = null,
+  checks = null,
+  onOpenLink,
   loading = false,
 }) => {
   const selectedWorkspace = workspaces.find(
@@ -403,6 +428,44 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <span aria-label={`${git.behind} behind`} title={`${git.behind} commit${git.behind === 1 ? "" : "s"} behind`}>
                   ↓{git.behind}
                 </span>
+              ) : null}
+            </div>
+          ) : null}
+          {git?.branch && onPush ? (
+            <div className="mt-1 flex justify-end">
+              <Button
+                tone="subtle"
+                size="sm"
+                onClick={onPush}
+                disabled={pushing}
+                title="Push this branch to origin and open a pull request"
+              >
+                {pushing ? "Pushing…" : "Push & PR"}
+              </Button>
+            </div>
+          ) : null}
+          {pushResult && !pushResult.ok && pushResult.reason ? (
+            <div className="text-2xs text-codify-warning-ink truncate text-right" title={pushResult.reason}>
+              {pushResult.reason}
+            </div>
+          ) : null}
+          {pushResult?.ok && pushResult.pr_url && onOpenLink ? (
+            <div className="mt-1 flex justify-end">
+              <Button tone="subtle" size="sm" onClick={() => onOpenLink(pushResult.pr_url!)}>
+                Open PR page
+              </Button>
+            </div>
+          ) : null}
+          {checks ? (
+            <div
+              className="flex items-center justify-end gap-1 text-2xs text-codify-muted"
+              title={checks.reason ?? undefined}
+            >
+              <span>{CHECK_LABELS[checks.state] ?? "CI unknown"}</span>
+              {checks.url && onOpenLink ? (
+                <Button tone="subtle" size="sm" onClick={() => onOpenLink(checks.url!)}>
+                  Checks
+                </Button>
               ) : null}
             </div>
           ) : null}

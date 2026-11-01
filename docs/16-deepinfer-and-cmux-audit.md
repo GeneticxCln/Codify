@@ -72,7 +72,7 @@ which is what `docs/15`'s `audit_usage` already measures, in tokens, from events
 | **OSC 9 / 99 / 777 terminal notifications**, plus `cmux notify` and agent hooks | **Taken, and built** — §6 item 1 | The standard escape sequences are data a program emits, not a capability it gains. Before this, the bytes in `terminal.rs` went to xterm unchanged; `OscScan` now reads one out as an inbox entry and still passes it through |
 | **Notification panel, unread badges, jump to the most recent unread** | **Taken, and built** — §6 item 2 | The inbox, its unread count and the per-tab unread dot already existed (`docs/09` §10.18); this added the palette's `Needs you` row, which opens the newest unread, and the latest line beside the project name |
 | Notification *rings* around panes | **Refused** | Decoration on state the tab strip and the inbox already show |
-| Sidebar metadata: git branch, PR status/number, cwd, listening ports, latest notification | **Partly taken, and the branch half is built** — §6 items 2 and 3 | Branch, dirty count and ahead/behind are a read of the workspace's own git, through the existing read-only table, and are shown on the panel header's project line. PR status needs a GitHub token and a request that leaves the machine; listening ports need the process table outside the workspace |
+| Sidebar metadata: git branch, PR status/number, cwd, listening ports, latest notification | **Partly taken, and the branch half is built** — §6 items 2 and 3 | Branch, dirty count and ahead/behind are a read of the workspace's own git, through the existing read-only table, and are shown on the panel header's project line. PR status is now the tokenless half: the header's push returns GitHub's compare form and reads the commit's anonymous check runs (`04` §6); creating a pull request through the API still needs a token. Listening ports need the process table outside the workspace |
 | In-app browser beside the terminal, with a scriptable API | **Already built** | `docs/09` §7.2–7.5, and `navigate_page`/`click_page`/`type_page` behind a setting |
 | Snapshot the accessibility tree, click by element ref, read console and network | **Not now** — item 8, as a decision | Clicking by role and name beats guessing selectors; it also needs a rule about what a snapshot may contain (never a field's value) that this repository would have to own |
 | Vertical tabs, horizontal/vertical splits | **Already built** | `docs/09`, and §12 for the paired pane |
@@ -186,6 +186,10 @@ that has to fail without it, because that is the rule here (`CONTRIBUTING.md`).
 - **Built** in this change: `bound_replay` in `engine/conductor.py`, called at the top of every loop iteration, with
   `tests/test_conductor_replay.py` driving a ten-read turn to its last request and pinning the direct function's
   order, idempotence and small-result rule. `docs/01` §5.3 and `docs/15` §4 say what it guarantees and how to see it.
+  A later audit found two holes in the promise: with `keep=4` and only four results nothing was stubbable, so the
+  transcript stayed over budget, and the thread's earlier turns were replayed unbounded. `bound_replay` now reduces
+  the kept results last (the budget outranks `keep`), and `bound_history` clips the earlier turns and drops the
+  oldest to `MAX_HISTORY_CHARS`; both are pinned in the same test file. `docs/01` §5.3 is the standing contract.
 
 **5. Ask for the reply shape, not just for JSON.** *Medium. `engine/replies.py`, `engine/providers.py`, the orchestrator
 call sites; `docs/01` §3, `docs/06` §5.*
@@ -317,8 +321,10 @@ sequence at a time (kitty's chunked and base64 forms are refused rather than hal
   bridge (`engine/surfaces.py`) and already exists. A new door is not the fix; a new op in that table is.
 - **Agent resume** would need a stored command with a trust and signature story. The answer today is that no stored
   state becomes argv. That changes only with an invariant, not with a feature.
-- **PR status** needs a token and a request that leaves the machine. `docs/12` is where such a request would be argued,
-  and it is about pages the model asked for, not about this project's repository.
+- **PR status** landed as the tokenless half: a person's push (`POST /workspaces/{id}/push`) returns GitHub's compare
+  form, which the window opens in its own browser pane, and `GET /workspaces/{id}/ci` reads the commit's check runs
+  unauthenticated (a private repository answers `unknown`). Creating a pull request through GitHub's API still needs a
+  token and is not built.
 - **Desktop notifications** are reversible on request: they are a system surface, not a capability, and the inbox's rules
   would carry over unchanged.
 - **Scrollback on disk** is `docs/09` §2.2's decision (not yet), and would arrive with the clipboard history's secret

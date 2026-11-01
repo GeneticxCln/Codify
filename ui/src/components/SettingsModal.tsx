@@ -14,6 +14,7 @@ import { SettingsPanel } from "./SettingsPanel";
 import { AppearancePane } from "./AppearancePane";
 import { AudioPane } from "./AudioPane";
 import { AboutPane } from "./AboutPane";
+import { AgentSkillsPane } from "./AgentSkillsPane";
 import { ProviderRow } from "./ProviderRow";
 import { useAgentConfigs } from "../hooks/useAgentConfigs";
 import { checkedLabel, discoveredFooter, needsOwnRefresh } from "../providerSetup";
@@ -24,7 +25,7 @@ import {
   saveSeen,
   type SeenIndex,
 } from "../modelFreshness";
-import { X, Key, Sliders, HardDrive, Lock, AlertCircle, RefreshCw, Palette, Mic, Info } from "lucide-react";
+import { X, Key, Sliders, Sparkles, HardDrive, Lock, AlertCircle, RefreshCw, Palette, Mic, Info } from "lucide-react";
 
 /**
  * How often the panel re-asks while it is open, and how long after a check a
@@ -70,6 +71,8 @@ interface SettingsModalProps {
    * versus one extra discovery, and the list is the worse of the two.
    */
   catalogLive?: boolean;
+  /** The selected workspace whose `.codify/skills/` the Agent skills tab lists. */
+  workspaceId?: string;
 }
 
 /**
@@ -87,6 +90,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   recentRuns = [],
   catalogTick = 0,
   catalogLive = false,
+  workspaceId,
 }) => {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [keys, setKeys] = useState<ProviderKeyStatus[]>([]);
@@ -393,6 +397,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     ? "Themes swap the app's surface and text colours at runtime — no restart, no rebuild."
                     : tab === "about"
                       ? "What this app is, what it is running on, and the keyboard shortcuts."
+                      : tab === "skills"
+                      ? "Choose which skills the conductor may offer. Enabled skills are named; their instructions are loaded only when one is chosen."
                       : tab === "audio"
                         ? "The microphone, dictation into the prompt, and answers read aloud — through the speech providers you choose."
                         : "Each role's model, endpoint, temperature, and prompt. Roles run in the order of the pipeline."}
@@ -410,7 +416,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Tab bar */}
-        {/* `flex-wrap`: five tabs are wider than a 900px window once the UI is scaled to 175%, and a
+        {/* `flex-wrap`: six tabs are wider than a 900px window once the UI is scaled to 175%, and a
             fixed row clipped the last ones and let the browser scroll the whole modal sideways to
             reach them. Wrapped, every tab is always on screen. */}
         <div className="flex flex-wrap items-center gap-1 px-6 pt-3 shrink-0">
@@ -440,6 +446,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }`}
           >
             <Sliders className="w-3.5 h-3.5" /> Agent Roles
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("skills")}
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+              tab === "skills"
+                ? "bg-codify-raised text-codify-primary border border-codify-border"
+                : "text-codify-muted hover:text-codify-secondary"
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5" /> Agent skills
           </button>
           <button
             type="button"
@@ -579,6 +596,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               refreshingModels={catalogLoading}
             />
           )}
+
+          {tab === "skills" && <AgentSkillsPane workspaceId={workspaceId} />}
 
           {tab === "audio" && (
             <AudioPane

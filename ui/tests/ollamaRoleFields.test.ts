@@ -196,16 +196,44 @@ test("set fields show their own value in place of the default", async () => {
   });
 });
 
+test("thinking effort is offered on every protocol and saves the chosen level", async () => {
+  for (const protocol of ["openai_compat", "anthropic", "google", "ollama"] as const) {
+    await withCard(role(protocol), async (dom, patches) => {
+      const picker = dom.byLabel("Thinking Effort") as HTMLButtonElement;
+      assert.equal(
+        picker.getAttribute("role"),
+        "combobox",
+        "the level must be a choice this app draws, not a native select's popup",
+      );
+      await dom.click(picker);
+      await dom.click(dom.byButton("High"));
+      await dom.click(dom.byButton("Save"));
+      assert.equal(patches[0].thinking_effort, "high", `${protocol} did not save the level`);
+    });
+  }
+});
+
+test("clearing thinking effort sends null, so the provider default returns", async () => {
+  await withCard(role("openai_compat", { thinking_effort: "high" }), async (dom, patches) => {
+    const picker = dom.byLabel("Thinking Effort") as HTMLButtonElement;
+    await dom.click(picker);
+    await dom.click(dom.byButton("Provider default"));
+    await dom.click(dom.byButton("Save"));
+    assert.equal(patches[0].thinking_effort, null, "a cleared level must arrive as null");
+  });
+});
+
 test("both fields are typed on the config and on the patch", () => {
   // Compile-time claims, checked by `make typecheck-ui-tests`: `node --test`
   // erases types, so the runtime half of this test only proves the values are
   // constructible. A field removed from either interface fails the typecheck,
   // and a field widened past `string | null` fails the `@ts-expect-error`.
   const config: AgentConfig = role("ollama", { num_ctx: null, keep_alive: "30m" });
-  const patch: AgentConfigPatch = { num_ctx: null, keep_alive: null };
+  const patch: AgentConfigPatch = { num_ctx: null, keep_alive: null, thinking_effort: null };
   // @ts-expect-error a duration is text; a bare number would be sent as one and rejected late
   const wrong: AgentConfigPatch = { keep_alive: 30 };
   assert.equal(config.keep_alive, "30m");
   assert.equal(patch.keep_alive, null);
+  assert.equal(patch.thinking_effort, null);
   assert.equal(wrong.keep_alive, 30);
 });

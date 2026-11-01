@@ -88,7 +88,7 @@ const MAX_ID = 200;
 
 const KINDS: ReadonlySet<string> = new Set(["goal", "plan", "engine", "models", "terminal"]);
 const TONES: ReadonlySet<string> = new Set(["success", "danger", "warning", "info"]);
-const SETTINGS_TABS: ReadonlySet<string> = new Set(["keys", "agents", "audio", "appearance", "about"]);
+const SETTINGS_TABS: ReadonlySet<string> = new Set(["keys", "agents", "skills", "audio", "appearance", "about"]);
 
 const clip = (text: string, max: number): string => (text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`);
 

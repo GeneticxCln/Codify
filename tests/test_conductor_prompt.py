@@ -39,7 +39,8 @@ NOT_TOOLS = {"task"}
 # Then to 3340 for `analyze_binary` (docs/14): a binary's names and strings are attacker-chosen text, and the same
 # one-clause rule that keeps a fetched page from being read as instructions belongs next to the tool's name.
 # Then to 3420 for `audit_usage` (docs/15): one clause telling the conductor its numbers are tokens and a finding is to be checked.
-CEILING = 3420
+# Then to 3650 for `read_ci` (docs/04 §3.0.9): one clause saying the check read is tokenless and that a check's name is data.
+CEILING = 3650
 
 
 class TestTheToolsAreNamed(unittest.TestCase):

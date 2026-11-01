@@ -8,6 +8,11 @@ import {
 import type {
   AgentCallStat,
   AgentConfig,
+  AgentSkillCreate,
+  AgentSkillCreated,
+  AgentSkillDetail,
+  AgentSkillImport,
+  AgentSkills,
   AudioInputs,
   AudioStatus,
   Conversation,
@@ -40,7 +45,9 @@ import type {
   WorkspaceFile,
   WorkspaceFileList,
   WorkspaceFileSaved,
+  WorkspaceChecks,
   WorkspaceGit,
+  WorkspacePush,
   SurfaceRequest,
 } from "./types.ts";
 
@@ -65,8 +72,24 @@ export function underShell(): boolean {
  * build is removed rather than trusted, since a token at rest in the webview's
  * profile is readable by anything that can read that directory.
  */
+/**
+ * The remembered port, or 7430 when the stored value is not one.
+ *
+ * `localStorage` is not a type. An older build, a hand-edited standalone preview
+ * or a partial write can leave anything under `CODIFY_PORT`, and `parseInt`
+ * turns that into `NaN` — which every later request renders as
+ * `http://127.0.0.1:NaN`. Strict `Number` rather than `parseInt` on purpose:
+ * `7431oops` is not a port, and accepting its prefix would probe a port the
+ * person did not choose.
+ */
+function storedPort(): number {
+  const text = (localStorage.getItem("CODIFY_PORT") || "").trim();
+  const port = Number(text);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 7430;
+}
+
 export function storedEngineInfo(shell: boolean = underShell()): EngineInfo {
-  const port = parseInt(localStorage.getItem("CODIFY_PORT") || "7430", 10);
+  const port = storedPort();
   if (shell) {
     localStorage.removeItem("CODIFY_TOKEN");
     return { port, token: "" };
@@ -411,7 +434,86 @@ export async function getEngineRuntime(): Promise<EngineRuntime> {
   return res.json();
 }
 
-/** Engine-wide settings (each value with its clamp bounds). Throws on failure. */
+/** Every skill in one workspace's menu. Throws on failure. */
+export async function getAgentSkills(workspaceId: string): Promise<AgentSkills> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const query = `?workspace_id=${encodeURIComponent(workspaceId)}`;
+  const res = await fetch(`${base}/settings/skills${query}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to fetch agent skills");
+  return res.json();
+}
+
+/** Create one skill in a workspace from the Settings form. */
+export async function createAgentSkill(
+  workspaceId: string,
+  body: AgentSkillCreate,
+): Promise<AgentSkillCreated> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const query = `?workspace_id=${encodeURIComponent(workspaceId)}`;
+  const res = await fetch(`${base}/settings/skills${query}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${currentEngine.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to create the skill");
+  return res.json();
+}
+
+/** Create one workspace skill from an uploaded Markdown file. */
+export async function importAgentSkill(
+  workspaceId: string,
+  body: AgentSkillImport,
+): Promise<AgentSkillCreated> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const query = `?workspace_id=${encodeURIComponent(workspaceId)}`;
+  const res = await fetch(`${base}/settings/skills/import${query}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${currentEngine.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to import the skill");
+  return res.json();
+}
+
+/** One skill's instructions, read only when the person asks to preview them. */
+export async function getAgentSkill(name: string, workspaceId: string): Promise<AgentSkillDetail> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const query = `?workspace_id=${encodeURIComponent(workspaceId)}`;
+  const res = await fetch(`${base}/settings/skills/${encodeURIComponent(name)}${query}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to read the skill");
+  return res.json();
+}
+
+/** Turn one skill on or off for one workspace. The engine returns the disabled set. */
+export async function setAgentSkillEnabled(
+  name: string,
+  enabled: boolean,
+  workspaceId: string,
+): Promise<{ name: string; enabled: boolean; disabled: string[] }> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const query = `?workspace_id=${encodeURIComponent(workspaceId)}`;
+  const res = await fetch(`${base}/settings/skills/${encodeURIComponent(name)}${query}`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${currentEngine.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw await engineError(res, "Failed to change the skill");
+  return res.json();
+}
+
 export async function getEngineSettings(): Promise<EngineSettings> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/settings/engine`, {
@@ -821,6 +923,38 @@ export async function getWorkspaceGit(workspace_id: string): Promise<WorkspaceGi
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) throw await engineError(res, "Failed to read the workspace's git state");
+  return res.json();
+}
+
+/**
+ * Push the selected branch to `origin`, for the person who pressed the button.
+ *
+ * A refused push is a 200 with `ok: false` and the sentence to show ("no origin remote", "your key was
+ * refused"); only an unreachable engine throws. `pr_url` is the GitHub form the window opens in its own
+ * browser pane, never a system opener and never a pull request the engine creates.
+ */
+export async function pushWorkspace(workspace_id: string): Promise<WorkspacePush> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/workspaces/${encodeURIComponent(workspace_id)}/push`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to push the branch");
+  return res.json();
+}
+
+/**
+ * The current commit's GitHub checks, for the header's CI line.
+ *
+ * `state: "unknown"` is a real answer with a reason, not an error: a private repository or a spent
+ * anonymous rate limit means "not read", which is drawn differently from "passed".
+ */
+export async function getWorkspaceChecks(workspace_id: string): Promise<WorkspaceChecks> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/workspaces/${encodeURIComponent(workspace_id)}/ci`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to read this commit's checks");
   return res.json();
 }
 

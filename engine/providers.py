@@ -610,7 +610,7 @@ class BaseProvider(ABC):
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
-        json_schema: dict[str, Any] | None = None,
+        json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
     ) -> str: ...
     # `num_ctx` is Ollama's per-request context window and `keep_alive` is how
     # long it holds the model afterwards. Both are keyword-only with a default on
@@ -777,17 +777,21 @@ class AnthropicProvider(BaseProvider):
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
-        json_schema: dict[str, Any] | None = None,
+        json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
     ) -> str:
         # `json_schema` is accepted and not sent: this protocol has no field for a reply schema here, and an
         # adapter that refused the keyword would fail every role before its first request. The system prompt
         # still asks for one JSON object, and `engine.replies` still reads it the same way.
-        data = await self._messages({
+        body: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_prompt}],
-        })
+        }
+        budget = _thinking_budget(thinking_effort, max_tokens)
+        if budget is not None and budget >= 1024:
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        data = await self._messages(body)
         self._report_usage("anthropic", data)
         return "".join(
             b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
@@ -862,6 +866,26 @@ def _response_format(capability: str | None, schema: dict[str, Any] | None) -> d
     if capability in ("schema", "object"):
         return {"type": "json_object"}
     return None
+
+
+# The budgets an effort level means on a protocol that takes tokens rather than a name. One table so
+# Anthropic and Gemini cannot disagree about what "medium" is. Low is the smallest budget Claude accepts.
+_THINKING_BUDGETS = {"low": 1024, "medium": 4096, "high": 8192}
+
+
+def _thinking_budget(effort: str | None, max_tokens: int) -> int | None:
+    """The thinking budget for one effort level, clamped under the reply's own cap.
+
+    Anthropic refuses a request whose `budget_tokens` is not below `max_tokens`, so a role with a
+    small output cap gets a smaller budget rather than a 400. Below its 1024-token minimum the
+    setting is left out: a budget the API will not accept is not a setting, and the caller still
+    gets an answer instead of a failure caused by a field the model did not need.
+    """
+    if effort is None:
+        return None
+    # Half the reply's cap, not the cap itself: thinking and the answer share `max_tokens`, and a
+    # budget at the cap leaves no room for the JSON the role exists to produce.
+    return min(_THINKING_BUDGETS[effort], max_tokens // 2)
 
 
 def _tool_call_thinking(provider_name: str) -> dict[str, Any]:
@@ -967,7 +991,7 @@ class OpenAICompatProvider(BaseProvider):
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
-        json_schema: dict[str, Any] | None = None,
+        json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
     ) -> str:
         if not self._api_key:
             raise ProviderError("missing_api_key", "API key is not set")
@@ -982,7 +1006,7 @@ class OpenAICompatProvider(BaseProvider):
         if self._json_capabilities is None:
             self._json_capabilities = await self._discover_json_capabilities()
         capability = self._json_capabilities.get(model)
-        payload = {
+        payload: dict[str, Any] = {
             "model": model,
             **({"temperature": temperature} if self._local else {}),
             "max_tokens": max_tokens,
@@ -991,6 +1015,11 @@ class OpenAICompatProvider(BaseProvider):
                 {"role": "user", "content": user_prompt},
             ],
         }
+        if thinking_effort is not None:
+            # OpenAI and its descendants name the level `reasoning_effort`. A server that does not
+            # know the field refuses the request rather than silently ignoring it, which is the honest
+            # outcome of asking a model for a control it does not advertise.
+            payload["reasoning_effort"] = thinking_effort
         response_format = _response_format(capability, json_schema)
         if response_format is not None:
             payload["response_format"] = response_format
@@ -1015,6 +1044,7 @@ class OpenAICompatProvider(BaseProvider):
                     return await self.complete(
                         system_prompt, user_prompt, model, temperature, max_tokens,
                         num_ctx=num_ctx, keep_alive=keep_alive, json_schema=json_schema,
+                        thinking_effort=thinking_effort,
                     )
                 finally:
                     self.on_delta = saved
@@ -1218,7 +1248,7 @@ class OllamaProvider(BaseProvider):
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
-        json_schema: dict[str, Any] | None = None,
+        json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
     ) -> str:
         # `json_schema` is accepted and not sent: this call already sends `format: "json"`, which is Ollama's
         # object-mode rung, and its schema form is not part of the protocol this engine targets.
@@ -1239,6 +1269,10 @@ class OllamaProvider(BaseProvider):
         # Nesting it under `options` is accepted-but-ignored, which would look
         # exactly like a setting that does nothing.
         keep_alive_field = {"keep_alive": keep_alive} if keep_alive is not None else {}
+        # `think` is a top-level sibling in Ollama's request, like `keep_alive`, and takes the level
+        # names directly on a model that supports levels. None sends nothing and leaves the model's own
+        # default alone.
+        think_field = {"think": thinking_effort} if thinking_effort is not None else {}
         async with httpx.AsyncClient(timeout=180, trust_env=trusts_proxy_env(self._base_url)) as client:
             if not stream:
                 data = await post_json(
@@ -1250,6 +1284,7 @@ class OllamaProvider(BaseProvider):
                         "prompt": f"{system_prompt}\n\n{user_prompt}",
                         "options": options,
                         **keep_alive_field,
+                        **think_field,
                         "stream": False,
                         "format": "json",
                     },
@@ -1270,6 +1305,7 @@ class OllamaProvider(BaseProvider):
                         "prompt": f"{system_prompt}\n\n{user_prompt}",
                         "options": options,
                         **keep_alive_field,
+                        **think_field,
                         "stream": True,
                         "format": "json",
                     },
@@ -1385,15 +1421,20 @@ class GoogleProvider(BaseProvider):
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
-        json_schema: dict[str, Any] | None = None,
+        json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
     ) -> str:
         # `json_schema` is accepted and not sent: this protocol's schema field is a separate generation config
         # this adapter does not build, and a reply schema is prompt material here.
         url = f"{self._base_url}/models/{model}:generateContent"
+        generation_config: dict[str, Any] = {"maxOutputTokens": max_tokens}
+        if thinking_effort is not None:
+            generation_config["thinkingConfig"] = {
+                "thinkingBudget": _THINKING_BUDGETS[thinking_effort],
+            }
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens},
+            "generationConfig": generation_config,
         }
         # The key travels in a header, not the URL: a query-string credential
         # lands in proxy/server access logs, and Google accepts the header form.

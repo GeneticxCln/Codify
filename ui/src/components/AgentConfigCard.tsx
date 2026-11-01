@@ -19,6 +19,7 @@ import { ApiKeyField } from "./ApiKeyField";
 import { BaseUrlField } from "./BaseUrlField";
 import { PromptOverrideEditor } from "./PromptOverrideEditor";
 import { TestConnectionButton } from "./TestConnectionButton";
+import { SelectMenu } from "./SelectMenu";
 import {
   Save,
   Check,
@@ -37,6 +38,14 @@ import {
 /** The temperature range's ends, named once for the slider and its fill. */
 const TEMPERATURE_MIN = 0;
 const TEMPERATURE_MAX = 2;
+
+/** The four levels, including the empty one that means "the provider's default". */
+const THINKING_EFFORT_OPTIONS = [
+  { value: "", label: "Provider default" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+] as const;
 
 interface AgentConfigCardProps {
   role: AgentRole;
@@ -217,6 +226,9 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
         base_url: active.base_url || undefined,
         temperature: active.temperature,
         max_tokens: active.max_tokens,
+        // null returns the role to the provider's own default; absent would read
+        // as "no change" and leave a value the person just cleared in place.
+        thinking_effort: active.thinking_effort ?? null,
         // null is meaningful here: it returns the role to Ollama's default
         // window, so an emptied field must arrive as null rather than as
         // "no change".
@@ -663,6 +675,34 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             className="bg-codify-bg border border-codify-border rounded-sm px-3 py-1.5 text-sm text-codify-secondary font-mono"
           />
         </div>
+      </div>
+
+      {/* Thinking effort — a request, not a guarantee. The provider decides
+          whether it has a control for it; a model without one still answers. */}
+      <div className="flex flex-col gap-1.5">
+        <label
+          htmlFor={`${role}-thinking-effort`}
+          className="text-xs font-semibold text-codify-muted uppercase tracking-wider"
+        >
+          Thinking Effort
+        </label>
+        <SelectMenu
+          id={`${role}-thinking-effort`}
+          label="Thinking Effort"
+          value={active.thinking_effort ?? ""}
+          options={THINKING_EFFORT_OPTIONS}
+          onChange={(next) =>
+            updateDraft({
+              thinking_effort: (next || null) as AgentConfig["thinking_effort"],
+            })
+          }
+        />
+        <p className="text-xs leading-relaxed text-codify-muted">
+          How much deliberate reasoning this role asks for. It is sent only where the provider has a
+          control for it — OpenAI-compatible models as <code>reasoning_effort</code>, Anthropic and
+          Gemini as a thinking budget, Ollama as <code>think</code>. A model without one stays at its
+          own default rather than failing.
+        </p>
       </div>
 
       {/* Context window — Ollama only. OpenAI-style APIs size it server-side,
