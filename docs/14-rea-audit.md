@@ -7,7 +7,8 @@ on its own**, and of the parts of this project that would change for the better 
 and a list, and on the owner's decision (section 8) it has since been built: sections 1 to 7 are the audit as written,
 with their status marked where it changed, and section 8 is what was built and what was not. The document still says why,
 what it took, and which smaller things REA does better than this engine. It follows the shape of `docs/10` to `docs/13`: what was read,
-what is taken and refused, what a build would be, what the audit does not claim, and what reopens a row.
+what is taken and refused, what a build would be, what the audit does not claim, and what reopens a row. **Section 9 records the later
+change: `analyze_binary` now reads ELF, PE and Mach-O natively and Ghidra is the fallback, not the requirement.**
 
 ## 1. What was read, and what was not
 
@@ -198,6 +199,7 @@ The owner's answer to section 4's "if the owner says yes" was yes, so the recomm
 | Machine-readable `retryable` and a remediation on refusals (item 4) | `BinaryAnalysisError` and the sentence `analyze_binary` returns | Built for the one tool where a transient failure (a timeout) differs from a permanent one. **Deliberately not applied to the conductor's other refusals**: REA's flag exists for MCP clients that are programs and branch on a field, but the consumer of every tool result here is the model, which reads the sentence, and those sentences already say what to do next (`Refused, and retrying will not help: ...`, `That call failed: ...`, "ask the person to open a machine"). Converting about 25 hand-written refusals to a structured shape would change text that tests and prompts quote and buy no behaviour. Reopen it if a program, not a model, ever consumes a tool result |
 | The `_clip` question (item 5) | `scan.format_scan`, `docs/04` §3.0.6, `tests/test_scan_report_fits.py` | Measured with the real profiles: a scan with hits in about 20 rules was 14,000 characters and `_clip` dropped the coverage line, the stop line and the next step. The report is now built to fit under 11,000, puts coverage and the stop reason **before** the findings, and names the rule groups it held back |
 | The rules REA's installation checks keep (section 5 item 6) | `locate_ghidra`, `docs/04` §3.0.7 | A relative path is never executed, a configured location is authoritative even when invalid, a missing tool is a named failure; `make doctor` reports the install |
+| The native binary reader, which now answers first (later) | `engine/binary_inspect.py`, `tests/test_binary_native.py`, `docs/04` §3.0.7 | Built: ELF, PE and Mach-O headers, symbol and export tables, imports, sections, printable strings and direct calls in Python, with no process and no JDK. The Ghidra tool above is reached only for a format the native reader refuses. Section 9 |
 
 **Not built, and said so.**
 
@@ -211,3 +213,28 @@ The owner's answer to section 4's "if the owner says yes" was yes, so the recomm
 * **No network isolation of the JVM.** The child is given no socket by this code and its environment carries no proxy or
   credential, but nothing enforces "no network"; section 3 says the same of every other child.
 * **POSIX only.** The guard's limits and group kill are, as the rest of the spawn guard is.
+
+## 9. The native reader, which now answers first
+
+The next request was to stop borrowing the analysis itself. `engine/binary_inspect.py` is that: a pure-Python reader that
+answers the same inventory questions from the file's own bytes, with no JVM, no project directory, no private copy and no
+child process. `analyze_binary` tries it first; Ghidra is reached only when it refuses the format.
+
+**What it reads.** The container (ELF, PE or Mach-O), its architecture, width and image base, and the compiler when
+`.comment` names one; sections that occupy memory, with their permissions; functions from a symbol table, an export table
+or Mach-O `nlist` entries; imports from `.dynsym` or import descriptors; printable strings from content sections; and
+direct calls (`call rel32` on x86, `BL` on AArch64) tied to the function whose address range contains them. Everything is
+bounded by the same `EXPORT_CAPS` the Ghidra export used, cleaned of control and invisible characters, and cached by
+SHA-256 and `INSPECTOR_VERSION`.
+
+**What it does not do.** There is no decompiler, no data-flow analysis and no recovery of functions a stripped file no
+longer names. An indirect call has no target in the bytes and is not guessed at. A stripped file keeps its addresses and
+loses its names, and the answer says so. A malformed header is a named refusal, never a traceback.
+
+**What changed in the contracts.** The tool's description and the conductor's prompt say the engine reads the file's own
+structure; `docs/01` §5.1, `docs/04` §3.0.7 and `docs/09` §10.8 carry the native-first routing; `docs/07`'s spawn table
+now calls the Ghidra door the fallback; `make doctor` describes Ghidra as optional; and `make check-ghidra` calls the
+analysis with `native=False`, so a valid ELF cannot make it pass without Ghidra. The move to the private copy, the SHA-256
+binding and the guarded child remain, and remain tested, for the fallback (`tests/test_binary_analysis.py`). The native
+path has its own tests (`tests/test_binary_native.py`) over hand-built fixtures, including PE and Mach-O headers, a broken
+header, a cap, and a proof that a valid ELF never starts the fallback.

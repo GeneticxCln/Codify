@@ -62,7 +62,7 @@ help:
 	@echo "  make bench        - Run the repo_scale tier against your configured models (spends tokens; BENCH_DRIVER=recipe for the fixed pipeline)"
 	@echo "  make check        - Run all verifications (ruff + mypy + UI tests + UI test typecheck + Python tests + stream tests + benchmark smoke + UI build + Tauri check)"
 	@echo "  make ci           - Run the whole CI gate locally: make check plus the declared $(PY_MIN) leg"
-	@echo "  make check-ghidra - Run analyze_binary against a REAL Ghidra (GHIDRA_INSTALL_DIR); fails without one, not part of ci"
+	@echo "  make check-ghidra - Exercise the Ghidra fallback against a REAL Ghidra (GHIDRA_INSTALL_DIR); fails without one, not part of ci"
 	@echo "  make check-history - Check that every commit in HISTORY_RANGE builds, not just the tip (default: origin/\$$branch..HEAD)"
 	@echo "  make verify-package - Check downloaded packages against a release's own SHA256SUMS (FILES=…, SUMS=…, TAG=…)"
 	@echo "  make ci-python-floor - Run only the $(PY_MIN) leg (uv or a system python$(PY_MIN) covers it)"
@@ -392,8 +392,9 @@ check-history:
 	python3 scripts/check_history.py --range '$(HISTORY_RANGE)' $(HISTORY_FLAGS)
 
 # Not part of `check` or `ci`: it needs a real Ghidra (GHIDRA_INSTALL_DIR) and does not skip without one. The gate drives a
-# stand-in for analyzeHeadless; this is the check that the export script runs inside the real thing. Pass
-# GHIDRA_CHECK_ARGS="--cancel" to also check that a Cancel kills a real run.
+# stand-in for analyzeHeadless; this is the check that the export script runs inside the real thing. It forces the
+# Ghidra path, so a valid ELF cannot be answered by the native reader instead. Pass GHIDRA_CHECK_ARGS="--cancel" to
+# also check that a Cancel kills a real run.
 GHIDRA_CHECK_ARGS ?=
 
 check-ghidra:

@@ -67,6 +67,13 @@ class TestTheRealGhidraCheck(unittest.TestCase):
         self.assertEqual(1, done.returncode, done.stdout)
         self.assertIn("FAIL", done.stdout)
 
+    def test_a_valid_elf_still_exercises_ghidra_because_the_check_forces_the_fallback(self) -> None:
+        self.binary = Path(sys.executable)
+        install = fake_ghidra.make_install(self.base)
+        done = self.run_script(install)
+        self.assertEqual(0, done.returncode, done.stdout + done.stderr)
+        self.assertNotEqual([], fake_ghidra.records(install), "the native reader answered, so Ghidra was not checked")
+
     def test_it_never_writes_to_the_callers_own_state_directory(self) -> None:
         self.run_script(fake_ghidra.make_install(self.base))
         self.assertEqual([], list(self.mine.iterdir()))

@@ -111,7 +111,12 @@ class TestARegexCannotFreezeTheEngine(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["regex"])
         self.assertEqual(["app.py"], [m["path"] for m in result["matches"]])
         self.assertEqual(1, result["matches"][0]["line"])
-        self.assertEqual([], regex_workers())
+        # The answer arrives when the worker's output does; its exit is a separate, brief event.
+        # Drop the search's own process by the same bounded wait the catastrophic test uses.
+        deadline = time.monotonic() + 3
+        while regex_workers() and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        self.assertEqual([], regex_workers(), "the workers from an ordinary search did not exit")
 
     async def test_a_worker_that_dies_is_a_refusal_naming_the_failure_not_a_crash(self) -> None:
         broken = self.root.parent / "broken_worker.py"

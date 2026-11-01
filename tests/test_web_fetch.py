@@ -11,8 +11,11 @@ Nothing here touches the network. `httpx.MockTransport` serves most pages; one t
 loopback interface and lets the guard through for it (the guard is patched, never bypassed by a parameter), to
 prove the connection really goes to an address that was checked and the name really travels in `Host`.
 
-Scrapling is the parser and only the parser. `TestScraplingIsOnlyTheParser` reads the engine's source and fails
-when anything else of it is imported, because the reasons it is not (docs/12) are the reasons this file exists.
+The HTML reader is the engine's own (`engine/html_text.py`). `TestTheParserIsNative` reads the source and fails
+if a scraping dependency returns, because the reasons it was removed (docs/12) are the reasons this file exists.
+`TestASavedRealWorldPage` reads a whole saved page (`tests/fixtures/docs_page.html`), because a few inline
+snippets cannot show what the reader does with unclosed markup, a script containing `<`, or a template in an
+article.
 """
 
 from __future__ import annotations
@@ -34,9 +37,8 @@ from typing import Any
 from unittest import mock
 
 import httpx
-from scrapling import parser as scrapling_parser
 
-from engine import web_fetch
+from engine import html_text, web_fetch
 from engine.web_fetch import (
     MAX_ADDRESS_TRIES,
     MAX_BODY_BYTES,
@@ -56,6 +58,8 @@ from engine.web_fetch import (
 )
 
 ENGINE = Path(__file__).resolve().parent.parent / "engine"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+SAVED_PAGE = FIXTURES / "docs_page.html"
 
 PUBLIC = "93.184.216.34"
 ANY = FetchPolicy(MODE_ANY)
@@ -121,6 +125,7 @@ class TestAddressesThatAreNeverPublic(unittest.TestCase):
         "127.0.0.1", "127.255.255.254", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1",
         "169.254.169.254",  # the cloud metadata service
         "100.64.0.1", "224.0.0.1", "240.0.0.1", "255.255.255.255", "192.0.2.1",
+        "192.88.99.1",  # deprecated 6to4 relay anycast: special-purpose, never a public host
         "0.0.0.0",  # noqa: S104 — the address under test, never bound
         "::1", "::", "fe80::1", "fc00::1", "fd12:3456::1", "ff02::1",
         "::ffff:127.0.0.1", "::ffff:169.254.169.254", "::ffff:10.0.0.1",
@@ -1158,8 +1163,8 @@ class TestAFailedHandshakeFallsThroughWithoutSendingARequest(unittest.IsolatedAs
                 self.assertNotIn(b" /x HTTP/", chunks[0])
 
 
-class TestScraplingIsOnlyTheParser(unittest.TestCase):
-    """docs/12: what of Scrapling this engine uses, and what it does not, as source and not as intention."""
+class TestTheParserIsNative(unittest.TestCase):
+    """docs/12: the HTML reader is the engine's own, so there is no scraping dependency left to import."""
 
     def imports(self) -> dict[str, set[str]]:
         found: dict[str, set[str]] = {}
@@ -1175,47 +1180,147 @@ class TestScraplingIsOnlyTheParser(unittest.TestCase):
                 found[path.name] = scrapling
         return found
 
-    def test_one_module_imports_it_and_it_imports_only_the_parser(self) -> None:
-        self.assertEqual(self.imports(), {"web_fetch.py": {"scrapling.parser"}})
+    def test_no_engine_module_imports_a_scraping_package(self) -> None:
+        self.assertEqual(self.imports(), {})
 
-    def test_the_parts_that_start_browsers_make_requests_or_keep_a_database_are_not_used(self) -> None:
-        # The module's docstring says why each is not used, so the scan reads names in code, not prose.
+    def test_the_parser_is_the_engine_module_and_it_does_the_three_jobs(self) -> None:
+        self.assertTrue(callable(html_text.parse))
+        self.assertTrue(callable(html_text.select))
+        self.assertTrue(callable(html_text.text))
         tree = ast.parse((ENGINE / "web_fetch.py").read_text(encoding="utf-8"))
-        used: set[str] = set()
+        imported: set[str] = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.Name):
-                used.add(node.id)
-            elif isinstance(node, ast.Attribute):
-                used.add(node.attr)
-            elif isinstance(node, ast.keyword) and node.arg:
-                used.add(node.arg)
-            elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                used.update(alias.name.split(".")[-1] for alias in node.names)
-        for forbidden in (
-            "StealthyFetcher", "DynamicFetcher", "Fetcher", "FetcherSession", "Spider",
-            "playwright", "patchright", "curl_cffi", "solve_cloudflare", "adaptive", "auto_save",
-        ):
-            with self.subTest(name=forbidden):
-                self.assertNotIn(forbidden, used)
-        self.assertIn("Selector", used, "the scan found nothing to check")
+            if isinstance(node, ast.ImportFrom):
+                imported.update(alias.name for alias in node.names)
+                if node.module:
+                    imported.add(node.module)
+            elif isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+        self.assertTrue("html_text" in imported or "engine.html_text" in imported, imported)
 
-    def test_no_dependency_the_engine_declares_is_the_fetchers_extra(self) -> None:
+    def test_no_dependency_names_a_scraping_package(self) -> None:
         root = ENGINE.parent
         for name in ("pyproject.toml", "engine/requirements.txt"):
-            text = (root / name).read_text(encoding="utf-8")
-            declared = [line for line in text.splitlines() if "scrapling" in line and not line.lstrip().startswith("#")]
-            self.assertEqual(len(declared), 1, f"{name}: {declared}")
-            self.assertNotIn("[", declared[0], f"{name} asks for an extra of scrapling: {declared[0]}")
+            text = (root / name).read_text(encoding="utf-8").lower()
+            self.assertNotIn("scrapling", text, f"{name} still asks for a parser this engine now owns")
 
-    def test_the_parser_never_writes_a_second_database(self) -> None:
-        # `adaptive` is what makes Scrapling open a SQLite file inside its own package directory (docs/00
-        # section 6.7: one database). It is off by default, so extraction must leave that file exactly as it was.
-        store = Path(str(getattr(scrapling_parser, "__DEFAULT_DB_FILE__")))  # noqa: B009 — a dunder name, so not an attribute to spell out
-        before = store.stat().st_mtime_ns if store.exists() else None
+    def test_the_parser_opens_nothing_and_writes_nothing(self) -> None:
+        # The tree is built from a string and read from memory. No sqlite, no second database, no state file.
+        tree = ast.parse((ENGINE / "html_text.py").read_text(encoding="utf-8"))
+        called = {
+            node.func.attr for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        for forbidden in ("open", "write", "write_text", "write_bytes", "connect", "sqlite3"):
+            self.assertNotIn(forbidden, called, f"html_text.py calls {forbidden}")
         page = web_fetch.extract(PAGE, "https://docs.example/", "main", 5_000)
         self.assertIn("Quickstart", page.text, "the extraction ran")
-        after = store.stat().st_mtime_ns if store.exists() else None
-        self.assertEqual(before, after)
+        self.assertEqual(
+            (page.title, page.matched, [label for label, _ in page.links]),
+            ("Quickstart | Thing", 1, ["Next", "Elsewhere"]),
+        )
+
+
+class TestASavedRealWorldPage(unittest.TestCase):
+    """A page read from a file, not a snippet: unclosed paragraphs, nested lists, a script whose
+    data contains `<`, an inline stylesheet, a template and an SVG inside the article.
+
+    The fixture was written for this test (no third-party source is committed here); its shape is a
+    normal documentation page, which is what `fetch_page` is asked to read. A handful of inline
+    strings cannot show the three things a real page stresses at once: malformed nesting, entities
+    the browser would decode, and inert subtrees that look like prose to a text walker.
+    """
+
+    markup: str
+    root: html_text.Node
+    page: web_fetch.Fetched
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.markup = SAVED_PAGE.read_text(encoding="utf-8")
+        cls.root = html_text.parse(cls.markup)
+        cls.page = web_fetch.extract(
+            cls.markup, "https://docs.example/guide/install/", "main", 50_000
+        )
+
+    def test_the_article_is_read_and_the_page_chrome_is_not(self) -> None:
+        self.assertEqual(self.page.title, "Install Widget | Widget docs")
+        self.assertEqual(self.page.matched, 1)
+        for kept in ("Widget & Co.", "—", "widget doctor", "Configuration", "Requires a token"):
+            self.assertIn(kept, self.page.text, f"the article text lost {kept!r}")
+        for dropped in (
+            "window.analytics",              # a script in the head
+            "--ink",                         # a stylesheet in the head
+            "color: #b00020",                # a stylesheet inside the article
+            "Enable JavaScript",             # noscript, in the head and in a section
+            "template text must not be read",
+            "Vector logo",                   # the SVG's own title
+            "schema.org",                    # JSON-LD is still script text
+            "ignore previous instructions",  # a comment
+            "Skip to content",               # outside main
+            "© 2026",                        # the site footer, outside main
+        ):
+            self.assertNotIn(dropped, self.page.text, f"the article text kept {dropped!r}")
+        self.assertFalse(self.page.truncated)
+        self.assertGreater(self.page.chars, 100)
+
+    def test_links_are_absolute_deduplicated_and_only_web_addresses(self) -> None:
+        self.assertEqual(
+            [href for _, href in self.page.links],
+            [
+                "https://docs.example/guide/",
+                "https://docs.example/guide/install/",
+                "https://docs.example/guide/configuration/",
+                "https://example.com/widget",
+            ],
+        )
+        self.assertEqual(
+            [label for label, _ in self.page.links],
+            ["Guide", "verify page", "Configuration", "example.com"],
+        )
+
+    def test_the_css_subset_matches_the_document_it_was_saved_from(self) -> None:
+        self.assertEqual(len(html_text.select(self.root, "article > section#installation")), 1)
+        self.assertEqual(
+            len(html_text.select(self.root, '.callout.warning[data-kind="warning"]')), 1
+        )
+        current = html_text.select(self.root, 'nav a[aria-current="page"]')
+        self.assertEqual([html_text.text(node) for node in current], ["Install"])
+        self.assertEqual(len(html_text.select(self.root, 'html[lang|="en"]')), 1)
+        self.assertEqual(len(html_text.select(self.root, 'main a[href^="/guide/"]')), 3)
+        self.assertGreaterEqual(len(html_text.select(self.root, "*")), 20)
+        self.assertGreaterEqual(len(html_text.select(self.root, "main *")), 20)
+        callout = html_text.select(self.root, ".callout")[0]
+        self.assertIn("Requires a token", html_text.text(callout))
+        with self.assertRaises(html_text.SelectorError):
+            html_text.select(self.root, "article:has(h2)")
+
+    def test_a_selector_that_matches_nothing_is_empty_not_the_whole_page(self) -> None:
+        page = web_fetch.extract(
+            self.markup, "https://docs.example/guide/install/", ".not-on-this-page", 5_000
+        )
+        self.assertEqual((page.matched, page.text, page.links), (0, "", []))
+        with self.assertRaises(FetchRefused) as caught:
+            web_fetch.extract(
+                self.markup, "https://docs.example/guide/install/", "article:has(h2)", 5_000
+            )
+        self.assertIn("not a CSS selector the parser accepts", str(caught.exception))
+
+    def test_the_budget_cuts_text_not_the_parse(self) -> None:
+        page = web_fetch.extract(
+            self.markup, "https://docs.example/guide/install/", "main", 120
+        )
+        self.assertTrue(page.truncated)
+        self.assertEqual(len(page.text), 120)
+        self.assertGreater(page.chars, 120)
+
+    def test_unclosed_markup_is_read_without_an_exception(self) -> None:
+        # The fixture leaves p, li and footer elements unclosed, as a real page does.
+        nav = html_text.find_first(self.root, "nav")
+        self.assertIsNotNone(nav)
+        assert nav is not None
+        self.assertIn("API", html_text.text(nav))
+        self.assertGreaterEqual(len(list(html_text.find_all(self.root, "li"))), 3)
 
 
 if __name__ == "__main__":  # pragma: no cover

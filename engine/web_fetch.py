@@ -4,13 +4,11 @@ Until this module the engine had no way onto the web at all. The conductor could
 looking at (`read_page`) and move it (`navigate_page`), and both go through the shell's webview. This is the
 first request the *engine* makes to an address a model chose, so it is worth being exact about who decides what.
 
-**Codify owns the request and Scrapling owns the parsing.** The fetch is `httpx`, which the engine already
-depends on, under rules written here. Scrapling contributes `Selector`, its HTML parser (CSS, text extraction),
-and nothing else: not its fetchers, whose HTTP client does not check the first address it is given, holds a
-whole response in memory and sends a spoofed `Referer` by default; not its stealth and browser fetchers, which
-start Chromium outside the spawn guard (docs/07) and are built to pass as something they are not (docs/03 §1.5
-says what this project does instead); not its spiders; not its adaptive storage, which writes a second SQLite
-file (docs/00 §6.7). `tests/test_web_fetch.py` pins every one of those exclusions. The audit is `docs/12`.
+**Codify owns the request and the parsing.** The fetch is `httpx`, which the engine already depends on, and the
+HTML reader is `engine/html_text.py`: a standard-library tree, text extraction and a small CSS subset written
+here. It replaced Scrapling's `Selector`, which was that package's one useful part but still a dependency whose
+adaptive storage could open a second SQLite file (docs/00 §6.7). The rest of Scrapling was refused before (its
+fetchers, spiders and browser engines), and now there is nothing of it to import at all. The audit is `docs/12`.
 
 What the rules are, and the attack each one answers:
 
@@ -66,8 +64,8 @@ from ssl import SSLContext
 from urllib.parse import urljoin, urlsplit
 
 import httpx
-from scrapling.parser import Selector
 
+from engine import html_text
 from engine.models import strip_invisible
 
 #: The three states of the `web_fetch` setting. A fresh install has `MODE_OFF`, which is also what a setting
@@ -130,16 +128,13 @@ PLAIN_TYPES = frozenset({
     "application/rss+xml", "application/atom+xml",
 })
 
-#: Tags whose text is not the page's. `head` goes too: the title is reported on its own line.
-IGNORED_TAGS = ("script", "style", "noscript", "template", "svg", "head")
-
 _REDIRECTS = frozenset({301, 302, 303, 307, 308})
 
 #: Addresses that are never public, spelled out beside `ipaddress`'s own `is_global` because that property has
 #: changed meaning between interpreter releases, and this has to mean the same thing on the 3.10 floor.
 _NEVER = tuple(ipaddress.ip_network(net) for net in (
     "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
-    "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
+    "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
     "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
     "::/128", "::1/128", "64:ff9b::/96", "100::/64", "2001:db8::/32", "fc00::/7", "fe80::/10", "fec0::/10", "ff00::/8",
 ))
@@ -419,48 +414,39 @@ def _clean(text: str) -> str:
 
 
 def extract(markup: str, url: str, selector: str | None, budget: int) -> Fetched:
-    """The text, title and links of an HTML page, by Scrapling's parser.
+    """The text, title and links of an HTML page, by the engine's own reader (`engine/html_text.py`).
 
-    Synchronous and pure, so it can be tested on a string and run in a thread. `Selector` is the only part of
-    Scrapling this engine uses: it drops script, style and comment text, and its CSS and text extraction are
-    the reason to have it. `adaptive` stays off (its default), which is what keeps it from writing a database.
+    Synchronous and pure, so it can be tested on a string and run in a thread. The reader drops script, style,
+    comment and head text; its text extraction joins text nodes with a newline, which is why an inline `<code>`
+    is a line of its own in the answer. An unreadable selector is refused here, before its result could be
+    mistaken for an empty page.
     """
-    page = Selector(markup, url=url)
-    try:
-        title = _clean(str(page.css("title::text").get() or ""))
-    except AttributeError:
-        # A document with no root element (only a comment, or only an XML declaration): the parser builds
-        # nothing to query and fails on the first question. There is no text to give, and that is the answer.
-        return Fetched(
-            url=url, status=0, content_type="text/html", title="", text="", chars=0, truncated=False,
-            links=[], redirects=[], matched=0 if selector is not None else None,
-        )
+    root = html_text.parse(markup)
+    title_node = html_text.find_first(root, "title")
+    title = _clean(html_text.text(title_node)) if title_node is not None else ""
     matched: int | None = None
-    scopes = [page]
+    scopes = [root]
     if selector is not None:
         try:
-            found = page.css(selector)
-        except Exception as exc:  # noqa: BLE001 — the parser's own error type is not part of its contract
-            raise FetchRefused(f"{selector!r} is not a CSS selector the parser accepts ({type(exc).__name__}).") from exc
+            found = html_text.select(root, selector)
+        except html_text.SelectorError as exc:
+            raise FetchRefused(f"{selector!r} is not a CSS selector the parser accepts ({exc}).") from exc
         matched = len(found)
-        scopes = list(found)
-    pieces = [
-        str(scope.get_all_text(separator="\n", strip=True, ignore_tags=IGNORED_TAGS))
-        for scope in scopes
-    ]
+        scopes = found
+    pieces = [_clean(html_text.text(scope)) for scope in scopes]
     text = _clean("\n\n".join(piece for piece in pieces if piece.strip()))
     links: list[tuple[str, str]] = []
     seen: set[str] = set()
     for scope in scopes:
-        for anchor in scope.css("a[href]"):
-            href = str(anchor.attrib.get("href") or "").strip()
+        for anchor in html_text.find_all(scope, "a"):
+            href = anchor.attrs.get("href", "").strip()
             if not href or href.startswith("#") or len(href) > MAX_LINK_URL_CHARS:
                 continue
             absolute = strip_invisible(urljoin(url, href)).split("#", 1)[0]
             if not absolute.startswith(("http://", "https://")) or absolute in seen or len(absolute) > MAX_LINK_URL_CHARS:
                 continue
             seen.add(absolute)
-            label = _clean(str(anchor.get_all_text(separator=" ", strip=True)))
+            label = _clean(html_text.text(anchor))
             links.append((_clip(label, MAX_LINK_LABEL_CHARS) or "(no text)", absolute))
             if len(links) >= MAX_LINKS:
                 break

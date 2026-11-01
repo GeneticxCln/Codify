@@ -170,7 +170,7 @@ class TestLicences(unittest.TestCase):
     def test_a_wheel_with_no_readable_licence_stops_the_lock(self) -> None:
         self.assertEqual(lock_engine.licence_of("x", {"license_expression": "MIT"}), "MIT")
         self.assertEqual(lock_engine.licence_of("x", {"license": "BSD-3-Clause"}), "BSD-3-Clause")
-        self.assertEqual(lock_engine.licence_of("scrapling", {"license": "BSD 3-Clause License\n..."}), "BSD-3-Clause")
+        self.assertEqual(lock_engine.licence_of("jaraco.classes", {"license": "MIT License\n..."}), "MIT")
         with self.assertRaises(lock_engine.LockError):
             lock_engine.licence_of("x", {"license": "Copyright (c) someone\nAll rights reserved"})
 

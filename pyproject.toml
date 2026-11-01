@@ -22,12 +22,6 @@ dependencies = [
     "pydantic>=2.10,<3",
     "httpx>=0.28,<1",
     "keyring>=25.0,<26",
-    # The HTML parser behind `fetch_page` (engine/web_fetch.py), and only the parser: the
-    # base install is six small packages. Its fetchers, spiders and browser engines need the
-    # `fetchers` extra, which this project does not install and tests/test_web_fetch.py keeps
-    # the engine from importing (docs/12). 0.x, so the minor version is capped: its API moves
-    # between minors. Python >=3.10, the same floor as this project.
-    "scrapling>=0.4.15,<0.5",
 ]
 
 [project.optional-dependencies]
@@ -36,7 +30,7 @@ dependencies = [
 # megabytes, and an install that never runs the gate should pay for neither. `make setup-laya`
 # installs it into the checkout's own `.venv` — the interpreter the desktop shell spawns — which
 # is the half that matters: a copy in some other Python leaves `sdk_available()` false with no
-# error (docs/05 §3). 0.x, so the minor is capped, like scrapling above.
+# error (docs/05 §3). 0.x, so the minor is capped.
 laya = [
     "laya>=0.4.19,<0.5",
 ]

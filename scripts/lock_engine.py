@@ -48,8 +48,6 @@ ALLOWED = frozenset({
 
 # Wheels whose metadata states a licence only as prose or not at all. Each says what it is.
 LICENCE_OVERRIDES = {
-    # The `License` field is the whole BSD 3-Clause text rather than an identifier.
-    "scrapling": "BSD-3-Clause",
     # No License-Expression; the only statement is the `License :: OSI Approved :: MIT License` classifier.
     "jaraco.classes": "MIT",
 }

@@ -417,7 +417,14 @@ class TestEveryWayARunGoesWrong(Case):
         self.assertLess(time.monotonic() - started, 6)
         self.assertEqual("timeout", err.code)
         self.assertTrue(err.retryable)
-        self.assertFalse(fake_ghidra.alive(fake_ghidra.records(self.install)[0]["pid"]), "the stand-in outlived its deadline")
+        # The run is killed by the engine; the child is not necessarily reaped by the instant the
+        # refusal returns. Wait for the pid to disappear, as the cancel test below does, rather
+        # than reading a reaping race as a process that outlived its deadline.
+        record = fake_ghidra.records(self.install)[0]
+        deadline = time.monotonic() + 3
+        while fake_ghidra.alive(record["pid"]) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(fake_ghidra.alive(record["pid"]), "the stand-in outlived its deadline")
 
     def test_a_child_that_ignores_term_is_still_gone(self) -> None:
         with mock.patch.object(ba, "ANALYSIS_DEADLINE_S", 1.0):

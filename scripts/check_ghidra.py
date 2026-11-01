@@ -4,7 +4,8 @@
 The gate drives a stand-in for `analyzeHeadless` (`tests/fake_ghidra.py`), which proves the engine's door but cannot prove
 that `engine/ghidra/CodifyExport.java` compiles and runs inside Ghidra. This is that check (`docs/14` §4 item 6). It is
 **not** part of `make check` or `make ci`, and it does not skip: with no usable Ghidra it fails, naming why, because a
-passing result must mean Ghidra was exercised.
+passing result must mean Ghidra was exercised. The analysis is requested with `native=False`, because the native reader
+would otherwise answer a valid ELF itself and this check would pass without Ghidra doing any work.
 
 What it does, in a throwaway `CODIFY_HOME` so nothing of yours is touched:
 
@@ -80,11 +81,11 @@ def main(argv: list[str]) -> int:
         print(f"analysing {small.name} ({small.stat().st_size:,} bytes)")
         try:
             started = time.monotonic()
-            summary = ba.analyze_binary(str(workspace), "target.bin")
+            summary = ba.analyze_binary(str(workspace), "target.bin", native=False)
             took = time.monotonic() - started
-            functions = ba.analyze_binary(str(workspace), "target.bin", "functions", limit=5)
-            imports = ba.analyze_binary(str(workspace), "target.bin", "imports", limit=5)
-            sections = ba.analyze_binary(str(workspace), "target.bin", "sections", limit=5)
+            functions = ba.analyze_binary(str(workspace), "target.bin", "functions", limit=5, native=False)
+            imports = ba.analyze_binary(str(workspace), "target.bin", "imports", limit=5, native=False)
+            sections = ba.analyze_binary(str(workspace), "target.bin", "sections", limit=5, native=False)
         except ba.BinaryAnalysisError as exc:
             print(f"FAIL  the analysis did not run ({exc.code}): {exc}")
             return 1
@@ -106,7 +107,7 @@ def main(argv: list[str]) -> int:
             started = time.monotonic()
             code = ""
             try:
-                ba.analyze_binary(str(workspace), "big.bin", cancel=cancel)
+                ba.analyze_binary(str(workspace), "big.bin", cancel=cancel, native=False)
             except ba.BinaryAnalysisError as exc:
                 code = exc.code
             finally:

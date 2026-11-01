@@ -2,10 +2,11 @@
 
 Scrapling (`D4Vinci/Scrapling`, BSD-3-Clause) is a Python web-scraping framework: a fast HTML parser, several
 HTTP and browser fetchers, a spider framework, and an MCP server. The question put to this repository was how to
-"integrate" it. The answer is one tool, `fetch_page`, built on Scrapling's **parser** and on nothing else of it;
-the rest is refused, and the reasons are the invariants in `docs/00` §6 and the decisions in `docs/03` and
-`docs/07`, not taste. This document follows the shape of `docs/10` and `docs/11`: what was read, what was
-measured, what each idea became, and what was not looked at, so the table cannot be mistaken for more than it is.
+"integrate" it. The first answer was one tool, `fetch_page`, built on Scrapling's **parser** and on nothing else of
+it; the rest was refused, and the reasons are the invariants in `docs/00` §6 and the decisions in `docs/03` and
+`docs/07`, not taste. That parser was later replaced by `engine/html_text.py` and the dependency removed (§6). This
+document follows the shape of `docs/10` and `docs/11`: what was read, what was measured, what each idea became, and
+what was not looked at, so the table cannot be mistaken for more than it is.
 
 ## 1. What was read, and what was not
 
@@ -30,7 +31,7 @@ measured, what each idea became, and what was not looked at, so the table cannot
 
 | Scrapling | Here | Why |
 |---|---|---|
-| `scrapling.parser.Selector`: CSS and XPath, text extraction that skips script, style and comments | **Have.** `engine/web_fetch.py` `extract`. | Six small, typed dependencies; works on the 3.10 floor. It is the part that is good at what it does and carries no authority. |
+| `scrapling.parser.Selector`: CSS and XPath, text extraction that skips script, style and comments | **Was have; now replaced.** `engine/web_fetch.py` `extract` and `engine/html_text.py`. | The engine needed a tree walk, not a scraping framework. The native reader removes six dependencies, including the package whose adaptive storage could open a second SQLite file (§6). |
 | `Fetcher` / `FetcherSession` (HTTP, TLS impersonation) | **Reject.** The fetch is `httpx`, which the engine already depends on, under rules in `web_fetch.py`. | It does not check the first address (measured), holds a response whole (measured), spoofs `Referer` by default (measured), and needs Playwright to import (measured). Each is a rule this tool has to own; two of them are the attacks the rules answer (§4). |
 | `StealthyFetcher`, `solve_cloudflare`, header and TLS impersonation | **Reject.** | `docs/03` §1.5 says what this project does about identity: it announces itself, and measured that pretending changed nothing. The tool sends `Codify-fetch_page/<version> (an AI coding assistant reading a page for its user)`. A site that blocks that is a site the person opens in their own tab. |
 | `DynamicFetcher` and the browser engines | **Reject.** | Playwright starts Chromium on its own, outside `spawn_guard` (`docs/07` §1), so "no process outlives the engine" would be false and `tests/test_no_unguarded_spawns.py`'s static scan would not see it. The person's own tab already renders script-built pages, and `read_page` reads it. |
@@ -70,12 +71,11 @@ One conductor tool, **`fetch_page(url, selector?, max_chars?)`**, in `engine/web
   | One 20 s budget over the whole fetch; the body is read to 1 MB and the stream stops there (a compressed body is capped after it is decompressed); the content type must be text | A slow or endless response; a large one held in memory; a binary one |
   | Text is capped, stripped of zero-width and bidirectional controls (embeddings, overrides and isolates), variation selectors and the Unicode tag block, and returned labelled as a website's words | Instructions hidden in text a person cannot see (in the text, the title, every link's address and label, the `url:` line and the redirect chain, and the same for `read_page`; one definition, `models.INVISIBLE_CHARS`); a page that talks like a command (`format_fetch` says what it is in the same breath as the text) |
 
-* **No process is started.** `web_fetch.py` adds nothing to `GUARDED_SPAWN_SITES` (`docs/07`), and imports
-  `scrapling.parser` only: `tests/test_web_fetch.py::TestScraplingIsOnlyTheParser` reads the engine's source and
-  fails on any other Scrapling import, on the fetchers, spiders or adaptive names in code, and on a declared
-  dependency that asks for an extra.
-* **`scrapling>=0.4.15,<0.5`** is a runtime dependency in both `pyproject.toml` and `engine/requirements.txt`
-  (the parity test holds them equal). Capped below 0.5 because it is 0.x and its API moves between minors.
+* **No process is started.** `web_fetch.py` adds nothing to `GUARDED_SPAWN_SITES` (`docs/07`), and its parser
+  (`engine/html_text.py`) imports only the standard library: `tests/test_web_fetch.py::TestTheParserIsNative` reads
+  the engine's source and fails if a scraping package returns, and checks that the parser opens and writes nothing.
+* **No scraping dependency is declared.** `engine/html_text.py` replaced `scrapling.parser.Selector`; both
+  `pyproject.toml` and `engine/requirements.txt` are free of Scrapling, and the parity test holds them equal.
 
 ## 4. What this does not do, and cannot
 
@@ -137,3 +137,17 @@ Each rejection above is a statement about an invariant or a decision, so reopeni
 
 Nothing here should be read as a verdict on Scrapling's quality. It is a different product with a different job,
 and this document is only about what this one may take from it.
+
+## 6. The parser is native now
+
+The parser was the last part of Scrapling this engine used, and it was still a dependency: six packages, one of them
+carrying an adaptive store that could open a SQLite file. `engine/html_text.py` replaces it with three jobs done on the
+standard library — build a tree with `html.parser`, extract text while skipping `script`, `style`, `head` and the other
+inert elements, and match a small, checked CSS subset (type, `*`, `.class`, `#id`, attribute tests, descendant and child
+combinators, comma groups). A selector outside that subset is refused with a sentence; it is never a silent zero-match.
+
+The replacement deliberately keeps the parser's limits rather than its features. It resolves no entity into markup,
+opens no file, starts no process and writes no state. The tree is built from the response body the fetch already bounded
+and cleaned. `tests/test_web_fetch.py` pins the extraction, every selector form the page fixture uses, the refusal of an
+unsupported selector, and the absence of any scraping import or declared dependency. `docs/00` §6.7 still holds: there
+is still one database, and the parser cannot open a second one.
