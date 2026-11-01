@@ -254,11 +254,12 @@ jail, and each one is written here with how it is held:
 **What this does not claim.** It is a jail on the **host's kernel**, not a virtual machine: there is **no seccomp filter**, so the host kernel's whole syscall surface is reachable from inside it, and a kernel vulnerability that can be reached from an unprivileged
 user namespace is not contained by anything here, and **no limit set here is a defence against a kernel fault**: the jail has no kernel of its own to fail. There is no cgroup memory limit (the guard polls, and a program can allocate faster than it looks); a delegated cgroup would be stronger where one exists and is not built because it cannot be tested without systemd. Some distributions switch unprivileged user namespaces off, and then a machine cannot be opened at all (`make doctor` says so). A seccomp filter is the next hardening step and a VM backend the stronger one (`09` §14.9).
 
-### 1.12 The update check: the one request that is not a model provider's (`built`)
+### 1.12 The GitHub requests: the update check and a pushed commit's checks (`built`)
 
 The About tab can ask whether a newer release exists and fetch the package for this install (`18`
-§4). It is the only address this app ever contacts that is neither the engine nor a model provider
-configured for it, so the whole of it is written here:
+§4). The engine also reads the checks for a commit a person just pushed (`04` §3), and the push
+itself is git talking to the workspace's `origin`. These are the requests this app makes that are
+neither the engine nor a model provider configured for it, so the whole of them is written here:
 
 - **One address.** `https://api.github.com/repos/GeneticxCln/Codify/releases/latest`, and a
   release asset's own `browser_download_url` when a person asks for the download. Nothing a model,
@@ -275,6 +276,15 @@ configured for it, so the whole of it is written here:
 - **A person starts it.** Nothing in the app calls it on mount or on a timer. GitHub's
   unauthenticated limit (60 requests an hour per address) is therefore a limit this app cannot reach
   by existing, only by being clicked, and the sentence a refusal produces says the limit is GitHub's.
+- **A pushed commit's checks are the workspace's own repository.** `GET
+  https://api.github.com/repos/{owner}/{repo}/commits/{sha}/check-runs`: the owner and repository are
+  parsed from the workspace's `origin`, the commit is `HEAD`, and neither a request body nor a query
+  string supplies them. Only `api.github.com` is contacted. No token is stored or sent, so a private
+  repository (or a spent anonymous limit) answers `unknown` with a reason rather than a guessed pass.
+  The window starts polling only after a push, at 30 s while a check is pending, and stops at a
+  terminal answer. The push that starts it is `git push` to the configured `origin`, using the
+  person's own ssh agent or credential helper; it is a route a person presses, never a tool a model
+  can call.
 - **It writes one file, into the downloads folder**, and nothing else: the release asset, named as
   the release names it (a name that is a path is refused), never past 256 MiB. It installs nothing,
   runs nothing, escalates nothing and replaces no binary — the `apt` and `chmod +x` lines it answers

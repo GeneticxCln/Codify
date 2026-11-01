@@ -113,12 +113,13 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
 | `10-agent-memory.md` | The agent-memory model: the Hindsight audit, what was built (`recall`, `recall_threads`, keyword search, the durable observation store and its fading), and what was rejected |
 | `11-ruflo-audit.md` | The Ruflo audit: which of its ideas were borrowed, which were refused and by which invariant, and what was not read |
 | `13-grepify-audit.md` | The Grepify audit: `scan_code`, a built-in code-review scanner (curated rule profiles, comment and test skipping, candidates the model triages), its rules, and what of Grepify was and was not taken |
-| `12-scrapling-audit.md` | The Scrapling audit: the one tool built on its parser (`fetch_page`), the engine's rules for a request it makes to an address a model chose, and which of its fetchers, spiders, browsers and MCP server were refused and why |
-| `14-rea-audit.md` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine — what Ghidra took (a dedicated door, a one-shot run, engine-owned limits), two gaps found and closed (no resource limits on a child, a worker that cannot be cancelled), the built `analyze_binary`, and what the build does not do |
+| `12-scrapling-audit.md` | The Scrapling audit: `fetch_page`, the engine's rules for a request it makes to an address a model chose, which of Scrapling's fetchers, spiders, browsers and MCP server were refused and why, and the native parser that later replaced its one useful part |
+| `14-rea-audit.md` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine — the guarded one-shot Ghidra fallback (a dedicated door, engine-owned limits), two gaps found and closed (no resource limits on a child, a worker that cannot be cancelled), and the native ELF/PE/Mach-O reader that now answers first |
 | `15-xerg-audit.md` | The Xerg audit: `audit_usage`, a native read-only audit of wasted model calls in tokens (retry waste and the fix loop, descriptive signals, coverage first), built from what the engine already records, with tool-loop waste reported as not measurable, cache reads and writes measured as a signal and no dollars (`04` §4.7); and what of Xerg's skill was and was not taken |
 | `16-deepinfer-and-cmux-audit.md` | The DeepInfer and cmux audit: a serving framework this engine is a client of, and a terminal that hosts agents where this one hosts its own — what is portable (terminal notifications into the existing inbox, bounded replay of the loop's transcript, JSON-schema replies where offered, prompt-prefix reuse) and what is refused and by which invariant (a CLI/socket second door, resume commands that run on restore, project files that name argv, browser credential import), with the plan in three ships |
 | `18-release-and-updates.md` | Release and updates: a release is a tag, what a deb and an AppImage hold (the shell and the engine, with its own pinned CPython and hashed lock), the workflow's deliberate decisions (the bundle, its smoke before publishing, the dry run), and what the About tab's update button does and refuses |
 | `17-leanrea-audit.md` | The leanrea audit: the routing-table skill that argues against REA's tool surface — what of it is already this engine's design (a closed 31-call menu, skills as lazy data, coverage lines), the defect its trap list found and fixed here (`search_code` now names the directories its walk pruned instead of reporting an absence), the measured fixed cost of one conductor call, and the two small rows built instead of the mechanism |
+| `19-deepseek-stack-audit.md` | The deepseek-stack audit: 29 skills for a cheap, literal model, read at the initial release `d4f1ebe` — the 24 native recipes built from them, what each does, and which actions stay with a person (push, merge, comments, screenshots, parallel models); per-role thinking effort remains a setting rather than a skill |
 
 ## 6. Invariants (non-negotiable)
 
@@ -145,9 +146,12 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
    See `docs/09` §10.
 9. Only the fixer writes for an agent. The `write` move is the single path from a conductor run to the
    filesystem, it refuses while the goal is unapproved, and no skill, workspace file or
-   conductor reply can widen that. A person's own Save in the editor is the one other door,
-   `PUT /workspaces/{id}/file`: it needs the boot token, so no agent, skill or conductor tool
-   can call it. A skill is instructions, never a capability. See `docs/09` §10.14.
+   conductor reply can widen that. A person's own Save in the editor is one other door,
+   `PUT /workspaces/{id}/file`, and a person's New skill action is the second,
+   `POST /settings/skills` and `POST /settings/skills/import`: both need the boot token, so no
+   agent, skill or conductor tool can call either, and the creator may only create one new file
+   under `.codify/skills/`, never replace or delete another file. A skill is instructions, never a
+   capability. See `docs/09` §10.14.
 
 Each of the nine is held by a test at the boundary it names (a route, the sandbox, the running app, the
 engine's own source) and not only by a test of a constructor or a table. `tests/test_invariants_at_their_boundary.py`

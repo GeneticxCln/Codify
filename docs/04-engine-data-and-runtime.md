@@ -350,7 +350,15 @@ because `unittest discover -s tests` loads test modules as top level modules and
 fallback does not carry the credential) rewrote a developer's real `secrets.json` on every `make test`,
 which is where stray `codify/agents/*` entries in a real store came from.
 
-WAL mode. `foreign_keys=ON`.
+WAL mode. `foreign_keys=ON`. The store handle is one object but not one connection: `connect` returns a
+`sqlite3.Connection` subclass that gives each thread its own connection (`engine/db.py`), opened on first
+use with the same per-connection PRAGMAs and closed with the handle. This is what makes a `commit()` mean
+the transaction its thread began. SQLite serialises individual C calls, not the BEGIN/statement/COMMIT
+sequence, and the engine runs its store from the event loop, `asyncio.to_thread` workers and the daemon
+threads behind the gate and the conductor — with one connection, a thread's commit landed another thread's
+uncommitted write, and two explicit `BEGIN`s in two threads raised `cannot start a transaction within a
+transaction`. WAL plus the busy timeout serialises writes at the database. `tests/test_db_threads.py` pins
+the interleaving, the concurrent `BEGIN`s and a many-thread write race.
 
 ```sql
 CREATE TABLE workspaces (
@@ -420,6 +428,8 @@ CREATE TABLE agent_configs (
   system_prompt_override TEXT,
   temperature REAL NOT NULL,
   max_tokens INTEGER NOT NULL,
+  -- low / medium / high, or NULL for the provider's own default.
+  thinking_effort TEXT,
   -- Ollama's context window for the role; NULL = the server default.
   num_ctx INTEGER,
   -- How long Ollama keeps the model resident; NULL = the server's own window.
@@ -482,6 +492,16 @@ CREATE TABLE engine_settings (
   updated_at REAL NOT NULL
 );
 
+-- Per-workspace skill switches (docs/02 §3.2): disabled names only, so a
+-- fresh workspace and a re-enabled skill are both "no row". The cascade takes
+-- the switches with the workspace.
+CREATE TABLE workspace_disabled_skills (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  updated_at REAL NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+
 -- A day THIS engine froze from its own goals and events: the numbers as that day
 -- ENDED (only the goals created and the calls logged before it was over; a goal
 -- whose status last changed after it counts as still in flight). Subject to the
@@ -536,6 +556,8 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/workspaces` | — | `Workspace[]` |
 | `GET` | `/workspaces/{id}` | — | `Workspace` |
 | `GET` | `/workspaces/{id}/git` | — | `{branch, detached, dirty, ahead, behind, reason}` — the panel header's branch and working-tree read (`09` §4). A folder that is not a repository, one with no commits and a detached HEAD are three quiet 200s: `branch` is null and `reason` says which. `dirty` is any changed, staged, unmerged or untracked path; `ahead`/`behind` are 0 without an upstream. Read through `GitService._run_text` and the read-only git table's hardening (`GIT_OPTIONAL_LOCKS=0`), so it adds no spawn site |
+| `POST` | `/workspaces/{id}/push` | — | `{ok, branch, remote, sha, pr_url, reason}` — a person's push (`09` §4). The branch is the repository's own and the refspec is fully qualified (`refs/heads/<branch>:refs/heads/<branch>`), so a branch name cannot become an option; `origin` comes from the workspace, and `remote` is that URL with any embedded userinfo stripped, so a token in it is never echoed into a response the window renders. A refused push is a **200 with `ok:false`** and git's sentence (no `origin`, a detached HEAD, a refused key), because each is an outcome the header can show. `pr_url` is GitHub's compare form when `origin` is GitHub. The engine stores no GitHub token and creates no pull request through GitHub's API. A route a person presses, not a tool: no model path reaches it |
+| `GET` | `/workspaces/{id}/ci` | — | `{state, sha, url, checks, reason}` — the current commit's GitHub check runs, for the header's CI line. `state` is `none`, `pending`, `success`, `failure` or `unknown`; `unknown` carries a reason (no GitHub origin, no commit, a private repository, a spent anonymous rate limit). Reads `https://api.github.com/repos/{owner}/{repo}/commits/{sha}/check-runs`, with owner/repository parsed from the workspace's `origin` and `sha` from `HEAD` — never from the request — and sends no credential. `tests/test_workspace_push.py` drives it with `httpx.MockTransport` |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
 | `GET` | `/workspaces/{id}/files?limit=` | `limit` 1–10 000, default 5 000 | `{files, truncated, limit}`, plus `non_utf8_names` only when it is not zero (names that are not valid UTF-8 text, left out and counted; the route is sent with `response_model_exclude_defaults=True`, so an ordinary workspace's body is byte-identical) — every file path under the root, sorted, skipping `SKIP_DIRS` and links out of the workspace. See §3.0.3 and §4.0 |
 | `GET` | `/workspaces/{id}/file?path=` | — | `{path, content, version, size}`. 400 `file_escape` / `workspace_protected`, 404 `file_missing`, 422 `file_binary` / `file_not_text` / `file_too_large` / `file_access`. See §3.0.3 |
@@ -576,6 +598,11 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `PUT` | `/settings/agents/{role}` | `AgentConfigUpdate` | `AgentConfig` |
 | `POST` | `/settings/agents/{role}/test-connection` | — | `{ok, message}` — a 15s liveness probe (`01` §3) |
 | `GET` | `/settings/roles` | — | each role's `job` + `timing` (`01` §1) |
+| `GET` | `/settings/skills` | query: `workspace_id` (required) | `{workspace_id, available_moves, skills: [{name, description, source, moves, enabled}], disabled, problems, shadows}` — the menu `load_skills` builds for that workspace, built-ins included, with its parse problems and shadowed names. `available_moves` is the conductor's own tool table, for the creator's move picker. A missing id is `422 workspace_required`; an unknown one is `404` |
+| `POST` | `/settings/skills` | `{name, description, moves, instructions}`, query: `workspace_id` (required) | `201 {workspace_id, name, description, path, source, moves, shadows}` — a person's New skill action. Renders the canonical `---` header and creates `.codify/skills/<name>.md`. It is create-only: an existing file or folder with that name is `409 skill_exists`; a bad name, description, move or body is `422`; a linked `.codify`/`skills` directory is `422 skill_directory_refused`. It clears a stale disabled row for the new name and never touches another file |
+| `POST` | `/settings/skills/import` | `{filename, content}`, query: `workspace_id` (required) | `201` with the same shape. Uploads one Markdown file. `filename` is a label and a fallback name, never a path; a header `name:` wins. The text is written unchanged after `parse_skill` accepts it, so `.md` only and the same size/UTF-8 limits apply. A path, a non-`.md` name or a malformed skill is `422` |
+| `GET` | `/settings/skills/{name}` | query: `workspace_id` (required) | `{workspace_id, name, description, source, moves, notes, enabled, body}` — one skill's full instructions for the Settings preview. Read-only and on demand; it does not change the switch or reach the conductor. Unknown name/workspace is `404`; a missing id is `422` |
+| `PUT` | `/settings/skills/{name}` | `{enabled: true\|false}`, query: `workspace_id` (required) | `{workspace_id, name, enabled, disabled}`. Writes or deletes one row in `workspace_disabled_skills` for that workspace, a filter over the menu and never a grant. The same built-in may be on in another workspace; an unknown name is `404 unknown_skill`, a missing workspace id is `422 workspace_required`, and a body that is not exactly `{enabled: bool}` is `422` |
 | `GET` | `/settings/engine` | — | every key in `SettingsService.SPEC` / `STRING_SPEC`, each with its clamp band (or its max length, for a string: `SettingsService.STRING_LIMITS`) |
 | `PUT` | `/settings/engine` | `{parallel_width, …}` | `{saved: {…}}` — echoes what was actually stored, clamped for numbers; a string is stored whole up to the max length `GET` advertises and refused past it (422 `invalid_value`), never shortened. `set_str` used to cut every string at 200, so a speech server address the screen allowed 500 for was saved as a different address |
 | `GET` | `/models?refresh=` | — | live-discovered catalog, per-provider status, each model's `context_tokens` (or `null`), and a `conductor` block `{provider, model, source, num_ctx}` — the model a conversation runs on when nothing is picked, computed per request and not cached (`06` §2.1) |
@@ -587,7 +614,9 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `POST` | `/audio/dictation/cancel` | — | `{cancelled}`; the recording is deleted and sent nowhere |
 | `POST` | `/audio/speak` | `{text}` | `audio/wav`; `400 text_empty` / `text_too_long`, `409 tts_not_configured`, `502` with the provider's own code |
 
-Declaration order matters for the parameterised settings routes: `/settings/agents/stats` and `/settings/agents/repair` are registered **before** `/settings/agents/{role}`, or FastAPI's in-order matching would read `stats` and `repair` as role ids and 404/422 them.
+Declaration order matters for the parameterised settings routes: `/settings/agents/stats` and `/settings/agents/repair` are registered **before** `/settings/agents/{role}`, or FastAPI's in-order matching would read `stats` and `repair` as role ids and 404/422 them. `/settings/skills` and `/settings/skills/import` are registered before `/settings/skills/{name}`, for the same reason.
+
+`workspace_disabled_skills` holds only the names a workspace switched off (`workspace_id`, `name`, `updated_at`, primary key `(workspace_id, name)`); enabled is the absence of a row. `WorkspaceService.disabled_skills` filters a hand-edited name to the shape a skill name can have, and `_conduct` reads the set on every run. Deleting a workspace cascades its rows, so no switch outlives the menu it belonged to. Creating a skill removes a stale row for its name, so a person who just made it is offered it; that is a settings change by the same person, not a grant.
 
 `retry`: only if step `FAILED` or (`IN_PROGRESS` and last review was `request-changes`). Resets step to `PENDING` then the Executor runs fixer → verifier → critic → scribe again. No agent overrides in body.
 
@@ -892,21 +921,32 @@ are named and counted ("N more rule groups matched and are not shown"). Errors t
 
 ### 3.0.7 Binary analysis: `analyze_binary`
 
-A conductor tool with no route (`engine/binary_analysis.py`; the design and the reasons are `docs/14` §4). It asks Ghidra
-about one compiled file in the workspace and answers from a bounded export, and it is held to what the read tools are:
-the file is never run, nothing in the workspace is written, and the model's words never reach an argv.
+A conductor tool with no route (`engine/binary_analysis.py`, native reader `engine/binary_inspect.py`; the Ghidra
+fallback and the reasons are `docs/14` §4, the native reader §9). It reads one compiled file in the workspace and
+answers from a bounded inventory, and it is held to what the read tools are: the file is never run, nothing in the
+workspace is written, and the model's words never reach an argv.
 
 **The call.** `analyze_binary(path, view?, query?, limit?)`. `view` is one of `summary` (default), `functions`, `imports`,
 `strings`, `sections`, `calls`; `query` is a **literal**, case-insensitive substring (never a regex: a hostile binary's names
 can make one backtrack for as long as it likes); `limit` defaults to 50 and is at most 200. `calls` takes a function name or
 address in `query` and shows its callers and callees.
 
-**Locating Ghidra.** `GHIDRA_INSTALL_DIR`, an absolute path, is authoritative: a relative path is never executed, a wrong
-one is an error and not a reason to search `PATH`, and the install is recognised by `support/analyzeHeadless` and
-`Ghidra/application.properties`, never by running anything. Ghidra 11 and 12 are accepted; another line is refused by name.
-`GHIDRA_HEADLESS_MAXMEM` sets the JVM heap (`2G` by default; anything that is not digits and `M` or `G` is ignored).
+**The native reader.** ELF, PE and Mach-O. The workspace file is opened without following a final link, must be a
+regular file of at most 64 MiB, and is read once with its SHA-256 computed over the bytes that were read. The reader
+returns the format, architecture, width, image base and (when `.comment` names one) the compiler; sections that occupy
+memory with their permissions; functions from a symbol table, export table or Mach-O `nlist`; imports from `.dynsym` or
+import descriptors; printable strings from content sections; and direct calls (`call rel32`, `BL`) resolved to the
+function whose range contains the target. Every list is bounded by `EXPORT_CAPS` and every name is cleaned. An indirect
+call is not guessed at, and a stripped file keeps its addresses but loses its names. No process is started and no run
+directory is made; the answer is cached by SHA-256 and `INSPECTOR_VERSION` under `CODIFY_HOME/binary-analysis/cache/`.
 
-**The run.** The file is copied once to a private owner-only directory under `CODIFY_HOME/binary-analysis/runs/` (opened without
+**The Ghidra fallback.** When the native reader refuses a format, `GHIDRA_INSTALL_DIR`, an absolute path, is
+authoritative: a relative path is never executed, a wrong one is an error and not a reason to search `PATH`, and the
+install is recognised by `support/analyzeHeadless` and `Ghidra/application.properties`, never by running anything.
+Ghidra 11 and 12 are accepted; another line is refused by name. `GHIDRA_HEADLESS_MAXMEM` sets the JVM heap (`2G` by
+default; anything that is not digits and `M` or `G` is ignored).
+
+**The fallback run.** The file is copied once to a private owner-only directory under `CODIFY_HOME/binary-analysis/runs/` (opened without
 following a final link and without blocking on a FIFO, a regular file of at most 64 MiB, the copy re-hashed), and
 `analyzeHeadless <project> analysis -import <copy> -readOnly -deleteProject -analysisTimeoutPerFile 240 -scriptPath <dir>
 -postScript CodifyExport.java <out> <caps…>` runs under the guard with `spawn_guard.Limits`, a stripped environment (a
@@ -920,19 +960,24 @@ not help until that changes>.` The codes are `not_configured`, `not_absolute`, `
 `unsupported_version`, `bad_request`, `bad_input`, `too_large`, `timeout` and `cancelled` (the last two are the only ones a
 retry can help), `failed`, `no_export` and `bad_export`.
 
-**What a crash leaves.** A run directory named `<pid>-<token>`. The next run removes every one whose pid is dead.
+**What a crash leaves.** A fallback run directory named `<pid>-<token>`; the next fallback run removes every one whose
+pid is dead. The native path creates no run directory.
 
-**What is verified, and how.** The gate drives a stand-in for `analyzeHeadless` (`tests/fake_ghidra.py`), which proves the
-door and nothing of Ghidra's. `make check-ghidra` (`scripts/check_ghidra.py`) is the check against a real install: it analyses
-a small executable, checks every view and the cache, checks that no run directory is left, and with `GHIDRA_CHECK_ARGS="--cancel"`
-that a Cancel returns promptly and kills the whole real run. It fails where Ghidra is missing and is not part of `check` or `ci`.
-It has passed, including the cancel, against Ghidra 12.1.4 and Ghidra 11.2.1 (both nixpkgs builds, which report
+**What is verified, and how.** `tests/test_binary_native.py` drives the native reader over hand-built ELF, PE and Mach-O
+fixtures, every view, the cache and the caps, and proves that a valid ELF never starts the fallback. The gate drives a
+stand-in for `analyzeHeadless` (`tests/fake_ghidra.py`), which proves the door and nothing of Ghidra's. `make check-ghidra`
+(`scripts/check_ghidra.py`) is the check against a real install; it asks with `native=False`, so a valid ELF cannot make it
+pass without Ghidra. It analyses a small executable, checks every view and the cache, checks that no run directory is left,
+and with `GHIDRA_CHECK_ARGS="--cancel"` that a Cancel returns promptly and kills the whole real run. It fails where Ghidra
+is missing and is not part of `check` or `ci`. It has passed, including the cancel, against Ghidra 12.1.4 and Ghidra 11.2.1
+(both nixpkgs builds, which report
 `application.release.name=NIX`: the two ends of the supported range). Other releases in the range are expected to work and
 have not been run.
 
-**What is not claimed.**
-There is no network isolation on the child beyond what it is given (it is not given a socket by this code, and nothing here
-forbids one); and analysis, not the file, is what is trusted: a malformed binary is an input to Ghidra's parsers.
+**What is not claimed.** The native reader does not decompile, recover names a stripped file lost, or interpret an
+indirect call. There is no network isolation on the fallback's child beyond what it is given (it is not given a socket by
+this code, and nothing here forbids one); and analysis, not the file, is what is trusted: a malformed binary is an input
+to the parsers, native or Ghidra's.
 
 ### 3.0.8 Usage audit: `audit_usage`
 
@@ -961,6 +1006,26 @@ Signals are descriptive and never waste: `context-outlier`, `context-growth`, `d
 `reask-rate`, `token-concentration` and `cache-reads` (the input tokens a provider served from a prompt cache, as a share of input, and what
 was written to one — counted inside the input tokens, never as a saving). Tool-loop waste is not measured, because tool results are not
 recorded. Which cache write a later read repaid is not recorded either, so no churn rate is claimed.
+
+### 3.0.9 CI checks: `read_ci`
+
+A conductor tool with no route (`engine/github_remote.py`; it is the same read the header's
+`GET /workspaces/{id}/ci` uses, §6). It answers what GitHub says about the current commit's check runs — the CI a
+person's push started — and nothing more.
+
+**The call.** `read_ci()` takes no arguments. The repository and commit come from the workspace's own `origin` and
+`HEAD`, never from a parameter; `api.github.com` is the only host, and no credential is stored or sent. A workspace
+whose origin is not GitHub, or whose `HEAD` has no commit, gets `state: "unknown"` and a reason.
+
+**What it answers.** `state` is `none`, `pending`, `success`, `failure` or `unknown`, followed by the commit, the
+checks page, and each check's name, status, conclusion and page. `unknown` always carries a reason — a private
+repository, a spent anonymous rate limit, a network failure — and is never drawn as a pass. The names and states
+are GitHub's and the repository's words; the tool frames them as data, not instructions.
+
+**What it does not do.** It does not push, create a pull request or read a private repository's checks; it sends no
+token and writes nothing but the call's one `log` event. A model cannot make it read a different repository or
+commit, because there is no such argument. `tests/test_ci_tool.py` holds the menu, the empty schema, the formatted
+answer and the unknown paths; `tests/test_workspace_push.py` holds the same read through the route.
 
 ### 3.1.1 The same rule at the start of every goal
 
@@ -2051,7 +2116,7 @@ connected** — an idle engine must not spend a provider's rate limit on a list 
 first sweep after a client connects is a silent baseline; announcing it would tell someone opening the
 app after an hour away that every model everywhere is new.
 
-Token lifetime is the state directory, not the process. It is written once, with `O_EXCL`, so two engines booting against the same state dir converge on one value rather than each minting its own. This replaced a per-spawn rotation: a client that cached the token was rejected with 401 after every restart, and only the desktop shell could recover, by re-reading the live handshake over IPC — a browser tab pointed at a dev engine has no shell to ask and stayed broken until a human reloaded it. The cost is a longer-lived credential, affordable only because the socket is `127.0.0.1`: anything able to present this token could read the file, and the database beside it, without it. `CODIFY_BOOT_TOKEN` overrides the value for a caller that wants a token scoped to one process, and a state directory that cannot be written falls back to a per-boot token rather than refusing to boot.
+Token lifetime is the state directory, not the process. It is written once, with `O_EXCL`, so two engines booting against the same state dir converge on one value rather than each minting its own. This replaced a per-spawn rotation: a client that cached the token was rejected with 401 after every restart, and only the desktop shell could recover, by re-reading the live handshake over IPC — a browser tab pointed at a dev engine has no shell to ask and stayed broken until a human reloaded it. The cost is a longer-lived credential, affordable only because the socket is `127.0.0.1`: anything able to present this token could read the file, and the database beside it, without it. `CODIFY_BOOT_TOKEN` overrides the value for a caller that wants a token scoped to one process, and a state directory that cannot be written falls back to a per-boot token rather than refusing to boot. The file is opened with `O_NOFOLLOW`, and the empty-file repair uses it too: a symlink planted where the token belongs is refused rather than followed, so it cannot supply the token and the repair cannot truncate its target. `tests/test_home.py` plants both links in an isolated `CODIFY_HOME`.
 
 The same state directory carries `<state dir>/engine.lock`, an advisory `flock` held for the process's life. It decides who may rescue goals: an engine that cannot take it boots and serves normally, but leaves another live engine's PLANNING/RUNNING goals alone — and on shutdown it fails only the goals it actually drove. Without it, booting a second engine moved the first one's live goal to FAILED.
 

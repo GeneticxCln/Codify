@@ -312,16 +312,28 @@ Settled decisions:
   conversations. The API query is scoped by `workspace_id`; the client caches
   lists by workspace, ignores stale fetches, and the sidebar filters again at
   its boundary. With no project selected the panel says so and shows no threads.
-  **The project name is a header, not a label**: under it sit two quiet lines and
-  nothing else. The first is the workspace's git state — branch, a dot when the
-  tree is dirty, and `↑`/`↓` counts against the upstream — from
-  `GET /workspaces/{id}/git` (`04` §3), refetched on a workspace switch, on window
-  focus and when a `step_status` lands, with a 5 s cache and no timer. A folder
-  that is not a repository, a repository with no commits and a detached HEAD show
-  nothing: each is a true answer, not an error banner. The second line is the
+  **The project name is a header, not a label**: under it sit the git line, the
+  CI line a push starts, and the newest unread title, and nothing else. The first
+  is the workspace's git state — branch, a dot when the tree is dirty, and
+  `↑`/`↓` counts against the upstream — from `GET /workspaces/{id}/git` (`04`
+  §3), refetched on a workspace switch, on window focus and when a `step_status`
+  lands, with a 5 s cache and no timer. A folder that is not a repository, a
+  repository with no commits and a detached HEAD show nothing: each is a true
+  answer, not an error banner. A branch also gets **Push & PR**:
+  `POST /workspaces/{id}/push` runs `git push` to `origin` as the person; the
+  answer reports `origin` with any embedded credentials stripped, because the
+  header renders it. **Open PR page** is GitHub's compare form for the pushed branch, opened in the
+  app's own browser pane — never the system opener (`markdownLinks.ts`). A
+  refused push prints git's sentence under the branch; a repository with no
+  branch gets no button. The CI line (`GET /workspaces/{id}/ci`) is absent until
+  a push, then says running, passed, failed or unknown, with a **Checks** button
+  to the commit's page. It polls at 30 s while checks are pending and stops at a
+  terminal answer; `unknown` is never drawn as a pass. The conductor reads the
+  same check runs through its tokenless `read_ci` tool (`04` §3.0.9), which takes
+  no argument and reads this workspace's own `HEAD`. The second line is the
   newest unread notification's title (§10.18), and it is absent when the inbox is
-  empty. `ui/tests/workspaceGit.test.ts` and `notificationsApp.test.ts` render the
-  header and pin both.
+  empty. `ui/tests/workspaceGit.test.ts`, `workspacePush.test.ts` and
+  `notificationsApp.test.ts` render the header and pin these.
   `ui/tests/shell.test.ts` covers placement, the absence of the panel's new-tab
   control, scope isolation, and the empty-project state;
   `ui/tests/tabStripInteraction.test.ts` covers the control itself and the fact
@@ -2590,7 +2602,7 @@ the pipeline already makes, through the same service:
 | `read_file` | `LibraryService.read` | path escape refused by `FileSystemService` |
 | `search_code` | `LibraryService.search` | same |
 | `scan_code` | `engine/scan.py` (`docs/13`) | curated review rules over the workspace in the regex worker: read-only, bounded, hits are candidates at `path:line`, a workspace's own profile is data and its wording is labelled as the repository's |
-| `analyze_binary` | `engine/binary_analysis.py` (`docs/14` §4) | what Ghidra knows about a compiled workspace file, from a **one-shot** `analyzeHeadless` on a hashed private copy and an engine-owned export script: the file is never run and the workspace is never written; the engine's own spawn site under the guard's limits and a cancel-aware wait; the binary's names and strings come back clipped, stripped of control and invisible characters and framed as data; a refusal is one sentence with its code, whether a retry could help, and the fix |
+| `analyze_binary` | `engine/binary_analysis.py`, native reader `engine/binary_inspect.py` (`docs/14` §9) | what a compiled workspace file contains, read from its own ELF/PE/Mach-O headers, symbol and export tables, imports, sections, strings and direct calls: no process is started, the file is never run and the workspace is never written. Ghidra is the fallback for a format the reader refuses, through a **one-shot** `analyzeHeadless` on a hashed private copy (`docs/14` §4). Names and strings come back clipped, stripped of control and invisible characters and framed as data; a refusal is one sentence with its code, whether a retry could help, and the fix |
 | `audit_usage` | `engine/usage_audit.py` (`docs/15`) | where this workspace's model calls were spent on work done twice, in tokens, from events already recorded: read-only, workspace-scoped in SQL, coverage and the detector it cannot run (tool-loop waste) stated first, cache reads and writes reported as a signal and never a saving; one optional `days` argument and nothing else reaches the engine |
 | `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` → `engine/git_readonly.py`: subcommands, their exact options, and every positional, one owner; 60 s bound, no credentials in the child's environment |
 | `run_command` | `SandboxService.run_command` | `validate_argv`, `test` mode (docs/00 §6.6) once the goal is approved; `read_only` before that, so a turn cannot start the repository's code |
@@ -2598,7 +2610,7 @@ the pipeline already makes, through the same service:
 | `fetch_page` | `engine/web_fetch.py` (`docs/12`) | the engine fetches one public page itself, with no tab involved: off unless a person allowed a site list or any public site in Settings → Web pages, public addresses only, bounded, announced before it is made; the page is text from the web, quoted as untrusted |
 | `read_editor` | `SurfaceBridge`, the `editor` surface (`04` §9.1) | eyes on the person's editor, **unsaved text included**; quoted file text, in a fixed shape with caps |
 | `open_in_editor` | the same, `open` | hands that only point: show a file and a range; nothing on disk changes |
-| `edit_editor` | the same, `edit` | hands that change **the open buffer only**: one undoable edit marked as the assistant's, never saved. The person's own Save is the only door to the disk (docs/00 §6.9); its text arguments are never healed (`VERBATIM_TOOLS`, §13.4) |
+| `edit_editor` | the same, `edit` | hands that change **the open buffer only**: one undoable edit marked as the assistant's, never saved. The person's own Save is one door to the disk (docs/00 §6.9); its text arguments are never healed (`VERBATIM_TOOLS`, §13.4) |
 | `read_machine` | `SurfaceBridge`, the `machine` surface (`04` §9.1) | eyes on a jailed shell the person opened: its screen and a bounded tail; program output, quoted, in a fixed shape with caps |
 | `run_in_machine` | the same, `run` | hands that type one command and bring back its output. **The one place a command runs without `validate_argv`** (docs/00 §6.6), and acceptable only because of the jail (§14); it cannot open or close a machine or change its network; its command is never healed either, because healing a lone surrogate would silently rewrite the command typed into a shell that deliberately has no `validate_argv`: it is refused, and the model gets "That was not run in the machine" (`VERBATIM_TOOLS`, §13.4) |
 | `key_in_machine` | the same, `key` | hands that press one *named* key from a fixed list; the engine never sends bytes |
@@ -2691,9 +2703,11 @@ missing from the list.
 The menu is narrowed by what can act, not only by what exists. With no app
 window attached there are no page verbs and no editor or machine tools; with a
 window but no machine open in this run's workspace, the four machine tools stay
-off; and with no usable Ghidra install, `analyze_binary` stays off. A tool that
-can only answer "there is no window" or "Ghidra is not configured" is a slot on
-every call and a call to discover the refusal (`conductor_menu`; docs/14 §4).
+off. `analyze_binary` is not narrowed by Ghidra: the native reader answers ELF,
+PE and Mach-O without it, so the tool is offered and only the formats it refuses
+reach the fallback. A tool that can only answer "there is no window" is a slot
+on every call and a call to discover the refusal (`conductor_menu`; docs/14 §4,
+§9).
 
 `ApiError` and `CommandNotAllowed` are the two exceptions: those are the engine
 refusing, and the sentence says retrying will not help — a recoverable-looking
@@ -2812,10 +2826,15 @@ instructions. It is discovered by name and one-line description, its body is
 fetched with `use_skill` only when it is wanted, and a
 `<workspace>/.codify/skills/*.md` file of the same name replaces it — with the
 replacement announced in the transcript, because a silently shadowed recipe is
-worse than an obvious one. `context-transfer.md`, `security-review.md` (docs/13),
-`usage-audit.md` (docs/15), `inspect-an-artifact.md` (docs/17) and `unstick.md`, which names the
-assumption two failed fixes shared and probes it before a third variation is attempted, are the
-directory's other built-ins and the proof that the set is not a pipeline with one entry.
+worse than an obvious one. The directory now ships thirty-three built-ins. The ship and review set is
+`ship-a-change`, `blast-radius`, `prove`, `design-review`, `review-loop`, `second-opinion`,
+`prepare-a-pull-request`, `watch-ci`, `ship-with-a-person`, `merge-ready`, `adopt-a-change`,
+`revive-a-change` and `review-replies`; the planning set is `working-style`,
+`engineering-principles`, `choose-a-skill`, `plan-loop`, `resume-long-run`, `decision-log`,
+`compare-approaches`, `wide-audit`, `sharpen-the-ask`, `blueprint`, `test-first` and
+`encode-a-lesson`; the reading and handoff set is `context-transfer`, `security-review`,
+`usage-audit`, `inspect-an-artifact`, `unstick`, `explain-code`, `catch-up` and `plain-prose`
+(docs/19). The set is not a pipeline with one entry.
 
 A skill is a `.md` file or a `<name>/SKILL.md` folder; a folder's name is the
 skill's name. Every other entry in the directory is reported with why it was
@@ -2828,6 +2847,16 @@ already exist; it cannot define a move, cannot widen `validate_argv`, and cannot
 reach the write gate — that gate reads the goal's *stored status*, not anything
 the model was told. The worst a hostile skill can do is argue, and an argument
 cannot open a door. `tests/test_skills.py::TestASkillCannotEmpower` holds it.
+
+**The menu is chosen, not the whole directory.** Settings → Agent skills lists the
+skills the selected workspace's menu would contain, and each switch writes a name
+into `workspace_disabled_skills` for that workspace. `_conduct` passes that set to
+`load_skills` at the one seam where the menu is built, so a disabled skill is not
+offered at all and `use_skill` cannot reach it. The same name is independent in each
+workspace. The body was already lazy — only a chosen skill's instructions are fetched
+— and this decides which names are eligible to be chosen. The preview in Settings
+fetches one body on demand and changes neither the switch nor a prompt. It changes no
+file, grants nothing, and includes a workspace skill that shadows a built-in.
 
 **A skill may say which moves it is written around, and that is a hint and never a grant.** A header line
 `moves: recon, plan, write` names them. The names are checked against the moves that exist
@@ -3552,7 +3581,7 @@ gets **eyes** and **hands** on it (`read_editor`, `open_in_editor`, `edit_editor
 the next surface that needs to be seen and driven (the terminal is the obvious one) is a registration and not a redesign (§13.7). The text is
 `ui/src/editorBuffers.ts`, the three operations `ui/src/editorSurface.ts`, the window's half of the bridge `ui/src/surfaceLoop.ts`, the pane
 `ui/src/components/EditorPane.tsx`, the engine's half `engine/surfaces.py` and `engine/surface_editor.py`, and the person's door to the disk is
-`PUT /workspaces/{id}/file` (`04` §3.0.3).
+`PUT /workspaces/{id}/file` (`04` §3.0.3). It is one of the two person-only doors in invariant 9; the other is Settings → Agent skills' creator, which may only create one new file under `.codify/skills/` and never replaces an editor file.
 
 ### 13.1 One file, one tab, and the text lives above the pane
 
@@ -3727,8 +3756,7 @@ Inside the jail the assistant is **not held to the argv allowlist**: `run_in_mac
 the machine tab is the one other place an assistant's keystrokes run commands, **only inside a jail that a person alone can open**, with the person's files never written (the machine edits its own copy of the project), no credentials and no network unless the person opened it with one. It is not `SandboxService`, it does not widen `validate_argv`, and the engine modules that define it
 import nothing that can start a process or write a file (an AST scan fails if they ever do). The containment is the jail, so the jail is what is tested (§14.11).
 
-**Nothing leaves.** The person's files are never written, the jail has no way out for files (the project layer is the machine's own copy and is discarded with it), and the one thing a person can do is **select text on the screen and copy it by hand**. There is deliberately no "copy out" or export door: invariant 9 is not amended, a Save from a machine would need a route that creates files and
-the person's Save does not, and that is a separate decision. The clipboard drawer's Insert and Paste are disabled for a machine, as for an editor (a machine is not the person's terminal).
+**Nothing leaves.** The person's files are never written, the jail has no way out for files (the project layer is the machine's own copy and is discarded with it), and the one thing a person can do is **select text on the screen and copy it by hand**. There is deliberately no "copy out" or export door: the machine tab is not one of invariant 9's write doors; a Save from a machine would need a general route that creates files, and the skill creator's route only writes one new file under `.codify/skills/`, not an arbitrary machine path. The clipboard drawer's Insert and Paste are disabled for a machine, as for an editor (a machine is not the person's terminal).
 
 ### 14.5 Local only: nothing about a machine is stored or restored
 

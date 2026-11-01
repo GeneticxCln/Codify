@@ -13,7 +13,7 @@ Agent configuration is edited only at **Settings → Agents**. Enforced at three
 ```
 ui/src/
   components/
-    SettingsModal.tsx         # the tabs: providers, agent roles, audio, appearance, about
+    SettingsModal.tsx         # the tabs: providers, agent roles, agent skills, audio, appearance, about
     SettingsPanel.tsx
     AgentConfigCard.tsx
     ProviderRow.tsx           # one provider: key field, model picker, apply button
@@ -26,6 +26,7 @@ ui/src/
     TestConnectionButton.tsx
     PromptOverrideEditor.tsx
     ConductorSettingsCard.tsx  # the conductor's own model + budgets, not a role
+    AgentSkillsPane.tsx        # Agent skills: one on/off switch per skill in this workspace's menu
     AudioPane.tsx              # microphone, dictation, read-aloud — engine settings only
     UiScalePanel.tsx           # Appearance → UI scale: how big the whole window is
     AboutPane.tsx              # About: version, engine, data folder, shortcuts — read-only
@@ -157,7 +158,62 @@ model the conductor is borrowing, and when the scribe has no model either it
 says there is no conductor on this install rather than naming a model that does
 not exist.
 
-### 3.2 The Audio tab
+### 3.2 The Agent skills tab
+
+One switch per skill the selected workspace's menu would contain: the built-ins, plus any
+`.codify/skills/*.md` or `<name>/SKILL.md` in that workspace, each labelled `Built-in` or
+`Workspace`. The list comes from `GET /settings/skills?workspace_id=…`, which loads it through the
+same `load_skills` the conductor uses — a second list here would be a menu that can disagree with
+the turn. `problems` (a malformed or refused workspace skill) is shown above the rows, because a
+file the person can see in their repository and not in this list is otherwise a mystery.
+
+**The switch belongs to the workspace.** `PUT /settings/skills/{name}?workspace_id=…` stores the
+exact name in `workspace_disabled_skills` for that workspace, not in an engine-wide key: the same
+built-in or workspace skill may be on in one repository and off in another. It is a **filter over
+the menu**, not a grant: a disabled skill is not offered to the conductor here, `use_skill` cannot
+reach it, and the file remains on disk. Nothing is imported, executed or deleted. Only disabled
+names have rows, so enabling removes one and a fresh workspace starts with every skill on. An
+unknown name, unknown workspace or missing `workspace_id` is refused rather than stored.
+
+**Search and filtering appear once there are many skills.** From six rows, the pane shows a
+search field (`name`, `description` and declared `moves`) plus one-of `All` / `Enabled` /
+`Disabled` / `Built-in` / `Workspace` filters, with a live `n of m skills` count. The rows and
+their switches are otherwise unchanged; the controls are local to the pane and send no request.
+
+**Preview reads the body on demand.** `GET /settings/skills/{name}?workspace_id=…` returns the
+loaded skill's full instructions, declared moves and header notes. The list never carries a body,
+for the same reason the conductor's menu does not: a body costs context until somebody asks for
+it. The preview is read-only and the conductor's own path is still `use_skill`, so opening it
+neither enables the skill nor adds it to a prompt.
+
+**The creator writes one new workspace file.** `New skill` opens a small inline form with two
+modes. `Write` takes a name, a one-line description, optional moves and instructions, and posts
+them to `POST /settings/skills?workspace_id=…`; the engine renders the same `---` header the
+loader reads and creates `.codify/skills/<name>.md`. `Upload` takes one `.md` file, reads it as
+UTF-8 in the window and posts the text to `POST /settings/skills/import?workspace_id=…`; the
+header name wins over the filename, and the body is written unchanged. An uploaded filename is
+never a path, a folder or an archive. Both routes return the created path, and the pane then
+re-reads the list.
+
+This is a person-only write door, not an agent capability (`docs/00` §6.9). It creates a file and
+never replaces, deletes or edits one: a name that already exists is a 409 `skill_exists`, and the
+file is left alone. It writes only under this workspace's `.codify/skills/`, and it refuses a
+`.codify` or `skills` directory that resolves elsewhere. A new skill is on for this workspace
+when it is created, because a person who just made it means the conductor to be offered it; a
+stale disabled row for the same name is cleared. The response also says when it shadows a
+built-in, which is the existing workspace-over-built-in rule, not a new grant.
+
+**Refresh in the corner re-reads the menu.** The button beside `New skill` calls the same list
+route again, with a spinner while it is in flight. It keeps the current search and filter and
+closes a preview only when that skill is no longer there; on failure it keeps the old list and
+shows the error instead of blanking the pane. The conductor already re-reads skills at the start
+of each turn, so this button is for the screen and does not restart anything.
+
+Enabled is the default for every skill in every workspace, including built-ins. Turning all of
+them off is allowed: the conductor is then shown no skill menu and answers from its own moves.
+When no workspace is selected, the pane asks for one instead of offering switches with no scope.
+
+### 3.3 The Audio tab
 
 Settings → Audio (`AudioPane.tsx`) is where voice is set up. It has three sections:
 
@@ -322,7 +378,9 @@ in `18` §4.
   standalone browser preview, which has no shell to ask, and the pane says so instead. Nothing is
   checked until it is pressed, which is the property the pane's own sentence about what leaves this
   machine now names: one unauthenticated request to `github.com/GeneticxCln/Codify` with nothing about
-  this machine in it. The release's page is shown as text, like the project facts below, because this
+  this machine in it. A push is a separate request, and only a person's: `POST /workspaces/{id}/push`
+  runs git against the workspace's own `origin`, and `GET /workspaces/{id}/ci` reads that commit's
+  checks from `api.github.com` unauthenticated (`04` §6). The release's page is shown as text, like the project facts below, because this
   pane opens no browser. Full behaviour, refusals and where the file lands: `18` §4.
 * **Where things live.** `~/.codify` (or `$CODIFY_HOME`), as text: no route exposes the data folder, and
   adding one only to print a path was not worth a new engine contract.
@@ -360,6 +418,7 @@ export function AgentConfigCard({ role }: { role: AgentRole }) {
       protocol: draft.protocol,
       temperature: draft.temperature,
       max_tokens: draft.max_tokens,
+      thinking_effort: active.thinking_effort ?? null,
       num_ctx: active.num_ctx ?? null,
       keep_alive: active.keep_alive?.trim() || null,
       system_prompt_override: draft.systemPromptOverride,
@@ -384,6 +443,9 @@ export function AgentConfigCard({ role }: { role: AgentRole }) {
                    onChange={t => setDraft({ ...draft, temperature: t })} />
       <NumberField label="Max tokens" value={draft.max_tokens}
                    onChange={m => setDraft({ ...draft, max_tokens: m })} />
+      <SelectField label="Thinking Effort" value={active.thinking_effort} placeholder="Provider default"
+                   options={["low", "medium", "high"]}
+                   onChange={e => setDraft({ ...draft, thinking_effort: e })} />
       {draft.protocol === "ollama" && (
         <NumberField label="Context window" value={active.num_ctx} placeholder="4096"
                      onChange={n => setDraft({ ...draft, num_ctx: n })} />

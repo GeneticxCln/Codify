@@ -1,7 +1,7 @@
 # CLAUDE.md — working rules for this repository
 
 **This file is a distillation, not a second source of truth.** Everything below is
-sourced from `CONTRIBUTING.md` and `docs/00`–`18`; where this file and either of
+sourced from `CONTRIBUTING.md` and `docs/00`–`19`; where this file and either of
 those disagree, **they win and this file is the bug**. `tests/test_claude_md_contracts.py`
 fails if the invariants quoted here drift from `docs/00` §6, so that is enforced, not
 merely intended.
@@ -18,7 +18,9 @@ and knowing which one you are in tells you what you may touch:
 |---|---|---|
 | Desktop shell | Rust / Tauri v2 | App lifecycle, owns the engine process, boot token |
 | UI | React 19 / TypeScript / Vite / Tailwind | Settings screen, goal chat, stats |
-| Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |The engine runs 8 fixed roles. `laya` (pre-flight gate) guards every request; the **conductor** — a loop, not a ninth role — then decides which of the other seven run and in what order, through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`) and *skills* it can load. The recipe that used to be compiled in — `librarian` → `design` → `planner` → `fixer` → `verifier` → `critic` → `scribe` — is now the built-in skill `ship-a-change` (`engine/builtin_skills/`), and a workspace can replace it. The directory's other built-ins are `context-transfer`, a recipe for packaging a degraded thread into one pasteable block for a new thread (load it when the thread is long enough that the model is losing track), and `security-review`, which sequences `scan_code` and `read_file` for a security review of the workspace. The fourth, `usage-audit`, has the conductor report wasted model calls honestly in tokens with `audit_usage`, and the fifth, `inspect-an-artifact`, orders `analyze_binary`, `read_file`, `search_code` and `scan_code` for a question about a compiled file or a generated bundle, which is the order that keeps Ghidra's minutes off the cheap path. The sixth, `unstick`, names the assumption two failed fixes shared and probes it once, so a repeating failure changes mechanism instead of getting a third variation. `fixer` is still the only writer and `verifier` still the only role that runs a command.
+| Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |The engine runs 8 fixed roles. `laya` (pre-flight gate) guards every request; the **conductor** — a loop, not a ninth role — then decides which of the other seven run and in what order, through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`) and *skills* it can load. The recipe that used to be compiled in — `librarian` → `design` → `planner` → `fixer` → `verifier` → `critic` → `scribe` — is now the built-in skill `ship-a-change` (`engine/builtin_skills/`), and a workspace can replace it. The directory's other built-ins are `context-transfer`, a recipe for packaging a degraded thread into one pasteable block for a new thread (load it when the thread is long enough that the model is losing track), and `security-review`, which sequences `scan_code` and `read_file` for a security review of the workspace. The fourth, `usage-audit`, has the conductor report wasted model calls honestly in tokens with `audit_usage`, and the fifth, `inspect-an-artifact`, orders `analyze_binary`, `read_file`, `search_code` and `scan_code` for a question about a compiled file or a generated bundle, which is the order that keeps a single read of the file on the cheap path. The sixth, `unstick`, names the assumption two failed fixes shared and probes it once, so a repeating failure changes mechanism instead of getting a third variation. The seventh, `blast-radius`, makes a change prove the one fact it is safe because of, beyond its diff; the eighth, `prove`, runs the narrowest real check and reads the first error; the ninth, `design-review`, audits a screen against the generic-look bans and the states it owes, and says plainly when it cannot see the screen. `fixer` is still the only writer and `verifier` still the only role that runs a command.
+
+The 24 deepseek-stack adaptations are `working-style`, `engineering-principles`, `choose-a-skill`, `plan-loop`, `resume-long-run`, `decision-log`, `review-loop`, `second-opinion`, `compare-approaches`, `wide-audit`, `sharpen-the-ask`, `blueprint`, `test-first`, `prepare-a-pull-request`, `watch-ci`, `ship-with-a-person`, `merge-ready`, `adopt-a-change`, `revive-a-change`, `review-replies`, `explain-code`, `catch-up`, `encode-a-lesson` and `plain-prose`. Their person-only actions still belong to the person; see `docs/19`.
 
 ## The gate is `make check` / `make ci`
 
@@ -41,7 +43,7 @@ mean the change is shippable.
 | `make check-tauri` | `cargo check` + `cargo test` (under Xvfb when there is no display; includes the machine tab's real-jail tests, which need `bwrap`, `unshare` and an unprivileged overlay mount, not only user namespaces; `make doctor` fails on each) + `cargo clippy --all-targets -D warnings` + the declared Rust version against the locked graph (`scripts/check_msrv.py`) + `cargo fmt --check` |
 | `make ci-python-floor` | Only the 3.10 leg; never skips — it fails with install instructions |
 | `make ci-report` | `make ci`, then publishes its verdict on the commit as a GitHub status (context local/make-ci) via `gh`. Not a second gate: it runs the one gate and reports it, and refuses a dirty tree — the mark a PR still carries when Actions cannot give one (it was billing-locked once) |
-| `make check-ghidra` | `analyze_binary` against a **real** Ghidra (`GHIDRA_INSTALL_DIR`; `GHIDRA_CHECK_ARGS="--cancel"` also kills a real run). Not part of `check` or `ci`, and it fails rather than skips without Ghidra: the gate drives a stand-in for `analyzeHeadless`, so this is the one check that the export script runs inside the real thing |
+| `make check-ghidra` | The **Ghidra fallback** of `analyze_binary` against a real install (`GHIDRA_INSTALL_DIR`; `GHIDRA_CHECK_ARGS="--cancel"` also kills a real run). It forces the fallback, so a valid ELF cannot be answered by the native reader instead. Not part of `check` or `ci`, and it fails rather than skips without Ghidra: the gate drives a stand-in for `analyzeHeadless`, so this is the one check that the export script runs inside the real thing |
 | `make check-history` | Every commit in `HISTORY_RANGE` (default `origin/<branch>..HEAD`), not just the tip. Separate from the gate on purpose: `make ci` asks about the tree you are about to share, this asks about the commits on the way to it. Pre-push runs it second, and it declines a one-commit range — that has no middle. It takes its tools and test interpreter from `.venv/bin` however it is started (as the Makefile does), and exits 2 with the fix, instead of blaming every commit, when that interpreter cannot import the engine |
 
 `make ci` is the real gate. `.github/workflows/check.yml` describes the same targets
@@ -65,7 +67,7 @@ Quoted from `docs/00` §6, which is the owner. Do not weaken one to make a chang
 6. Every `SandboxService.run_command` call goes through `validate_argv` first. Verifier-proposed argv reaches it in `test` mode, and so do the conductor's `run_command` and `verify` moves, but only for an approved goal (stored status `RUNNING`, not plan-only) — until then the conductor's `run_command` is `read_only`. The librarian's requests use `read_only` mode and cannot change the workspace or run its code. The conductor proposes argv through either move, it does not widen the allowlist — see `docs/01` §5. The machine tab is the one other place an assistant's keystrokes run commands, and only inside a jail that a person alone can open: the person's files are never written (the machine edits its own copy of the project, or sees it read-only where a copy cannot be made), no credentials, no network unless the person opened it with one; it is not `SandboxService` and widens nothing here — see `docs/09` §14. *(docs/00 §6.6)*
 7. Single SQLite file: `~/.codify/codify.db`. There is no `agents.db`. *(docs/00 §6.7)*
 8. A turn is created only by `POST /conversations/{id}/turns`. `POST /goals` refuses `mode: "chat"`, and `TurnCreate` carries no pipeline flags, so a client chooses neither that a turn exists nor what it becomes — the gate classifies and the conductor disposes. See `docs/09` §10. *(docs/00 §6.8)*
-9. Only the fixer writes for an agent. The `write` move is the single path from a conductor run to the filesystem, it refuses while the goal is unapproved, and no skill, workspace file or conductor reply can widen that. A person's own Save in the editor is the one other door, `PUT /workspaces/{id}/file`: it needs the boot token, so no agent, skill or conductor tool can call it. A skill is instructions, never a capability. See `docs/09` §10.14. *(docs/00 §6.9)*
+9. Only the fixer writes for an agent. The `write` move is the single path from a conductor run to the filesystem, it refuses while the goal is unapproved, and no skill, workspace file or conductor reply can widen that. A person's own Save in the editor is one other door, `PUT /workspaces/{id}/file`, and a person's New skill action is the second, `POST /settings/skills` and `POST /settings/skills/import`: both need the boot token, so no agent, skill or conductor tool can call either, and the creator may only create one new file under `.codify/skills/`, never replace or delete another file. A skill is instructions, never a capability. See `docs/09` §10.14. *(docs/00 §6.9)*
 
 ## Layout
 
@@ -82,7 +84,8 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
   skills.py       built-in + workspace recipes (`.codify/skills/`) discovered and loaded as data
   toolcall.py     the neutral tool-calling shape and its four protocol translations
   spawn_guard.py process guard; every spawn routes through it, and it applies a spawn site's resource limits (`Limits`)
-  binary_analysis.py  `analyze_binary`: Ghidra, one-shot, on a private copy; its own spawn site (docs/14 §4)
+  binary_inspect.py   the native ELF/PE/Mach-O reader behind `analyze_binary`; no process and no Ghidra
+  binary_analysis.py  `analyze_binary`: native first; Ghidra is the guarded one-shot fallback (docs/14 §4, §9)
   usage_audit.py  `audit_usage`: wasted model calls in tokens, a pure read over recorded events (docs/15)
   speech.py       voice: dictation and read-aloud through an OpenAI-compatible speech provider; the engine records the mic (pw-record)
   surfaces.py     the bridge for what the app window owns: the engine asks, the window answers, ops are fixed strings in a table;
@@ -96,7 +99,7 @@ scripts/        fake_ollama.py (drive a goal with no API keys; FAKE_CONDUCTOR=1 
                  make_logo.py, check_history.py (does every commit in a range build),
                  bundle_engine.py / lock_engine.py / smoke_bundle.py (the engine a package carries; packaging/ holds its pin and lock)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–18, below
+docs/           00–19, below
 .githooks/      versioned pre-commit / pre-push
 ```
 
@@ -160,12 +163,13 @@ docs/           00–18, below
 | `docs/10` | Agent memory: the Hindsight audit — what was built (`recall`, `recall_threads`, keyword search, the durable observation store and its fading), and what was rejected |
 | `docs/11` | The Ruflo audit: which ideas were borrowed, which were refused and by which invariant, and what was not read |
 | `docs/13` | The Grepify audit: `scan_code`, the built-in scanner for code review (curated profiles, masking, workspace profiles as data), and what of Grepify was taken |
-| `docs/12` | The Scrapling audit: `fetch_page` (a request the engine makes to an address a model chose), its rules, and what of Scrapling was refused |
-| `docs/14` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, the design a Ghidra tool needs here (now built: `analyze_binary`), and the gaps it found (child resource limits and a cancellable worker, both closed) |
+| `docs/12` | The Scrapling audit: `fetch_page` (a request the engine makes to an address a model chose), its rules, what of Scrapling was refused, and the native parser that replaced it |
+| `docs/14` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, the guarded Ghidra fallback, the gaps it found (child resource limits and a cancellable worker, both closed), and §9's native reader that now answers first |
 | `docs/15` | The Xerg audit: `audit_usage`, the native audit of wasted model calls in tokens (coverage first; retry waste and the fix loop measured; cache reads and writes measured as a signal, never a saving; tool-loop waste reported as not measurable), and what of Xerg's skill was taken |
 | `docs/16` | The DeepInfer and cmux audit: what is portable from a serving framework and an agent terminal (terminal OSC notifications into the inbox, bounded transcript replay, JSON-schema replies, prompt-prefix reuse), what is refused and by which invariant, and the plan |
 | `docs/18` | Release and updates: a release is a tag (three files and the tag must agree, `scripts/release_notes.py`), the deb and AppImage hold the shell and the engine with its own CPython (the bundle, its pinned interpreter and hashed lock, the smoke that boots it before publishing), the workflow's decisions, and what the About tab's update button does and refuses — one GET to GitHub when a person clicks, a package written to their downloads folder, nothing installed |
 | `docs/17` | The leanrea audit: the 8 KB routing-table skill that argues against REA's 207 tools — what is already this engine's design, the gap its trap list found (`search_code` now names the directories its walk pruned), the measured cost of one conductor call, and the two small rows built |
+| `docs/19` | The deepseek-stack audit: 29 skills read in full, the 24 native recipes built from them, what each does, and which actions stay with a person (push, merge, comments, screenshots, parallel models) |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.

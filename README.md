@@ -296,9 +296,9 @@ Loopback stays blocked, and a model-proposed URL meets the same guard your click
 
 The conductor can also **fetch a public page itself** (`fetch_page`), without moving your tab. It is on for any public
 site out of the box, because an assistant on a local model has to be able to look things up; Settings → Web pages
-narrows it to only the sites you list, or switches it off. It reads the page with
-[Scrapling](https://github.com/D4Vinci/Scrapling)'s parser and nothing else of Scrapling: the request is Codify's own,
-public addresses only, bounded, and announced in the transcript before it is made. The address is sent to the site and
+narrows it to only the sites you list, or switches it off. It reads the page with the engine's own parser
+(`engine/html_text.py`), so there is no scraping dependency in the install: the request is Codify's own, public
+addresses only, bounded, and announced in the transcript before it is made. The address is sent to the site and
 can carry whatever the assistant has read, which no rule can prevent, so the list is the safer setting if that matters to you. See
 [`docs/12`](docs/12-scrapling-audit.md).
 
@@ -309,11 +309,12 @@ crypto, deserialization, unsafe C, web) run over the workspace with comments and
 before it calls it real, and fixes still go through a plan you approve. It is the idea of NCC Group's Grepify built
 natively, with none of its code. See [`docs/13`](docs/13-grepify-audit.md).
 
-For compiled files, the conductor can ask Ghidra with `analyze_binary` (functions, imports, strings, sections and what
-calls what). Ghidra is not bundled: set `GHIDRA_INSTALL_DIR` to an unpacked Ghidra 11 or 12 and restart. The first question
-about a file runs one headless analysis of a private copy (the file is never run, the workspace is never written) and the
-rest are answered from a cache; what comes back is the binary's own text and is handed to the model as data, not instructions.
-See [`docs/14`](docs/14-rea-audit.md) and `docs/04` §3.0.7.
+For compiled files, the conductor has `analyze_binary`: the engine's own reader parses ELF, PE and Mach-O headers,
+symbols, imports, strings, sections and direct calls, with no process and no JDK. Ghidra is an optional fallback for a
+format the native reader refuses: set `GHIDRA_INSTALL_DIR` to an unpacked Ghidra 11 or 12 and restart. The file is never
+run, the workspace is never written, and a second question about the same bytes is answered from a cache; what comes back
+is the binary's own text and is handed to the model as data, not instructions. See [`docs/14`](docs/14-rea-audit.md)
+§9 and `docs/04` §3.0.7.
 
 To see where model calls were spent on work done twice, the conductor has `audit_usage` and a built-in `usage-audit` skill. It reads
 the events this engine already records and reports, in **tokens** (there is no price table, on purpose), re-asked calls whose step then
@@ -577,13 +578,14 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/09`](docs/09-workspace-shell.md) | The workspace shell: conversations, tabs, panes, the embedded browser, the editor, the machine, what a turn is |
 | [`docs/10`](docs/10-agent-memory.md) | Agent memory: what was built, what was rejected |
 | [`docs/11`](docs/11-ruflo-audit.md) | The Ruflo audit: which ideas were borrowed, which were refused and why |
-| [`docs/12`](docs/12-scrapling-audit.md) | The Scrapling audit: `fetch_page`, a request the engine makes to an address a model chose, its rules, and what was refused |
+| [`docs/12`](docs/12-scrapling-audit.md) | The Scrapling audit: `fetch_page`, a request the engine makes to an address a model chose, its rules, what was refused, and the native parser that replaced Scrapling |
 | [`docs/13`](docs/13-grepify-audit.md) | The Grepify audit: `scan_code`, the built-in scanner for code review, and what of Grepify was taken |
-| [`docs/14`](docs/14-rea-audit.md) | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, and what was built from it (child resource limits, a cancellable scan worker, `analyze_binary` for Ghidra) |
+| [`docs/14`](docs/14-rea-audit.md) | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, what was built from it (child resource limits, a cancellable scan worker, a guarded Ghidra fallback), and the native binary reader that now answers first |
 | [`docs/15`](docs/15-xerg-audit.md) | The Xerg audit: `audit_usage`, a native audit of wasted model calls in tokens, and what of Xerg's skill was taken |
 | [`docs/16`](docs/16-deepinfer-and-cmux-audit.md) | The DeepInfer and cmux audit: what is portable from a serving framework and an agent terminal, what is refused and by which invariant, and the plan |
 | [`docs/17`](docs/17-leanrea-audit.md) | The leanrea audit: the routing-table skill that argues against REA's 207 tools — what of it this engine already is, and the one gap its trap list found in `search_code` |
 | [`docs/18`](docs/18-release-and-updates.md) | Release and updates: a release is a tag, what the deb and AppImage hold, how the release workflow is built, and what the About tab's update button does and refuses |
+| [`docs/19`](docs/19-deepseek-stack-audit.md) | The deepseek-stack audit: 29 skills read in full, the 24 native recipes built from them, what each does, and which actions stay with a person (push, merge, comments, screenshots, parallel models) |
 
 ## 📂 Layout
 
@@ -595,7 +597,7 @@ src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the emb
             the render-starvation watchdog
 tests/      Python suite; hermetic.py is the shared isolation bootstrap
 scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py
-docs/       00–18, the specifications this README summarises
+docs/       00–19, the specifications this README summarises
 ```
 
 ## 📄 License

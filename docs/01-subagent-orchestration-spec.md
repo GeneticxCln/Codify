@@ -177,6 +177,16 @@ both of its calls, one constant; the API accepts `2023-06-01` and `2023-01-01` a
 call once sent `2023-11-01`, which does not exist. A Gemini 3 model's `thoughtSignature` on a function call is carried
 on `ToolCall.signature` and sent back on the same part, because the API refuses the next request without it.
 
+`complete` also takes a keyword-only `thinking_effort` (`low`, `medium`, `high`, or unset for the
+provider's own default), and each protocol translates it into the one control it has. The
+OpenAI-compatible adapter sends `reasoning_effort`; Anthropic sends
+`thinking: {type: "enabled", budget_tokens: N}`; Google sends
+`generationConfig.thinkingConfig.thinkingBudget`; Ollama sends the top-level `think` field. The
+budgets are one table — 1024, 4096 and 8192 tokens for low, medium and high — clamped to half the
+role's `max_tokens`, because thinking and the reply share that cap. Anthropic's floor is 1024, so a
+role whose cap leaves less than that sends no thinking block rather than a request the API refuses.
+The setting is a request, not a guarantee: a model with no such control still answers.
+
 `keep_alive` is not a latency setting for a single call. Role calls inside one goal are
 seconds apart and already warm; what it covers is the gap *between* goals, where a role used
 every ten minutes pays a full model reload each time.
@@ -198,6 +208,9 @@ class AgentConfig(BaseModel):
     system_prompt_override: Optional[str] = Field(None, max_length=SYSTEM_PROMPT_OVERRIDE_MAX)
     temperature: float = Field(0.2, ge=0.0, le=2.0)
     max_tokens: int = Field(4096, gt=0, le=200000)
+    # How much thinking this role asks for, where its provider has a control; None = the
+    # provider's default. See 2.1 for the per-protocol translation.
+    thinking_effort: Optional[Literal["low", "medium", "high"]] = None
     # Ollama's context window for this role; None = the server's default.
     # Only Ollama consumes it (see 2.1); the other protocols accept and
     # ignore the keyword, because the field is a property of the target.
@@ -226,6 +239,8 @@ class AgentConfigUpdate(BaseModel):
     system_prompt_override: Optional[str] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    # Explicit null clears back to the provider's default; absent leaves it unchanged.
+    thinking_effort: Optional[Literal["low", "medium", "high"]] = None
     # Explicit null clears back to the server default; it is one of the few
     # fields where "absent" and "null" mean different things.
     num_ctx: Optional[int] = None
@@ -250,8 +265,8 @@ fallback ends up speaking the wrong wire format):
 7. `updated_at = time.time()`.
 
 Nullable fields where an explicit `null` means *clear*: `system_prompt_override`, `base_url`,
-`fallback_provider`, `fallback_protocol`, `fallback_base_url`. Everything else treats `null` as "no
-change". Clearing `fallback_provider` clears its protocol, endpoint, and model with it — a fallback
+`thinking_effort`, `num_ctx`, `keep_alive`, `fallback_provider`, `fallback_protocol`,
+`fallback_base_url`. Everything else treats `null` as "no change". Clearing `fallback_provider` clears its protocol, endpoint, and model with it — a fallback
 that is half removed is a target nothing points at.
 
 ### 2.2.1 Fallback target
@@ -302,8 +317,8 @@ configured fallback is the exception: it runs on the fallback, because a rescue 
 role.
 
 SQL: `04` §2 (`fallback_provider`, `fallback_model_name`, `fallback_protocol`, `fallback_base_url`,
-`num_ctx`, `keep_alive`; an existing database gains them by `ALTER TABLE`, keeping every configured
-role).```python
+`num_ctx`, `keep_alive`, `thinking_effort`; an existing database gains them by `ALTER TABLE`, keeping
+every configured role).```python
 DEFAULT_AGENTS = [
     _role("laya",       "Laya — System-1 Gate",  0.0,  512, num_ctx= 8192),
     _role("librarian",  "Librarian Agent",     0.1, 8192, num_ctx=32768),
@@ -487,7 +502,7 @@ a copy is sent. `tests/test_provider_requests_surrogates.py` covers all four pro
 | `read_file` | `LibraryService.read` | `FileSystemService` refuses a path escape |
 | `search_code` | `LibraryService.search` | same |
 | `scan_code` | `engine/scan.py` `run_scan`, in the regex worker (`op: scan`) | read-only like `search_code`: the same walk, skips and symlink rule, bounded, and honest about what it did not look at (`docs/13`). The patterns run in the guarded worker, killed at a hard limit, because a workspace profile is untrusted data (never a capability: the worker is handed only `id`, `pattern`, `flags`, `languages`, `where`). Hits are candidates, said first |
-| `analyze_binary` | `engine/binary_analysis.py`, its own guarded spawn site (`docs/14` §4) | read-only: Ghidra analyses a private copy of a workspace file (the file is never run and nothing is written to the workspace); the model supplies a path, a view from a fixed list and a literal filter, never a flag, a script or a regex; the output is the binary's own text, framed as data |
+| `analyze_binary` | `engine/binary_analysis.py`, native reader `engine/binary_inspect.py`; Ghidra is the fallback (`docs/14` §9) | read-only: the native reader parses ELF, PE and Mach-O headers, symbol and export tables, imports, sections, printable strings and direct calls; no process is started and nothing is written to the workspace. A format it refuses may use Ghidra's guarded one-shot door (`docs/14` §4). The model supplies a path, a view from a fixed list and a literal filter, never a flag, a script or a regex; the output is the binary's own text, framed as data |
 | `audit_usage` | `engine/usage_audit.py`, over `GoalService.usage_audit_events` (`docs/15`) | read-only and workspace-scoped in the SQL like `recall`: wasted model calls in tokens (a re-ask whose step then succeeded, a fix attempt a retry got past) plus descriptive signals, coverage first, with the detectors it cannot run named; no price, no path, no query from the model |
 | `git_history` | `GitService.read_only` | `sandbox.validate_argv(mode="read_only")` — the librarian's own validator (`engine/git_readonly.py`'s exact-match table), so the subcommand list and its option rules have one owner (`04` §5) |
 | `run_command` | `SandboxService.run_command` | `validate_argv` in `test` mode (docs/00 §6.6) **once the goal is approved** — the same stored-status gate as `write` (`_write_allowed`). Before that the mode is `read_only` (`ls`, `wc`, git history), because the test allowlist admits the repository's own code and a turn has no approval step; a command that would run once approved is refused with that reason, not deferred. The allowlist decides what may run, not what it may connect to: the project's tests and build are code, and may reach the network |
@@ -495,7 +510,7 @@ a copy is sent. `tests/test_provider_requests_surrogates.py` covers all four pro
 | `navigate_page` | `WebviewBridge.navigate`, over `browser::navigate` | the model proposes a URL and the shell's `parse_navigation` decides: the *same call the user's click makes* (docs/03 §1.5). Changes what someone is looking at, so no approval, but no egress guard either (docs/03 §1.6) |
 | `click_page` | `WebviewBridge.click` | the page's own event does the work; every navigation it causes meets the same guard |
 | `type_page` | `WebviewBridge.type_text` | the one page verb that writes, so the one whose answer says nothing was submitted |
-| `fetch_page` | `engine/web_fetch.py` `fetch`, parsed by Scrapling's `Selector` | the engine's own request, so the rules are its own (`docs/12` §3): off unless a person allowed a site list or any public site under `web_fetch` (`PUT /settings/engine` only), GET only, public addresses only with the connection pinned to one of the addresses that were checked (the next is tried only when connecting fails), every redirect re-checked, bounded in time and bytes, announced in the transcript before it is made, at most 8 a run. The text returns quoted as untrusted. Not an egress guard: the address is the payload (`docs/03` §1.6). Not on the menu while it cannot act |
+| `fetch_page` | `engine/web_fetch.py` `fetch`, parsed by the engine's own `engine/html_text.py` | the engine's own request and its own parser, so the rules are its own (`docs/12` §3): off unless a person allowed a site list or any public site under `web_fetch` (`PUT /settings/engine` only), GET only, public addresses only with the connection pinned to one of the addresses that were checked (the next is tried only when connecting fails), every redirect re-checked, bounded in time and bytes, announced in the transcript before it is made, at most 8 a run. The text returns quoted as untrusted. Not an egress guard: the address is the payload (`docs/03` §1.6). Not on the menu while it cannot act |
 | `read_editor` | `SurfaceBridge.ask("editor", "read")` | eyes on the person's editor, **unsaved text included** (`read_file` reads the disk, which is what they are not looking at). Quoted file text, not instructions; a fixed shape with caps (`04` §9.1) |
 | `open_in_editor` | `SurfaceBridge.ask("editor", "open")` | hands that only point: show a file and a range. Paths are checked against the workspace root before the round trip. Changes nothing on disk |
 | `edit_editor` | `SurfaceBridge.ask("editor", "edit")` | hands that change **the open buffer only**: one undoable edit, marked as the assistant's, never saved. It touches no file, so it has none of `write`'s gates and needs none: the person's own Save is the only door to the disk (docs/00 §6.9), and no conductor tool can reach it |
@@ -624,15 +639,28 @@ and `tests/test_failure_visibility.py` for the output.
 librarian, design, planner — whether or not the request needed them, which made
 the sequence a property of the code rather than a decision of the decider. The
 seven stage moves replaced it, and the sequence they are used in is a *skill*
-(`engine/builtin_skills/ship-a-change.md`) rather than control flow. It is one of six built-ins in that directory, beside `context-transfer.md`, which is a
-recipe for handing a degraded thread to a new one, `security-review.md`, which
-sequences `scan_code` and `read_file` for a security review (docs/13), `usage-audit.md`,
-which has the conductor report wasted model calls honestly in tokens (docs/15), and
-`inspect-an-artifact.md`, which orders `analyze_binary`, `read_file`, `search_code` and
-`scan_code` for a question about a compiled file or a generated bundle (docs/17), and
-`unstick.md`, which makes a repeating failure test the assumption its fixes shared rather than
-produce a third variation. See docs/09
-§10.14.
+(`engine/builtin_skills/ship-a-change.md`) rather than control flow. It is one of thirty-three built-ins in that directory. The set is:
+`adopt-a-change`, `blast-radius`, `blueprint`, `catch-up`, `choose-a-skill`, `compare-approaches`,
+`context-transfer`, `decision-log`, `design-review`, `encode-a-lesson`, `engineering-principles`,
+`explain-code`, `inspect-an-artifact`, `merge-ready`, `plain-prose`, `plan-loop`,
+`prepare-a-pull-request`, `prove`, `resume-long-run`, `review-loop`, `review-replies`,
+`revive-a-change`, `second-opinion`, `security-review`, `sharpen-the-ask`, `ship-a-change`,
+`ship-with-a-person`, `test-first`, `unstick`, `usage-audit`, `watch-ci`, `wide-audit`,
+`working-style`. All are data; `ship-a-change` is the old compiled order, and the rest cover
+review, proof, shipping, long-run state and understanding (docs/19). See docs/09 §10.14.
+
+The menu is the workspace's, not the model's. Settings → Agent skills lists every skill that
+workspace's menu would contain and stores a disabled name in `workspace_disabled_skills` for that
+workspace; `load_skills` filters it at the one seam in `_conduct`, so a disabled skill is not
+offered to the conductor there and `use_skill` cannot reach it. The same built-in may be off in one
+repository and on in another, and the same name includes a workspace skill that shadows a built-in.
+Removing a name from the menu changes no file and grants nothing — the skill remains data, and its
+body is still fetched only when it is chosen. The preview route reads one body on demand; it does
+not enable the skill or put it in a prompt. The same tab can create a skill: a person writes the
+fields or uploads one `.md`, and the engine renders or validates it and creates exactly
+`.codify/skills/<name>.md`. That is the second person-only write door, never an agent tool; it
+creates and does not replace, and a skill it creates is on for that workspace immediately. An
+unknown name or workspace is refused rather than stored as a dead preference. See docs/02 §3.2.
 
 ### 5.2 Why `complete_with_tools` is a separate method
 
@@ -709,11 +737,17 @@ is a 400 on each. OpenAI and Ollama take an empty string and keep it.
   collected, each clipped at 12,000 characters: a hundred thousand characters of evidence in a local model's
   32k-token window. `bound_replay` runs before every model call and replaces the *oldest* tool results with a
   stub until the transcript is under `MAX_CONTEXT_CHARS` (60,000 characters), keeping the newest
-  `KEEP_WHOLE_RESULTS` (4) whole. A stub names the tool, the size it was and that it can be read again. User
-  and assistant messages are never touched — the person's words and the model's own replies are the
-  conversation, not evidence — and a tool message keeps its `tool_call_id`. Stubbing is idempotent, a result
-  already smaller than the stub is left alone, and the newest result is kept even when it alone exceeds the
-  budget. The effect is visible afterwards in `audit_usage`'s `context-growth` signal (`docs/15` §4).
+  `KEEP_WHOLE_RESULTS` (4) whole while they fit. A stub names the tool, the size it was and that it can be read
+  again. User and assistant messages are never touched — the person's words and the model's own replies are the
+  conversation, not evidence — and a tool message keeps its `tool_call_id`. Stubbing is idempotent, and a result
+  already smaller than the stub is left alone. `keep` is a preference, not a promise: with four results and
+  `keep=4` there used to be nothing to stub, so a transcript they had already overflowed went out whole. The
+  newest results are now reduced last, oldest first, when stubbing every older one is not enough — a call that
+  has to read a file again is recoverable, a call that overflows the window is not. That conversation needs a
+  bound of its own, because this one will not replace it: `bound_history` builds the earlier turns as messages
+  once per run, clipping each (`MAX_HISTORY_MESSAGE_CHARS`, 4,000) and keeping the newest turns that fit
+  `MAX_HISTORY_CHARS` (16,000), so one long thread cannot fill the window its next turn is answered from. The
+  effect is visible afterwards in `audit_usage`'s `context-growth` signal (`docs/15` §4).
 - **The one stable prefix is paid for once, where the protocol can say so.** Every call in a turn re-sends the same
   system prompt, so it is the only prompt prefix whose cache write is read back. `_call` passes
   `cache_prefix=True` on every call; only Anthropic consumes it, marking the **system block alone** with
