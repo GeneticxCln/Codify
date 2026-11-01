@@ -226,6 +226,10 @@ class GateCall(Protocol):
         model: str,
         temperature: float,
         max_tokens: int,
+        *,
+        # The role's own request, forwarded only when it set one. A gate fallback on a provider with
+        # no thinking control must still make the call, so this is never required.
+        thinking_effort: str | None = None,
     ) -> str: ...
 
 
@@ -636,6 +640,7 @@ class LayaService:
             raw = await on_call(
                 provider, cfg.provider, system, user, cfg.model_name,
                 cfg.temperature, cfg.max_tokens,
+                **({"thinking_effort": cfg.thinking_effort} if cfg.thinking_effort else {}),
             )
         else:
             raw = await provider.complete(
@@ -646,6 +651,7 @@ class LayaService:
                 max_tokens=cfg.max_tokens,
                 num_ctx=getattr(cfg, "ollama_num_ctx", None),
                 keep_alive=getattr(cfg, "ollama_keep_alive", None),
+                thinking_effort=cfg.thinking_effort,
                 # The gate's typed contract, where the endpoint can take a schema. The SDK path above never
                 # reaches this call; this is the LLM fallback, whose answer is read by `_extract_json`.
                 json_schema=REPLY_SCHEMAS["laya"],

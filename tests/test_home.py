@@ -256,21 +256,52 @@ class TestTheBootTokenOutlivesTheProcess(_EnvCase):
         # each holding a token the other does not accept.
         path = self.scratch / "boot_token"
         path.write_text("the-winners-token")
-        real_read_text = Path.read_text
+        real_read_token = home._read_token
         answered_once: list[bool] = []
 
-        def blind_first_read(target: Path, *args: Any, **kwargs: Any) -> str:
+        def blind_first_read(target: Path) -> str:
             # Report the file as missing, once, so the create is attempted.
             if target == path and not answered_once:
                 answered_once.append(True)
                 raise FileNotFoundError(target)
-            return real_read_text(target, *args, **kwargs)
+            return real_read_token(target)
 
         with self.env(**{home.ENV_HOME: str(self.scratch)}), patch.object(
-            Path, "read_text", blind_first_read
+            home, "_read_token", blind_first_read
         ):
             self.assertEqual(home.boot_token(), "the-winners-token")
         self.assertEqual(path.read_text(), "the-winners-token")
+
+    def test_a_symlinked_token_file_is_refused_rather_than_followed(self) -> None:
+        # The state directory is 0700, so this is someone who can already write it — defence in depth,
+        # not a remote hole. A link is how a file elsewhere chooses this engine's bearer token, and how
+        # the repair path writes a fresh one through the link. Both are refused: the link reads as
+        # absent, nothing is opened for writing, and this boot gets a fresh per-boot token.
+        target = self.root / "outside-the-state-dir"
+        target.write_text("a-token-from-outside")
+        path = self.scratch / "boot_token"
+        path.symlink_to(target)
+
+        token = self.token()
+
+        self.assertNotEqual("a-token-from-outside", token)
+        self.assertEqual(64, len(token), "the run did not fall back to a per-boot token")
+        self.assertEqual("a-token-from-outside", target.read_text(), "the link's target was rewritten")
+        self.assertTrue(path.is_symlink(), "the link was replaced rather than refused")
+
+    def test_the_repair_path_does_not_truncate_a_symlinks_target(self) -> None:
+        # An empty target is the case the repair path handled in place: `O_TRUNC` without `O_NOFOLLOW`
+        # wrote the new token through the link, into a file the state directory does not own.
+        target = self.root / "outside-the-state-dir"
+        target.write_text("")
+        path = self.scratch / "boot_token"
+        path.symlink_to(target)
+
+        token = self.token()
+
+        self.assertTrue(token)
+        self.assertEqual("", target.read_text(), "the repair wrote through the link")
+        self.assertTrue(path.is_symlink(), "the link was replaced rather than refused")
 
     def test_an_empty_token_file_is_repaired_rather_than_ignored(self) -> None:
         # A boot that died between creating the file and filling it. Handing out

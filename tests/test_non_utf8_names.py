@@ -161,8 +161,13 @@ class TestWhatReachesAModel(unittest.IsolatedAsyncioTestCase):
             prompts: list[str] = []
 
             class Provider(BaseProvider):
-                async def complete(self, system_prompt: str, user_prompt: str, model: str, temperature: float,
-                                   max_tokens: int, *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None) -> str:
+                async def complete(
+                    self, system_prompt: str, user_prompt: str, model: str,
+                    temperature: float, max_tokens: int,
+                    *, num_ctx: int | None = None, keep_alive: str | None = None,
+                    json_schema: dict[str, Any] | None = None,
+                    thinking_effort: str | None = None,
+                ) -> str:
                     role = next((r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown")
                     sent_as_a_request(user_prompt)
                     if role == "librarian":

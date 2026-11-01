@@ -7,7 +7,7 @@ editor needs one thing `apply` is not: a *person* pressing Save. That is `save_t
   * it only ever **replaces a file that exists**, so Save is never a way to create or delete one;
   * it refuses unless the caller names the version it read (`base_version`), so a file an agent or an editor changed in
     the meantime is a conflict, never a silent overwrite;
-  * nothing reaches it except one HTTP route (see `test_invariants_at_their_boundary.TestAPersonsSaveIsTheOneOtherDoor`).
+  * nothing reaches it except one HTTP route (see `test_invariants_at_their_boundary.TestAPersonsWriteDoors`).
 
 What a file *is* for this purpose is stated once: UTF-8 text without a NUL byte, at most `MAX_EDIT_BYTES`. Anything else
 is refused in words, because opening a PNG in a text editor and saving it back is how it gets corrupted.

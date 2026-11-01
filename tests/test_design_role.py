@@ -57,7 +57,7 @@ class MockProvider(BaseProvider):
         temperature: float,
         max_tokens: int,
         *,
-        num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+        num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None
     ) -> str:
         self.calls.append({
             "role": self.current_role,

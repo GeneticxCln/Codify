@@ -797,7 +797,7 @@ class TheBriefReachesThePrompt(unittest.IsolatedAsyncioTestCase):
         self.assertIn("self._memory_brief(goal)", source)
         self.assertLess(
             source.index("self._memory_brief(goal)"),
-            source.index("self._intent_brief(intent)"),
+            source.index("self._intent_brief(intent, skills)"),
             "the brief belongs before the gate's instructions, not after",
         )
         memory = inspect.getsource(ExecutorService._memory_brief)

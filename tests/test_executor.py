@@ -53,7 +53,7 @@ class MockProvider(BaseProvider):
         temperature: float,
         max_tokens: int,
         *,
-        num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+        num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None
     ) -> str:
         self.calls.append({
             "system_prompt": system_prompt,
@@ -537,7 +537,7 @@ class _ScriptedProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None
     ) -> str:
         role = next(
             (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -985,7 +985,7 @@ class _FailingProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None
     ) -> str:
         # Real providers report their token usage through the sink the
         # orchestrator attaches; the double does the same so latency tests can
@@ -1057,7 +1057,7 @@ class _QueuedProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None
     ) -> str:
         role = self.current_role or "unknown"
         self.calls.append((role, system_prompt, user_prompt))
@@ -1544,6 +1544,7 @@ class TestFixRetryLoop(unittest.IsolatedAsyncioTestCase):
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
             *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+            thinking_effort: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -1833,7 +1834,7 @@ class _HoldingProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None
     ) -> str:
         role = next(
             (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -1920,6 +1921,7 @@ class TestFixerSelfContinuation(unittest.IsolatedAsyncioTestCase):
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
             *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+            thinking_effort: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -2051,6 +2053,7 @@ class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
             *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+            thinking_effort: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -2166,6 +2169,7 @@ class TestUsageAccounting(unittest.IsolatedAsyncioTestCase):
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
             *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+            thinking_effort: str | None = None,
         ) -> str:
             text = await real_complete(system_prompt, user_prompt, model, temperature, max_tokens)
             scripted._report_usage("ollama", {"response": text, "prompt_eval_count": 10, "eval_count": 5})
@@ -2354,6 +2358,7 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
             *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+            thinking_effort: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -2855,6 +2860,7 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
             *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+            thinking_effort: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -2979,6 +2985,7 @@ class TestModelDeltaStreaming(unittest.IsolatedAsyncioTestCase):
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
             *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+            thinking_effort: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"
@@ -3058,6 +3065,7 @@ class TestCriticInspectionCommand(unittest.IsolatedAsyncioTestCase):
             system_prompt: str, user_prompt: str, model: str,
             temperature: float, max_tokens: int,
             *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+            thinking_effort: str | None = None,
         ) -> str:
             role = next(
                 (r for r in ROLES if f"You are Codify {r.capitalize()}" in system_prompt), "unknown"

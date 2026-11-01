@@ -270,7 +270,7 @@ class ReplayProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None
     ) -> str:
         role = self.current_role or "unknown"
         digest = prompt_digest(system_prompt, user_prompt)

@@ -77,15 +77,30 @@ def boot_token_path() -> Path:
     return codify_home() / "boot_token"
 
 
+def _read_token(path: Path) -> str:
+    """The token file's text, refusing to follow a symlink at `path`.
+
+    `O_NOFOLLOW` is the line: the token file is state this engine wrote inside a directory only its
+    owner can write (`0700`). A symlink where it belongs is a link out of that directory, and following
+    it would let a file elsewhere choose this engine's bearer token — and let the repair path below
+    truncate a file this engine does not own. A link reads as absent instead.
+
+    Raises what the open and read raise; `_stored_token` is the quiet wrapper.
+    """
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
 def _stored_token(path: Path) -> str:
-    """The token in `path`, or "" when it is missing or not UTF-8 text.
+    """The token in `path`, or "" when it is missing, a symlink, or not UTF-8 text.
 
     The file is bytes on a disk a person can edit. A corrupt one must read as
     absent and be repaired, not raise `UnicodeDecodeError` out of import-time
     boot-token resolution and stop the engine from starting.
     """
     try:
-        return path.read_text(encoding="utf-8").strip()
+        return _read_token(path).strip()
     except (OSError, UnicodeDecodeError):
         return ""
 
@@ -129,8 +144,14 @@ def boot_token() -> str:
                 return adopted
             # An empty file is a boot that died between creating and filling
             # it. No client can have read one, so repairing it invalidates
-            # nothing.
-            fd = os.open(path, os.O_WRONLY | os.O_TRUNC, 0o600)
+            # nothing. `O_NOFOLLOW` because `O_TRUNC` follows a link and would empty
+            # whatever it points at: a link is refused here, and the run falls back to
+            # a per-boot token rather than writing outside the state directory.
+            fd = os.open(
+                path,
+                os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
         with os.fdopen(fd, "w") as handle:
             handle.write(fresh)
     except OSError:
