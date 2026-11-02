@@ -15,7 +15,7 @@ workstreams of roughly 13–14 days, because four of its premises did not hold (
 | The step pipeline and the conductor's `review` move build review prompts independently | `ConductorTools.review` calls `ExecutorService._critic`. There is one critic path | Review work is inside `_critic`; there is no second call site to unify |
 | Deep review costs "4 calls" | The critic may already ask for up to `MAX_CRITIC_COMMANDS` (2) read-only commands, each a model round | The cap is stated as measured: see §3 |
 | The entry chunk is 640 KB | An in-flight change lazy-loads Settings and Stats; the entry chunk is about 448 KB and `ui/dist` about 2.03 MB. `ui/tests/entryChunk.test.ts` already guards the split | A budget baseline is set after that change lands, not from the old number |
-| The UI suite needs real DOM smoke tests | About 90 of the 194 UI test files already mount through `ui/tests/dom.ts` / `appHarness.ts` | Dropped |
+| The UI suite needs real DOM smoke tests | 86 of the 196 UI test files already mount through `ui/tests/dom.ts` / `appHarness.ts` | Dropped |
 | Startup time can be budgeted from the existing smoke script | `scripts/tabs_smoke.py` needs a display and times seeding, not startup | Dropped; no startup budget |
 | `CLAUDE.md` can be ≤10 KB | The invariants and the gate table are about 8.5 KB; `tests/test_skills.py` also required `CLAUDE.md` to name every built-in | The cap is 12 KB, and that test names `docs/01` and `docs/09` only |
 | A new `docs/README.md`, `docs/adr/` and `CONTEXT.md` | Registration of every numbered doc is already enforced in three tables (`docs/00` §5, `CLAUDE.md`, the README). The repository's idiom for a decision is one design doc (`docs/20`) | One doc: this one |
@@ -91,7 +91,7 @@ in `ui/budgets.json`; every baseline must carry a `reason` and a `measured_at`, 
 as `make budgets` inside `make check` and as a step of the CI UI job; it needs no display and no network. The baselines are
 the measured build: entry chunk 450,680 bytes (about 640 kB before Settings and Stats became lazy chunks), whole build
 2,030,178 bytes. A startup-time budget and new DOM smoke tests were dropped (§1): `scripts/tabs_smoke.py` needs a display
-and times seeding, and about 90 UI test files already mount through the DOM harness.
+and times seeding, and 86 of 196 UI test files already mount through the DOM harness.
 
 **P5 — Skill contracts. Status: built.** `tests/test_skill_contracts.py` holds every built-in to the routing contract:
 no loader problems, existing moves only, a description that is a sentence, unique and uncut at 200 characters, a

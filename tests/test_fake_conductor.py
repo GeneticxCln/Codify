@@ -401,6 +401,39 @@ class TestAChangeEndToEnd(LiveCase):
         self.assertIn("conductor", roles)
 
 
+class TestDeepReviewEndToEnd(LiveCase):
+    """`review_deep` on, through the conductor's `review` move, a real socket and a real provider (docs/21 P1).
+
+    The fake answers a review lens with the critic's own reply shape, which is not the findings contract. That is
+    the case worth running live: both lenses are asked, re-asked once, and recorded `not_run`, the report says the
+    review fell back, and the critic's decision and the commit are unchanged. A deep review that could stall or
+    fail a step on an unusable lens would show here and nowhere in a double.
+    """
+
+    async def test_unusable_lenses_fall_back_to_the_standard_review_and_the_step_still_commits(self) -> None:
+        self.executor.settings.set_int("review_deep", 1)  # type: ignore[union-attr]
+        goal_id = await self.turn("add a banner file")
+
+        await self.start(goal_id)
+
+        self.assertEqual("COMPLETED", self.goals.get(goal_id).status, self.events(goal_id, "error"))
+        self.assertEqual("feat: add banner.txt", self.commits()[0])
+        lenses = {p["lens"]: p for p in self.events(goal_id, "review_lens")}
+        self.assertEqual(["zoom-out", "comprehension", "readiness"], list(lenses))
+        self.assertEqual("not_run", lenses["zoom-out"]["status"])
+        self.assertEqual("not_run", lenses["comprehension"]["status"])
+        self.assertEqual("ran", lenses["readiness"]["status"])
+        (report,) = self.events(goal_id, "review_report")
+        self.assertIn("fell back", report["detail"])
+        self.assertEqual("1 of 3 lenses ran — zoom-out, comprehension not run", report["status"])
+
+    async def test_with_the_switch_off_no_lens_is_ever_asked(self) -> None:
+        goal_id = await self.turn("add a banner file")
+        await self.start(goal_id)
+        self.assertEqual("COMPLETED", self.goals.get(goal_id).status)
+        self.assertEqual([], self.events(goal_id, "review_lens"))
+
+
 class TestAConductorThatCannotFinish(LiveCase):
     async def test_a_step_it_stops_after_writing_pauses_the_goal_and_says_why(self) -> None:
         goal_id = await self.turn("add a banner file [stall]")

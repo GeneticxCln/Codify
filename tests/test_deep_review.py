@@ -17,6 +17,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from tests.test_executor import _QueuedFactory, _QueuedProvider, _SkippedGate, configure_every_role
 
@@ -185,6 +186,33 @@ class TestDeepReview(_Harness):
         blocker = dict(FINDING, severity="blocker")
         goal_id, step = await self._critic({"critic": [{"findings": [blocker]}, {"findings": []}, APPROVE]})
         self.assertNotEqual("FAILED", self.goals.steps(goal_id)[0].status)
+
+    async def test_a_path_the_planner_wrote_that_cannot_be_looked_up_does_not_fail_the_review(self) -> None:
+        goal_id, step = await self._step()
+        step = step.model_copy(update={"suggested_paths": ["bad\x00name.py", "x" * 9000, "/etc/passwd", "../out.py"]})
+        self.provider.by_role = {"critic": [{"findings": []}, {"findings": []}, APPROVE]}
+        await self.executor._critic(
+            goal_id, step, FileSystemService(str(self.root)), DIFFS, EVIDENCE, OUTCOME, ws_root=str(self.root),
+        )
+        readiness = next(e for e in self.events(goal_id, "review_lens") if e["lens"] == "readiness")
+        self.assertEqual("ran", readiness["status"])
+        report = self.events(goal_id, "review_report")[0]
+        missing = {f["scope"] for f in report["findings"] if f["category"] == "missing-path"}
+        self.assertIn("bad\x00name.py", missing, "a path that cannot be looked up does not exist")
+        self.assertIn("/etc/passwd", missing, "an absolute path is outside the workspace, so it is not the workspace's")
+
+    async def test_a_cancelled_goal_asks_no_further_lens(self) -> None:
+        goal_id, step = await self._step()
+        self.provider.by_role = {"critic": [APPROVE]}
+        self.provider.calls.clear()
+        with mock.patch.object(self.executor, "_is_cancelled", return_value=True):
+            await self.executor._critic(
+                goal_id, step, FileSystemService(str(self.root)), DIFFS, EVIDENCE, OUTCOME, ws_root=str(self.root),
+            )
+        lenses = {e["lens"]: e for e in self.events(goal_id, "review_lens")}
+        self.assertEqual({"not_run"}, {lenses["zoom-out"]["status"], lenses["comprehension"]["status"]})
+        self.assertEqual("the goal was cancelled", lenses["zoom-out"]["detail"])
+        self.assertEqual(1, len(self.critic_calls()), "only the critic itself was asked")
 
     async def test_the_readiness_lens_needs_no_model_call(self) -> None:
         await self._critic({"critic": [{"findings": []}, {"findings": []}, APPROVE]})

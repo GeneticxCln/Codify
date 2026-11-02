@@ -1333,6 +1333,13 @@ class _Steps(_Design):
             started = time.monotonic()
             replies = 0
             lens_findings: list[review.Finding] = []
+            if self._is_cancelled(goal_id):
+                # A cancelled goal spends nothing more: the lens is recorded as not run, not skipped silently.
+                runs.append(review.LensRun(
+                    lens=lens, status="not_run", findings=0, calls=0, duration_ms=0, detail="the goal was cancelled",
+                ))
+                self.goals.publish(self._event(goal_id, step.id, "review_lens", dict(runs[-1].__dict__)))
+                continue
 
             def accept(reply: Any, lens: str = lens) -> None:
                 nonlocal replies
@@ -1360,8 +1367,14 @@ class _Steps(_Design):
         root = Path(ws_root)
 
         def exists(rel: str) -> bool:
-            target = (root / rel).resolve()
-            return target.is_relative_to(root.resolve()) and target.exists()
+            # The paths are the planner model's text. One with a NUL byte makes `resolve` raise `ValueError`, and a
+            # name the filesystem refuses raises `OSError`; neither is a reason to fail the review, and a path that
+            # cannot be looked up does not exist.
+            try:
+                target = (root / rel).resolve()
+                return target.is_relative_to(root.resolve()) and target.exists()
+            except (OSError, ValueError):
+                return False
 
         mechanical = review.readiness_findings(step.suggested_paths, [str(d["path"]) for d in diffs], exists)
         found += mechanical

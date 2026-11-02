@@ -39,7 +39,18 @@ export interface ReviewReportPayload {
 export function looksLikeReviewReport(value: unknown): value is ReviewReportPayload {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Partial<ReviewReportPayload>;
-  return typeof v.status === "string" && Array.isArray(v.lenses) && Array.isArray(v.findings);
+  if (typeof v.status !== "string" || !Array.isArray(v.lenses) || !Array.isArray(v.findings)) return false;
+  // The entries are read field by field below, so one that is not an object, or lacks the fields, would throw while
+  // rendering and take the whole timeline with it. An event from another engine version draws nothing instead.
+  const lensOk = v.lenses.every(
+    (l) => typeof l === "object" && l !== null && typeof l.lens === "string" && typeof l.status === "string",
+  );
+  const findingOk = v.findings.every(
+    (f) =>
+      typeof f === "object" && f !== null && typeof f.severity === "string" && typeof f.scope === "string" &&
+      typeof f.recommendation === "string" && Array.isArray(f.lenses),
+  );
+  return lensOk && findingOk;
 }
 
 const SEVERITY_STYLES: Record<string, string> = {

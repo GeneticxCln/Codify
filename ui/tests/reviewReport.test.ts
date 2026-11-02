@@ -85,6 +85,11 @@ test("an event of the wrong shape is not drawn", () => {
   for (const bad of [null, undefined, "x", {}, { status: "s" }, { status: "s", lenses: [], findings: "no" }]) {
     assert.equal(looksLikeReviewReport(bad), false);
   }
+  // A well-shaped envelope with a bad entry inside would throw while drawing, so it is refused up front.
+  assert.equal(looksLikeReviewReport({ status: "s", lenses: [null], findings: [] }), false);
+  assert.equal(looksLikeReviewReport({ status: "s", lenses: [{ lens: "x" }], findings: [] }), false);
+  assert.equal(looksLikeReviewReport({ status: "s", lenses: [], findings: [{ severity: "major", scope: "a" }] }), false);
+  assert.equal(looksLikeReviewReport({ ...FULL, findings: [{ ...FULL.findings[0], lenses: "zoom-out" }] }), false);
 });
 
 test("the audit report shows a deep-review section only when there is a report", async () => {
