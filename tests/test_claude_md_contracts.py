@@ -130,6 +130,12 @@ KNOWN_SUFFIXES = (".md", ".py", ".toml", ".json", ".yml", ".yaml", ".sh", ".txt"
 # how a guarantee quietly stops being checked.
 KNOWN_DANGLING: frozenset[tuple[str, str]] = frozenset()
 
+# `CLAUDE.md` is paid for on every session, so its length is a contract and not a taste. It was 21.8 KB when it
+# carried the role catalogue and the list of built-in skills, both of which `docs/01` and `docs/19` already own.
+# The bar is 12 KB: the invariants and the gate table alone are about 8.5 KB, so a lower number would be met only by
+# cutting a contract. To grow past it, move prose into the doc that owns it, and do not raise this number.
+MAX_CLAUDE_MD_BYTES = 12 * 1024
+
 
 def _content_words(text: str) -> set[str]:
     """Distinct lowercase words of `text`, minus pure function words and bare numbers.
@@ -394,6 +400,15 @@ class ClaudeMdContractsTest(unittest.TestCase):
             CLAUDE_MD.is_file(),
             "CLAUDE.md is missing; the agent-facing rules and their pointer to "
             "CONTRIBUTING.md/docs went with it",
+        )
+
+    def test_claude_md_stays_within_its_byte_budget(self) -> None:
+        size = len(CLAUDE_MD.read_bytes())
+        self.assertLessEqual(
+            size,
+            MAX_CLAUDE_MD_BYTES,
+            f"CLAUDE.md is {size} bytes, over its {MAX_CLAUDE_MD_BYTES}-byte budget. Every session pays "
+            "for this file: move the depth into the doc that owns it and leave a pointer here",
         )
 
     def test_every_documented_invariant_is_quoted(self) -> None:

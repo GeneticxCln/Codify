@@ -430,13 +430,12 @@ class TestTheMenuAndTheDocsAgree(unittest.TestCase):
 
     The menu is `builtin_skills()`; the documentation list is the prose that names every recipe. They
     used to be maintained by hand, which is exactly how a new skill is added and the docs keep saying
-    eight. This test derives both sides: every shipped name must appear in each of the three docs that
+    eight. This test derives both sides: every shipped name must appear in each of the two docs that
     list the set, no doc may cite a `builtin_skills/<name>.md` that is not shipped, and the count word
     in `docs/01` must match the directory.
     """
 
     DOCS = (
-        "CLAUDE.md",
         "docs/01-subagent-orchestration-spec.md",
         "docs/09-workspace-shell.md",
     )
@@ -467,7 +466,7 @@ class TestTheMenuAndTheDocsAgree(unittest.TestCase):
 
         word = self.NUMBER_WORDS.get(len(names))
         self.assertIsNotNone(word, "the count needs a word in the docs; extend NUMBER_WORDS")
-        docs01 = Path(self.DOCS[1]).read_text(encoding="utf-8")
+        docs01 = Path(self.DOCS[0]).read_text(encoding="utf-8")
         self.assertIn(
             f"one of {word} built-ins",
             docs01,

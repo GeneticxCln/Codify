@@ -121,6 +121,7 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
 | `17-leanrea-audit.md` | The leanrea audit: the routing-table skill that argues against REA's tool surface — what of it is already this engine's design (a closed 31-call menu, skills as lazy data, coverage lines), the defect its trap list found and fixed here (`search_code` now names the directories its walk pruned instead of reporting an absence), the measured fixed cost of one conductor call, and the two small rows built instead of the mechanism |
 | `19-deepseek-stack-audit.md` | The deepseek-stack audit: 29 skills for a cheap, literal model, read at the initial release `d4f1ebe` — the 24 native recipes built from them, what each does, and which actions stay with a person (push, merge, comments, screenshots, parallel models); per-role thinking effort remains a setting rather than a skill |
 | `20-mcp-admission-design.md` | The MCP admission design: invariant 10 (a remote data source, never a capability), remote-only transport, per-tool Read/Act authority, and the tests that hold it. **Phase 3 is built: admission, probe, per-tool Read/Act authority, `list_mcp_tools` and `call_mcp`; act is gated on the goal's stored `RUNNING` status** |
+| `21-improvement-plan.md` | The improvement plan, audited against the code: goldfish review lenses (parameters, not roles), person-recorded project health, content-free cache diagnostics, a size budget and skill contracts — the decisions, the phases, and each phase's status |
 
 ## 6. Invariants (non-negotiable)
 
