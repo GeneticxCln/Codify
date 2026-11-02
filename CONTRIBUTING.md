@@ -30,6 +30,7 @@ runs everything in one pass:
 | `make test` | full Python suite (411 tests today — the number moves, so trust the run) |
 | `make test-streams` | the concurrency/stream-isolation tests, **by name** (not just via discovery) |
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |
+| `make budgets` | `make build-ui`, then `scripts/check_budgets.py`: the entry chunk and the whole build against the baselines in `ui/budgets.json`, 10% tolerance (part of `make check`) |
 | `make check-tauri` | `cargo check` + `cargo test` (under Xvfb when there is no display; the machine tab's tests run a real `bwrap` jail and mount its project layer through `unshare`, so they need user namespaces and an unprivileged overlay mount, and `make doctor` checks all of it) + `cargo fmt --check` on the desktop shell |
 | `make check-history` | every commit in `HISTORY_RANGE` (default `origin/<branch>..HEAD`) builds, not just the tip |
 

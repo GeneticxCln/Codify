@@ -159,6 +159,10 @@ jobs:
       - name: Typecheck and build
         run: make build-ui
 
+      # Reads ui/dist and ui/budgets.json only; stdlib Python, which the runner image has.
+      - name: Size budget
+        run: python3 scripts/check_budgets.py
+
   rust:
     name: rust — cargo check, tests, fmt
     runs-on: ubuntu-latest

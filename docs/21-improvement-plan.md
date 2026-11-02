@@ -85,9 +85,13 @@ conductor's system prompt, every role prompt and the skills menu are byte-identi
 on an injected volatile string; the conductor's prompt moved into `conductor_system_prompt` so it can be tested. There is
 no target for the read ratio: it is measured first.
 
-**P4 — Size budget. Status: planned.** `scripts/check_budgets.py` reads `ui/dist` after `make build-ui` and fails when
-the entry chunk or the total grows more than 10% over a recorded baseline. It runs inside `make check`; it needs no
-display and no network.
+**P4 — Size budget. Status: built.** `scripts/check_budgets.py` reads `ui/dist` after `make build-ui` and fails when the
+entry chunk (the module script `index.html` loads on first paint) or the whole build grows more than 10% over the baseline
+in `ui/budgets.json`; every baseline must carry a `reason` and a `measured_at`, so raising one is a reviewed edit. It runs
+as `make budgets` inside `make check` and as a step of the CI UI job; it needs no display and no network. The baselines are
+the measured build: entry chunk 450,680 bytes (about 640 kB before Settings and Stats became lazy chunks), whole build
+2,030,178 bytes. A startup-time budget and new DOM smoke tests were dropped (§1): `scripts/tabs_smoke.py` needs a display
+and times seeding, and about 90 UI test files already mount through the DOM harness.
 
 **P5 — Skill contracts. Status: planned.** A test over every built-in: the loader reports no problems, names and
 descriptions are unique, a description is at most 200 characters and starts with a "Use when" clause, and a skill that

@@ -31,14 +31,14 @@ a built-in.
 
 | Target | What it runs |
 |---|---|
-| `make setup` / `make doctor` | Fresh clone: make `.venv` and install / check the machine and `.venv` against `pyproject.toml` (read-only) |
+| `make setup` / `make doctor` | Fresh clone: make `.venv` and install / check the machine and `.venv` against `pyproject.toml` |
 | `make check` | Everything below on the interpreter you have, including `bench-smoke` |
 | `make ci` | `make check`, then the same Python legs on the declared 3.10 floor (`make ci-python-floor` is that leg alone) |
 | `make lint` / `make typecheck` | `ruff` / `mypy`; config pinned in `pyproject.toml` |
 | `make test` / `make test-streams` | Python suite via `unittest` / stream-isolation tests **by name** |
 | `make bench-smoke` | Hermetic benchmark tier, both drivers: no network, models or spend |
 | `make test-ui` / `make typecheck-ui-tests` | `ui/tests/` via `node --test` (Node 22.22.2+, 24.15+ or 26+) / `tsc --noEmit` over `ui/src` **and** `ui/tests` |
-| `make build-ui` | TypeScript check (`src` only) + Vite build |
+| `make build-ui` | TypeScript check (`src` only) + Vite build; `make budgets` then checks its size (`ui/budgets.json`) |
 | `make check-tauri` | `cargo check`/`test` (jail tests need `bwrap`, `unshare`, an unprivileged overlay mount; `make doctor` says which), clippy `-D warnings`, `scripts/check_msrv.py`, `cargo fmt --check` |
 | `make check-history` | Every commit in `HISTORY_RANGE`, not just the tip; pre-push runs it second |
 | `make ci-report`, `make check-ghidra` | Publish `make ci`'s verdict as a GitHub status / the Ghidra fallback against a real install. Neither is in `check` or `ci` |
@@ -75,7 +75,7 @@ engine/         Python: orchestration, providers, sandbox, git, db, trace
 ui/             React 19 + TS + Vite; ui/tests/ run through node --test
 src-tauri/      Tauri v2 Rust shell
 tests/          Python suite; stream_isolation.py is the shared isolation helper
-scripts/        fake_ollama.py (drive a goal with no API keys), check_history.py
+scripts/        fake_ollama.py (drive a goal with no API keys)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
 docs/           00–21, below
 ```
@@ -119,8 +119,8 @@ docs/           00–21, below
 | `docs/06` | Live model discovery — why there is no catalog |
 | `docs/07` | Spawn guard and deterministic tests |
 | `docs/08` | Benchmarks: what a number may claim |
-| `docs/09` | Workspace shell; §10 what a turn is, §13 editor and surfaces, §14 the machine |
-| `docs/10` | Agent memory: `recall`, observations and their fading |
+| `docs/09` | Workspace shell; §10 what a turn is, §14 the machine |
+| `docs/10` | Agent memory: `recall`, observations |
 | `docs/11` | Ruflo audit |
 | `docs/12` | Scrapling audit: `fetch_page` |
 | `docs/13` | Grepify audit: `scan_code` |

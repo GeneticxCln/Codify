@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup setup-laya doctor check ci ci-report ci-python-floor check-history check-ghidra bundle-engine lock-engine check-bundle verify-package hooks clean bench bench-review bench-smoke smoke-tabs
+.PHONY: help budgets test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup setup-laya doctor check ci ci-report ci-python-floor check-history check-ghidra bundle-engine lock-engine check-bundle verify-package hooks clean bench bench-review bench-smoke smoke-tabs
 
 # A checkout's own virtualenv (`make setup` makes one) wins over whatever `python3` is on
 # PATH, so `make setup && make check` works with nothing activated. The floor leg sets
@@ -59,6 +59,7 @@ help:
 	@echo "  make run-engine-preview - Start the engine and print the token/port for the browser preview"
 	@echo "  make run-engine-scratch - Start an engine isolated under $(SCRATCH_HOME) (real ~/.codify untouched)"
 	@echo "  make bench-smoke  - Run the hermetic benchmark tier under both drivers (no network, no models, no spend)"
+	@echo "  make budgets      - Build the UI, then fail if its size grew past ui/budgets.json (part of check)"
 	@echo "  make bench-review - Run the review tier: standard critic against deep review on planted defects (spends tokens)"
 	@echo "  make bench        - Run the repo_scale tier against your configured models (spends tokens; BENCH_DRIVER=recipe for the fixed pipeline)"
 	@echo "  make check        - Run all verifications (ruff + mypy + UI tests + UI test typecheck + Python tests + stream tests + benchmark smoke + UI build + Tauri check)"
@@ -351,7 +352,12 @@ bench-smoke:
 	python3 -m benchmarks.runner --tier smoke --driver conductor
 	python3 -m benchmarks.runner --tier smoke --driver recipe
 
-check: lint typecheck test-ui typecheck-ui-tests test test-streams bench-smoke build-ui check-tauri
+# The built UI against its recorded sizes (docs/21 P4): fails when the entry chunk or the whole build grows past the
+# tolerance in ui/budgets.json. It only reads ui/dist, so it needs no network and no display, and it builds first.
+budgets: build-ui
+	python3 scripts/check_budgets.py
+
+check: lint typecheck test-ui typecheck-ui-tests test test-streams bench-smoke build-ui budgets check-tauri
 	@echo "All verifications passed successfully!"
 
 # The declared-minimum leg. No machine is guaranteed a python $(PY_MIN), so this brings
