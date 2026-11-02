@@ -2827,7 +2827,7 @@ instructions. It is discovered by name and one-line description, its body is
 fetched with `use_skill` only when it is wanted, and a
 `<workspace>/.codify/skills/*.md` file of the same name replaces it — with the
 replacement announced in the transcript, because a silently shadowed recipe is
-worse than an obvious one. The directory now ships thirty-four built-ins. The ship and review set is
+worse than an obvious one. The directory now ships forty built-ins. The ship and review set is
 `ship-a-change`, `blast-radius`, `prove`, `design-review`, `review-loop`, `second-opinion`,
 `prepare-a-pull-request`, `watch-ci`, `ship-with-a-person`, `merge-ready`, `adopt-a-change`,
 `revive-a-change` and `review-replies`; the planning set is `working-style`,
@@ -2835,7 +2835,8 @@ worse than an obvious one. The directory now ships thirty-four built-ins. The sh
 `compare-approaches`, `wide-audit`, `sharpen-the-ask`, `blueprint`, `test-first` and
 `encode-a-lesson`; the reading and handoff set is `context-transfer`, `security-review`,
 `usage-audit`, `inspect-an-artifact`, `unstick`, `explain-code`, `catch-up`, `plain-prose` and
-`health-review` (docs/19, docs/21). The set is not a pipeline with one entry.
+`health-review`; the set from docs/22 is `match-a-reference`, `ui-motion`, `scoped-fix`, `claims-ledger`,
+`tune-to-a-number` and `film-as-code` (docs/19, docs/21, docs/22). The set is not a pipeline with one entry.
 
 A skill is a `.md` file or a `<name>/SKILL.md` folder; a folder's name is the
 skill's name. Every other entry in the directory is reported with why it was

@@ -465,7 +465,7 @@ class TestTheMenuAndTheDocsAgree(unittest.TestCase):
     NUMBER_WORDS = {
         1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
         6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
-        11: "eleven", 12: "twelve", 33: "thirty-three", 34: "thirty-four",
+        11: "eleven", 12: "twelve", 33: "thirty-three", 34: "thirty-four", 40: "forty",
     }
 
     def test_every_built_in_is_named_in_the_docs_and_no_retired_one_is(self) -> None:
