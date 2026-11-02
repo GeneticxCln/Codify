@@ -68,19 +68,20 @@ class GitService:
 
     Every git command runs under `engine/spawn_guard.py`, exactly like a sandboxed
     command does: kill the engine — a closed window SIGKILLs it — and git takes its
-    whole tree with it. That is not a theoretical stray. A `git commit` runs the
-    repository's hooks, which are workspace content: a hook that hangs (or a hook
-    whose child keeps writing) used to live on after the engine that ran the commit
-    was gone, with the repository still mutating under a closed window.
+    whole tree with it. That is not a theoretical stray. A commit can still run the
+    repository's clean filters, and a filter that hangs (or whose child keeps writing)
+    used to live on after the engine that ran the commit was gone, with the repository
+    still mutating under a closed window. Hooks and `core.fsmonitor` are disabled
+    before every command, so they are not another door onto that tree.
     """
 
     # How long a model-chosen read may run. A whole-history `git log -p` on a large
     # repository is finite and still not worth a turn that never returns.
     read_only_timeout_s: float = 60.0
 
-    # How long a step's commit may run. `--no-verify` skips pre-commit and commit-msg,
-    # but not post-commit: a hook there runs after the commit exists, and without a
-    # limit it can hold the step (and Cancel, which waits for the step) forever.
+    # How long a step's commit may run. Hooks are disabled, but a clean filter is still
+    # repository config and can block; without a limit it can hold the step (and Cancel,
+    # which waits for the step) forever.
     commit_timeout_s: float = 120.0
 
     # How long a person's push may run. Unlike a commit this crosses the network, and a slow
@@ -94,12 +95,12 @@ class GitService:
     def _workspace_env() -> dict[str, str]:
         """Env for git subprocesses, with credential variables stripped.
 
-        `git commit` runs the repo's pre-commit / commit-msg hooks with this
-        process's environment. The engine carries provider API keys in env vars
-        (the same names providers resolve through ENV_KEY_MAP) — a checked-in
-        hook would otherwise execute with live credentials in scope, and hooks
-        are workspace content: they run whatever the repo ships. The whitelist
-        keeps git's own identity/locale knobs and drops everything else.
+        A git child can run a repository's clean filter, and that filter got this
+        process's environment before this whitelist existed. The engine carries
+        provider API keys in env vars (the same names providers resolve through
+        ENV_KEY_MAP), and a workspace's config is content someone else may have
+        written. The whitelist keeps git's own identity/locale knobs and drops
+        everything else.
         """
         # HOME, so git reads the person's global config exactly as it would in their own terminal:
         # without it a filter or attribute set there was silently not applied, and `git lfs install`
@@ -133,7 +134,7 @@ class GitService:
             return {**clean, "reason": "This workspace is not a git repository."}
         try:
             res = self._run_text(
-                git_readonly.runner_args(["status", "--porcelain=v2", "--branch"]),
+                ["status", "--porcelain=v2", "--branch"],
                 cwd=str(Path(root_path).resolve()),
                 env=git_readonly.runner_env(os.environ, root_path),
                 timeout=self.read_only_timeout_s,
@@ -321,6 +322,12 @@ class GitService:
     ) -> subprocess.CompletedProcess[bytes]:
         """Run one git command under the guard, capturing raw output.
 
+        Every command is hardened here, in this one door: no pager, no configured
+        filesystem monitor, and no repository hooks. That matters most for a commit,
+        because `--no-verify` skips pre-commit and commit-msg but never post-commit —
+        a hook left in `.git/hooks` used to run outside the jail with the engine's
+        environment.
+
         `capped` keeps only the first `MAX_KEPT_BYTES` of each stream (the sandbox's own `_Drain`, which still
         reads the rest so git is never blocked on a full pipe). A model-chosen read can name a whole history,
         and `communicate()` holds all of it, then decodes all of it, before anything is cut.
@@ -329,11 +336,12 @@ class GitService:
         fixed commands (`status --porcelain`, `init`) still do; the one caller whose
         arguments come from a model, `read_only`, passes an explicit environment.
 
-        `timeout=None` waits as long as git takes, which a `commit` running the
-        repository's hooks is entitled to. A model-chosen read is not, so `read_only`
-        passes one: on expiry the command's *whole group* is stopped — the guard alone
-        dying would leave git running, holding the pipes — and `TimeoutExpired` is raised.
+        `timeout=None` waits as long as git takes. A `commit` can still block on a
+        clean filter or a large index, so it gets one; a model-chosen read does too,
+        and on expiry the command's *whole group* is stopped — the guard alone dying
+        would leave git running, holding the pipes — and `TimeoutExpired` is raised.
         """
+        args = git_readonly.runner_args(args)
         proc = subprocess.Popen(  # noqa: S603 — git's own binary and an argv list already validated by the caller; guarded, no shell
             guarded_argv([self._git_bin, *args]),
             cwd=cwd,
@@ -476,7 +484,7 @@ class GitService:
         # and the boot token included — for a command whose arguments a model chose.
         try:
             res = self._run_text(
-                git_readonly.runner_args(args),
+                args,
                 cwd=str(Path(root_path).resolve()),
                 env=git_readonly.runner_env(os.environ, root_path),
                 timeout=self.read_only_timeout_s,

@@ -355,6 +355,11 @@ def runner_args(args: Sequence[str]) -> list[str]:
         # Runs the configured "filesystem monitor" program, and `status`, `diff` and
         # `ls-files` all consult it.
         "-c", "core.fsmonitor=false",
+        # Hooks are repository content too. `--no-verify` skips pre-commit and
+        # commit-msg, never post-commit, and a read-only command can still run one
+        # through git itself. Pointing the hook path at the null device disables
+        # all of them, for the engine's own commits as well as a model's reads.
+        "-c", f"core.hooksPath={os.devnull}",
         sub,
         *_NO_DRIVERS.get(sub, ()),
         *rest,

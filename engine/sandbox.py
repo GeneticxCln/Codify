@@ -428,6 +428,12 @@ class SandboxService:
             # guard.
             bwrap, "--die-with-parent",
             "--ro-bind", "/", "/",
+            # `/run` is where the host's live sockets are: the session bus, gnupg,
+            # keyring, PipeWire and Wayland. `--unshare-net` does not hide pathname
+            # sockets, and a read-only bind still lets a process connect to one. A
+            # fresh tmpfs leaves the path present and empty; a command that needs a
+            # system socket has to be given it explicitly, which nothing here does.
+            "--tmpfs", "/run",
             "--dev", "/dev", "--proc", "/proc",
             "--tmpfs", JAIL_HOME, "--setenv", "HOME", JAIL_HOME,
         ]
@@ -445,7 +451,16 @@ class SandboxService:
         # (`pyvenv.cfg` beside `bin/`), and every PATH entry under the home. Nothing else of the home is
         # visible, and none of these are writable.
         args += self._tool_binds(Path(argv[0]), real_home)
-        args += ["--bind", root_text, root_text, "--chdir", root_text]
+        args += ["--bind", root_text, root_text]
+        # The workspace is writable; its git metadata is not. A test that can write
+        # `.git/config` can name a `core.fsmonitor` or install a post-commit hook, and
+        # the engine's own commit — which runs outside this jail — would execute it
+        # with the person's real HOME. Bind the metadata back read-only after the
+        # writable workspace, so the workspace itself stays a normal working tree.
+        git_meta = root / ".git"
+        if git_meta.exists():
+            args += ["--ro-bind", str(git_meta), str(git_meta)]
+        args += ["--chdir", root_text]
         if not network:
             args += ["--unshare-net"]
         return [*args, "--", *argv], None

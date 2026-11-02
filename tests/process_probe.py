@@ -4,7 +4,7 @@ Every "nothing survives the engine" test asks the same two questions — "is any
 still running that carries this marker?" and "did that stop changing the workspace?" —
 from the ends of the same guarantee: `test_sandbox.py` kills a *stand-in engine* (one
 Python process that calls `SandboxService().run_command` directly), `test_git.py` does
-the same for a commit's hook tree, and `test_sandbox_orphans_e2e.py` SIGKILLs a real
+the same for a commit's clean-filter tree, and `test_sandbox_orphans_e2e.py` SIGKILLs a real
 `python3 -m engine` subprocess driven through the API with a fake provider. The
 markers differ (a probe string in a grandchild's argv, a unique script name that
 catches both a command and the guard in front of it, a commit message that names the

@@ -1889,9 +1889,13 @@ allowlist validated: the same resolved program and tokens are placed after `bwra
 
 `engine/sandbox.py` wraps the child in bubblewrap when the engine-wide `sandbox_isolation` setting is `required` or
 `auto` (the default). The jail binds `/` read-only, then binds the workspace read-write at the same absolute path and
-`chdir`s there; a fresh tmpfs is mounted over the person's real home at that same path, so `~/.ssh`, `~/.codify` and
-everything beside them are absent rather than unreadable, while an absolute path a build tool prints still reads the
-same. The executable's own directory, a virtualenv root and the `PATH` entries under the home are rebound read-only,
+binds the workspace's `.git` back read-only before it `chdir`s there. A workspace test may edit the working tree; it
+cannot install a post-commit hook or name a `core.fsmonitor` that the engine's own commit would later run outside the
+jail with the person's real home. A fresh tmpfs is mounted over `/run`, where the host's session bus, gnupg, keyring,
+PipeWire and Wayland sockets live: a read-only `/` still leaves those pathname sockets connectable, and `--unshare-net`
+does not hide them, so they are absent rather than merely unwritable. A fresh tmpfs is also mounted over the person's
+real home at that same path, so `~/.ssh`, `~/.codify` and everything beside them are absent rather than unreadable,
+while an absolute path a build tool prints still reads the same. The executable's own directory, a virtualenv root and the `PATH` entries under the home are rebound read-only,
 because a fresh home would otherwise hide the venv the command was started from; nothing else of the home is visible. A
 redirected `CODIFY_HOME` outside the home gets its own tmpfs, so this run's database, secrets and boot token are absent too. `--unshare-net` is added unless the command has network authority: the goal's stored `allow_network`, or the
 engine's `sandbox_network` switch, default off. `HOME` is the tmpfs path, so a build's cache writes are discarded with
@@ -1903,7 +1907,8 @@ deliberate opt-out. `isolation` is `"bwrap"` when the jail ran. A `SandboxServic
 test harness, the read-only librarian path) has no jail, because it cannot see the person's setting; the engine always
 passes `SettingsService` (`app.state.sandbox`). The jail does not replace `validate_argv` and does not admit a program the
 table refuses. Proven by `tests/test_sandbox_jail.py`, which runs real bwrap and checks a state-directory secret, a write
-outside the workspace, a home write, and loopback reachability with and without the opt-in. A command that times out reports exit `124` (`timeout(1)`'s code); one stopped because its goal
+outside the workspace, a home write, a `.git` metadata write, and loopback reachability with and without the opt-in; its
+jail argument is also asserted to carry `--tmpfs /run`. A command that times out reports exit `124` (`timeout(1)`'s code); one stopped because its goal
 was cancelled reports `130` and says so in its stderr, so the two are never confused with each other or with an exit the
 command chose.
 
@@ -1971,12 +1976,15 @@ signature, which makes git run gpg), names a file (`--file`, `-f`, `--exclude-fr
 - `branch` and `tag` accept a positional only with `--list`/`-l`, where it is a pattern.
 
 **The child process.** Read-only git — and the verifier's `git status`/`diff`/`log -1` — starts as
-`git --no-pager -c core.fsmonitor=false SUBCOMMAND [--no-ext-diff --no-textconv] ARGS…` with an
-environment of `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE` and `TZ` plus `GIT_CONFIG_GLOBAL=/dev/null`,
-`GIT_CONFIG_NOSYSTEM`, `GIT_OPTIONAL_LOCKS=0` (a `status` otherwise rewrites the index), `GIT_TERMINAL_PROMPT=0`
-and `GIT_CEILING_DIRECTORIES` set to the workspace's parent, so a workspace that is not itself a
-repository cannot read the history of one above it. No provider key or boot token is in that
-environment: `GitService.read_only` used to inherit the engine's whole one. The conductor's door is
+`git --no-pager -c core.fsmonitor=false -c core.hooksPath=/dev/null SUBCOMMAND
+[--no-ext-diff --no-textconv] ARGS…` with an environment of `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE` and `TZ`
+plus `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM`, `GIT_OPTIONAL_LOCKS=0` (a `status` otherwise
+rewrites the index), `GIT_TERMINAL_PROMPT=0` and `GIT_CEILING_DIRECTORIES` set to the workspace's parent,
+so a workspace that is not itself a repository cannot read the history of one above it. Every command
+`GitService` starts goes through that same prefix, including `status`, `add` and `commit`, so
+`--no-verify` is not the only thing standing between a repository hook and the engine: `core.hooksPath`
+points at the null device and no hook runs, post-commit included. No provider key or boot token is in
+that environment: `GitService.read_only` used to inherit the engine's whole one. The conductor's door is
 also **bounded**: 60 seconds (`GitService.read_only_timeout_s`), after which the command's whole
 process group is stopped and the model gets a sentence saying so.
 

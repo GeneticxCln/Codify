@@ -1,12 +1,13 @@
 """`run_command` inside bubblewrap, and the two places the opt-in lives.
 
-The jail is exercised for real, not asserted about: a secret under this run's
-`CODIFY_HOME` must be absent, `/tmp` outside the workspace must be read-only,
-the workspace must still be writable, and the network must be unreachable
-unless the goal or the engine setting opted in. These tests never touch the
-developer's `~/.codify` — `tests/hermetic.py` already moved it — and they do
-not skip when bubblewrap is missing: a container without `bwrap` cannot prove
-the containment this file exists for.
+The jail is exercised for real, not merely asserted about: a secret under this
+run's `CODIFY_HOME` must be absent, `/tmp` outside the workspace must be
+read-only, the workspace must still be writable, `.git` metadata must not be,
+`/run` must be a fresh tmpfs, and the network must be unreachable unless the
+goal or the engine setting opted in. These tests never touch the developer's
+`~/.codify` — `tests/hermetic.py` already moved it — and they do not skip when
+bubblewrap is missing: a container without `bwrap` cannot prove the containment
+this file exists for.
 """
 
 from __future__ import annotations
@@ -135,6 +136,53 @@ class SandboxJailTests(unittest.TestCase):
         self.assertIsNone(result["isolation_warning"])
         self.assertFalse(self.outside.exists())
         self.assertEqual("written", (self.root / "inside.txt").read_text(encoding="utf-8"))
+
+    def test_the_jail_cannot_write_git_metadata(self) -> None:
+        """A writable workspace must not make its `.git` writable too.
+
+        A test that can write `.git/config` can name a `core.fsmonitor` or install a
+        post-commit hook, and the engine's own commit runs outside this jail with the
+        person's real HOME. The workspace stays writable; its metadata is bound back
+        read-only.
+        """
+        git_dir = self.root / ".git"
+        (git_dir / "hooks").mkdir(parents=True)
+        config = git_dir / "config"
+        config.write_text("[core]\n", encoding="utf-8")
+        (self.root / "git_probe.py").write_text(
+            "from pathlib import Path\n"
+            "\n"
+            "def check(name, action):\n"
+            "    try:\n"
+            "        action()\n"
+            "    except Exception:\n"
+            "        print(name + '=no')\n"
+            "    else:\n"
+            "        print(name + '=yes')\n"
+            "\n"
+            "check('GIT_CONFIG', lambda: Path('.git/config').open('a', encoding='utf-8').write('[core]\\n'))\n"
+            "check('GIT_HOOK', lambda: Path('.git/hooks/post-commit').write_text('#!/bin/sh\\n', encoding='utf-8'))\n",
+            encoding="utf-8",
+        )
+
+        result = SandboxService(settings=_Settings()).run_command(
+            str(self.root), ["python3", "git_probe.py"], timeout_s=30
+        )
+
+        self.assertEqual(0, result["exit_code"], result)
+        output = str(result["stdout"])
+        self.assertIn("GIT_CONFIG=no", output, "the jailed command wrote .git/config")
+        self.assertIn("GIT_HOOK=no", output, "the jailed command installed a hook")
+        self.assertEqual("[core]\n", config.read_text(encoding="utf-8"))
+        self.assertFalse((git_dir / "hooks" / "post-commit").exists())
+
+    def test_the_jail_hides_the_hosts_run_directory(self) -> None:
+        sandbox = SandboxService(settings=_Settings())
+        jail, warning = sandbox._jail_argv(["python3", "probe.py"], self.root, False)
+
+        assert jail is not None, warning
+        pairs = list(zip(jail, jail[1:], strict=False))
+        self.assertIn(("--tmpfs", "/run"), pairs)
 
     def test_network_is_unreachable_until_the_goal_opts_in(self) -> None:
         blocked = self._run(network=False)

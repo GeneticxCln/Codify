@@ -2,12 +2,12 @@
 
 `test_sandbox.py` proves the process-tree contract with a stand-in engine: a single
 Python process that calls `SandboxService().run_command` directly — no uvicorn, no
-API, no agent pipeline. `test_git.py` does the same for a commit's hook tree. What
-neither can see is everything *between* a stand-in and a real engine: whether a goal's
-verifier stage actually reaches `run_command`, whether the executor's scribe stage
-reaches `GitService.commit`, whether the pid handed to the guard is the engine's own,
-whether the process the window SIGKILLs is the one whose death the guard watches. This
-module drives both paths for real, against a real `python3 -m engine` subprocess:
+API, no agent pipeline. `test_git.py` does the same for a commit's clean-filter tree.
+What neither can see is everything *between* a stand-in and a real engine: whether a
+goal's verifier stage actually reaches `run_command`, whether the executor's scribe
+stage reaches `GitService.commit`, whether the pid handed to the guard is the engine's
+own, whether the process the window SIGKILLs is the one whose death the guard watches.
+This module drives both paths for real, against a real `python3 -m engine` subprocess:
 
     POST /workspaces → POST /goals → (planning) → POST /goals/{id}/start
 
@@ -15,8 +15,8 @@ with a fake provider registered as the roles' Ollama `base_url` — real HTTP ov
 sockets, no engine code patched or imported by the test. Three scenarios, one fixture:
 
 * the **verifier** asks the sandbox to run a workspace script (the model-driven path);
-* the workspace's **post-commit hook** execs the same script (the engine's own path:
-  a commit runs hooks, git waits for them, and hooks are workspace content);
+* the workspace's **clean filter** execs the same script (the engine's own path: a
+  commit runs filters, git waits for them, and filters are workspace config);
 * a client calls `POST /workspaces/browse` while a goal runs (the engine's own GUI
   spawn: the native folder picker, `python3 -c <GTK source>`, which lives until a
   human answers it). A real dialog can neither be driven headlessly nor be allowed
@@ -33,7 +33,7 @@ not merely planned — the engine is SIGKILLed, exactly what closing the desktop
 does. Three things must then hold within seconds:
 
 1. the grandchild is gone — the orphan this guard exists for;
-2. the command or hook is gone, and the heartbeat stops growing — a survivor still
+2. the command or filter is gone, and the heartbeat stops growing — a survivor still
    writing is the half of the bug a user notices first;
 3. the guard in front of whatever the engine ran is gone with it (one `pgrep` pattern
    names "the guard, with this argument", which nothing else in the tree matches).
@@ -79,15 +79,15 @@ ORPHAN_PROBE = "codify-live-engine-orphan-probe"
 # survivor checks cannot mistake another run's process for this one.
 SLEEPER = "e2e_orphan_probe_sleeper.py"
 HEARTBEAT = "heartbeat.txt"
-# The commit the second scenario lets the engine make. A commit message stays in git's
-# argv (`git commit … -m <message>`), so it names the git process — and the guard in
-# front of it — without either of them carrying the repository path.
+# The commit the second scenario lets the engine make. The clean filter runs during
+# `git add`, before any commit exists, so the git process is named by the target path
+# in its argv — the guard in front of it carries the same path.
 COMMIT_MARKER = "test: codify-live-engine-commit-marker"
 # "The guard, with that argument": an ERE `pgrep -f` reads against the whole command
 # line, and `guarded_argv` puts the guard's own path first, so each pattern matches the
 # guard and nothing else in the tree.
 GUARDED_SLEEPER = f"spawn_guard\\.py.*{SLEEPER}"
-GUARDED_COMMIT = f"spawn_guard\\.py.*{COMMIT_MARKER}"
+GUARDED_COMMIT = "spawn_guard\\.py.*git.*probe_target\\.txt"
 
 # The folder-picker scenario. The shim directory's *name* is the picker process's
 # marker (the guard's argv carries the shim path, so one ERE names "the guard, with
@@ -341,9 +341,9 @@ class _SandboxCommandFake(_FakeProvider):
                 "explanation": "running the long probe"}
 
 
-class _CommitHookFake(_FakeProvider):
+class _CommitFilterFake(_FakeProvider):
     """The engine-driven scenario: the verifier passes, so the goal reaches its commit
-    — and the scribe's subject is the message git will be run with."""
+    and its clean filter."""
 
     def _verifier_reply(self) -> dict[str, Any]:
         return {"argv": None, "verdict": "pass", "explanation": "nothing to run"}
@@ -402,33 +402,33 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
         )
         self.assert_workspace_froze(heartbeat)
 
-    def test_killing_the_engine_takes_a_running_commit_hook_with_it(self) -> None:
+    def test_killing_the_engine_takes_a_running_commit_filter_with_it(self) -> None:
         """The engine's *own* processes, not ones a model asked for.
 
-        Nothing asks the sandbox for anything here: the repository's post-commit hook
+        Nothing asks the sandbox for anything here: the repository's clean filter
         execs the script, and the goal runs all the way to its commit to get there.
         That path is the last spawn the engine makes for itself, and the one a user
-        would never connect to the closed window — a hook still rewriting the tree.
+        would never connect to the closed window — a filter still rewriting the tree.
         """
         workspace = self._scenario_workspace()
         (workspace / SLEEPER).write_text(SLEEPER_SOURCE, encoding="utf-8")
         heartbeat = workspace / HEARTBEAT
-        self._prepare_repo_with_hook(workspace)
-        client, goal_id, engine = self._start_a_goal(workspace, _CommitHookFake)
+        self._prepare_repo_with_filter(workspace)
+        client, goal_id, engine = self._start_a_goal(workspace, _CommitFilterFake)
 
         self.assertTrue(
             wait_until(ORPHAN_PROBE, matches=True, timeout=30),
-            "the live engine never reached its commit hook: "
+            "the live engine never reached its commit filter: "
             + _diagnose(client, goal_id, engine),
         )
         before = wait_for_text(heartbeat)
-        self.assertNotEqual("", before, "the running hook never wrote a heartbeat")
+        self.assertNotEqual("", before, "the running filter never wrote a heartbeat")
         self.assertNotEqual(
             [], pids_matching(SLEEPER),
-            "the hook was not on the process table while its grandchild was",
+            "the filter was not on the process table while its grandchild was",
         )
-        # The guard is in front of *git* here, and git is mid-commit: its command line
-        # carries the message the scribe wrote, which nothing else in the tree has.
+        # The guard is in front of *git* here, and git is mid-add: its command line
+        # carries the target path, which nothing else in the tree has.
         self.assertNotEqual(
             [], pids_matching(GUARDED_COMMIT),
             "the engine ran git with no guard in front of it",
@@ -439,14 +439,14 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
 
         self.assertTrue(
             wait_until(ORPHAN_PROBE, matches=False, timeout=15),
-            "the hook's grandchild outlived the engine that ran the commit",
+            "the filter's grandchild outlived the engine that ran the commit",
         )
         self.assertTrue(
             wait_until(SLEEPER, matches=False, timeout=15),
-            "the commit hook outlived the engine that ran the commit",
+            "the commit filter outlived the engine that ran the commit",
         )
         self.assertTrue(
-            wait_until(COMMIT_MARKER, matches=False, timeout=15),
+            wait_until(GUARDED_COMMIT, matches=False, timeout=15),
             "git, or the guard in front of it, outlived the engine",
         )
         self.assert_workspace_froze(heartbeat)
@@ -596,20 +596,25 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         return Path(tmp.name).resolve()
 
-    def _prepare_repo_with_hook(self, workspace: Path) -> None:
-        """A real repository whose post-commit hook execs the workspace script.
+    def _prepare_repo_with_filter(self, workspace: Path) -> None:
+        """A real repository whose clean filter execs the workspace script.
 
         `git init` runs here rather than through GitService: this is the fixture, and
-        the path under test must not be the thing that builds it. `--no-verify` skips
-        pre-commit and commit-msg, never post-commit — and git waits for that hook, so
-        a hook that never returns is a commit that never returns.
+        the path under test must not be the thing that builds it. Hooks are disabled
+        on the engine's git now, so a commit cannot be held open by a post-commit
+        hook; a clean filter is still repository config, and git waits for it while
+        it adds the file the fixer wrote.
         """
         subprocess.run(
             ["git", "init", "-q"], cwd=str(workspace), capture_output=True, check=True
         )
-        hook = workspace / ".git" / "hooks" / "post-commit"
-        hook.write_text(f"#!/bin/sh\nexec python3 ./{SLEEPER}\n", encoding="utf-8")
-        hook.chmod(0o755)
+        (workspace / ".gitattributes").write_text(
+            "probe_target.txt filter=slow\n", encoding="utf-8"
+        )
+        subprocess.run(
+            ["git", "config", "filter.slow.clean", f"python3 ./{SLEEPER}"],
+            cwd=str(workspace), capture_output=True, check=True,
+        )
 
     def _start_a_goal(
         self, workspace: Path, handler: type[_FakeProvider]

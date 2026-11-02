@@ -22,10 +22,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # this run's survivor, or one red gate poisons every later one.
 GIT_ORPHAN_PROBE = "codify-git-orphan-probe"
 COMMIT_MARKER = "feat: codify-git-guard-marker"
-# Git runs a hook as `.git/hooks/post-commit` from the worktree root — a *relative*
-# path, so the hook's command line does not name the repository. The hook therefore execs
-# this file, whose unique name is the hook's marker (`python3 ./<name>`).
-HOOK_BODY = "codify_git_hook_body"
+# A clean filter runs as `python3 ./<name>` from the worktree root, so this file's
+# unique name is the filter's process marker without the repository path appearing
+# in its command line.
+HOOK_BODY = "codify_git_filter_body"
 # A hook that never returns: it writes a heartbeat and leaves a sleeping grandchild,
 # the two things a stray hook was ever caught doing.
 HOOK_BODY_SOURCE = (
@@ -126,22 +126,54 @@ class TestGitService(GitTestBase):
         self.assertFalse((self.root / "hook-evidence.txt").exists(),
                          "pre-commit hook executed during commit")
 
-    def test_a_commit_hook_that_never_returns_is_stopped(self) -> None:
-        # `--no-verify` does not skip post-commit. Without a timeout, a hook that
-        # sleeps held the step, and Cancel waits for the step, so the only way out
-        # was to kill the engine.
+    def test_a_commit_does_not_run_a_post_commit_hook_or_a_configured_fsmonitor(self) -> None:
+        """Hooks and fsmonitor are repository content, and a commit is engine-owned.
+
+        `--no-verify` skips pre-commit and commit-msg, never post-commit. A hook that
+        writes a marker must not run, and a `core.fsmonitor` named in `.git/config`
+        must not be started by the commit's git child either.
+        """
+        hook_marker = self.root / "post-commit-ran"
+        fsmonitor_marker = self.root / "fsmonitor-ran"
         hook = self.root / ".git" / "hooks" / "post-commit"
-        hook.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+        hook.write_text(f"#!/bin/sh\ntouch '{hook_marker}'\n", encoding="utf-8")
         hook.chmod(0o755)
+        fsmonitor = self.root / "fsmonitor.sh"
+        fsmonitor.write_text(f"#!/bin/sh\ntouch '{fsmonitor_marker}'\n", encoding="utf-8")
+        fsmonitor.chmod(0o755)
+        subprocess.run(
+            ["git", "config", "core.fsmonitor", str(fsmonitor)],
+            cwd=self.root, check=True, capture_output=True,
+        )
+        self.write("guarded.py", "x = 1\n")
+
+        rev = self.git.commit(str(self.root), "feat: no hooks", ["guarded.py"])
+
+        self.assertIsNotNone(rev, "the commit did not happen")
+        self.assertFalse(hook_marker.exists(), "a post-commit hook ran during the engine's commit")
+        self.assertFalse(fsmonitor_marker.exists(), "a configured fsmonitor ran during the commit")
+
+    def test_a_hanging_clean_filter_is_stopped(self) -> None:
+        # A commit can still block on a clean filter, which is repository config.
+        # Without the timeout, the step (and Cancel, which waits for it) could not
+        # finish while the filter slept.
+        clean = self.root / "clean.sh"
+        clean.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+        clean.chmod(0o755)
+        subprocess.run(
+            ["git", "config", "filter.slow.clean", f"sh {clean}"],
+            cwd=self.root, check=True, capture_output=True,
+        )
+        self.write(".gitattributes", "slow.py filter=slow\n")
         self.write("slow.py", "x = 1\n")
         self.git.commit_timeout_s = 1.0
 
         started = time.monotonic()
-        rev = self.git.commit(str(self.root), "feat: slow hook", ["slow.py"])
+        rev = self.git.commit(str(self.root), "feat: slow filter", ["slow.py"])
         elapsed = time.monotonic() - started
 
         self.assertIsNone(rev, "a commit that timed out must not report a revision")
-        self.assertLess(elapsed, 15.0, "the commit waited for its post-commit hook")
+        self.assertLess(elapsed, 15.0, "the commit waited for its clean filter")
 
     def test_commit_env_does_not_carry_credentials(self) -> None:
         """The commit subprocess env must not include provider key variables —
@@ -155,7 +187,7 @@ class TestGitService(GitTestBase):
             # git binary and its subcommand are found two slots further along.
             # Watched at `Popen`: that is where `GitService._run_bytes` starts it, so
             # that a timeout can stop the whole group (`subprocess.run` cannot).
-            if len(argv) > 3 and argv[2].endswith("git") and argv[3] == "commit":
+            if len(argv) > 3 and argv[2].endswith("git") and "commit" in argv:
                 captured.update(kwargs.get("env") or {})
             return real_popen(argv, **kwargs)
 
@@ -299,10 +331,11 @@ class TestGuardedGitCommands(unittest.TestCase):
 
     `test_sandbox.py` proves the guard for the commands a *model* asks for; this is the
     same proof for the processes the engine starts itself. It matters more than it
-    looks: a `git commit` runs the repository's hooks (`--no-verify` skips pre-commit
-    and commit-msg, not post-commit), hooks are workspace content, and git waits for
-    one to finish. A hook that never returns used to keep running — and keep writing to
-    the repository — after the engine that ran the commit was already gone.
+    looks: a `git commit` runs the repository's clean filters, a filter is workspace
+    config, and git waits for one to finish. A filter that never returns used to keep
+    running — and keep writing to the repository — after the engine that ran the
+    commit was already gone. Hooks are disabled on this path now; the filter is the
+    child that still proves the guard.
     """
 
     def setUp(self) -> None:
@@ -314,27 +347,32 @@ class TestGuardedGitCommands(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def test_a_hanging_commit_hook_dies_with_the_engine_that_started_the_commit(self) -> None:
+    def test_a_hanging_clean_filter_dies_with_the_engine_that_started_the_commit(self) -> None:
         token = secrets.token_hex(6)
         probe = f"{GIT_ORPHAN_PROBE}-{token}"
-        hook_body = f"{HOOK_BODY}_{token}.py"
+        filter_body = f"{HOOK_BODY}_{token}.py"
         commit_marker = f"{COMMIT_MARKER}-{token}"
-        guarded_commit = f"spawn_guard\\.py.*{commit_marker}"
-        heartbeat = self.root / "hook-heartbeat.txt"
-        hook = self.root / ".git" / "hooks" / "post-commit"
-        hook.write_text(f"#!/bin/sh\nexec python3 ./{hook_body}\n", encoding="utf-8")
-        hook.chmod(0o755)
-        (self.root / hook_body).write_text(
+        target = f"hooked-{token}.py"
+        guarded_add = f"spawn_guard\\.py.*git.*{target}"
+        heartbeat = self.root / "filter-heartbeat.txt"
+        subprocess.run(
+            ["git", "config", "filter.slow.clean", f"python3 ./{filter_body}"],
+            cwd=self.root, check=True, capture_output=True,
+        )
+        (self.root / ".gitattributes").write_text(
+            f"{target} filter=slow\n", encoding="utf-8"
+        )
+        (self.root / filter_body).write_text(
             HOOK_BODY_SOURCE.format(heartbeat=str(heartbeat), probe=probe),
             encoding="utf-8",
         )
-        (self.root / "hooked.py").write_text("x = 1\n", encoding="utf-8")
+        (self.root / target).write_text("x = 1\n", encoding="utf-8")
 
         # A stand-in engine: the commit is the only thing it does, and it blocks inside
-        # git waiting for the hook, exactly as the real engine's scribe stage does.
+        # git's clean filter, exactly as the real engine's scribe stage can.
         driver = (
             "from engine.git import GitService\n"
-            f"GitService().commit({str(self.root)!r}, {commit_marker!r}, ['hooked.py'])\n"
+            f"GitService().commit({str(self.root)!r}, {commit_marker!r}, [{target!r}])\n"
         )
         engine = subprocess.Popen(
             [sys.executable, "-c", driver],
@@ -345,15 +383,15 @@ class TestGuardedGitCommands(unittest.TestCase):
         try:
             self.assertTrue(
                 wait_until(probe, matches=True, timeout=15),
-                "the commit never reached its post-commit hook",
+                "the commit never reached its clean filter",
             )
             # The hook, git and the guard are all live *now* — the patterns below must
             # mean something before the kill, or "gone afterwards" proves nothing.
             before = wait_for_text(heartbeat)
             self.assertNotEqual("", before, "the hook never wrote its heartbeat")
-            self.assertNotEqual([], pids_matching(hook_body), "the hook body was not running")
+            self.assertNotEqual([], pids_matching(filter_body), "the filter body was not running")
             self.assertNotEqual(
-                [], pids_matching(guarded_commit),
+                [], pids_matching(guarded_add),
                 "the engine ran git with no guard in front of it",
             )
 
@@ -365,11 +403,11 @@ class TestGuardedGitCommands(unittest.TestCase):
                 "the hook's grandchild outlived the engine that started the commit",
             )
             self.assertTrue(
-                wait_until(hook_body, matches=False, timeout=15),
-                "the commit hook itself outlived the engine that started the commit",
+                wait_until(filter_body, matches=False, timeout=15),
+                "the clean filter itself outlived the engine that started the commit",
             )
             self.assertTrue(
-                wait_until(commit_marker, matches=False, timeout=15),
+                wait_until(guarded_add, matches=False, timeout=15),
                 "git, or the guard in front of it, outlived the engine",
             )
             frozen = file_text(heartbeat)
@@ -380,7 +418,7 @@ class TestGuardedGitCommands(unittest.TestCase):
             )
         finally:
             engine.kill()
-            for pattern in (probe, hook_body, commit_marker, str(self.root)):
+            for pattern in (probe, filter_body, guarded_add, str(self.root)):
                 sigkill_matching(pattern)
 
 
